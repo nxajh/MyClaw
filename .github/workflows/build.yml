@@ -30,17 +30,18 @@ jobs:
       - name: Fix path deps
         run: |
           # Directory layout (confirmed):
-          #   /home/runner/work/MyClaw/MyClaw/   <- GitHub workspace root
+          #   /home/runner/work/MyClaw/MyClaw/   <- GITHUB_WORKSPACE
           #   /home/runner/work/MyClaw/MyClaw/zeroclaw/  <- zeroclaw repo (crates at zeroclaw/crates/xxx)
           #   /home/runner/work/MyClaw/MyClaw/myclaw/     <- MyClaw workspace root
-          #
-          # From myclaw/ (workspace root):
-          #   ../zeroclaw/crates/xxx -> /home/runner/work/MyClaw/MyClaw/zeroclaw/crates/xxx ✓
           cd myclaw
-          # Fix workspace Cargo.toml: ../../src/crates/xxx → ../zeroclaw/crates/xxx
-          sed -i 's|../../src/crates/|../zeroclaw/crates/|g' Cargo.toml
-          # Fix member crates: /home/ubuntu/.zeroclaw/src/crates/xxx" } → ../zeroclaw/crates/xxx" }
-          find . -name "Cargo.toml" -exec sed -i 's|"/home/ubuntu/.zeroclaw/src/crates/\([^"]*\)"|"../zeroclaw/crates/\1\"|g' {} +
+          WS="$GITHUB_WORKSPACE"
+          ZPATH="$WS/zeroclaw/crates"
+          # Fix workspace Cargo.toml: ../../src/crates/xxx → $ZPATH/xxx
+          sed -i "s|../../src/crates/|$ZPATH/|g" Cargo.toml
+          # Fix member crates: path = "/home/ubuntu/.zeroclaw/src/crates/xxx" } → $ZPATH/xxx }
+          find . -name "Cargo.toml" -exec sed -i \
+            -e "s|\"/home/ubuntu/.zeroclaw/src/crates/\\([^\"]*\\)\" }|\"$ZPATH/\\1\" }|g" \
+            {} +
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
