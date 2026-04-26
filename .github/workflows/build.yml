@@ -27,22 +27,37 @@ jobs:
           path: myclaw
           fetch-depth: 0
 
+      - name: Debug: list zeroclaw/crates directory
+        run: |
+          echo "=== Workspace root ==="
+          ls /home/runner/work/MyClaw/
+          echo ""
+          echo "=== Zeroclaw root ==="
+          ls /home/runner/work/MyClaw/MyClaw/zeroclaw/ 2>/dev/null || echo "zeroclaw not at MyClaw level"
+          ls /home/runner/work/MyClaw/zeroclaw/ 2>/dev/null || echo "zeroclaw not at root level"
+          echo ""
+          echo "=== Current directory ==="
+          pwd
+          echo ""
+          echo "=== Zeroclaw crates ==="
+          find zeroclaw -name "Cargo.toml" -path "*/zeroclaw-*" 2>/dev/null | head -20
+
       - name: Fix path deps in MyClaw workspace
         run: |
-          # Directory layout on runner:
-          #   /home/runner/work/MyClaw/zeroclaw/      <- zeroclaw repo root
-          #   /home/runner/work/MyClaw/zeroclaw/crates/ <- crates (confirmed via GitHub API)
-          #   /home/runner/work/MyClaw/MyClaw/myclaw/    <- MyClaw workspace root
-          #
-          # Confirmed via GitHub API: zeroclaw's crates are at zeroclaw/crates/ not zeroclaw/src/crates/
-          # The /home/ubuntu/.zeroclaw/src/crates/ paths are LOCAL-ONLY (not in git).
-          # Replace ALL zeroclaw path deps with ../../zeroclaw/crates/xxx
-
+          # Check where zeroclaw is
+          ZEROCLAW_PATH=""
+          if [ -d "/home/runner/work/MyClaw/MyClaw/zeroclaw" ]; then
+            ZEROCLAW_PATH="/home/runner/work/MyClaw/MyClaw/zeroclaw"
+          elif [ -d "/home/runner/work/MyClaw/zeroclaw" ]; then
+            ZEROCLAW_PATH="/home/runner/work/MyClaw/zeroclaw"
+          fi
+          echo "ZEROCLAW_PATH=$ZEROCLAW_PATH"
+          
+          # Rewrite all zeroclaw path deps to the found location
           cd myclaw
-
           find . -name "Cargo.toml" -exec sed -i \
-            -e 's|path = "/home/ubuntu/.zeroclaw/src/crates/\([^"]*\)"|path = "../../zeroclaw/crates/\1"|g' \
-            -e 's|path = "../../src/crates/\([^"]*\)"|path = "../../zeroclaw/crates/\1"|g' \
+            -e "s|path = \"/home/ubuntu/.zeroclaw/src/crates/\\([^ \"]*\\)\"|path = \"${ZEROCLAW_PATH}/crates/\\1\"|g" \
+            -e "s|path = \"../../src/crates/\\([^ \"]*\\)\"|path = \"${ZEROCLAW_PATH}/crates/\\1\"|g" \
             {} \;
 
       - name: Setup Rust
