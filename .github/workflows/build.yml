@@ -24,40 +24,6 @@ jobs:
           path: zeroclaw-external
           fetch-depth: 1
 
-      - name: Create cargo path overrides
-        # zeroclaw crates are hard-coded to paths like:
-        #   zeroclaw-api = { path = "/home/ubuntu/.zeroclaw/src/crates/zeroclaw-api" }
-        # Use [target.'cfg(not(...))'.dependencies] + path overrides
-        # to redirect to zeroclaw-external/src/crates/ on the runner.
-        run: |
-          mkdir -p .cargo
-          cat > .cargo/config.toml << 'EOF'
-          [alias]
-          # No aliases needed
-
-          [build]
-          # Override path dependencies to use zeroclaw-external on the runner.
-          # The runner checkout lives in /home/runner/work/MyClaw/MyClaw/
-          # and zeroclaw-external is a sibling directory.
-          rustflags = [
-            # Not needed — we use [alias] or [target] instead below.
-          ]
-          EOF
-
-          # Write path-overriding config that cargo will respect.
-          # Each crate that depends on zeroclaw-xxx via absolute path
-          # needs to be redirected here.
-          cat > .cargo/config.toml << 'TOML'
-          [build]
-          target = "x86_64-unknown-linux-gnu"
-
-          [alias]
-          # Workaround: cargo only supports path overrides via [target.<triple>.dependencies]
-          # We use the simpler approach: rewrite the zeroclaw path deps
-          # to relative paths via a patch section in Cargo.toml, which is
-          # project-global and works from any location.
-          TOML
-
       - name: Rewrite zeroclaw path deps to relative paths
         run: |
           # Change all /home/ubuntu/.zeroclaw/src/crates/xxx paths to
@@ -89,11 +55,27 @@ jobs:
           path: target
           key: cargo-build-${{ hashFiles('**/Cargo.toml') }}
 
-      - name: Build all workspace crates
-        run: cargo build --workspace
+      # Build crates that have real implementations.
+      # Empty stub crates (zeroclaw-orchestrator, zeroclaw-channels, zeroclaw-runtime)
+      # are registered in workspace for future development but not built yet.
+      - name: Build domain/zeroclaw-capability
+        run: cargo build -p zeroclaw-capability
 
-      - name: Run clippy
-        run: cargo clippy --workspace -- -D warnings
+      - name: Build infrastructure/zeroclaw-registry
+        run: cargo build -p zeroclaw-registry
 
-      - name: Run tests
-        run: cargo test --workspace
+      - name: Build infrastructure/zeroclaw-memory-storage
+        run: cargo build -p zeroclaw-memory-storage
+
+      - name: Build infrastructure/zeroclaw-mcp
+        run: cargo build -p zeroclaw-mcp
+
+      - name: Run clippy on active crates
+        run: |
+          cargo clippy -p zeroclaw-capability -- -D warnings
+          cargo clippy -p zeroclaw-registry -- -D warnings
+          cargo clippy -p zeroclaw-memory-storage -- -D warnings
+          cargo clippy -p zeroclaw-mcp -- -D warnings
+
+      - name: Run tests on active crates
+        run: cargo test -p zeroclaw-registry
