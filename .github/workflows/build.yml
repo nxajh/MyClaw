@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout zeroclaw (full repo)
+      - name: Checkout zeroclaw
         uses: actions/checkout@v4
         with:
           repository: nxajh/zeroclaw
@@ -27,70 +27,34 @@ jobs:
           path: myclaw
           fetch-depth: 0
 
-      - name: Debug: list zeroclaw/crates directory
+      - name: Fix path deps
         run: |
-          echo "=== Workspace root ==="
-          ls /home/runner/work/MyClaw/
-          echo ""
-          echo "=== Zeroclaw root ==="
-          ls /home/runner/work/MyClaw/MyClaw/zeroclaw/ 2>/dev/null || echo "zeroclaw not at MyClaw level"
-          ls /home/runner/work/MyClaw/zeroclaw/ 2>/dev/null || echo "zeroclaw not at root level"
-          echo ""
-          echo "=== Current directory ==="
-          pwd
-          echo ""
-          echo "=== Zeroclaw crates ==="
-          find zeroclaw -name "Cargo.toml" -path "*/zeroclaw-*" 2>/dev/null | head -20
-
-      - name: Fix path deps in MyClaw workspace
-        run: |
-          # Check where zeroclaw is
-          ZEROCLAW_PATH=""
-          if [ -d "/home/runner/work/MyClaw/MyClaw/zeroclaw" ]; then
-            ZEROCLAW_PATH="/home/runner/work/MyClaw/MyClaw/zeroclaw"
-          elif [ -d "/home/runner/work/MyClaw/zeroclaw" ]; then
-            ZEROCLAW_PATH="/home/runner/work/MyClaw/zeroclaw"
-          fi
-          echo "ZEROCLAW_PATH=$ZEROCLAW_PATH"
-          
-          # Rewrite all zeroclaw path deps to the found location
           cd myclaw
-          find . -name "Cargo.toml" -exec sed -i \
-            -e "s|path = \"/home/ubuntu/.zeroclaw/src/crates/\\([^ \"]*\\)\"|path = \"${ZEROCLAW_PATH}/crates/\\1\"|g" \
-            -e "s|path = \"../../src/crates/\\([^ \"]*\\)\"|path = \"${ZEROCLAW_PATH}/crates/\\1\"|g" \
-            {} \;
+          find . -name "Cargo.toml" -exec sed -i 's|path = "/home/ubuntu/.zeroclaw/src/crates/\([^"]*\)"|path = "../../zeroclaw/crates/\1"|g' {} +
+          find . -name "Cargo.toml" -exec sed -i 's|path = "../../src/crates/\([^"]*\)"|path = "../../zeroclaw/crates/\1"|g' {} +
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      - name: Cache cargo registry
+      - name: Cache
         uses: actions/cache@v4
         with:
-          path: ~/.cargo/registry
-          key: cargo-registry-${{ hashFiles('**/Cargo.toml') }}
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ hashFiles('**/Cargo.toml') }}
 
-      - name: Cache cargo git
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: cargo-git-${{ hashFiles('**/Cargo.toml') }}
-
-      - name: Cache build artifacts
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: cargo-build-${{ hashFiles('**/Cargo.toml') }}
-
-      - name: Build all workspace crates
+      - name: Build
         run: cargo build --workspace
         working-directory: myclaw
 
-      - name: Run clippy on active crates
+      - name: Clippy
         run: cargo clippy --workspace -- -D warnings
         working-directory: myclaw
 
-      - name: Run tests on active crates
+      - name: Test
         run: cargo test -p zeroclaw-registry
         working-directory: myclaw
