@@ -12,8 +12,6 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # Run as non-root user on GitHub Actions
-    # We create the same home path as the local dev environment.
     
     steps:
       - name: Checkout MyClaw
@@ -26,13 +24,47 @@ jobs:
           path: zeroclaw-external
           fetch-depth: 1
 
-      - name: Mirror zeroclaw to /home/ubuntu path
-        # zeroclaw-registry/Cargo.toml has hard-coded paths:
+      - name: Create cargo path overrides
+        # zeroclaw crates are hard-coded to paths like:
         #   zeroclaw-api = { path = "/home/ubuntu/.zeroclaw/src/crates/zeroclaw-api" }
-        # Create the same path structure on the runner.
+        # Use [target.'cfg(not(...))'.dependencies] + path overrides
+        # to redirect to zeroclaw-external/src/crates/ on the runner.
         run: |
-          mkdir -p /home/ubuntu/.zeroclaw/src
-          cp -r zeroclaw-external/src/crates /home/ubuntu/.zeroclaw/src/
+          mkdir -p .cargo
+          cat > .cargo/config.toml << 'EOF'
+          [alias]
+          # No aliases needed
+
+          [build]
+          # Override path dependencies to use zeroclaw-external on the runner.
+          # The runner checkout lives in /home/runner/work/MyClaw/MyClaw/
+          # and zeroclaw-external is a sibling directory.
+          rustflags = [
+            # Not needed — we use [alias] or [target] instead below.
+          ]
+          EOF
+
+          # Write path-overriding config that cargo will respect.
+          # Each crate that depends on zeroclaw-xxx via absolute path
+          # needs to be redirected here.
+          cat > .cargo/config.toml << 'TOML'
+          [build]
+          target = "x86_64-unknown-linux-gnu"
+
+          [alias]
+          # Workaround: cargo only supports path overrides via [target.<triple>.dependencies]
+          # We use the simpler approach: rewrite the zeroclaw path deps
+          # to relative paths via a patch section in Cargo.toml, which is
+          # project-global and works from any location.
+          TOML
+
+      - name: Rewrite zeroclaw path deps to relative paths
+        run: |
+          # Change all /home/ubuntu/.zeroclaw/src/crates/xxx paths to
+          # the relative sibling zeroclaw-external/src/crates/xxx
+          find . -name "Cargo.toml" -exec sed -i \
+            -e 's|path = "/home/ubuntu/.zeroclaw/src/crates/\([^"]*\)"|path = "zeroclaw-external/src/crates/\1"|g' \
+            {} \;
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
