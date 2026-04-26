@@ -27,11 +27,45 @@ jobs:
           path: myclaw
           fetch-depth: 0
 
+      - name: Debug directory layout
+        run: |
+          echo "=== /home/runner/work/MyClaw/ contents ==="
+          ls /home/runner/work/MyClaw/
+          echo ""
+          echo "=== /home/runner/work/MyClaw/MyClaw/ contents ==="
+          ls /home/runner/work/MyClaw/MyClaw/
+          echo ""
+          echo "=== Current working directory ==="
+          pwd
+          echo ""
+          echo "=== myclaw directory ==="
+          ls myclaw/
+          echo ""
+          echo "=== zeroclaw directory ==="
+          ls zeroclaw/
+
       - name: Fix path deps
         run: |
           cd myclaw
-          find . -name "Cargo.toml" -exec sed -i 's|path = "/home/ubuntu/.zeroclaw/src/crates/\([^"]*\)"|path = "../../zeroclaw/crates/\1"|g' {} +
-          find . -name "Cargo.toml" -exec sed -i 's|path = "../../src/crates/\([^"]*\)"|path = "../../zeroclaw/crates/\1"|g' {} +
+          # Check if zeroclaw is a sibling of myclaw or somewhere else
+          if [ -d "../zeroclaw" ]; then
+            echo "zeroclaw found at ../zeroclaw"
+            ZEROCLAW_PATH="../zeroclaw"
+          elif [ -d "/home/runner/work/MyClaw/MyClaw/zeroclaw" ]; then
+            echo "zeroclaw found at /home/runner/work/MyClaw/MyClaw/zeroclaw"
+            ZEROCLAW_PATH="/home/runner/work/MyClaw/MyClaw/zeroclaw"
+          elif [ -d "/home/runner/work/MyClaw/zeroclaw" ]; then
+            echo "zeroclaw found at /home/runner/work/MyClaw/zeroclaw"
+            ZEROCLAW_PATH="/home/runner/work/MyClaw/zeroclaw"
+          else
+            echo "zeroclaw not found!"
+            ZEROCLAW_PATH=""
+          fi
+          echo "Using ZEROCLAW_PATH=$ZEROCLAW_PATH"
+          if [ -n "$ZEROCLAW_PATH" ]; then
+            find . -name "Cargo.toml" -exec sed -i "s|path = \"/home/ubuntu/.zeroclaw/src/crates/\\([^\\\"]*\\)\"|path = \"${ZEROCLAW_PATH}/crates/\\1\"|g" {} +
+            find . -name "Cargo.toml" -exec sed -i "s|path = \"../../src/crates/\\([^\\\"]*\\)\"|path = \"${ZEROCLAW_PATH}/crates/\\1\"|g" {} +
+          fi
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
