@@ -1,0 +1,10 @@
+[package]
+name = "zeroclaw-session"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+
+[dependencies]
+chrono.workspace = true
+
+zeroclaw-api = { path = "/home/ubuntu/.zeroclaw/src/crates/zeroclaw-api" }

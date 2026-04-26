@@ -1,0 +1,23 @@
+[package]
+name = "zeroclaw-mcp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+# HTTP/SSE transports need reqwest with stream feature
+reqwest = { workspace = true, features = ["stream"] }
+
+# SSE transport uses tokio_stream and tokio_util
+tokio-stream.workspace = true
+tokio-util.workspace = true
+
+zeroclaw-api = { path = "/home/ubuntu/.zeroclaw/src/crates/zeroclaw-api" }
+zeroclaw-config = { path = "/home/ubuntu/.zeroclaw/src/crates/zeroclaw-config" }
