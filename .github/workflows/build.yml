@@ -26,11 +26,19 @@ jobs:
 
       - name: Rewrite zeroclaw path deps to relative paths
         run: |
-          # Replace all /home/ubuntu/.zeroclaw/src/crates/xxx absolute paths
-          # with the relative zeroclaw-external/src/crates/xxx path.
+          # Step 1: In all Cargo.toml files, rewrite the hard-coded
+          # /home/ubuntu/.zeroclaw/src/crates/xxx to zeroclaw-external/src/crates/xxx
           find . -name "Cargo.toml" -exec sed -i \
             -e 's|path = "/home/ubuntu/.zeroclaw/src/crates/\([^"]*\)"|path = "zeroclaw-external/src/crates/\1"|g' \
             {} \;
+
+          # Step 2: Fix the workspace-level zeroclaw-* path dependencies.
+          # In the workspace Cargo.toml, zeroclaw-api, zeroclaw-config, etc.
+          # are defined as:
+          #   zeroclaw-api = { path = "../../src/crates/zeroclaw-api" }
+          # which resolves to /home/runner/src/crates/ (wrong on the runner).
+          # Override them to point into zeroclaw-external/src/crates/.
+          sed -i 's|path = "../../src/crates/|path = "zeroclaw-external/src/crates/|g' Cargo.toml
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
