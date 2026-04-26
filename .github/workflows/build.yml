@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout zeroclaw (full repo, before MyClaw)
+      - name: Checkout zeroclaw (full repo)
         uses: actions/checkout@v4
         with:
           repository: nxajh/zeroclaw
@@ -24,19 +24,30 @@ jobs:
       - name: Checkout MyClaw
         uses: actions/checkout@v4
         with:
-          path: zeroclaw/MyClaw
+          path: myclaw
           fetch-depth: 0
 
-      - name: Rewrite zeroclaw path deps in MyClaw workspace
+      - name: Fix path deps in MyClaw workspace
         run: |
-          cd zeroclaw/MyClaw
-          # Replace /home/ubuntu/.zeroclaw/src/crates/xxx → ../src/crates/xxx
-          # After checkout, zeroclaw repo root is zeroclaw/ and MyClaw is zeroclaw/MyClaw/
+          # Directory layout on runner:
+          #   zeroclaw/                  <- zeroclaw repo root (contains src/crates/)
+          #   myclaw/                    <- MyClaw workspace root
+          #
+          # MyClaw's Cargo.toml workspace root has:
+          #   zeroclaw-api = { path = "../../src/crates/zeroclaw-api" }
+          # From myclaw/, "../../src/crates/" → zeroclaw/src/crates/ ✓
+          # So the workspace-level paths are already correct!
+          #
+          # But member crates (domain/zeroclaw-capability, infrastructure/zeroclaw-registry)
+          # have their own zeroclaw-* path deps like:
+          #   zeroclaw-api = { path = "/home/ubuntu/.zeroclaw/src/crates/zeroclaw-api" }
+          # These hard-coded /home/ubuntu paths don't exist on the runner.
+          # Fix only the hard-coded /home/ubuntu paths.
+          cd myclaw
+
           find . -name "Cargo.toml" -exec sed -i \
-            -e 's|path = "/home/ubuntu/.zeroclaw/src/crates/\([^"]*\)"|path = "../../src/crates/\1"|g' \
+            's|path = "/home/ubuntu/.zeroclaw/src/crates/\([^"]*\)"|path = "../zeroclaw/src/crates/\1"|g' \
             {} \;
-          # Fix workspace-level zeroclaw-* deps too
-          sed -i 's|path = "../../src/crates/|path = "../src/crates/|g' Cargo.toml
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -63,12 +74,12 @@ jobs:
 
       - name: Build all workspace crates
         run: cargo build --workspace
-        working-directory: zeroclaw/MyClaw
+        working-directory: myclaw
 
       - name: Run clippy on active crates
         run: cargo clippy --workspace -- -D warnings
-        working-directory: zeroclaw/MyClaw
+        working-directory: myclaw
 
       - name: Run tests on active crates
         run: cargo test -p zeroclaw-registry
-        working-directory: zeroclaw/MyClaw
+        working-directory: myclaw
