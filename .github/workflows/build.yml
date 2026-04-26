@@ -1,0 +1,67 @@
+name: Build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout MyClaw
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout zeroclaw (for path deps)
+        uses: actions/checkout@v4
+        with:
+          repository: nxajh/zeroclaw
+          path: /tmp/zeroclaw
+          fetch-depth: 1
+
+      - name: Mirror zeroclaw to match local paths
+        # zeroclaw-registry/Cargo.toml has:
+        #   zeroclaw-api = { path = "/home/ubuntu/.zeroclaw/src/crates/zeroclaw-api" }
+        # We mirror the structure at /home/ubuntu so the paths resolve.
+        run: |
+          mkdir -p /home/ubuntu/.zeroclaw/src
+          cp -r /tmp/zeroclaw/src/crates /home/ubuntu/.zeroclaw/src/
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: cargo-registry-${{ hashFiles('**/Cargo.toml') }}
+
+      - name: Cache cargo git
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: cargo-git-${{ hashFiles('**/Cargo.toml') }}
+
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: cargo-build-${{ hashFiles('**/Cargo.toml') }}
+
+      - name: Build all workspace crates
+        run: cargo build --workspace
+
+      - name: Run clippy
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace
