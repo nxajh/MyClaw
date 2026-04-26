@@ -26,8 +26,8 @@ jobs:
 
       - name: Rewrite zeroclaw path deps to relative paths
         run: |
-          # Change all /home/ubuntu/.zeroclaw/src/crates/xxx paths to
-          # the relative sibling zeroclaw-external/src/crates/xxx
+          # Replace all /home/ubuntu/.zeroclaw/src/crates/xxx absolute paths
+          # with the relative zeroclaw-external/src/crates/xxx path.
           find . -name "Cargo.toml" -exec sed -i \
             -e 's|path = "/home/ubuntu/.zeroclaw/src/crates/\([^"]*\)"|path = "zeroclaw-external/src/crates/\1"|g' \
             {} \;
@@ -55,27 +55,19 @@ jobs:
           path: target
           key: cargo-build-${{ hashFiles('**/Cargo.toml') }}
 
-      # Build crates that have real implementations.
-      # Empty stub crates (zeroclaw-orchestrator, zeroclaw-channels, zeroclaw-runtime)
-      # are registered in workspace for future development but not built yet.
-      - name: Build domain/zeroclaw-capability
-        run: cargo build -p zeroclaw-capability
-
-      - name: Build infrastructure/zeroclaw-registry
-        run: cargo build -p zeroclaw-registry
-
-      - name: Build infrastructure/zeroclaw-memory-storage
-        run: cargo build -p zeroclaw-memory-storage
-
-      - name: Build infrastructure/zeroclaw-mcp
-        run: cargo build -p zeroclaw-mcp
+      - name: Build all workspace crates
+        run: cargo build --workspace
 
       - name: Run clippy on active crates
         run: |
           cargo clippy -p zeroclaw-capability -- -D warnings
           cargo clippy -p zeroclaw-registry -- -D warnings
+          cargo clippy -p zeroclaw-memory -- -D warnings
           cargo clippy -p zeroclaw-memory-storage -- -D warnings
           cargo clippy -p zeroclaw-mcp -- -D warnings
+          cargo clippy -p zeroclaw-orchestrator -- -D warnings
+          cargo clippy -p zeroclaw-channels -- -D warnings
+          cargo clippy -p zeroclaw-runtime -- -D warnings
 
       - name: Run tests on active crates
         run: cargo test -p zeroclaw-registry
