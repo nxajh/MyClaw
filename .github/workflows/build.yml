@@ -30,23 +30,28 @@ jobs:
       - name: Fix path deps in MyClaw workspace
         run: |
           # Directory layout on runner:
-          #   zeroclaw/                  <- zeroclaw repo root (contains src/crates/)
-          #   myclaw/                    <- MyClaw workspace root
+          #   /home/runner/work/MyClaw/             <- runner workspace root (GITHUB_WORKSPACE)
+          #   /home/runner/work/MyClaw/zeroclaw/     <- zeroclaw repo (src/crates/...)
+          #   /home/runner/work/MyClaw/MyClaw/      <- default GitHub Actions workspace
+          #   /home/runner/work/MyClaw/MyClaw/myclaw/ <- MyClaw workspace root
           #
-          # MyClaw's Cargo.toml workspace root has:
-          #   zeroclaw-api = { path = "../../src/crates/zeroclaw-api" }
-          # From myclaw/, "../../src/crates/" → zeroclaw/src/crates/ ✓
-          # So the workspace-level paths are already correct!
+          # Problem: all zeroclaw path deps in MyClaw Cargo.toml files use
+          # /home/ubuntu/.zeroclaw/src/crates/xxx (local dev) or
+          # ../../src/crates/xxx (relative to MyClaw, which is wrong on the runner).
           #
-          # But member crates (domain/zeroclaw-capability, infrastructure/zeroclaw-registry)
-          # have their own zeroclaw-* path deps like:
-          #   zeroclaw-api = { path = "/home/ubuntu/.zeroclaw/src/crates/zeroclaw-api" }
-          # These hard-coded /home/ubuntu paths don't exist on the runner.
-          # Fix only the hard-coded /home/ubuntu paths.
+          # Fix: replace all of them with ../zeroclaw/src/crates/xxx
+          # This is relative to the MyClaw workspace root (myclaw/) and works from
+          # both workspace root and member crate level.
+          #
+          # From myclaw/infrastructure/zeroclaw-registry/:
+          #   ../zeroclaw/src/crates/zeroclaw-api → myclaw/../zeroclaw/src/crates/ = zeroclaw/src/crates/ ✓
+
           cd myclaw
 
+          # Fix all zeroclaw path deps to ../zeroclaw/src/crates/xxx
           find . -name "Cargo.toml" -exec sed -i \
-            's|path = "/home/ubuntu/.zeroclaw/src/crates/\([^"]*\)"|path = "../zeroclaw/src/crates/\1"|g' \
+            -e 's|path = "/home/ubuntu/.zeroclaw/src/crates/\([^"]*\)"|path = "../zeroclaw/src/crates/\1"|g' \
+            -e 's|path = "../../src/crates/\([^"]*\)"|path = "../zeroclaw/src/crates/\1"|g' \
             {} \;
 
       - name: Setup Rust
