@@ -12,27 +12,27 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Run as non-root user on GitHub Actions
+    # We create the same home path as the local dev environment.
     
     steps:
       - name: Checkout MyClaw
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Checkout zeroclaw (for path deps)
         uses: actions/checkout@v4
         with:
           repository: nxajh/zeroclaw
-          path: /tmp/zeroclaw
+          path: zeroclaw-external
           fetch-depth: 1
 
-      - name: Mirror zeroclaw to match local paths
-        # zeroclaw-registry/Cargo.toml has:
+      - name: Mirror zeroclaw to /home/ubuntu path
+        # zeroclaw-registry/Cargo.toml has hard-coded paths:
         #   zeroclaw-api = { path = "/home/ubuntu/.zeroclaw/src/crates/zeroclaw-api" }
-        # We mirror the structure at /home/ubuntu so the paths resolve.
+        # Create the same path structure on the runner.
         run: |
           mkdir -p /home/ubuntu/.zeroclaw/src
-          cp -r /tmp/zeroclaw/src/crates /home/ubuntu/.zeroclaw/src/
+          cp -r zeroclaw-external/src/crates /home/ubuntu/.zeroclaw/src/
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
