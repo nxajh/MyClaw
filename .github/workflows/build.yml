@@ -30,43 +30,21 @@ jobs:
       - name: Fix path deps in MyClaw workspace
         run: |
           # Directory layout on runner:
-          #   /home/runner/work/MyClaw/             <- GitHub workspace root (GITHUB_WORKSPACE)
-          #   /home/runner/work/MyClaw/zeroclaw/    <- zeroclaw repo (src/crates/...)
-          #   /home/runner/work/MyClaw/MyClaw/     <- default Actions workspace (where we're running from)
+          #   /home/runner/work/MyClaw/zeroclaw/  <- zeroclaw repo root
+          #   /home/runner/work/MyClaw/MyClaw/    <- GitHub Actions default workspace
           #   /home/runner/work/MyClaw/MyClaw/myclaw/ <- MyClaw workspace root
           #
-          # MyClaw's workspace root (myclaw/Cargo.toml):
-          #   zeroclaw-api = { path = "../../src/crates/zeroclaw-api" }
-          # From myclaw/, goes to /home/runner/work/MyClaw/MyClaw/src/crates/ (WRONG)
-          # Correct: ../../zeroclaw/src/crates/ → /home/runner/work/MyClaw/zeroclaw/src/crates/ ✓
+          # zeroclaw repo structure: zeroclaw/crates/ (not src/crates/)
+          # So paths that point to zeroclaw/src/crates/xxx are WRONG.
           #
-          # Member crates (infrastructure/zeroclaw-registry/, etc.):
-          #   zeroclaw-api = { path = "/home/ubuntu/.zeroclaw/src/crates/zeroclaw-api" }
-          # From infrastructure/zeroclaw-registry/:
-          #   ../zeroclaw/src/crates/ → /home/runner/work/MyClaw/MyClaw/zeroclaw/src/crates/ (WRONG)
-          # Correct: ../../zeroclaw/src/crates/ → /home/runner/work/MyClaw/zeroclaw/src/crates/ ✓
-          #
-          # Actually ALL zeroclaw-* path deps in MyClaw should point to
-          # /home/runner/work/MyClaw/zeroclaw/src/crates/xxx
-          # From myclaw/: ../../zeroclaw/src/crates/xxx
-          # From infrastructure/zeroclaw-registry/: ../../../zeroclaw/src/crates/xxx
-          # The cleanest approach: use an absolute path via $GITHUB_WORKSPACE
+          # Fix all zeroclaw path deps to use ../../zeroclaw/crates/xxx
+          # This is relative to myclaw/ and correctly points to zeroclaw/crates/xxx
 
           cd myclaw
 
-          # Use the GitHub workspace root to construct the correct path.
-          # $GITHUB_WORKSPACE = /home/runner/work/MyClaw/MyClaw
-          # zeroclaw is at $GITHUB_WORKSPACE/../zeroclaw/ = /home/runner/work/MyClaw/zeroclaw/
-          ZEROCLAW_PATH="$GITHUB_WORKSPACE/../zeroclaw"
-
-          # Fix all zeroclaw path deps to use the correct relative path.
-          # For workspace root (myclaw/Cargo.toml): ../../zeroclaw/src/crates/xxx
-          # For member crates: ../../zeroclaw/src/crates/xxx (same, because
-          # from myclaw/infrastructure/zeroclaw-registry/,
-          # ../../zeroclaw → myclaw/../../zeroclaw → /home/runner/work/MyClaw/zeroclaw/ ✓)
           find . -name "Cargo.toml" -exec sed -i \
-            -e "s|path = \"/home/ubuntu/.zeroclaw/src/crates/\\([^ ]*\\)\"|path = \"../../zeroclaw/src/crates/\\1\"|g" \
-            -e "s|path = \"../../src/crates/\\([^ ]*\\)\"|path = \"../../zeroclaw/src/crates/\\1\"|g" \
+            -e 's|path = "/home/ubuntu/.zeroclaw/src/crates/\([^"]*\)"|path = "../../zeroclaw/crates/\1"|g' \
+            -e 's|path = "../../src/crates/\([^"]*\)"|path = "../../zeroclaw/crates/\1"|g' \
             {} \;
 
       - name: Setup Rust
