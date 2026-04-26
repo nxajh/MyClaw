@@ -30,15 +30,13 @@ jobs:
       - name: Fix path deps in MyClaw workspace
         run: |
           # Directory layout on runner:
-          #   /home/runner/work/MyClaw/zeroclaw/  <- zeroclaw repo root
-          #   /home/runner/work/MyClaw/MyClaw/    <- GitHub Actions default workspace
-          #   /home/runner/work/MyClaw/MyClaw/myclaw/ <- MyClaw workspace root
+          #   /home/runner/work/MyClaw/zeroclaw/      <- zeroclaw repo root
+          #   /home/runner/work/MyClaw/zeroclaw/crates/ <- crates (confirmed via GitHub API)
+          #   /home/runner/work/MyClaw/MyClaw/myclaw/    <- MyClaw workspace root
           #
-          # zeroclaw repo structure: zeroclaw/crates/ (not src/crates/)
-          # So paths that point to zeroclaw/src/crates/xxx are WRONG.
-          #
-          # Fix all zeroclaw path deps to use ../../zeroclaw/crates/xxx
-          # This is relative to myclaw/ and correctly points to zeroclaw/crates/xxx
+          # Confirmed via GitHub API: zeroclaw's crates are at zeroclaw/crates/ not zeroclaw/src/crates/
+          # The /home/ubuntu/.zeroclaw/src/crates/ paths are LOCAL-ONLY (not in git).
+          # Replace ALL zeroclaw path deps with ../../zeroclaw/crates/xxx
 
           cd myclaw
 
