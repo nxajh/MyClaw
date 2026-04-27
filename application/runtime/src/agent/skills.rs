@@ -86,4 +86,9 @@ impl SkillsManager {
     pub fn skill_count(&self) -> usize {
         self.skills.len()
     }
+
+    /// Iterate over all skills (name, &Skill).
+    pub fn skills_iter(&self) -> impl Iterator<Item = (&str, &Skill)> {
+        self.skills.iter().map(|(k, v)| (k.as_str(), v))
+    }
 }
