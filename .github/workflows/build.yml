@@ -35,16 +35,12 @@ jobs:
 
       - name: Check
         run: cargo check --workspace
-        working-directory: MyClaw
 
       - name: Build
         run: cargo build --workspace
-        working-directory: MyClaw
 
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
-        working-directory: MyClaw
 
       - name: Test
-        run: cargo test -p claw-registry
-        working-directory: MyClaw
+        run: cargo test -p registry
