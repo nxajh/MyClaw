@@ -1,4 +1,4 @@
-//! MyClaw — binary entry point.
+//! MyClaw — binary entry point (Composition Root).
 
 use structopt::StructOpt;
 
@@ -22,7 +22,6 @@ async fn main() -> anyhow::Result<()> {
             let cfg = match config {
                 Some(path) => orchestrator::daemon::load_config_from(&path)?,
                 None => {
-                    // Check MYCLAW_CONFIG env var, then fall back to default search paths.
                     if let Ok(env_path) = std::env::var("MYCLAW_CONFIG") {
                         orchestrator::daemon::load_config_from(&env_path)?
                     } else {
@@ -31,9 +30,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
 
-            // Initialize tracing first (before any other imports log).
             orchestrator::daemon::init_tracing(&cfg);
-
             orchestrator::daemon::run(cfg).await?;
         }
     }

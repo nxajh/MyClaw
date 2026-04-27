@@ -1,27 +1,32 @@
-//! Daemon — MyClaw server process entry point.
+//! Daemon — MyClaw server process entry point (Composition Root).
 //!
-//! Mimics ZeroClaw's `start_channels()` pattern:
+//! This is the **Composition Root** in DDD terms:
 //! 1. Load config from TOML file
-//! 2. Initialize tracing/logging
-//! 3. Create and start Orchestrator (channel listeners + message dispatch)
-//! 4. Wait for shutdown signal, then graceful exit
+//! 2. Assemble all Infrastructure components (Registry, Providers, Tools, Storage)
+//! 3. Inject them into Application layer (Orchestrator, Agent)
+//! 4. Run the daemon until shutdown signal
+//!
+//! DDD: The Composition Root is the *only* place that knows about concrete
+//! Infrastructure types. Application layer receives everything through traits.
 
 use anyhow::{Context, Result};
-use crate::orchestrator::Orchestrator;
+use runtime::{
+    Agent, AgentConfig, InMemoryBackend, Orchestrator, OrchestratorParts, SessionManager,
+    SkillsManager, SystemPromptConfig, AutonomyLevel, SkillsPromptInjectionMode,
+};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::signal::unix::{signal, SignalKind};
-use tokio::sync::oneshot;
+use tokio::sync::watch;
 
-/// Default config file location.
+use channels::Channel;
+
+/// Default config file locations.
 const DEFAULT_CONFIG_PATHS: &[&str] = &[
     "myclaw.toml",
     "~/.myclaw/myclaw.toml",
     "/etc/myclaw/myclaw.toml",
 ];
-
-/// Global shutdown flag.
-static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Load configuration from the first found config file.
 pub fn load_config() -> Result<config::AppConfig> {
@@ -102,32 +107,211 @@ fn print_banner(config: &config::AppConfig) {
     println!();
 }
 
-/// Run the MyClaw daemon, blocking until shutdown.
-/// Returns Ok(()) on graceful shutdown, Err on error.
-pub async fn run(config: config::AppConfig) -> Result<()> {
-    // Build orchestrator (this spawns channel listeners).
-    let (mut orchestrator, _msg_tx) =
-        Orchestrator::new(&config).context("failed to create orchestrator")?;
+// ═══════════════════════════════════════════════════════════════════════════════
+// Composition Root — assemble all components
+// ═══════════════════════════════════════════════════════════════════════════════
 
+/// Build the Registry and register all providers from config.
+fn build_registry(config: &config::AppConfig) -> anyhow::Result<registry::Registry> {
+    let mut registry =
+        registry::Registry::from_config(config.providers.clone(), &config.routing)
+            .context("failed to build registry")?;
+
+    for (provider_key, provider_cfg) in &config.providers.clone() {
+        let api_key = provider_cfg
+            .api_key
+            .as_ref()
+            .with_context(|| format!("no API key for '{}'", provider_key))?;
+
+        for (model_id, model_cfg) in &provider_cfg.models {
+            tracing::info!(
+                provider = %provider_key,
+                model = %model_id,
+                capabilities = ?model_cfg.capabilities,
+                "registering provider for model"
+            );
+
+            let handle = providers::ProviderHandle::from_url(
+                api_key.clone(),
+                &provider_cfg.base_url,
+            ).with_context(|| format!(
+                "cannot determine provider type from base_url '{}' (key='{}')",
+                provider_cfg.base_url, provider_key
+            ))?;
+
+            use config::provider::Capability as CfgCap;
+
+            for cap in &model_cfg.capabilities {
+                match cap {
+                    CfgCap::Chat | CfgCap::Vision | CfgCap::NativeTools => {}
+                    CfgCap::Embedding => {
+                        if let Some(emb) = providers::ProviderHandle::from_url(
+                            api_key.clone(), &provider_cfg.base_url,
+                        ).and_then(|h| h.into_embedding_provider()) {
+                            registry.register_embedding(emb, model_id.clone());
+                        }
+                    }
+                    CfgCap::ImageGeneration => {
+                        if let Some(img) = providers::ProviderHandle::from_url(
+                            api_key.clone(), &provider_cfg.base_url,
+                        ).and_then(|h| h.into_image_provider()) {
+                            registry.register_image(img, model_id.clone());
+                        }
+                    }
+                    CfgCap::TextToSpeech => {
+                        if let Some(tts) = providers::ProviderHandle::from_url(
+                            api_key.clone(), &provider_cfg.base_url,
+                        ).and_then(|h| h.into_tts_provider()) {
+                            registry.register_tts(tts, model_id.clone());
+                        }
+                    }
+                    CfgCap::VideoGeneration => {
+                        if let Some(vid) = providers::ProviderHandle::from_url(
+                            api_key.clone(), &provider_cfg.base_url,
+                        ).and_then(|h| h.into_video_provider()) {
+                            registry.register_video(vid, model_id.clone());
+                        }
+                    }
+                    CfgCap::Search => {
+                        if let Some(srch) = providers::ProviderHandle::from_url(
+                            api_key.clone(), &provider_cfg.base_url,
+                        ).and_then(|h| h.into_search_provider()) {
+                            registry.register_search(srch, model_id.clone());
+                        }
+                    }
+                    CfgCap::SpeechToText => {
+                        if let Some(stt) = providers::ProviderHandle::from_url(
+                            api_key.clone(), &provider_cfg.base_url,
+                        ).and_then(|h| h.into_stt_provider()) {
+                            registry.register_stt(stt, model_id.clone());
+                        }
+                    }
+                }
+            }
+
+            let chat_provider: Box<dyn providers::ChatProvider> = handle.into_chat_provider();
+            registry.register_chat(chat_provider, model_id.clone());
+        }
+    }
+
+    Ok(registry)
+}
+
+/// Build SkillsManager with all built-in tools registered.
+fn build_skills() -> SkillsManager {
+    let mut skills = SkillsManager::new();
+    let builtin = tools::builtin_tools_with_memory(tools::MemoryStore::new());
+    for tool in builtin {
+        let name = tool.name().to_string();
+        skills.register_tool(&name, tool);
+    }
+    tracing::info!(tool_count = skills.tool_count(), "builtin tools registered");
+    skills
+}
+
+/// Build SessionManager with SQLite backend (falls back to in-memory).
+fn build_session_manager(config: &config::AppConfig) -> SessionManager {
+    let db_path = config.workspace_dir.join("sessions.db");
+    let backend: Arc<dyn session::SessionBackend> =
+        match memory_storage::SqliteSessionBackend::open(&db_path.to_string_lossy()) {
+            Ok(db) => {
+                tracing::info!(path = %db_path.display(), "session database opened");
+                Arc::new(db)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to open session database, falling back to in-memory");
+                Arc::new(InMemoryBackend::new())
+            }
+        };
+    SessionManager::new(backend)
+}
+
+/// Build Channel adapters from config.
+fn build_channels(config: &config::AppConfig) -> Vec<(&'static str, Arc<dyn Channel>)> {
+    let mut channels: Vec<(&'static str, Arc<dyn Channel>)> = Vec::new();
+
+    if let Some(ref cfg) = config.channels.telegram {
+        if cfg.enabled {
+            channels.push((
+                "telegram",
+                Arc::new(channels::telegram::TelegramChannel::new(cfg.clone())),
+            ));
+        }
+    }
+
+    if let Some(ref cfg) = config.channels.wechat {
+        if cfg.enabled {
+            channels.push((
+                "wechat",
+                Arc::new(channels::wechat::WechatChannel::new(cfg.clone())),
+            ));
+        }
+    }
+
+    channels
+}
+
+/// Convert config prompt settings into Application-layer type.
+fn build_prompt_config(cfg: &config::agent::PromptConfig) -> SystemPromptConfig {
+    SystemPromptConfig {
+        workspace_dir: String::new(),
+        model_name: cfg.model_name.clone().unwrap_or_default(),
+        autonomy: match config::agent::AutonomyLevel::default() {
+            config::agent::AutonomyLevel::Full => AutonomyLevel::Full,
+            config::agent::AutonomyLevel::Default => AutonomyLevel::Default,
+            config::agent::AutonomyLevel::ReadOnly => AutonomyLevel::ReadOnly,
+        },
+        skills_mode: SkillsPromptInjectionMode::Compact,
+        compact: cfg.compact,
+        max_chars: cfg.max_chars,
+        bootstrap_max_chars: cfg.bootstrap_max_chars,
+        native_tools: cfg.native_tools,
+        channel_name: cfg.channel_name.clone(),
+        host_info: None,
+    }
+}
+
+/// Run the MyClaw daemon, blocking until shutdown.
+pub async fn run(config: config::AppConfig) -> Result<()> {
+    // ── Composition Root: assemble all components ──────────────────────────
+
+    let registry = build_registry(&config)?;
+    let skills = build_skills();
+    let session_manager = build_session_manager(&config);
+    let channels = build_channels(&config);
+
+    let agent_config = AgentConfig {
+        max_tool_calls: config.agent.max_tool_calls,
+        max_history: config.agent.max_history,
+        prompt_config: build_prompt_config(&config.agent.prompt),
+    };
+    let agent = Agent::new(Arc::new(registry), skills, agent_config);
+
+    let parts = OrchestratorParts {
+        agent,
+        session_manager,
+        channels,
+    };
+
+    // ── Launch ─────────────────────────────────────────────────────────────
+
+    let (mut orchestrator, _msg_tx) = Orchestrator::new(parts);
     print_banner(&config);
 
-    // Spawn shutdown guard.
-    let (shutdown_tx, _shutdown_rx) = oneshot::channel::<()>();
-    tokio::spawn(async move {
-        let _ = shutdown_tx;
-    });
+    // Shutdown channel.
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    // Wait for Ctrl+C or SIGTERM, then initiate graceful shutdown.
+    // Wait for SIGINT or SIGTERM.
     tokio::spawn(async move {
         let _ = wait_for_signal().await;
+        let _ = shutdown_tx.send(true);
         tracing::info!("shutdown signal received, initiating graceful shutdown...");
-        SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
     });
 
-    // Run the message dispatch loop (blocks until all channels disconnect).
-    orchestrator.run().await.context("orchestrator run error")?;
+    // Run the message dispatch loop (blocks until shutdown).
+    orchestrator.run(shutdown_rx).await.context("orchestrator run error")?;
 
-    // Graceful shutdown: await all listener tasks.
+    // Graceful shutdown.
     tracing::info!("dispatch loop ended, shutting down listeners...");
     orchestrator.shutdown_listeners().await;
 
@@ -149,9 +333,4 @@ async fn wait_for_signal() -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// Return true if shutdown was requested (e.g., via signal).
-pub fn is_shutdown_requested() -> bool {
-    SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
 }

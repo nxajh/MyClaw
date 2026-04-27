@@ -8,22 +8,27 @@ name = "myclaw"
 path = "src/main.rs"
 
 [dependencies]
-channels = { path = "../../interface/channels", features = ["wechat", "telegram"] }
+# Application layer
 runtime = { path = "../../application/runtime" }
+
+# Interface layer (Channel adapters with feature flags)
+channels = { path = "../../interface/channels", features = ["wechat", "telegram"] }
+
+# Domain
 session = { path = "../../domain/session" }
-capability = { path = "../../domain/capability" }
+
+# Infrastructure (Composition Root wires these up)
 config = { path = "../../infrastructure/config" }
-memory-storage = { path = "../../infrastructure/memory-storage" }
 registry = { path = "../../infrastructure/registry" }
 providers = { path = "../../infrastructure/providers" }
 tools = { path = "../../infrastructure/tools" }
+memory-storage = { path = "../../infrastructure/memory-storage" }
 
+# External
 tokio = { workspace = true, features = ["sync", "macros", "rt-multi-thread", "signal"] }
-dashmap = "5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 anyhow = { workspace = true }
-parking_lot = "0.12"
 serde = { workspace = true }
 serde_json = "1"
 reqwest = { workspace = true }

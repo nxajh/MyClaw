@@ -1,8 +1,7 @@
-//! Orchestrator — Channel management and message routing.
+//! Orchestrator crate — Composition Root for MyClaw.
 //!
-//! Stub: to be implemented according to zeroclaw-new-architecture.md §1.6
+//! This crate is a thin binary entry point (Composition Root in DDD).
+//! It assembles all Infrastructure components and injects them into
+//! the Application layer. It does NOT contain business logic.
 
 pub mod daemon;
-pub mod orchestrator;
-
-pub use orchestrator::Orchestrator;

@@ -14,7 +14,12 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 chrono = { workspace = true }
+dashmap = "5"
 
-# Domain crates (DDD: Application depends only on Domain traits)
+# Domain crates (DDD: Application depends on Domain)
 capability = { path = "../../domain/capability" }
 session = { path = "../../domain/session" }
+
+# Interface: Channel trait (Application coordinates interface adapters)
+# No features — only needs the trait + types, not concrete implementations.
+channels = { path = "../../interface/channels" }
