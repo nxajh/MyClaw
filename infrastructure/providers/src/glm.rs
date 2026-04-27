@@ -1,4 +1,4 @@
-//! GLM (Zhipu/GLM-4) provider — OpenAI-compatible protocol with JWT auth.
+//! GLM (Zhipu/GLM-4) provider — OpenAI-compatible protocol with Bearer auth.
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -31,7 +31,7 @@ impl ChatProvider for GlmProvider {
     fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
         let url = format!("{}/chat/completions", self.base_url);
         let body = build_openai_chat_body(&req);
-        let auth = crate::shared::build_auth(&crate::shared::AuthStyle::ZhipuJwt, &self.api_key);
+        let auth = crate::shared::build_auth(&crate::shared::AuthStyle::Bearer, &self.api_key);
         let client = self.client.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(100);
 

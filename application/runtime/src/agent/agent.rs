@@ -106,6 +106,8 @@ impl AgentLoop {
     ///
     /// This is the main entry point called by the orchestrator.
     pub async fn run(&mut self, user_message: &str) -> anyhow::Result<String> {
+        tracing::info!(user_input = %user_message, "user message received");
+
         // 1. Add user message to session.
         self.session.add_user_text(user_message.to_string());
 
@@ -162,16 +164,53 @@ impl AgentLoop {
                 stream: true,
             };
 
+            // Log the message sequence being sent to the model.
+            tracing::debug!(
+                msg_count = messages.len(),
+                tool_count = tool_calls_count,
+                "sending messages to model: {:?}",
+                messages.iter().map(|m| {
+                    let content = m.text_content();
+                    let truncated = if content.len() > 100 { format!("{}...", &content[..100]) } else { content };
+                    format!("{}: {}", m.role, truncated)
+                }).collect::<Vec<_>>()
+            );
+
             // 4. Call chat and process stream.
             let stream = provider.chat(req)?;
+            tracing::info!("chat stream started, collecting...");
             let response = self.collect_stream(stream).await?;
+            tracing::info!(text_len = response.text.len(), tool_calls = response.tool_calls.len(), stop = ?response.stop_reason, "chat stream collected");
 
             // 5. No tool calls → return text.
             if response.tool_calls.is_empty() {
+                if response.text.is_empty() {
+                    tracing::warn!("chat response text is empty");
+                }
                 return Ok(response.text);
             }
 
             // 6. Tool calls present → execute them and append results.
+            // First, log what the model wants to do.
+            for call in &response.tool_calls {
+                tracing::info!(tool = %call.name, id = %call.id, arguments = %call.arguments, "model requested tool call");
+            }
+
+            // Build the assistant's tool_calls message to append to conversation.
+            let assistant_tool_calls: Vec<serde_json::Value> = response.tool_calls.iter().map(|call| {
+                serde_json::json!({
+                    "id": call.id,
+                    "type": "function",
+                    "function": {
+                        "name": call.name,
+                        "arguments": call.arguments,
+                    }
+                })
+            }).collect();
+            let mut assistant_msg = ChatMessage::assistant_text(&response.text);
+            assistant_msg.tool_calls = Some(assistant_tool_calls);
+            messages.push(assistant_msg);
+
             for call in &response.tool_calls {
                 tool_calls_count += 1;
 
@@ -191,8 +230,12 @@ impl AgentLoop {
                     Err(e) => format!("error: {}", e),
                 };
 
-                // Append tool result to messages for next iteration.
-                messages.push(ChatMessage::text("tool", &result_content).with_name(call.id.clone()));
+                tracing::info!(tool = %call.name, success = result.is_ok(), "tool result:\n{}", result_content);
+
+                // Append tool result with tool_call_id.
+                let mut tool_msg = ChatMessage::text("tool", &result_content);
+                tool_msg.tool_call_id = Some(call.id.clone());
+                messages.push(tool_msg);
 
                 // Append to session history.
                 self.session
@@ -218,16 +261,31 @@ impl AgentLoop {
                 StreamEvent::Thinking { .. } => {
                     // TODO: surface reasoning in response or log.
                 }
-                StreamEvent::ToolCallStart { id, name } => {
+                StreamEvent::ToolCallStart { id, name, initial_arguments } => {
                     tool_calls.push(ToolCall {
                         id,
                         name,
-                        arguments: String::new(),
+                        arguments: initial_arguments,
                     });
                 }
                 StreamEvent::ToolCallDelta { id, delta } => {
-                    if let Some(call) = tool_calls.iter_mut().find(|c| c.id == id) {
-                        call.arguments.push_str(&delta);
+                    // OpenAI-compatible streaming: only the first chunk carries
+                    // id + name; subsequent chunks may have empty id.
+                    // Match by id if present, otherwise append to last tool call.
+                    if !id.is_empty() {
+                        if let Some(call) = tool_calls.iter_mut().find(|c| c.id == id) {
+                            call.arguments.push_str(&delta);
+                        } else {
+                            tool_calls.push(ToolCall {
+                                id: id.clone(),
+                                name: String::new(),
+                                arguments: delta,
+                            });
+                            tracing::debug!(tool_call_id = %id, "auto-created tool call from delta");
+                        }
+                    } else if let Some(last) = tool_calls.last_mut() {
+                        // No id — append arguments to the most recent tool call.
+                        last.arguments.push_str(&delta);
                     }
                 }
                 StreamEvent::ToolCallEnd { id, name, arguments } => {
@@ -312,6 +370,8 @@ impl ChatMessageExt for ChatMessage {
             role: self.role,
             parts: self.parts,
             name: Some(name),
+            tool_call_id: None,
+            tool_calls: None,
         }
     }
 }

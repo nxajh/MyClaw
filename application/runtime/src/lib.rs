@@ -10,5 +10,5 @@ pub mod mcp;
 pub mod prompt;
 
 // Re-export top-level types for convenient access.
-pub use agent::{Agent, AgentConfig, AgentLoop, Session, SessionManager, SkillsManager};
+pub use agent::{Agent, AgentConfig, AgentLoop, InMemoryBackend, Session, SessionManager, SkillsManager};
 pub use prompt::{AutonomyLevel, SkillsPromptInjectionMode, SystemPromptBuilder, SystemPromptConfig};

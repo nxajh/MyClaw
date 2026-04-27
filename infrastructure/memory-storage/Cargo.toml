@@ -9,6 +9,8 @@ all-features = true
 [dependencies]
 # Domain types
 memory = { path = "../../domain/memory" }
+session = { path = "../../domain/session" }
+capability = { path = "../../domain/capability" }
 
 # Workspace dependencies
 anyhow.workspace = true

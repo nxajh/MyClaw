@@ -571,6 +571,7 @@ fn classify_backoff(err: &ApiError, count: u32) -> u64 {
 
 // ── WechatChannel ─────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct WechatChannel {
     api: ApiClient,
     config: WechatConfig,
@@ -649,88 +650,99 @@ impl Channel for WechatChannel {
         Ok(())
     }
 
-    async fn listen(&self, tx: mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
+    async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>> {
         self.login().await?;
-        let mut consecutive_errors = 0u32;
+        let (tx, rx) = mpsc::channel::<ChannelMessage>(100);
 
-        loop {
-            match self.api.get_updates().await {
-                Ok(resp) => {
-                    consecutive_errors = 0;
-                    for msg in resp.msgs {
-                        let event = parse_inbound(&msg);
-                        if !self.dedup.check_and_record(&event.msg_id) { continue; }
-                        if !self.is_user_allowed(&event.sender_wxid) { continue; }
+        // Clone what the background task needs.
+        let this = self.clone();
 
-                        let content = match event.content {
-                            InboundContent::Text(t) => t,
-                            InboundContent::Unknown => continue,
-                        };
-                        if content.trim().is_empty() { continue; }
+        tokio::spawn(async move {
+            let mut consecutive_errors = 0u32;
 
-                        if !event.context_token.is_empty() {
-                            self.api.state.write()
-                                .context_tokens.insert(event.chat_id.clone(), event.context_token.clone());
-                        }
+            loop {
+                match this.api.get_updates().await {
+                    Ok(resp) => {
+                        consecutive_errors = 0;
+                        for msg in resp.msgs {
+                            let event = parse_inbound(&msg);
+                            if !this.dedup.check_and_record(&event.msg_id) { continue; }
+                            if !this.is_user_allowed(&event.sender_wxid) { continue; }
 
-                        let channel_msg = ChannelMessage {
-                            id: event.msg_id,
-                            sender: event.sender_wxid,
-                            reply_target: event.chat_id,
-                            content,
-                            channel: "wechat".to_string(),
-                            timestamp: event.raw_timestamp as u64,
-                            thread_ts: None,
-                            interruption_scope_id: None,
-                            attachments: vec![],
-                        };
-                        if let Err(e) = tx.send(channel_msg).await {
-                            warn!("WeChat dispatch error: {e}");
-                        }
-                    }
-                }
-                Err(ApiError::Api(-14, _)) => {
-                    warn!("WeChat: rate limited (-14), pausing {}s", RATE_LIMIT_PAUSE_SECS);
-                    tokio::time::sleep(Duration::from_secs(RATE_LIMIT_PAUSE_SECS)).await;
-                }
-                Err(e) => {
-                    consecutive_errors += 1;
-                    let backoff = classify_backoff(&e, consecutive_errors);
-                    match error_class(&e) {
-                        ErrorClass::Auth => {
-                            warn!("WeChat: auth error ({consecutive_errors}): {e}");
-                            self.api.state.write().bot_token = None;
-                            if let Err(login_err) = self.login().await {
-                                warn!("WeChat: re-login failed: {login_err}");
-                            } else {
-                                info!("WeChat: re-login successful");
-                                consecutive_errors = 0;
+                            let content = match event.content {
+                                InboundContent::Text(t) => t,
+                                InboundContent::Unknown => continue,
+                            };
+                            if content.trim().is_empty() { continue; }
+
+                            if !event.context_token.is_empty() {
+                                this.api.state.write()
+                                    .context_tokens.insert(event.chat_id.clone(), event.context_token.clone());
+                            }
+
+                            let channel_msg = ChannelMessage {
+                                id: event.msg_id,
+                                sender: event.sender_wxid,
+                                reply_target: event.chat_id,
+                                content,
+                                channel: "wechat".to_string(),
+                                timestamp: event.raw_timestamp as u64,
+                                thread_ts: None,
+                                interruption_scope_id: None,
+                                attachments: vec![],
+                            };
+                            // tx is moved into the async block; we send on it directly.
+                            if let Err(e) = tx.send(channel_msg).await {
+                                warn!("WeChat dispatch error (receiver dropped): {e}");
+                                break;
                             }
                         }
-                        ErrorClass::Network => {
-                            warn!("WeChat: network error, retrying in {backoff}s: {e}");
-                        }
-                        ErrorClass::Server => {
-                            warn!("WeChat: server error ({consecutive_errors}): {e}, retrying in {backoff}s");
-                            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                                warn!("WeChat: max consecutive errors, attempting re-login");
-                                self.api.state.write().bot_token = None;
-                                if let Err(login_err) = self.login().await {
+                    }
+                    Err(ApiError::Api(-14, _)) => {
+                        warn!("WeChat: rate limited (-14), pausing {}s", RATE_LIMIT_PAUSE_SECS);
+                        tokio::time::sleep(Duration::from_secs(RATE_LIMIT_PAUSE_SECS)).await;
+                    }
+                    Err(e) => {
+                        consecutive_errors += 1;
+                        let backoff = classify_backoff(&e, consecutive_errors);
+                        match error_class(&e) {
+                            ErrorClass::Auth => {
+                                warn!("WeChat: auth error ({consecutive_errors}): {e}");
+                                this.api.state.write().bot_token = None;
+                                if let Err(login_err) = this.login().await {
                                     warn!("WeChat: re-login failed: {login_err}");
                                 } else {
                                     info!("WeChat: re-login successful");
                                     consecutive_errors = 0;
                                 }
                             }
+                            ErrorClass::Network => {
+                                warn!("WeChat: network error, retrying in {backoff}s: {e}");
+                            }
+                            ErrorClass::Server => {
+                                warn!("WeChat: server error ({consecutive_errors}): {e}, retrying in {backoff}s");
+                                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                                    warn!("WeChat: max consecutive errors, attempting re-login");
+                                    this.api.state.write().bot_token = None;
+                                    if let Err(login_err) = this.login().await {
+                                        warn!("WeChat: re-login failed: {login_err}");
+                                    } else {
+                                        info!("WeChat: re-login successful");
+                                        consecutive_errors = 0;
+                                    }
+                                }
+                            }
+                            ErrorClass::Parse => {
+                                warn!("WeChat: parse error, retrying in {backoff}s: {e}");
+                            }
                         }
-                        ErrorClass::Parse => {
-                            warn!("WeChat: parse error, retrying in {backoff}s: {e}");
-                        }
+                        tokio::time::sleep(Duration::from_secs(backoff)).await;
                     }
-                    tokio::time::sleep(Duration::from_secs(backoff)).await;
                 }
             }
-        }
+        });
+
+        Ok(rx)
     }
 
     async fn health_check(&self) -> bool {

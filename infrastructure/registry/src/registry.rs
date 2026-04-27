@@ -1,5 +1,6 @@
 //! ServiceRegistry — capability routing center.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use anyhow::Context;
 use capability::capability::Capability;
@@ -12,15 +13,19 @@ use capability::video::VideoGenerationProvider;
 
 use crate::routing::{RoutingConfig, RouteEntry, RoutingStrategy};
 
+// ── Config types ────────────────────────────────────────────────────────────────
+
+/// Registry-level provider config (converted from config::ProviderConfig).
 #[derive(Debug, Clone)]
 pub struct ProviderConfig {
-    pub name: String,
+    /// Provider API kind: "minimax", "openai", "glm", etc. (HashMap key).
     pub api: String,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub models: Vec<ModelConfig>,
 }
 
+/// Registry-level model config (converted from config::ModelConfig).
 #[derive(Debug, Clone)]
 pub struct ModelConfig {
     pub model_id: String,
@@ -36,29 +41,34 @@ impl ModelConfig {
     }
 }
 
+// ── Registry ───────────────────────────────────────────────────────────────────
+
 pub struct Registry {
-    providers: std::collections::HashMap<String, ProviderConfig>,
+    providers: HashMap<String, ProviderConfig>,
     routing: RoutingConfig,
-    chat_providers: std::collections::HashMap<String, Arc<dyn ChatProvider>>,
+    chat_providers: HashMap<String, Arc<dyn ChatProvider>>,
 }
 
 impl Registry {
-    pub fn new(providers: std::collections::HashMap<String, ProviderConfig>, routing: RoutingConfig) -> Self {
-        Self { providers, routing, chat_providers: std::collections::HashMap::new() }
+    pub fn new(providers: HashMap<String, ProviderConfig>, routing: RoutingConfig) -> Self {
+        Self { providers, routing, chat_providers: HashMap::new() }
     }
 
     pub fn register_chat(&mut self, provider: Box<dyn ChatProvider>, model_id: String) {
         self.chat_providers.insert(model_id, provider.into());
     }
 
-    fn find_provider_by_model(&self, model_id: &str) -> anyhow::Result<(&ProviderConfig, &ModelConfig)> {
-        for provider in self.providers.values() {
+    fn find_provider_by_model(&self, model_id: &str) -> anyhow::Result<(&str, &ModelConfig)> {
+        tracing::debug!(model_id, "find_provider_by_model");
+        for (key, provider) in &self.providers {
             for model in &provider.models {
+                tracing::debug!(provider = %key, model = %model.model_id, "checking");
                 if model.model_id == model_id {
-                    return Ok((provider, model));
+                    return Ok((key.as_str(), model));
                 }
             }
         }
+        tracing::warn!(model_id, available_providers = ?self.providers.keys().collect::<Vec<_>>(), "No provider found for model");
         anyhow::bail!("No provider found for model: {}", model_id)
     }
 
@@ -100,8 +110,8 @@ impl Registry {
     }
 
     pub fn resolve_model(&self, model_id: &str) -> anyhow::Result<(&str, &ModelConfig)> {
-        let (provider, model) = self.find_provider_by_model(model_id)?;
-        Ok((&provider.name, model))
+        let (provider_key, model) = self.find_provider_by_model(model_id)?;
+        Ok((&provider_key, model))
     }
 
     pub fn provider_names(&self) -> impl Iterator<Item = &str> {
@@ -111,7 +121,130 @@ impl Registry {
     pub fn get_provider(&self, name: &str) -> Option<&ProviderConfig> {
         self.providers.get(name)
     }
+
+    /// Build a Registry from config types.
+    ///
+    /// This only converts the config data structures — it does NOT instantiate
+    /// live ChatProviders.  Use `register_chat()` to add providers afterwards.
+    pub fn from_config(
+        providers: HashMap<String, config::provider::ProviderConfig>,
+        routing: &config::routing::RoutingConfig,
+    ) -> anyhow::Result<Self> {
+        let registry_providers: HashMap<String, ProviderConfig> = providers
+            .into_iter()
+            .map(|(api, cfg)| {
+                let models = cfg.models
+                    .into_iter()
+                    .map(|(id, mc)| ModelConfig::from((id.as_str(), mc)))
+                    .collect();
+                let pc = ProviderConfig {
+                    api: api.clone(),
+                    api_key: cfg.api_key,
+                    base_url: Some(cfg.base_url),
+                    models,
+                };
+                (api, pc)
+            })
+            .collect();
+
+        let registry_routing = RoutingConfig::from_other(routing);
+
+        Ok(Self::new(registry_providers, registry_routing))
+    }
 }
+
+// ── Type conversions (config → registry) ─────────────────────────────────────
+
+impl From<(&str, config::provider::ModelConfig)> for ModelConfig {
+    fn from((model_id, cfg): (&str, config::provider::ModelConfig)) -> Self {
+        Self {
+            model_id: model_id.to_string(),
+            capabilities: cfg.capabilities.into_iter().map(convert_capability).collect(),
+            context_window: cfg.context_window,
+            max_tokens: cfg.max_output_tokens,
+            reasoning: cfg.reasoning,
+        }
+    }
+}
+
+impl From<config::provider::ProviderConfig> for ProviderConfig {
+    fn from(cfg: config::provider::ProviderConfig) -> Self {
+        Self {
+            // api is set by the caller via ProviderConfig::with_api() or inline
+            api: String::new(),
+            api_key: cfg.api_key,
+            base_url: Some(cfg.base_url),
+            models: vec![], // models are set separately in from_config
+        }
+    }
+}
+
+impl ProviderConfig {
+    /// Set the API kind (provider name, e.g. "minimax", "openai") — the HashMap key.
+    pub fn with_api(mut self, api: String) -> Self {
+        self.api = api;
+        self
+    }
+}
+
+fn convert_capability(c: config::provider::Capability) -> Capability {
+    use config::provider::Capability as Cc;
+    use Capability as Cr;
+    match c {
+        Cc::Chat => Cr::Chat,
+        Cc::Vision => Cr::Vision,
+        Cc::NativeTools => Cr::NativeTools,
+        Cc::Search => Cr::Search,
+        Cc::Embedding => Cr::Embedding,
+        Cc::ImageGeneration => Cr::ImageGeneration,
+        Cc::TextToSpeech => Cr::TextToSpeech,
+        Cc::SpeechToText => Cr::SpeechToText,
+        Cc::VideoGeneration => Cr::VideoGeneration,
+    }
+}
+
+impl RoutingConfig {
+    /// Convert from config's RoutingConfig (HashMap<String, RouteEntry>)
+    /// to registry's RoutingConfig (flat struct with typed fields).
+    pub fn from_other(other: &config::routing::RoutingConfig) -> Self {
+        fn convert_entry(e: &config::routing::RouteEntry) -> RouteEntry {
+            RouteEntry {
+                strategy: match e.strategy {
+                    config::routing::RoutingStrategy::Fixed => RoutingStrategy::Fixed,
+                    config::routing::RoutingStrategy::Fallback => RoutingStrategy::Fallback,
+                    config::routing::RoutingStrategy::Cheapest => RoutingStrategy::Cheapest,
+                    config::routing::RoutingStrategy::Fastest => RoutingStrategy::Fastest,
+                },
+                models: e.models.clone(),
+                provider: e.providers.first().cloned(),
+            }
+        }
+
+        let mut cfg = RoutingConfig::default();
+        for (key, entry) in other.iter() {
+            let e = convert_entry(entry);
+            match key {
+                "chat" => cfg.chat = Some(e),
+                "search" => cfg.search = Some(e),
+                "embedding" => cfg.embedding = Some(e),
+                "image_generation" => cfg.image_generation = Some(e),
+                "text_to_speech" => cfg.text_to_speech = Some(e),
+                "speech_to_text" => cfg.speech_to_text = Some(e),
+                "video_generation" => cfg.video_generation = Some(e),
+                "vision" | "native_tools" => {
+                    // Map to chat routing.
+                    if cfg.chat.is_none() {
+                        cfg.chat = Some(e);
+                    }
+                }
+                _ => {}
+            }
+        }
+        cfg
+    }
+}
+
+// ── ServiceRegistry trait ─────────────────────────────────────────────────────
 
 impl ServiceRegistry for Registry {
     fn register_chat(&mut self, provider: Box<dyn ChatProvider>, model_id: String) {

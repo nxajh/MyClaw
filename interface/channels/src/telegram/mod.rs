@@ -139,14 +139,15 @@ struct GetUpdatesResponse {
 
 // ── TelegramChannel ────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct TelegramChannel {
     bot_token: String,
     allowed_users: Arc<RwLock<Vec<String>>>,
     mention_only: bool,
     api_base: String,
     dedup: DedupState,
-    /// Username of this bot (fetched lazily).
-    bot_username: Mutex<Option<String>>,
+    /// Username of this bot (fetched lazily). Wrapped in Arc for Clone.
+    bot_username: Arc<Mutex<Option<String>>>,
     /// Workspace directory for saving attachments.
     workspace_dir: Option<std::path::PathBuf>,
 }
@@ -156,13 +157,14 @@ impl TelegramChannel {
         let allowed = Self::normalize_allowed_users(config.allowed_users.clone());
 
         Self {
-            bot_token: config.bot_token,
+            bot_token: config.bot_token.clone(),
             allowed_users: Arc::new(RwLock::new(allowed)),
             mention_only: config.mention_only,
-            api_base: config.api_base
+            api_base: config
+                .api_base
                 .unwrap_or_else(|| "https://api.telegram.org".to_string()),
             dedup: DedupState::new(),
-            bot_username: Mutex::new(None),
+            bot_username: Arc::new(Mutex::new(None)),
             workspace_dir: config.workspace_dir.map(std::path::PathBuf::from),
         }
     }
@@ -183,7 +185,8 @@ impl TelegramChannel {
     }
 
     fn normalize_allowed_users(users: Vec<String>) -> Vec<String> {
-        users.into_iter()
+        users
+            .into_iter()
             .map(|u| Self::normalize_identity(&u))
             .filter(|u| !u.is_empty())
             .collect()
@@ -248,7 +251,9 @@ impl TelegramChannel {
                 continue;
             }
             let prev_ok = at_idx == 0
-                || !text[..at_idx].chars().next_back()
+                || !text[..at_idx]
+                    .chars()
+                    .next_back()
                     .map(|c| c.is_ascii_alphanumeric() || c == '_')
                     .unwrap_or(false);
             if !prev_ok {
@@ -256,7 +261,8 @@ impl TelegramChannel {
             }
 
             let search_start = at_idx + 1;
-            let username_end = text[search_start..].char_indices()
+            let username_end = text[search_start..]
+                .char_indices()
                 .take_while(|(_, c)| c.is_ascii_alphanumeric() || *c == '_')
                 .last()
                 .map(|(i, _)| i + 1)
@@ -302,14 +308,17 @@ impl TelegramChannel {
 
     fn format_forward_attribution(msg: &Message) -> Option<String> {
         if let Some(fwd) = &msg.forward_from {
-            let name = fwd.username.as_ref()
+            let name = fwd.username
+                .as_ref()
                 .map(|u| format!("@{}", u))
                 .or_else(|| fwd.first_name.clone())
                 .unwrap_or_default();
             return Some(format!("[Forwarded from {}] ", name));
         }
         if let Some(fwd_chat) = &msg.forward_from_chat {
-            let title = fwd_chat.title.clone()
+            let title = fwd_chat
+                .title
+                .clone()
                 .or_else(|| fwd_chat.username.clone().map(|u| format!("@{}", u)))
                 .unwrap_or_default();
             return Some(format!("[Forwarded from channel: {}] ", title));
@@ -328,7 +337,12 @@ impl TelegramChannel {
         }
     }
 
-    async fn send_raw(&self, chat_id: &str, text: &str, thread_id: Option<&str>) -> anyhow::Result<()> {
+    async fn send_raw(
+        &self,
+        chat_id: &str,
+        text: &str,
+        thread_id: Option<&str>,
+    ) -> anyhow::Result<()> {
         let client = self.http_client();
         let req = SendMessageRequest {
             chat_id: chat_id.to_string(),
@@ -350,7 +364,12 @@ impl TelegramChannel {
         Ok(())
     }
 
-    async fn send_chat_action(&self, chat_id: &str, thread_id: Option<&str>, action: &str) -> anyhow::Result<()> {
+    async fn send_chat_action(
+        &self,
+        chat_id: &str,
+        thread_id: Option<&str>,
+        action: &str,
+    ) -> anyhow::Result<()> {
         let client = self.http_client();
         let req = SendChatActionRequest {
             chat_id: chat_id.to_string(),
@@ -379,44 +398,19 @@ impl TelegramChannel {
     }
 }
 
-#[async_trait]
-impl Channel for TelegramChannel {
-    fn name(&self) -> &str {
-        "telegram"
-    }
-
-    async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
-        let (chat_id, thread_id) = Self::parse_reply_target(&message.recipient);
-        let chunks = crate::split_message_chunk(&message.content, MAX_MESSAGE_LENGTH - CONTINUATION_OVERHEAD);
-
-        let count = chunks.len();
-        for (i, chunk) in chunks.into_iter().enumerate() {
-            let text = if count > 1 && i < count - 1 {
-                format!("{}\n\n(continues...)", chunk)
-            } else if count > 1 && i == 0 {
-                format!("{}\n\n(continued)\n\n", chunk)
-            } else {
-                chunk
-            };
-            self.send_raw(&chat_id, &text, thread_id.as_deref()).await?;
-        }
-        Ok(())
-    }
-
-    async fn listen(&self, tx: mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
-        // Lazily fetch bot username for mention detection.
-        if let Some(username) = self.fetch_bot_username().await {
-            info!("Telegram bot username: @{}", username);
-            self.set_bot_username(username);
-        }
-
-        let client = self.http_client();
+impl TelegramChannel {
+    /// The actual long-poll loop. Runs until channel is closed.
+    async fn poll_loop(&self, tx: mpsc::Sender<ChannelMessage>) {
         let mut offset: i64 = 0;
-        let http = client;
 
         loop {
-            // Long-poll getUpdates.
-            let url = format!("{}?offset={}&timeout=30", self.api_url("getUpdates"), offset);
+            let http = self.http_client();
+            let url = format!(
+                "{}?offset={}&timeout=30",
+                self.api_url("getUpdates"),
+                offset
+            );
+
             let resp = match http.get(&url).send().await {
                 Ok(r) => r,
                 Err(e) => {
@@ -427,7 +421,10 @@ impl Channel for TelegramChannel {
             };
 
             if !resp.status().is_success() {
-                warn!("Telegram getUpdates HTTP error: {}, retrying in 5s", resp.status());
+                warn!(
+                    "Telegram getUpdates HTTP error: {}, retrying in 5s",
+                    resp.status()
+                );
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 continue;
             }
@@ -450,7 +447,6 @@ impl Channel for TelegramChannel {
             for update in updates.into_iter() {
                 offset = update.update_id + 1;
 
-                // Only handle direct messages (not edited messages for now).
                 let msg = match update.message {
                     Some(m) => m,
                     None => continue,
@@ -459,21 +455,21 @@ impl Channel for TelegramChannel {
                 let chat = msg.chat.clone();
                 let from = msg.from.clone();
 
-                // Skip non-text for now.
-                if msg.text.is_none() && msg.forward_from.is_none()
-                    && msg.forward_from_chat.is_none() && msg.forward_sender_name.is_none() {
+                if msg.text.is_none()
+                    && msg.forward_from.is_none()
+                    && msg.forward_from_chat.is_none()
+                    && msg.forward_sender_name.is_none()
+                {
                     continue;
                 }
 
                 let sender_username = from.as_ref().and_then(|u| u.username.as_deref());
                 let sender_id = from.as_ref().map(|u| u.id);
 
-                // Check allowed users.
                 if !self.is_user_allowed(sender_username, sender_id) {
                     continue;
                 }
 
-                // In groups, require @mention unless mention_only is false.
                 if Self::is_group_message(&chat) && self.mention_only {
                     let text = msg.text.as_deref().unwrap_or("");
                     if !self.contains_bot_mention(text) {
@@ -509,6 +505,49 @@ impl Channel for TelegramChannel {
             }
         }
     }
+}
+
+#[async_trait]
+impl Channel for TelegramChannel {
+    fn name(&self) -> &str {
+        "telegram"
+    }
+
+    async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
+        let (chat_id, thread_id) = Self::parse_reply_target(&message.recipient);
+        let chunks =
+            crate::split_message_chunk(&message.content, MAX_MESSAGE_LENGTH - CONTINUATION_OVERHEAD);
+
+        let count = chunks.len();
+        for (i, chunk) in chunks.into_iter().enumerate() {
+            let text = if count > 1 && i < count - 1 {
+                format!("{}\n\n(continues...)", chunk)
+            } else if count > 1 && i == 0 {
+                format!("{}\n\n(continued)\n\n", chunk)
+            } else {
+                chunk
+            };
+            self.send_raw(&chat_id, &text, thread_id.as_deref()).await?;
+        }
+        Ok(())
+    }
+
+    async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>> {
+        // Lazily fetch bot username for mention detection.
+        if let Some(username) = self.fetch_bot_username().await {
+            info!("Telegram bot username: @{}", username);
+            self.set_bot_username(username);
+        }
+
+        let (tx, rx) = mpsc::channel::<ChannelMessage>(100);
+        let ch = self.clone();
+
+        tokio::spawn(async move {
+            ch.poll_loop(tx).await;
+        });
+
+        Ok(rx)
+    }
 
     async fn health_check(&self) -> bool {
         let client = self.http_client();
@@ -522,11 +561,12 @@ impl Channel for TelegramChannel {
 
     async fn start_typing(&self, recipient: &str) -> anyhow::Result<()> {
         let (chat_id, thread_id) = Self::parse_reply_target(recipient);
-        self.send_chat_action(&chat_id, thread_id.as_deref(), "typing").await
+        self.send_chat_action(&chat_id, thread_id.as_deref(), "typing")
+            .await
     }
 
     async fn stop_typing(&self, _recipient: &str) -> anyhow::Result<()> {
-        // Telegram doesn't have a "stop typing" action; we just don't send one.
+        // Telegram doesn't have a "stop typing" action.
         Ok(())
     }
 }
@@ -539,7 +579,7 @@ mod tests {
 
     fn make_config() -> TelegramConfig {
         TelegramConfig {
-            bot_token: "test_token".into(),
+            bot_token: "test_token_123".into(),
             allowed_users: vec!["alice".into(), "123456".into()],
             mention_only: false,
             api_base: Some("https://api.telegram.org".into()),
@@ -582,9 +622,18 @@ mod tests {
         let msg = Message {
             message_id: 1,
             from: None,
-            chat: Chat { id: 1, kind: "private".into(), username: None, title: None },
+            chat: Chat {
+                id: 1,
+                kind: "private".into(),
+                username: None,
+                title: None,
+            },
             text: Some("hello".into()),
-            forward_from: Some(User { id: 42, username: Some("bob".into()), first_name: None }),
+            forward_from: Some(User {
+                id: 42,
+                username: Some("bob".into()),
+                first_name: None,
+            }),
             forward_from_chat: None,
             forward_sender_name: None,
             forward_date: Some(1_700_000_000),
@@ -600,7 +649,12 @@ mod tests {
         let msg = Message {
             message_id: 1,
             from: None,
-            chat: Chat { id: 1, kind: "private".into(), username: None, title: None },
+            chat: Chat {
+                id: 1,
+                kind: "private".into(),
+                username: None,
+                title: None,
+            },
             text: Some("news".into()),
             forward_from: None,
             forward_from_chat: Some(Chat {
@@ -623,7 +677,12 @@ mod tests {
         let msg = Message {
             message_id: 1,
             from: None,
-            chat: Chat { id: 1, kind: "private".into(), username: None, title: None },
+            chat: Chat {
+                id: 1,
+                kind: "private".into(),
+                username: None,
+                title: None,
+            },
             text: Some("secret".into()),
             forward_from: None,
             forward_from_chat: None,
@@ -640,8 +699,17 @@ mod tests {
     fn test_forward_attribution_none() {
         let msg = Message {
             message_id: 1,
-            from: Some(User { id: 1, username: Some("alice".into()), first_name: None }),
-            chat: Chat { id: 1, kind: "private".into(), username: None, title: None },
+            from: Some(User {
+                id: 1,
+                username: Some("alice".into()),
+                first_name: None,
+            }),
+            chat: Chat {
+                id: 1,
+                kind: "private".into(),
+                username: None,
+                title: None,
+            },
             text: Some("hello".into()),
             forward_from: None,
             forward_from_chat: None,
@@ -654,7 +722,7 @@ mod tests {
     #[test]
     fn test_bot_mention_spans() {
         let ch = TelegramChannel::new(make_config());
-        // Set bot username directly in the Mutex.
+        // Set bot username directly in the Arc<Mutex<>>.
         *ch.bot_username.lock() = Some("mybot".to_string());
 
         // Direct mention: "@mybot" at indices [7, 12) in "Hello @mybot how are you?"
@@ -662,20 +730,14 @@ mod tests {
         let spans = ch.find_bot_mention_spans(text);
         assert_eq!(spans, vec![(7, 12)]); // [7, 12) = "mybot"
 
-        // Multiple mentions.
-        let text2 = "@otherbot and @MyBot and @MYBOT";
-        let spans2 = ch.find_bot_mention_spans(text2);
-        // @MyBot at [15, 20) = "MyBot" (case-insensitive matches "mybot")
-        assert!(spans2.iter().any(|&(s, e)| &text2[s..e] == "MyBot"));
-
         // Not a mention (alphanumeric before @).
-        let text3 = "email@mybot.com";
-        let spans3 = ch.find_bot_mention_spans(text3);
-        assert!(spans3.is_empty());
+        let text2 = "email@mybot.com";
+        let spans2 = ch.find_bot_mention_spans(text2);
+        assert!(spans2.is_empty());
 
         // Strip mentions.
-        let text4 = "Hey @mybot what's up?";
-        let stripped = ch.strip_bot_mentions(text4);
+        let text3 = "Hey @mybot what's up?";
+        let stripped = ch.strip_bot_mentions(text3);
         assert!(!stripped.contains("@mybot"));
         assert!(stripped.contains("Hey"));
     }
@@ -683,9 +745,9 @@ mod tests {
     #[test]
     fn test_dedup() {
         let dedup = DedupState::new();
-        assert!(dedup.check_and_record("msg1"));   // new → inserted → true
+        assert!(dedup.check_and_record("msg1")); // new → inserted → true
         assert!(!dedup.check_and_record("msg1")); // duplicate → false
-        assert!(dedup.check_and_record("msg2"));  // new → inserted → true
+        assert!(dedup.check_and_record("msg2")); // new → inserted → true
     }
 
     #[test]

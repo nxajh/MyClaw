@@ -98,16 +98,20 @@ pub fn parse_openai_sse(line: &str) -> Option<StreamEvent> {
         reasoning_content: Option<String>,
         tool_calls: Option<Vec<TcDelta>>,
     }
-    #[derive(serde::Deserialize)]
+    #[derive(serde::Deserialize, serde::Serialize)]
     #[allow(dead_code)]
     struct TcDelta { index: u32, id: Option<String>, function: Option<FuncDelta> }
-    #[derive(serde::Deserialize)]
+    #[derive(serde::Deserialize, serde::Serialize)]
     #[allow(dead_code)]
     struct FuncDelta { name: Option<String>, arguments: Option<String> }
 
     let chunk: Chunk = serde_json::from_str(data).ok()?;
 
     for choice in &chunk.choices {
+        if let Some(tcs) = &choice.delta.tool_calls {
+            // Log raw tool_calls delta for debugging.
+            tracing::debug!(raw_tool_calls = %serde_json::to_string(tcs).unwrap_or_default(), "SSE tool_calls delta");
+        }
         if let Some(text) = &choice.delta.content {
             if !text.is_empty() { return Some(StreamEvent::Delta { text: text.clone() }); }
         }
@@ -117,8 +121,26 @@ pub fn parse_openai_sse(line: &str) -> Option<StreamEvent> {
         if let Some(tcs) = &choice.delta.tool_calls {
             if let Some(tc) = tcs.first() {
                 let id = tc.id.clone().unwrap_or_default();
-                let args = tc.function.as_ref().and_then(|f| f.arguments.clone()).unwrap_or_default();
-                return Some(StreamEvent::ToolCallDelta { id, delta: args });
+                let func = tc.function.as_ref();
+
+                // If this delta carries an id AND a name, it's the first chunk
+                // for this tool call → emit ToolCallStart.
+                // GLM sends id + name + arguments ALL in one chunk, so carry
+                // initial_arguments along.
+                if !id.is_empty() && func.is_some_and(|f| f.name.is_some()) {
+                    let initial_args = func.and_then(|f| f.arguments.clone()).unwrap_or_default();
+                    return Some(StreamEvent::ToolCallStart {
+                        id: id.clone(),
+                        name: func.and_then(|f| f.name.clone()).unwrap_or_default(),
+                        initial_arguments: initial_args,
+                    });
+                }
+
+                // Subsequent deltas carry argument fragments.
+                let args = func.and_then(|f| f.arguments.clone()).unwrap_or_default();
+                if !args.is_empty() {
+                    return Some(StreamEvent::ToolCallDelta { id, delta: args });
+                }
             }
         }
         if choice.finish_reason.is_some() {
@@ -157,12 +179,45 @@ pub fn build_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
             }).collect();
 
             let content = if content_vec.len() == 1 {
-                content_vec.into_iter().next().unwrap()
+                // For a single text part, emit plain string content for maximum compatibility.
+                if let Some(text) = msg.parts.iter().find_map(|p| match p {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                }) {
+                    serde_json::json!(text)
+                } else {
+                    content_vec.into_iter().next().unwrap()
+                }
             } else {
                 serde_json::json!(content_vec)
             };
 
-            serde_json::json!({ "role": msg.role, "content": content })
+            let mut msg_json = serde_json::json!({ "role": msg.role });
+
+            // Handle "tool" role: must include tool_call_id.
+            if msg.role == "tool" {
+                if let Some(tc_id) = &msg.tool_call_id {
+                    msg_json["tool_call_id"] = serde_json::json!(tc_id);
+                } else if let Some(n) = &msg.name {
+                    // Backward compat: name field used as tool_call_id.
+                    msg_json["tool_call_id"] = serde_json::json!(n);
+                }
+                msg_json["content"] = serde_json::json!(content);
+            } else if msg.role == "assistant" {
+                // Assistant message may carry tool_calls from a previous turn.
+                msg_json["content"] = if content.is_string() && content.as_str().unwrap_or("").is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!(content)
+                };
+                if let Some(tcs) = &msg.tool_calls {
+                    msg_json["tool_calls"] = serde_json::json!(tcs);
+                }
+            } else {
+                msg_json["content"] = serde_json::json!(content);
+            }
+
+            msg_json
         })
         .collect();
 
@@ -207,3 +262,32 @@ impl ProviderInstance for crate::anthropic::AnthropicProvider {}
 impl ProviderInstance for crate::glm::GlmProvider {}
 impl ProviderInstance for crate::kimi::KimiProvider {}
 impl ProviderInstance for crate::minimax::MiniMaxProvider {}
+
+/// Create a provider by inspecting the base_url hostname.
+/// Falls back to OpenAI-compatible if no specific match is found.
+pub fn create_provider_by_url(
+    api_key: String,
+    base_url: &str,
+) -> Option<Box<dyn capability::chat::ChatProvider>> {
+    let host = base_url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/').next()
+        .unwrap_or("");
+
+    tracing::info!(base_url, host, "auto-detecting provider type from base_url");
+
+    if host.contains("bigmodel.cn") || host.contains("zhipuai") {
+        Some(Box::new(crate::glm::GlmProvider::with_base_url(api_key, base_url.to_string())))
+    } else if host.contains("anthropic.com") || host.contains("claude.ai") {
+        Some(Box::new(crate::anthropic::AnthropicProvider::with_base_url(api_key, base_url.to_string())))
+    } else if host.contains("minimax") {
+        Some(Box::new(crate::minimax::MiniMaxProvider::with_base_url(api_key, base_url.to_string())))
+    } else if host.contains("moonshot") || host.contains("kimi") {
+        Some(Box::new(crate::kimi::KimiProvider::with_base_url(api_key, base_url.to_string())))
+    } else {
+        // Default: OpenAI-compatible (covers api.openai.com, api.deepseek.com, etc.)
+        tracing::info!(host, "no specific match, using OpenAI-compatible provider");
+        Some(Box::new(crate::openai::OpenAiProvider::with_base_url(api_key, base_url.to_string())))
+    }
+}

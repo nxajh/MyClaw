@@ -7,9 +7,11 @@
 //! - `wechat`    — WeChat iLink Bot channel (QR login, AES-ECB crypto, long-poll)
 //! - `telegram` — Telegram Bot API channel (webhook/long-poll, streaming edits)
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 // ── Core message types ─────────────────────────────────────────────────────────
@@ -46,6 +48,8 @@ pub struct SendMessage {
     pub thread_ts: Option<String>,
     pub cancellation_token: Option<CancellationToken>,
     pub attachments: Vec<MediaAttachment>,
+    /// Image URLs to include as attachments (optional).
+    pub image_urls: Option<Vec<String>>,
 }
 
 impl SendMessage {
@@ -57,6 +61,7 @@ impl SendMessage {
             thread_ts: None,
             cancellation_token: None,
             attachments: vec![],
+            image_urls: None,
         }
     }
 
@@ -84,7 +89,7 @@ pub trait Channel: Send + Sync {
 
     async fn send(&self, message: &SendMessage) -> anyhow::Result<()>;
 
-    async fn listen(&self, tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> anyhow::Result<()>;
+    async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>>;
 
     async fn health_check(&self) -> bool {
         true
@@ -222,14 +227,17 @@ impl RateLimiter {
 
 /// Tracks recently-seen message IDs to suppress duplicates from reconnects.
 /// Uses parking_lot::Mutex for interior mutability — safe in async contexts.
-#[derive(Debug)]
+/// Wrapped in Arc so it can be cheaply cloned into spawned listener tasks.
+#[derive(Debug, Clone)]
 pub struct DedupState {
-    seen: parking_lot::Mutex<std::collections::HashSet<String>>,
+    seen: Arc<parking_lot::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl DedupState {
     pub fn new() -> Self {
-        Self { seen: parking_lot::Mutex::new(std::collections::HashSet::new()) }
+        Self {
+            seen: Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new())),
+        }
     }
 
     /// Check if a message ID is already seen; record it if not.

@@ -34,11 +34,17 @@ pub struct ChatMessage {
     /// Tool call ID for "tool" role messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Tool call ID (OpenAI: tool_call_id for "tool" role).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// Tool calls from assistant (OpenAI: tool_calls in assistant message).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<serde_json::Value>>,
 }
 
 impl ChatMessage {
     pub fn text(role: impl Into<String>, text: impl Into<String>) -> Self {
-        Self { role: role.into(), parts: vec![ContentPart::Text { text: text.into() }], name: None }
+        Self { role: role.into(), parts: vec![ContentPart::Text { text: text.into() }], name: None, tool_call_id: None, tool_calls: None }
     }
     pub fn user_text(text: impl Into<String>) -> Self { Self::text("user", text) }
     pub fn assistant_text(text: impl Into<String>) -> Self { Self::text("assistant", text) }
@@ -65,7 +71,7 @@ pub type BoxStream<T> = Pin<Box<dyn Stream<Item = T> + Send>>;
 pub enum StreamEvent {
     Delta { text: String },
     Thinking { text: String },
-    ToolCallStart { id: String, name: String },
+    ToolCallStart { id: String, name: String, initial_arguments: String },
     ToolCallDelta { id: String, delta: String },
     ToolCallEnd { id: String, name: String, arguments: String },
     Usage(ChatUsage),

@@ -8,7 +8,7 @@ pub mod openai;
 pub mod shared;
 
 // Re-export from shared module at crate root
-pub use shared::{AuthStyle, ProviderInstance, create_provider,
+pub use shared::{AuthStyle, ProviderInstance, create_provider, create_provider_by_url,
     parse_openai_sse, build_openai_chat_body};
 
 // Re-export Client directly (from reqwest)

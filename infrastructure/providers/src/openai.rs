@@ -31,10 +31,16 @@ impl OpenAiProvider {
         Self { base_url, api_key, auth_style: AuthStyle::Bearer, client: Client::new() }
     }
 
-    fn chat_url(&self) -> String { format!("{}/v1/chat/completions", self.base_url) }
-    fn images_url(&self) -> String { format!("{}/v1/images/generations", self.base_url) }
-    fn embeddings_url(&self) -> String { format!("{}/v1/embeddings", self.base_url) }
-    fn tts_url(&self) -> String { format!("{}/v1/audio/speech", self.base_url) }
+    fn chat_url(&self) -> String {
+        if self.base_url.contains("/v1") || self.base_url.contains("/v4") {
+            format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
+        } else {
+            format!("{}/v1/chat/completions", self.base_url.trim_end_matches('/'))
+        }
+    }
+    fn images_url(&self) -> String { format!("{}/v1/images/generations", self.base_url.trim_end_matches('/')) }
+    fn embeddings_url(&self) -> String { format!("{}/v1/embeddings", self.base_url.trim_end_matches('/')) }
+    fn tts_url(&self) -> String { format!("{}/v1/audio/speech", self.base_url.trim_end_matches('/')) }
     fn auth(&self) -> String { crate::shared::build_auth(&self.auth_style, &self.api_key) }
 }
 

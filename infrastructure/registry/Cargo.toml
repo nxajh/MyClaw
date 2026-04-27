@@ -12,3 +12,6 @@ tracing.workspace = true
 
 # Use domain capability types
 capability = { path = "../../domain/capability" }
+
+# Use config types for FromConfig builder
+config = { path = "../config" }
