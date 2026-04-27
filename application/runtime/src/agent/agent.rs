@@ -1,0 +1,298 @@
+//! Agent — shared factory for AgentLoop instances.
+//!
+//! Agent holds shared resources (registry, skills, config) and creates
+//! per-session AgentLoop handles.
+
+use std::sync::Arc;
+
+use capability::capability::Capability;
+use capability::chat::{
+    BoxStream, ChatMessage, ChatRequest, StopReason, StreamEvent, ToolCall, ToolSpec,
+};
+use capability::service_registry::ServiceRegistry;
+use futures_util::StreamExt;
+
+
+use super::session_manager::Session;
+use super::skills::SkillsManager;
+use registry::Registry;
+
+/// AgentConfig controls loop breaker thresholds and tool call limits.
+#[derive(Debug, Clone)]
+pub struct AgentConfig {
+    /// Hard cap on tool calls per turn. 0 = unlimited.
+    pub max_tool_calls: usize,
+    /// Maximum history messages to keep in memory. 0 = unlimited.
+    pub max_history: usize,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            max_tool_calls: 100,
+            max_history: 200,
+        }
+    }
+}
+
+/// Agent is the shared factory — call `.loop_for(session)` to get an AgentLoop.
+#[derive(Clone)]
+pub struct Agent {
+    registry: Arc<Registry>,
+    skills: Arc<SkillsManager>,
+    config: AgentConfig,
+    system_prompt: String,
+}
+
+impl Agent {
+    pub fn new(registry: Registry, skills: SkillsManager, config: AgentConfig) -> Self {
+        Self {
+            registry: Arc::new(registry),
+            skills: Arc::new(skills),
+            config,
+            system_prompt: String::new(),
+        }
+    }
+
+    /// Set the system prompt template.
+    pub fn with_system_prompt(mut self, prompt: String) -> Self {
+        self.system_prompt = prompt;
+        self
+    }
+
+    /// Create an AgentLoop for the given session.
+    pub fn loop_for(&self, session: Session) -> AgentLoop {
+        AgentLoop {
+            registry: Arc::clone(&self.registry),
+            skills: Arc::clone(&self.skills),
+            config: self.config.clone(),
+            session,
+            system_prompt: self.system_prompt.clone(),
+        }
+    }
+}
+
+/// Per-session agent loop handle. Execute `run(user_message)` to process a message.
+pub struct AgentLoop {
+    registry: Arc<Registry>,
+    skills: Arc<SkillsManager>,
+    config: AgentConfig,
+    session: Session,
+    /// Template for the system prompt.
+    system_prompt: String,
+}
+
+impl AgentLoop {
+    /// Process a user message and return the assistant's text response.
+    ///
+    /// This is the main entry point called by the orchestrator.
+    pub async fn run(&mut self, user_message: &str) -> anyhow::Result<String> {
+        // 1. Add user message to session.
+        self.session.add_user_text(user_message.to_string());
+
+        // 2. Build the full message list for this turn.
+        let messages = self.build_messages().await?;
+
+        // 3. Run the chat loop (handles tool calls iteratively).
+        let text = self.chat_loop(messages).await?;
+
+        // 4. Persist assistant response.
+        self.session.add_assistant_text(text.clone());
+
+        Ok(text)
+    }
+
+    /// Build the message list: system prompt + history.
+    async fn build_messages(&self) -> anyhow::Result<Vec<ChatMessage>> {
+        let mut messages = Vec::with_capacity(self.session.history.len() + 4);
+
+        // System prompt.
+        if !self.system_prompt.is_empty() {
+            messages.push(ChatMessage::system_text(&self.system_prompt));
+        }
+
+        // History.
+        messages.extend(self.session.history.iter().cloned());
+
+        Ok(messages)
+    }
+
+    /// Core chat loop: call LLM, handle tool calls, repeat until text response.
+    async fn chat_loop(&mut self, mut messages: Vec<ChatMessage>) -> anyhow::Result<String> {
+        let mut tool_calls_count = 0usize;
+
+        loop {
+            // 1. Get a chat provider via registry.
+            let (provider, model_id) = self
+                .registry
+                .get_chat_provider(Capability::Chat)?;
+
+            // 2. Build tool specs from skills manager.
+            let tools = self.build_tool_specs();
+
+            // 3. Build request.
+            let req = ChatRequest {
+                model: &model_id,
+                messages: &messages,
+                temperature: None,
+                max_tokens: None,
+                thinking: None,
+                stop: None,
+                seed: None,
+                tools: if tools.is_empty() { None } else { Some(&tools) },
+                stream: true,
+            };
+
+            // 4. Call chat and process stream.
+            let stream = provider.chat(req)?;
+            let response = self.collect_stream(stream).await?;
+
+            // 5. No tool calls → return text.
+            if response.tool_calls.is_empty() {
+                return Ok(response.text);
+            }
+
+            // 6. Tool calls present → execute them and append results.
+            for call in &response.tool_calls {
+                tool_calls_count += 1;
+
+                // Hard limit check.
+                if self.config.max_tool_calls > 0
+                    && tool_calls_count > self.config.max_tool_calls
+                {
+                    anyhow::bail!(
+                        "Tool call limit reached ({}), loop broken",
+                        self.config.max_tool_calls
+                    );
+                }
+
+                let result = self.execute_tool(call).await;
+                let result_content = match &result {
+                    Ok(r) => r.output.clone(),
+                    Err(e) => format!("error: {}", e),
+                };
+
+                // Append tool result to messages for next iteration.
+                messages.push(ChatMessage::text("tool", &result_content).with_name(call.id.clone()));
+
+                // Append to session history.
+                self.session
+                    .add_assistant_text(serde_json::to_string(&call).unwrap_or_default());
+                self.session
+                    .add_assistant_text(result_content);
+            }
+        }
+    }
+
+    /// Collect all events from a streaming chat response.
+    async fn collect_stream(
+        &self,
+        mut stream: BoxStream<StreamEvent>,
+    ) -> anyhow::Result<CollectedResponse> {
+        let mut text = String::new();
+        let mut tool_calls = Vec::new();
+        let mut stop_reason = StopReason::EndTurn;
+
+        while let Some(event) = stream.next().await {
+            match event {
+                StreamEvent::Delta { text: delta } => text.push_str(&delta),
+                StreamEvent::Thinking { .. } => {
+                    // TODO: surface reasoning in response or log.
+                }
+                StreamEvent::ToolCallStart { id, name } => {
+                    tool_calls.push(ToolCall {
+                        id,
+                        name,
+                        arguments: String::new(),
+                    });
+                }
+                StreamEvent::ToolCallDelta { id, delta } => {
+                    if let Some(call) = tool_calls.iter_mut().find(|c| c.id == id) {
+                        call.arguments.push_str(&delta);
+                    }
+                }
+                StreamEvent::ToolCallEnd { id, name, arguments } => {
+                    if let Some(call) = tool_calls.iter_mut().find(|c| c.id == id) {
+                        call.name = name;
+                        call.arguments = arguments;
+                    }
+                }
+                StreamEvent::Usage(_) => {
+                    // TODO: record usage.
+                }
+                StreamEvent::Done { reason } => {
+                    stop_reason = reason;
+                    break;
+                }
+                StreamEvent::Error(e) => {
+                    anyhow::bail!("Stream error: {}", e);
+                }
+            }
+        }
+
+        Ok(CollectedResponse {
+            text,
+            tool_calls,
+            stop_reason,
+        })
+    }
+
+    /// Build tool specs from the skills manager.
+    fn build_tool_specs(&self) -> Vec<ToolSpec> {
+        self.skills
+            .all_tools()
+            .iter()
+            .map(|t| {
+                // Convert from mcp::ToolSpec to capability::chat::ToolSpec.
+                let spec = t.spec();
+                ToolSpec {
+                    name: spec.name,
+                    description: Some(spec.description),
+                    input_schema: spec.parameters,
+                }
+            })
+            .collect()
+    }
+
+    /// Execute a single tool call.
+    async fn execute_tool(&self, call: &ToolCall) -> anyhow::Result<mcp::ToolResult> {
+        let tool = self.skills.get(&call.name).ok_or_else(|| {
+            anyhow::anyhow!("Unknown tool: '{}'", call.name)
+        })?;
+
+        let args: serde_json::Value = if call.arguments.is_empty() {
+            serde_json::Value::Object(serde_json::Map::new())
+        } else {
+            serde_json::from_str(&call.arguments).unwrap_or_else(|_| {
+                serde_json::json!({ "raw": &call.arguments })
+            })
+        };
+
+        tool.execute(args).await
+    }
+}
+
+/// Response collected from a chat stream.
+struct CollectedResponse {
+    text: String,
+    tool_calls: Vec<ToolCall>,
+    #[allow(dead_code)]
+    stop_reason: StopReason,
+}
+
+// ── Extension trait for ChatMessage ──────────────────────────────────────────
+
+/// Extension methods for ChatMessage.
+trait ChatMessageExt {
+    fn with_name(self, name: String) -> ChatMessage;
+}
+
+impl ChatMessageExt for ChatMessage {
+    fn with_name(self, name: String) -> ChatMessage {
+        ChatMessage {
+            role: self.role,
+            parts: self.parts,
+            name: Some(name),
+        }
+    }
+}

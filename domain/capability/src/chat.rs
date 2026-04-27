@@ -31,11 +31,14 @@ pub struct ChatMessage {
     pub role: String,
     #[serde(default)]
     pub parts: Vec<ContentPart>,
+    /// Tool call ID for "tool" role messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl ChatMessage {
     pub fn text(role: impl Into<String>, text: impl Into<String>) -> Self {
-        Self { role: role.into(), parts: vec![ContentPart::Text { text: text.into() }] }
+        Self { role: role.into(), parts: vec![ContentPart::Text { text: text.into() }], name: None }
     }
     pub fn user_text(text: impl Into<String>) -> Self { Self::text("user", text) }
     pub fn assistant_text(text: impl Into<String>) -> Self { Self::text("assistant", text) }

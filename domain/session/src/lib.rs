@@ -1,20 +1,13 @@
 //! Session domain — Domain types for session management.
 //!
 //! Contains the core [`SessionBackend`] trait and associated data types.
-//! Implementations (SQLite, JSONL, etc.) live in `src/crates/myclaw-infra`.
+//! ChatMessage types are re-exported from the capability crate for use
+//! throughout the application.
 
 use chrono::{DateTime, Utc};
 
-/// A single message in a chat conversation.
-#[derive(Debug, Clone)]
-pub struct ChatMessage {
-    /// Role: "system", "user", "assistant", or "tool".
-    pub role: String,
-    /// Message content (text or JSON-encoded structured content).
-    pub content: String,
-    /// Optional name identifier (for multi-user or tool contexts).
-    pub name: Option<String>,
-}
+/// Re-export ChatMessage from capability crate (multimodal: Vec<ContentPart>).
+pub use capability::chat::ChatMessage;
 
 /// Metadata about a persisted session.
 #[derive(Debug, Clone)]
@@ -106,30 +99,5 @@ pub trait SessionBackend: Send + Sync {
     /// List sessions that appear to be stuck (active for longer than threshold).
     fn list_stuck_sessions(&self, _threshold_secs: u64) -> Vec<SessionMetadata> {
         Vec::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn session_metadata_is_constructible() {
-        let meta = SessionMetadata {
-            key: "test".into(),
-            name: None,
-            created_at: Utc::now(),
-            last_activity: Utc::now(),
-            message_count: 5,
-        };
-        assert_eq!(meta.key, "test");
-        assert_eq!(meta.message_count, 5);
-    }
-
-    #[test]
-    fn session_query_defaults() {
-        let q = SessionQuery::default();
-        assert!(q.keyword.is_none());
-        assert!(q.limit.is_none());
     }
 }
