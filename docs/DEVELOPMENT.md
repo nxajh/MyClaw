@@ -1,6 +1,6 @@
 # MyClaw 开发计划
 
-> 基于 `docs/zeroclaw-new-architecture.md` 设计文档重写 ZeroClaw
+> 全新开发 MyClaw，基于 `docs/architecture.md` 架构设计文档
 
 ---
 
@@ -20,7 +20,7 @@
 
 - **Provider 按能力拆分**：Chat / Search / Embedding / Image / TTS / STT / Video 独立 trait
 - **Channel 编译时可选**：不需要的 channel 不编译
-- **Memory 独立模块**：`claw-memory` + `claw-memory-storage`
+- **Memory 独立模块**：`myclaw-memory` + `myclaw-memory-storage`
 - **Loop Breaker 装饰器**：可插拔的限流/熔断机制
 
 ---
@@ -45,16 +45,16 @@ src/
 
 ```
 crates/
-├── zeroclaw-api           # API 层
-├── claw-channels      # Channel 聚合
-├── zeroclaw-config        # 配置
-├── zeroclaw-gateway       # 网关
-├── zeroclaw-infra         # 基础设施
-├── claw-memory        # Memory 模块
-├── claw-providers     # Provider 聚合
-├── claw-runtime       # 运行时
-├── claw-tools         # Tools 聚合
-├── zeroclaw-tui           # TUI
+├── myclaw-api           # API 层
+├── myclaw-channels      # Channel 聚合
+├── myclaw-config        # 配置
+├── myclaw-gateway       # 网关
+├── myclaw-infra         # 基础设施
+├── myclaw-memory        # Memory 模块
+├── myclaw-providers     # Provider 聚合
+├── myclaw-runtime       # 运行时
+├── myclaw-tools         # Tools 聚合
+├── myclaw-tui           # TUI
 └── ... (其他)
 ```
 
@@ -62,24 +62,24 @@ crates/
 
 ## 三、目标目录结构
 
-> 完全基于 `zeroclaw-new-architecture.md` 文档各节定义
+> 完全基于 `docs/architecture.md` 文档各节定义
 
 ```
 ├── orchestration/                         # Orchestration Layer（编排层）
-│   └── claw-orchestrator/           # Orchestrator
-│       └── src/lib.rs                   # 启动 Channels、消息路由
+│   └── myclaw-orchestrator/          # Orchestrator
+│       └── src/lib.rs                    # 启动 Channels、消息路由
 │
-├── interface/                           # Interface Layer（接口层）
-│   └── claw-channels/               # Channel Adapters（编译时可选）
+├── interface/                            # Interface Layer（接口层）
+│   └── myclaw-channels/              # Channel Adapters（编译时可选）
 │       └── src/
-│           ├── lib.rs                   # #[cfg(feature = "...")] 条件编译
-│           ├── wechat/                  # zeroclaw-channel-wechat（optional）
-│           ├── telegram/               # zeroclaw-channel-telegram（optional）
-│           ├── discord/                # zeroclaw-channel-discord（optional）
-│           └── slack/                  # zeroclaw-channel-slack（optional）
+│           ├── lib.rs                  # #[cfg(feature = "...")] 条件编译
+│           ├── wechat/                  # myclaw-channel-wechat（optional）
+│           ├── telegram/               # myclaw-channel-telegram（optional）
+│           ├── discord/                # myclaw-channel-discord（optional）
+│           └── slack/                  # myclaw-channel-slack（optional）
 │
-├── application/                         # Application Layer（应用层）
-│   ├── claw-runtime/               # AgentLoop、SkillsManager、McpManager、SystemPromptBuilder
+├── application/                          # Application Layer（应用层）
+│   ├── myclaw-runtime/              # AgentLoop、SkillsManager、McpManager、SystemPromptBuilder
 │   │   └── src/
 │   │       ├── agent/                  # AgentLoop 实现
 │   │       ├── skills/                 # SkillsManager
@@ -87,22 +87,22 @@ crates/
 │   │       ├── prompt/                 # SystemPromptBuilder
 │   │       ├── cron/                   # Scheduler（保持在 runtime 内，不独立 crate）
 │   │       └── doctor/                 # Self-check 诊断
-│   └── zeroclaw-cli/                   # CLI 入口（main.rs）
+│   └── myclaw-cli/                     # CLI 入口（main.rs）
 │
-├── domain/                              # Domain Layer（核心域）
-│   ├── claw-session/               # Session 领域
+├── domain/                               # Domain Layer（核心域）
+│   ├── myclaw-session/             # Session 领域
 │   │   └── src/session.rs
 │   │
-│   └── claw-memory/                # Memory 领域
+│   └── myclaw-memory/               # Memory 领域
 │       └── src/
 │           ├── memory.rs               # Memory trait
 │           ├── shared.rs               # Shared Memory 逻辑
 │           └── private.rs              # Private Memory 逻辑
 │
-├── infrastructure/                      # Infrastructure Layer（基础设施）
-│   ├── claw-registry/              # ServiceRegistry（能力路由中心）
+├── infrastructure/                       # Infrastructure Layer（基础设施）
+│   ├── myclaw-registry/             # ServiceRegistry（能力路由中心）
 │   │   └── src/lib.rs                  # get_chat_provider() 等方法
-│   ├── claw-providers/             # Provider 实现
+│   ├── myclaw-providers/            # Provider 实现
 │   │   └── src/
 │   │       ├── mod.rs                  # 共享网络函数 + 工厂函数
 │   │       ├── openai.rs              # OpenAIProvider（Chat + Search + Embedding）
@@ -114,21 +114,21 @@ crates/
 │   │       ├── elevenlabs.rs          # ElevenLabsProvider（TTS）
 │   │       ├── perplexity.rs          # PerplexityProvider（Search）
 │   │       └── ...                    # 其他 Provider
-│   ├── claw-memory-storage/        # Memory 存储实现
+│   ├── myclaw-memory-storage/       # Memory 存储实现
 │   │   └── src/
 │   │       ├── sqlite.rs              # SQLite 实现
 │   │       ├── embedding.rs           # Embedding 计算
 │   │       └── mod.rs
-│   ├── claw-tools/                 # 内置 Tool 实现
+│   ├── myclaw-tools/                # 内置 Tool 实现
 │   │   └── src/
 │   │       ├── mod.rs
 │   │       └── ...                    # 70+ 内置工具
-│   └── claw-mcp/                   # MCP Client 实现
+│   └── myclaw-mcp/                  # MCP Client 实现
 │       └── src/
 │           ├── lib.rs
 │           └── transport/              # Stdio/HTTP/SSE
 │
-└── Cargo.toml                          # Workspace 根
+└── Cargo.toml                           # Workspace 根
 ```
 
 ### 各层依赖关系
@@ -149,20 +149,20 @@ Infrastructure (Registry, Provider 实现, Storage, LoopBreakerAgent)
 
 | 文档中定义的 crate | 存放位置 | 说明 |
 |-------------------|---------|------|
-| `claw-orchestrator` | `orchestration/claw-orchestrator/` | 新建 |
-| `claw-channels` | `interface/claw-channels/` | 编译时可选 feature |
-| `zeroclaw-channel-wechat` | `interface/claw-channels/wechat/` | 可选依赖 |
-| `zeroclaw-channel-telegram` | `interface/claw-channels/telegram/` | 可选依赖 |
-| `zeroclaw-channel-discord` | `interface/claw-channels/discord/` | 可选依赖 |
-| `zeroclaw-channel-slack` | `interface/claw-channels/slack/` | 可选依赖 |
-| `claw-runtime` | `application/claw-runtime/` | 现有重构 |
-| `claw-session` | `domain/claw-session/` | 新建 |
-| `claw-memory` | `domain/claw-memory/` | 现有 crate 移入 Domain Layer |
-| `claw-registry` | `infrastructure/claw-registry/` | 新建 |
-| `claw-providers` | `infrastructure/claw-providers/` | 现有重构 |
-| `claw-memory-storage` | `infrastructure/claw-memory-storage/` | 新建 |
-| `claw-tools` | `infrastructure/claw-tools/` | 现有重构 |
-| `claw-mcp` | `infrastructure/claw-mcp/` | 新建 |
+| `myclaw-orchestrator` | `orchestration/myclaw-orchestrator/` | 新建 |
+| `myclaw-channels` | `interface/myclaw-channels/` | 编译时可选 feature |
+| `myclaw-channel-wechat` | `interface/myclaw-channels/wechat/` | 可选依赖 |
+| `myclaw-channel-telegram` | `interface/myclaw-channels/telegram/` | 可选依赖 |
+| `myclaw-channel-discord` | `interface/myclaw-channels/discord/` | 可选依赖 |
+| `myclaw-channel-slack` | `interface/myclaw-channels/slack/` | 可选依赖 |
+| `myclaw-runtime` | `application/myclaw-runtime/` | 现有重构 |
+| `myclaw-session` | `domain/myclaw-session/` | 新建 |
+| `myclaw-memory` | `domain/myclaw-memory/` | 现有 crate 移入 Domain Layer |
+| `myclaw-registry` | `infrastructure/myclaw-registry/` | 新建 |
+| `myclaw-providers` | `infrastructure/myclaw-providers/` | 现有重构 |
+| `myclaw-memory-storage` | `infrastructure/myclaw-memory-storage/` | 新建 |
+| `myclaw-tools` | `infrastructure/myclaw-tools/` | 现有重构 |
+| `myclaw-mcp` | `infrastructure/myclaw-mcp/` | 新建 |
 
 ---
 
@@ -173,42 +173,40 @@ Infrastructure (Registry, Provider 实现, Storage, LoopBreakerAgent)
 | 模块 | 路径 | 原因 |
 |------|------|------|
 | `agent/` | `src/agent/` | 逻辑混杂，需要按新架构拆分 |
-| `zeroclaw-api` | `crates/zeroclaw-api/` | 旧 API 层，重写 |
-| `zeroclaw-gateway` | `crates/zeroclaw-gateway/` | 重构为 Orchestrator |
-| `zeroclaw-tui` | `crates/zeroclaw-tui/` | 独立应用，可选 |
-| `zeroclaw-hardware` | `crates/zeroclaw-hardware/` | 与核心逻辑无关 |
+| `myclaw-api` | `crates/myclaw-api/` | 旧 API 层，重写 |
+| `myclaw-gateway` | `crates/myclaw-gateway/` | 重构为 Orchestrator |
+| `myclaw-tui` | `crates/myclaw-tui/` | 独立应用，可选 |
+| `myclaw-hardware` | `crates/myclaw-hardware/` | 与核心逻辑无关 |
 | `robot-kit` | `crates/robot-kit/` | 实验性，可移除 |
 | `aardvark-sys` | `crates/aardvark-sys/` | 硬件相关，暂不需要 |
-| `zeroclaw-plugins` | `crates/zeroclaw-plugins/` | 旧插件系统，待定 |
-| `zeroclaw-tool-call-parser` | `crates/zeroclaw-tool-call-parser/` | 功能已迁移 |
-| `zeroclaw-macros` | `crates/zeroclaw-macros/` | 视需求保留 |
+| `myclaw-plugins` | `crates/myclaw-plugins/` | 旧插件系统，待定 |
+| `myclaw-tool-call-parser` | `crates/myclaw-tool-call-parser/` | 功能已迁移 |
+| `myclaw-macros` | `crates/myclaw-macros/` | 视需求保留 |
 
 ### 4.2 需要重构的模块
 
 | 模块 | 当前状态 | 目标状态 |
 |------|---------|---------|
-| `claw-channels` | 聚合所有 channel | Interface Layer，编译时可选 |
-| `claw-providers` | 混合实现 | 拆分 Provider trait + 各自独立实现 |
-| `claw-memory` | 混在 src/memory | 独立 Domain Module |
-| `zeroclaw-config` | 旧配置结构 | 新配置层 (ProviderConfig/ModelConfig) |
-| `claw-runtime` | 运行时管理 | Application Layer 核心 |
+| `myclaw-channels` | 聚合所有 channel | Interface Layer，编译时可选 |
+| `myclaw-providers` | 混合实现 | 拆分 Provider trait + 各自独立实现 |
+| `myclaw-memory` | 混在 src/memory | 独立 Domain Module |
+| `myclaw-config` | 旧配置结构 | 新配置层 (ProviderConfig/ModelConfig) |
+| `myclaw-runtime` | 运行时管理 | Application Layer 核心 |
 
 ### 4.3 新增模块
 
 | 模块 | 职责 |
 |------|------|
-| `claw-orchestrator` | 消息路由、Channel 管理 |
-| `claw-session` | Session Domain |
-| `claw-memory-storage` | Memory 存储实现 (SQLite/PostgreSQL) |
-| `claw-registry` | ServiceRegistry，能力路由 |
-| `zeroclaw-channel-wechat` | 微信 Channel (独立 crate) |
-| `zeroclaw-channel-telegram` | Telegram Channel (独立 crate) |
+| `myclaw-orchestrator` | 消息路由、Channel 管理 |
+| `myclaw-session` | Session Domain |
+| `myclaw-memory-storage` | Memory 存储实现 (SQLite/PostgreSQL) |
+| `myclaw-registry` | ServiceRegistry，能力路由 |
+| `myclaw-channel-wechat` | 微信 Channel (独立 crate) |
+| `myclaw-channel-telegram` | Telegram Channel (独立 crate) |
 
 ---
 
 ## 五、重构路径
-
-> 严格按文档 Section 16 的四阶段执行
 
 ### Phase 1：修复问题，不改变 trait
 
@@ -246,7 +244,7 @@ Infrastructure (Registry, Provider 实现, Storage, LoopBreakerAgent)
 
 ## 六、配置层目标结构
 
-> 来自文档 Section 12
+> 来自架构文档
 
 ```rust
 // ProviderConfig: 单个 provider 的配置
@@ -286,9 +284,9 @@ pub struct RouteEntry {
 
 1. **Channel 是否作为独立 crates？** 优点：减少不需要的依赖；缺点：版本管理复杂
 2. **Memory 存储后端？** 当前 SQLite，可选 PostgreSQL
-3. **是否保留 plugin 系统？** 当前 `zeroclaw-plugins` 状态
+3. **是否保留 plugin 系统？** 当前 `myclaw-plugins` 状态
 4. **TUI 作为独立应用？** 还是集成到主 binary
 
 ---
 
-*最后更新: 2026-04-26*
+*最后更新: 2026-04-27*
