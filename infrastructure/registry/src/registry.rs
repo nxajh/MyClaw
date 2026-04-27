@@ -7,7 +7,9 @@ use capability::capability::Capability;
 use capability::chat::ChatProvider;
 use capability::embedding::EmbeddingProvider;
 use capability::image::ImageGenerationProvider;
+use capability::search::SearchProvider;
 use capability::service_registry::ServiceRegistry;
+use capability::stt::SttProvider;
 use capability::tts::TtsProvider;
 use capability::video::VideoGenerationProvider;
 
@@ -46,17 +48,38 @@ impl ModelConfig {
 pub struct Registry {
     providers: HashMap<String, ProviderConfig>,
     routing: RoutingConfig,
+    // Per-capability provider stores: model_id → Arc'd provider
     chat_providers: HashMap<String, Arc<dyn ChatProvider>>,
+    embedding_providers: HashMap<String, Arc<dyn EmbeddingProvider>>,
+    image_providers: HashMap<String, Arc<dyn ImageGenerationProvider>>,
+    tts_providers: HashMap<String, Arc<dyn TtsProvider>>,
+    video_providers: HashMap<String, Arc<dyn VideoGenerationProvider>>,
+    search_providers: HashMap<String, Arc<dyn SearchProvider>>,
+    stt_providers: HashMap<String, Arc<dyn SttProvider>>,
 }
 
 impl Registry {
     pub fn new(providers: HashMap<String, ProviderConfig>, routing: RoutingConfig) -> Self {
-        Self { providers, routing, chat_providers: HashMap::new() }
+        Self {
+            providers,
+            routing,
+            chat_providers: HashMap::new(),
+            embedding_providers: HashMap::new(),
+            image_providers: HashMap::new(),
+            tts_providers: HashMap::new(),
+            video_providers: HashMap::new(),
+            search_providers: HashMap::new(),
+            stt_providers: HashMap::new(),
+        }
     }
+
+    // ── Legacy register_chat (used by Orchestrator) ──────────────────────────
 
     pub fn register_chat(&mut self, provider: Box<dyn ChatProvider>, model_id: String) {
         self.chat_providers.insert(model_id, provider.into());
     }
+
+    // ── Internal helpers ─────────────────────────────────────────────────────
 
     fn find_provider_by_model(&self, model_id: &str) -> anyhow::Result<(&str, &ModelConfig)> {
         tracing::debug!(model_id, "find_provider_by_model");
@@ -243,12 +266,40 @@ impl RoutingConfig {
     }
 }
 
-// ── ServiceRegistry trait ─────────────────────────────────────────────────────
+// ── ServiceRegistry trait impl ────────────────────────────────────────────────
 
 impl ServiceRegistry for Registry {
+    // ── Register methods ─────────────────────────────────────────────────────
+
     fn register_chat(&mut self, provider: Box<dyn ChatProvider>, model_id: String) {
         self.chat_providers.insert(model_id, provider.into());
     }
+
+    fn register_embedding(&mut self, provider: Box<dyn EmbeddingProvider>, model_id: String) {
+        self.embedding_providers.insert(model_id, provider.into());
+    }
+
+    fn register_image(&mut self, provider: Box<dyn ImageGenerationProvider>, model_id: String) {
+        self.image_providers.insert(model_id, provider.into());
+    }
+
+    fn register_tts(&mut self, provider: Box<dyn TtsProvider>, model_id: String) {
+        self.tts_providers.insert(model_id, provider.into());
+    }
+
+    fn register_video(&mut self, provider: Box<dyn VideoGenerationProvider>, model_id: String) {
+        self.video_providers.insert(model_id, provider.into());
+    }
+
+    fn register_search(&mut self, provider: Box<dyn SearchProvider>, model_id: String) {
+        self.search_providers.insert(model_id, provider.into());
+    }
+
+    fn register_stt(&mut self, provider: Box<dyn SttProvider>, model_id: String) {
+        self.stt_providers.insert(model_id, provider.into());
+    }
+
+    // ── Get methods ──────────────────────────────────────────────────────────
 
     fn get_chat_provider(&self, capability: Capability) -> anyhow::Result<(Arc<dyn ChatProvider>, String)> {
         let entry = self.routing.get(capability)
@@ -278,18 +329,65 @@ impl ServiceRegistry for Registry {
     }
 
     fn get_embedding_provider(&self) -> anyhow::Result<(Arc<dyn EmbeddingProvider>, String)> {
-        anyhow::bail!("Embedding provider not yet implemented")
+        self.route_capability(Capability::Embedding, &self.embedding_providers)
     }
 
     fn get_image_provider(&self) -> anyhow::Result<(Arc<dyn ImageGenerationProvider>, String)> {
-        anyhow::bail!("ImageGeneration provider not yet implemented")
+        self.route_capability(Capability::ImageGeneration, &self.image_providers)
     }
 
     fn get_tts_provider(&self) -> anyhow::Result<(Arc<dyn TtsProvider>, String)> {
-        anyhow::bail!("TTS provider not yet implemented")
+        self.route_capability(Capability::TextToSpeech, &self.tts_providers)
     }
 
     fn get_video_provider(&self) -> anyhow::Result<(Arc<dyn VideoGenerationProvider>, String)> {
-        anyhow::bail!("VideoGeneration provider not yet implemented")
+        self.route_capability(Capability::VideoGeneration, &self.video_providers)
+    }
+
+    fn get_search_provider(&self) -> anyhow::Result<(Arc<dyn SearchProvider>, String)> {
+        self.route_capability(Capability::Search, &self.search_providers)
+    }
+
+    fn get_stt_provider(&self) -> anyhow::Result<(Arc<dyn SttProvider>, String)> {
+        self.route_capability(Capability::SpeechToText, &self.stt_providers)
+    }
+}
+
+// ── Generic routing helper ────────────────────────────────────────────────────
+
+impl Registry {
+    /// Generic capability routing: look up routing config, select model, return provider.
+    fn route_capability<T: ?Sized + Send + Sync>(
+        &self,
+        capability: Capability,
+        store: &HashMap<String, Arc<T>>,
+    ) -> anyhow::Result<(Arc<T>, String)> {
+        let entry = self.routing.get(capability)
+            .with_context(|| format!("No routing configured for {:?}", capability))?;
+        let model = self.select_model(entry, capability)?;
+
+        // Try exact model_id match first
+        if let Some(provider) = store.get(&model.model_id) {
+            return Ok((Arc::clone(provider), model.model_id.clone()));
+        }
+
+        // Fallback: find any model in the store that supports this capability
+        // (in case routing points to a model that wasn't registered for this capability)
+        for (model_id, _) in store {
+            if let Ok((_, m)) = self.find_provider_by_model(model_id) {
+                if m.supports(capability) {
+                    if let Some(provider) = store.get(model_id) {
+                        return Ok((Arc::clone(provider), model_id.clone()));
+                    }
+                }
+            }
+        }
+
+        anyhow::bail!(
+            "No {:?} provider registered (routing model: {}, available: [{}])",
+            capability,
+            model.model_id,
+            store.keys().cloned().collect::<Vec<_>>().join(", ")
+        )
     }
 }

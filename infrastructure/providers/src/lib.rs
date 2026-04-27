@@ -8,8 +8,8 @@ pub mod openai;
 pub mod shared;
 
 // Re-export from shared module at crate root
-pub use shared::{AuthStyle, ProviderInstance, create_provider, create_provider_by_url,
-    parse_openai_sse, build_openai_chat_body};
+pub use shared::{AuthStyle, ProviderHandle, ProviderInstance, create_provider, create_provider_by_url,
+    create_full_openai_provider, parse_openai_sse, build_openai_chat_body};
 
 // Re-export Client directly (from reqwest)
 pub use reqwest::Client;
@@ -28,5 +28,8 @@ pub use capability::chat::{
 };
 pub use capability::embedding::{EmbedRequest, EmbedResponse, EmbeddingProvider, EmbedInput};
 pub use capability::image::{ImageGenerationProvider, ImageRequest, ImageResponse};
+pub use capability::search::{SearchProvider, SearchRequest, SearchResults};
+pub use capability::stt::{SttProvider, SttRequest, TranscriptionResponse};
 pub use capability::tts::{TtsProvider, TtsRequest};
+pub use capability::video::{VideoGenerationProvider, VideoRequest, VideoResponse};
 pub use capability::capability::Capability;

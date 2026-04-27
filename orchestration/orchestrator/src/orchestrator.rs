@@ -3,13 +3,12 @@
 use anyhow::Context;
 use channels::{Channel, ChannelMessage, SendMessage};
 use dashmap::DashMap;
+use registry::ServiceRegistry;
 use runtime::{Agent, AgentConfig, AgentLoop, SessionManager, SkillsManager};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex as TokioMutex};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
-
-use providers::ChatProvider;
 
 const CHANNEL_QUEUE_SIZE: usize = 100;
 
@@ -52,20 +51,90 @@ impl Orchestrator {
                     .as_ref()
                     .with_context(|| format!("no API key for '{}'", provider_key))?;
 
-            for model_id in provider_cfg.models.keys() {
-                tracing::info!(provider = %provider_key, model = %model_id, "registering chat provider");
+            for (model_id, model_cfg) in &provider_cfg.models {
+                tracing::info!(
+                    provider = %provider_key,
+                    model = %model_id,
+                    capabilities = ?model_cfg.capabilities,
+                    "registering provider for model"
+                );
 
-                let provider: Box<dyn ChatProvider> =
-                    providers::create_provider_by_url(
-                        api_key.clone(),
-                        &provider_cfg.base_url,
-                    )
-                    .with_context(|| format!(
-                        "cannot determine provider type from base_url '{}' (key='{}')",
-                        provider_cfg.base_url, provider_key
-                    ))?;
+                // Determine which capabilities this model needs.
+                // Each capability may require a separate trait object, but multiple
+                // capabilities backed by the same concrete type (e.g. OpenAiProvider
+                // implements Chat + Embedding + Image + TTS) share one instance.
+                //
+                // Strategy: create one ProviderHandle per provider key (not per model),
+                // then extract trait objects for each capability the model declares.
+                // For now, we create a handle per model to keep things simple.
 
-                registry.register_chat(provider, model_id.clone());
+                // Chat is always needed — register via the ProviderHandle pattern.
+                let handle = providers::ProviderHandle::from_url(
+                    api_key.clone(),
+                    &provider_cfg.base_url,
+                ).with_context(|| format!(
+                    "cannot determine provider type from base_url '{}' (key='{}')",
+                    provider_cfg.base_url, provider_key
+                ))?;
+
+                // For each capability, clone the handle and extract the trait object.
+                // ProviderHandle consumes self, so we recreate it each time.
+                use config::provider::Capability as CfgCap;
+
+                for cap in &model_cfg.capabilities {
+                    match cap {
+                        CfgCap::Chat | CfgCap::Vision | CfgCap::NativeTools => {
+                            // Chat is always registered below; skip here to avoid
+                            // double-registering with a fresh handle.
+                        }
+                        CfgCap::Embedding => {
+                            if let Some(emb) = providers::ProviderHandle::from_url(
+                                api_key.clone(), &provider_cfg.base_url,
+                            ).and_then(|h| h.into_embedding_provider()) {
+                                registry.register_embedding(emb, model_id.clone());
+                            }
+                        }
+                        CfgCap::ImageGeneration => {
+                            if let Some(img) = providers::ProviderHandle::from_url(
+                                api_key.clone(), &provider_cfg.base_url,
+                            ).and_then(|h| h.into_image_provider()) {
+                                registry.register_image(img, model_id.clone());
+                            }
+                        }
+                        CfgCap::TextToSpeech => {
+                            if let Some(tts) = providers::ProviderHandle::from_url(
+                                api_key.clone(), &provider_cfg.base_url,
+                            ).and_then(|h| h.into_tts_provider()) {
+                                registry.register_tts(tts, model_id.clone());
+                            }
+                        }
+                        CfgCap::VideoGeneration => {
+                            if let Some(vid) = providers::ProviderHandle::from_url(
+                                api_key.clone(), &provider_cfg.base_url,
+                            ).and_then(|h| h.into_video_provider()) {
+                                registry.register_video(vid, model_id.clone());
+                            }
+                        }
+                        CfgCap::Search => {
+                            if let Some(srch) = providers::ProviderHandle::from_url(
+                                api_key.clone(), &provider_cfg.base_url,
+                            ).and_then(|h| h.into_search_provider()) {
+                                registry.register_search(srch, model_id.clone());
+                            }
+                        }
+                        CfgCap::SpeechToText => {
+                            if let Some(stt) = providers::ProviderHandle::from_url(
+                                api_key.clone(), &provider_cfg.base_url,
+                            ).and_then(|h| h.into_stt_provider()) {
+                                registry.register_stt(stt, model_id.clone());
+                            }
+                        }
+                    }
+                }
+
+                // Always register ChatProvider (every model with Chat/Vision/NativeTools needs it)
+                let chat_provider: Box<dyn providers::ChatProvider> = handle.into_chat_provider();
+                registry.register_chat(chat_provider, model_id.clone());
             }
         }
 

@@ -291,3 +291,124 @@ pub fn create_provider_by_url(
         Some(Box::new(crate::openai::OpenAiProvider::with_base_url(api_key, base_url.to_string())))
     }
 }
+
+/// Create a full OpenAI provider (Chat + Embedding + Image + TTS) by URL.
+/// Only succeeds for providers that implement all capabilities via the OpenAI protocol.
+/// Returns `None` for non-OpenAI providers (Anthropic, etc.).
+pub fn create_full_openai_provider(
+    api_key: String,
+    base_url: &str,
+) -> Option<crate::openai::OpenAiProvider> {
+    let host = base_url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/').next()
+        .unwrap_or("");
+
+    // Only create full provider for OpenAI-compatible endpoints
+    // Non-OpenAI providers (Anthropic) don't implement Embedding/Image/TTS
+    if host.contains("anthropic.com") || host.contains("claude.ai")
+        || host.contains("bigmodel.cn") || host.contains("zhipuai")
+        || host.contains("minimax") || host.contains("moonshot") || host.contains("kimi")
+    {
+        return None;
+    }
+
+    Some(crate::openai::OpenAiProvider::with_base_url(api_key, base_url.to_string()))
+}
+
+/// Capability-aware provider creation result.
+/// Holds the concrete provider type and lets the caller extract trait objects.
+pub enum ProviderHandle {
+    OpenAi(crate::openai::OpenAiProvider),
+    Glm(crate::glm::GlmProvider),
+    Kimi(crate::kimi::KimiProvider),
+    MiniMax(crate::minimax::MiniMaxProvider),
+    Anthropic(crate::anthropic::AnthropicProvider),
+}
+
+impl ProviderHandle {
+    /// Create a ProviderHandle by inspecting the base_url hostname.
+    pub fn from_url(api_key: String, base_url: &str) -> Option<Self> {
+        let host = base_url
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .split('/').next()
+            .unwrap_or("");
+
+        if host.contains("bigmodel.cn") || host.contains("zhipuai") {
+            Some(ProviderHandle::Glm(
+                crate::glm::GlmProvider::with_base_url(api_key, base_url.to_string())
+            ))
+        } else if host.contains("anthropic.com") || host.contains("claude.ai") {
+            Some(ProviderHandle::Anthropic(
+                crate::anthropic::AnthropicProvider::with_base_url(api_key, base_url.to_string())
+            ))
+        } else if host.contains("minimax") {
+            Some(ProviderHandle::MiniMax(
+                crate::minimax::MiniMaxProvider::with_base_url(api_key, base_url.to_string())
+            ))
+        } else if host.contains("moonshot") || host.contains("kimi") {
+            Some(ProviderHandle::Kimi(
+                crate::kimi::KimiProvider::with_base_url(api_key, base_url.to_string())
+            ))
+        } else {
+            Some(ProviderHandle::OpenAi(
+                crate::openai::OpenAiProvider::with_base_url(api_key, base_url.to_string())
+            ))
+        }
+    }
+
+    /// Return a boxed ChatProvider.
+    pub fn into_chat_provider(self) -> Box<dyn capability::chat::ChatProvider> {
+        match self {
+            ProviderHandle::OpenAi(p) => Box::new(p),
+            ProviderHandle::Glm(p) => Box::new(p),
+            ProviderHandle::Kimi(p) => Box::new(p),
+            ProviderHandle::MiniMax(p) => Box::new(p),
+            ProviderHandle::Anthropic(p) => Box::new(p),
+        }
+    }
+
+    /// Return a boxed EmbeddingProvider, if this provider supports it.
+    pub fn into_embedding_provider(self) -> Option<Box<dyn capability::embedding::EmbeddingProvider>> {
+        match self {
+            ProviderHandle::OpenAi(p) => Some(Box::new(p)),
+            _ => None,
+        }
+    }
+
+    /// Return a boxed ImageGenerationProvider, if this provider supports it.
+    pub fn into_image_provider(self) -> Option<Box<dyn capability::image::ImageGenerationProvider>> {
+        match self {
+            ProviderHandle::OpenAi(p) => Some(Box::new(p)),
+            _ => None,
+        }
+    }
+
+    /// Return a boxed TtsProvider, if this provider supports it.
+    pub fn into_tts_provider(self) -> Option<Box<dyn capability::tts::TtsProvider>> {
+        match self {
+            ProviderHandle::OpenAi(p) => Some(Box::new(p)),
+            _ => None,
+        }
+    }
+
+    /// Return a boxed VideoGenerationProvider, if this provider supports it.
+    pub fn into_video_provider(self) -> Option<Box<dyn capability::video::VideoGenerationProvider>> {
+        // No provider implements VideoGeneration yet
+        None
+    }
+
+    /// Return a boxed SearchProvider, if this provider supports it.
+    pub fn into_search_provider(self) -> Option<Box<dyn capability::search::SearchProvider>> {
+        // No provider implements Search yet
+        None
+    }
+
+    /// Return a boxed SttProvider, if this provider supports it.
+    pub fn into_stt_provider(self) -> Option<Box<dyn capability::stt::SttProvider>> {
+        // No provider implements STT yet
+        None
+    }
+}
