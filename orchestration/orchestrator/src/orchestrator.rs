@@ -27,6 +27,7 @@ pub struct Orchestrator {
     session_manager: SessionManager,
     /// The message receiver, owned and consumed by run().
     /// Wrapped so run() can extract it without conflicting with Arc'd fields.
+    #[allow(clippy::type_complexity)]
     msg_rx: Arc<TokioMutex<Option<mpsc::Receiver<(String, ChannelMessage)>>>>,
     /// Listener task handles — taken and awaited on shutdown.
     listener_handles: Vec<JoinHandle<()>>,
@@ -51,7 +52,7 @@ impl Orchestrator {
                     .as_ref()
                     .with_context(|| format!("no API key for '{}'", provider_key))?;
 
-            for (model_id, _mc) in &provider_cfg.models {
+            for model_id in provider_cfg.models.keys() {
                 tracing::info!(provider = %provider_key, model = %model_id, "registering chat provider");
 
                 let provider: Box<dyn ChatProvider> =
