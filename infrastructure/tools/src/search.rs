@@ -7,6 +7,7 @@ use std::path::Path;
 
 // ── GlobSearchTool ───────────────────────────────────────────────────────────
 
+#[derive(Default)]
 pub struct GlobSearchTool;
 
 impl GlobSearchTool {
@@ -166,6 +167,7 @@ impl Tool for GlobSearchTool {
 
 // ── ContentSearchTool ────────────────────────────────────────────────────────
 
+#[derive(Default)]
 pub struct ContentSearchTool;
 
 impl ContentSearchTool {

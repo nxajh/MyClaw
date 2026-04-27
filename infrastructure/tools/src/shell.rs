@@ -6,6 +6,7 @@ use serde_json::json;
 use tokio::time::{Duration, timeout};
 
 /// Execute shell commands.
+#[derive(Default)]
 pub struct ShellTool;
 
 impl ShellTool {

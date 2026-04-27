@@ -111,7 +111,7 @@ impl Registry {
 
     pub fn resolve_model(&self, model_id: &str) -> anyhow::Result<(&str, &ModelConfig)> {
         let (provider_key, model) = self.find_provider_by_model(model_id)?;
-        Ok((&provider_key, model))
+        Ok((provider_key, model))
     }
 
     pub fn provider_names(&self) -> impl Iterator<Item = &str> {
@@ -231,12 +231,11 @@ impl RoutingConfig {
                 "text_to_speech" => cfg.text_to_speech = Some(e),
                 "speech_to_text" => cfg.speech_to_text = Some(e),
                 "video_generation" => cfg.video_generation = Some(e),
-                "vision" | "native_tools" => {
+                "vision" | "native_tools"
                     // Map to chat routing.
-                    if cfg.chat.is_none() {
+                    if cfg.chat.is_none() => {
                         cfg.chat = Some(e);
                     }
-                }
                 _ => {}
             }
         }

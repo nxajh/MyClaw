@@ -7,6 +7,7 @@ use std::path::Path;
 
 // ── FileReadTool ─────────────────────────────────────────────────────────────
 
+#[derive(Default)]
 pub struct FileReadTool;
 
 impl FileReadTool {
@@ -89,6 +90,7 @@ impl Tool for FileReadTool {
 
 // ── FileWriteTool ────────────────────────────────────────────────────────────
 
+#[derive(Default)]
 pub struct FileWriteTool;
 
 impl FileWriteTool {
@@ -158,6 +160,7 @@ impl Tool for FileWriteTool {
 
 // ── FileEditTool ─────────────────────────────────────────────────────────────
 
+#[derive(Default)]
 pub struct FileEditTool;
 
 impl FileEditTool {

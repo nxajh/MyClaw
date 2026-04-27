@@ -119,10 +119,10 @@ impl SessionBackend for SqliteSessionBackend {
     fn append(&self, session_key: &str, message: &ChatMessage) -> std::io::Result<()> {
         // Ensure session exists.
         self.ensure_session(session_key)
-            .map_err(|e| std::io::Error::other(e))?;
+            .map_err(std::io::Error::other)?;
 
         let json = Self::serialize_message(message)
-            .map_err(|e| std::io::Error::other(e))?;
+            .map_err(std::io::Error::other)?;
 
         let conn = self.conn.lock();
 
@@ -145,14 +145,14 @@ impl SessionBackend for SqliteSessionBackend {
                 message.name,
             ],
         )
-        .map_err(|e| std::io::Error::other(e))?;
+        .map_err(std::io::Error::other)?;
 
         // Touch activity timestamp.
         conn.execute(
             "UPDATE sessions SET last_activity = datetime('now') WHERE session_key = ?1",
             params![session_key],
         )
-        .map_err(|e| std::io::Error::other(e))?;
+        .map_err(std::io::Error::other)?;
 
         Ok(())
     }
@@ -168,7 +168,7 @@ impl SessionBackend for SqliteSessionBackend {
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|e| std::io::Error::other(e))?
+            .map_err(std::io::Error::other)?
             .flatten();
 
         let Some(seq) = max_seq else {
@@ -179,7 +179,7 @@ impl SessionBackend for SqliteSessionBackend {
             "DELETE FROM messages WHERE session_key = ?1 AND seq = ?2",
             params![session_key, seq],
         )
-        .map_err(|e| std::io::Error::other(e))?;
+        .map_err(std::io::Error::other)?;
 
         Ok(deleted > 0)
     }
@@ -251,7 +251,7 @@ impl SessionBackend for SqliteSessionBackend {
              WHERE messages.id = sub.id",
             params![session_key],
         )
-        .map_err(|e| std::io::Error::other(e))?;
+        .map_err(std::io::Error::other)?;
         Ok(())
     }
 
@@ -263,7 +263,7 @@ impl SessionBackend for SqliteSessionBackend {
                 "DELETE FROM sessions WHERE last_activity < datetime('now', ?1)",
                 [format!("-{} hours", ttl_hours)],
             )
-            .map_err(|e| std::io::Error::other(e))?;
+            .map_err(std::io::Error::other)?;
         Ok(deleted)
     }
 

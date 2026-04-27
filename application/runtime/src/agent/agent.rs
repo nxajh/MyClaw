@@ -171,7 +171,10 @@ impl AgentLoop {
                 "sending messages to model: {:?}",
                 messages.iter().map(|m| {
                     let content = m.text_content();
-                    let truncated = if content.len() > 100 { format!("{}...", &content[..100]) } else { content };
+                    let truncated = if content.len() > 100 {
+                        let end = content.char_indices().take_while(|(i, _)| *i < 100).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(100);
+                        format!("{}...", &content[..end])
+                    } else { content };
                     format!("{}: {}", m.role, truncated)
                 }).collect::<Vec<_>>()
             );
@@ -360,6 +363,7 @@ struct CollectedResponse {
 // ── Extension trait for ChatMessage ──────────────────────────────────────────
 
 /// Extension methods for ChatMessage.
+#[allow(dead_code)]
 trait ChatMessageExt {
     fn with_name(self, name: String) -> ChatMessage;
 }
