@@ -373,7 +373,7 @@ impl Registry {
 
         // Fallback: find any model in the store that supports this capability
         // (in case routing points to a model that wasn't registered for this capability)
-        for (model_id, _) in store {
+        for model_id in store.keys() {
             if let Ok((_, m)) = self.find_provider_by_model(model_id) {
                 if m.supports(capability) {
                     if let Some(provider) = store.get(model_id) {
