@@ -14,34 +14,10 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout zeroclaw
-        uses: actions/checkout@v4
-        with:
-          repository: nxajh/zeroclaw
-          path: zeroclaw
-          fetch-depth: 1
-
       - name: Checkout MyClaw
         uses: actions/checkout@v4
         with:
-          path: myclaw
           fetch-depth: 0
-
-      - name: Fix path deps
-        run: |
-          # Directory layout (confirmed):
-          #   /home/runner/work/MyClaw/MyClaw/   <- GITHUB_WORKSPACE
-          #   /home/runner/work/MyClaw/MyClaw/zeroclaw/  <- zeroclaw repo (crates at zeroclaw/crates/xxx)
-          #   /home/runner/work/MyClaw/MyClaw/myclaw/     <- MyClaw workspace root
-          cd myclaw
-          WS="$GITHUB_WORKSPACE"
-          ZPATH="$WS/zeroclaw/crates"
-          # Fix workspace Cargo.toml: ../../src/crates/xxx → $ZPATH/xxx
-          sed -i "s|../../src/crates/|$ZPATH/|g" Cargo.toml
-          # Fix member crates: path = "/home/ubuntu/.zeroclaw/src/crates/xxx" } → $ZPATH/xxx }
-          find . -name "Cargo.toml" -exec sed -i \
-            -e "s|\"/home/ubuntu/.zeroclaw/src/crates/\\([^\"]*\\)\" }|\"$ZPATH/\\1\" }|g" \
-            {} +
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -57,14 +33,18 @@ jobs:
             target
           key: cargo-${{ hashFiles('**/Cargo.toml') }}
 
+      - name: Check
+        run: cargo check --workspace
+        working-directory: MyClaw
+
       - name: Build
         run: cargo build --workspace
-        working-directory: myclaw
+        working-directory: MyClaw
 
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
-        working-directory: myclaw
+        working-directory: MyClaw
 
       - name: Test
-        run: cargo test -p zeroclaw-registry
-        working-directory: myclaw
+        run: cargo test -p claw-registry
+        working-directory: MyClaw

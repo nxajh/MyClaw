@@ -1,0 +1,12 @@
+[package]
+name = "capability"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+futures-core = { workspace = true }

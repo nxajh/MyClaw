@@ -1,0 +1,22 @@
+[package]
+name = "providers"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+futures-core.workspace = true
+reqwest.workspace = true
+futures-util.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tracing.workspace = true
+hmac-sha256.workspace = true
+base64.workspace = true
+
+capability = { path = "../../domain/capability" }

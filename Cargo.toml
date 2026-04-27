@@ -1,17 +1,17 @@
 [workspace]
 resolver = "2"
 members = [
-    "orchestration/zeroclaw-orchestrator",
-    "interface/zeroclaw-channels",
-    "application/zeroclaw-runtime",
-    "domain/zeroclaw-capability",
-    "domain/zeroclaw-memory",
-    "domain/zeroclaw-session",
-    "infrastructure/zeroclaw-registry",
-    "infrastructure/zeroclaw-memory-storage",
-    "infrastructure/zeroclaw-providers",
-    "infrastructure/zeroclaw-tools",
-    "infrastructure/zeroclaw-mcp",
+    "orchestration/orchestrator",
+    "interface/channels",
+    "application/runtime",
+    "domain/capability",
+    "domain/memory",
+    "domain/session",
+    "infrastructure/registry",
+    "infrastructure/memory-storage",
+    "infrastructure/providers",
+    "infrastructure/tools",
+    "infrastructure/mcp",
 ]
 
 [workspace.dependencies]
@@ -19,10 +19,14 @@ anyhow = "1"
 async-trait = "0.1"
 chrono = "0.4"
 futures-core = "0.3"
+futures-util = "0.3"
+futures = "0.3"
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+hmac-sha256 = "1"
+base64 = "0.22"
 tempfile = "3"
 thiserror = "1"
 tokio = { version = "1", features = ["full"] }
@@ -30,11 +34,5 @@ tokio-stream = "0.1.18"
 tokio-util = "0.7"
 tracing = "0.1"
 uuid = "1"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 regex = "1"
-
-# External crates that are part of the zeroclaw monorepo.
-zeroclaw-api = { path = "../../src/crates/zeroclaw-api" }
-zeroclaw-runtime = { path = "../../src/crates/zeroclaw-runtime" }
-zeroclaw-providers = { path = "../../src/crates/zeroclaw-providers" }
-zeroclaw-config = { path = "../../src/crates/zeroclaw-config" }

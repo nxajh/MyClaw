@@ -1,0 +1,11 @@
+[package]
+name = "channels"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+wechat = []
+telegram = []
+discord = []
+slack = []

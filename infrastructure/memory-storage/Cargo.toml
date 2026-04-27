@@ -1,0 +1,32 @@
+[package]
+name = "memory-storage"
+version = "0.1.0"
+edition = "2021"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+# Domain types
+memory = { path = "../../domain/memory" }
+
+# Workspace dependencies
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+reqwest.workspace = true
+regex.workspace = true
+
+# Must match zeroclaw-runtime's version to avoid libsqlite3-sys conflict.
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
