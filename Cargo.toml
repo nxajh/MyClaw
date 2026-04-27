@@ -7,6 +7,7 @@ members = [
     "domain/capability",
     "domain/memory",
     "domain/session",
+    "infrastructure/config",
     "infrastructure/registry",
     "infrastructure/memory-storage",
     "infrastructure/providers",
@@ -18,6 +19,8 @@ members = [
 anyhow = "1"
 async-trait = "0.1"
 chrono = "0.4"
+hex = "0.4"
+rand = "0.10"
 futures-core = "0.3"
 futures-util = "0.3"
 futures = "0.3"
@@ -36,3 +39,6 @@ tracing = "0.1"
 uuid = "1"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 regex = "1"
+
+# Internal crates
+myclaw-config = { path = "infrastructure/config" }
