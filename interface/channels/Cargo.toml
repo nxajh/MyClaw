@@ -7,8 +7,6 @@ edition = "2021"
 default = []
 wechat = ["dep:aes", "dep:ecb", "dep:md-5", "dep:urlencoding"]
 telegram = []
-discord = []
-slack = []
 
 [dependencies]
 # Workspace shared
@@ -29,11 +27,16 @@ tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
+# Config
+config = { workspace = true }
+
 # WeChat-specific crypto dependencies
 aes = { version = "0.8", optional = true }
 ecb = { version = "0.1", optional = true }
 md-5 = { version = "0.10", optional = true }
 urlencoding = { version = "2.1", optional = true }
+
+# Shared across channels
 chrono.workspace = true
 hex.workspace = true
 rand.workspace = true

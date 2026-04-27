@@ -1,4 +1,4 @@
-//! myclaw-config — Central configuration for MyClaw.
+//! config — Central configuration for MyClaw.
 //!
 //! Defines all configuration types and provides TOML file loading with
 //! environment variable expansion (`${ENV_VAR}`).
