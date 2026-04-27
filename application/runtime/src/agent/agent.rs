@@ -12,9 +12,9 @@ use capability::chat::{
 use capability::service_registry::ServiceRegistry;
 use futures_util::StreamExt;
 
-
 use super::session_manager::Session;
 use super::skills::SkillsManager;
+use crate::prompt::{SystemPromptBuilder, SystemPromptConfig};
 use registry::Registry;
 
 /// AgentConfig controls loop breaker thresholds and tool call limits.
@@ -24,6 +24,8 @@ pub struct AgentConfig {
     pub max_tool_calls: usize,
     /// Maximum history messages to keep in memory. 0 = unlimited.
     pub max_history: usize,
+    /// System prompt builder config.
+    pub prompt_config: SystemPromptConfig,
 }
 
 impl Default for AgentConfig {
@@ -31,6 +33,7 @@ impl Default for AgentConfig {
         Self {
             max_tool_calls: 100,
             max_history: 200,
+            prompt_config: SystemPromptConfig::default(),
         }
     }
 }
@@ -54,20 +57,36 @@ impl Agent {
         }
     }
 
-    /// Set the system prompt template.
+    /// Set the system prompt directly (overrides builder).
     pub fn with_system_prompt(mut self, prompt: String) -> Self {
         self.system_prompt = prompt;
         self
     }
 
     /// Create an AgentLoop for the given session.
+    /// The system prompt is built from SystemPromptConfig + SkillsManager.
     pub fn loop_for(&self, session: Session) -> AgentLoop {
+        let prompt = if !self.system_prompt.is_empty() {
+            // Direct prompt set via with_system_prompt()
+            self.system_prompt.clone()
+        } else {
+            // Build from config
+            let builder = SystemPromptBuilder::new(self.config.prompt_config.clone());
+            let tool_names: Vec<String> = self
+                .skills
+                .all_tools()
+                .iter()
+                .map(|t| t.name().to_string())
+                .collect();
+            builder.build(&self.skills, &tool_names)
+        };
+
         AgentLoop {
             registry: Arc::clone(&self.registry),
             skills: Arc::clone(&self.skills),
             config: self.config.clone(),
             session,
-            system_prompt: self.system_prompt.clone(),
+            system_prompt: prompt,
         }
     }
 }

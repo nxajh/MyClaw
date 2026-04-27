@@ -1,6 +1,7 @@
 //! runtime — Application Layer
 //!
-//! Contains: Agent, AgentLoop, SkillsManager, SessionManager, SystemPromptBuilder, Scheduler, Doctor
+//! Contains: Agent, AgentLoop, SkillsManager, SessionManager,
+//! SystemPromptBuilder, Scheduler, Doctor, McpManager
 
 pub mod agent;
 pub mod cron;
@@ -10,3 +11,4 @@ pub mod prompt;
 
 // Re-export top-level types for convenient access.
 pub use agent::{Agent, AgentConfig, AgentLoop, Session, SessionManager, SkillsManager};
+pub use prompt::{AutonomyLevel, SkillsPromptInjectionMode, SystemPromptBuilder, SystemPromptConfig};
