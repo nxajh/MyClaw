@@ -623,11 +623,9 @@ impl WechatChannel {
                     warn!("WeChat: QR code expired, refreshing");
                     qrcode = self.api.get_bot_qrcode().await?.qrcode;
                 }
-                "scaned_but_redirect" => {
-                    if !status.baseurl.is_empty() {
-                        info!("WeChat: IDC redirect to {}", status.baseurl);
-                        self.api.state.write().api_base = Some(status.baseurl.clone());
-                    }
+                "scaned_but_redirect" if !status.baseurl.is_empty() => {
+                    info!("WeChat: IDC redirect to {}", status.baseurl);
+                    self.api.state.write().api_base = Some(status.baseurl.clone());
                 }
                 _ => { /* "wait" or "scaned" — keep polling */ }
             }
