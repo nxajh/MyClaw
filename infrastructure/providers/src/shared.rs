@@ -374,6 +374,7 @@ impl ProviderHandle {
     pub fn into_embedding_provider(self) -> Option<Box<dyn capability::embedding::EmbeddingProvider>> {
         match self {
             ProviderHandle::OpenAi(p) => Some(Box::new(p)),
+            ProviderHandle::Glm(p) => Some(Box::new(p)),
             _ => None,
         }
     }
@@ -402,8 +403,10 @@ impl ProviderHandle {
 
     /// Return a boxed SearchProvider, if this provider supports it.
     pub fn into_search_provider(self) -> Option<Box<dyn capability::search::SearchProvider>> {
-        // No provider implements Search yet
-        None
+        match self {
+            ProviderHandle::Glm(p) => Some(Box::new(p)),
+            _ => None,
+        }
     }
 
     /// Return a boxed SttProvider, if this provider supports it.
