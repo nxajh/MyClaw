@@ -1,8 +1,9 @@
 //! GLM (Zhipu/GLM-4) provider — Chat + Embedding + Search.
 //!
-//! Chat uses OpenAI-compatible SSE protocol.
-//! Embedding uses the standard OpenAI `/v4/embeddings` endpoint.
-//! Search uses the GLM-specific `/v4/web_search` endpoint.
+//! All endpoints are relative to base_url (which already contains /v4 or similar version prefix).
+//! Chat:      {base_url}/chat/completions
+//! Embedding: {base_url}/embeddings
+//! Search:    {base_url}/web_search
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -36,21 +37,11 @@ impl GlmProvider {
     }
 
     fn embeddings_url(&self) -> String {
-        let base = self.base_url.trim_end_matches('/');
-        if base.ends_with("/v4") || base.ends_with("/v1") {
-            format!("{}/embeddings", base)
-        } else {
-            format!("{}/v4/embeddings", base)
-        }
+        format!("{}/embeddings", self.base_url.trim_end_matches('/'))
     }
 
     fn web_search_url(&self) -> String {
-        let base = self.base_url.trim_end_matches('/');
-        if base.ends_with("/v4") || base.ends_with("/v1") {
-            format!("{}/web_search", base)
-        } else {
-            format!("{}/v4/web_search", base)
-        }
+        format!("{}/web_search", self.base_url.trim_end_matches('/'))
     }
 }
 
