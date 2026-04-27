@@ -12,6 +12,9 @@ serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
+# Domain dependency for Tool trait
+capability = { path = "../../domain/capability" }
+
 # HTTP/SSE transports need reqwest with stream feature
 reqwest = { workspace = true, features = ["stream"] }
 

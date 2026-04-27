@@ -73,12 +73,6 @@ impl Registry {
         }
     }
 
-    // ── Legacy register_chat (used by Orchestrator) ──────────────────────────
-
-    pub fn register_chat(&mut self, provider: Box<dyn ChatProvider>, model_id: String) {
-        self.chat_providers.insert(model_id, provider.into());
-    }
-
     // ── Internal helpers ─────────────────────────────────────────────────────
 
     fn find_provider_by_model(&self, model_id: &str) -> anyhow::Result<(&str, &ModelConfig)> {
@@ -266,39 +260,48 @@ impl RoutingConfig {
     }
 }
 
-// ── ServiceRegistry trait impl ────────────────────────────────────────────────
+// ── Registry registration methods (Infrastructure concern, NOT part of ServiceRegistry trait) ──
 
-impl ServiceRegistry for Registry {
-    // ── Register methods ─────────────────────────────────────────────────────
-
-    fn register_chat(&mut self, provider: Box<dyn ChatProvider>, model_id: String) {
+impl Registry {
+    /// Register a Chat provider with its model ID.
+    pub fn register_chat(&mut self, provider: Box<dyn ChatProvider>, model_id: String) {
         self.chat_providers.insert(model_id, provider.into());
     }
 
-    fn register_embedding(&mut self, provider: Box<dyn EmbeddingProvider>, model_id: String) {
+    /// Register an Embedding provider with its model ID.
+    pub fn register_embedding(&mut self, provider: Box<dyn EmbeddingProvider>, model_id: String) {
         self.embedding_providers.insert(model_id, provider.into());
     }
 
-    fn register_image(&mut self, provider: Box<dyn ImageGenerationProvider>, model_id: String) {
+    /// Register an ImageGeneration provider with its model ID.
+    pub fn register_image(&mut self, provider: Box<dyn ImageGenerationProvider>, model_id: String) {
         self.image_providers.insert(model_id, provider.into());
     }
 
-    fn register_tts(&mut self, provider: Box<dyn TtsProvider>, model_id: String) {
+    /// Register a TTS provider with its model ID.
+    pub fn register_tts(&mut self, provider: Box<dyn TtsProvider>, model_id: String) {
         self.tts_providers.insert(model_id, provider.into());
     }
 
-    fn register_video(&mut self, provider: Box<dyn VideoGenerationProvider>, model_id: String) {
+    /// Register a VideoGeneration provider with its model ID.
+    pub fn register_video(&mut self, provider: Box<dyn VideoGenerationProvider>, model_id: String) {
         self.video_providers.insert(model_id, provider.into());
     }
 
-    fn register_search(&mut self, provider: Box<dyn SearchProvider>, model_id: String) {
+    /// Register a Search provider with its model ID.
+    pub fn register_search(&mut self, provider: Box<dyn SearchProvider>, model_id: String) {
         self.search_providers.insert(model_id, provider.into());
     }
 
-    fn register_stt(&mut self, provider: Box<dyn SttProvider>, model_id: String) {
+    /// Register a STT provider with its model ID.
+    pub fn register_stt(&mut self, provider: Box<dyn SttProvider>, model_id: String) {
         self.stt_providers.insert(model_id, provider.into());
     }
+}
 
+// ── ServiceRegistry trait impl (read-only interface consumed by Application) ──
+
+impl ServiceRegistry for Registry {
     // ── Get methods ──────────────────────────────────────────────────────────
 
     fn get_chat_provider(&self, capability: Capability) -> anyhow::Result<(Arc<dyn ChatProvider>, String)> {

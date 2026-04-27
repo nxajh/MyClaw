@@ -1,4 +1,4 @@
-//! Memory domain — trait, types, and shared/private memory decorators.
+//! Memory domain — trait, types, and decorators.
 //!
 //! ## Public API
 //!

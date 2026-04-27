@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use chrono::Utc;
-use mcp::{Tool, ToolResult};
+use capability::tool::{Tool, ToolResult};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::json;

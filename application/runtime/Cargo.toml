@@ -15,8 +15,6 @@ tracing = { workspace = true }
 parking_lot = { workspace = true }
 chrono = { workspace = true }
 
-# Local crates
+# Domain crates (DDD: Application depends only on Domain traits)
 capability = { path = "../../domain/capability" }
 session = { path = "../../domain/session" }
-mcp = { path = "../../infrastructure/mcp" }
-registry = { path = "../../infrastructure/registry" }

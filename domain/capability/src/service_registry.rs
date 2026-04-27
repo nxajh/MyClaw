@@ -1,4 +1,9 @@
 //! ServiceRegistry trait: the single routing point for all provider capabilities.
+//!
+//! This file defines only the **read** side of the registry — the methods that
+//! Application and Domain layers call to obtain providers.  Registration
+//! (the write side) is an Infrastructure concern and lives in
+//! `infrastructure/registry`.
 
 use crate::capability::Capability;
 use crate::chat::ChatProvider;
@@ -10,31 +15,11 @@ use crate::tts::TtsProvider;
 use crate::video::VideoGenerationProvider;
 use std::sync::Arc;
 
-/// ServiceRegistry trait — implemented by Infrastructure, consumed by Application.
+/// ServiceRegistry — read-only view consumed by Application / Domain layers.
+///
+/// Infrastructure (`infrastructure/registry`) implements this trait and also
+/// exposes a separate builder API for registration.
 pub trait ServiceRegistry: Send + Sync {
-    // ── Register ──────────────────────────────────────────────────────────────
-
-    /// Register a Chat provider with its model ID.
-    fn register_chat(&mut self, provider: Box<dyn ChatProvider>, model_id: String);
-
-    /// Register an Embedding provider with its model ID.
-    fn register_embedding(&mut self, provider: Box<dyn EmbeddingProvider>, model_id: String);
-
-    /// Register an ImageGeneration provider with its model ID.
-    fn register_image(&mut self, provider: Box<dyn ImageGenerationProvider>, model_id: String);
-
-    /// Register a TTS provider with its model ID.
-    fn register_tts(&mut self, provider: Box<dyn TtsProvider>, model_id: String);
-
-    /// Register a VideoGeneration provider with its model ID.
-    fn register_video(&mut self, provider: Box<dyn VideoGenerationProvider>, model_id: String);
-
-    /// Register a Search provider with its model ID.
-    fn register_search(&mut self, provider: Box<dyn SearchProvider>, model_id: String);
-
-    /// Register a STT provider with its model ID.
-    fn register_stt(&mut self, provider: Box<dyn SttProvider>, model_id: String);
-
     // ── Get providers ─────────────────────────────────────────────────────────
 
     /// Get a Chat provider for the given capability.

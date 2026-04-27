@@ -19,7 +19,8 @@ uuid.workspace = true
 reqwest.workspace = true
 regex.workspace = true
 
-mcp = { path = "../mcp" }
+# Domain dependency for Tool trait
+capability = { path = "../../domain/capability" }
 
 [dev-dependencies]
 tempfile.workspace = true

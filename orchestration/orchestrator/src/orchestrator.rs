@@ -3,7 +3,6 @@
 use anyhow::Context;
 use channels::{Channel, ChannelMessage, SendMessage};
 use dashmap::DashMap;
-use registry::ServiceRegistry;
 use runtime::{Agent, AgentConfig, AgentLoop, SessionManager, SkillsManager};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex as TokioMutex};
@@ -153,7 +152,7 @@ impl Orchestrator {
             max_history: config.agent.max_history,
             prompt_config: system_prompt_config_from(&config.agent.prompt),
         };
-        let agent = Agent::new(registry, skills, agent_config);
+        let agent = Agent::new(Arc::new(registry), skills, agent_config);
 
         // Session persistence: SQLite in workspace dir.
         let db_path = config.workspace_dir.join("sessions.db");

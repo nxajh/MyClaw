@@ -7,5 +7,6 @@ pub mod image;
 pub mod search;
 pub mod service_registry;
 pub mod stt;
+pub mod tool;
 pub mod tts;
 pub mod video;

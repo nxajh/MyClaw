@@ -11,6 +11,7 @@ path = "src/main.rs"
 channels = { path = "../../interface/channels", features = ["wechat", "telegram"] }
 runtime = { path = "../../application/runtime" }
 session = { path = "../../domain/session" }
+capability = { path = "../../domain/capability" }
 config = { path = "../../infrastructure/config" }
 memory-storage = { path = "../../infrastructure/memory-storage" }
 registry = { path = "../../infrastructure/registry" }

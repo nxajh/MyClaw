@@ -4,7 +4,7 @@
 //! In the future, it will route through the Registry's SearchProvider capability.
 
 use async_trait::async_trait;
-use mcp::{Tool, ToolResult};
+use capability::tool::{Tool, ToolResult};
 use serde_json::json;
 
 pub struct WebSearchTool;

@@ -1,7 +1,7 @@
 //! Web fetch tool — HTTP GET to fetch web page content.
 
 use async_trait::async_trait;
-use mcp::{Tool, ToolResult};
+use capability::tool::{Tool, ToolResult};
 use serde_json::json;
 use tokio::time::{Duration, timeout};
 

@@ -2,6 +2,10 @@
 //!
 //! Agent holds shared resources (registry, skills, config) and creates
 //! per-session AgentLoop handles.
+//!
+//! DDD: Agent depends on `dyn ServiceRegistry` (Domain trait), not on
+//! `Registry` (Infrastructure concrete type). This keeps the Application
+//! layer decoupled from Infrastructure.
 
 use std::sync::Arc;
 
@@ -10,12 +14,12 @@ use capability::chat::{
     BoxStream, ChatMessage, ChatRequest, StopReason, StreamEvent, ToolCall, ToolSpec,
 };
 use capability::service_registry::ServiceRegistry;
+use capability::tool::ToolResult;
 use futures_util::StreamExt;
 
 use super::session_manager::Session;
 use super::skills::SkillsManager;
 use crate::prompt::{SystemPromptBuilder, SystemPromptConfig};
-use registry::Registry;
 
 /// AgentConfig controls loop breaker thresholds and tool call limits.
 #[derive(Debug, Clone)]
@@ -41,16 +45,16 @@ impl Default for AgentConfig {
 /// Agent is the shared factory — call `.loop_for(session)` to get an AgentLoop.
 #[derive(Clone)]
 pub struct Agent {
-    registry: Arc<Registry>,
+    registry: Arc<dyn ServiceRegistry>,
     skills: Arc<SkillsManager>,
     config: AgentConfig,
     system_prompt: String,
 }
 
 impl Agent {
-    pub fn new(registry: Registry, skills: SkillsManager, config: AgentConfig) -> Self {
+    pub fn new(registry: Arc<dyn ServiceRegistry>, skills: SkillsManager, config: AgentConfig) -> Self {
         Self {
-            registry: Arc::new(registry),
+            registry,
             skills: Arc::new(skills),
             config,
             system_prompt: String::new(),
@@ -93,7 +97,7 @@ impl Agent {
 
 /// Per-session agent loop handle. Execute `run(user_message)` to process a message.
 pub struct AgentLoop {
-    registry: Arc<Registry>,
+    registry: Arc<dyn ServiceRegistry>,
     skills: Arc<SkillsManager>,
     config: AgentConfig,
     session: Session,
@@ -323,7 +327,6 @@ impl AgentLoop {
             .all_tools()
             .iter()
             .map(|t| {
-                // Convert from mcp::ToolSpec to capability::chat::ToolSpec.
                 let spec = t.spec();
                 ToolSpec {
                     name: spec.name,
@@ -335,7 +338,7 @@ impl AgentLoop {
     }
 
     /// Execute a single tool call.
-    async fn execute_tool(&self, call: &ToolCall) -> anyhow::Result<mcp::ToolResult> {
+    async fn execute_tool(&self, call: &ToolCall) -> anyhow::Result<ToolResult> {
         let tool = self.skills.get(&call.name).ok_or_else(|| {
             anyhow::anyhow!("Unknown tool: '{}'", call.name)
         })?;

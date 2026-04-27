@@ -1,5 +1,7 @@
 //! tools — Tool implementations for the MyClaw runtime.
 //!
+//! Concrete implementations of `capability::tool::Tool` (Domain trait).
+//!
 //! **Core:** ShellTool, FileReadTool, FileWriteTool, FileEditTool, GlobSearchTool, ContentSearchTool
 //! **Web:** WebFetchTool, HttpRequestTool, WebSearchTool
 //! **Utility:** CalculatorTool, AskUserTool
@@ -26,7 +28,7 @@ pub use shell::ShellTool;
 pub use web::WebFetchTool;
 pub use web_search::WebSearchTool;
 
-use mcp::Tool;
+use capability::tool::Tool;
 use std::sync::Arc;
 
 /// Create all built-in tools with a shared memory store.

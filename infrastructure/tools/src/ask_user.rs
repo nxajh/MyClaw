@@ -5,7 +5,7 @@
 //! as output, signaling that the agent needs user input.
 
 use async_trait::async_trait;
-use mcp::{Tool, ToolResult};
+use capability::tool::{Tool, ToolResult};
 use serde_json::json;
 
 pub struct AskUserTool;

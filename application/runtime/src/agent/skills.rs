@@ -2,11 +2,14 @@
 //!
 //! A Skill is a named group of tools. The manager maintains a flat
 //! tool-name → tool registry for fast lookup.
+//!
+//! DDD: SkillsManager depends on `capability::tool::Tool` (Domain trait),
+//! not on any Infrastructure concrete type.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use mcp::Tool;
+use capability::tool::Tool;
 
 /// A named collection of tools.
 #[derive(Clone)]
