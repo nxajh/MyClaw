@@ -36,7 +36,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1.18"
 tokio-util = "0.7"
 tracing = "0.1"
-uuid = "1"
+uuid = { version = "1", features = ["v4"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 regex = "1"
 
