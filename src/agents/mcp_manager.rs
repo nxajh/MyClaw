@@ -81,27 +81,25 @@ impl McpManager {
     }
 
     /// Build `McpToolWrapper` instances for every tool in the registry.
-    fn build_wrappers(
+    async fn build_wrappers(
         &self,
         registry: Arc<crate::mcp::McpRegistry>,
-    ) -> impl std::future::Future<Output = Vec<Arc<dyn crate::providers::Tool>>> + '_ {
-        async move {
-            let mut wrappers = Vec::new();
-            let tool_names = registry.tool_names();
+    ) -> Vec<Arc<dyn crate::providers::Tool>> {
+        let mut wrappers = Vec::new();
+        let tool_names = registry.tool_names();
 
-            for prefixed_name in tool_names {
-                if let Some(def) = registry.get_tool_def(&prefixed_name).await {
-                    let wrapper = crate::mcp::McpToolWrapper::new(
-                        prefixed_name.clone(),
-                        def,
-                        Arc::clone(&registry),
-                    );
-                    wrappers.push(Arc::new(wrapper) as Arc<dyn crate::providers::Tool>);
-                }
+        for prefixed_name in tool_names {
+            if let Some(def) = registry.get_tool_def(&prefixed_name).await {
+                let wrapper = crate::mcp::McpToolWrapper::new(
+                    prefixed_name.clone(),
+                    def,
+                    Arc::clone(&registry),
+                );
+                wrappers.push(Arc::new(wrapper) as Arc<dyn crate::providers::Tool>);
             }
-
-            wrappers
         }
+
+        wrappers
     }
 
     /// All MCP tool wrappers as `dyn Tool`, for injection into SkillsManager.
