@@ -1,16 +1,34 @@
-//! OpenAI provider — implements ChatProvider + ImageGenerationProvider + TtsProvider + EmbeddingProvider.
+//! OpenAI provider — Chat + Image + TTS + Embedding.
+//!
+//! Reference: https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
+//!
+//! Handles OpenAI-specific streaming behaviours:
+//! - `finish_reason` can be `"stop"` even when tool_calls were emitted in prior
+//!   chunks; we track `saw_tool_call` and override to ToolUse.
+//! - `finish_reason` can be `"function_call"` (deprecated but still possible).
+//! - `reasoning_content` in delta carries o-series chain-of-thought.
+//! - `stream_options.include_usage` requests a final usage chunk.
+//!
+//! Body differences from the generic shared builder:
+//! - `max_completion_tokens` is preferred over the deprecated `max_tokens`.
+//! - `stream_options: { include_usage: true }` is added for token tracking.
+//! - `parallel_tool_calls: true` when tools are present (OpenAI default, but
+//!   explicit for safety).
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
 
-use crate::providers::shared::{parse_openai_sse, build_openai_chat_body, AuthStyle};
 use crate::providers::Client;
 use crate::providers::{
-    BoxStream, ChatProvider, ChatRequest, StreamEvent, StopReason,
+    BoxStream, ChatProvider, ChatRequest, ContentPart, StreamEvent, StopReason,
 };
-use crate::providers::{ImageGenerationProvider, ImageRequest, ImageResponse, ImageFormat, ImageOutput};
+use crate::providers::{
+    EmbedInput, EmbedRequest, EmbedResponse, EmbeddingProvider,
+};
+use crate::providers::{
+    ImageGenerationProvider, ImageRequest, ImageResponse, ImageFormat, ImageOutput,
+};
 use crate::providers::{TtsProvider, TtsRequest, TtsFormat, TtsVoice};
-use crate::providers::{EmbedRequest, EmbedResponse, EmbeddingProvider, EmbedInput};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 
@@ -18,7 +36,6 @@ const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 pub struct OpenAiProvider {
     base_url: String,
     api_key: String,
-    auth_style: AuthStyle,
     client: Client,
 }
 
@@ -28,7 +45,11 @@ impl OpenAiProvider {
     }
 
     pub fn with_base_url(api_key: String, base_url: String) -> Self {
-        Self { base_url, api_key, auth_style: AuthStyle::Bearer, client: Client::new() }
+        Self { base_url, api_key, client: Client::new() }
+    }
+
+    fn auth(&self) -> String {
+        format!("Bearer {}", self.api_key)
     }
 
     fn chat_url(&self) -> String {
@@ -41,7 +62,6 @@ impl OpenAiProvider {
     fn images_url(&self) -> String { format!("{}/v1/images/generations", self.base_url.trim_end_matches('/')) }
     fn embeddings_url(&self) -> String { format!("{}/v1/embeddings", self.base_url.trim_end_matches('/')) }
     fn tts_url(&self) -> String { format!("{}/v1/audio/speech", self.base_url.trim_end_matches('/')) }
-    fn auth(&self) -> String { crate::providers::shared::build_auth(&self.auth_style, &self.api_key) }
 }
 
 // ── ChatProvider ───────────────────────────────────────────────────────────────
@@ -50,7 +70,7 @@ impl OpenAiProvider {
 impl ChatProvider for OpenAiProvider {
     fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
         let url = self.chat_url();
-        let body = build_openai_chat_body(&req);
+        let body = build_openai_body(&req);
         let auth = self.auth();
         let client = self.client.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(100);
@@ -75,6 +95,7 @@ impl ChatProvider for OpenAiProvider {
                 return;
             }
 
+            let mut saw_tool_call = false;
             let mut buffer = String::new();
             let mut utf8_buf = Vec::new();
             let mut stream = resp.bytes_stream();
@@ -102,16 +123,223 @@ impl ChatProvider for OpenAiProvider {
                 while let Some(pos) = buffer.find('\n') {
                     let line = buffer[..pos].to_string();
                     buffer.drain(..=pos);
-                    if let Some(event) = parse_openai_sse(&line) {
+                    if let Some(event) = parse_openai_sse(&line, &mut saw_tool_call) {
                         let _ = tx.send(event).await;
                     }
                 }
             }
-            let _ = tx.send(StreamEvent::Done { reason: StopReason::EndTurn }).await;
+            // OpenAI may report finish_reason="stop" even when tool calls were present.
+            let final_reason = if saw_tool_call { StopReason::ToolUse } else { StopReason::EndTurn };
+            let _ = tx.send(StreamEvent::Done { reason: final_reason }).await;
         });
 
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
+}
+
+// ── Body building ─────────────────────────────────────────────────────────────
+
+/// Build the request body for the OpenAI Chat Completions API.
+///
+/// Per the latest OpenAI documentation:
+/// - `max_completion_tokens` is preferred over the deprecated `max_tokens`.
+/// - `stream_options: { include_usage: true }` requests a final usage chunk.
+/// - `parallel_tool_calls: true` when tools are present.
+fn build_openai_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
+    use serde_json::json;
+
+    let messages: Vec<serde_json::Value> = req.messages
+        .iter()
+        .map(|msg| {
+            let content_vec: Vec<serde_json::Value> = msg.parts.iter().map(|part| match part {
+                ContentPart::Text { text } => json!({"type": "text", "text": text}),
+                ContentPart::ImageUrl { url, detail } => json!({
+                    "type": "image_url",
+                    "image_url": { "url": url, "detail": format!("{:?}", detail).to_lowercase() }
+                }),
+                ContentPart::ImageB64 { b64_json, detail } => json!({
+                    "type": "image_url",
+                    "image_url": { "url": format!("data:image;base64,{}", b64_json), "detail": format!("{:?}", detail).to_lowercase() }
+                }),
+            }).collect();
+
+            let content = if content_vec.len() == 1 {
+                if let Some(text) = msg.parts.iter().find_map(|p| match p {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                }) {
+                    json!(text)
+                } else {
+                    content_vec.into_iter().next().unwrap()
+                }
+            } else {
+                json!(content_vec)
+            };
+
+            let mut msg_json = json!({ "role": msg.role });
+
+            if msg.role == "tool" {
+                if let Some(tc_id) = &msg.tool_call_id {
+                    msg_json["tool_call_id"] = json!(tc_id);
+                } else if let Some(n) = &msg.name {
+                    msg_json["tool_call_id"] = json!(n);
+                }
+                msg_json["content"] = json!(content);
+            } else if msg.role == "assistant" {
+                msg_json["content"] = if content.is_string() && content.as_str().unwrap_or("").is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    json!(content)
+                };
+                if let Some(tcs) = &msg.tool_calls {
+                    msg_json["tool_calls"] = json!(tcs);
+                }
+            } else {
+                msg_json["content"] = json!(content);
+            }
+
+            msg_json
+        })
+        .collect();
+
+    let mut body = json!({
+        "model": req.model,
+        "messages": messages,
+        "stream": true,
+        "stream_options": { "include_usage": true },
+    });
+
+    if let Some(temp) = req.temperature { body["temperature"] = json!(temp); }
+
+    // max_completion_tokens is the current parameter; fall back to max_tokens
+    // for providers that haven't updated yet.
+    if let Some(max) = req.max_tokens {
+        body["max_completion_tokens"] = json!(max);
+        body["max_tokens"] = json!(max);
+    }
+    if let Some(stop) = &req.stop { body["stop"] = json!(stop); }
+    if let Some(seed) = req.seed { body["seed"] = json!(seed); }
+    if let Some(tools) = req.tools {
+        body["tools"] = json!(tools.iter().map(|t| {
+            json!({
+                "type": "function",
+                "function": { "name": t.name, "description": t.description, "parameters": t.input_schema }
+            })
+        }).collect::<Vec<_>>());
+        body["parallel_tool_calls"] = json!(true);
+    }
+
+    body
+}
+
+// ── SSE parsing ───────────────────────────────────────────────────────────────
+
+/// Parse a single SSE line from the OpenAI Chat Completions streaming API.
+///
+/// OpenAI-specific handling:
+/// - `finish_reason` can be `"stop"` after tool calls were emitted in earlier
+///   chunks; `saw_tool_call` tracks this and overrides the reason.
+/// - `finish_reason` can be `"function_call"` (deprecated).
+/// - `delta.tool_calls` takes priority over `delta.content` when both are present.
+/// - `delta.reasoning_content` carries o-series chain-of-thought.
+fn parse_openai_sse(line: &str, saw_tool_call: &mut bool) -> Option<StreamEvent> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with(':') { return None; }
+    let data = line.strip_prefix("data:")?.trim();
+    if data == "[DONE]" { return None; }
+
+    #[derive(serde::Deserialize)]
+    struct Chunk { choices: Vec<Choice>, #[serde(default)] usage: Option<Usage> }
+    #[derive(serde::Deserialize)]
+    struct Choice { delta: Delta, finish_reason: Option<String> }
+    #[derive(serde::Deserialize)]
+    struct Delta {
+        content: Option<String>,
+        reasoning_content: Option<String>,
+        tool_calls: Option<Vec<TcDelta>>,
+    }
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct TcDelta { index: u32, id: Option<String>, function: Option<FuncDelta> }
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct FuncDelta { name: Option<String>, arguments: Option<String> }
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct Usage {
+        #[serde(default)] prompt_tokens: Option<u64>,
+        #[serde(default)] completion_tokens: Option<u64>,
+        #[serde(default)] total_tokens: Option<u64>,
+        #[serde(default)] prompt_tokens_details: Option<PromptDetails>,
+        #[serde(default)] completion_tokens_details: Option<CompletionDetails>,
+    }
+    #[derive(serde::Deserialize)]
+    struct PromptDetails { #[serde(default)] cached_tokens: Option<u64> }
+    #[derive(serde::Deserialize)]
+    struct CompletionDetails { #[serde(default)] reasoning_tokens: Option<u64> }
+
+    let chunk: Chunk = serde_json::from_str(data).ok()?;
+
+    // Final usage chunk (choices is empty).
+    if let Some(usage) = chunk.usage {
+        if chunk.choices.is_empty() {
+            return Some(StreamEvent::Usage(crate::providers::ChatUsage {
+                input_tokens: usage.prompt_tokens,
+                output_tokens: usage.completion_tokens,
+                cached_input_tokens: usage.prompt_tokens_details.and_then(|d| d.cached_tokens),
+                reasoning_tokens: usage.completion_tokens_details.and_then(|d| d.reasoning_tokens),
+                ..Default::default()
+            }));
+        }
+    }
+
+    for choice in &chunk.choices {
+        // Tool calls take priority — when both content and tool_calls are
+        // present in the same chunk, the content is usually a text
+        // representation of the tool call and must be ignored.
+        if let Some(tcs) = &choice.delta.tool_calls {
+            *saw_tool_call = true;
+            if let Some(tc) = tcs.first() {
+                let id = tc.id.clone().unwrap_or_default();
+                let func = tc.function.as_ref();
+
+                if !id.is_empty() && func.is_some_and(|f| f.name.is_some()) {
+                    let initial_args = func.and_then(|f| f.arguments.clone()).unwrap_or_default();
+                    return Some(StreamEvent::ToolCallStart {
+                        id: id.clone(),
+                        name: func.and_then(|f| f.name.clone()).unwrap_or_default(),
+                        initial_arguments: initial_args,
+                    });
+                }
+
+                let args = func.and_then(|f| f.arguments.clone()).unwrap_or_default();
+                if !args.is_empty() {
+                    return Some(StreamEvent::ToolCallDelta { id, delta: args });
+                }
+            }
+        }
+
+        if let Some(text) = &choice.delta.content {
+            if !text.is_empty() { return Some(StreamEvent::Delta { text: text.clone() }); }
+        }
+        if let Some(reasoning) = &choice.delta.reasoning_content {
+            if !reasoning.is_empty() { return Some(StreamEvent::Thinking { text: reasoning.clone() }); }
+        }
+        if choice.finish_reason.is_some() {
+            let raw = choice.finish_reason.as_ref().unwrap();
+            let reason = match raw.as_str() {
+                "stop" if *saw_tool_call => StopReason::ToolUse,
+                "stop" => StopReason::EndTurn,
+                "tool_calls" | "function_call" => StopReason::ToolUse,
+                "length" => StopReason::MaxTokens,
+                "content_filter" => StopReason::ContentFilter,
+                _ => StopReason::EndTurn,
+            };
+            return Some(StreamEvent::Done { reason });
+        }
+    }
+
+    None
 }
 
 // ── ImageGenerationProvider ────────────────────────────────────────────────────
