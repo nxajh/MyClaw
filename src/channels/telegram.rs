@@ -478,7 +478,8 @@ impl TelegramChannel {
                 }
 
                 let update_id = update.update_id.to_string();
-                if !self.dedup.check_and_record(&update_id) {
+                if self.dedup.check_and_record(&update_id) {
+                    // Already seen this update — skip
                     continue;
                 }
 
