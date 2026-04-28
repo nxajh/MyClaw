@@ -9,4 +9,4 @@ pub use routing::{RouteEntry, RoutingConfig, RoutingStrategy};
 
 // Re-export ServiceRegistry trait so consumers don't need the capability crate directly.
 // Use `::capability` to refer to the external crate, not our local `capability` module.
-pub use ::capability::service_registry::ServiceRegistry;
+pub use ::myclaw_capability::service_registry::ServiceRegistry;

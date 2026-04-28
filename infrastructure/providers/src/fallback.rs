@@ -5,7 +5,7 @@
 //! The Application layer (Agent) only sees a single `ChatProvider`.
 
 use async_trait::async_trait;
-use capability::chat::{
+use myclaw_capability::chat::{
     BoxStream, ChatProvider, ChatRequest, ChatMessage, StreamEvent, ToolSpec,
     ThinkingConfig,
 };

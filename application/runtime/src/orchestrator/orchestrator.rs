@@ -10,7 +10,7 @@
 //! not here. This struct receives fully-assembled components via its constructor.
 
 use anyhow::Context;
-use channels::{Channel, ChannelMessage, SendMessage};
+use myclaw_channels::{Channel, ChannelMessage, SendMessage};
 use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex as TokioMutex};

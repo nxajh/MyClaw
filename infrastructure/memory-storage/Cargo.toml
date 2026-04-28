@@ -1,16 +1,16 @@
 [package]
-name = "memory-storage"
+name = "myclaw-memory-storage"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [package.metadata.docs.rs]
 all-features = true
 
 [dependencies]
 # Domain types
-memory = { path = "../../domain/memory" }
-session = { path = "../../domain/session" }
-capability = { path = "../../domain/capability" }
+myclaw-memory = { path = "../../domain/memory" }
+myclaw-session = { path = "../../domain/session" }
+myclaw-capability = { path = "../../domain/capability" }
 
 # Workspace dependencies
 anyhow.workspace = true

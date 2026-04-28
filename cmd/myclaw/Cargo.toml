@@ -1,7 +1,7 @@
 [package]
 name = "myclaw"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [[bin]]
 name = "myclaw"
@@ -9,20 +9,20 @@ path = "src/main.rs"
 
 [dependencies]
 # Application layer
-runtime = { path = "../../application/runtime" }
+myclaw-runtime = { path = "../../application/runtime" }
 
 # Interface layer (Channel adapters with feature flags)
-channels = { path = "../../interface/channels", features = ["wechat", "telegram"] }
+myclaw-channels = { path = "../../interface/channels", features = ["wechat", "telegram"] }
 
 # Domain
-session = { path = "../../domain/session" }
+myclaw-session = { path = "../../domain/session" }
 
 # Infrastructure (Composition Root wires these up)
-config = { path = "../../infrastructure/config" }
-registry = { path = "../../infrastructure/registry" }
-providers = { path = "../../infrastructure/providers" }
-tools = { path = "../../infrastructure/tools" }
-memory-storage = { path = "../../infrastructure/memory-storage" }
+myclaw-config = { path = "../../infrastructure/config" }
+myclaw-registry = { path = "../../infrastructure/registry" }
+myclaw-providers = { path = "../../infrastructure/providers" }
+myclaw-tools = { path = "../../infrastructure/tools" }
+myclaw-memory-storage = { path = "../../infrastructure/memory-storage" }
 
 # External
 tokio = { workspace = true, features = ["sync", "macros", "rt-multi-thread", "signal"] }

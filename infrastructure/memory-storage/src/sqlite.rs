@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
-use session::{ChatMessage, SessionBackend, SessionMetadata, SessionQuery};
+use myclaw_session::{ChatMessage, SessionBackend, SessionMetadata, SessionQuery};
 
 /// SQLite-backed session persistence.
 pub struct SqliteSessionBackend {

@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 
 /// Re-export ChatMessage from capability crate (multimodal: Vec<ContentPart>).
-pub use capability::chat::ChatMessage;
+pub use myclaw_capability::chat::ChatMessage;
 
 /// Metadata about a persisted session.
 #[derive(Debug, Clone)]

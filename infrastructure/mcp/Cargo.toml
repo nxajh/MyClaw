@@ -1,5 +1,5 @@
 [package]
-name = "mcp"
+name = "myclaw-mcp"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.87"
@@ -13,7 +13,7 @@ tokio.workspace = true
 tracing.workspace = true
 
 # Domain dependency for Tool trait
-capability = { path = "../../domain/capability" }
+myclaw-capability = { path = "../../domain/capability" }
 
 # HTTP/SSE transports need reqwest with stream feature
 reqwest = { workspace = true, features = ["stream"] }

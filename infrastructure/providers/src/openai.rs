@@ -5,12 +5,12 @@ use futures_util::StreamExt;
 
 use crate::shared::{parse_openai_sse, build_openai_chat_body, AuthStyle};
 use crate::Client;
-use capability::chat::{
+use myclaw_capability::chat::{
     BoxStream, ChatProvider, ChatRequest, StreamEvent, StopReason,
 };
-use capability::image::{ImageGenerationProvider, ImageRequest, ImageResponse, ImageFormat, ImageOutput};
-use capability::tts::{TtsProvider, TtsRequest, TtsFormat, TtsVoice};
-use capability::embedding::{EmbedRequest, EmbedResponse, EmbeddingProvider, EmbedInput};
+use myclaw_capability::image::{ImageGenerationProvider, ImageRequest, ImageResponse, ImageFormat, ImageOutput};
+use myclaw_capability::tts::{TtsProvider, TtsRequest, TtsFormat, TtsVoice};
+use myclaw_capability::embedding::{EmbedRequest, EmbedResponse, EmbeddingProvider, EmbedInput};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 
@@ -131,14 +131,14 @@ impl ImageGenerationProvider for OpenAiProvider {
             "prompt": req.prompt,
             "n": req.n.unwrap_or(1),
             "size": match req.size {
-                Some(capability::image::ImageSize::Square1024) => "1024x1024",
-                Some(capability::image::ImageSize::Landscape1792) => "1792x1024",
-                Some(capability::image::ImageSize::Portrait1024) => "1024x1792",
+                Some(myclaw_capability::image::ImageSize::Square1024) => "1024x1024",
+                Some(myclaw_capability::image::ImageSize::Landscape1792) => "1792x1024",
+                Some(myclaw_capability::image::ImageSize::Portrait1024) => "1024x1792",
                 None => "1024x1024",
             },
             "quality": match req.quality {
-                Some(capability::image::ImageQuality::HD) => "hd",
-                Some(capability::image::ImageQuality::Standard) | None => "standard",
+                Some(myclaw_capability::image::ImageQuality::HD) => "hd",
+                Some(myclaw_capability::image::ImageQuality::Standard) | None => "standard",
             },
             "response_format": match req.response_format {
                 Some(ImageFormat::Url) | None => "url",
@@ -172,7 +172,7 @@ impl ImageGenerationProvider for OpenAiProvider {
 
 #[async_trait]
 impl TtsProvider for OpenAiProvider {
-    fn synthesize(&self, req: TtsRequest) -> anyhow::Result<capability::tts::AudioResponse> {
+    fn synthesize(&self, req: TtsRequest) -> anyhow::Result<myclaw_capability::tts::AudioResponse> {
         let url = self.tts_url();
         let auth = self.auth();
 
@@ -200,8 +200,8 @@ impl TtsProvider for OpenAiProvider {
             resp.bytes().await
         })?;
 
-        Ok(capability::tts::AudioResponse {
-            audio: capability::tts::AudioData {
+        Ok(myclaw_capability::tts::AudioResponse {
+            audio: myclaw_capability::tts::AudioData {
                 bytes: bytes.to_vec(),
                 mime_type: "audio/mp3".to_string(),
             },
@@ -245,7 +245,7 @@ impl EmbeddingProvider for OpenAiProvider {
         struct Eu { prompt_tokens: u64 }
 
         let resp: Er = serde_json::from_str(&text)?;
-        let usage = resp.usage.map(|u| capability::embedding::EmbeddingUsage { prompt_tokens: u.prompt_tokens });
+        let usage = resp.usage.map(|u| myclaw_capability::embedding::EmbeddingUsage { prompt_tokens: u.prompt_tokens });
         let embeddings = resp.data.into_iter().flat_map(|d| d.embedding).collect();
 
         Ok(EmbedResponse { embeddings, usage, model: req.model })

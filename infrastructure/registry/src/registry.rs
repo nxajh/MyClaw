@@ -3,21 +3,21 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use anyhow::Context;
-use capability::capability::Capability;
-use capability::chat::ChatProvider;
-use capability::embedding::EmbeddingProvider;
-use capability::image::ImageGenerationProvider;
-use capability::search::SearchProvider;
-use capability::service_registry::ServiceRegistry;
-use capability::stt::SttProvider;
-use capability::tts::TtsProvider;
-use capability::video::VideoGenerationProvider;
+use myclaw_capability::capability::Capability;
+use myclaw_capability::chat::ChatProvider;
+use myclaw_capability::embedding::EmbeddingProvider;
+use myclaw_capability::image::ImageGenerationProvider;
+use myclaw_capability::search::SearchProvider;
+use myclaw_capability::service_registry::ServiceRegistry;
+use myclaw_capability::stt::SttProvider;
+use myclaw_capability::tts::TtsProvider;
+use myclaw_capability::video::VideoGenerationProvider;
 
 use crate::routing::{RoutingConfig, RouteEntry, RoutingStrategy};
 
 // ── Config types ────────────────────────────────────────────────────────────────
 
-/// Registry-level provider config (converted from config::ProviderConfig).
+/// Registry-level provider config (converted from myclaw_config::ProviderConfig).
 #[derive(Debug, Clone)]
 pub struct ProviderConfig {
     /// Provider API kind: "minimax", "openai", "glm", etc. (HashMap key).
@@ -27,7 +27,7 @@ pub struct ProviderConfig {
     pub models: Vec<ModelConfig>,
 }
 
-/// Registry-level model config (converted from config::ModelConfig).
+/// Registry-level model config (converted from myclaw_config::ModelConfig).
 #[derive(Debug, Clone)]
 pub struct ModelConfig {
     pub model_id: String,
@@ -144,8 +144,8 @@ impl Registry {
     /// This only converts the config data structures — it does NOT instantiate
     /// live ChatProviders.  Use `register_chat()` to add providers afterwards.
     pub fn from_config(
-        providers: HashMap<String, config::provider::ProviderConfig>,
-        routing: &config::routing::RoutingConfig,
+        providers: HashMap<String, myclaw_config::provider::ProviderConfig>,
+        routing: &myclaw_config::routing::RoutingConfig,
     ) -> anyhow::Result<Self> {
         let registry_providers: HashMap<String, ProviderConfig> = providers
             .into_iter()
@@ -172,8 +172,8 @@ impl Registry {
 
 // ── Type conversions (config → registry) ─────────────────────────────────────
 
-impl From<(&str, config::provider::ModelConfig)> for ModelConfig {
-    fn from((model_id, cfg): (&str, config::provider::ModelConfig)) -> Self {
+impl From<(&str, myclaw_config::provider::ModelConfig)> for ModelConfig {
+    fn from((model_id, cfg): (&str, myclaw_config::provider::ModelConfig)) -> Self {
         Self {
             model_id: model_id.to_string(),
             capabilities: cfg.capabilities.into_iter().map(convert_capability).collect(),
@@ -184,8 +184,8 @@ impl From<(&str, config::provider::ModelConfig)> for ModelConfig {
     }
 }
 
-impl From<config::provider::ProviderConfig> for ProviderConfig {
-    fn from(cfg: config::provider::ProviderConfig) -> Self {
+impl From<myclaw_config::provider::ProviderConfig> for ProviderConfig {
+    fn from(cfg: myclaw_config::provider::ProviderConfig) -> Self {
         Self {
             // api is set by the caller via ProviderConfig::with_api() or inline
             api: String::new(),
@@ -204,8 +204,8 @@ impl ProviderConfig {
     }
 }
 
-fn convert_capability(c: config::provider::Capability) -> Capability {
-    use config::provider::Capability as Cc;
+fn convert_capability(c: myclaw_config::provider::Capability) -> Capability {
+    use myclaw_config::provider::Capability as Cc;
     use Capability as Cr;
     match c {
         Cc::Chat => Cr::Chat,
@@ -223,14 +223,14 @@ fn convert_capability(c: config::provider::Capability) -> Capability {
 impl RoutingConfig {
     /// Convert from config's RoutingConfig (HashMap<String, RouteEntry>)
     /// to registry's RoutingConfig (flat struct with typed fields).
-    pub fn from_other(other: &config::routing::RoutingConfig) -> Self {
-        fn convert_entry(e: &config::routing::RouteEntry) -> RouteEntry {
+    pub fn from_other(other: &myclaw_config::routing::RoutingConfig) -> Self {
+        fn convert_entry(e: &myclaw_config::routing::RouteEntry) -> RouteEntry {
             RouteEntry {
                 strategy: match e.strategy {
-                    config::routing::RoutingStrategy::Fixed => RoutingStrategy::Fixed,
-                    config::routing::RoutingStrategy::Fallback => RoutingStrategy::Fallback,
-                    config::routing::RoutingStrategy::Cheapest => RoutingStrategy::Cheapest,
-                    config::routing::RoutingStrategy::Fastest => RoutingStrategy::Fastest,
+                    myclaw_config::routing::RoutingStrategy::Fixed => RoutingStrategy::Fixed,
+                    myclaw_config::routing::RoutingStrategy::Fallback => RoutingStrategy::Fallback,
+                    myclaw_config::routing::RoutingStrategy::Cheapest => RoutingStrategy::Cheapest,
+                    myclaw_config::routing::RoutingStrategy::Fastest => RoutingStrategy::Fastest,
                 },
                 models: e.models.clone(),
                 provider: e.providers.first().cloned(),
@@ -302,16 +302,16 @@ impl Registry {
     /// replace individual chat providers with a single FallbackChatProvider wrapper.
     ///
     /// Must be called after all providers are registered.
-    pub fn maybe_wrap_chat_fallback(&mut self, routing: &config::routing::RoutingConfig) {
-        use providers::FallbackChatProvider;
-        use providers::FallbackEntry;
+    pub fn maybe_wrap_chat_fallback(&mut self, routing: &myclaw_config::routing::RoutingConfig) {
+        use myclaw_providers::FallbackChatProvider;
+        use myclaw_providers::FallbackEntry;
 
-        let entry = match routing.get(config::provider::Capability::Chat) {
+        let entry = match routing.get(myclaw_config::provider::Capability::Chat) {
             Some(e) => e,
             None => return,
         };
 
-        if entry.strategy != config::routing::RoutingStrategy::Fallback {
+        if entry.strategy != myclaw_config::routing::RoutingStrategy::Fallback {
             return;
         }
         if entry.models.len() <= 1 {

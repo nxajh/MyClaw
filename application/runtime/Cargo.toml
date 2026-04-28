@@ -1,7 +1,7 @@
 [package]
-name = "runtime"
+name = "myclaw-runtime"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 # Workspace deps
@@ -17,9 +17,9 @@ chrono = { workspace = true }
 dashmap = "5"
 
 # Domain crates (DDD: Application depends on Domain)
-capability = { path = "../../domain/capability" }
-session = { path = "../../domain/session" }
+myclaw-capability = { path = "../../domain/capability" }
+myclaw-session = { path = "../../domain/session" }
 
 # Interface: Channel trait (Application coordinates interface adapters)
 # No features — only needs the trait + types, not concrete implementations.
-channels = { path = "../../interface/channels" }
+myclaw-channels = { path = "../../interface/channels" }

@@ -1,7 +1,7 @@
 [package]
-name = "registry"
+name = "myclaw-registry"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 anyhow.workspace = true
@@ -11,10 +11,10 @@ tokio.workspace = true
 tracing.workspace = true
 
 # Use domain capability types
-capability = { path = "../../domain/capability" }
+myclaw-capability = { path = "../../domain/capability" }
 
 # Use config types for FromConfig builder
-config = { path = "../config" }
+myclaw-config = { path = "../config" }
 
 # FallbackChatProvider wrapping
-providers = { path = "../providers" }
+myclaw-providers = { path = "../providers" }

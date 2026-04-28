@@ -1,7 +1,7 @@
 //! Calculator tool — evaluates mathematical expressions safely.
 
 use async_trait::async_trait;
-use capability::tool::{Tool, ToolResult};
+use myclaw_capability::tool::{Tool, ToolResult};
 use serde_json::json;
 
 /// Simple recursive-descent math expression evaluator.

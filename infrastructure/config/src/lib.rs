@@ -380,7 +380,7 @@ level = "INFO"
 
     #[test]
     fn env_var_expansion() {
-        std::env::set_var("TEST_MYCLAW_KEY", "secret123");
+        unsafe { std::env::set_var("TEST_MYCLAW_KEY", "secret123"); }
 
         let toml_str = r#"
 [providers.test]
@@ -393,6 +393,6 @@ api_key = "${TEST_MYCLAW_KEY}"
             Some("secret123")
         );
 
-        std::env::remove_var("TEST_MYCLAW_KEY");
+        unsafe { std::env::remove_var("TEST_MYCLAW_KEY"); }
     }
 }

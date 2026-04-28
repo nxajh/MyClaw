@@ -26,14 +26,14 @@ pub use minimax::MiniMaxProvider;
 pub use openai::OpenAiProvider;
 
 // Re-export capability types
-pub use capability::chat::{
+pub use myclaw_capability::chat::{
     BoxStream, ChatProvider, ChatRequest, ChatResponse, ChatMessage, ContentPart,
     StreamEvent, StopReason, ToolCall, ToolSpec,
 };
-pub use capability::embedding::{EmbedRequest, EmbedResponse, EmbeddingProvider, EmbedInput};
-pub use capability::image::{ImageGenerationProvider, ImageRequest, ImageResponse};
-pub use capability::search::{SearchProvider, SearchRequest, SearchResults};
-pub use capability::stt::{SttProvider, SttRequest, TranscriptionResponse};
-pub use capability::tts::{TtsProvider, TtsRequest};
-pub use capability::video::{VideoGenerationProvider, VideoRequest, VideoResponse};
-pub use capability::capability::Capability;
+pub use myclaw_capability::embedding::{EmbedRequest, EmbedResponse, EmbeddingProvider, EmbedInput};
+pub use myclaw_capability::image::{ImageGenerationProvider, ImageRequest, ImageResponse};
+pub use myclaw_capability::search::{SearchProvider, SearchRequest, SearchResults};
+pub use myclaw_capability::stt::{SttProvider, SttRequest, TranscriptionResponse};
+pub use myclaw_capability::tts::{TtsProvider, TtsRequest};
+pub use myclaw_capability::video::{VideoGenerationProvider, VideoRequest, VideoResponse};
+pub use myclaw_capability::capability::Capability;

@@ -2,7 +2,7 @@
 
 use base64::Engine;
 use sha2::Digest;
-use capability::chat::{ChatRequest, ContentPart, StreamEvent, StopReason};
+use myclaw_capability::chat::{ChatRequest, ContentPart, StreamEvent, StopReason};
 
 // ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -272,7 +272,7 @@ impl ProviderInstance for crate::minimax::MiniMaxProvider {}
 pub fn create_provider_by_url(
     api_key: String,
     base_url: &str,
-) -> Option<Box<dyn capability::chat::ChatProvider>> {
+) -> Option<Box<dyn myclaw_capability::chat::ChatProvider>> {
     let host = base_url
         .trim_start_matches("https://")
         .trim_start_matches("http://")
@@ -364,7 +364,7 @@ impl ProviderHandle {
     }
 
     /// Return a boxed ChatProvider.
-    pub fn into_chat_provider(self) -> Box<dyn capability::chat::ChatProvider> {
+    pub fn into_chat_provider(self) -> Box<dyn myclaw_capability::chat::ChatProvider> {
         match self {
             ProviderHandle::OpenAi(p) => Box::new(p),
             ProviderHandle::Glm(p) => Box::new(p),
@@ -375,7 +375,7 @@ impl ProviderHandle {
     }
 
     /// Return a boxed EmbeddingProvider, if this provider supports it.
-    pub fn into_embedding_provider(self) -> Option<Box<dyn capability::embedding::EmbeddingProvider>> {
+    pub fn into_embedding_provider(self) -> Option<Box<dyn myclaw_capability::embedding::EmbeddingProvider>> {
         match self {
             ProviderHandle::OpenAi(p) => Some(Box::new(p)),
             ProviderHandle::Glm(p) => Some(Box::new(p)),
@@ -384,7 +384,7 @@ impl ProviderHandle {
     }
 
     /// Return a boxed ImageGenerationProvider, if this provider supports it.
-    pub fn into_image_provider(self) -> Option<Box<dyn capability::image::ImageGenerationProvider>> {
+    pub fn into_image_provider(self) -> Option<Box<dyn myclaw_capability::image::ImageGenerationProvider>> {
         match self {
             ProviderHandle::OpenAi(p) => Some(Box::new(p)),
             _ => None,
@@ -392,7 +392,7 @@ impl ProviderHandle {
     }
 
     /// Return a boxed TtsProvider, if this provider supports it.
-    pub fn into_tts_provider(self) -> Option<Box<dyn capability::tts::TtsProvider>> {
+    pub fn into_tts_provider(self) -> Option<Box<dyn myclaw_capability::tts::TtsProvider>> {
         match self {
             ProviderHandle::OpenAi(p) => Some(Box::new(p)),
             _ => None,
@@ -400,13 +400,13 @@ impl ProviderHandle {
     }
 
     /// Return a boxed VideoGenerationProvider, if this provider supports it.
-    pub fn into_video_provider(self) -> Option<Box<dyn capability::video::VideoGenerationProvider>> {
+    pub fn into_video_provider(self) -> Option<Box<dyn myclaw_capability::video::VideoGenerationProvider>> {
         // No provider implements VideoGeneration yet
         None
     }
 
     /// Return a boxed SearchProvider, if this provider supports it.
-    pub fn into_search_provider(self) -> Option<Box<dyn capability::search::SearchProvider>> {
+    pub fn into_search_provider(self) -> Option<Box<dyn myclaw_capability::search::SearchProvider>> {
         match self {
             ProviderHandle::Glm(p) => Some(Box::new(p)),
             _ => None,
@@ -414,7 +414,7 @@ impl ProviderHandle {
     }
 
     /// Return a boxed SttProvider, if this provider supports it.
-    pub fn into_stt_provider(self) -> Option<Box<dyn capability::stt::SttProvider>> {
+    pub fn into_stt_provider(self) -> Option<Box<dyn myclaw_capability::stt::SttProvider>> {
         // No provider implements STT yet
         None
     }

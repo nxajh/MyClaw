@@ -10,9 +10,9 @@ use futures_util::StreamExt;
 
 use crate::Client;
 use crate::shared::{parse_openai_sse, build_openai_chat_body};
-use capability::chat::{BoxStream, ChatProvider, ChatRequest, StreamEvent, StopReason};
-use capability::embedding::{EmbedInput, EmbedRequest, EmbedResponse, EmbeddingProvider};
-use capability::search::{SearchProvider, SearchRequest, SearchResult, SearchResults};
+use myclaw_capability::chat::{BoxStream, ChatProvider, ChatRequest, StreamEvent, StopReason};
+use myclaw_capability::embedding::{EmbedInput, EmbedRequest, EmbedResponse, EmbeddingProvider};
+use myclaw_capability::search::{SearchProvider, SearchRequest, SearchResult, SearchResults};
 
 const DEFAULT_BASE_URL: &str = "https://open.bigmodel.cn/api/paas/v4";
 
@@ -163,7 +163,7 @@ impl EmbeddingProvider for GlmProvider {
         struct Eu { prompt_tokens: u64 }
 
         let resp: Er = serde_json::from_str(&text)?;
-        let usage = resp.usage.map(|u| capability::embedding::EmbeddingUsage {
+        let usage = resp.usage.map(|u| myclaw_capability::embedding::EmbeddingUsage {
             prompt_tokens: u.prompt_tokens,
         });
 

@@ -41,4 +41,4 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 regex = "1"
 
 # Internal crates
-config = { path = "infrastructure/config" }
+myclaw-config = { path = "infrastructure/config" }

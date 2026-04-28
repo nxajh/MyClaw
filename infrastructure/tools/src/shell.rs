@@ -1,7 +1,7 @@
 //! Shell execution tool.
 
 use async_trait::async_trait;
-use capability::tool::{Tool, ToolResult};
+use myclaw_capability::tool::{Tool, ToolResult};
 use serde_json::json;
 use tokio::time::{Duration, timeout};
 

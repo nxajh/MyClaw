@@ -31,7 +31,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::{Channel, ChannelMessage, DedupState, SendMessage};
-use config::channel::TelegramConfig;
+use myclaw_config::channel::TelegramConfig;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 

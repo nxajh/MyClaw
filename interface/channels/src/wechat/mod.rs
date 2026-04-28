@@ -35,7 +35,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::{Channel, ChannelMessage, DedupState, SendMessage};
-use config::channel::WechatConfig;
+use myclaw_config::channel::WechatConfig;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 

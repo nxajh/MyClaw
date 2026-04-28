@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 
 use crate::Client;
-use capability::chat::{BoxStream, ChatProvider, ChatRequest, ContentPart, StreamEvent, StopReason};
+use myclaw_capability::chat::{BoxStream, ChatProvider, ChatRequest, ContentPart, StreamEvent, StopReason};
 
 const DEFAULT_BASE_URL: &str = "https://api.minimaxi.chat/v1";
 

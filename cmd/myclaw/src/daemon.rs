@@ -10,7 +10,7 @@
 //! Infrastructure types. Application layer receives everything through traits.
 
 use anyhow::{Context, Result};
-use runtime::{
+use myclaw_runtime::{
     Agent, AgentConfig, InMemoryBackend, Orchestrator, OrchestratorParts, SessionManager,
     SkillsManager, SystemPromptConfig, AutonomyLevel, SkillsPromptInjectionMode,
 };
@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
 
-use channels::Channel;
+use myclaw_channels::Channel;
 
 /// Default config file locations.
 const DEFAULT_CONFIG_PATHS: &[&str] = &[
@@ -29,13 +29,13 @@ const DEFAULT_CONFIG_PATHS: &[&str] = &[
 ];
 
 /// Load configuration from the first found config file.
-pub fn load_config() -> Result<config::AppConfig> {
+pub fn load_config() -> Result<myclaw_config::AppConfig> {
     for path in DEFAULT_CONFIG_PATHS {
         let expanded = shellexpand::tilde(path).to_string();
         let p = PathBuf::from(expanded);
         if p.exists() {
             tracing::info!(path = %p.display(), "loading config");
-            return config::ConfigLoader::from_file(&p)
+            return myclaw_config::ConfigLoader::from_file(&p)
                 .context("failed to load config");
         }
     }
@@ -46,18 +46,18 @@ pub fn load_config() -> Result<config::AppConfig> {
 }
 
 /// Load configuration from a specific path.
-pub fn load_config_from(path: &str) -> Result<config::AppConfig> {
+pub fn load_config_from(path: &str) -> Result<myclaw_config::AppConfig> {
     let expanded = shellexpand::tilde(path).to_string();
     let p = PathBuf::from(expanded.clone());
     if !p.exists() {
         anyhow::bail!("Config file not found: {}", expanded);
     }
     tracing::info!(path = %p.display(), "loading config");
-    config::ConfigLoader::from_file(&p).context("failed to load config")
+    myclaw_config::ConfigLoader::from_file(&p).context("failed to load config")
 }
 
 /// Initialize tracing subscriber based on config.
-pub fn init_tracing(config: &config::AppConfig) {
+pub fn init_tracing(config: &myclaw_config::AppConfig) {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
     let level = config
@@ -78,7 +78,7 @@ pub fn init_tracing(config: &config::AppConfig) {
 }
 
 /// Print startup banner with config summary.
-fn print_banner(config: &config::AppConfig) {
+fn print_banner(config: &myclaw_config::AppConfig) {
     println!();
     println!("🐾 MyClaw Daemon");
     println!("  📁 Workspace: {}", config.workspace_dir.display());
@@ -96,7 +96,7 @@ fn print_banner(config: &config::AppConfig) {
 
     if let Some(chat_route) = config
         .routing
-        .get(config::provider::Capability::Chat)
+        .get(myclaw_config::provider::Capability::Chat)
         .map(|e| e.models.join(" → "))
     {
         println!("  🗺️  Chat route: {}", chat_route);
@@ -112,9 +112,9 @@ fn print_banner(config: &config::AppConfig) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Build the Registry and register all providers from config.
-fn build_registry(config: &config::AppConfig) -> anyhow::Result<registry::Registry> {
+fn build_registry(config: &myclaw_config::AppConfig) -> anyhow::Result<myclaw_registry::Registry> {
     let mut registry =
-        registry::Registry::from_config(config.providers.clone(), &config.routing)
+        myclaw_registry::Registry::from_config(config.providers.clone(), &config.routing)
             .context("failed to build registry")?;
 
     for (provider_key, provider_cfg) in &config.providers.clone() {
@@ -131,7 +131,7 @@ fn build_registry(config: &config::AppConfig) -> anyhow::Result<registry::Regist
                 "registering provider for model"
             );
 
-            let handle = providers::ProviderHandle::from_url(
+            let handle = myclaw_providers::ProviderHandle::from_url(
                 api_key.clone(),
                 &provider_cfg.base_url,
             ).with_context(|| format!(
@@ -139,48 +139,48 @@ fn build_registry(config: &config::AppConfig) -> anyhow::Result<registry::Regist
                 provider_cfg.base_url, provider_key
             ))?;
 
-            use config::provider::Capability as CfgCap;
+            use myclaw_config::provider::Capability as CfgCap;
 
             for cap in &model_cfg.capabilities {
                 match cap {
                     CfgCap::Chat | CfgCap::Vision | CfgCap::NativeTools => {}
                     CfgCap::Embedding => {
-                        if let Some(emb) = providers::ProviderHandle::from_url(
+                        if let Some(emb) = myclaw_providers::ProviderHandle::from_url(
                             api_key.clone(), &provider_cfg.base_url,
                         ).and_then(|h| h.into_embedding_provider()) {
                             registry.register_embedding(emb, model_id.clone());
                         }
                     }
                     CfgCap::ImageGeneration => {
-                        if let Some(img) = providers::ProviderHandle::from_url(
+                        if let Some(img) = myclaw_providers::ProviderHandle::from_url(
                             api_key.clone(), &provider_cfg.base_url,
                         ).and_then(|h| h.into_image_provider()) {
                             registry.register_image(img, model_id.clone());
                         }
                     }
                     CfgCap::TextToSpeech => {
-                        if let Some(tts) = providers::ProviderHandle::from_url(
+                        if let Some(tts) = myclaw_providers::ProviderHandle::from_url(
                             api_key.clone(), &provider_cfg.base_url,
                         ).and_then(|h| h.into_tts_provider()) {
                             registry.register_tts(tts, model_id.clone());
                         }
                     }
                     CfgCap::VideoGeneration => {
-                        if let Some(vid) = providers::ProviderHandle::from_url(
+                        if let Some(vid) = myclaw_providers::ProviderHandle::from_url(
                             api_key.clone(), &provider_cfg.base_url,
                         ).and_then(|h| h.into_video_provider()) {
                             registry.register_video(vid, model_id.clone());
                         }
                     }
                     CfgCap::Search => {
-                        if let Some(srch) = providers::ProviderHandle::from_url(
+                        if let Some(srch) = myclaw_providers::ProviderHandle::from_url(
                             api_key.clone(), &provider_cfg.base_url,
                         ).and_then(|h| h.into_search_provider()) {
                             registry.register_search(srch, model_id.clone());
                         }
                     }
                     CfgCap::SpeechToText => {
-                        if let Some(stt) = providers::ProviderHandle::from_url(
+                        if let Some(stt) = myclaw_providers::ProviderHandle::from_url(
                             api_key.clone(), &provider_cfg.base_url,
                         ).and_then(|h| h.into_stt_provider()) {
                             registry.register_stt(stt, model_id.clone());
@@ -189,7 +189,7 @@ fn build_registry(config: &config::AppConfig) -> anyhow::Result<registry::Regist
                 }
             }
 
-            let chat_provider: Box<dyn providers::ChatProvider> = handle.into_chat_provider();
+            let chat_provider: Box<dyn myclaw_providers::ChatProvider> = handle.into_chat_provider();
             registry.register_chat(chat_provider, model_id.clone());
         }
     }
@@ -204,7 +204,7 @@ fn build_registry(config: &config::AppConfig) -> anyhow::Result<registry::Regist
 /// Build SkillsManager with all built-in tools registered.
 fn build_skills() -> SkillsManager {
     let mut skills = SkillsManager::new();
-    let builtin = tools::builtin_tools_with_memory(tools::MemoryStore::new());
+    let builtin = myclaw_tools::builtin_tools_with_memory(myclaw_tools::MemoryStore::new());
     for tool in builtin {
         let name = tool.name().to_string();
         skills.register_tool(&name, tool);
@@ -214,10 +214,10 @@ fn build_skills() -> SkillsManager {
 }
 
 /// Build SessionManager with SQLite backend (falls back to in-memory).
-fn build_session_manager(config: &config::AppConfig) -> SessionManager {
+fn build_session_manager(config: &myclaw_config::AppConfig) -> SessionManager {
     let db_path = config.workspace_dir.join("sessions.db");
-    let backend: Arc<dyn session::SessionBackend> =
-        match memory_storage::SqliteSessionBackend::open(&db_path.to_string_lossy()) {
+    let backend: Arc<dyn myclaw_session::SessionBackend> =
+        match myclaw_memory_storage::SqliteSessionBackend::open(&db_path.to_string_lossy()) {
             Ok(db) => {
                 tracing::info!(path = %db_path.display(), "session database opened");
                 Arc::new(db)
@@ -231,14 +231,14 @@ fn build_session_manager(config: &config::AppConfig) -> SessionManager {
 }
 
 /// Build Channel adapters from config.
-fn build_channels(config: &config::AppConfig) -> Vec<(&'static str, Arc<dyn Channel>)> {
+fn build_channels(config: &myclaw_config::AppConfig) -> Vec<(&'static str, Arc<dyn Channel>)> {
     let mut channels: Vec<(&'static str, Arc<dyn Channel>)> = Vec::new();
 
     if let Some(ref cfg) = config.channels.telegram {
         if cfg.enabled {
             channels.push((
                 "telegram",
-                Arc::new(channels::telegram::TelegramChannel::new(cfg.clone())),
+                Arc::new(myclaw_channels::telegram::TelegramChannel::new(cfg.clone())),
             ));
         }
     }
@@ -247,7 +247,7 @@ fn build_channels(config: &config::AppConfig) -> Vec<(&'static str, Arc<dyn Chan
         if cfg.enabled {
             channels.push((
                 "wechat",
-                Arc::new(channels::wechat::WechatChannel::new(cfg.clone())),
+                Arc::new(myclaw_channels::wechat::WechatChannel::new(cfg.clone())),
             ));
         }
     }
@@ -256,14 +256,14 @@ fn build_channels(config: &config::AppConfig) -> Vec<(&'static str, Arc<dyn Chan
 }
 
 /// Convert config prompt settings into Application-layer type.
-fn build_prompt_config(cfg: &config::agent::PromptConfig) -> SystemPromptConfig {
+fn build_prompt_config(cfg: &myclaw_config::agent::PromptConfig) -> SystemPromptConfig {
     SystemPromptConfig {
         workspace_dir: String::new(),
         model_name: cfg.model_name.clone().unwrap_or_default(),
-        autonomy: match config::agent::AutonomyLevel::default() {
-            config::agent::AutonomyLevel::Full => AutonomyLevel::Full,
-            config::agent::AutonomyLevel::Default => AutonomyLevel::Default,
-            config::agent::AutonomyLevel::ReadOnly => AutonomyLevel::ReadOnly,
+        autonomy: match myclaw_config::agent::AutonomyLevel::default() {
+            myclaw_config::agent::AutonomyLevel::Full => AutonomyLevel::Full,
+            myclaw_config::agent::AutonomyLevel::Default => AutonomyLevel::Default,
+            myclaw_config::agent::AutonomyLevel::ReadOnly => AutonomyLevel::ReadOnly,
         },
         skills_mode: SkillsPromptInjectionMode::Compact,
         compact: cfg.compact,
@@ -276,7 +276,7 @@ fn build_prompt_config(cfg: &config::agent::PromptConfig) -> SystemPromptConfig 
 }
 
 /// Run the MyClaw daemon, blocking until shutdown.
-pub async fn run(config: config::AppConfig) -> Result<()> {
+pub async fn run(config: myclaw_config::AppConfig) -> Result<()> {
     // ── Composition Root: assemble all components ──────────────────────────
 
     let registry = build_registry(&config)?;

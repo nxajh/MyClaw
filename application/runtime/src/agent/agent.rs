@@ -9,12 +9,12 @@
 
 use std::sync::Arc;
 
-use capability::capability::Capability;
-use capability::chat::{
+use myclaw_capability::capability::Capability;
+use myclaw_capability::chat::{
     BoxStream, ChatMessage, ChatRequest, StopReason, StreamEvent, ToolCall, ToolSpec,
 };
-use capability::service_registry::ServiceRegistry;
-use capability::tool::ToolResult;
+use myclaw_capability::service_registry::ServiceRegistry;
+use myclaw_capability::tool::ToolResult;
 use futures_util::StreamExt;
 
 use super::session_manager::Session;

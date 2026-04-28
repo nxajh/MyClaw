@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use capability::chat::ChatMessage;
-use session::SessionBackend;
+use myclaw_capability::chat::ChatMessage;
+use myclaw_session::SessionBackend;
 
 /// In-memory session backend for development and testing.
 pub struct InMemoryBackend {

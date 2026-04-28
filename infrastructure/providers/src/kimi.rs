@@ -5,7 +5,7 @@ use futures_util::StreamExt;
 
 use crate::Client;
 use crate::shared::{parse_openai_sse, build_openai_chat_body};
-use capability::chat::{BoxStream, ChatProvider, ChatRequest, StreamEvent, StopReason};
+use myclaw_capability::chat::{BoxStream, ChatProvider, ChatRequest, StreamEvent, StopReason};
 
 const DEFAULT_BASE_URL: &str = "https://api.moonshot.cn/v1";
 

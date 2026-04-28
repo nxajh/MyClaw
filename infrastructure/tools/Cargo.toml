@@ -1,5 +1,5 @@
 [package]
-name = "tools"
+name = "myclaw-tools"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.87"
@@ -20,7 +20,7 @@ reqwest.workspace = true
 regex.workspace = true
 
 # Domain dependency for Tool trait
-capability = { path = "../../domain/capability" }
+myclaw-capability = { path = "../../domain/capability" }
 
 [dev-dependencies]
 tempfile.workspace = true

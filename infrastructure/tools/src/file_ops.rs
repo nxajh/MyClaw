@@ -1,7 +1,7 @@
 //! File operation tools: read, write, edit.
 
 use async_trait::async_trait;
-use capability::tool::{Tool, ToolResult};
+use myclaw_capability::tool::{Tool, ToolResult};
 use serde_json::json;
 use std::path::Path;
 

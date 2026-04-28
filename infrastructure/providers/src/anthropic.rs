@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 
 use crate::Client;
-use capability::chat::{
+use myclaw_capability::chat::{
     BoxStream, ChatProvider, ChatRequest, StreamEvent, StopReason,
 };
 
@@ -104,7 +104,7 @@ fn build_anthropic_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
         .filter(|m| m.role == "system")
         .filter_map(|m| {
             let text: String = m.parts.iter().filter_map(|p| match p {
-                capability::chat::ContentPart::Text { text } => Some(text.clone()),
+                myclaw_capability::chat::ContentPart::Text { text } => Some(text.clone()),
                 _ => None,
             }).collect();
             if text.is_empty() { None } else { Some(text) }
@@ -117,15 +117,15 @@ fn build_anthropic_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
         .filter(|m| m.role != "system")
         .map(|msg| {
             let content: Vec<serde_json::Value> = msg.parts.iter().map(|part| match part {
-                capability::chat::ContentPart::Text { text } =>
+                myclaw_capability::chat::ContentPart::Text { text } =>
                     serde_json::json!({"type": "text", "text": text}),
-                capability::chat::ContentPart::ImageUrl { url, detail } =>
+                myclaw_capability::chat::ContentPart::ImageUrl { url, detail } =>
                     serde_json::json!({"type": "image", "source": {
                         "type": "url", "url": url,
                         "media_type": "image/jpeg",
                         "detail": format!("{:?}", detail).to_lowercase(),
                     }}),
-                capability::chat::ContentPart::ImageB64 { b64_json, detail } =>
+                myclaw_capability::chat::ContentPart::ImageB64 { b64_json, detail } =>
                     serde_json::json!({"type": "image", "source": {
                         "type": "base64", "media_type": "image/jpeg",
                         "data": b64_json,
@@ -168,7 +168,7 @@ fn build_anthropic_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
 }
 
 fn parse_anthropic_sse(line: &str) -> Option<StreamEvent> {
-    use capability::chat::{ChatUsage, StreamEvent as SE, StopReason};
+    use myclaw_capability::chat::{ChatUsage, StreamEvent as SE, StopReason};
 
     let line = line.trim();
     if line.is_empty() || line.starts_with(':') { return None; }

@@ -1,6 +1,6 @@
 //! Routing configuration types.
 
-use capability::capability::Capability;
+use myclaw_capability::capability::Capability;
 use serde::{Deserialize, Serialize};
 
 /// Routing strategy for selecting a model/provider.
