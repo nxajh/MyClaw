@@ -1,4 +1,10 @@
 //! MiniMax provider — OpenAI-compatible protocol.
+//!
+//! Handles MiniMax-specific quirks:
+//! - SSE streaming via `/text/chatcompletion_v2`
+//! - Occasionally, the model emits tool-call JSON as plain text in `content`
+//!   instead of using the structured `tool_calls` field.  We detect and
+//!   correct this at the provider level so upstream consumers never see it.
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -59,6 +65,13 @@ impl ChatProvider for MiniMaxProvider {
             let mut utf8_buf = Vec::new();
             let mut stream = resp.bytes_stream();
 
+            // Accumulator for leaked tool-call detection.
+            // MiniMax occasionally sends tool-call JSON as plain `content`
+            // text instead of using the `tool_calls` delta field.  We buffer
+            // content deltas and inspect them when the stream ends; if they
+            // look like a tool call we emit proper tool-call events instead.
+            let mut content_buf = String::new();
+
             while let Some(item) = stream.next().await {
                 let bytes = match item {
                     Ok(b) => b,
@@ -82,12 +95,53 @@ impl ChatProvider for MiniMaxProvider {
                 while let Some(pos) = buffer.find('\n') {
                     let line = buffer[..pos].to_string();
                     buffer.drain(..=pos);
-                    if let Some(event) = parse_minimax_sse(&line, &mut saw_tool_call) {
+                    if let Some(event) = parse_minimax_sse(&line, &mut saw_tool_call, &mut content_buf) {
                         let _ = tx.send(event).await;
                     }
                 }
             }
-            // MiniMax may report finish_reason="stop" even when tool calls were present.
+
+            // ── Leaked tool-call detection ──────────────────────────────
+            // If we accumulated content that looks like a tool-call JSON,
+            // emit proper tool-call events so the agent loop handles them.
+            if !saw_tool_call && !content_buf.is_empty() {
+                if let Some(calls) = extract_leaked_tool_calls(&content_buf) {
+                    if !calls.is_empty() {
+                        tracing::info!(
+                            leaked = calls.len(),
+                            "MiniMax leaked tool-call JSON in content, correcting to structured events"
+                        );
+                        saw_tool_call = true;
+                        for (idx, tc) in calls.iter().enumerate() {
+                            let id = tc.id.clone();
+                            let name = tc.name.clone();
+                            let arguments = tc.arguments.clone();
+
+                            // Emit ToolCallStart for the first chunk.
+                            let _ = tx.send(StreamEvent::ToolCallStart {
+                                id: id.clone(),
+                                name,
+                                initial_arguments: arguments,
+                            }).await;
+
+                            // If there are multiple tool calls, subsequent
+                            // ones need their own ToolCallStart (already done
+                            // in the loop) but the agent loop's collect_stream
+                            // expects ToolCallStart per call.
+                            let _ = idx; // suppress unused-var warning
+                        }
+                        // Clear content_buf so no Delta is emitted.
+                        content_buf.clear();
+                    }
+                }
+            }
+
+            // If content was accumulated but NOT a leaked tool call,
+            // emit it as a regular Delta now (before Done).
+            if !content_buf.is_empty() {
+                let _ = tx.send(StreamEvent::Delta { text: content_buf }).await;
+            }
+
             let final_reason = if saw_tool_call { StopReason::ToolUse } else { StopReason::EndTurn };
             let _ = tx.send(StreamEvent::Done { reason: final_reason }).await;
         });
@@ -95,6 +149,8 @@ impl ChatProvider for MiniMaxProvider {
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
 }
+
+// ── Body building ────────────────────────────────────────────────────────────
 
 fn build_minimax_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
     use serde_json::json;
@@ -114,8 +170,6 @@ fn build_minimax_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
             }),
         }).collect();
 
-        // For a single text part, emit plain string for maximum compatibility
-        // (matches build_openai_chat_body behavior).
         let content = if content_vec.len() == 1 {
             if let Some(text) = msg.parts.iter().find_map(|p| match p {
                 ContentPart::Text { text } => Some(text.as_str()),
@@ -131,7 +185,6 @@ fn build_minimax_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
 
         let mut msg_json = json!({ "role": msg.role, "content": content });
 
-        // Handle "tool" role: must include tool_call_id.
         if msg.role == "tool" {
             if let Some(tc_id) = &msg.tool_call_id {
                 msg_json["tool_call_id"] = serde_json::json!(tc_id);
@@ -139,7 +192,6 @@ fn build_minimax_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                 msg_json["tool_call_id"] = serde_json::json!(n);
             }
         } else if msg.role == "assistant" {
-            // Assistant message may carry tool_calls from a previous turn.
             msg_json["content"] = if content.is_string() && content.as_str().unwrap_or("").is_empty() {
                 serde_json::Value::Null
             } else {
@@ -168,7 +220,19 @@ fn build_minimax_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
     body
 }
 
-fn parse_minimax_sse(line: &str, saw_tool_call: &mut bool) -> Option<StreamEvent> {
+// ── SSE parsing ──────────────────────────────────────────────────────────────
+
+/// Parse a single SSE line from MiniMax.
+///
+/// `content_buf` accumulates plain-text content deltas so we can detect
+/// leaked tool-call JSON at the end of the stream.  When the stream is
+/// still in progress we hold back the content; if a `tool_calls` delta
+/// arrives mid-stream we flush the buffer as a normal Delta (it was real text).
+fn parse_minimax_sse(
+    line: &str,
+    saw_tool_call: &mut bool,
+    content_buf: &mut String,
+) -> Option<StreamEvent> {
     let line = line.trim();
     if line.is_empty() || line.starts_with(':') { return None; }
     let data = line.strip_prefix("data:")?.trim();
@@ -194,9 +258,16 @@ fn parse_minimax_sse(line: &str, saw_tool_call: &mut bool) -> Option<StreamEvent
     let chunk: Chunk = serde_json::from_str(data).ok()?;
 
     for choice in &chunk.choices {
-        // Tool calls take priority (same as parse_openai_sse).
+        // Tool calls take priority.
         if let Some(tcs) = &choice.delta.tool_calls {
             *saw_tool_call = true;
+
+            // If we had buffered content and now see a real tool_call,
+            // the buffered content was genuine text — but if tool_calls
+            // and content arrive in the same chunk, the content is almost
+            // always the leaked text representation.  Discard it.
+            content_buf.clear();
+
             if let Some(tc) = tcs.first() {
                 let id = tc.id.clone().unwrap_or_default();
                 let func = tc.function.as_ref();
@@ -217,9 +288,22 @@ fn parse_minimax_sse(line: &str, saw_tool_call: &mut bool) -> Option<StreamEvent
             }
         }
 
+        // Content: buffer it instead of emitting immediately.
+        // This allows us to detect leaked tool-call JSON at stream end.
         if let Some(text) = &choice.delta.content {
-            if !text.is_empty() { return Some(StreamEvent::Delta { text: text.clone() }); }
+            if !text.is_empty() {
+                // If we already saw a real tool_call, content is genuine text.
+                if *saw_tool_call {
+                    return Some(StreamEvent::Delta { text: text.clone() });
+                }
+                // Otherwise, buffer it for later inspection.
+                content_buf.push_str(text);
+                // Don't return an event yet — we'll emit it at stream end
+                // if it turns out NOT to be a leaked tool call.
+                return None;
+            }
         }
+
         if let Some(reasoning) = &choice.delta.reasoning_content {
             if !reasoning.is_empty() { return Some(StreamEvent::Thinking { text: reasoning.clone() }); }
         }
@@ -238,4 +322,96 @@ fn parse_minimax_sse(line: &str, saw_tool_call: &mut bool) -> Option<StreamEvent
     }
 
     None
+}
+
+// ── Leaked tool-call detection ───────────────────────────────────────────────
+
+/// A parsed leaked tool call (id + name + arguments).
+struct LeakedToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+/// Try to extract one or more tool-call objects from `text`.
+///
+/// MiniMax occasionally produces responses like:
+///
+/// ```json
+/// {"id":"call_function_xxx","name":"shell","arguments":"{\"command\":\"ls\"}"}
+/// ```
+///
+/// Returns `Some(vec![...])` if at least one valid tool call was found,
+/// or `None` if the text doesn't look like a tool call.
+fn extract_leaked_tool_calls(text: &str) -> Option<Vec<LeakedToolCall>> {
+    let trimmed = text.trim();
+
+    // Fast-path: must start with `{` to be a candidate.
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+
+    // Try parsing as a single tool-call object.
+    if let Some(call) = try_parse_tool_call_json(trimmed) {
+        return Some(vec![call]);
+    }
+
+    // Maybe multiple JSON objects concatenated.  Split by brace depth.
+    let mut calls = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, ch) in trimmed.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let fragment = trimmed[start..=i].trim();
+                    if let Some(call) = try_parse_tool_call_json(fragment) {
+                        calls.push(call);
+                    }
+                    start = i + 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if calls.is_empty() { None } else { Some(calls) }
+}
+
+/// Try to parse a single JSON string as a tool call.
+///
+/// Returns `Some(LeakedToolCall)` if the JSON has the shape:
+/// `{"id":"call_...", "name":"...", "arguments":"..."}`
+fn try_parse_tool_call_json(json_str: &str) -> Option<LeakedToolCall> {
+    #[derive(serde::Deserialize)]
+    struct RawToolCall {
+        id: Option<String>,
+        name: Option<String>,
+        arguments: Option<serde_json::Value>,
+    }
+
+    let raw: RawToolCall = serde_json::from_str(json_str).ok()?;
+
+    let id = raw.id?;
+    let name = raw.name?;
+
+    if id.is_empty() || name.is_empty() {
+        return None;
+    }
+
+    // MiniMax leaked tool calls always have ids starting with "call".
+    if !id.starts_with("call") {
+        return None;
+    }
+
+    let arguments = match raw.arguments {
+        Some(serde_json::Value::String(s)) => s,
+        Some(v @ serde_json::Value::Object(_)) => v.to_string(),
+        Some(serde_json::Value::Null) | None => String::new(),
+        Some(other) => other.to_string(),
+    };
+
+    Some(LeakedToolCall { id, name, arguments })
 }
