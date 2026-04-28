@@ -644,7 +644,7 @@ impl Channel for WechatChannel {
 
     async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
         let ctx_token = self.api.state.read().context_tokens.get(&message.recipient).cloned();
-        let chunks = crate::channels_message::split_message_chunk(&message.content, 2048);
+        let chunks = crate::channels::message::split_message_chunk(&message.content, 2048);
         for chunk in chunks {
             self.api.send_text(&message.recipient, &chunk, ctx_token.as_deref()).await?;
         }

@@ -516,7 +516,7 @@ impl Channel for TelegramChannel {
     async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
         let (chat_id, thread_id) = Self::parse_reply_target(&message.recipient);
         let chunks =
-            crate::channels_message::split_message_chunk(&message.content, MAX_MESSAGE_LENGTH - CONTINUATION_OVERHEAD);
+            crate::channels::message::split_message_chunk(&message.content, MAX_MESSAGE_LENGTH - CONTINUATION_OVERHEAD);
 
         let count = chunks.len();
         for (i, chunk) in chunks.into_iter().enumerate() {
@@ -752,12 +752,12 @@ mod tests {
 
     #[test]
     fn test_message_chunking() {
-        let chunks = crate::channels_message::split_message_chunk("short", 10);
+        let chunks = crate::channels::message::split_message_chunk("short", 10);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0], "short");
 
         let long = "a".repeat(5000);
-        let chunks = crate::channels_message::split_message_chunk(&long, 100);
+        let chunks = crate::channels::message::split_message_chunk(&long, 100);
         assert!(chunks.len() > 1);
         assert!(chunks.iter().all(|c| c.len() <= 100));
     }

@@ -2,7 +2,6 @@
 
 pub mod agents;
 pub mod channels;
-pub mod channels_message;  // shared channel message types
 pub mod config;
 pub mod daemon;
 pub mod mcp;
@@ -18,8 +17,7 @@ pub use agents::{
     SystemPromptBuilder, SystemPromptConfig,
     AutonomyLevel, SkillsPromptInjectionMode,
 };
-pub use channels::{Channel, ChannelMessage, SendMessage};
-pub use channels_message::DedupState;
+pub use channels::{Channel, ChannelMessage, SendMessage, DedupState};
 pub use config::{AppConfig, ConfigLoader};
 pub use registry::{Registry};
 pub use providers::ServiceRegistry;
