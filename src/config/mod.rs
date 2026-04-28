@@ -358,7 +358,7 @@ level = "INFO"
         assert!(minimax.models.contains_key("minimax-m2-7"));
 
         // Routing
-        let chat_route = config.routing.get(provider::Capability::Chat).unwrap();
+        let chat_route = config.routing.get(crate::providers::capability::Capability::Chat).unwrap();
         assert_eq!(chat_route.models, vec!["minimax-m2-7"]);
 
         // Channels

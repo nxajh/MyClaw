@@ -294,7 +294,7 @@ impl McpRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config_types::McpTransport;
+    use crate::mcp::config_types::McpTransport;
 
     #[test]
     fn tool_name_prefix_format() {
