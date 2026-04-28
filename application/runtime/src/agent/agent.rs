@@ -310,8 +310,14 @@ impl AgentLoop {
             text
         };
 
-        // Try to parse as a single JSON object with "name" and "arguments".
-        // Also try as an array of such objects.
+        // The text must be *predominantly* a JSON tool call.
+        // We only accept it when the entire text (after stripping fences)
+        // is a valid JSON object/array.  We deliberately do NOT try to
+        // extract embedded JSON from prose — that causes false positives
+        // when the model says things like:
+        //   "I can call {\"name\": \"web_search\", ...} to look that up."
+        let val = serde_json::from_str::<serde_json::Value>(json_str).ok()?;
+
         let tool_names: Vec<String> = self.skills.all_tools()
             .iter()
             .map(|t| t.name().to_string())
@@ -335,33 +341,18 @@ impl AgentLoop {
             })
         };
 
-        // Try as single object.
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
-            if let Some(tc) = try_parse_one(&val) {
-                return Some(vec![tc]);
-            }
-            // Try as array.
-            if let Some(arr) = val.as_array() {
-                let calls: Vec<ToolCall> = arr.iter()
-                    .filter_map(try_parse_one)
-                    .collect();
-                if !calls.is_empty() {
-                    return Some(calls);
-                }
-            }
+        // Single object: {"name": "...", "arguments": {...}}
+        if let Some(tc) = try_parse_one(&val) {
+            return Some(vec![tc]);
         }
 
-        // Try to find a JSON object embedded in the text.
-        if let Some(start) = json_str.find('{') {
-            if let Some(end) = json_str.rfind('}') {
-                if end > start {
-                    let candidate = &json_str[start..=end];
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(candidate) {
-                        if let Some(tc) = try_parse_one(&val) {
-                            return Some(vec![tc]);
-                        }
-                    }
-                }
+        // Array of objects: [{"name": ...}, {"name": ...}]
+        if let Some(arr) = val.as_array() {
+            let calls: Vec<ToolCall> = arr.iter()
+                .filter_map(try_parse_one)
+                .collect();
+            if !calls.is_empty() {
+                return Some(calls);
             }
         }
 
