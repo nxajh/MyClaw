@@ -126,12 +126,42 @@ fn build_minimax_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
             serde_json::json!(content_vec)
         };
 
-        messages.push(json!({ "role": msg.role, "content": content }));
+        let mut msg_json = json!({ "role": msg.role, "content": content });
+
+        // Handle "tool" role: must include tool_call_id.
+        if msg.role == "tool" {
+            if let Some(tc_id) = &msg.tool_call_id {
+                msg_json["tool_call_id"] = serde_json::json!(tc_id);
+            } else if let Some(n) = &msg.name {
+                msg_json["tool_call_id"] = serde_json::json!(n);
+            }
+        } else if msg.role == "assistant" {
+            // Assistant message may carry tool_calls from a previous turn.
+            msg_json["content"] = if content.is_string() && content.as_str().unwrap_or("").is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(content)
+            };
+            if let Some(tcs) = &msg.tool_calls {
+                msg_json["tool_calls"] = serde_json::json!(tcs);
+            }
+        }
+
+        messages.push(msg_json);
     }
 
     let mut body = json!({ "model": req.model, "messages": messages, "stream": true });
     if let Some(temp) = req.temperature { body["temperature"] = serde_json::json!(temp); }
     if let Some(max) = req.max_tokens { body["max_tokens"] = serde_json::json!(max); }
+    if let Some(tools) = req.tools {
+        body["tools"] = serde_json::json!(tools.iter().map(|t| {
+            serde_json::json!({
+                "type": "function",
+                "function": { "name": t.name, "description": t.description, "parameters": t.input_schema }
+            })
+        }).collect::<Vec<_>>());
+    }
+
     body
 }
 
@@ -146,11 +176,43 @@ fn parse_minimax_sse(line: &str) -> Option<StreamEvent> {
     #[derive(serde::Deserialize)]
     struct Choice { delta: Delta, finish_reason: Option<String> }
     #[derive(serde::Deserialize)]
-    struct Delta { content: Option<String>, reasoning_content: Option<String> }
+    struct Delta {
+        content: Option<String>,
+        reasoning_content: Option<String>,
+        tool_calls: Option<Vec<TcDelta>>,
+    }
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct TcDelta { index: u32, id: Option<String>, function: Option<FuncDelta> }
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct FuncDelta { name: Option<String>, arguments: Option<String> }
 
     let chunk: Chunk = serde_json::from_str(data).ok()?;
 
     for choice in &chunk.choices {
+        // Tool calls take priority (same as parse_openai_sse).
+        if let Some(tcs) = &choice.delta.tool_calls {
+            if let Some(tc) = tcs.first() {
+                let id = tc.id.clone().unwrap_or_default();
+                let func = tc.function.as_ref();
+
+                if !id.is_empty() && func.is_some_and(|f| f.name.is_some()) {
+                    let initial_args = func.and_then(|f| f.arguments.clone()).unwrap_or_default();
+                    return Some(StreamEvent::ToolCallStart {
+                        id: id.clone(),
+                        name: func.and_then(|f| f.name.clone()).unwrap_or_default(),
+                        initial_arguments: initial_args,
+                    });
+                }
+
+                let args = func.and_then(|f| f.arguments.clone()).unwrap_or_default();
+                if !args.is_empty() {
+                    return Some(StreamEvent::ToolCallDelta { id, delta: args });
+                }
+            }
+        }
+
         if let Some(text) = &choice.delta.content {
             if !text.is_empty() { return Some(StreamEvent::Delta { text: text.clone() }); }
         }
@@ -158,7 +220,14 @@ fn parse_minimax_sse(line: &str) -> Option<StreamEvent> {
             if !reasoning.is_empty() { return Some(StreamEvent::Thinking { text: reasoning.clone() }); }
         }
         if choice.finish_reason.is_some() {
-            return Some(StreamEvent::Done { reason: StopReason::EndTurn });
+            let reason = choice.finish_reason.as_ref().and_then(|r| match r.as_str() {
+                "stop" => Some(StopReason::EndTurn),
+                "tool_calls" => Some(StopReason::ToolUse),
+                "length" => Some(StopReason::MaxTokens),
+                "content_filter" => Some(StopReason::ContentFilter),
+                _ => None,
+            }).unwrap_or(StopReason::EndTurn);
+            return Some(StreamEvent::Done { reason });
         }
     }
 
