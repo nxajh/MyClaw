@@ -86,7 +86,7 @@ impl ChatProvider for FallbackChatProvider {
 
                 while let Some(event) = inner_stream.next().await {
                     match &event {
-                        StreamEvent::HttpError { status, message } if is_retryable(*status) => {
+                        StreamEvent::HttpError { status, message: _ } if is_retryable(*status) => {
                             tracing::warn!(
                                 model = %entry.model_id,
                                 status,
