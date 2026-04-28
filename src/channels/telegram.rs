@@ -745,9 +745,9 @@ mod tests {
     #[test]
     fn test_dedup() {
         let dedup = DedupState::new();
-        assert!(dedup.check_and_record("msg1")); // new → inserted → true
-        assert!(!dedup.check_and_record("msg1")); // duplicate → false
-        assert!(dedup.check_and_record("msg2")); // new → inserted → true
+        assert!(!dedup.check_and_record("msg1")); // new → false (not seen before)
+        assert!(dedup.check_and_record("msg1"));  // duplicate → true (already seen)
+        assert!(!dedup.check_and_record("msg2")); // new → false (not seen before)
     }
 
     #[test]
