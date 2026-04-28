@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use crate::agents::{
     Agent, AgentConfig, InMemoryBackend, Orchestrator, OrchestratorParts, SessionManager,
     SkillsManager, SystemPromptConfig, AutonomyLevel, SkillsPromptInjectionMode,
+    McpManager,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -78,7 +79,7 @@ pub fn init_tracing(config: &crate::config::AppConfig) {
 }
 
 /// Print startup banner with config summary.
-fn print_banner(config: &crate::config::AppConfig) {
+fn print_banner(config: &crate::config::AppConfig, mcp_servers: usize, mcp_tools: usize) {
     println!();
     println!("🐾 MyClaw Daemon");
     println!("  📁 Workspace: {}", config.workspace_dir.display());
@@ -100,6 +101,10 @@ fn print_banner(config: &crate::config::AppConfig) {
         .map(|e| e.models.join(" → "))
     {
         println!("  🗺️  Chat route: {}", chat_route);
+    }
+
+    if mcp_servers > 0 {
+        println!("  🔌 MCP servers: {} ({} tools)", mcp_servers, mcp_tools);
     }
 
     println!();
@@ -202,14 +207,28 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
 }
 
 /// Build SkillsManager with all built-in tools registered.
-fn build_skills() -> SkillsManager {
+async fn build_skills(mcp_manager: &McpManager) -> SkillsManager {
     let mut skills = SkillsManager::new();
     let builtin = crate::tools::builtin_tools_with_memory(crate::tools::MemoryStore::new());
     for tool in builtin {
         let name = tool.name().to_string();
         skills.register_tool(&name, tool);
     }
-    tracing::info!(tool_count = skills.tool_count(), "builtin tools registered");
+
+    // Inject MCP tools (if any servers are configured and connected).
+    if mcp_manager.is_connected().await {
+        let mcp_tools = mcp_manager.tools().await;
+        let count = mcp_tools.len();
+        for tool in mcp_tools {
+            let name = tool.name().to_string();
+            skills.register_tool(&name, tool);
+        }
+        tracing::info!(mcp_tools = count, "MCP tools registered in SkillsManager");
+    } else {
+        tracing::debug!("MCP manager not connected, skipping MCP tool injection");
+    }
+
+    tracing::info!(tool_count = skills.tool_count(), "skills manager built");
     skills
 }
 
@@ -281,7 +300,14 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // ── Composition Root: assemble all components ──────────────────────────
 
     let registry = build_registry(&config)?;
-    let skills = build_skills();
+
+    // Connect to MCP servers first so tools are available before building SkillsManager.
+    let mcp_manager = McpManager::new();
+    if let Err(e) = mcp_manager.connect(&config.mcp_servers).await {
+        tracing::warn!(error = %e, "MCP server connection had errors (non-fatal), continuing");
+    }
+
+    let skills = build_skills(&mcp_manager).await;
     let session_manager = build_session_manager(&config);
     let channels = build_channels(&config);
 
@@ -301,7 +327,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // ── Launch ─────────────────────────────────────────────────────────────
 
     let (mut orchestrator, _msg_tx) = Orchestrator::new(parts);
-    print_banner(&config);
+    print_banner(&config, mcp_manager.server_count().await, mcp_manager.tool_count().await);
 
     // Shutdown channel.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
