@@ -1,6 +1,7 @@
 //! providers — Provider implementations for OpenAI, Anthropic, GLM, Kimi, MiniMax.
 
 pub mod anthropic;
+pub mod fallback;
 pub mod glm;
 pub mod kimi;
 pub mod minimax;
@@ -10,6 +11,9 @@ pub mod shared;
 // Re-export from shared module at crate root
 pub use shared::{AuthStyle, ProviderHandle, ProviderInstance, create_provider, create_provider_by_url,
     create_full_openai_provider, parse_openai_sse, build_openai_chat_body};
+
+// Re-export fallback decorator
+pub use fallback::{FallbackChatProvider, FallbackEntry};
 
 // Re-export Client directly (from reqwest)
 pub use reqwest::Client;

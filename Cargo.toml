@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "orchestration/orchestrator",
+    "cmd/myclaw",
     "interface/channels",
     "application/runtime",
     "domain/capability",

@@ -15,3 +15,6 @@ capability = { path = "../../domain/capability" }
 
 # Use config types for FromConfig builder
 config = { path = "../config" }
+
+# FallbackChatProvider wrapping
+providers = { path = "../providers" }

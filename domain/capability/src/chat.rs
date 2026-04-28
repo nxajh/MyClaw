@@ -77,6 +77,22 @@ pub enum StreamEvent {
     Usage(ChatUsage),
     Done { reason: StopReason },
     Error(String),
+    /// HTTP-level error with status code; used for retry/fallback decisions.
+    HttpError { status: u16, message: String },
+}
+
+impl StreamEvent {
+    /// Whether this error is retryable (429 rate-limit, 503 service unavailable, etc.).
+    pub fn is_retryable_error(&self) -> bool {
+        match self {
+            StreamEvent::HttpError { status, .. } => *status == 429 || *status >= 500,
+            StreamEvent::Error(msg) => {
+                // Fallback: heuristically detect retryable errors from string.
+                msg.contains("429") || msg.contains("503") || msg.contains("rate_limit")
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Why the stream ended.
@@ -149,6 +165,7 @@ pub struct ChatRequest<'a> {
     pub stream: bool,
 }
 
+#[derive(Debug, Clone)]
 pub struct ThinkingConfig {
     /// Reasoning effort: "high" | "medium" | "low"
     pub effort: Option<String>,

@@ -297,6 +297,60 @@ impl Registry {
     pub fn register_stt(&mut self, provider: Box<dyn SttProvider>, model_id: String) {
         self.stt_providers.insert(model_id, provider.into());
     }
+
+    /// If the chat routing strategy is Fallback and multiple models are configured,
+    /// replace individual chat providers with a single FallbackChatProvider wrapper.
+    ///
+    /// Must be called after all providers are registered.
+    pub fn maybe_wrap_chat_fallback(&mut self, routing: &config::routing::RoutingConfig) {
+        use providers::FallbackChatProvider;
+        use providers::FallbackEntry;
+
+        let entry = match routing.get(config::provider::Capability::Chat) {
+            Some(e) => e,
+            None => return,
+        };
+
+        if entry.strategy != config::routing::RoutingStrategy::Fallback {
+            return;
+        }
+        if entry.models.len() <= 1 {
+            return;
+        }
+
+        // Build the fallback chain in routing order.
+        let mut chain: Vec<FallbackEntry> = Vec::new();
+        for model_id in &entry.models {
+            if let Some(provider) = self.chat_providers.remove(model_id) {
+                chain.push(FallbackEntry {
+                    provider,
+                    model_id: model_id.clone(),
+                });
+            } else {
+                tracing::warn!(model = %model_id, "model in fallback routing not registered, skipping");
+            }
+        }
+
+        if chain.is_empty() {
+            tracing::error!("Fallback routing configured but no chat providers found");
+            return;
+        }
+
+        tracing::info!(
+            models = ?chain.iter().map(|e| e.model_id.as_str()).collect::<Vec<_>>(),
+            "wrapping {} chat providers with FallbackChatProvider",
+            chain.len()
+        );
+
+        let fallback_provider = FallbackChatProvider::new(chain);
+
+        // Register under the first model ID in the routing list.
+        let primary_model = entry.models[0].clone();
+        self.chat_providers.insert(
+            primary_model,
+            Arc::new(fallback_provider),
+        );
+    }
 }
 
 // ── ServiceRegistry trait impl (read-only interface consumed by Application) ──
@@ -329,6 +383,28 @@ impl ServiceRegistry for Registry {
         } else {
             self.get_chat_provider(capability)
         }
+    }
+
+    fn get_chat_fallback_chain(&self, capability: Capability) -> anyhow::Result<Vec<(Arc<dyn ChatProvider>, String)>> {
+        let entry = self.routing.get(capability)
+            .with_context(|| format!("No routing for {:?}", capability))?;
+
+        let mut chain = Vec::new();
+        for model_id in &entry.models {
+            if let Ok((_, model)) = self.find_provider_by_model(model_id) {
+                if model.supports(capability) {
+                    if let Some(provider) = self.chat_providers.get(&model.model_id) {
+                        chain.push((Arc::clone(provider), model.model_id.clone()));
+                    }
+                }
+            }
+        }
+
+        if chain.is_empty() {
+            anyhow::bail!("No available providers in fallback chain for {:?}", capability);
+        }
+
+        Ok(chain)
     }
 
     fn get_embedding_provider(&self) -> anyhow::Result<(Arc<dyn EmbeddingProvider>, String)> {

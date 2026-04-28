@@ -20,18 +20,18 @@ async fn main() -> anyhow::Result<()> {
     match cmd {
         Commands::Run { config } => {
             let cfg = match config {
-                Some(path) => orchestrator::daemon::load_config_from(&path)?,
+                Some(path) => myclaw::daemon::load_config_from(&path)?,
                 None => {
                     if let Ok(env_path) = std::env::var("MYCLAW_CONFIG") {
-                        orchestrator::daemon::load_config_from(&env_path)?
+                        myclaw::daemon::load_config_from(&env_path)?
                     } else {
-                        orchestrator::daemon::load_config()?
+                        myclaw::daemon::load_config()?
                     }
                 }
             };
 
-            orchestrator::daemon::init_tracing(&cfg);
-            orchestrator::daemon::run(cfg).await?;
+            myclaw::daemon::init_tracing(&cfg);
+            myclaw::daemon::run(cfg).await?;
         }
     }
 

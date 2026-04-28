@@ -308,6 +308,9 @@ impl AgentLoop {
                     stop_reason = reason;
                     break;
                 }
+                StreamEvent::HttpError { message, .. } => {
+                    anyhow::bail!("Stream error: {}", message);
+                }
                 StreamEvent::Error(e) => {
                     anyhow::bail!("Stream error: {}", e);
                 }

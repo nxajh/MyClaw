@@ -1,7 +1,4 @@
 //! MiniMax provider — OpenAI-compatible protocol.
-//!
-//! MiniMax requires system messages to be merged into the first user message
-//! (rejects `role: system`).
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -50,7 +47,10 @@ impl ChatProvider for MiniMaxProvider {
             if resp.error_for_status_ref().is_err() {
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_default();
-                let _ = tx.send(StreamEvent::Error(format!("HTTP {}: {}", status, text))).await;
+                let _ = tx.send(StreamEvent::HttpError {
+                    status: status.as_u16(),
+                    message: format!("HTTP {}: {}", status, text),
+                }).await;
                 return;
             }
 
@@ -96,47 +96,37 @@ impl ChatProvider for MiniMaxProvider {
 fn build_minimax_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
     use serde_json::json;
 
-    let mut system_parts: Vec<ContentPart> = Vec::new();
     let mut messages: Vec<serde_json::Value> = Vec::new();
 
     for msg in req.messages {
-        if msg.role == "system" {
-            system_parts.extend(msg.parts.clone());
-        } else {
-            let content: Vec<serde_json::Value> = msg.parts.iter().map(|part| match part {
-                ContentPart::Text { text } => serde_json::json!({"type": "text", "text": text}),
-                ContentPart::ImageUrl { url, detail } => serde_json::json!({
-                    "type": "image_url",
-                    "image_url": { "url": url, "detail": format!("{:?}", detail).to_lowercase() }
-                }),
-                ContentPart::ImageB64 { b64_json, detail } => serde_json::json!({
-                    "type": "image_url",
-                    "image_url": { "url": format!("data:image;base64,{}", b64_json), "detail": format!("{:?}", detail).to_lowercase() }
-                }),
-            }).collect();
+        let content_vec: Vec<serde_json::Value> = msg.parts.iter().map(|part| match part {
+            ContentPart::Text { text } => serde_json::json!({"type": "text", "text": text}),
+            ContentPart::ImageUrl { url, detail } => serde_json::json!({
+                "type": "image_url",
+                "image_url": { "url": url, "detail": format!("{:?}", detail).to_lowercase() }
+            }),
+            ContentPart::ImageB64 { b64_json, detail } => serde_json::json!({
+                "type": "image_url",
+                "image_url": { "url": format!("data:image;base64,{}", b64_json), "detail": format!("{:?}", detail).to_lowercase() }
+            }),
+        }).collect();
 
-            let content = if content.len() == 1 {
-                content.into_iter().next().unwrap()
+        // For a single text part, emit plain string for maximum compatibility
+        // (matches build_openai_chat_body behavior).
+        let content = if content_vec.len() == 1 {
+            if let Some(text) = msg.parts.iter().find_map(|p| match p {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            }) {
+                serde_json::json!(text)
             } else {
-                serde_json::json!(content)
-            };
-
-            messages.push(json!({ "role": msg.role, "content": content }));
-        }
-    }
-
-    // Merge system into first user message
-    if !system_parts.is_empty() && !messages.is_empty() {
-        let system_text: String = system_parts.iter().filter_map(|p| match p {
-            ContentPart::Text { text } => Some(text.clone()),
-            _ => None,
-        }).collect::<Vec<_>>().join("\n");
-
-        if let Some(obj) = messages[0].as_object_mut() {
-            if let Some(content) = obj.get("content").and_then(|c| c.as_str()) {
-                obj["content"] = serde_json::json!(format!("[System instructions]\n{}\n\n{}", system_text, content));
+                content_vec.into_iter().next().unwrap()
             }
-        }
+        } else {
+            serde_json::json!(content_vec)
+        };
+
+        messages.push(json!({ "role": msg.role, "content": content }));
     }
 
     let mut body = json!({ "model": req.model, "messages": messages, "stream": true });

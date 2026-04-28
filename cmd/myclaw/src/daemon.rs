@@ -194,6 +194,10 @@ fn build_registry(config: &config::AppConfig) -> anyhow::Result<registry::Regist
         }
     }
 
+    // --- Wrap with FallbackChatProvider if strategy is Fallback ---
+    // This must happen after all providers are registered above.
+    registry.maybe_wrap_chat_fallback(&config.routing);
+
     Ok(registry)
 }
 

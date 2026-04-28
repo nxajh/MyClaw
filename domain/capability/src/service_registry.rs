@@ -32,6 +32,11 @@ pub trait ServiceRegistry: Send + Sync {
         provider_hint: Option<&str>,
     ) -> anyhow::Result<(Arc<dyn ChatProvider>, String)>;
 
+    /// Get all fallback Chat providers for the given capability.
+    /// Returns the full ordered list of (provider, model_id) from the routing entry,
+    /// allowing the caller to try each one on runtime error (e.g. HTTP 429).
+    fn get_chat_fallback_chain(&self, capability: Capability) -> anyhow::Result<Vec<(Arc<dyn ChatProvider>, String)>>;
+
     /// Get an Embedding provider.
     fn get_embedding_provider(&self) -> anyhow::Result<(Arc<dyn EmbeddingProvider>, String)>;
 

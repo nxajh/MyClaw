@@ -69,7 +69,10 @@ impl ChatProvider for GlmProvider {
             if resp.error_for_status_ref().is_err() {
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_default();
-                let _ = tx.send(StreamEvent::Error(format!("HTTP {}: {}", status, text))).await;
+                let _ = tx.send(StreamEvent::HttpError {
+                    status: status.as_u16(),
+                    message: format!("HTTP {}: {}", status, text),
+                }).await;
                 return;
             }
 
