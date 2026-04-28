@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use crate::providers::{
-    BoxStream, ChatProvider, ChatRequest, ChatMessage, StreamEvent, ToolCall, ChatToolSpec,
+    BoxStream, ChatProvider, ChatRequest, ChatMessage, StreamEvent, ChatToolSpec,
     ThinkingConfig,
 };
 use futures_util::StreamExt;

@@ -25,4 +25,3 @@ pub use registry::{Registry};
 pub use providers::ServiceRegistry;
 pub use providers::{ChatProvider, FallbackChatProvider, ToolResult};
 pub use providers::capability_chat::ToolSpec;
-use crate::providers::Tool;

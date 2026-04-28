@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::providers::Capability;
 use crate::providers::{
-    BoxStream, ChatMessage, ChatRequest, StopReason, StreamEvent, ToolCall, ToolSpec,
+    BoxStream, ChatMessage, ChatRequest, StopReason, StreamEvent, ToolCall,
 };
 use crate::providers::ServiceRegistry;
 use crate::providers::capability_tool::ToolResult;

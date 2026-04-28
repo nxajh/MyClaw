@@ -73,6 +73,7 @@ pub trait Channel: Send + Sync {
 #[derive(Clone)]
 pub struct DedupState {
     seen: Arc<Mutex<std::collections::HashSet<String>>>,
+    #[allow(dead_code)]
     window_secs: u64,
 }
 
