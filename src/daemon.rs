@@ -96,7 +96,7 @@ fn print_banner(config: &crate::config::AppConfig) {
 
     if let Some(chat_route) = config
         .routing
-        .get(crate::providers::capability::Capability::Chat)
+        .get(crate::providers::Capability::Chat)
         .map(|e| e.models.join(" → "))
     {
         println!("  🗺️  Chat route: {}", chat_route);
@@ -139,7 +139,7 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
                 provider_cfg.base_url, provider_key
             ))?;
 
-            use crate::config::provider::Capability;
+            use crate::providers::Capability;
 
             for cap in &model_cfg.capabilities {
                 match cap {

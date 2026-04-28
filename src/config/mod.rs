@@ -266,6 +266,7 @@ impl ConfigLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::Capability;
 
     #[test]
     fn parse_minimal_config() {
@@ -283,7 +284,7 @@ models = ["minimax-m2.7"]
         let config = ConfigLoader::from_toml(toml_str).unwrap();
         assert!(config.providers.contains_key("minimax"));
         assert_eq!(config.routing.len(), 1);
-        assert!(config.routing.get(capability::Capability::Chat).is_some());
+        assert!(config.routing.get(Capability::Chat).is_some());
     }
 
     #[test]
@@ -358,7 +359,7 @@ level = "INFO"
         assert!(minimax.models.contains_key("minimax-m2-7"));
 
         // Routing
-        let chat_route = config.routing.get(crate::providers::capability::Capability::Chat).unwrap();
+        let chat_route = config.routing.get(crate::providers::Capability::Chat).unwrap();
         assert_eq!(chat_route.models, vec!["minimax-m2-7"]);
 
         // Channels

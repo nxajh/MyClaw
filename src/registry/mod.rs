@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use anyhow::Context;
 
-use crate::providers::capability::Capability;
+use crate::providers::Capability;
 use crate::providers::capability_chat::ChatProvider;
 use crate::providers::capability_embedding::EmbeddingProvider;
 use crate::providers::image::ImageGenerationProvider;
@@ -172,7 +172,7 @@ impl From<(&str, crate::config::provider::ModelConfig)> for ModelConfig {
     fn from((model_id, cfg): (&str, crate::config::provider::ModelConfig)) -> Self {
         Self {
             model_id: model_id.to_string(),
-            capabilities: cfg.capabilities.into_iter().map(convert_capability).collect(),
+            capabilities: cfg.capabilities,
             context_window: cfg.context_window,
             max_tokens: cfg.max_output_tokens,
             reasoning: cfg.reasoning,
@@ -188,21 +188,6 @@ impl From<crate::config::provider::ProviderConfig> for ProviderConfig {
             base_url: Some(cfg.base_url),
             models: vec![],
         }
-    }
-}
-
-fn convert_capability(c: crate::config::provider::Capability) -> Capability {
-    use crate::config::provider::Capability as Cc;
-    match c {
-        Cc::Chat => Capability::Chat,
-        Cc::Vision => Capability::Vision,
-        Cc::NativeTools => Capability::NativeTools,
-        Cc::Search => Capability::Search,
-        Cc::Embedding => Capability::Embedding,
-        Cc::ImageGeneration => Capability::ImageGeneration,
-        Cc::TextToSpeech => Capability::TextToSpeech,
-        Cc::SpeechToText => Capability::SpeechToText,
-        Cc::VideoGeneration => Capability::VideoGeneration,
     }
 }
 
@@ -283,7 +268,7 @@ impl Registry {
         use crate::providers::FallbackChatProvider;
         use crate::providers::fallback::FallbackEntry;
 
-        let entry = match routing.get(crate::providers::capability::Capability::Chat) {
+        let entry = match routing.get(crate::providers::Capability::Chat) {
             Some(e) => e,
             None => return,
         };

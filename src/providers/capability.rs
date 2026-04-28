@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Capability {
     Chat,
     Vision,

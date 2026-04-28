@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::providers::capability::Capability;
+use crate::providers::Capability;
 
 // ── RoutingStrategy ───────────────────────────────────────────────────────────
 

@@ -7,22 +7,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-// ── Capability ────────────────────────────────────────────────────────────────
-
-/// A provider/model capability tag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Capability {
-    Chat,
-    Vision,
-    NativeTools,
-    Search,
-    Embedding,
-    ImageGeneration,
-    TextToSpeech,
-    SpeechToText,
-    VideoGeneration,
-}
+// Re-export Capability and ChatFeatures from the canonical source.
+pub use crate::providers::capability::{Capability, ChatFeatures};
 
 // ── AuthStyle ─────────────────────────────────────────────────────────────────
 
@@ -39,24 +25,6 @@ pub enum AuthStyle {
     ZhipuJwt,
     /// x-api-key header (Anthropic style).
     XApiKey,
-}
-
-// ── ChatFeatures ──────────────────────────────────────────────────────────────
-
-/// Chat sub-capability details.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ChatFeatures {
-    #[serde(default)]
-    pub vision: bool,
-    #[serde(default)]
-    pub audio_input: bool,
-    #[serde(default)]
-    pub video_input: bool,
-    #[serde(default)]
-    pub native_tools: bool,
-    pub max_image_size: Option<u64>,
-    #[serde(default)]
-    pub supported_image_formats: Vec<String>,
 }
 
 // ── Pricing ───────────────────────────────────────────────────────────────────
@@ -161,7 +129,7 @@ api_key = "sk-test"
     fn deserialize_provider_with_models() {
         let toml_str = r#"
 base_url = "https://api.minimaxi.com/v1"
-api_key = "${MINIMAX_API_KEY}"
+api_key="${MI*[REDACTED]"
 auth_style = "bearer"
 
 [models.minimax-m2-dot-7]

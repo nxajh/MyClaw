@@ -1,6 +1,6 @@
 //! Routing configuration types.
 
-use crate::providers::capability::Capability;
+use crate::providers::Capability;
 use serde::{Deserialize, Serialize};
 
 /// Routing strategy for selecting a model/provider.
