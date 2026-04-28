@@ -51,7 +51,6 @@ impl StdioTransport {
     pub fn new(config: &McpServerConfig) -> Result<Self> {
         let mut child = Command::new(&config.command)
             .args(&config.args)
-            .env_clear()
             .envs(&config.env)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
