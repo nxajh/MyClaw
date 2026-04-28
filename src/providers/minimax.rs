@@ -54,6 +54,7 @@ impl ChatProvider for MiniMaxProvider {
                 return;
             }
 
+            let mut saw_tool_call = false;
             let mut buffer = String::new();
             let mut utf8_buf = Vec::new();
             let mut stream = resp.bytes_stream();
@@ -81,12 +82,14 @@ impl ChatProvider for MiniMaxProvider {
                 while let Some(pos) = buffer.find('\n') {
                     let line = buffer[..pos].to_string();
                     buffer.drain(..=pos);
-                    if let Some(event) = parse_minimax_sse(&line) {
+                    if let Some(event) = parse_minimax_sse(&line, &mut saw_tool_call) {
                         let _ = tx.send(event).await;
                     }
                 }
             }
-            let _ = tx.send(StreamEvent::Done { reason: StopReason::EndTurn }).await;
+            // MiniMax may report finish_reason="stop" even when tool calls were present.
+            let final_reason = if saw_tool_call { StopReason::ToolUse } else { StopReason::EndTurn };
+            let _ = tx.send(StreamEvent::Done { reason: final_reason }).await;
         });
 
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
@@ -165,7 +168,7 @@ fn build_minimax_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
     body
 }
 
-fn parse_minimax_sse(line: &str) -> Option<StreamEvent> {
+fn parse_minimax_sse(line: &str, saw_tool_call: &mut bool) -> Option<StreamEvent> {
     let line = line.trim();
     if line.is_empty() || line.starts_with(':') { return None; }
     let data = line.strip_prefix("data:")?.trim();
@@ -193,6 +196,7 @@ fn parse_minimax_sse(line: &str) -> Option<StreamEvent> {
     for choice in &chunk.choices {
         // Tool calls take priority (same as parse_openai_sse).
         if let Some(tcs) = &choice.delta.tool_calls {
+            *saw_tool_call = true;
             if let Some(tc) = tcs.first() {
                 let id = tc.id.clone().unwrap_or_default();
                 let func = tc.function.as_ref();
@@ -220,13 +224,15 @@ fn parse_minimax_sse(line: &str) -> Option<StreamEvent> {
             if !reasoning.is_empty() { return Some(StreamEvent::Thinking { text: reasoning.clone() }); }
         }
         if choice.finish_reason.is_some() {
-            let reason = choice.finish_reason.as_ref().and_then(|r| match r.as_str() {
-                "stop" => Some(StopReason::EndTurn),
-                "tool_calls" => Some(StopReason::ToolUse),
-                "length" => Some(StopReason::MaxTokens),
-                "content_filter" => Some(StopReason::ContentFilter),
-                _ => None,
-            }).unwrap_or(StopReason::EndTurn);
+            let raw = choice.finish_reason.as_ref().unwrap();
+            let reason = match raw.as_str() {
+                "stop" if *saw_tool_call => StopReason::ToolUse,
+                "stop" => StopReason::EndTurn,
+                "tool_calls" => StopReason::ToolUse,
+                "length" => StopReason::MaxTokens,
+                "content_filter" => StopReason::ContentFilter,
+                _ => StopReason::EndTurn,
+            };
             return Some(StreamEvent::Done { reason });
         }
     }
