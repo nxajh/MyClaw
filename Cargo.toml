@@ -1,44 +1,73 @@
-[workspace]
-resolver = "2"
-members = [
-    "cmd/myclaw",
-    "interface/channels",
-    "application/runtime",
-    "domain/capability",
-    "domain/memory",
-    "domain/session",
-    "infrastructure/config",
-    "infrastructure/registry",
-    "infrastructure/memory-storage",
-    "infrastructure/providers",
-    "infrastructure/tools",
-    "infrastructure/mcp",
-]
+[package]
+name = "myclaw"
+version = "0.1.0"
+edition = "2024"
 
-[workspace.dependencies]
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "myclaw"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
 anyhow = "1"
-async-trait = "0.1"
-chrono = "0.4"
-hex = "0.4"
-rand = "0.10"
+thiserror = "1"
+
+# Tracing / logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+# Async utilities
 futures-core = "0.3"
 futures-util = "0.3"
 futures = "0.3"
 parking_lot = "0.12"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+tokio-stream = "0.1"
+tokio-util = "0.7"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Utils
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+hex = "0.4"
+base64 = "0.22"
+rand = "0.10"
 sha2 = "0.10"
 hmac-sha256 = "1"
-base64 = "0.22"
-tempfile = "3"
-thiserror = "1"
-tokio = { version = "1", features = ["full"] }
-tokio-stream = "0.1.18"
-tokio-util = "0.7"
-tracing = "0.1"
-uuid = { version = "1", features = ["v4"] }
-reqwest = { version = "0.12", features = ["json", "stream"] }
 regex = "1"
+dashmap = "5"
+structopt = "0.3"
+shellexpand = "3.1"
+tempfile = "3"
+directories = "5"
+toml = "0.8"
+async-trait = "0.1"
 
-# Internal crates
-myclaw-config = { path = "infrastructure/config" }
+# Storage
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+# WeChat crypto (feature-gated)
+aes = { version = "0.8", optional = true }
+ecb = { version = "0.1", optional = true }
+md-5 = { version = "0.10", optional = true }
+urlencoding = { version = "2.1", optional = true }
+
+[features]
+default = []
+wechat = ["aes", "ecb", "md-5", "urlencoding"]
+telegram = []
+
+[profile.release]
+opt-level = 3
+lto = true

@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 use futures_util::StreamExt;
 
-use crate::Client;
-use myclaw_capability::chat::{BoxStream, ChatProvider, ChatRequest, ContentPart, StreamEvent, StopReason};
+use crate::providers::Client;
+use crate::providers::{BoxStream, ChatProvider, ChatRequest, ContentPart, StreamEvent, StopReason};
 
 const DEFAULT_BASE_URL: &str = "https://api.minimaxi.chat/v1";
 
@@ -30,7 +30,7 @@ impl ChatProvider for MiniMaxProvider {
     fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
         let url = format!("{}/text/chatcompletion_v2", self.base_url);
         let body = build_minimax_body(&req);
-        let auth = crate::shared::build_auth(&crate::shared::AuthStyle::Bearer, &self.api_key);
+        let auth = crate::providers::shared::build_auth(&crate::providers::shared::AuthStyle::Bearer, &self.api_key);
         let client = self.client.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(100);
 
@@ -96,8 +96,6 @@ impl ChatProvider for MiniMaxProvider {
 fn build_minimax_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
     use serde_json::json;
 
-    let model = normalize_model_name(req.model);
-
     let mut messages: Vec<serde_json::Value> = Vec::new();
 
     for msg in req.messages {
@@ -152,7 +150,7 @@ fn build_minimax_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
         messages.push(msg_json);
     }
 
-    let mut body = json!({ "model": model, "messages": messages, "stream": true });
+    let mut body = json!({ "model": req.model, "messages": messages, "stream": true });
     if let Some(temp) = req.temperature { body["temperature"] = serde_json::json!(temp); }
     if let Some(max) = req.max_tokens { body["max_tokens"] = serde_json::json!(max); }
     if let Some(tools) = req.tools {
@@ -167,42 +165,11 @@ fn build_minimax_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
     body
 }
 
-/// Normalize MiniMax model name to the format expected by the API.
-///
-/// MiniMax API expects names like "MiniMax-M2.7" (capital M, dot separator),
-/// but the config may use "minimax-m2-7" or "minimax-m2.7".
-fn normalize_model_name(model: &str) -> &str {
-    match model {
-        "minimax-m2-7" | "minimax-m2.7" => "MiniMax-M2.7",
-        "minimax-m2-7-highspeed" | "minimax-m2.7-highspeed" => "MiniMax-M2.7-highspeed",
-        "minimax-m2-5" | "minimax-m2.5" => "MiniMax-M2.5",
-        "minimax-m2-5-highspeed" | "minimax-m2.5-highspeed" => "MiniMax-M2.5-highspeed",
-        "minimax-m2-1" | "minimax-m2.1" => "MiniMax-M2.1",
-        "minimax-m2" => "MiniMax-M2",
-        _ => model,
-    }
-}
-
 fn parse_minimax_sse(line: &str) -> Option<StreamEvent> {
     let line = line.trim();
     if line.is_empty() || line.starts_with(':') { return None; }
     let data = line.strip_prefix("data:")?.trim();
     if data == "[DONE]" { return None; }
-
-    // Parse MiniMax API error responses (e.g., {"base_resp": {"status_code": 1001, "status_msg": "..."}}).
-    #[derive(serde::Deserialize)]
-    struct BaseResp { status_code: i32, status_msg: String }
-    #[derive(serde::Deserialize)]
-    struct ErrorResp { base_resp: BaseResp }
-    if let Ok(err_resp) = serde_json::from_str::<ErrorResp>(data) {
-        if err_resp.base_resp.status_code != 0 {
-            return Some(StreamEvent::Error(format!(
-                "MiniMax API error {}: {}",
-                err_resp.base_resp.status_code,
-                err_resp.base_resp.status_msg
-            )));
-        }
-    }
 
     #[derive(serde::Deserialize)]
     struct Chunk { choices: Vec<Choice> }

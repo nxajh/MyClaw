@@ -1041,209 +1041,39 @@ dependencies = [
 name = "myclaw"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "myclaw-channels",
- "myclaw-config",
- "myclaw-memory-storage",
- "myclaw-providers",
- "myclaw-registry",
- "myclaw-runtime",
- "myclaw-session",
- "myclaw-tools",
- "reqwest",
- "serde",
- "serde_json",
- "shellexpand",
- "structopt",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "myclaw-capability"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "futures-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "myclaw-channels"
-version = "0.1.0"
-dependencies = [
  "aes",
  "anyhow",
  "async-trait",
  "base64",
  "chrono",
+ "dashmap",
+ "directories",
  "ecb",
+ "futures",
+ "futures-core",
  "futures-util",
  "hex",
  "hmac-sha256",
  "md-5",
- "myclaw-config",
  "parking_lot",
  "rand",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "urlencoding",
- "uuid",
-]
-
-[[package]]
-name = "myclaw-config"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "directories",
- "serde",
- "serde_json",
- "shellexpand",
- "toml",
- "tracing",
-]
-
-[[package]]
-name = "myclaw-mcp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "myclaw-capability",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "myclaw-memory"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "reqwest",
- "serde",
-]
-
-[[package]]
-name = "myclaw-memory-storage"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "myclaw-capability",
- "myclaw-memory",
- "myclaw-session",
- "parking_lot",
  "regex",
  "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
- "tempfile",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "myclaw-providers"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64",
- "futures",
- "futures-core",
- "futures-util",
- "hmac-sha256",
- "myclaw-capability",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tokio-stream",
- "tracing",
-]
-
-[[package]]
-name = "myclaw-registry"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "myclaw-capability",
- "myclaw-config",
- "myclaw-providers",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "myclaw-runtime"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "dashmap",
- "futures-core",
- "futures-util",
- "myclaw-capability",
- "myclaw-channels",
- "myclaw-session",
- "parking_lot",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "myclaw-session"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "myclaw-capability",
-]
-
-[[package]]
-name = "myclaw-tools"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "myclaw-capability",
- "parking_lot",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
+ "shellexpand",
+ "structopt",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "toml",
  "tracing",
+ "tracing-subscriber",
+ "urlencoding",
  "uuid",
 ]
 

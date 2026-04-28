@@ -1,0 +1,236 @@
+//! Orchestrator — Application Service that connects channels and agent loops.
+//!
+//! This is the core Application Service in DDD terms:
+//! - Receives messages from Interface (Channel) adapters
+//! - Coordinates Domain objects (Agent, Session, Tools)
+//! - Routes responses back through Interface adapters
+//!
+//! Assembly of Infrastructure components (Registry, Providers, Tools, Storage)
+//! is done in the Composition Root (orchestration/orchestrator main.rs + daemon.rs),
+//! not here. This struct receives fully-assembled components via its constructor.
+
+use anyhow::Context;
+use crate::channels::{Channel, ChannelMessage, SendMessage};
+use dashmap::DashMap;
+use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex as TokioMutex};
+use tokio::task::JoinHandle;
+use tracing::{error, info, warn};
+
+use crate::agents::agent_impl::{Agent, AgentLoop}; use crate::agents::session_manager::SessionManager;
+
+const CHANNEL_QUEUE_SIZE: usize = 100;
+
+/// Orchestrator — Application Service for message routing and session lifecycle.
+///
+/// Coordinates the flow: Channel → Session → AgentLoop → Channel.
+/// Does NOT depend on any Infrastructure concrete types.
+pub struct Orchestrator {
+    /// Channels, keyed by name (e.g. "telegram", "wechat").
+    channels: Arc<DashMap<String, Arc<dyn Channel>>>,
+    /// Per-session agent loops: "channel:sender" → Arc<Mutex<AgentLoop>>.
+    sessions: Arc<DashMap<String, Arc<TokioMutex<AgentLoop>>>>,
+    agent: Agent,
+    session_manager: SessionManager,
+    /// The message receiver, owned and consumed by run().
+    #[allow(clippy::type_complexity)]
+    msg_rx: Arc<TokioMutex<Option<mpsc::Receiver<(String, ChannelMessage)>>>>,
+    /// Listener task handles — taken and awaited on shutdown.
+    listener_handles: Vec<JoinHandle<()>>,
+}
+
+/// Fully-assembled components ready for the Orchestrator to use.
+///
+/// Built by the Composition Root (daemon.rs).  This struct is the seam that
+/// decouples the Application layer from Infrastructure assembly logic.
+pub struct OrchestratorParts {
+    pub agent: Agent,
+    pub session_manager: SessionManager,
+    /// Pre-built channels from Interface layer (Feature-gated at compile time).
+    pub channels: Vec<(&'static str, Arc<dyn Channel>)>,
+}
+
+impl Orchestrator {
+    /// Create a new Orchestrator from pre-assembled parts.
+    ///
+    /// The Composition Root is responsible for building `OrchestratorParts`
+    /// (creating Registry, registering Providers/Tools, opening Storage, etc.).
+    pub fn new(parts: OrchestratorParts) -> (Self, mpsc::Sender<(String, ChannelMessage)>) {
+        let (msg_tx, msg_rx) = mpsc::channel(CHANNEL_QUEUE_SIZE);
+        let msg_tx = Arc::new(msg_tx);
+
+        let channels_map: Arc<DashMap<String, Arc<dyn Channel>>> = Arc::new(DashMap::new());
+        let mut listener_handles = Vec::new();
+
+        for (name, channel) in &parts.channels {
+            let name_static: &'static str = name;
+            let handle = Self::spawn_listener(name_static, Arc::clone(channel), Arc::clone(&msg_tx));
+            channels_map.insert((*name).to_string(), Arc::clone(channel));
+            listener_handles.push(handle);
+            info!(channel = %name, "listener started");
+        }
+
+        if channels_map.is_empty() {
+            warn!("no channels enabled");
+        }
+
+        let orchestrator = Orchestrator {
+            channels: channels_map,
+            sessions: Arc::new(DashMap::new()),
+            agent: parts.agent,
+            session_manager: parts.session_manager,
+            msg_rx: Arc::new(TokioMutex::new(Some(msg_rx))),
+            listener_handles,
+        };
+
+        info!(channels = orchestrator.channels.len(), "orchestrator initialized");
+        (orchestrator, (*msg_tx).clone())
+    }
+
+    fn spawn_listener(
+        channel_name: &'static str,
+        channel: Arc<dyn Channel>,
+        msg_tx: Arc<mpsc::Sender<(String, ChannelMessage)>>,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            let rx = match channel.listen().await {
+                Ok(r) => r,
+                Err(e) => {
+                    error!(channel = %channel_name, err = %e, "listen failed");
+                    return;
+                }
+            };
+            let mut rx = rx;
+            while let Some(msg) = rx.recv().await {
+                if msg_tx.send((channel_name.to_string(), msg)).await.is_err() {
+                    break;
+                }
+            }
+            info!(channel = %channel_name, "listener ended");
+        })
+    }
+
+    fn session_key(channel: &str, sender: &str) -> String {
+        format!("{channel}:{sender}")
+    }
+
+    fn get_or_create_loop(
+        sessions: &DashMap<String, Arc<TokioMutex<AgentLoop>>>,
+        agent: &Agent,
+        session_manager: &SessionManager,
+        sk: &str,
+    ) -> Arc<TokioMutex<AgentLoop>> {
+        if let Some(existing) = sessions.get(sk) {
+            return existing.clone();
+        }
+        let session = session_manager.get_or_create(sk);
+        let loop_ = agent.loop_for(session);
+        let entry: Arc<TokioMutex<AgentLoop>> = Arc::new(TokioMutex::new(loop_));
+        sessions.insert(sk.into(), entry.clone());
+        entry
+    }
+
+    /// Main message loop. Consumes self.msg_rx.
+    /// Call from the Composition Root; blocks until shutdown.
+    pub async fn run(&self, mut shutdown_rx: tokio::sync::watch::Receiver<bool>) -> anyhow::Result<()> {
+        let rx = {
+            let mut guard = self.msg_rx.lock().await;
+            guard.take().context("run() already called or msg_rx was None")?
+        };
+
+        let sessions = self.sessions.clone();
+        let agent = self.agent.clone();
+        let channels = self.channels.clone();
+
+        let mut rx = rx;
+
+        loop {
+            if *shutdown_rx.borrow() {
+                tracing::info!("shutdown requested, exiting message loop");
+                break;
+            }
+
+            let msg = tokio::select! {
+                msg = rx.recv() => match msg {
+                    Some(m) => m,
+                    None => break,
+                },
+                _ = shutdown_rx.changed() => {
+                    tracing::info!("shutdown signal received");
+                    break;
+                }
+            };
+
+            let (channel_name, msg) = msg;
+            let sk = Self::session_key(&channel_name, &msg.sender);
+            let content = msg.content.clone();
+            let reply_target = msg.reply_target.clone();
+            let channel_name_clone = channel_name.clone();
+            let loop_ = Self::get_or_create_loop(&sessions, &agent, &self.session_manager, &sk);
+
+            let ch = channels.clone();
+            tokio::spawn(async move {
+                let response = {
+                    let mut guard = loop_.lock().await;
+                    guard.run(&content).await
+                };
+
+                let channel: Option<Arc<dyn Channel>> = {
+                    ch.get(&channel_name_clone).map(|r| r.clone())
+                };
+
+                let channel = match channel {
+                    Some(c) => c,
+                    None => return,
+                };
+
+                match response {
+                    Ok(text) if !text.is_empty() => {
+                        tracing::info!(session = %sk, text_len = text.len(), "sending response");
+                        let send_msg = SendMessage {
+                            recipient: reply_target,
+                            content: text,
+                            subject: None,
+                            thread_ts: None,
+                            cancellation_token: None,
+                            attachments: vec![],
+                            image_urls: None,
+                        };
+                        if let Err(e) = channel.send(&send_msg).await {
+                            error!(session = %sk, err = %e, "send failed");
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!(session = %sk, err = %e, "loop failed");
+                    }
+                }
+            });
+        }
+
+        info!("all listeners stopped, exiting");
+        Ok(())
+    }
+
+    /// Abort all listener handles (call after run() returns).
+    pub async fn shutdown_listeners(&mut self) {
+        let handles = std::mem::take(&mut self.listener_handles);
+        for h in handles {
+            h.abort();
+        }
+        tracing::info!("all listener tasks aborted");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_session_key() {
+        assert_eq!(
+            Orchestrator::session_key("wechat", "o9cq80zXpSX1Hz0ph_QNs591k4PA"),
+            "wechat:o9cq80zXpSX1Hz0ph_QNs591k4PA"
+        );
+    }
+}
