@@ -108,17 +108,14 @@ pub fn parse_openai_sse(line: &str) -> Option<StreamEvent> {
     let chunk: Chunk = serde_json::from_str(data).ok()?;
 
     for choice in &chunk.choices {
+        // Check tool_calls FIRST — some providers (GLM) occasionally send both
+        // content and tool_calls in the same chunk.  When that happens the
+        // content is usually a text representation of the tool call and must
+        // be ignored in favour of the structured tool_calls field.
         if let Some(tcs) = &choice.delta.tool_calls {
             // Log raw tool_calls delta for debugging.
             tracing::debug!(raw_tool_calls = %serde_json::to_string(tcs).unwrap_or_default(), "SSE tool_calls delta");
-        }
-        if let Some(text) = &choice.delta.content {
-            if !text.is_empty() { return Some(StreamEvent::Delta { text: text.clone() }); }
-        }
-        if let Some(reasoning) = &choice.delta.reasoning_content {
-            if !reasoning.is_empty() { return Some(StreamEvent::Thinking { text: reasoning.clone() }); }
-        }
-        if let Some(tcs) = &choice.delta.tool_calls {
+
             if let Some(tc) = tcs.first() {
                 let id = tc.id.clone().unwrap_or_default();
                 let func = tc.function.as_ref();
@@ -142,6 +139,13 @@ pub fn parse_openai_sse(line: &str) -> Option<StreamEvent> {
                     return Some(StreamEvent::ToolCallDelta { id, delta: args });
                 }
             }
+        }
+
+        if let Some(text) = &choice.delta.content {
+            if !text.is_empty() { return Some(StreamEvent::Delta { text: text.clone() }); }
+        }
+        if let Some(reasoning) = &choice.delta.reasoning_content {
+            if !reasoning.is_empty() { return Some(StreamEvent::Thinking { text: reasoning.clone() }); }
         }
         if choice.finish_reason.is_some() {
             let reason = choice.finish_reason.as_ref().and_then(|r| match r.as_str() {
