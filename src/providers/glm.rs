@@ -1,16 +1,25 @@
-//! GLM (Zhipu/GLM-4) provider — Chat + Embedding + Search.
+//! GLM (Zhipu) provider — Chat + Embedding + Search.
 //!
-//! All endpoints are relative to base_url (which already contains /v4 or similar version prefix).
-//! Chat:      {base_url}/chat/completions
-//! Embedding: {base_url}/embeddings
-//! Search:    {base_url}/web_search
+//! Reference: https://docs.bigmodel.cn/api-reference/模型-api/对话补全.md
+//!
+//! Endpoints (relative to base_url):
+//!   Chat:      {base_url}/chat/completions
+//!   Embedding: {base_url}/embeddings
+//!   Search:    {base_url}/web_search
+//!
+//! GLM-specific behaviours handled here:
+//! - `do_sample` is required for non-greedy decoding
+//! - `tool_stream: true` enables streaming tool-call deltas (otherwise the
+//!   entire tool call is returned in a single chunk with finish_reason="stop")
+//! - finish_reason can be "sensitive" (content filtered by GLM's safety)
+//! - finish_reason may be "stop" even when tool_calls were emitted; we track
+//!   `saw_tool_call` and override to ToolUse in that case
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
 
 use crate::providers::Client;
-use crate::providers::shared::{parse_openai_sse, build_openai_chat_body};
-use crate::providers::{BoxStream, ChatProvider, ChatRequest, StreamEvent, StopReason};
+use crate::providers::{BoxStream, ChatProvider, ChatRequest, ContentPart, StreamEvent, StopReason};
 use crate::providers::{EmbedInput, EmbedRequest, EmbedResponse, EmbeddingProvider};
 use crate::providers::{SearchProvider, SearchRequest, SearchResult, SearchResults};
 
@@ -51,7 +60,7 @@ impl GlmProvider {
 impl ChatProvider for GlmProvider {
     fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
         let url = format!("{}/chat/completions", self.base_url);
-        let body = build_openai_chat_body(&req);
+        let body = build_glm_body(&req);
         let auth = self.auth();
         let client = self.client.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(100);
@@ -76,6 +85,7 @@ impl ChatProvider for GlmProvider {
                 return;
             }
 
+            let mut saw_tool_call = false;
             let mut buffer = String::new();
             let mut utf8_buf = Vec::new();
             let mut stream = resp.bytes_stream();
@@ -103,28 +113,202 @@ impl ChatProvider for GlmProvider {
                 while let Some(pos) = buffer.find('\n') {
                     let line = buffer[..pos].to_string();
                     buffer.drain(..=pos);
-                    if let Some(event) = parse_openai_sse(&line) {
+                    if let Some(event) = parse_glm_sse(&line, &mut saw_tool_call) {
                         let _ = tx.send(event).await;
                     }
                 }
             }
-            let _ = tx.send(StreamEvent::Done { reason: StopReason::EndTurn }).await;
+            // GLM may report finish_reason="stop" even when tool calls were present.
+            let final_reason = if saw_tool_call { StopReason::ToolUse } else { StopReason::EndTurn };
+            let _ = tx.send(StreamEvent::Done { reason: final_reason }).await;
         });
 
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
 }
 
+// ── Body building ─────────────────────────────────────────────────────────────
+
+/// Build a request body tailored to GLM's API.
+///
+/// Differences from the generic OpenAI body:
+/// - `do_sample: true` is added when `temperature > 0` so GLM actually
+///   samples (without it, temperature is silently ignored).
+/// - `tool_stream: true` when tools are present so that tool calls arrive
+///   as incremental SSE deltas instead of a single blob at stream end.
+fn build_glm_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
+    use serde_json::json;
+
+    let messages: Vec<serde_json::Value> = req.messages
+        .iter()
+        .map(|msg| {
+            let content_vec: Vec<serde_json::Value> = msg.parts.iter().map(|part| match part {
+                ContentPart::Text { text } => json!({"type": "text", "text": text}),
+                ContentPart::ImageUrl { url, detail } => json!({
+                    "type": "image_url",
+                    "image_url": { "url": url, "detail": format!("{:?}", detail).to_lowercase() }
+                }),
+                ContentPart::ImageB64 { b64_json, detail } => json!({
+                    "type": "image_url",
+                    "image_url": { "url": format!("data:image;base64,{}", b64_json), "detail": format!("{:?}", detail).to_lowercase() }
+                }),
+            }).collect();
+
+            let content = if content_vec.len() == 1 {
+                if let Some(text) = msg.parts.iter().find_map(|p| match p {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                }) {
+                    json!(text)
+                } else {
+                    content_vec.into_iter().next().unwrap()
+                }
+            } else {
+                json!(content_vec)
+            };
+
+            let mut msg_json = json!({ "role": msg.role });
+
+            if msg.role == "tool" {
+                if let Some(tc_id) = &msg.tool_call_id {
+                    msg_json["tool_call_id"] = json!(tc_id);
+                } else if let Some(n) = &msg.name {
+                    msg_json["tool_call_id"] = json!(n);
+                }
+                msg_json["content"] = json!(content);
+            } else if msg.role == "assistant" {
+                msg_json["content"] = if content.is_string() && content.as_str().unwrap_or("").is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    json!(content)
+                };
+                if let Some(tcs) = &msg.tool_calls {
+                    msg_json["tool_calls"] = json!(tcs);
+                }
+            } else {
+                msg_json["content"] = json!(content);
+            }
+
+            msg_json
+        })
+        .collect();
+
+    let mut body = json!({
+        "model": req.model,
+        "messages": messages,
+        "stream": true,
+    });
+
+    if let Some(temp) = req.temperature {
+        body["temperature"] = json!(temp);
+        // GLM requires do_sample=true for non-greedy decoding.
+        body["do_sample"] = json!(true);
+    }
+    if let Some(max) = req.max_tokens {
+        body["max_tokens"] = json!(max);
+    }
+    if let Some(stop) = &req.stop {
+        body["stop"] = json!(stop);
+    }
+    if let Some(tools) = req.tools {
+        body["tools"] = json!(tools.iter().map(|t| {
+            json!({
+                "type": "function",
+                "function": { "name": t.name, "description": t.description, "parameters": t.input_schema }
+            })
+        }).collect::<Vec<_>>());
+        // Request incremental tool-call deltas so we can stream them
+        // instead of receiving the entire call in one chunk.
+        body["tool_stream"] = json!(true);
+    }
+
+    body
+}
+
+// ── SSE parsing ───────────────────────────────────────────────────────────────
+
+/// Parse a single SSE line from GLM.
+///
+/// GLM-specific handling:
+/// - `finish_reason` can be `"sensitive"` (content filtered by GLM safety)
+/// - `finish_reason` may be `"stop"` even when `tool_calls` were emitted
+///   in previous chunks; `saw_tool_call` tracks this and overrides the reason
+fn parse_glm_sse(line: &str, saw_tool_call: &mut bool) -> Option<StreamEvent> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with(':') { return None; }
+    let data = line.strip_prefix("data:")?.trim();
+    if data == "[DONE]" { return None; }
+
+    #[derive(serde::Deserialize)]
+    struct Chunk { choices: Vec<Choice> }
+    #[derive(serde::Deserialize)]
+    struct Choice { delta: Delta, finish_reason: Option<String> }
+    #[derive(serde::Deserialize)]
+    struct Delta {
+        content: Option<String>,
+        reasoning_content: Option<String>,
+        tool_calls: Option<Vec<TcDelta>>,
+    }
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct TcDelta { index: u32, id: Option<String>, function: Option<FuncDelta> }
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct FuncDelta { name: Option<String>, arguments: Option<String> }
+
+    let chunk: Chunk = serde_json::from_str(data).ok()?;
+
+    for choice in &chunk.choices {
+        // Tool calls take priority — GLM occasionally sends both content
+        // and tool_calls in the same chunk.  When that happens the content
+        // is usually a text representation of the tool call and must be
+        // ignored in favour of the structured tool_calls field.
+        if let Some(tcs) = &choice.delta.tool_calls {
+            *saw_tool_call = true;
+            if let Some(tc) = tcs.first() {
+                let id = tc.id.clone().unwrap_or_default();
+                let func = tc.function.as_ref();
+
+                if !id.is_empty() && func.is_some_and(|f| f.name.is_some()) {
+                    let initial_args = func.and_then(|f| f.arguments.clone()).unwrap_or_default();
+                    return Some(StreamEvent::ToolCallStart {
+                        id: id.clone(),
+                        name: func.and_then(|f| f.name.clone()).unwrap_or_default(),
+                        initial_arguments: initial_args,
+                    });
+                }
+
+                let args = func.and_then(|f| f.arguments.clone()).unwrap_or_default();
+                if !args.is_empty() {
+                    return Some(StreamEvent::ToolCallDelta { id, delta: args });
+                }
+            }
+        }
+
+        if let Some(text) = &choice.delta.content {
+            if !text.is_empty() { return Some(StreamEvent::Delta { text: text.clone() }); }
+        }
+        if let Some(reasoning) = &choice.delta.reasoning_content {
+            if !reasoning.is_empty() { return Some(StreamEvent::Thinking { text: reasoning.clone() }); }
+        }
+        if choice.finish_reason.is_some() {
+            let raw = choice.finish_reason.as_ref().unwrap();
+            let reason = match raw.as_str() {
+                "stop" if *saw_tool_call => StopReason::ToolUse,
+                "stop" => StopReason::EndTurn,
+                "tool_calls" => StopReason::ToolUse,
+                "length" => StopReason::MaxTokens,
+                "content_filter" | "sensitive" => StopReason::ContentFilter,
+                _ => StopReason::EndTurn,
+            };
+            return Some(StreamEvent::Done { reason });
+        }
+    }
+
+    None
+}
+
 // ── EmbeddingProvider ─────────────────────────────────────────────────────────
-//
-// GLM Embedding API (OpenAI-compatible):
-//   POST /v4/embeddings
-//   { "model": "embedding-3", "input": "text" | ["t1", "t2"], "dimensions": 2048 }
-//
-// Response:
-//   { "data": [{ "embedding": [0.1, ...], "index": 0, "object": "embedding" }],
-//     "usage": { "prompt_tokens": N, "total_tokens": N },
-//     "model": "embedding-3" }
 
 impl EmbeddingProvider for GlmProvider {
     fn embed(&self, req: EmbedRequest) -> anyhow::Result<EmbedResponse> {
@@ -152,11 +336,7 @@ impl EmbeddingProvider for GlmProvider {
         })?;
 
         #[derive(serde::Deserialize)]
-        struct Er {
-            data: Vec<Ed>,
-            usage: Option<Eu>,
-            model: String,
-        }
+        struct Er { data: Vec<Ed>, usage: Option<Eu>, model: String }
         #[derive(serde::Deserialize)]
         struct Ed { embedding: Vec<f32> }
         #[derive(serde::Deserialize)]
@@ -167,8 +347,6 @@ impl EmbeddingProvider for GlmProvider {
             prompt_tokens: u.prompt_tokens,
         });
 
-        // Flatten all embedding vectors. For single input, there's one vector.
-        // For batch input, concatenate (matching existing capability API).
         let embeddings: Vec<f32> = resp.data.into_iter().flat_map(|d| d.embedding).collect();
 
         Ok(EmbedResponse {
@@ -180,15 +358,6 @@ impl EmbeddingProvider for GlmProvider {
 }
 
 // ── SearchProvider ────────────────────────────────────────────────────────────
-//
-// GLM Web Search API:
-//   POST /v4/web_search
-//   { "search_query": "query", "search_engine": "search_std", "count": 10 }
-//
-// Response:
-//   { "search_result": [{ "title": "", "content": "", "link": "", "media": "",
-//                        "icon": "", "refer": "", "publish_date": "" }],
-//     "search_intent": [...], "id": "", "created": N, "request_id": "" }
 
 impl SearchProvider for GlmProvider {
     fn search(&self, req: SearchRequest) -> anyhow::Result<SearchResults> {
@@ -219,19 +388,14 @@ impl SearchProvider for GlmProvider {
         })?;
 
         #[derive(serde::Deserialize)]
-        struct SearchResp {
-            #[serde(default)]
-            search_result: Vec<Sr>,
-        }
+        struct SearchResp { #[serde(default)] search_result: Vec<Sr> }
         #[derive(serde::Deserialize)]
         struct Sr {
             title: String,
             content: String,
             link: String,
-            #[allow(dead_code)]
-            media: String,
-            #[serde(default)]
-            publish_date: Option<String>,
+            #[allow(dead_code)] media: String,
+            #[serde(default)] publish_date: Option<String>,
         }
 
         let resp: SearchResp = serde_json::from_str(&text)?;
