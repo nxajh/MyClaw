@@ -67,7 +67,7 @@ impl ChatProvider for FallbackChatProvider {
                     thinking: thinking.clone(),
                     stop: stop.clone(),
                     seed,
-                    tools: tools.as_ref().map(|t| t.as_slice()),
+                    tools: tools.as_deref(),
                     stream: stream_flag,
                 };
 
