@@ -811,9 +811,9 @@ mod tests {
     #[test]
     fn test_dedup() {
         let dedup = DedupState::new();
-        // HashSet::insert returns true when value was inserted (not a duplicate).
-        assert!(dedup.check_and_record("msg1"));   // new → inserted → true
-        assert!(!dedup.check_and_record("msg1")); // duplicate → not inserted → false
-        assert!(dedup.check_and_record("msg2"));  // new → inserted → true
+        // check_and_record returns true if already seen (should skip), false if new.
+        assert!(!dedup.check_and_record("msg1"));  // new → false (don't skip)
+        assert!(dedup.check_and_record("msg1"));   // duplicate → true (skip)
+        assert!(!dedup.check_and_record("msg2"));  // new → false (don't skip)
     }
 }
