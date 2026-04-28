@@ -283,7 +283,7 @@ models = ["minimax-m2.7"]
         let config = ConfigLoader::from_toml(toml_str).unwrap();
         assert!(config.providers.contains_key("minimax"));
         assert_eq!(config.routing.len(), 1);
-        assert!(config.routing.get(provider::Capability::Chat).is_some());
+        assert!(config.routing.get(capability::Capability::Chat).is_some());
     }
 
     #[test]
