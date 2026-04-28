@@ -1,8 +1,0 @@
-[package]
-name = "myclaw-session"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-chrono.workspace = true
-myclaw-capability = { path = "../capability" }
