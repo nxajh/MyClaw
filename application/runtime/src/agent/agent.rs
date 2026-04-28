@@ -186,177 +186,77 @@ impl AgentLoop {
             // 4. Call chat and process stream.
             let stream = provider.chat(req)?;
             tracing::info!("chat stream started, collecting...");
+
+            // Log raw request.
+            Self::log_chat_io("request", &model_id, &messages, &tools, None);
+
             let response = self.collect_stream(stream).await?;
             tracing::info!(text_len = response.text.len(), tool_calls = response.tool_calls.len(), stop = ?response.stop_reason, "chat stream collected");
 
-            // 5. No tool calls → check if the model emitted a tool call as plain text.
-            //    Some providers (GLM) occasionally skip the structured tool_calls field
-            //    and output the JSON directly in content.  Detect and recover.
-            if response.tool_calls.is_empty() {
-                if let Some(recovered) = self.try_recover_tool_calls(&response.text) {
-                    tracing::info!(
-                        recovered_calls = recovered.len(),
-                        "recovered tool calls from plain-text content"
-                    );
-                    // Replace response with recovered version.
-                    let response = CollectedResponse {
-                        text: String::new(),
-                        tool_calls: recovered,
-                        stop_reason: response.stop_reason,
-                    };
-                    // Fall through to tool execution below.
-                    self.handle_tool_calls(&response, &mut messages, &mut tool_calls_count).await?;
-                    continue; // Next loop iteration — send tool results back to model.
-                }
+            // Log raw response.
+            Self::log_chat_io("response", &model_id, &[], &[], Some(&response));
 
+            // 5. No tool calls → return text.
+            if response.tool_calls.is_empty() {
                 if response.text.is_empty() {
                     tracing::warn!("chat response text is empty");
                 }
                 return Ok(response.text);
             }
 
-            // 6. Structured tool calls present → execute them.
-            self.handle_tool_calls(&response, &mut messages, &mut tool_calls_count).await?;
-        }
-    }
+            // 6. Tool calls present → execute them and append results.
+            for call in &response.tool_calls {
+                tracing::info!(tool = %call.name, id = %call.id, arguments = %call.arguments, "model requested tool call");
+            }
 
-    /// Execute tool calls and append results to the message list.
-    async fn handle_tool_calls(
-        &mut self,
-        response: &CollectedResponse,
-        messages: &mut Vec<ChatMessage>,
-        tool_calls_count: &mut usize,
-    ) -> anyhow::Result<()> {
-        for call in &response.tool_calls {
-            tracing::info!(tool = %call.name, id = %call.id, arguments = %call.arguments, "model requested tool call");
-        }
+            // Build the assistant's tool_calls message to append to conversation.
+            let assistant_tool_calls: Vec<serde_json::Value> = response.tool_calls.iter().map(|call| {
+                serde_json::json!({
+                    "id": call.id,
+                    "type": "function",
+                    "function": {
+                        "name": call.name,
+                        "arguments": call.arguments,
+                    }
+                })
+            }).collect();
+            let mut assistant_msg = ChatMessage::assistant_text(&response.text);
+            assistant_msg.tool_calls = Some(assistant_tool_calls);
+            messages.push(assistant_msg);
 
-        // Build the assistant's tool_calls message to append to conversation.
-        let assistant_tool_calls: Vec<serde_json::Value> = response.tool_calls.iter().map(|call| {
-            serde_json::json!({
-                "id": call.id,
-                "type": "function",
-                "function": {
-                    "name": call.name,
-                    "arguments": call.arguments,
+            for call in &response.tool_calls {
+                tool_calls_count += 1;
+
+                // Hard limit check.
+                if self.config.max_tool_calls > 0
+                    && tool_calls_count > self.config.max_tool_calls
+                {
+                    anyhow::bail!(
+                        "Tool call limit reached ({}), loop broken",
+                        self.config.max_tool_calls
+                    );
                 }
-            })
-        }).collect();
-        let mut assistant_msg = ChatMessage::assistant_text(&response.text);
-        assistant_msg.tool_calls = Some(assistant_tool_calls);
-        messages.push(assistant_msg);
 
-        for call in &response.tool_calls {
-            *tool_calls_count += 1;
+                let result = self.execute_tool(call).await;
+                let result_content = match &result {
+                    Ok(r) => r.output.clone(),
+                    Err(e) => format!("error: {}", e),
+                };
 
-            // Hard limit check.
-            if self.config.max_tool_calls > 0
-                && *tool_calls_count > self.config.max_tool_calls
-            {
-                anyhow::bail!(
-                    "Tool call limit reached ({}), loop broken",
-                    self.config.max_tool_calls
-                );
-            }
+                tracing::info!(tool = %call.name, success = result.is_ok(), "tool result:\n{}", result_content);
 
-            let result = self.execute_tool(call).await;
-            let result_content = match &result {
-                Ok(r) => r.output.clone(),
-                Err(e) => format!("error: {}", e),
-            };
+                // Append tool result with tool_call_id.
+                let mut tool_msg = ChatMessage::text("tool", &result_content);
+                tool_msg.tool_call_id = Some(call.id.clone());
+                messages.push(tool_msg);
 
-            tracing::info!(tool = %call.name, success = result.is_ok(), "tool result:\n{}", result_content);
-
-            // Append tool result with tool_call_id.
-            let mut tool_msg = ChatMessage::text("tool", &result_content);
-            tool_msg.tool_call_id = Some(call.id.clone());
-            messages.push(tool_msg);
-
-            // Append to session history.
-            self.session
-                .add_assistant_text(serde_json::to_string(&call).unwrap_or_default());
-            self.session
-                .add_assistant_text(result_content);
-        }
-
-        Ok(())
-    }
-
-    /// Try to recover tool calls from plain-text content.
-    ///
-    /// When a model outputs a tool call as plain JSON text instead of using the
-    /// structured `tool_calls` SSE field, the text looks like:
-    ///
-    /// ```json
-    /// {"name": "web_search", "arguments": {"query": "..."}}
-    /// ```
-    ///
-    /// or possibly wrapped in a markdown code block.  This method attempts to
-    /// detect and parse such patterns into proper `ToolCall` structs.
-    fn try_recover_tool_calls(&self, text: &str) -> Option<Vec<ToolCall>> {
-        let text = text.trim();
-
-        // Skip short text — tool call JSON is always substantial.
-        if text.len() < 10 {
-            return None;
-        }
-
-        // Strip markdown code fence if present (```json ... ```).
-        let json_str = if text.starts_with("```") {
-            let inner = text.trim_start_matches('`');
-            let inner = inner.trim_start_matches("json").trim();
-            inner.trim_end_matches('`').trim()
-        } else {
-            text
-        };
-
-        // The text must be *predominantly* a JSON tool call.
-        // We only accept it when the entire text (after stripping fences)
-        // is a valid JSON object/array.  We deliberately do NOT try to
-        // extract embedded JSON from prose — that causes false positives
-        // when the model says things like:
-        //   "I can call {\"name\": \"web_search\", ...} to look that up."
-        let val = serde_json::from_str::<serde_json::Value>(json_str).ok()?;
-
-        let tool_names: Vec<String> = self.skills.all_tools()
-            .iter()
-            .map(|t| t.name().to_string())
-            .collect();
-
-        let try_parse_one = |obj: &serde_json::Value| -> Option<ToolCall> {
-            let name = obj.get("name")?.as_str()?;
-            if !tool_names.iter().any(|n| n == name) {
-                return None; // Not a known tool.
-            }
-            let arguments = obj.get("arguments")
-                .and_then(|a| serde_json::to_string(a).ok())
-                .unwrap_or_default();
-            Some(ToolCall {
-                id: format!("recovered_{:08x}", std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.subsec_nanos())
-                    .unwrap_or(0)),
-                name: name.to_string(),
-                arguments,
-            })
-        };
-
-        // Single object: {"name": "...", "arguments": {...}}
-        if let Some(tc) = try_parse_one(&val) {
-            return Some(vec![tc]);
-        }
-
-        // Array of objects: [{"name": ...}, {"name": ...}]
-        if let Some(arr) = val.as_array() {
-            let calls: Vec<ToolCall> = arr.iter()
-                .filter_map(try_parse_one)
-                .collect();
-            if !calls.is_empty() {
-                return Some(calls);
+                // Append to session history.
+                self.session
+                    .add_assistant_text(serde_json::to_string(&call).unwrap_or_default());
+                self.session
+                    .add_assistant_text(result_content);
             }
         }
-
-        None
     }
 
     /// Collect all events from a streaming chat response.
@@ -461,6 +361,71 @@ impl AgentLoop {
         };
 
         tool.execute(args).await
+    }
+
+    /// Append raw chat I/O to a debug log file for post-mortem analysis.
+    ///
+    /// Each entry is a JSON line with timestamp, direction, model, and payload.
+    /// The log file is `chat_debug.jsonl` in the current working directory.
+    /// Writes are best-effort — errors are silently ignored.
+    fn log_chat_io(
+        direction: &str,
+        model_id: &str,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        response: Option<&CollectedResponse>,
+    ) {
+        use std::io::Write;
+
+        let entry = if direction == "request" {
+            serde_json::json!({
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "dir": "request",
+                "model": model_id,
+                "messages": messages.iter().map(|m| {
+                    let mut obj = serde_json::json!({
+                        "role": m.role,
+                        "content": m.text_content(),
+                    });
+                    if let Some(tcs) = &m.tool_calls {
+                        obj["tool_calls"] = serde_json::json!(tcs);
+                    }
+                    if let Some(tc_id) = &m.tool_call_id {
+                        obj["tool_call_id"] = serde_json::json!(tc_id);
+                    }
+                    obj
+                }).collect::<Vec<_>>(),
+                "tools": tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
+            })
+        } else {
+            let resp = response.unwrap();
+            serde_json::json!({
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "dir": "response",
+                "model": model_id,
+                "text": resp.text,
+                "text_len": resp.text.len(),
+                "tool_calls": resp.tool_calls.iter().map(|tc| {
+                    serde_json::json!({
+                        "id": tc.id,
+                        "name": tc.name,
+                        "arguments": tc.arguments,
+                    })
+                }).collect::<Vec<_>>(),
+                "tool_calls_count": resp.tool_calls.len(),
+                "stop_reason": format!("{:?}", resp.stop_reason),
+            })
+        };
+
+        // Best-effort write; don't propagate errors.
+        let path = "chat_debug.jsonl";
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(f, "{}", entry);
+        }
     }
 }
 
