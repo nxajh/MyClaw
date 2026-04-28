@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [master]
+    branches: [master, refactor/*]
   pull_request:
   workflow_dispatch:
 
@@ -24,9 +24,6 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Ensure clippy
-        run: rustup component add clippy
-
       - name: Cache
         uses: actions/cache@v4
         with:
@@ -34,16 +31,23 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ hashFiles('**/Cargo.toml') }}
+          key: cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Check
-        run: cargo check --workspace
-
-      - name: Build
-        run: cargo build --workspace
+        run: cargo check
 
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy -- -D warnings
 
       - name: Test
         run: cargo test
+
+      - name: Build Release
+        run: cargo build --release
+
+      - name: Upload Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: myclaw-linux-x86_64
+          path: target/release/myclaw
+          retention-days: 7
