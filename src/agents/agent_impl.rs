@@ -336,10 +336,10 @@ impl AgentLoop {
                 StreamEvent::Delta { text: delta } => text.push_str(&delta),
                 StreamEvent::Thinking { text: delta } => {
                     if !delta.is_empty() {
-                        if reasoning_content.is_none() {
-                            reasoning_content = Some(delta);
+                        if let Some(rc) = &mut reasoning_content {
+                            rc.push_str(&delta);
                         } else {
-                            reasoning_content.as_mut().unwrap().push_str(&delta);
+                            reasoning_content = Some(delta);
                         }
                     }
                 }
