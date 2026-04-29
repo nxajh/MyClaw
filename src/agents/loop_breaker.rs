@@ -255,20 +255,39 @@ impl LoopBreaker {
 /// Simple deterministic hash for detecting identical content.
 /// Uses a basic FNV-like approach (no need for cryptographic strength).
 fn simple_hash(s: &str) -> u64 {
-    // Truncate at a valid UTF-8 character boundary, not a raw byte offset.
-    // Chinese/multi-byte chars can span byte positions 255-257, so slicing
-    // at raw byte 256 would panic with "byte index N is not a char boundary".
-    let truncated = if s.len() > 256 {
-        let mut end = 256;
+    // Combine hashes of first 128 bytes and last 128 bytes to detect loops
+    // that produce similar beginnings but different endings. Truncate each
+    // end at a valid UTF-8 character boundary.
+    fn head128(s: &str) -> &str {
+        if s.len() <= 128 {
+            return s;
+        }
+        let mut end = 128;
         while !s.is_char_boundary(end) && end > 0 {
             end -= 1;
         }
         &s[..end]
-    } else {
-        s
-    };
+    }
+    fn tail128(s: &str) -> &str {
+        if s.len() <= 128 {
+            return s;
+        }
+        let mut start = s.len() - 128;
+        while !s.is_char_boundary(start) {
+            start += 1;
+        }
+        &s[start..]
+    }
+
+    let head = head128(s);
+    let tail = tail128(s);
+
     let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in truncated.bytes() {
+    for byte in head.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    for byte in tail.bytes() {
         hash ^= byte as u64;
         hash = hash.wrapping_mul(0x100000001b3);
     }
