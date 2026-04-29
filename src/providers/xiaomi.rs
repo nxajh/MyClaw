@@ -191,19 +191,17 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
             // For tool-result messages: use {"type":"tool_result","tool_use_id":"...","content":"..."}
             // For assistant messages with tool_calls: append tool_use blocks to content array.
             let has_tool_result = msg.tool_call_id.is_some();
-            let (parts_json, tool_use_blocks): (Vec<serde_json::Value>, Option<Vec<serde_json::Value>>) =
-                if has_tool_result {
+            let parts_json: Vec<serde_json::Value> = if has_tool_result {
                     // Tool-result: single tool_result block.
                     let content = msg.parts.iter().map(|p| match p {
                         crate::providers::ContentPart::Text { text } => text.clone(),
                         _ => String::new(),
                     }).collect::<String>();
-                    let tb = serde_json::json!({
+                    vec![serde_json::json!({
                         "type": "tool_result",
                         "tool_use_id": msg.tool_call_id.as_ref().unwrap(),
                         "content": content,
-                    });
-                    (vec![tb], None)
+                    })]
                 } else {
                     // Regular parts.
                     let mut parts: Vec<serde_json::Value> = msg.parts.iter().map(|part| match part {
@@ -224,7 +222,7 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                     }).collect();
 
                     // For assistant messages: also build tool_use blocks and append to content.
-                    let tool_use_blocks = if msg.role == "assistant" && msg.tool_calls.is_some() {
+                    if msg.role == "assistant" && msg.tool_calls.is_some() {
                         let blocks: Vec<serde_json::Value> = msg.tool_calls.as_ref().unwrap().iter().map(|tc| {
                             let input = serde_json::from_str::<serde_json::Value>(&tc.arguments)
                                 .unwrap_or(serde_json::Value::String(tc.arguments.clone()));
@@ -235,47 +233,43 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                                 "input": input,
                             })
                         }).collect();
-                        parts.extend(blocks.clone());
-                        Some(blocks)
-                    } else {
-                        None
-                    };
-                    (parts, tool_use_blocks)
+                        parts.extend(blocks);
+                    }
+                    parts
                 };
 
             // Check if content has any non-empty blocks.
-            let has_non_empty_part = parts_json.iter().any(|p| {
-                let ptype = p.get("type").and_then(|v| v.as_str());
-                ptype == Some("tool_use")
-                || ptype == Some("tool_result")
-                || (ptype == Some("text") && !p.get("text").and_then(|v| v.as_str()).is_none_or(|t| t.is_empty()))
-                || (ptype == Some("thinking") && !p.get("thinking").and_then(|v| v.as_str()).is_none_or(|t| t.is_empty()))
-            });
+            fn is_non_empty_block(p: &serde_json::Value) -> bool {
+                match p.get("type").and_then(|v| v.as_str()) {
+                    Some("tool_use") => {
+                        // tool_use must have a non-empty id and input
+                        let id_empty = p.get("id").and_then(|v| v.as_str()).is_none_or(|s| s.is_empty());
+                        let input_empty = p.get("input").map(|v| v.is_null() || v.as_str().is_some_and(|s| s.is_empty())).unwrap_or(false);
+                        !(id_empty || input_empty)
+                    }
+                    Some("tool_result") => {
+                        !p.get("content").and_then(|v| v.as_str()).is_none_or(|s| s.is_empty())
+                    }
+                    Some("text") => !p.get("text").and_then(|v| v.as_str()).is_none_or(|t| t.is_empty()),
+                    Some("thinking") => !p.get("thinking").and_then(|v| v.as_str()).is_none_or(|t| t.is_empty()),
+                    Some("image") => true,
+                    _ => true,
+                }
+            }
+            let non_empty_parts: Vec<serde_json::Value> = parts_json.into_iter().filter(is_non_empty_block).collect();
+            let has_non_empty_part = !non_empty_parts.is_empty();
 
             let final_content = if !has_non_empty_part {
                 serde_json::Value::Null
             } else {
-                serde_json::json!(parts_json)
+                serde_json::json!(non_empty_parts)
             };
 
-            // Build the message object. top-level tool_calls only when there is
-            // text/thinking alongside tool_use blocks (not when content is only tool_use).
+            // Build the message object. No top-level tool_calls — Xiaomi puts
+            // tool_call info only in content blocks.
             let mut msg_json = serde_json::Map::new();
             msg_json.insert("role".to_string(), serde_json::json!(role));
-            msg_json.insert("content".to_string(), final_content.clone());
-            if let Some(ref te) = tool_use_blocks {
-                if final_content.is_array() {
-                    let tc_json: Vec<serde_json::Value> = te.iter().map(|tb| {
-                        serde_json::json!({
-                            "id": tb.get("id").unwrap_or(&serde_json::Value::Null),
-                            "type": "tool",
-                            "name": tb.get("name").unwrap_or(&serde_json::Value::Null),
-                            "input": tb.get("input").unwrap_or(&serde_json::Value::Null),
-                        })
-                    }).collect();
-                    msg_json.insert("tool_calls".to_string(), serde_json::json!(tc_json));
-                }
-            }
+            msg_json.insert("content".to_string(), final_content);
             serde_json::json!(msg_json)
         })
         .collect();
