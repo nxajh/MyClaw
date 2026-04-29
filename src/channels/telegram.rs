@@ -39,6 +39,277 @@ const BOT_BIND_COMMAND: &str = "/bind";
 const MAX_MESSAGE_LENGTH: usize = 4096;
 const CONTINUATION_OVERHEAD: usize = 30;
 
+// ── Markdown → Telegram HTML conversion ──────────────────────────────────────
+
+/// Escape HTML special characters for Telegram's HTML parse mode.
+fn escape_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Convert LLM Markdown output to Telegram-supported HTML.
+///
+/// Supports: bold, italic, strikethrough, inline code, code blocks (with optional language),
+/// headings, links, blockquotes, and horizontal rules.
+///
+/// Formatting inside code blocks and inline code is preserved as-is (no nested parsing).
+pub fn markdown_to_telegram_html(markdown: &str) -> String {
+    let mut out = String::with_capacity(markdown.len() * 2);
+
+    // Tracks which inline formatting tags are currently open.
+    let mut bold = false;
+    let mut italic = false;
+    let mut strike = false;
+
+    let chars: Vec<char> = markdown.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        // ── Fenced code block (```) ─────────────────────────────────────
+        if i + 2 < len && chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
+            // Collect the optional language identifier (e.g. "rust", "python").
+            let mut lang = String::new();
+            let mut j = i + 3;
+            while j < len && chars[j] != '\n' {
+                lang.push(chars[j]);
+                j += 1;
+            }
+            // Skip the newline after the opening fence.
+            if j < len && chars[j] == '\n' {
+                j += 1;
+            }
+            // Find the closing fence.
+            let start = j;
+            while j < len {
+                if j + 2 < len && chars[j] == '`' && chars[j + 1] == '`' && chars[j + 2] == '`' {
+                    break;
+                }
+                j += 1;
+            }
+            let code: String = chars[start..j].iter().collect();
+            let escaped = escape_html(&code);
+            let trimmed_lang = lang.trim();
+            if trimmed_lang.is_empty() {
+                out.push_str(&format!("<pre>{}</pre>", escaped));
+            } else {
+                out.push_str(&format!(
+                    "<pre><code class=\"language-{}\">{}</code></pre>",
+                    trimmed_lang, escaped
+                ));
+            }
+            // Advance past the closing fence.
+            i = if j + 3 <= len { j + 3 } else { len };
+            continue;
+        }
+
+        // ── Inline code (`) ─────────────────────────────────────────────
+        if chars[i] == '`' {
+            let end = chars[i + 1..]
+                .iter()
+                .position(|&c| c == '`')
+                .map(|p| i + 1 + p);
+            if let Some(e) = end {
+                let code: String = chars[i + 1..e].iter().collect();
+                out.push_str(&format!("<code>{}</code>", escape_html(&code)));
+                i = e + 1;
+                continue;
+            }
+            // No closing backtick — treat as literal.
+            out.push('`');
+            i += 1;
+            continue;
+        }
+
+        // ── Headings (# …) → bold ───────────────────────────────────────
+        if chars[i] == '#' {
+            let mut level = 0;
+            let mut j = i;
+            while j < len && chars[j] == '#' {
+                level += 1;
+                j += 1;
+            }
+            // Must have a space after the hashes, and be at line start.
+            if j < len && chars[j] == ' ' && (i == 0 || chars[i - 1] == '\n') {
+                // Skip leading space.
+                j += 1;
+                let line_start = j;
+                while j < len && chars[j] != '\n' {
+                    j += 1;
+                }
+                let heading_text: String = chars[line_start..j].iter().collect();
+                out.push_str(&format!("<b>{}</b>", escape_html(&heading_text.trim())));
+                if j < len {
+                    out.push('\n');
+                    j += 1;
+                }
+                i = j;
+                continue;
+            }
+        }
+
+        // ── Blockquote (> …) ────────────────────────────────────────────
+        if chars[i] == '>' && (i == 0 || chars[i - 1] == '\n') {
+            let mut j = i + 1;
+            if j < len && chars[j] == ' ' {
+                j += 1;
+            }
+            let line_start = j;
+            while j < len && chars[j] != '\n' {
+                j += 1;
+            }
+            let quote_text: String = chars[line_start..j].iter().collect();
+            out.push_str(&format!("❝ {}", escape_html(&quote_text)));
+            if j < len {
+                out.push('\n');
+                j += 1;
+            }
+            i = j;
+            continue;
+        }
+
+        // ── Horizontal rule (---, ***, ___) → ───────────────────────────
+        if (chars[i] == '-' || chars[i] == '*' || chars[i] == '_')
+            && (i == 0 || chars[i - 1] == '\n')
+        {
+            let c = chars[i];
+            let mut j = i;
+            while j < len && chars[j] == c {
+                j += 1;
+            }
+            // Must be at least 3 repeats, followed by newline or EOF, with only whitespace.
+            if j - i >= 3 {
+                let rest: String = chars[i..j].iter().collect();
+                if rest.chars().all(|ch| ch == c || ch == ' ' || ch == '\t')
+                    && (j >= len || chars[j] == '\n')
+                {
+                    out.push_str("───");
+                    if j < len {
+                        out.push('\n');
+                        j += 1;
+                    }
+                    i = j;
+                    continue;
+                }
+            }
+        }
+
+        // ── Links [text](url) ───────────────────────────────────────────
+        if chars[i] == '[' {
+            if let Some(bracket_end) = chars[i + 1..].iter().position(|&c| c == ']') {
+                let real_bracket = i + 1 + bracket_end;
+                if real_bracket + 1 < len && chars[real_bracket + 1] == '(' {
+                    if let Some(paren_end) = chars[real_bracket + 2..]
+                        .iter()
+                        .position(|&c| c == ')')
+                    {
+                        let real_paren = real_bracket + 2 + paren_end;
+                        let link_text: String = chars[i + 1..real_bracket].iter().collect();
+                        let link_url: String =
+                            chars[real_bracket + 2..real_paren].iter().collect();
+                        out.push_str(&format!(
+                            "<a href=\"{}\">{}</a>",
+                            escape_html(&link_url),
+                            escape_html(&link_text)
+                        ));
+                        i = real_paren + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // ── Strikethrough (~~) ──────────────────────────────────────────
+        if i + 1 < len && chars[i] == '~' && chars[i + 1] == '~' {
+            if strike {
+                out.push_str("</s>");
+                strike = false;
+            } else {
+                out.push_str("<s>");
+                strike = true;
+            }
+            i += 2;
+            continue;
+        }
+
+        // ── Bold (**) ───────────────────────────────────────────────────
+        if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
+            if bold {
+                out.push_str("</b>");
+                bold = false;
+            } else {
+                out.push_str("<b>");
+                bold = true;
+            }
+            i += 2;
+            continue;
+        }
+
+        // ── Italic (* or _) ─────────────────────────────────────────────
+        // Must be preceded by whitespace/start and followed by non-whitespace,
+        // or preceded by non-whitespace and followed by whitespace/end.
+        if (chars[i] == '*' || chars[i] == '_') && !bold {
+            let m = chars[i];
+            let prev_ok = i == 0
+                || chars[i - 1].is_whitespace()
+                || chars[i - 1].is_ascii_punctuation();
+            let next_ok = i + 1 < len && !chars[i + 1].is_whitespace();
+
+            if italic {
+                // Closing: must be preceded by non-whitespace.
+                let prev_non_ws = i > 0 && !chars[i - 1].is_whitespace();
+                if prev_non_ws {
+                    out.push_str("</i>");
+                    italic = false;
+                    i += 1;
+                    continue;
+                }
+            } else if prev_ok && next_ok {
+                if m == '_' {
+                    out.push_str("<i>");
+                } else {
+                    out.push_str("<i>");
+                }
+                italic = true;
+                i += 1;
+                continue;
+            }
+        }
+
+        // ── Plain text (escape HTML) ────────────────────────────────────
+        match chars[i] {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            c => out.push(c),
+        }
+        i += 1;
+    }
+
+    // Close any tags still open at the end.
+    if strike {
+        out.push_str("</s>");
+    }
+    if italic {
+        out.push_str("</i>");
+    }
+    if bold {
+        out.push_str("</b>");
+    }
+
+    out
+}
+
 // ── Telegram types ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize)]
@@ -344,11 +615,14 @@ impl TelegramChannel {
         thread_id: Option<&str>,
     ) -> anyhow::Result<()> {
         let client = self.http_client();
+        let html_text = markdown_to_telegram_html(text);
+
+        // Try sending with HTML parse_mode first.
         let req = SendMessageRequest {
             chat_id: chat_id.to_string(),
             message_thread_id: thread_id.map(String::from),
-            text: text.to_string(),
-            parse_mode: None,
+            text: html_text.clone(),
+            parse_mode: Some("HTML".to_string()),
         };
         let resp = client
             .post(self.api_url("sendMessage"))
@@ -356,9 +630,33 @@ impl TelegramChannel {
             .send()
             .await?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+        if resp.status().is_success() {
+            return Ok(());
+        }
+
+        // HTML parse failed (likely malformed tags) — fall back to plain text.
+        let html_status = resp.status();
+        let html_body = resp.text().await.unwrap_or_default();
+        warn!(
+            "sendMessage with HTML parse_mode failed (status={html_status}, body={html_body}), \
+             falling back to plain text"
+        );
+
+        let fallback_req = SendMessageRequest {
+            chat_id: chat_id.to_string(),
+            message_thread_id: thread_id.map(String::from),
+            text: text.to_string(),
+            parse_mode: None,
+        };
+        let fallback_resp = client
+            .post(self.api_url("sendMessage"))
+            .json(&fallback_req)
+            .send()
+            .await?;
+
+        if !fallback_resp.status().is_success() {
+            let status = fallback_resp.status();
+            let body = fallback_resp.text().await.unwrap_or_default();
             anyhow::bail!("sendMessage failed: status={status}, body={body}");
         }
         Ok(())
@@ -761,5 +1059,177 @@ mod tests {
         let chunks = crate::channels::message::split_message_chunk(&long, 100);
         assert!(chunks.len() > 1);
         assert!(chunks.iter().all(|c| c.len() <= 100));
+    }
+
+    // ── Markdown → Telegram HTML tests ──────────────────────────────────────
+
+    #[test]
+    fn test_md_bold() {
+        assert_eq!(
+            markdown_to_telegram_html("this is **bold** text"),
+            "this is <b>bold</b> text"
+        );
+    }
+
+    #[test]
+    fn test_md_italic_asterisk() {
+        assert_eq!(
+            markdown_to_telegram_html("this is *italic* text"),
+            "this is <i>italic</i> text"
+        );
+    }
+
+    #[test]
+    fn test_md_italic_underscore() {
+        assert_eq!(
+            markdown_to_telegram_html("this is _italic_ text"),
+            "this is <i>italic</i> text"
+        );
+    }
+
+    #[test]
+    fn test_md_strikethrough() {
+        assert_eq!(
+            markdown_to_telegram_html("this is ~~deleted~~ text"),
+            "this is <s>deleted</s> text"
+        );
+    }
+
+    #[test]
+    fn test_md_inline_code() {
+        assert_eq!(
+            markdown_to_telegram_html("use `println!()` for output"),
+            "use <code>println!()</code> for output"
+        );
+    }
+
+    #[test]
+    fn test_md_code_block_plain() {
+        let input = "```\nfn main() {\n    println!(\"hi\");\n}\n```";
+        assert_eq!(
+            markdown_to_telegram_html(input),
+            "<pre>fn main() {\n    println!(&quot;hi&quot;);\n}</pre>"
+        );
+    }
+
+    #[test]
+    fn test_md_code_block_with_lang() {
+        let input = "```rust\nfn main() {}\n```";
+        assert_eq!(
+            markdown_to_telegram_html(input),
+            "<pre><code class=\"language-rust\">fn main() {}</code></pre>"
+        );
+    }
+
+    #[test]
+    fn test_md_link() {
+        assert_eq!(
+            markdown_to_telegram_html("[Rust](https://rust-lang.org)"),
+            "<a href=\"https://rust-lang.org\">Rust</a>"
+        );
+    }
+
+    #[test]
+    fn test_md_heading() {
+        assert_eq!(
+            markdown_to_telegram_html("# Hello World\nSome text"),
+            "<b>Hello World</b>\nSome text"
+        );
+    }
+
+    #[test]
+    fn test_md_blockquote() {
+        assert_eq!(
+            markdown_to_telegram_html("> important note"),
+            "❝ important note"
+        );
+    }
+
+    #[test]
+    fn test_md_horizontal_rule() {
+        assert_eq!(markdown_to_telegram_html("---"), "───");
+        assert_eq!(markdown_to_telegram_html("***"), "───");
+    }
+
+    #[test]
+    fn test_md_html_escape_in_plain_text() {
+        assert_eq!(
+            markdown_to_telegram_html("a < b & c > d"),
+            "a &lt; b &amp; c &gt; d"
+        );
+    }
+
+    #[test]
+    fn test_md_no_formatting() {
+        let input = "just plain text, no markup";
+        assert_eq!(markdown_to_telegram_html(input), input);
+    }
+
+    #[test]
+    fn test_md_mixed_formatting() {
+        let input = "**bold** and *italic* and `code`";
+        assert_eq!(
+            markdown_to_telegram_html(input),
+            "<b>bold</b> and <i>italic</i> and <code>code</code>"
+        );
+    }
+
+    #[test]
+    fn test_md_formatting_not_inside_code_block() {
+        let input = "```text\n**not bold** and *not italic*\n```";
+        assert_eq!(
+            markdown_to_telegram_html(input),
+            "<pre>**not bold** and *not italic*</pre>"
+        );
+    }
+
+    #[test]
+    fn test_md_formatting_not_inside_inline_code() {
+        assert_eq!(
+            markdown_to_telegram_html("`**not bold**`"),
+            "<code>**not bold**</code>"
+        );
+    }
+
+    #[test]
+    fn test_md_unclosed_bold_closed_at_end() {
+        assert_eq!(
+            markdown_to_telegram_html("start **never closed"),
+            "start <b>never closed</b>"
+        );
+    }
+
+    #[test]
+    fn test_md_multiline_heading() {
+        let input = "# First\n## Second\n### Third";
+        assert_eq!(
+            markdown_to_telegram_html(input),
+            "<b>First</b>\n<b>Second</b>\n<b>Third</b>"
+        );
+    }
+
+    #[test]
+    fn test_md_complex_message() {
+        let input = "\
+**Summary**
+
+Here is some `inline code` and a [link](https://example.com).
+
+```python
+print('hello')
+```
+
+> A blockquote";
+
+        let expected = "\
+<b>Summary</b>
+
+Here is some <code>inline code</code> and a <a href=\"https://example.com\">link</a>.
+
+<pre><code class=\"language-python\">print('hello')</code></pre>
+
+❝ A blockquote";
+
+        assert_eq!(markdown_to_telegram_html(input), expected);
     }
 }

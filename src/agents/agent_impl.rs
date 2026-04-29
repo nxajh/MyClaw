@@ -299,7 +299,15 @@ impl AgentLoop {
 
                 let result = self.execute_tool(call).await;
                 let result_content = match &result {
-                    Ok(r) => r.output.clone(),
+                    Ok(r) => {
+                        let mut out = r.output.clone();
+                        if let Some(ref err) = r.error {
+                            if out.is_empty() {
+                                out = format!("error: {}", err);
+                            }
+                        }
+                        out
+                    }
                     Err(e) => format!("error: {}", e),
                 };
 
