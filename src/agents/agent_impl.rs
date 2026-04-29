@@ -30,6 +30,7 @@ pub type AskUserHandler = Arc<
         + Sync,
 >;
 
+use super::loop_breaker::{LoopBreak, LoopBreaker, LoopBreakerConfig};
 use super::session_manager::Session;
 use super::skills::SkillsManager;
 use crate::agents::prompt::{SystemPromptBuilder, SystemPromptConfig};
@@ -105,6 +106,10 @@ impl Agent {
             session,
             system_prompt: prompt,
             ask_user_handler: None,
+            loop_breaker: LoopBreaker::new(LoopBreakerConfig {
+                max_tool_calls: self.config.max_tool_calls,
+                ..LoopBreakerConfig::default()
+            }),
         }
     }
 }
@@ -119,6 +124,8 @@ pub struct AgentLoop {
     system_prompt: String,
     /// Optional callback for ask_user tool.
     ask_user_handler: Option<AskUserHandler>,
+    /// Loop breaker — detects repetitive tool-call patterns.
+    loop_breaker: LoopBreaker,
 }
 
 impl AgentLoop {
@@ -133,6 +140,9 @@ impl AgentLoop {
     /// This is the main entry point called by the orchestrator.
     pub async fn run(&mut self, user_message: &str) -> anyhow::Result<String> {
         tracing::info!(user_input = %user_message, "user message received");
+
+        // Reset loop breaker for new turn.
+        self.loop_breaker.reset();
 
         // 1. Add user message to session.
         self.session.add_user_text(user_message.to_string());
@@ -258,6 +268,15 @@ impl AgentLoop {
                 };
 
                 tracing::info!(tool = %call.name, success = result.is_ok(), "tool result:\n{}", result_content);
+
+                // Loop breaker check.
+                match self.loop_breaker.record_and_check(&call.name, &call.arguments, &result_content) {
+                    LoopBreak::Detected(reason) => {
+                        tracing::warn!(reason = ?reason, "loop breaker triggered, aborting turn");
+                        anyhow::bail!("Loop breaker triggered: {:?}", reason);
+                    }
+                    LoopBreak::None => {}
+                }
 
                 // Append tool result with tool_call_id.
                 let mut tool_msg = ChatMessage::text("tool", &result_content);

@@ -1,6 +1,7 @@
 //! agents — Agent loop, session management, and prompt construction.
 
 mod agent_impl;
+mod loop_breaker;
 mod orchestrator;
 mod prompt;
 mod session_manager;
@@ -9,6 +10,7 @@ mod mcp_manager;
 mod sub_agent;
 
 pub use agent_impl::{Agent, AgentConfig, AgentLoop, AskUserHandler};
+pub use loop_breaker::{LoopBreak, LoopBreakReason, LoopBreaker, LoopBreakerConfig};
 pub use session_manager::{InMemoryBackend, Session};
 pub use orchestrator::{Orchestrator, OrchestratorParts};
 pub use prompt::{AutonomyLevel, SkillsPromptInjectionMode, SystemPromptBuilder, SystemPromptConfig};
