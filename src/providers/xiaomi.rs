@@ -250,15 +250,15 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                 };
 
             let role = if msg.role == "assistant" { "assistant" } else { "user" };
-            // Filter out empty text blocks — some models (e.g. MiMo) emit
-            // tool_calls without any text, which produces a content array
-            // like [{"type":"text","text":""}].  Xiaomi/Anthropic APIs reject
-            // that as "must provide content, reasoning_content or tool_calls".
-            // Note: thinking blocks are NOT text blocks and are always non-empty
-            // by construction, so they don't need filtering here.
+            // Filter out empty text and empty thinking blocks.
+            // Anthropic/Xiaomi: "assistant must provide content, reasoning_content
+            // or tool_calls" — if content is only empty blocks and tool_calls
+            // exist, use null instead.
             let has_non_empty_part = parts_json.iter().any(|p| {
                 !(p.get("type").and_then(|v| v.as_str()) == Some("text")
                     && p.get("text").and_then(|v| v.as_str()).is_none_or(|t| t.is_empty()))
+                && !(p.get("type").and_then(|v| v.as_str()) == Some("thinking")
+                    && p.get("thinking").and_then(|v| v.as_str()).is_none_or(|t| t.is_empty()))
             });
             let final_content = if !has_non_empty_part && tool_calls.is_some() {
                 serde_json::Value::Null
@@ -266,11 +266,16 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                 content_json
             };
 
-            serde_json::json!({
-                "role": role,
-                "content": final_content,
-                "tool_calls": tool_calls,
-            })
+            // Build the message object. tool_calls is only included when present
+            // (completely omitted, not null) — Xiaomi rejects "tool_calls": null on
+            // user/tool messages and requires it omitted on those roles.
+            let mut msg_json = serde_json::Map::new();
+            msg_json.insert("role".to_string(), serde_json::json!(role));
+            msg_json.insert("content".to_string(), final_content);
+            if let Some(tcs) = tool_calls {
+                msg_json.insert("tool_calls".to_string(), serde_json::json!(tcs));
+            }
+            serde_json::json!(msg_json)
         })
         .collect();
 
