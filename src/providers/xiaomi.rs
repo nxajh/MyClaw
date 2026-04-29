@@ -185,95 +185,96 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
         .iter()
         .filter(|m| m.role != "system")
         .map(|msg| {
-            // Build content array from parts.
-            // tool_call_id presence signals a tool-result message — those use
-            // a special "tool_result" content block per Anthropic/Xiaomi protocol.
+            let role = if msg.role == "assistant" { "assistant" } else { "user" };
+
+            // Build content array from parts (text, image, thinking).
+            // For tool-result messages: use {"type":"tool_result","tool_use_id":"...","content":"..."}
+            // For assistant messages with tool_calls: append tool_use blocks to content array.
             let has_tool_result = msg.tool_call_id.is_some();
-            let parts_json: Vec<serde_json::Value> = if has_tool_result {
-                vec![serde_json::json!({
-                    "type": "tool_result",
-                    "tool_use_id": msg.tool_call_id.as_ref().unwrap(),
-                    "content": msg.parts.iter().map(|p| match p {
+            let (parts_json, tool_use_blocks): (Vec<serde_json::Value>, Option<Vec<serde_json::Value>>) =
+                if has_tool_result {
+                    // Tool-result: single tool_result block.
+                    let content = msg.parts.iter().map(|p| match p {
                         crate::providers::ContentPart::Text { text } => text.clone(),
                         _ => String::new(),
-                    }).collect::<String>(),
-                })]
-            } else {
-                msg.parts
-                    .iter()
-                    .map(|part| match part {
+                    }).collect::<String>();
+                    let tb = serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": msg.tool_call_id.as_ref().unwrap(),
+                        "content": content,
+                    });
+                    (vec![tb], None)
+                } else {
+                    // Regular parts.
+                    let mut parts: Vec<serde_json::Value> = msg.parts.iter().map(|part| match part {
                         crate::providers::ContentPart::Text { text } => {
                             serde_json::json!({"type": "text", "text": text})
                         }
                         crate::providers::ContentPart::ImageUrl { url, detail: _ } => {
-                            serde_json::json!({"type": "image", "source": {
-                                "type": "url", "url": url,
-                            }})
+                            serde_json::json!({"type": "image", "source": {"type": "url", "url": url}})
                         }
                         crate::providers::ContentPart::ImageB64 { b64_json, detail: _ } => {
                             serde_json::json!({"type": "image", "source": {
-                                "type": "base64", "media_type": "image/jpeg",
-                                "data": b64_json,
+                                "type": "base64", "media_type": "image/jpeg", "data": b64_json,
                             }})
                         }
                         crate::providers::ContentPart::Thinking { thinking } => {
                             serde_json::json!({"type": "thinking", "thinking": thinking})
                         }
-                    })
-                    .collect()
-            };
+                    }).collect();
 
-            // Anthropic/Xiaomi: assistant content must be an array, not a single text block.
-            let content_json: serde_json::Value = serde_json::json!(parts_json);
-
-            // Assistant messages with tool_calls must also provide content=null.
-            // Anthropic/Xiaomi API: "assistant must provide content, reasoning_content
-            // or tool_calls" — if content is empty array and tool_calls exist, use null.
-            let tool_calls: Option<Vec<serde_json::Value>> =
-                if msg.role == "assistant" {
-                    msg.tool_calls.as_ref().map(|tcs| {
-                        tcs.iter()
-                            .map(|tc| {
-                                let input: serde_json::Value = serde_json::from_str(&tc.arguments)
-                                    .unwrap_or(serde_json::Value::String(tc.arguments.clone()));
-                                serde_json::json!({
-                                    "id": tc.id,
-                                    "type": "tool",
-                                    "name": tc.name,
-                                    "input": input,
-                                })
+                    // For assistant messages: also build tool_use blocks and append to content.
+                    let tool_use_blocks = if msg.role == "assistant" && msg.tool_calls.is_some() {
+                        let blocks: Vec<serde_json::Value> = msg.tool_calls.as_ref().unwrap().iter().map(|tc| {
+                            let input = serde_json::from_str::<serde_json::Value>(&tc.arguments)
+                                .unwrap_or(serde_json::Value::String(tc.arguments.clone()));
+                            serde_json::json!({
+                                "type": "tool_use",
+                                "tool_use_id": tc.id,
+                                "name": tc.name,
+                                "content": input,
                             })
-                            .collect()
-                    })
-                } else {
-                    None
+                        }).collect();
+                        parts.extend(blocks.clone());
+                        Some(blocks)
+                    } else {
+                        None
+                    };
+                    (parts, tool_use_blocks)
                 };
 
-            let role = if msg.role == "assistant" { "assistant" } else { "user" };
-            // Filter out empty text and empty thinking blocks.
-            // Anthropic/Xiaomi: "assistant must provide content, reasoning_content
-            // or tool_calls" — if content is only empty blocks and tool_calls
-            // exist, use null instead.
+            // Check if content has any non-empty blocks.
             let has_non_empty_part = parts_json.iter().any(|p| {
-                !(p.get("type").and_then(|v| v.as_str()) == Some("text")
-                    && p.get("text").and_then(|v| v.as_str()).is_none_or(|t| t.is_empty()))
-                && !(p.get("type").and_then(|v| v.as_str()) == Some("thinking")
-                    && p.get("thinking").and_then(|v| v.as_str()).is_none_or(|t| t.is_empty()))
+                let ptype = p.get("type").and_then(|v| v.as_str());
+                ptype == Some("tool_use")
+                || ptype == Some("tool_result")
+                || (ptype == Some("text") && !p.get("text").and_then(|v| v.as_str()).is_none_or(|t| t.is_empty()))
+                || (ptype == Some("thinking") && !p.get("thinking").and_then(|v| v.as_str()).is_none_or(|t| t.is_empty()))
             });
-            let final_content = if !has_non_empty_part && tool_calls.is_some() {
+
+            let final_content = if !has_non_empty_part {
                 serde_json::Value::Null
             } else {
-                content_json
+                serde_json::json!(parts_json)
             };
 
-            // Build the message object. tool_calls is only included when present
-            // (completely omitted, not null) — Xiaomi rejects "tool_calls": null on
-            // user/tool messages and requires it omitted on those roles.
+            // Build the message object. top-level tool_calls only when there is
+            // text/thinking alongside tool_use blocks (not when content is only tool_use).
             let mut msg_json = serde_json::Map::new();
             msg_json.insert("role".to_string(), serde_json::json!(role));
-            msg_json.insert("content".to_string(), final_content);
-            if let Some(tcs) = tool_calls {
-                msg_json.insert("tool_calls".to_string(), serde_json::json!(tcs));
+            msg_json.insert("content".to_string(), final_content.clone());
+            if let Some(ref te) = tool_use_blocks {
+                if final_content.is_array() {
+                    let tc_json: Vec<serde_json::Value> = te.iter().map(|tb| {
+                        serde_json::json!({
+                            "id": tb.get("tool_use_id").unwrap_or(&serde_json::Value::Null),
+                            "type": "tool",
+                            "name": tb.get("name").unwrap_or(&serde_json::Value::Null),
+                            "input": tb.get("content").unwrap_or(&serde_json::Value::Null),
+                        })
+                    }).collect();
+                    msg_json.insert("tool_calls".to_string(), serde_json::json!(tc_json));
+                }
             }
             serde_json::json!(msg_json)
         })
