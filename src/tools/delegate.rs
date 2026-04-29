@@ -46,16 +46,15 @@ impl Tool for DelegateTaskTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        // Build enum of available agent names for the schema.
-        let agents: Vec<serde_json::Value> = self
+        let agents: Vec<String> = self
             .delegator
             .available_agents()
             .into_iter()
             .map(|(name, desc)| {
                 if desc.is_empty() {
-                    json!(name)
+                    name
                 } else {
-                    json!(format!("{}: {}", name, desc))
+                    format!("{}: {}", name, desc)
                 }
             })
             .collect();

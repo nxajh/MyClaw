@@ -5,14 +5,12 @@
 
 use std::sync::Arc;
 
-use crate::agents::agent_impl::AgentLoop;
 use crate::agents::skills::SkillsManager;
 use crate::agents::session_manager::Session;
 use crate::config::sub_agent::SubAgentConfig;
 use crate::providers::ServiceRegistry;
 use crate::tools::TaskDelegator;
 
-/// Holds sub-agent configs and creates temporary AgentLoops for delegation.
 pub struct SubAgentDelegator {
     /// Sub-agent configurations, keyed by name.
     configs: Arc<Vec<SubAgentConfig>>,

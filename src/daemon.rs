@@ -325,8 +325,10 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         tracing::warn!(error = %e, "MCP server connection had errors (non-fatal), continuing");
     }
 
-    // Build skills first (without delegate_task tool — we'll add it after).
+    // Build skills first (without delegate_task tool — we'll add it after if needed).
     let skills = build_skills(&mcp_manager, None).await;
+    let registry_arc: Arc<dyn crate::providers::ServiceRegistry> = Arc::new(registry);
+    let mut skills_arc: Arc<SkillsManager> = Arc::new(skills);
 
     // Build sub-agent delegator if sub-agents are configured.
     let sub_agent_delegator: Option<Arc<SubAgentDelegator>> = if config.agents.is_empty() {
@@ -335,17 +337,21 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         tracing::info!(agents = config.agents.len(), "multi-agent mode enabled");
         let delegator = SubAgentDelegator::new(
             config.agents.clone(),
-            registry.clone(),
-            skills.clone(),
+            registry_arc.clone(),
+            Arc::clone(&skills_arc),
             config.agent.max_tool_calls,
         );
-        // Register delegate_task tool in skills.
+        // Register delegate_task tool in the router agent's skills.
         let delegate_tool = crate::tools::DelegateTaskTool::new(Arc::new(delegator.clone()));
-        // We need mutable access to skills, but it's behind Arc.
-        // Instead, let's handle this differently — build skills with delegator.
+        if let Some(skills_mut) = Arc::get_mut(&mut skills_arc) {
+            skills_mut.register_tool("delegate_task", Arc::new(delegate_tool));
+        } else {
+            tracing::warn!("could not register delegate_task tool — Arc already shared");
+        }
         tracing::info!("delegate_task tool registered (multi-agent mode)");
         Some(Arc::new(delegator))
     };
+
     let session_manager = build_session_manager(&config);
     let channels = build_channels(&config);
 
@@ -354,7 +360,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         max_history: config.agent.max_history,
         prompt_config: build_prompt_config(&config.agent.prompt),
     };
-    let agent = Agent::new(Arc::new(registry), skills, agent_config);
+    let agent = Agent::new(registry_arc, skills_arc, agent_config);
 
     let parts = OrchestratorParts {
         agent,
