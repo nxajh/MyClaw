@@ -13,6 +13,7 @@ use anyhow::Context;
 use crate::channels::{Channel, ChannelMessage, SendMessage};
 use dashmap::DashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, Mutex as TokioMutex, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
@@ -20,6 +21,8 @@ use tracing::{error, info, warn};
 use crate::agents::agent_impl::{Agent, AgentLoop, AskUserHandler}; use crate::agents::session_manager::SessionManager;
 
 const CHANNEL_QUEUE_SIZE: usize = 100;
+/// Timeout for ask_user waiting for user reply (5 minutes).
+const ASK_USER_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Orchestrator — Application Service for message routing and session lifecycle.
 ///
@@ -37,8 +40,8 @@ pub struct Orchestrator {
     msg_rx: Arc<TokioMutex<Option<mpsc::Receiver<(String, ChannelMessage)>>>>,
     /// Listener task handles — taken and awaited on shutdown.
     listener_handles: Vec<JoinHandle<()>>,
-    /// Pending ask_user replies: session_key → oneshot sender.
-    pending_asks: Arc<DashMap<String, oneshot::Sender<String>>>,
+    /// Pending ask_user replies: session_key → (oneshot sender, reply_target).
+    pending_asks: Arc<DashMap<String, (oneshot::Sender<String>, String)>>,
 }
 
 /// Parse a session key like "telegram:12345" into (channel_name, sender).
@@ -132,7 +135,8 @@ impl Orchestrator {
         session_manager: &SessionManager,
         sk: &str,
         channels: &DashMap<String, Arc<dyn Channel>>,
-        pending_asks: &Arc<DashMap<String, oneshot::Sender<String>>>,
+        pending_asks: &Arc<DashMap<String, (oneshot::Sender<String>, String)>>,
+        reply_target: &str,
     ) -> Arc<TokioMutex<AgentLoop>> {
         if let Some(existing) = sessions.get(sk) {
             return existing.clone();
@@ -143,9 +147,11 @@ impl Orchestrator {
         // Wire up the ask_user handler.
         let channels = channels.clone();
         let pending_asks = pending_asks.clone();
+        let reply_target_owned = reply_target.to_string();
         let handler: AskUserHandler = Arc::new(move |session_key: String, question: String| {
             let channels = channels.clone();
             let pending_asks = pending_asks.clone();
+            let reply_target = reply_target_owned.clone();
             Box::pin(async move {
                 // 1. Send the question through the channel.
                 let (ch_name, _) = parse_session_key(&session_key)
@@ -156,18 +162,18 @@ impl Orchestrator {
                     .map(|r| r.clone())
                     .ok_or_else(|| anyhow::anyhow!("channel '{}' not found", ch_name))?;
 
-                let reply_target = session_key.split_once(':').map(|(_, s)| s).unwrap_or(&session_key).to_string();
                 let send_msg = SendMessage::new(&question, &reply_target);
                 channel.send(&send_msg).await?;
 
                 // 2. Create a oneshot channel and register as pending.
                 let (tx, rx) = oneshot::channel();
-                pending_asks.insert(session_key.clone(), tx);
+                pending_asks.insert(session_key.clone(), (tx, reply_target.clone()));
 
-                // 3. Wait for the user's reply (delivered by the run loop).
-                let answer = rx.await.map_err(|_| {
-                    anyhow::anyhow!("ask_user cancelled (dropped)")
-                })?;
+                // 3. Wait for the user's reply (delivered by the run loop) with timeout.
+                let answer = tokio::time::timeout(ASK_USER_TIMEOUT, rx)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("ask_user timed out waiting for user reply"))?
+                    .map_err(|_| anyhow::anyhow!("ask_user cancelled (dropped)"))?;
 
                 Ok(answer)
             })
@@ -214,7 +220,7 @@ impl Orchestrator {
             let sk = Self::session_key(&channel_name, &msg.sender);
 
             // Check if this is a reply to a pending ask_user.
-            if let Some((_, tx)) = self.pending_asks.remove(&sk) {
+            if let Some((_, ((tx, _)))) = self.pending_asks.remove(&sk) {
                 // Deliver the user's answer to the waiting ask_user handler.
                 if tx.send(msg.content.clone()).is_err() {
                     warn!(session = %sk, "ask_user oneshot already closed");
@@ -226,7 +232,9 @@ impl Orchestrator {
             let content = msg.content.clone();
             let reply_target = msg.reply_target.clone();
             let channel_name_clone = channel_name.clone();
-            let loop_ = Self::get_or_create_loop(&sessions, &agent, &self.session_manager, &sk, &channels, &self.pending_asks);
+            let loop_ = Self::get_or_create_loop(
+                &sessions, &agent, &self.session_manager, &sk, &channels, &self.pending_asks, &reply_target,
+            );
 
             let ch = channels.clone();
             tokio::spawn(async move {

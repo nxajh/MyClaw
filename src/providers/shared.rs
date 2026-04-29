@@ -273,6 +273,15 @@ pub fn create_provider_by_url(
     api_key: String,
     base_url: &str,
 ) -> Option<Box<dyn crate::providers::ChatProvider>> {
+    create_provider_by_url_with_user_agent(api_key, base_url, None)
+}
+
+/// Create a provider with optional user_agent by inspecting the base_url hostname.
+pub fn create_provider_by_url_with_user_agent(
+    api_key: String,
+    base_url: &str,
+    user_agent: Option<&str>,
+) -> Option<Box<dyn crate::providers::ChatProvider>> {
     let host = base_url
         .trim_start_matches("https://")
         .trim_start_matches("http://")
@@ -282,17 +291,27 @@ pub fn create_provider_by_url(
     tracing::info!(base_url, host, "auto-detecting provider type from base_url");
 
     if host.contains("bigmodel.cn") || host.contains("zhipuai") {
-        Some(Box::new(crate::providers::glm::GlmProvider::with_base_url(api_key, base_url.to_string())))
+        let mut p = crate::providers::glm::GlmProvider::with_base_url(api_key, base_url.to_string());
+        if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
+        Some(Box::new(p))
     } else if host.contains("anthropic.com") || host.contains("claude.ai") {
-        Some(Box::new(crate::providers::anthropic::AnthropicProvider::with_base_url(api_key, base_url.to_string())))
+        let mut p = crate::providers::anthropic::AnthropicProvider::with_base_url(api_key, base_url.to_string());
+        if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
+        Some(Box::new(p))
     } else if host.contains("minimax") {
-        Some(Box::new(crate::providers::minimax::MiniMaxProvider::with_base_url(api_key, base_url.to_string())))
+        let mut p = crate::providers::minimax::MiniMaxProvider::with_base_url(api_key, base_url.to_string());
+        if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
+        Some(Box::new(p))
     } else if host.contains("moonshot") || host.contains("kimi") {
-        Some(Box::new(crate::providers::kimi::KimiProvider::with_base_url(api_key, base_url.to_string())))
+        let mut p = crate::providers::kimi::KimiProvider::with_base_url(api_key, base_url.to_string());
+        if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
+        Some(Box::new(p))
     } else {
         // Default: OpenAI-compatible (covers api.openai.com, api.deepseek.com, etc.)
         tracing::info!(host, "no specific match, using OpenAI-compatible provider");
-        Some(Box::new(crate::providers::openai::OpenAiProvider::with_base_url(api_key, base_url.to_string())))
+        let mut p = crate::providers::openai::OpenAiProvider::with_base_url(api_key, base_url.to_string());
+        if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
+        Some(Box::new(p))
     }
 }
 
@@ -302,6 +321,15 @@ pub fn create_provider_by_url(
 pub fn create_full_openai_provider(
     api_key: String,
     base_url: &str,
+) -> Option<crate::providers::openai::OpenAiProvider> {
+    create_full_openai_provider_with_user_agent(api_key, base_url, None)
+}
+
+/// Create a full OpenAI provider with optional user_agent.
+pub fn create_full_openai_provider_with_user_agent(
+    api_key: String,
+    base_url: &str,
+    user_agent: Option<&str>,
 ) -> Option<crate::providers::openai::OpenAiProvider> {
     let host = base_url
         .trim_start_matches("https://")
@@ -318,7 +346,9 @@ pub fn create_full_openai_provider(
         return None;
     }
 
-    Some(crate::providers::openai::OpenAiProvider::with_base_url(api_key, base_url.to_string()))
+    let mut p = crate::providers::openai::OpenAiProvider::with_base_url(api_key, base_url.to_string());
+    if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
+    Some(p)
 }
 
 /// Capability-aware provider creation result.

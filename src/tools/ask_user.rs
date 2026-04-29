@@ -1,8 +1,11 @@
 //! Ask user tool — pauses the agent loop to ask the user a question and waits for a response.
 //!
-//! In a real implementation, this would integrate with the channel layer to
-//! send a question and wait for a response. For now, it returns the question
-//! as output, signaling that the agent needs user input.
+//! When the AgentLoop has an `AskUserHandler` wired (set by the Orchestrator),
+//! `ask_user` calls are intercepted before reaching this fallback implementation.
+//!
+//! This fallback exists for scenarios where the agent is run without a channel
+//! (e.g. CLI mode, tests). It returns the question text so the LLM can surface
+//! it to the user in its own response.
 
 use async_trait::async_trait;
 use crate::providers::{Tool, ToolResult};
@@ -45,16 +48,23 @@ impl Tool for AskUserTool {
         })
     }
 
+    /// Fallback: returns the question so the LLM can surface it to the user.
+    ///
+    /// When the Orchestrator is active, this code path is NOT reached —
+    /// the `AgentLoop` intercepts `ask_user` and uses the `AskUserHandler`
+    /// to send the question through the channel and wait for a real reply.
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let question = args["question"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'question' is required"))?;
 
-        // TODO: Integrate with channel layer to actually pause and wait for user input.
-        // For now, return the question as a prompt that the LLM should surface to the user.
         Ok(ToolResult {
             success: true,
-            output: format!("[Question for user]: {}", question),
+            output: format!(
+                "Please answer this question: {} (Note: direct channel delivery is not available, \
+                 please respond in the conversation.)",
+                question
+            ),
             error: None,
         })
     }

@@ -48,6 +48,7 @@ pub use kimi::KimiProvider;
 pub use minimax::MiniMaxProvider;
 pub use openai::OpenAiProvider;
 pub use shared::{AuthStyle, ProviderHandle, ProviderInstance,
-    create_provider, create_provider_by_url,
-    create_full_openai_provider, parse_openai_sse, build_openai_chat_body};
+    create_provider, create_provider_by_url, create_provider_by_url_with_user_agent,
+    create_full_openai_provider, create_full_openai_provider_with_user_agent,
+    parse_openai_sse, build_openai_chat_body};
 pub use reqwest::Client;

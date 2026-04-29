@@ -371,7 +371,7 @@ impl AgentLoop {
 
     /// Execute a single tool call.
     /// Special-cases `ask_user` to use the handler when available.
-    async fn execute_tool(&self, call: &ToolCall) -> anyhow::Result<ToolResult> {
+    async fn execute_tool(&mut self, call: &ToolCall) -> anyhow::Result<ToolResult> {
         // Special handling for ask_user tool.
         if call.name == "ask_user" {
             if let Some(ref handler) = self.ask_user_handler {
@@ -386,7 +386,14 @@ impl AgentLoop {
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("'question' is required"))?;
 
+                // Record the assistant's question in session history.
+                self.session.add_assistant_text(question.to_string());
+
                 let answer = handler(self.session.key.clone(), question.to_string()).await?;
+
+                // Record the user's answer in session history.
+                self.session.add_user_text(answer.clone());
+
                 return Ok(ToolResult {
                     success: true,
                     output: answer,
