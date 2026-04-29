@@ -96,10 +96,16 @@ pub fn markdown_to_telegram_html(markdown: &str) -> String {
                 }
                 j += 1;
             }
-            let code: String = chars[start..j].iter().collect();
+            let mut code: String = chars[start..j].iter().collect();
+            // Trim exactly one trailing newline (common in fenced blocks).
+            if code.ends_with('\n') {
+                code.pop();
+            }
             let escaped = escape_html(&code);
             let trimmed_lang = lang.trim();
-            if trimmed_lang.is_empty() {
+            // Treat empty or "text" as no language.
+            let has_lang = !trimmed_lang.is_empty() && trimmed_lang != "text";
+            if !has_lang {
                 out.push_str(&format!("<pre>{}</pre>", escaped));
             } else {
                 out.push_str(&format!(
