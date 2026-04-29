@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use crate::agents::{
     Agent, AgentConfig, InMemoryBackend, Orchestrator, OrchestratorParts, SessionManager,
     SkillsManager, SystemPromptConfig, AutonomyLevel, SkillsPromptInjectionMode,
-    McpManager, SubAgentDelegator,
+    McpManager, SubAgentDelegator, DelegationManager,
 };
 use crate::tools::TaskDelegator;
 use std::path::PathBuf;
@@ -341,7 +341,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // (for sub-agent tool filtering). The parent gets a rebuilt Arc that includes
     // all the same tools + delegate_task. Tool instances (Arc<dyn Tool>) are shared.
 
-    let (skills_arc, _sub_agent_delegator) = if config.agents.is_empty() {
+    let (skills_arc, sub_agent_delegator_arc) = if config.agents.is_empty() {
         (Arc::new(skills), None)
     } else {
         tracing::info!(agents = config.agents.len(), "multi-agent mode enabled");
@@ -373,6 +373,14 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         (Arc::new(parent_skills), Some(delegator_arc))
     };
 
+    // ── Delegation channel (conditional — only when sub-agents configured) ─────
+    let (delegation_manager, delegation_rx) = if sub_agent_delegator_arc.is_some() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<crate::agents::DelegationEvent>(100);
+        (Some(Arc::new(DelegationManager::new(tx))), Some(rx))
+    } else {
+        (None, None)
+    };
+
     let session_manager = build_session_manager(&config);
     let channels = build_channels(&config);
 
@@ -387,6 +395,9 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         agent,
         session_manager,
         channels,
+        sub_delegator: sub_agent_delegator_arc,
+        delegation_manager,
+        delegation_rx,
     };
 
     // ── Launch ─────────────────────────────────────────────────────────────

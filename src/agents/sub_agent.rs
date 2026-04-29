@@ -2,9 +2,12 @@
 //!
 //! Implements `TaskDelegator` by creating temporary `AgentLoop` instances
 //! with restricted tool sets and specialized system prompts.
+//!
+//! Also provides `delegate_async` for non-blocking background execution.
 
 use std::sync::Arc;
 
+use crate::agents::delegation::{DelegationEvent, DelegationManager};
 use crate::agents::skills::SkillsManager;
 use crate::agents::session_manager::Session;
 use crate::config::sub_agent::SubAgentConfig;
@@ -54,6 +57,88 @@ impl SubAgentDelegator {
             }
         }
         filtered
+    }
+
+    /// Delegate a task asynchronously — spawns sub-agent in a background tokio task.
+    ///
+    /// Returns the `task_id` immediately. When the sub-agent completes, it sends
+    /// a `DelegationEvent` via the `DelegationManager`'s channel, which the
+    /// Orchestrator listens for.
+    pub fn delegate_async(
+        &self,
+        agent_name: &str,
+        task: &str,
+        session_key: &str,
+        reply_target: &str,
+        delegation_manager: &DelegationManager,
+    ) -> anyhow::Result<String> {
+        let config = self.find_config(agent_name)
+            .ok_or_else(|| {
+                let available: Vec<&str> = self.configs.iter().map(|c| c.name.as_str()).collect();
+                anyhow::anyhow!(
+                    "Unknown sub-agent '{}'. Available: {}",
+                    agent_name,
+                    available.join(", ")
+                )
+            })?;
+
+        let task_id = format!("del_{}", uuid::Uuid::new_v4());
+
+        tracing::info!(
+            agent = %config.name,
+            task_id = %task_id,
+            task_len = task.len(),
+            "spawning sub-agent in background"
+        );
+
+        // Clone everything needed for the spawned task.
+        let configs = self.configs.clone();
+        let registry = self.registry.clone();
+        let skills = self.skills.clone();
+        let default_max_tool_calls = self.default_max_tool_calls;
+        let config_clone = config.clone();
+        let task_owned = task.to_string();
+        let session_key_owned = session_key.to_string();
+        let reply_target_owned = reply_target.to_string();
+        let event_tx = delegation_manager.event_sender();
+        let task_id_clone = task_id.clone();
+
+        let handle = tokio::spawn(async move {
+            // Build a new SubAgentDelegator inside the spawned task
+            // (all fields are Arc/Clone, so this is cheap).
+            let sub_delegator = SubAgentDelegator {
+                configs,
+                registry,
+                skills,
+                default_max_tool_calls,
+            };
+
+            let result = sub_delegator.delegate(&config_clone.name, &task_owned).await;
+
+            match result {
+                Ok(summary) => {
+                    tracing::info!(task_id = %task_id_clone, "sub-agent completed successfully");
+                    let _ = event_tx.send(DelegationEvent::Completed {
+                        task_id: task_id_clone.clone(),
+                        session_key: session_key_owned,
+                        reply_target: reply_target_owned,
+                        summary,
+                    }).await;
+                }
+                Err(e) => {
+                    tracing::warn!(task_id = %task_id_clone, err = %e, "sub-agent failed");
+                    let _ = event_tx.send(DelegationEvent::Failed {
+                        task_id: task_id_clone.clone(),
+                        session_key: session_key_owned,
+                        reply_target: reply_target_owned,
+                        error: e.to_string(),
+                    }).await;
+                }
+            }
+        });
+
+        delegation_manager.register(task_id.clone(), handle);
+        Ok(task_id)
     }
 }
 

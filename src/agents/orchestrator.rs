@@ -10,6 +10,8 @@
 //! not here. This struct receives fully-assembled components via its constructor.
 
 use anyhow::Context;
+use crate::agents::delegation::{DelegationEvent, DelegationManager};
+use crate::agents::sub_agent::SubAgentDelegator;
 use crate::channels::{Channel, ChannelMessage, SendMessage};
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -18,11 +20,18 @@ use tokio::sync::{mpsc, Mutex as TokioMutex, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::agents::agent_impl::{Agent, AgentLoop, AskUserHandler}; use crate::agents::session_manager::SessionManager;
+use crate::agents::agent_impl::{Agent, AgentLoop, AskUserHandler, DelegateHandler};
+use crate::agents::session_manager::SessionManager;
 
 const CHANNEL_QUEUE_SIZE: usize = 100;
 /// Timeout for ask_user waiting for user reply (5 minutes).
 const ASK_USER_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Internal enum for the run loop's select.
+enum ChannelEvent {
+    UserMessage((String, ChannelMessage)),
+    Delegation(DelegationEvent),
+}
 
 /// Orchestrator — Application Service for message routing and session lifecycle.
 ///
@@ -42,6 +51,12 @@ pub struct Orchestrator {
     listener_handles: Vec<JoinHandle<()>>,
     /// Pending ask_user replies: session_key → (oneshot sender, reply_target).
     pending_asks: Arc<DashMap<String, (oneshot::Sender<String>, String)>>,
+    /// Sub-agent delegator (for async delegation).
+    sub_delegator: Option<Arc<SubAgentDelegator>>,
+    /// Delegation manager (shared with DelegateTaskTool via handler).
+    delegation_manager: Option<Arc<DelegationManager>>,
+    /// Delegation event receiver.
+    delegation_rx: Arc<TokioMutex<Option<mpsc::Receiver<DelegationEvent>>>>,
 }
 
 /// Parse a session key like "telegram:12345" into (channel_name, sender).
@@ -62,6 +77,12 @@ pub struct OrchestratorParts {
     pub session_manager: SessionManager,
     /// Pre-built channels from Interface layer (Feature-gated at compile time).
     pub channels: Vec<(&'static str, Arc<dyn Channel>)>,
+    /// Sub-agent delegator (conditional — only when sub-agents are configured).
+    pub sub_delegator: Option<Arc<SubAgentDelegator>>,
+    /// Delegation manager (conditional — only when sub-agents are configured).
+    pub delegation_manager: Option<Arc<DelegationManager>>,
+    /// Delegation event receiver (conditional).
+    pub delegation_rx: Option<mpsc::Receiver<DelegationEvent>>,
 }
 
 impl Orchestrator {
@@ -96,6 +117,9 @@ impl Orchestrator {
             msg_rx: Arc::new(TokioMutex::new(Some(msg_rx))),
             listener_handles,
             pending_asks: Arc::new(DashMap::new()),
+            sub_delegator: parts.sub_delegator,
+            delegation_manager: parts.delegation_manager,
+            delegation_rx: Arc::new(TokioMutex::new(parts.delegation_rx)),
         };
 
         info!(channels = orchestrator.channels.len(), "orchestrator initialized");
@@ -129,6 +153,7 @@ impl Orchestrator {
         format!("{channel}:{sender}")
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn get_or_create_loop(
         sessions: &DashMap<String, Arc<TokioMutex<AgentLoop>>>,
         agent: &Agent,
@@ -137,6 +162,8 @@ impl Orchestrator {
         channels: &DashMap<String, Arc<dyn Channel>>,
         pending_asks: &Arc<DashMap<String, (oneshot::Sender<String>, String)>>,
         reply_target: &str,
+        sub_delegator: &Option<Arc<SubAgentDelegator>>,
+        delegation_manager: &Option<Arc<DelegationManager>>,
     ) -> Arc<TokioMutex<AgentLoop>> {
         if let Some(existing) = sessions.get(sk) {
             return existing.clone();
@@ -179,7 +206,26 @@ impl Orchestrator {
             })
         });
 
-        let loop_ = loop_.with_ask_user_handler(handler);
+        let mut loop_ = loop_.with_ask_user_handler(handler);
+
+        // Wire up the delegate handler (async delegation).
+        if let (Some(delegator), Some(manager)) = (sub_delegator.clone(), delegation_manager.clone()) {
+            let session_key_owned = sk.to_string();
+            let reply_target_for_delegate = reply_target.to_string();
+            let delegate_handler: DelegateHandler = Arc::new(
+                move |agent_name: String, task: String| {
+                    delegator.delegate_async(
+                        &agent_name,
+                        &task,
+                        &session_key_owned,
+                        &reply_target_for_delegate,
+                        &manager,
+                    )
+                }
+            );
+            loop_ = loop_.with_delegate_handler(delegate_handler);
+        }
+
         let entry: Arc<TokioMutex<AgentLoop>> = Arc::new(TokioMutex::new(loop_));
         sessions.insert(sk.into(), entry.clone());
         entry
@@ -193,9 +239,17 @@ impl Orchestrator {
             guard.take().context("run() already called or msg_rx was None")?
         };
 
+        // Take the delegation event receiver if available.
+        let mut delegation_rx = {
+            let mut guard = self.delegation_rx.lock().await;
+            guard.take()
+        };
+
         let sessions = self.sessions.clone();
         let agent = self.agent.clone();
         let channels = self.channels.clone();
+        let sub_delegator = self.sub_delegator.clone();
+        let delegation_manager = self.delegation_manager.clone();
 
         let mut rx = rx;
 
@@ -205,89 +259,233 @@ impl Orchestrator {
                 break;
             }
 
-            let msg = tokio::select! {
-                msg = rx.recv() => match msg {
-                    Some(m) => m,
-                    None => break,
-                },
-                _ = shutdown_rx.changed() => {
-                    tracing::info!("shutdown signal received");
-                    break;
+            let event = if delegation_rx.is_some() {
+                // select over user messages + delegation events + shutdown
+                tokio::select! {
+                    msg = rx.recv() => match msg {
+                        Some(m) => ChannelEvent::UserMessage(m),
+                        None => break,
+                    },
+                    event = delegation_rx.as_mut().unwrap().recv() => {
+                        match event {
+                            Some(e) => ChannelEvent::Delegation(e),
+                            None => {
+                                // Delegation channel closed, stop listening for it.
+                                delegation_rx = None;
+                                continue;
+                            }
+                        }
+                    },
+                    _ = shutdown_rx.changed() => {
+                        tracing::info!("shutdown signal received");
+                        break;
+                    }
+                }
+            } else {
+                // No delegation events — only user messages + shutdown
+                tokio::select! {
+                    msg = rx.recv() => match msg {
+                        Some(m) => ChannelEvent::UserMessage(m),
+                        None => break,
+                    },
+                    _ = shutdown_rx.changed() => {
+                        tracing::info!("shutdown signal received");
+                        break;
+                    }
                 }
             };
 
-            let (channel_name, msg) = msg;
-            let sk = Self::session_key(&channel_name, &msg.sender);
+            match event {
+                ChannelEvent::UserMessage((channel_name, msg)) => {
+                    let sk = Self::session_key(&channel_name, &msg.sender);
 
-            // Check if this is a reply to a pending ask_user.
-            if let Some((_, (tx, _))) = self.pending_asks.remove(&sk) {
-                // Deliver the user's answer to the waiting ask_user handler.
-                if tx.send(msg.content.clone()).is_err() {
-                    warn!(session = %sk, "ask_user oneshot already closed");
-                }
-                // Do NOT spawn a new agent loop — the existing one is waiting.
-                continue;
-            }
-
-            let content = msg.content.clone();
-            let reply_target = msg.reply_target.clone();
-            let channel_name_clone = channel_name.clone();
-            let loop_ = Self::get_or_create_loop(
-                &sessions, &agent, &self.session_manager, &sk, &channels, &self.pending_asks, &reply_target,
-            );
-
-            let ch = channels.clone();
-            tokio::spawn(async move {
-                // Resolve channel early so we can manage typing indicators.
-                let channel: Option<Arc<dyn Channel>> = {
-                    ch.get(&channel_name_clone).map(|r| r.clone())
-                };
-                let channel = match channel {
-                    Some(c) => c,
-                    None => return,
-                };
-
-                // Start typing indicator while the agent processes the message.
-                if let Err(e) = channel.start_typing(&reply_target).await {
-                    tracing::debug!(session = %sk, err = %e, "start_typing failed (non-fatal)");
-                }
-
-                let response = {
-                    let mut guard = loop_.lock().await;
-                    guard.run(&content).await
-                };
-
-                // Stop typing indicator before sending the response.
-                if let Err(e) = channel.stop_typing(&reply_target).await {
-                    tracing::debug!(session = %sk, err = %e, "stop_typing failed (non-fatal)");
-                }
-
-                match response {
-                    Ok(text) if !text.is_empty() => {
-                        tracing::info!(session = %sk, text_len = text.len(), "sending response");
-                        let send_msg = SendMessage {
-                            recipient: reply_target,
-                            content: text,
-                            subject: None,
-                            thread_ts: None,
-                            cancellation_token: None,
-                            attachments: vec![],
-                            image_urls: None,
-                        };
-                        if let Err(e) = channel.send(&send_msg).await {
-                            error!(session = %sk, err = %e, "send failed");
+                    // Check if this is a reply to a pending ask_user.
+                    if let Some((_, (tx, _))) = self.pending_asks.remove(&sk) {
+                        // Deliver the user's answer to the waiting ask_user handler.
+                        if tx.send(msg.content.clone()).is_err() {
+                            warn!(session = %sk, "ask_user oneshot already closed");
                         }
+                        // Do NOT spawn a new agent loop — the existing one is waiting.
+                        continue;
                     }
-                    Ok(_) => {}
-                    Err(e) => {
-                        error!(session = %sk, err = %e, "loop failed");
-                    }
+
+                    let content = msg.content.clone();
+                    let reply_target = msg.reply_target.clone();
+                    let channel_name_clone = channel_name.clone();
+                    let loop_ = Self::get_or_create_loop(
+                        &sessions, &agent, &self.session_manager, &sk,
+                        &channels, &self.pending_asks, &reply_target,
+                        &sub_delegator, &delegation_manager,
+                    );
+
+                    let ch = channels.clone();
+                    tokio::spawn(async move {
+                        // Resolve channel early so we can manage typing indicators.
+                        let channel: Option<Arc<dyn Channel>> = {
+                            ch.get(&channel_name_clone).map(|r| r.clone())
+                        };
+                        let channel = match channel {
+                            Some(c) => c,
+                            None => return,
+                        };
+
+                        // Start typing indicator while the agent processes the message.
+                        if let Err(e) = channel.start_typing(&reply_target).await {
+                            tracing::debug!(session = %sk, err = %e, "start_typing failed (non-fatal)");
+                        }
+
+                        let response = {
+                            let mut guard = loop_.lock().await;
+                            guard.run(&content).await
+                        };
+
+                        // Stop typing indicator before sending the response.
+                        if let Err(e) = channel.stop_typing(&reply_target).await {
+                            tracing::debug!(session = %sk, err = %e, "stop_typing failed (non-fatal)");
+                        }
+
+                        match response {
+                            Ok(text) if !text.is_empty() => {
+                                tracing::info!(session = %sk, text_len = text.len(), "sending response");
+                                let send_msg = SendMessage {
+                                    recipient: reply_target,
+                                    content: text,
+                                    subject: None,
+                                    thread_ts: None,
+                                    cancellation_token: None,
+                                    attachments: vec![],
+                                    image_urls: None,
+                                };
+                                if let Err(e) = channel.send(&send_msg).await {
+                                    error!(session = %sk, err = %e, "send failed");
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                error!(session = %sk, err = %e, "loop failed");
+                            }
+                        }
+                    });
                 }
-            });
+                ChannelEvent::Delegation(event) => {
+                    self.handle_delegation_event(event).await;
+                }
+            }
         }
 
         info!("all listeners stopped, exiting");
         Ok(())
+    }
+
+    /// Handle a delegation event from a background sub-agent.
+    async fn handle_delegation_event(&self, event: DelegationEvent) {
+        match event {
+            DelegationEvent::Completed { task_id, session_key, reply_target, summary } => {
+                tracing::info!(task_id = %task_id, "delegation completed, waking main agent");
+
+                let loop_ = match self.sessions.get(&session_key) {
+                    Some(l) => l.clone(),
+                    None => {
+                        tracing::warn!(session = %session_key, "session not found for delegation event");
+                        return;
+                    }
+                };
+
+                // Construct synthetic message to wake the main agent.
+                let synthetic_msg = format!(
+                    "[系统通知] 子代理已完成后台任务 (task_id: {})，结果如下：\n{}",
+                    task_id, summary
+                );
+
+                // Run the main agent with the synthetic message.
+                let response = {
+                    let mut guard = loop_.lock().await;
+                    guard.run(&synthetic_msg).await
+                };
+
+                // Send the main agent's response to the user.
+                match response {
+                    Ok(text) if !text.is_empty() => {
+                        let (ch_name, _) = match parse_session_key(&session_key) {
+                            Some(pair) => pair,
+                            None => {
+                                tracing::warn!(session = %session_key, "invalid session key in delegation event");
+                                return;
+                            }
+                        };
+                        if let Some(channel) = self.channels.get(ch_name) {
+                            let send_msg = SendMessage {
+                                recipient: reply_target,
+                                content: text,
+                                subject: None,
+                                thread_ts: None,
+                                cancellation_token: None,
+                                attachments: vec![],
+                                image_urls: None,
+                            };
+                            if let Err(e) = channel.send(&send_msg).await {
+                                tracing::error!(session = %session_key, err = %e, "send delegation result failed");
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::error!(session = %session_key, err = %e, "main agent failed to process delegation result");
+                    }
+                }
+            }
+            DelegationEvent::Failed { task_id, session_key, reply_target, error } => {
+                tracing::warn!(task_id = %task_id, "delegation failed, waking main agent");
+
+                let loop_ = match self.sessions.get(&session_key) {
+                    Some(l) => l.clone(),
+                    None => {
+                        tracing::warn!(session = %session_key, "session not found for delegation event");
+                        return;
+                    }
+                };
+
+                let synthetic_msg = format!(
+                    "[系统通知] 子代理后台任务失败 (task_id: {})，错误：\n{}",
+                    task_id, error
+                );
+
+                let response = {
+                    let mut guard = loop_.lock().await;
+                    guard.run(&synthetic_msg).await
+                };
+
+                match response {
+                    Ok(text) if !text.is_empty() => {
+                        let (ch_name, _) = match parse_session_key(&session_key) {
+                            Some(pair) => pair,
+                            None => {
+                                tracing::warn!(session = %session_key, "invalid session key in delegation event");
+                                return;
+                            }
+                        };
+                        if let Some(channel) = self.channels.get(ch_name) {
+                            let send_msg = SendMessage {
+                                recipient: reply_target,
+                                content: text,
+                                subject: None,
+                                thread_ts: None,
+                                cancellation_token: None,
+                                attachments: vec![],
+                                image_urls: None,
+                            };
+                            if let Err(e) = channel.send(&send_msg).await {
+                                tracing::error!(session = %session_key, err = %e, "send delegation result failed");
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::error!(session = %session_key, err = %e, "main agent failed to process delegation failure");
+                    }
+                }
+            }
+        }
     }
 
     /// Abort all listener handles (call after run() returns).

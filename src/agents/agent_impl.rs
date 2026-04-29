@@ -30,6 +30,15 @@ pub type AskUserHandler = Arc<
         + Sync,
 >;
 
+/// Callback for async delegation: (agent_name, task) → task_id.
+///
+/// The handler spawns the sub-agent in a background tokio task and returns
+/// the task_id immediately. When the sub-agent completes, the Orchestrator
+/// receives a DelegationEvent and wakes the main agent.
+pub type DelegateHandler = Arc<
+    dyn Fn(String, String) -> anyhow::Result<String> + Send + Sync,
+>;
+
 use super::loop_breaker::{LoopBreak, LoopBreaker, LoopBreakerConfig};
 use super::session_manager::Session;
 use super::skills::SkillsManager;
@@ -106,6 +115,7 @@ impl Agent {
             session,
             system_prompt: prompt,
             ask_user_handler: None,
+            delegate_handler: None,
             loop_breaker: LoopBreaker::new(LoopBreakerConfig {
                 max_tool_calls: self.config.max_tool_calls,
                 ..LoopBreakerConfig::default()
@@ -124,6 +134,8 @@ pub struct AgentLoop {
     system_prompt: String,
     /// Optional callback for ask_user tool.
     ask_user_handler: Option<AskUserHandler>,
+    /// Optional callback for async delegate_task.
+    delegate_handler: Option<DelegateHandler>,
     /// Loop breaker — detects repetitive tool-call patterns.
     loop_breaker: LoopBreaker,
 }
@@ -132,6 +144,12 @@ impl AgentLoop {
     /// Set the ask_user handler (called by Orchestrator to wire the channel).
     pub fn with_ask_user_handler(mut self, handler: AskUserHandler) -> Self {
         self.ask_user_handler = Some(handler);
+        self
+    }
+
+    /// Set the delegate handler (called by Orchestrator to wire async delegation).
+    pub fn with_delegate_handler(mut self, handler: DelegateHandler) -> Self {
+        self.delegate_handler = Some(handler);
         self
     }
 
@@ -381,7 +399,7 @@ impl AgentLoop {
     }
 
     /// Execute a single tool call.
-    /// Special-cases `ask_user` to use the handler when available.
+    /// Special-cases `ask_user` and `delegate_task` to use handlers when available.
     async fn execute_tool(&mut self, call: &ToolCall) -> anyhow::Result<ToolResult> {
         // Special handling for ask_user tool.
         if call.name == "ask_user" {
@@ -408,6 +426,38 @@ impl AgentLoop {
                 return Ok(ToolResult {
                     success: true,
                     output: answer,
+                    error: None,
+                });
+            }
+        }
+
+        // Special handling for delegate_task tool — async delegation via handler.
+        if call.name == "delegate_task" {
+            if let Some(ref handler) = self.delegate_handler {
+                let args: serde_json::Value = if call.arguments.is_empty() {
+                    serde_json::Value::Object(serde_json::Map::new())
+                } else {
+                    serde_json::from_str(&call.arguments).unwrap_or_else(|_| {
+                        serde_json::json!({ "raw": &call.arguments })
+                    })
+                };
+                let agent_name = args["agent"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("'agent' is required"))?;
+                let task = args["task"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("'task' is required"))?;
+
+                let task_id = handler(agent_name.to_string(), task.to_string())?;
+
+                return Ok(ToolResult {
+                    success: true,
+                    output: format!(
+                        "Task delegated to sub-agent '{}' (task_id: {}). \
+                         The sub-agent is now running in the background. \
+                         You will be notified when it completes.",
+                        agent_name, task_id
+                    ),
                     error: None,
                 });
             }
