@@ -11,6 +11,8 @@ use crate::config::sub_agent::SubAgentConfig;
 use crate::providers::ServiceRegistry;
 use crate::tools::TaskDelegator;
 
+/// Holds sub-agent configs and creates temporary AgentLoops for delegation.
+#[derive(Clone)]
 pub struct SubAgentDelegator {
     /// Sub-agent configurations, keyed by name.
     configs: Arc<Vec<SubAgentConfig>>,
@@ -116,7 +118,7 @@ impl TaskDelegator for SubAgentDelegator {
         // Use a temporary Agent to create the loop.
         let agent = crate::agents::Agent::new(
             self.registry.clone(),
-            skills,
+            Arc::new(skills),
             agent_config,
         );
         let mut loop_ = agent.with_system_prompt(system_prompt).loop_for(session);
