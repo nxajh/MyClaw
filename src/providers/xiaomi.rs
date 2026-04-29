@@ -253,7 +253,8 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                         !p.get("content").and_then(|v| v.as_str()).is_none_or(|s| s.is_empty())
                     }
                     Some("text") => !p.get("text").and_then(|v| v.as_str()).is_none_or(|t| t.is_empty()),
-                    Some("thinking") => !p.get("thinking").and_then(|v| v.as_str()).is_none_or(|t| t.is_empty()),
+                    Some("thinking") => true, // always keep — empty thinking blocks are
+                    // semantically meaningful; actual thinking streams via deltas.
                     Some("image") => true,
                     _ => true,
                 }
