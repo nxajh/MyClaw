@@ -238,19 +238,29 @@ impl Orchestrator {
 
             let ch = channels.clone();
             tokio::spawn(async move {
+                // Resolve channel early so we can manage typing indicators.
+                let channel: Option<Arc<dyn Channel>> = {
+                    ch.get(&channel_name_clone).map(|r| r.clone())
+                };
+                let channel = match channel {
+                    Some(c) => c,
+                    None => return,
+                };
+
+                // Start typing indicator while the agent processes the message.
+                if let Err(e) = channel.start_typing(&reply_target).await {
+                    tracing::debug!(session = %sk, err = %e, "start_typing failed (non-fatal)");
+                }
+
                 let response = {
                     let mut guard = loop_.lock().await;
                     guard.run(&content).await
                 };
 
-                let channel: Option<Arc<dyn Channel>> = {
-                    ch.get(&channel_name_clone).map(|r| r.clone())
-                };
-
-                let channel = match channel {
-                    Some(c) => c,
-                    None => return,
-                };
+                // Stop typing indicator before sending the response.
+                if let Err(e) = channel.stop_typing(&reply_target).await {
+                    tracing::debug!(session = %sk, err = %e, "stop_typing failed (non-fatal)");
+                }
 
                 match response {
                     Ok(text) if !text.is_empty() => {
