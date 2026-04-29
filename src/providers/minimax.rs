@@ -178,6 +178,10 @@ fn build_minimax_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                 "type": "image_url",
                 "image_url": { "url": format!("data:image;base64,{}", b64_json), "detail": format!("{:?}", detail).to_lowercase() }
             }),
+            ContentPart::Thinking { .. } => {
+                // MiniMax does not support thinking blocks — skip silently.
+                serde_json::json!({"type": "text", "text": ""})
+            },
         }).collect();
 
         let content = if content_vec.len() == 1 {

@@ -183,26 +183,42 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
         .filter(|m| m.role != "system")
         .map(|msg| {
             // Build content array from parts.
-            let parts_json: Vec<serde_json::Value> = msg
-                .parts
-                .iter()
-                .map(|part| match part {
-                    crate::providers::ContentPart::Text { text } => {
-                        serde_json::json!({"type": "text", "text": text})
-                    }
-                    crate::providers::ContentPart::ImageUrl { url, detail: _ } => {
-                        serde_json::json!({"type": "image", "source": {
-                            "type": "url", "url": url,
-                        }})
-                    }
-                    crate::providers::ContentPart::ImageB64 { b64_json, detail: _ } => {
-                        serde_json::json!({"type": "image", "source": {
-                            "type": "base64", "media_type": "image/jpeg",
-                            "data": b64_json,
-                        }})
-                    }
-                })
-                .collect();
+            // tool_call_id presence signals a tool-result message — those use
+            // a special "tool_result" content block per Anthropic/Xiaomi protocol.
+            let has_tool_result = msg.tool_call_id.is_some();
+            let parts_json: Vec<serde_json::Value> = if has_tool_result {
+                vec![serde_json::json!({
+                    "type": "tool_result",
+                    "tool_use_id": msg.tool_call_id.as_ref().unwrap(),
+                    "content": msg.parts.iter().map(|p| match p {
+                        crate::providers::ContentPart::Text { text } => text.clone(),
+                        _ => String::new(),
+                    }).collect::<String>(),
+                })]
+            } else {
+                msg.parts
+                    .iter()
+                    .map(|part| match part {
+                        crate::providers::ContentPart::Text { text } => {
+                            serde_json::json!({"type": "text", "text": text})
+                        }
+                        crate::providers::ContentPart::ImageUrl { url, detail: _ } => {
+                            serde_json::json!({"type": "image", "source": {
+                                "type": "url", "url": url,
+                            }})
+                        }
+                        crate::providers::ContentPart::ImageB64 { b64_json, detail: _ } => {
+                            serde_json::json!({"type": "image", "source": {
+                                "type": "base64", "media_type": "image/jpeg",
+                                "data": b64_json,
+                            }})
+                        }
+                        crate::providers::ContentPart::Thinking { thinking } => {
+                            serde_json::json!({"type": "thinking", "thinking": thinking})
+                        }
+                    })
+                    .collect()
+            };
 
             // Anthropic/Xiaomi: assistant content must be an array, not a single text block.
             let content_json: serde_json::Value = serde_json::json!(parts_json);
@@ -235,6 +251,8 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
             // tool_calls without any text, which produces a content array
             // like [{"type":"text","text":""}].  Xiaomi/Anthropic APIs reject
             // that as "must provide content, reasoning_content or tool_calls".
+            // Note: thinking blocks are NOT text blocks and are always non-empty
+            // by construction, so they don't need filtering here.
             let has_non_empty_part = parts_json.iter().any(|p| {
                 !(p.get("type").and_then(|v| v.as_str()) == Some("text")
                     && p.get("text").and_then(|v| v.as_str()).is_none_or(|t| t.is_empty()))
@@ -267,6 +285,17 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
     }
     if let Some(max) = req.max_tokens {
         body["max_tokens"] = serde_json::json!(max);
+    }
+    if let Some(ref thinking) = req.thinking {
+        // Build thinking config per Anthropic/Xiaomi protocol.
+        // Xiaomi expects: {"type": "enabled", "budget_tokens": N}
+        // effort field maps to budget_tokens level when present.
+        let mut t = serde_json::Map::new();
+        t.insert("type".to_string(), serde_json::json!("enabled"));
+        if let Some(budget) = thinking.budget_tokens {
+            t.insert("budget_tokens".to_string(), serde_json::json!(budget));
+        }
+        body["thinking"] = serde_json::json!(t);
     }
     if let Some(tools) = req.tools {
         body["tools"] = serde_json::json!(tools.iter().map(|t| {

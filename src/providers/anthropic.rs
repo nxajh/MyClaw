@@ -141,6 +141,8 @@ fn build_anthropic_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                         "data": b64_json,
                         "detail": format!("{:?}", detail).to_lowercase(),
                     }}),
+                crate::providers::ContentPart::Thinking { thinking } =>
+                    serde_json::json!({"type": "thinking", "thinking": thinking}),
             }).collect();
 
             let content = if content.len() == 1 {

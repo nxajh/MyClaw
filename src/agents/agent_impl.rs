@@ -264,6 +264,17 @@ impl AgentLoop {
             // translates to its own wire format.
             let mut assistant_msg = ChatMessage::assistant_text(&response.text);
             assistant_msg.tool_calls = Some(response.tool_calls.clone());
+
+            // If the model emitted thinking content, add it as a Thinking part
+            // so it is re-sent to the model on subsequent turns.
+            if let Some(ref thinking) = response.reasoning_content {
+                use crate::providers::ContentPart;
+                assistant_msg.parts.insert(
+                    0,
+                    ContentPart::Thinking { thinking: thinking.clone() },
+                );
+            }
+
             messages.push(assistant_msg);
 
             for call in &response.tool_calls {
@@ -316,14 +327,21 @@ impl AgentLoop {
         mut stream: BoxStream<StreamEvent>,
     ) -> anyhow::Result<CollectedResponse> {
         let mut text = String::new();
+        let mut reasoning_content: Option<String> = None;
         let mut tool_calls = Vec::new();
         let mut stop_reason = StopReason::EndTurn;
 
         while let Some(event) = stream.next().await {
             match event {
                 StreamEvent::Delta { text: delta } => text.push_str(&delta),
-                StreamEvent::Thinking { .. } => {
-                    // TODO: surface reasoning in response or log.
+                StreamEvent::Thinking { text: delta } => {
+                    if !delta.is_empty() {
+                        if reasoning_content.is_none() {
+                            reasoning_content = Some(delta);
+                        } else {
+                            reasoning_content.as_mut().unwrap().push_str(&delta);
+                        }
+                    }
                 }
                 StreamEvent::ToolCallStart { id, name, initial_arguments } => {
                     tool_calls.push(ToolCall {
@@ -376,6 +394,7 @@ impl AgentLoop {
 
         Ok(CollectedResponse {
             text,
+            reasoning_content,
             tool_calls,
             stop_reason,
         })
@@ -547,6 +566,7 @@ impl AgentLoop {
 /// Response collected from a chat stream.
 struct CollectedResponse {
     text: String,
+    reasoning_content: Option<String>,
     tool_calls: Vec<ToolCall>,
     #[allow(dead_code)]
     stop_reason: StopReason,

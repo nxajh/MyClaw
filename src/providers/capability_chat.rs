@@ -14,6 +14,11 @@ pub enum ContentPart {
     Text { text: String },
     ImageUrl { url: String, detail: ImageDetail },
     ImageB64 { b64_json: String, detail: ImageDetail },
+    /// Extended thinking block — stored in message history so it can be
+    /// re-sent to the model on subsequent turns (Anthropic protocol requires
+    /// the model to see its own reasoning).
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String },
 }
 
 /// Image detail level.
@@ -198,6 +203,67 @@ pub struct ChatResponse {
     pub usage: Option<ChatUsage>,
     pub reasoning_content: Option<String>,
     pub stop_reason: StopReason,
+}
+
+impl ChatResponse {
+    /// Collect a streaming response from a `BoxStream<StreamEvent>`.
+    pub async fn from_stream(stream: BoxStream<StreamEvent>) -> anyhow::Result<Self> {
+        use futures_util::StreamExt;
+        let mut text = String::new();
+        let mut reasoning_content = String::new();
+        let mut tool_calls = Vec::new();
+        let mut stop_reason = StopReason::EndTurn;
+        let mut usage: Option<ChatUsage> = None;
+
+        let mut stream = stream;
+        while let Some(event) = stream.next().await {
+            match event {
+                StreamEvent::Delta { text: delta } => text.push_str(&delta),
+                StreamEvent::Thinking { text: delta } => reasoning_content.push_str(&delta),
+                StreamEvent::ToolCallStart { id, name, initial_arguments } => {
+                    tool_calls.push(ToolCall { id, name, arguments: initial_arguments });
+                }
+                StreamEvent::ToolCallDelta { id, delta } => {
+                    if !id.is_empty() {
+                        if let Some(call) = tool_calls.iter_mut().find(|c| c.id == id) {
+                            call.arguments.push_str(&delta);
+                        } else {
+                            tool_calls.push(ToolCall { id, name: String::new(), arguments: delta });
+                        }
+                    } else if let Some(last) = tool_calls.last_mut() {
+                        last.arguments.push_str(&delta);
+                    }
+                }
+                StreamEvent::ToolCallEnd { id, name, arguments } => {
+                    if let Some(call) = tool_calls.iter_mut().find(|c| c.id == id) {
+                        call.name = name;
+                        call.arguments = arguments;
+                    }
+                }
+                StreamEvent::Usage(u) => usage = Some(u),
+                StreamEvent::Done { reason } => {
+                    stop_reason = reason;
+                    break;
+                }
+                StreamEvent::HttpError { message, .. } => {
+                    anyhow::bail!("Stream error: HTTP {}", message);
+                }
+                StreamEvent::Error(e) => anyhow::bail!("Stream error: {}", e),
+            }
+        }
+
+        Ok(Self {
+            text,
+            tool_calls,
+            usage,
+            reasoning_content: if reasoning_content.is_empty() {
+                None
+            } else {
+                Some(reasoning_content)
+            },
+            stop_reason,
+        })
+    }
 }
 
 // ── ChatProvider trait ───────────────────────────────────────────────────────
