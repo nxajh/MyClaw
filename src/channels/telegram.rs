@@ -132,10 +132,8 @@ pub fn markdown_to_telegram_html(markdown: &str) -> String {
 
         // ── Headings (# …) → bold ───────────────────────────────────────
         if chars[i] == '#' {
-            let mut level = 0;
             let mut j = i;
             while j < len && chars[j] == '#' {
-                level += 1;
                 j += 1;
             }
             // Must have a space after the hashes, and be at line start.
@@ -147,7 +145,7 @@ pub fn markdown_to_telegram_html(markdown: &str) -> String {
                     j += 1;
                 }
                 let heading_text: String = chars[line_start..j].iter().collect();
-                out.push_str(&format!("<b>{}</b>", escape_html(&heading_text.trim())));
+                out.push_str(&format!("<b>{}</b>", escape_html(heading_text.trim())));
                 if j < len {
                     out.push('\n');
                     j += 1;
@@ -274,11 +272,7 @@ pub fn markdown_to_telegram_html(markdown: &str) -> String {
                     continue;
                 }
             } else if prev_ok && next_ok {
-                if m == '_' {
-                    out.push_str("<i>");
-                } else {
-                    out.push_str("<i>");
-                }
+                out.push_str("<i>");
                 italic = true;
                 i += 1;
                 continue;
