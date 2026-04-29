@@ -205,7 +205,7 @@ fn build_openai_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                     json!(content)
                 };
                 if let Some(tcs) = &msg.tool_calls {
-                    msg_json["tool_calls"] = json!(tcs);
+                    msg_json["tool_calls"] = serde_json::json!(tcs.iter().map(|tc| tc.to_openai()).collect::<Vec<_>>());
                 }
             } else {
                 msg_json["content"] = json!(content);

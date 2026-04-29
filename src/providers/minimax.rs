@@ -208,7 +208,7 @@ fn build_minimax_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                 serde_json::json!(content)
             };
             if let Some(tcs) = &msg.tool_calls {
-                msg_json["tool_calls"] = serde_json::json!(tcs);
+                msg_json["tool_calls"] = serde_json::json!(tcs.iter().map(|tc| tc.to_openai()).collect::<Vec<_>>());
             }
         }
 

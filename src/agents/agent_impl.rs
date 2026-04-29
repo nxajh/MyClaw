@@ -232,18 +232,10 @@ impl AgentLoop {
             }
 
             // Build the assistant's tool_calls message to append to conversation.
-            let assistant_tool_calls: Vec<serde_json::Value> = response.tool_calls.iter().map(|call| {
-                serde_json::json!({
-                    "id": call.id,
-                    "type": "function",
-                    "function": {
-                        "name": call.name,
-                        "arguments": call.arguments,
-                    }
-                })
-            }).collect();
+            // Store in canonical ToolCall format — each provider's build_body()
+            // translates to its own wire format.
             let mut assistant_msg = ChatMessage::assistant_text(&response.text);
-            assistant_msg.tool_calls = Some(assistant_tool_calls);
+            assistant_msg.tool_calls = Some(response.tool_calls.clone());
             messages.push(assistant_msg);
 
             for call in &response.tool_calls {

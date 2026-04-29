@@ -38,8 +38,11 @@ pub struct ChatMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     /// Tool calls from assistant (OpenAI: tool_calls in assistant message).
+    /// Always stored in the canonical ToolCall format regardless of
+    /// which provider generated them. Each provider's build_body() is
+    /// responsible for translating this into its own wire format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<serde_json::Value>>,
+    pub tool_calls: Option<Vec<ToolCall>>,
 }
 
 impl ChatMessage {
@@ -130,6 +133,21 @@ pub struct ToolCall {
     pub name: String,
     /// JSON string of tool arguments.
     pub arguments: String,
+}
+
+impl ToolCall {
+    /// Convert to the OpenAI / OpenAI-compatible wire format used in
+    /// assistant message tool_calls arrays.
+    pub fn to_openai(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id,
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "arguments": self.arguments,
+            }
+        })
+    }
 }
 
 /// Tool specification for providers that support native tool calling.
