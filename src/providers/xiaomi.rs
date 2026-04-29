@@ -62,6 +62,8 @@ impl ChatProvider for XiaomiProvider {
         let url = self.chat_url();
         let auth = format!("Bearer {}", self.api_key);
         let body = build_xiaomi_body(&req);
+        let body_str = serde_json::to_string_pretty(&body).unwrap_or_default();
+        tracing::debug!(url, body = %body_str, "xiaomi: sending chat request");
         let client = self.client.clone();
         let user_agent = self.user_agent.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(100);
