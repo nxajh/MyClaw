@@ -601,6 +601,7 @@ impl ChatMessageExt for ChatMessage {
             name: Some(name),
             tool_call_id: None,
             tool_calls: None,
+            is_error: None,
         }
     }
 }
