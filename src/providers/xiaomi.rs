@@ -203,7 +203,7 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                         "type": "tool_result",
                         "tool_use_id": msg.tool_call_id.as_ref().unwrap(),
                         "content": content,
-                        "is_error": false,
+                        "is_error": msg.is_error.unwrap_or(false),
                     })]
                 } else {
                     // Regular parts.

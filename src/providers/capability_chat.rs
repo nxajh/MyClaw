@@ -48,11 +48,14 @@ pub struct ChatMessage {
     /// responsible for translating this into its own wire format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// Whether this tool result message indicates an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_error: Option<bool>,
 }
 
 impl ChatMessage {
     pub fn text(role: impl Into<String>, text: impl Into<String>) -> Self {
-        Self { role: role.into(), parts: vec![ContentPart::Text { text: text.into() }], name: None, tool_call_id: None, tool_calls: None }
+        Self { role: role.into(), parts: vec![ContentPart::Text { text: text.into() }], name: None, tool_call_id: None, tool_calls: None, is_error: None }
     }
     pub fn user_text(text: impl Into<String>) -> Self { Self::text("user", text) }
     pub fn assistant_text(text: impl Into<String>) -> Self { Self::text("assistant", text) }

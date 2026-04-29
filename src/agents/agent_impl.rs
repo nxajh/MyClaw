@@ -298,7 +298,7 @@ impl AgentLoop {
                 }
 
                 let result = self.execute_tool(call).await;
-                let result_content = match &result {
+                let (result_content, is_error) = match &result {
                     Ok(r) => {
                         let mut out = r.output.clone();
                         if let Some(ref err) = r.error {
@@ -306,12 +306,12 @@ impl AgentLoop {
                                 out = format!("error: {}", err);
                             }
                         }
-                        out
+                        (out, !r.success)
                     }
-                    Err(e) => format!("error: {}", e),
+                    Err(e) => (format!("error: {}", e), true),
                 };
 
-                tracing::info!(tool = %call.name, success = result.is_ok(), "tool result:\n{}", result_content);
+                tracing::info!(tool = %call.name, success = !is_error, "tool result:\n{}", result_content);
 
                 // Loop breaker check.
                 match self.loop_breaker.record_and_check(&call.name, &call.arguments, &result_content) {
@@ -322,13 +322,14 @@ impl AgentLoop {
                     LoopBreak::None => {}
                 }
 
-                // Append tool result with tool_call_id.
+                // Append tool result with tool_call_id and is_error.
                 let mut tool_msg = ChatMessage::text("tool", &result_content);
                 tool_msg.tool_call_id = Some(call.id.clone());
+                tool_msg.is_error = Some(is_error);
                 messages.push(tool_msg);
 
                 // Persist tool result to session history.
-                self.session.add_tool_result(call.id.clone(), result_content);
+                self.session.add_tool_result(call.id.clone(), result_content, is_error);
             }
         }
     }

@@ -113,9 +113,10 @@ impl Session {
 
     /// Append a tool result message to history.
     /// Preserves tool_call_id so providers can format it as tool_result block.
-    pub fn add_tool_result(&mut self, tool_call_id: String, content: String) {
+    pub fn add_tool_result(&mut self, tool_call_id: String, content: String, is_error: bool) {
         let mut msg = ChatMessage::text("tool", &content);
         msg.tool_call_id = Some(tool_call_id);
+        msg.is_error = Some(is_error);
         self.history.push(msg);
     }
 
