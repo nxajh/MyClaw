@@ -141,11 +141,9 @@ impl Orchestrator {
         let loop_ = agent.loop_for(session);
 
         // Wire up the ask_user handler.
-        let sk_owned = sk.to_string();
         let channels = channels.clone();
         let pending_asks = pending_asks.clone();
         let handler: AskUserHandler = Arc::new(move |session_key: String, question: String| {
-            let sk_owned = sk_owned.clone();
             let channels = channels.clone();
             let pending_asks = pending_asks.clone();
             Box::pin(async move {
