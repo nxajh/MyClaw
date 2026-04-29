@@ -331,7 +331,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let mut skills_arc: Arc<SkillsManager> = Arc::new(skills);
 
     // Build sub-agent delegator if sub-agents are configured.
-    let sub_agent_delegator: Option<Arc<SubAgentDelegator>> = if config.agents.is_empty() {
+    let _sub_agent_delegator: Option<Arc<SubAgentDelegator>> = if config.agents.is_empty() {
         None
     } else {
         tracing::info!(agents = config.agents.len(), "multi-agent mode enabled");
