@@ -255,6 +255,7 @@ pub fn create_provider(name: &str, api_key: String) -> Option<Box<dyn ProviderIn
         "glm" => Some(Box::new(crate::providers::glm::GlmProvider::new(api_key)) as _),
         "kimi" => Some(Box::new(crate::providers::kimi::KimiProvider::new(api_key)) as _),
         "minimax" => Some(Box::new(crate::providers::minimax::MiniMaxProvider::new(api_key)) as _),
+        "xiaomi" | "mimo" => Some(Box::new(crate::providers::xiaomi::XiaomiProvider::new(api_key)) as _),
         _ => None,
     }
 }
@@ -266,6 +267,7 @@ impl ProviderInstance for crate::providers::anthropic::AnthropicProvider {}
 impl ProviderInstance for crate::providers::glm::GlmProvider {}
 impl ProviderInstance for crate::providers::kimi::KimiProvider {}
 impl ProviderInstance for crate::providers::minimax::MiniMaxProvider {}
+impl ProviderInstance for crate::providers::xiaomi::XiaomiProvider {}
 
 /// Create a provider by inspecting the base_url hostname.
 /// Falls back to OpenAI-compatible if no specific match is found.
@@ -294,8 +296,16 @@ pub fn create_provider_by_url_with_user_agent(
         let mut p = crate::providers::glm::GlmProvider::with_base_url(api_key, base_url.to_string());
         if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
         Some(Box::new(p))
+    } else if host.contains("xiaomimimo") {
+        let mut p = crate::providers::xiaomi::XiaomiProvider::with_base_url(api_key, base_url.to_string());
+        if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
+        Some(Box::new(p))
     } else if host.contains("anthropic.com") || host.contains("claude.ai") {
         let mut p = crate::providers::anthropic::AnthropicProvider::with_base_url(api_key, base_url.to_string());
+        if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
+        Some(Box::new(p))
+    } else if host.contains("xiaomimimo") {
+        let mut p = crate::providers::xiaomi::XiaomiProvider::with_base_url(api_key, base_url.to_string());
         if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
         Some(Box::new(p))
     } else if host.contains("minimax") {
@@ -338,10 +348,11 @@ pub fn create_full_openai_provider_with_user_agent(
         .unwrap_or("");
 
     // Only create full provider for OpenAI-compatible endpoints
-    // Non-OpenAI providers (Anthropic) don't implement Embedding/Image/TTS
+    // Non-OpenAI providers (Anthropic, Xiaomi, etc.) don't implement Embedding/Image/TTS
     if host.contains("anthropic.com") || host.contains("claude.ai")
         || host.contains("bigmodel.cn") || host.contains("zhipuai")
         || host.contains("minimax") || host.contains("moonshot") || host.contains("kimi")
+        || host.contains("xiaomimimo")
     {
         return None;
     }
@@ -359,6 +370,7 @@ pub enum ProviderHandle {
     Kimi(crate::providers::kimi::KimiProvider),
     MiniMax(crate::providers::minimax::MiniMaxProvider),
     Anthropic(crate::providers::anthropic::AnthropicProvider),
+    Xiaomi(crate::providers::xiaomi::XiaomiProvider),
 }
 
 impl ProviderHandle {
@@ -379,10 +391,18 @@ impl ProviderHandle {
             let mut p = crate::providers::glm::GlmProvider::with_base_url(api_key, base_url.to_string());
             if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
             Some(ProviderHandle::Glm(p))
+        } else if host.contains("xiaomimimo") {
+            let mut p = crate::providers::xiaomi::XiaomiProvider::with_base_url(api_key, base_url.to_string());
+            if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
+            Some(ProviderHandle::Xiaomi(p))
         } else if host.contains("anthropic.com") || host.contains("claude.ai") {
             let mut p = crate::providers::anthropic::AnthropicProvider::with_base_url(api_key, base_url.to_string());
             if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
             Some(ProviderHandle::Anthropic(p))
+        } else if host.contains("xiaomimimo") {
+            let mut p = crate::providers::xiaomi::XiaomiProvider::with_base_url(api_key, base_url.to_string());
+            if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
+            Some(ProviderHandle::Xiaomi(p))
         } else if host.contains("minimax") {
             let mut p = crate::providers::minimax::MiniMaxProvider::with_base_url(api_key, base_url.to_string());
             if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
@@ -406,6 +426,7 @@ impl ProviderHandle {
             ProviderHandle::Kimi(p) => Box::new(p),
             ProviderHandle::MiniMax(p) => Box::new(p),
             ProviderHandle::Anthropic(p) => Box::new(p),
+            ProviderHandle::Xiaomi(p) => Box::new(p),
         }
     }
 

@@ -23,5 +23,8 @@ pub use channels::{Channel, ChannelMessage, SendMessage, DedupState};
 pub use config::{AppConfig, ConfigLoader};
 pub use registry::{Registry};
 pub use providers::ServiceRegistry;
-pub use providers::{ChatProvider, FallbackChatProvider, ToolResult};
+pub use providers::{
+    ChatProvider, FallbackChatProvider, ToolResult,
+    XiaomiProvider, // Xiaomi MiMo provider
+};
 pub use providers::capability_chat::ToolSpec;
