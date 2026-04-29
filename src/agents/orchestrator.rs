@@ -220,7 +220,7 @@ impl Orchestrator {
             let sk = Self::session_key(&channel_name, &msg.sender);
 
             // Check if this is a reply to a pending ask_user.
-            if let Some((_, ((tx, _)))) = self.pending_asks.remove(&sk) {
+            if let Some((_, (tx, _))) = self.pending_asks.remove(&sk) {
                 // Deliver the user's answer to the waiting ask_user handler.
                 if tx.send(msg.content.clone()).is_err() {
                     warn!(session = %sk, "ask_user oneshot already closed");
