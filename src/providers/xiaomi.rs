@@ -224,8 +224,8 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                         }
                     }).collect();
 
-                    // For assistant messages with tool_calls:
-                    // Only tool_use blocks go into content (text/thinking parts excluded).
+                    // For assistant messages with tool_calls: append tool_use blocks to content
+                    // alongside text/thinking parts.
                     if msg.role == "assistant" && msg.tool_calls.is_some() {
                         let blocks: Vec<serde_json::Value> = msg.tool_calls.as_ref().unwrap().iter().map(|tc| {
                             let input = serde_json::from_str::<serde_json::Value>(&tc.arguments)
@@ -235,7 +235,6 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                                 "id": tc.id,
                                 "name": tc.name,
                                 "input": input,
-                                "is_error": false,
                             })
                         }).collect();
                         parts.extend(blocks);
