@@ -277,6 +277,13 @@ impl AgentLoop {
 
             messages.push(assistant_msg);
 
+            // Persist assistant message with tool_calls to session history.
+            self.session.add_assistant_with_tools(
+                response.text.clone(),
+                response.tool_calls.clone(),
+                response.reasoning_content.clone(),
+            );
+
             for call in &response.tool_calls {
                 tool_calls_count += 1;
 
@@ -312,11 +319,8 @@ impl AgentLoop {
                 tool_msg.tool_call_id = Some(call.id.clone());
                 messages.push(tool_msg);
 
-                // Append to session history.
-                self.session
-                    .add_assistant_text(serde_json::to_string(&call).unwrap_or_default());
-                self.session
-                    .add_assistant_text(result_content);
+                // Persist tool result to session history.
+                self.session.add_tool_result(call.id.clone(), result_content);
             }
         }
     }

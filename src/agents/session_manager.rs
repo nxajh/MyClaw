@@ -94,6 +94,31 @@ impl Session {
             .push(ChatMessage::assistant_text(text));
     }
 
+    /// Append an assistant message with tool_calls to history.
+    /// Preserves tool_calls and thinking content for correct request formatting.
+    pub fn add_assistant_with_tools(
+        &mut self,
+        text: String,
+        tool_calls: Vec<crate::providers::ToolCall>,
+        thinking: Option<String>,
+    ) {
+        let mut msg = ChatMessage::assistant_text(&text);
+        msg.tool_calls = Some(tool_calls);
+        if let Some(thinking) = thinking {
+            use crate::providers::ContentPart;
+            msg.parts.insert(0, ContentPart::Thinking { thinking });
+        }
+        self.history.push(msg);
+    }
+
+    /// Append a tool result message to history.
+    /// Preserves tool_call_id so providers can format it as tool_result block.
+    pub fn add_tool_result(&mut self, tool_call_id: String, content: String) {
+        let mut msg = ChatMessage::text("tool", &content);
+        msg.tool_call_id = Some(tool_call_id);
+        self.history.push(msg);
+    }
+
     /// Add a system message to history.
     pub fn add_system_text(&mut self, text: String) {
         self.history
