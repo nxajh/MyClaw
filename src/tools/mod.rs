@@ -5,10 +5,12 @@
 //! **Core:** ShellTool, FileReadTool, FileWriteTool, FileEditTool, GlobSearchTool, ContentSearchTool
 //! **Web:** WebFetchTool, HttpRequestTool, WebSearchTool
 //! **Utility:** CalculatorTool, AskUserTool
+//! **Multi-Agent:** DelegateTaskTool
 //! **Memory:** MemoryStoreTool, MemoryRecallTool, MemoryForgetTool
 
 mod ask_user;
 mod calculator;
+mod delegate;
 mod file_ops;
 mod http;
 mod memory;
@@ -20,6 +22,7 @@ mod web_search;
 // Re-export tools.
 pub use ask_user::AskUserTool;
 pub use calculator::CalculatorTool;
+pub use delegate::{DelegateTaskTool, TaskDelegator};
 pub use file_ops::{FileEditTool, FileReadTool, FileWriteTool};
 pub use http::HttpRequestTool;
 pub use memory::{MemoryForgetTool, MemoryRecallTool, MemoryStore, MemoryStoreTool};

@@ -65,10 +65,10 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(registry: Arc<dyn ServiceRegistry>, skills: SkillsManager, config: AgentConfig) -> Self {
+    pub fn new(registry: Arc<dyn ServiceRegistry>, skills: Arc<SkillsManager>, config: AgentConfig) -> Self {
         Self {
             registry,
-            skills: Arc::new(skills),
+            skills,
             config,
             system_prompt: String::new(),
         }

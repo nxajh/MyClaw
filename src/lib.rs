@@ -16,7 +16,7 @@ pub use agents::{
     SkillsManager, Orchestrator, OrchestratorParts,
     SystemPromptBuilder, SystemPromptConfig,
     AutonomyLevel, SkillsPromptInjectionMode,
-    McpManager, AskUserHandler,
+    McpManager, AskUserHandler, SubAgentDelegator,
 };
 pub use channels::{Channel, ChannelMessage, SendMessage, DedupState};
 pub use config::{AppConfig, ConfigLoader};

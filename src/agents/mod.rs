@@ -6,6 +6,7 @@ mod prompt;
 mod session_manager;
 mod skills;
 mod mcp_manager;
+mod sub_agent;
 
 pub use agent_impl::{Agent, AgentConfig, AgentLoop, AskUserHandler};
 pub use session_manager::{InMemoryBackend, Session};
@@ -15,3 +16,4 @@ pub use session_manager::SessionManager;
 pub use crate::storage::SessionBackend;
 pub use skills::{Skill, SkillsManager};
 pub use mcp_manager::McpManager;
+pub use sub_agent::SubAgentDelegator;

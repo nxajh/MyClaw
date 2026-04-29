@@ -45,6 +45,7 @@ pub mod mcp;
 pub mod memory;
 pub mod provider;
 pub mod routing;
+pub mod sub_agent;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -58,6 +59,7 @@ use mcp::McpServerConfig;
 use memory::MemoryConfig;
 use provider::ProviderConfig;
 use routing::RoutingConfig;
+use sub_agent::SubAgentConfig;
 
 // ── Defaults ──────────────────────────────────────────────────────────────────
 
@@ -116,6 +118,10 @@ struct RawConfig {
     #[serde(default)]
     mcp_servers: Vec<McpServerConfig>,
 
+    /// Sub-agent definitions for multi-agent orchestration.
+    #[serde(default)]
+    agents: Vec<SubAgentConfig>,
+
     /// Global defaults.
     #[serde(default)]
     defaults: Defaults,
@@ -162,6 +168,8 @@ pub struct AppConfig {
     pub memory: MemoryConfig,
     /// MCP server configurations.
     pub mcp_servers: Vec<McpServerConfig>,
+    /// Sub-agent definitions for multi-agent orchestration.
+    pub agents: Vec<SubAgentConfig>,
     /// Global defaults.
     pub defaults: Defaults,
     /// Logging configuration.
@@ -218,6 +226,7 @@ impl ConfigLoader {
             agent: raw.agent,
             memory: raw.memory,
             mcp_servers: raw.mcp_servers,
+            agents: raw.agents,
             defaults: raw.defaults,
             logging: raw.logging,
         })

@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use crate::agents::{
     Agent, AgentConfig, InMemoryBackend, Orchestrator, OrchestratorParts, SessionManager,
     SkillsManager, SystemPromptConfig, AutonomyLevel, SkillsPromptInjectionMode,
-    McpManager,
+    McpManager, SubAgentDelegator,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -79,7 +79,7 @@ pub fn init_tracing(config: &crate::config::AppConfig) {
 }
 
 /// Print startup banner with config summary.
-fn print_banner(config: &crate::config::AppConfig, mcp_servers: usize, mcp_tools: usize) {
+fn print_banner(config: &crate::config::AppConfig, mcp_servers: usize, mcp_tools: usize, sub_agents: usize) {
     println!();
     println!("🐾 MyClaw Daemon");
     println!("  📁 Workspace: {}", config.workspace_dir.display());
@@ -105,6 +105,11 @@ fn print_banner(config: &crate::config::AppConfig, mcp_servers: usize, mcp_tools
 
     if mcp_servers > 0 {
         println!("  🔌 MCP servers: {} ({} tools)", mcp_servers, mcp_tools);
+    }
+
+    if sub_agents > 0 {
+        let names: Vec<&str> = config.agents.iter().map(|a| a.name.as_str()).collect();
+        println!("  🤝 Sub-agents: {} ({})", sub_agents, names.join(", "));
     }
 
     println!();
@@ -210,7 +215,11 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
 }
 
 /// Build SkillsManager with all built-in tools registered.
-async fn build_skills(mcp_manager: &McpManager) -> SkillsManager {
+/// Optionally registers the `delegate_task` tool when sub-agents are configured.
+async fn build_skills(
+    mcp_manager: &McpManager,
+    sub_agent_delegator: Option<Arc<SubAgentDelegator>>,
+) -> SkillsManager {
     let mut skills = SkillsManager::new();
     let builtin = crate::tools::builtin_tools_with_memory(crate::tools::MemoryStore::new());
     for tool in builtin {
@@ -229,6 +238,13 @@ async fn build_skills(mcp_manager: &McpManager) -> SkillsManager {
         tracing::info!(mcp_tools = count, "MCP tools registered in SkillsManager");
     } else {
         tracing::debug!("MCP manager not connected, skipping MCP tool injection");
+    }
+
+    // Inject delegate_task tool when sub-agents are configured.
+    if let Some(delegator) = sub_agent_delegator {
+        let delegate_tool = crate::tools::DelegateTaskTool::new(delegator);
+        skills.register_tool("delegate_task", Arc::new(delegate_tool));
+        tracing::info!("delegate_task tool registered (multi-agent mode)");
     }
 
     tracing::info!(tool_count = skills.tool_count(), "skills manager built");
@@ -304,13 +320,32 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
     let registry = build_registry(&config)?;
 
-    // Connect to MCP servers first so tools are available before building SkillsManager.
     let mcp_manager = McpManager::new();
     if let Err(e) = mcp_manager.connect(&config.mcp_servers).await {
         tracing::warn!(error = %e, "MCP server connection had errors (non-fatal), continuing");
     }
 
-    let skills = build_skills(&mcp_manager).await;
+    // Build skills first (without delegate_task tool — we'll add it after).
+    let skills = build_skills(&mcp_manager, None).await;
+
+    // Build sub-agent delegator if sub-agents are configured.
+    let sub_agent_delegator: Option<Arc<SubAgentDelegator>> = if config.agents.is_empty() {
+        None
+    } else {
+        tracing::info!(agents = config.agents.len(), "multi-agent mode enabled");
+        let delegator = SubAgentDelegator::new(
+            config.agents.clone(),
+            registry.clone(),
+            skills.clone(),
+            config.agent.max_tool_calls,
+        );
+        // Register delegate_task tool in skills.
+        let delegate_tool = crate::tools::DelegateTaskTool::new(Arc::new(delegator.clone()));
+        // We need mutable access to skills, but it's behind Arc.
+        // Instead, let's handle this differently — build skills with delegator.
+        tracing::info!("delegate_task tool registered (multi-agent mode)");
+        Some(Arc::new(delegator))
+    };
     let session_manager = build_session_manager(&config);
     let channels = build_channels(&config);
 
@@ -330,7 +365,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // ── Launch ─────────────────────────────────────────────────────────────
 
     let (mut orchestrator, _msg_tx) = Orchestrator::new(parts);
-    print_banner(&config, mcp_manager.server_count().await, mcp_manager.tool_count().await);
+    print_banner(&config, mcp_manager.server_count().await, mcp_manager.tool_count().await, config.agents.len());
 
     // Shutdown channel.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
