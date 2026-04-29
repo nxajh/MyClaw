@@ -37,6 +37,8 @@ impl ChatProvider for KimiProvider {
     fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
         let url = format!("{}/chat/completions", self.base_url);
         let body = build_openai_chat_body(&req);
+        let body_str = serde_json::to_string_pretty(&body).unwrap_or_default();
+        tracing::debug!(url, body = %body_str, "kimi: sending chat request");
         let auth = crate::providers::shared::build_auth(&crate::providers::shared::AuthStyle::Bearer, &self.api_key);
         let client = self.client.clone();
         let user_agent = self.user_agent.clone();

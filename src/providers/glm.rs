@@ -67,6 +67,8 @@ impl ChatProvider for GlmProvider {
     fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
         let url = format!("{}/chat/completions", self.base_url);
         let body = build_glm_body(&req);
+        let body_str = serde_json::to_string_pretty(&body).unwrap_or_default();
+        tracing::debug!(url, body = %body_str, "glm: sending chat request");
         let auth = self.auth();
         let client = self.client.clone();
         let user_agent = self.user_agent.clone();

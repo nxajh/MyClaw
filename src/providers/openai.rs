@@ -88,6 +88,8 @@ impl ChatProvider for OpenAiProvider {
     fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
         let url = self.chat_url();
         let body = build_openai_body(&req);
+        let body_str = serde_json::to_string_pretty(&body).unwrap_or_default();
+        tracing::debug!(url, body = %body_str, "openai: sending chat request");
         let client = self.client.clone();
         let headers = self.common_headers();
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(100);

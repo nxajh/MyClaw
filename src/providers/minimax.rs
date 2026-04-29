@@ -42,6 +42,8 @@ impl ChatProvider for MiniMaxProvider {
     fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
         let url = format!("{}/text/chatcompletion_v2", self.base_url);
         let body = build_minimax_body(&req);
+        let body_str = serde_json::to_string_pretty(&body).unwrap_or_default();
+        tracing::debug!(url, body = %body_str, "minimax: sending chat request");
         let auth = crate::providers::shared::build_auth(&crate::providers::shared::AuthStyle::Bearer, &self.api_key);
         let client = self.client.clone();
         let user_agent = self.user_agent.clone();
