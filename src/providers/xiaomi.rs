@@ -203,6 +203,7 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                         "type": "tool_result",
                         "tool_use_id": msg.tool_call_id.as_ref().unwrap(),
                         "content": content,
+                        "is_error": false,
                     })]
                 } else {
                     // Regular parts.
@@ -224,15 +225,15 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                     }).collect();
 
                     // For assistant messages: also build tool_use blocks and append to content.
-                    // Text/thinking parts are NOT included when tool_calls are present —
-                    // tool_call info lives only in tool_use content blocks, not in text.
                     if msg.role == "assistant" && msg.tool_calls.is_some() {
                         let blocks: Vec<serde_json::Value> = msg.tool_calls.as_ref().unwrap().iter().map(|tc| {
+                            let input = serde_json::from_str::<serde_json::Value>(&tc.arguments)
+                                .unwrap_or(serde_json::Value::String(tc.arguments.clone()));
                             serde_json::json!({
                                 "type": "tool_use",
                                 "id": tc.id,
                                 "name": tc.name,
-                                "input": tc.arguments, // string — API expects serialized JSON string
+                                "input": input, // parsed object
                             })
                         }).collect();
                         parts.extend(blocks);
@@ -240,8 +241,8 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                     parts
                 };
 
-            // Xiaomi API: input must be a string (JSON string), not an object.
-            // Also filter empty text/thinking blocks but always keep tool_use and tool_result.
+            // tool_result content: always a string (serialized tool output).
+            // is_error defaults to false when absent.
             fn is_non_empty_block(p: &serde_json::Value) -> bool {
                 match p.get("type").and_then(|v| v.as_str()) {
                     Some("tool_use") => {
