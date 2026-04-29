@@ -256,7 +256,6 @@ pub fn markdown_to_telegram_html(markdown: &str) -> String {
         // Must be preceded by whitespace/start and followed by non-whitespace,
         // or preceded by non-whitespace and followed by whitespace/end.
         if (chars[i] == '*' || chars[i] == '_') && !bold {
-            let m = chars[i];
             let prev_ok = i == 0
                 || chars[i - 1].is_whitespace()
                 || chars[i - 1].is_ascii_punctuation();
