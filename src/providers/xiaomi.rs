@@ -95,6 +95,11 @@ impl ChatProvider for XiaomiProvider {
                 return;
             }
 
+            // SSE parsing state: index → (tool_id, tool_name) mapping.
+            // Anthropic uses index (block number) in content_block_delta, not id.
+            let mut tool_index_map: std::collections::HashMap<u64, (String, String)> =
+                std::collections::HashMap::new();
+
             let mut buffer = String::new();
             let mut utf8_buf = Vec::new();
             let mut stream = resp.bytes_stream();
@@ -132,7 +137,7 @@ impl ChatProvider for XiaomiProvider {
                 while let Some(pos) = buffer.find('\n') {
                     let line = buffer[..pos].to_string();
                     buffer.drain(..=pos);
-                    if let Some(event) = parse_xiaomi_sse(&line) {
+                    if let Some(event) = parse_xiaomi_sse(&line, &mut tool_index_map) {
                         let _ = tx.send(event).await;
                     }
                 }
@@ -271,7 +276,10 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
 /// Parse Anthropic-style SSE events from Xiaomi MiMo.
 /// Handles: message_start, content_block_start, content_block_delta,
 /// content_block_stop, message_delta, message_stop.
-fn parse_xiaomi_sse(line: &str) -> Option<StreamEvent> {
+fn parse_xiaomi_sse(
+    line: &str,
+    tool_index_map: &mut std::collections::HashMap<u64, (String, String)>,
+) -> Option<StreamEvent> {
     use crate::providers::StreamEvent as SE;
 
     let line = line.trim();
@@ -288,12 +296,14 @@ fn parse_xiaomi_sse(line: &str) -> Option<StreamEvent> {
 
     match ty {
         "content_block_start" => {
-            // Handle tool_use content block start — emit ToolCallStart.
+            let index = evt.get("index").and_then(|v| v.as_u64())?;
             if let Some(cb) = evt.get("content_block") {
                 if cb.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
                     let id = cb.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     let name = cb.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     if !id.is_empty() && !name.is_empty() {
+                        // Store index → (id, name) so subsequent deltas can look it up.
+                        tool_index_map.insert(index, (id.clone(), name.clone()));
                         return Some(SE::ToolCallStart {
                             id,
                             name,
@@ -324,7 +334,9 @@ fn parse_xiaomi_sse(line: &str) -> Option<StreamEvent> {
                     }
                 }
                 "input_json_delta" => {
-                    let id = evt.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    // Delta carries index, not id. Look up (id, name) from the map.
+                    let index = evt.get("index").and_then(|v| v.as_u64())?;
+                    let (id, _name) = tool_index_map.get(&index)?.clone();
                     let args = delta.get("partial_json").and_then(|v| v.as_str()).unwrap_or("");
                     return Some(SE::ToolCallDelta {
                         id,
