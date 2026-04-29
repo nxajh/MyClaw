@@ -37,6 +37,7 @@ pub struct OpenAiProvider {
     base_url: String,
     api_key: String,
     client: Client,
+    user_agent: Option<String>,
 }
 
 impl OpenAiProvider {
@@ -45,7 +46,12 @@ impl OpenAiProvider {
     }
 
     pub fn with_base_url(api_key: String, base_url: String) -> Self {
-        Self { base_url, api_key, client: Client::new() }
+        Self { base_url, api_key, client: Client::new(), user_agent: None }
+    }
+
+    pub fn with_user_agent(mut self, user_agent: String) -> Self {
+        self.user_agent = Some(user_agent);
+        self
     }
 
     fn auth(&self) -> String {
@@ -62,6 +68,17 @@ impl OpenAiProvider {
     fn images_url(&self) -> String { format!("{}/v1/images/generations", self.base_url.trim_end_matches('/')) }
     fn embeddings_url(&self) -> String { format!("{}/v1/embeddings", self.base_url.trim_end_matches('/')) }
     fn tts_url(&self) -> String { format!("{}/v1/audio/speech", self.base_url.trim_end_matches('/')) }
+
+    /// Build a HeaderMap with common headers (auth, content-type, optional user-agent).
+    fn common_headers(&self) -> reqwest::header::HeaderMap {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::AUTHORIZATION, self.auth().parse().unwrap());
+        headers.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
+        if let Some(ref ua) = self.user_agent {
+            headers.insert(reqwest::header::USER_AGENT, ua.parse().unwrap());
+        }
+        headers
+    }
 }
 
 // ── ChatProvider ───────────────────────────────────────────────────────────────
@@ -71,15 +88,11 @@ impl ChatProvider for OpenAiProvider {
     fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
         let url = self.chat_url();
         let body = build_openai_body(&req);
-        let auth = self.auth();
         let client = self.client.clone();
+        let headers = self.common_headers();
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(100);
 
         tokio::spawn(async move {
-            let mut headers = reqwest::header::HeaderMap::new();
-            headers.insert(reqwest::header::AUTHORIZATION, auth.parse().unwrap());
-            headers.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
-
             let resp = match client.post(&url).headers(headers).json(&body).send().await {
                 Ok(r) => r,
                 Err(e) => { let _ = tx.send(StreamEvent::Error(e.to_string())).await; return; }
@@ -348,11 +361,7 @@ fn parse_openai_sse(line: &str, saw_tool_call: &mut bool) -> Option<StreamEvent>
 impl ImageGenerationProvider for OpenAiProvider {
     fn generate_image(&self, req: ImageRequest) -> anyhow::Result<ImageResponse> {
         let url = self.images_url();
-        let auth = self.auth();
-
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(reqwest::header::AUTHORIZATION, auth.parse().unwrap());
-        headers.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
+        let headers = self.common_headers();
 
         let body = serde_json::json!({
             "model": req.model,
@@ -443,11 +452,7 @@ impl TtsProvider for OpenAiProvider {
 impl EmbeddingProvider for OpenAiProvider {
     fn embed(&self, req: EmbedRequest) -> anyhow::Result<EmbedResponse> {
         let url = self.embeddings_url();
-        let auth = self.auth();
-
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(reqwest::header::AUTHORIZATION, auth.parse().unwrap());
-        headers.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
+        let headers = self.common_headers();
 
         let input = match &req.input {
             EmbedInput::Text(t) => serde_json::json!(vec![t.clone()]),

@@ -334,6 +334,11 @@ pub enum ProviderHandle {
 impl ProviderHandle {
     /// Create a ProviderHandle by inspecting the base_url hostname.
     pub fn from_url(api_key: String, base_url: &str) -> Option<Self> {
+        Self::from_url_with_user_agent(api_key, base_url, None)
+    }
+
+    /// Create a ProviderHandle with an optional user_agent.
+    pub fn from_url_with_user_agent(api_key: String, base_url: &str, user_agent: Option<&str>) -> Option<Self> {
         let host = base_url
             .trim_start_matches("https://")
             .trim_start_matches("http://")
@@ -341,25 +346,25 @@ impl ProviderHandle {
             .unwrap_or("");
 
         if host.contains("bigmodel.cn") || host.contains("zhipuai") {
-            Some(ProviderHandle::Glm(
-                crate::providers::glm::GlmProvider::with_base_url(api_key, base_url.to_string())
-            ))
+            let mut p = crate::providers::glm::GlmProvider::with_base_url(api_key, base_url.to_string());
+            if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
+            Some(ProviderHandle::Glm(p))
         } else if host.contains("anthropic.com") || host.contains("claude.ai") {
-            Some(ProviderHandle::Anthropic(
-                crate::providers::anthropic::AnthropicProvider::with_base_url(api_key, base_url.to_string())
-            ))
+            let mut p = crate::providers::anthropic::AnthropicProvider::with_base_url(api_key, base_url.to_string());
+            if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
+            Some(ProviderHandle::Anthropic(p))
         } else if host.contains("minimax") {
-            Some(ProviderHandle::MiniMax(
-                crate::providers::minimax::MiniMaxProvider::with_base_url(api_key, base_url.to_string())
-            ))
+            let mut p = crate::providers::minimax::MiniMaxProvider::with_base_url(api_key, base_url.to_string());
+            if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
+            Some(ProviderHandle::MiniMax(p))
         } else if host.contains("moonshot") || host.contains("kimi") {
-            Some(ProviderHandle::Kimi(
-                crate::providers::kimi::KimiProvider::with_base_url(api_key, base_url.to_string())
-            ))
+            let mut p = crate::providers::kimi::KimiProvider::with_base_url(api_key, base_url.to_string());
+            if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
+            Some(ProviderHandle::Kimi(p))
         } else {
-            Some(ProviderHandle::OpenAi(
-                crate::providers::openai::OpenAiProvider::with_base_url(api_key, base_url.to_string())
-            ))
+            let mut p = crate::providers::openai::OpenAiProvider::with_base_url(api_key, base_url.to_string());
+            if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
+            Some(ProviderHandle::OpenAi(p))
         }
     }
 

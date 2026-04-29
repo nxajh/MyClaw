@@ -15,15 +15,21 @@ pub struct AnthropicProvider {
     base_url: String,
     api_key: String,
     client: Client,
+    user_agent: Option<String>,
 }
 
 impl AnthropicProvider {
     pub fn new(api_key: String) -> Self {
-        Self { base_url: DEFAULT_BASE_URL.to_string(), api_key, client: Client::new() }
+        Self { base_url: DEFAULT_BASE_URL.to_string(), api_key, client: Client::new(), user_agent: None }
     }
 
     pub fn with_base_url(api_key: String, base_url: String) -> Self {
-        Self { base_url, api_key, client: Client::new() }
+        Self { base_url, api_key, client: Client::new(), user_agent: None }
+    }
+
+    pub fn with_user_agent(mut self, user_agent: String) -> Self {
+        self.user_agent = Some(user_agent);
+        self
     }
 
     fn chat_url(&self) -> String { format!("{}/v1/messages", self.base_url) }
@@ -36,6 +42,7 @@ impl ChatProvider for AnthropicProvider {
         let auth = format!("Bearer {}", self.api_key);
         let body = build_anthropic_body(&req);
         let client = self.client.clone();
+        let user_agent = self.user_agent.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(100);
 
         tokio::spawn(async move {
@@ -43,6 +50,9 @@ impl ChatProvider for AnthropicProvider {
             headers.insert(reqwest::header::AUTHORIZATION, auth.parse().unwrap());
             headers.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
             headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
+            if let Some(ref ua) = user_agent {
+                headers.insert(reqwest::header::USER_AGENT, ua.parse().unwrap());
+            }
 
             let resp = match client.post(&url).headers(headers).json(&body).send().await {
                 Ok(r) => r,

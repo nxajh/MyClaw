@@ -136,9 +136,12 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
                 "registering provider for model"
             );
 
-            let handle = crate::providers::ProviderHandle::from_url(
+            let user_agent = provider_cfg.chat.user_agent.as_deref();
+
+            let handle = crate::providers::ProviderHandle::from_url_with_user_agent(
                 api_key.clone(),
                 &provider_cfg.base_url,
+                user_agent,
             ).with_context(|| format!(
                 "cannot determine provider type from base_url '{}' (key='{}')",
                 provider_cfg.base_url, provider_key
@@ -150,43 +153,43 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
                 match cap {
                     Capability::Chat | Capability::Vision | Capability::NativeTools => {}
                     Capability::Embedding => {
-                        if let Some(emb) = crate::providers::ProviderHandle::from_url(
-                            api_key.clone(), &provider_cfg.base_url,
+                        if let Some(emb) = crate::providers::ProviderHandle::from_url_with_user_agent(
+                            api_key.clone(), &provider_cfg.base_url, user_agent,
                         ).and_then(|h| h.into_embedding_provider()) {
                             registry.register_embedding(emb, model_id.clone());
                         }
                     }
                     Capability::ImageGeneration => {
-                        if let Some(img) = crate::providers::ProviderHandle::from_url(
-                            api_key.clone(), &provider_cfg.base_url,
+                        if let Some(img) = crate::providers::ProviderHandle::from_url_with_user_agent(
+                            api_key.clone(), &provider_cfg.base_url, user_agent,
                         ).and_then(|h| h.into_image_provider()) {
                             registry.register_image(img, model_id.clone());
                         }
                     }
                     Capability::TextToSpeech => {
-                        if let Some(tts) = crate::providers::ProviderHandle::from_url(
-                            api_key.clone(), &provider_cfg.base_url,
+                        if let Some(tts) = crate::providers::ProviderHandle::from_url_with_user_agent(
+                            api_key.clone(), &provider_cfg.base_url, user_agent,
                         ).and_then(|h| h.into_tts_provider()) {
                             registry.register_tts(tts, model_id.clone());
                         }
                     }
                     Capability::VideoGeneration => {
-                        if let Some(vid) = crate::providers::ProviderHandle::from_url(
-                            api_key.clone(), &provider_cfg.base_url,
+                        if let Some(vid) = crate::providers::ProviderHandle::from_url_with_user_agent(
+                            api_key.clone(), &provider_cfg.base_url, user_agent,
                         ).and_then(|h| h.into_video_provider()) {
                             registry.register_video(vid, model_id.clone());
                         }
                     }
                     Capability::Search => {
-                        if let Some(srch) = crate::providers::ProviderHandle::from_url(
-                            api_key.clone(), &provider_cfg.base_url,
+                        if let Some(srch) = crate::providers::ProviderHandle::from_url_with_user_agent(
+                            api_key.clone(), &provider_cfg.base_url, user_agent,
                         ).and_then(|h| h.into_search_provider()) {
                             registry.register_search(srch, model_id.clone());
                         }
                     }
                     Capability::SpeechToText => {
-                        if let Some(stt) = crate::providers::ProviderHandle::from_url(
-                            api_key.clone(), &provider_cfg.base_url,
+                        if let Some(stt) = crate::providers::ProviderHandle::from_url_with_user_agent(
+                            api_key.clone(), &provider_cfg.base_url, user_agent,
                         ).and_then(|h| h.into_stt_provider()) {
                             registry.register_stt(stt, model_id.clone());
                         }

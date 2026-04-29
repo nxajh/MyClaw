@@ -19,6 +19,7 @@ pub struct MiniMaxProvider {
     base_url: String,
     api_key: String,
     client: Client,
+    user_agent: Option<String>,
 }
 
 impl MiniMaxProvider {
@@ -27,7 +28,12 @@ impl MiniMaxProvider {
     }
 
     pub fn with_base_url(api_key: String, base_url: String) -> Self {
-        Self { base_url, api_key, client: Client::new() }
+        Self { base_url, api_key, client: Client::new(), user_agent: None }
+    }
+
+    pub fn with_user_agent(mut self, user_agent: String) -> Self {
+        self.user_agent = Some(user_agent);
+        self
     }
 }
 
@@ -38,12 +44,16 @@ impl ChatProvider for MiniMaxProvider {
         let body = build_minimax_body(&req);
         let auth = crate::providers::shared::build_auth(&crate::providers::shared::AuthStyle::Bearer, &self.api_key);
         let client = self.client.clone();
+        let user_agent = self.user_agent.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(100);
 
         tokio::spawn(async move {
             let mut headers = reqwest::header::HeaderMap::new();
             headers.insert(reqwest::header::AUTHORIZATION, auth.parse().unwrap());
             headers.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
+            if let Some(ref ua) = user_agent {
+                headers.insert(reqwest::header::USER_AGENT, ua.parse().unwrap());
+            }
 
             let resp = match client.post(&url).headers(headers).json(&body).send().await {
                 Ok(r) => r,

@@ -30,6 +30,7 @@ pub struct GlmProvider {
     base_url: String,
     api_key: String,
     client: Client,
+    user_agent: Option<String>,
 }
 
 impl GlmProvider {
@@ -38,7 +39,12 @@ impl GlmProvider {
     }
 
     pub fn with_base_url(api_key: String, base_url: String) -> Self {
-        Self { base_url, api_key, client: Client::new() }
+        Self { base_url, api_key, client: Client::new(), user_agent: None }
+    }
+
+    pub fn with_user_agent(mut self, user_agent: String) -> Self {
+        self.user_agent = Some(user_agent);
+        self
     }
 
     fn auth(&self) -> String {
@@ -63,12 +69,16 @@ impl ChatProvider for GlmProvider {
         let body = build_glm_body(&req);
         let auth = self.auth();
         let client = self.client.clone();
+        let user_agent = self.user_agent.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(100);
 
         tokio::spawn(async move {
             let mut headers = reqwest::header::HeaderMap::new();
             headers.insert(reqwest::header::AUTHORIZATION, auth.parse().unwrap());
             headers.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
+            if let Some(ref ua) = user_agent {
+                headers.insert(reqwest::header::USER_AGENT, ua.parse().unwrap());
+            }
 
             let resp = match client.post(&url).headers(headers).json(&body).send().await {
                 Ok(r) => r,
@@ -329,6 +339,9 @@ impl EmbeddingProvider for GlmProvider {
             let mut headers = reqwest::header::HeaderMap::new();
             headers.insert(reqwest::header::AUTHORIZATION, auth.parse().unwrap());
             headers.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
+            if let Some(ref ua) = self.user_agent {
+                headers.insert(reqwest::header::USER_AGENT, ua.parse().unwrap());
+            }
 
             let resp = self.client.post(&url).headers(headers).json(&body).send().await?;
             let resp = resp.error_for_status()?;
@@ -377,6 +390,9 @@ impl SearchProvider for GlmProvider {
             let mut headers = reqwest::header::HeaderMap::new();
             headers.insert(reqwest::header::AUTHORIZATION, auth.parse().unwrap());
             headers.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
+            if let Some(ref ua) = self.user_agent {
+                headers.insert(reqwest::header::USER_AGENT, ua.parse().unwrap());
+            }
 
             let resp = self.client.post(&url).headers(headers).json(&body).send().await?;
             let status = resp.status();
