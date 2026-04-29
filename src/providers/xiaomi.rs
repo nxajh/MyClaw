@@ -230,9 +230,9 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                                 .unwrap_or(serde_json::Value::String(tc.arguments.clone()));
                             serde_json::json!({
                                 "type": "tool_use",
-                                "tool_use_id": tc.id,
+                                "id": tc.id,
                                 "name": tc.name,
-                                "content": input,
+                                "input": input,
                             })
                         }).collect();
                         parts.extend(blocks.clone());
@@ -267,10 +267,10 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                 if final_content.is_array() {
                     let tc_json: Vec<serde_json::Value> = te.iter().map(|tb| {
                         serde_json::json!({
-                            "id": tb.get("tool_use_id").unwrap_or(&serde_json::Value::Null),
+                            "id": tb.get("id").unwrap_or(&serde_json::Value::Null),
                             "type": "tool",
                             "name": tb.get("name").unwrap_or(&serde_json::Value::Null),
-                            "input": tb.get("content").unwrap_or(&serde_json::Value::Null),
+                            "input": tb.get("input").unwrap_or(&serde_json::Value::Null),
                         })
                     }).collect();
                     msg_json.insert("tool_calls".to_string(), serde_json::json!(tc_json));
