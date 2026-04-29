@@ -7,7 +7,7 @@ mod session_manager;
 mod skills;
 mod mcp_manager;
 
-pub use agent_impl::{Agent, AgentConfig, AgentLoop};
+pub use agent_impl::{Agent, AgentConfig, AgentLoop, AskUserHandler};
 pub use session_manager::{InMemoryBackend, Session};
 pub use orchestrator::{Orchestrator, OrchestratorParts};
 pub use prompt::{AutonomyLevel, SkillsPromptInjectionMode, SystemPromptBuilder, SystemPromptConfig};

@@ -7,6 +7,8 @@
 //! `Registry` (Infrastructure concrete type). This keeps the Application
 //! layer decoupled from Infrastructure.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::providers::Capability;
@@ -16,6 +18,17 @@ use crate::providers::{
 use crate::providers::ServiceRegistry;
 use crate::providers::capability_tool::ToolResult;
 use futures_util::StreamExt;
+
+/// Callback for ask_user tool: (session_key, question) → user_answer.
+///
+/// The handler sends the question through the channel and waits for the
+/// user's next message, which is delivered via a oneshot channel managed
+/// by the Orchestrator.
+pub type AskUserHandler = Arc<
+    dyn Fn(String, String) -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 use super::session_manager::Session;
 use super::skills::SkillsManager;
@@ -91,6 +104,7 @@ impl Agent {
             config: self.config.clone(),
             session,
             system_prompt: prompt,
+            ask_user_handler: None,
         }
     }
 }
@@ -103,9 +117,17 @@ pub struct AgentLoop {
     session: Session,
     /// Template for the system prompt.
     system_prompt: String,
+    /// Optional callback for ask_user tool.
+    ask_user_handler: Option<AskUserHandler>,
 }
 
 impl AgentLoop {
+    /// Set the ask_user handler (called by Orchestrator to wire the channel).
+    pub fn with_ask_user_handler(mut self, handler: AskUserHandler) -> Self {
+        self.ask_user_handler = Some(handler);
+        self
+    }
+
     /// Process a user message and return the assistant's text response.
     ///
     /// This is the main entry point called by the orchestrator.
@@ -348,7 +370,31 @@ impl AgentLoop {
     }
 
     /// Execute a single tool call.
+    /// Special-cases `ask_user` to use the handler when available.
     async fn execute_tool(&self, call: &ToolCall) -> anyhow::Result<ToolResult> {
+        // Special handling for ask_user tool.
+        if call.name == "ask_user" {
+            if let Some(ref handler) = self.ask_user_handler {
+                let args: serde_json::Value = if call.arguments.is_empty() {
+                    serde_json::Value::Object(serde_json::Map::new())
+                } else {
+                    serde_json::from_str(&call.arguments).unwrap_or_else(|_| {
+                        serde_json::json!({ "raw": &call.arguments })
+                    })
+                };
+                let question = args["question"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("'question' is required"))?;
+
+                let answer = handler(self.session.key.clone(), question.to_string()).await?;
+                return Ok(ToolResult {
+                    success: true,
+                    output: answer,
+                    error: None,
+                });
+            }
+        }
+
         let tool = self.skills.get(&call.name).ok_or_else(|| {
             anyhow::anyhow!("Unknown tool: '{}'", call.name)
         })?;
