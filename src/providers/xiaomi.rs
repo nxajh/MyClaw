@@ -140,8 +140,10 @@ impl ChatProvider for XiaomiProvider {
                 while let Some(pos) = buffer.find('\n') {
                     let line = buffer[..pos].to_string();
                     buffer.drain(..=pos);
-                    if let Some(event) = parse_xiaomi_sse(&line, &mut tool_index_map) {
-                        let _ = tx.send(event).await;
+                    let event = parse_xiaomi_sse(&line, &mut tool_index_map);
+                    tracing::debug!(line = %line, event = ?event, "xiaomi: SSE line parsed");
+                    if let Some(ev) = event {
+                        let _ = tx.send(ev).await;
                     }
                 }
             }
