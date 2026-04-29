@@ -231,7 +231,15 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                 };
 
             let role = if msg.role == "assistant" { "assistant" } else { "user" };
-            let final_content = if parts_json.is_empty() && tool_calls.is_some() {
+            // Filter out empty text blocks — some models (e.g. MiMo) emit
+            // tool_calls without any text, which produces a content array
+            // like [{"type":"text","text":""}].  Xiaomi/Anthropic APIs reject
+            // that as "must provide content, reasoning_content or tool_calls".
+            let has_non_empty_part = parts_json.iter().any(|p| {
+                !(p.get("type").and_then(|v| v.as_str()) == Some("text")
+                    && p.get("text").and_then(|v| v.as_str()).map_or(true, |t| t.is_empty()))
+            });
+            let final_content = if !has_non_empty_part && tool_calls.is_some() {
                 serde_json::Value::Null
             } else {
                 content_json
