@@ -304,10 +304,6 @@ pub fn create_provider_by_url_with_user_agent(
         let mut p = crate::providers::anthropic::AnthropicProvider::with_base_url(api_key, base_url.to_string());
         if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
         Some(Box::new(p))
-    } else if host.contains("xiaomimimo") {
-        let mut p = crate::providers::xiaomi::XiaomiProvider::with_base_url(api_key, base_url.to_string());
-        if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
-        Some(Box::new(p))
     } else if host.contains("minimax") {
         let mut p = crate::providers::minimax::MiniMaxProvider::with_base_url(api_key, base_url.to_string());
         if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
@@ -399,10 +395,6 @@ impl ProviderHandle {
             let mut p = crate::providers::anthropic::AnthropicProvider::with_base_url(api_key, base_url.to_string());
             if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
             Some(ProviderHandle::Anthropic(p))
-        } else if host.contains("xiaomimimo") {
-            let mut p = crate::providers::xiaomi::XiaomiProvider::with_base_url(api_key, base_url.to_string());
-            if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
-            Some(ProviderHandle::Xiaomi(p))
         } else if host.contains("minimax") {
             let mut p = crate::providers::minimax::MiniMaxProvider::with_base_url(api_key, base_url.to_string());
             if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
