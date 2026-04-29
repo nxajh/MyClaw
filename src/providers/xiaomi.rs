@@ -224,7 +224,8 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                         }
                     }).collect();
 
-                    // For assistant messages: also build tool_use blocks and append to content.
+                    // For assistant messages with tool_calls:
+                    // Only tool_use blocks go into content (text/thinking parts excluded).
                     if msg.role == "assistant" && msg.tool_calls.is_some() {
                         let blocks: Vec<serde_json::Value> = msg.tool_calls.as_ref().unwrap().iter().map(|tc| {
                             let input = serde_json::from_str::<serde_json::Value>(&tc.arguments)
@@ -233,7 +234,8 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                                 "type": "tool_use",
                                 "id": tc.id,
                                 "name": tc.name,
-                                "input": input, // parsed object
+                                "input": input,
+                                "is_error": false,
                             })
                         }).collect();
                         parts.extend(blocks);
@@ -241,14 +243,22 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                     parts
                 };
 
-            // tool_result content: always a string (serialized tool output).
-            // is_error defaults to false when absent.
+            // input is empty if null, empty string, or empty JSON object "{}"
+            fn input_is_empty(v: &serde_json::Value) -> bool {
+                match v {
+                    serde_json::Value::Null => true,
+                    serde_json::Value::String(s) => s.trim().is_empty(),
+                    serde_json::Value::Object(m) => m.is_empty(),
+                    _ => false,
+                }
+            }
+
             fn is_non_empty_block(p: &serde_json::Value) -> bool {
                 match p.get("type").and_then(|v| v.as_str()) {
                     Some("tool_use") => {
-                        // tool_use must have a non-empty id and input
+                        // tool_use must have a non-empty id and non-empty input object
                         let id_empty = p.get("id").and_then(|v| v.as_str()).is_none_or(|s| s.is_empty());
-                        let input_empty = p.get("input").map(|v| v.is_null() || v.as_str().is_some_and(|s| s.is_empty())).unwrap_or(false);
+                        let input_empty = p.get("input").map(input_is_empty).unwrap_or(true);
                         !(id_empty || input_empty)
                     }
                     Some("tool_result") => {
