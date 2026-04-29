@@ -152,7 +152,14 @@ impl Tool for FileWriteTool {
 
         Ok(ToolResult {
             success: true,
-            output: format!("wrote {} bytes ({} lines) to {}", byte_count, line_count, path),
+            output: format!(
+                "wrote {} bytes ({} lines) to {}\n  first: {}\n  last: {}",
+                byte_count,
+                line_count,
+                path,
+                content.lines().next().map(|l| truncate_line(l, 80)).unwrap_or_else(|| "(empty)".to_string()),
+                content.lines().last().map(|l| truncate_line(l, 80)).unwrap_or_else(|| "(empty)".to_string()),
+            ),
             error: None,
         })
     }
@@ -239,8 +246,36 @@ impl Tool for FileEditTool {
 
         Ok(ToolResult {
             success: true,
-            output: format!("replaced 1 occurrence in {}", path),
+            output: format!(
+                "replaced 1 occurrence in {} (line {}):\n  - {}\n  + {}",
+                path,
+                find_line_number(&content, old_string),
+                truncate_line(old_string, 80),
+                truncate_line(new_string, 80),
+            ),
             error: None,
         })
+    }
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Find the 1-based line number where `needle` first occurs in `haystack`.
+fn find_line_number(haystack: &str, needle: &str) -> usize {
+    if let Some(pos) = haystack.find(needle) {
+        haystack[..pos].lines().count() + 1
+    } else {
+        0
+    }
+}
+
+/// Truncate a string to `max_len` chars, appending "..." if truncated.
+/// Also collapses multi-line strings into the first line.
+fn truncate_line(s: &str, max_len: usize) -> String {
+    let first_line = s.lines().next().unwrap_or("");
+    if first_line.len() <= max_len {
+        first_line.to_string()
+    } else {
+        format!("{}...", &first_line[..max_len - 3])
     }
 }
