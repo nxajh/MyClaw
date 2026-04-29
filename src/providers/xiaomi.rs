@@ -85,11 +85,11 @@ impl ChatProvider for XiaomiProvider {
 
             if resp.error_for_status_ref().is_err() {
                 let status = resp.status();
-                let text = resp.text().await.unwrap_or_default();
+                let body_text = resp.text().await.unwrap_or_default();
                 let _ = tx
                     .send(StreamEvent::HttpError {
                         status: status.as_u16(),
-                        message: format!("HTTP {}: {}", status, text),
+                        message: format!("HTTP {}: {}", status, body_text),
                     })
                     .await;
                 return;
@@ -99,15 +99,16 @@ impl ChatProvider for XiaomiProvider {
             // Anthropic uses index (block number) in content_block_delta, not id.
             let mut tool_index_map: std::collections::HashMap<u64, (String, String)> =
                 std::collections::HashMap::new();
-
             let mut buffer = String::new();
             let mut utf8_buf = Vec::new();
             let mut stream = resp.bytes_stream();
+            tracing::debug!(url, "xiaomi: starting SSE stream");
 
             while let Some(item) = stream.next().await {
                 let bytes = match item {
                     Ok(b) => b,
                     Err(e) => {
+                        tracing::warn!(url, error = %e, "xiaomi: bytes stream error");
                         let _ = tx.send(StreamEvent::Error(e.to_string())).await;
                         return;
                     }
