@@ -177,7 +177,8 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
         .iter()
         .filter(|m| m.role != "system")
         .map(|msg| {
-            let content: Vec<serde_json::Value> = msg
+            // Build content array from parts.
+            let parts_json: Vec<serde_json::Value> = msg
                 .parts
                 .iter()
                 .map(|part| match part {
@@ -198,15 +199,43 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                 })
                 .collect();
 
-            let content = if content.len() == 1 {
-                content.into_iter().next().unwrap()
+            // Anthropic/Xiaomi: assistant content must be an array, not a single text block.
+            let content_json: serde_json::Value = serde_json::json!(parts_json);
+
+            // Assistant messages with tool_calls must also provide content=null.
+            // Anthropic/Xiaomi API: "assistant must provide content, reasoning_content
+            // or tool_calls" — if content is empty array and tool_calls exist, use null.
+            let tool_calls: Option<Vec<serde_json::Value>> =
+                if msg.role == "assistant" {
+                    msg.tool_calls.as_ref().map(|tcs| {
+                        tcs.iter()
+                            .map(|tc| {
+                                let input: serde_json::Value = serde_json::from_str(&tc.arguments)
+                                    .unwrap_or(serde_json::Value::String(tc.arguments.clone()));
+                                serde_json::json!({
+                                    "id": tc.id,
+                                    "type": "tool",
+                                    "name": tc.name,
+                                    "input": input,
+                                })
+                            })
+                            .collect()
+                    })
+                } else {
+                    None
+                };
+
+            let role = if msg.role == "assistant" { "assistant" } else { "user" };
+            let final_content = if parts_json.is_empty() && tool_calls.is_some() {
+                serde_json::Value::Null
             } else {
-                serde_json::json!(content)
+                content_json
             };
 
             serde_json::json!({
-                "role": if msg.role == "assistant" { "assistant" } else { "user" },
-                "content": content,
+                "role": role,
+                "content": final_content,
+                "tool_calls": tool_calls,
             })
         })
         .collect();
@@ -295,10 +324,10 @@ fn parse_xiaomi_sse(line: &str) -> Option<StreamEvent> {
                     }
                 }
                 "input_json_delta" => {
-                    let idx = evt.get("index").and_then(|v| v.as_u64()).unwrap_or(0).to_string();
+                    let id = evt.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     let args = delta.get("partial_json").and_then(|v| v.as_str()).unwrap_or("");
                     return Some(SE::ToolCallDelta {
-                        id: idx,
+                        id,
                         delta: args.to_string(),
                     });
                 }
