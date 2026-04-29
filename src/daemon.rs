@@ -15,6 +15,7 @@ use crate::agents::{
     SkillsManager, SystemPromptConfig, AutonomyLevel, SkillsPromptInjectionMode,
     McpManager, SubAgentDelegator,
 };
+use crate::tools::TaskDelegator;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::signal::unix::{signal, SignalKind};
@@ -325,31 +326,51 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         tracing::warn!(error = %e, "MCP server connection had errors (non-fatal), continuing");
     }
 
-    // Build skills first (without delegate_task tool — we'll add it after if needed).
+    // Build base skills (all built-in + MCP tools).
     let skills = build_skills(&mcp_manager, None).await;
     let registry_arc: Arc<dyn crate::providers::ServiceRegistry> = Arc::new(registry);
-    let mut skills_arc: Arc<SkillsManager> = Arc::new(skills);
 
-    // Build sub-agent delegator if sub-agents are configured.
-    let _sub_agent_delegator: Option<Arc<SubAgentDelegator>> = if config.agents.is_empty() {
-        None
+    // ── Sub-agent delegator (conditional) ──────────────────────────────────────
+    //
+    // Dependency chain:
+    //   delegate_task tool → needs Arc<dyn TaskDelegator>
+    //   SubAgentDelegator  → needs Arc<SkillsManager>
+    //   parent Agent       → needs Arc<SkillsManager> (with delegate_task registered)
+    //
+    // Fix: build two separate Arc<SkillsManager>. The delegator gets its own Arc
+    // (for sub-agent tool filtering). The parent gets a rebuilt Arc that includes
+    // all the same tools + delegate_task. Tool instances (Arc<dyn Tool>) are shared.
+
+    let (skills_arc, _sub_agent_delegator) = if config.agents.is_empty() {
+        (Arc::new(skills), None)
     } else {
         tracing::info!(agents = config.agents.len(), "multi-agent mode enabled");
+
+        // Wrap skills in Arc, create delegator (takes its own clone).
+        let skills_arc: Arc<SkillsManager> = Arc::new(skills);
         let delegator = SubAgentDelegator::new(
             config.agents.clone(),
             registry_arc.clone(),
             Arc::clone(&skills_arc),
             config.agent.max_tool_calls,
         );
-        // Register delegate_task tool in the router agent's skills.
-        let delegate_tool = crate::tools::DelegateTaskTool::new(Arc::new(delegator.clone()));
-        if let Some(skills_mut) = Arc::get_mut(&mut skills_arc) {
-            skills_mut.register_tool("delegate_task", Arc::new(delegate_tool));
-        } else {
-            tracing::warn!("could not register delegate_task tool — Arc already shared");
+        let delegator_arc = Arc::new(delegator);
+
+        // Build delegate_task tool.
+        let delegate_tool = crate::tools::DelegateTaskTool::new(
+            Arc::clone(&delegator_arc) as Arc<dyn TaskDelegator>,
+        );
+
+        // Rebuild parent skills: same tool instances + delegate_task.
+        let mut parent_skills = SkillsManager::new();
+        for tool in skills_arc.all_tools() {
+            let name = tool.name().to_string();
+            parent_skills.register_tool(&name, tool);
         }
+        parent_skills.register_tool("delegate_task", Arc::new(delegate_tool));
         tracing::info!("delegate_task tool registered (multi-agent mode)");
-        Some(Arc::new(delegator))
+
+        (Arc::new(parent_skills), Some(delegator_arc))
     };
 
     let session_manager = build_session_manager(&config);
