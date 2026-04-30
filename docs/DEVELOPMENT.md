@@ -108,6 +108,12 @@
 | **Memory Config** | `src/config/memory.rs` | 84 | Memory 存储后端配置 |
 | **SubAgent Config** | `src/config/sub_agent.rs` | 65 | 子 Agent 定义 |
 
+> **配置结构**：模型挂在能力下面，例如 `providers.openai.chat.models.gpt-4o`。
+> 每个模型用 `input = ["text", "image"]`、`output = ["text"]` 声明支持的模态，可选
+> `context_window`、`max_output_tokens`、`pricing`、`reasoning` 等字段。
+>
+> **认证合并**：能力级 `api_key` 优先，fallback 到 provider 级。
+
 #### 工具系统
 
 | 模块 | 文件 | 行数 | 说明 |
@@ -145,6 +151,9 @@
 | Xiaomi MiMo | ✅ | — | — | — | — | — | — | ✅ |
 
 > **注意**：Xiaomi MiMo Provider 代码已完成（447 行），但尚未在 `daemon.rs` 中注册组装。
+>
+> **输入/输出模态**：每个 chat model 通过 `input = ["text", "image"]` / `output = ["text"]` 声明支持的模态
+> （text、image、audio、video），用于上下文感知的能力查询（如 `ServiceRegistry::get_chat_model_config()`）。
 
 ### 1.5 LoopBreaker 熔断机制 ✅（已完成）
 
@@ -316,6 +325,9 @@ daemon.rs (Composition Root) ✅
 | Provider 路由 | ServiceRegistry 按 Capability 路由 | ✅ |
 | MCP 工具延迟加载 | Deferred Loading，按需拉取 schema | ✅ |
 | 多 Agent 委托 | SubAgentDelegator + 异步 DelegationManager | ✅ |
+| 配置结构 | 模型挂在能力下面（providers.openai.chat.models.gpt-4o） | ✅ |
+| 输入模态 | 用 `input = ["text", "image"]` 描述，不再是 Capability 枚举 | ✅ |
+| 认证合并 | 能力级 api_key 优先，fallback 到 provider 级 | ✅ |
 
 ---
 
