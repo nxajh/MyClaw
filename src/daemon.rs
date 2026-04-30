@@ -305,21 +305,19 @@ async fn build_skills(
     skills
 }
 
-/// Build SessionManager with SQLite backend (falls back to in-memory).
-fn build_session_manager(config: &crate::config::AppConfig) -> SessionManager {
+/// Build the session backend (shared with SessionManager and persist hooks).
+fn build_session_backend(config: &crate::config::AppConfig) -> Arc<dyn crate::storage::SessionBackend> {
     let db_path = config.workspace_dir.join("sessions.db");
-    let backend: Arc<dyn crate::storage::SessionBackend> =
-        match crate::storage::SqliteSessionBackend::open(&db_path.to_string_lossy()) {
-            Ok(db) => {
-                tracing::info!(path = %db_path.display(), "session database opened");
-                Arc::new(db)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to open session database, falling back to in-memory");
-                Arc::new(InMemoryBackend::new())
-            }
-        };
-    SessionManager::new(backend)
+    match crate::storage::SqliteSessionBackend::open(&db_path.to_string_lossy()) {
+        Ok(db) => {
+            tracing::info!(path = %db_path.display(), "session database opened");
+            Arc::new(db)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to open session database, falling back to in-memory");
+            Arc::new(InMemoryBackend::new())
+        }
+    }
 }
 
 /// Build Channel adapters from config.
@@ -434,7 +432,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         (None, None)
     };
 
-    let session_manager = build_session_manager(&config);
+    let session_backend = build_session_backend(&config);
+    let session_manager = SessionManager::new(Arc::clone(&session_backend));
     let channels = build_channels(&config);
 
     let agent_config = AgentConfig {
@@ -452,6 +451,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         sub_delegator: sub_agent_delegator_arc,
         delegation_manager,
         delegation_rx,
+        persist_backend: session_backend,
     };
 
     // ── Launch ─────────────────────────────────────────────────────────────

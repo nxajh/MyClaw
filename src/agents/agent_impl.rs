@@ -41,9 +41,10 @@ pub type DelegateHandler = Arc<
 >;
 
 use super::loop_breaker::{LoopBreak, LoopBreaker, LoopBreakerConfig};
-use super::session_manager::Session;
+use super::session_manager::{Session, PersistHook};
 use super::skills::SkillsManager;
 use crate::agents::prompt::{SystemPromptBuilder, SystemPromptConfig};
+use crate::storage::SummaryRecord;
 
 /// Estimate token count from text length (~4 bytes per token).
 pub(crate) fn estimate_tokens(text: &str) -> u64 {
@@ -154,6 +155,15 @@ impl Agent {
     /// Create an AgentLoop for the given session.
     /// The system prompt is built from SystemPromptConfig + SkillsManager.
     pub fn loop_for(&self, session: Session) -> AgentLoop {
+        self.loop_for_with_persist(session, None)
+    }
+
+    /// Create an AgentLoop for the given session with an optional persist hook.
+    pub fn loop_for_with_persist(
+        &self,
+        session: Session,
+        persist_hook: Option<Arc<dyn PersistHook>>,
+    ) -> AgentLoop {
         let prompt = if !self.system_prompt.is_empty() {
             // Direct prompt set via with_system_prompt()
             self.system_prompt.clone()
@@ -183,6 +193,7 @@ impl Agent {
             }),
             pending_image_urls: None,
             token_tracker: TokenTracker::default(),
+            persist_hook,
         }
     }
 }
@@ -205,6 +216,8 @@ pub struct AgentLoop {
     pending_image_urls: Option<Vec<String>>,
     /// Token usage tracker for context window management.
     token_tracker: TokenTracker,
+    /// Optional hook for persisting messages to the backend.
+    persist_hook: Option<Arc<dyn PersistHook>>,
 }
 
 impl AgentLoop {
@@ -235,6 +248,13 @@ impl AgentLoop {
         // 1. Add user message to session (text only; images attached per-model in chat_loop).
         self.session.add_user_text(user_message.to_string());
 
+        // Persist user message via hook.
+        if let Some(ref hook) = self.persist_hook {
+            if let Some(msg) = self.session.history.last() {
+                hook.persist_message(&self.session.key, msg);
+            }
+        }
+
         // Estimate and track the new user message tokens.
         if let Some(last_msg) = self.session.history.last() {
             self.token_tracker.record_pending(estimate_message_tokens(last_msg));
@@ -250,6 +270,13 @@ impl AgentLoop {
 
         // 4. Persist assistant response.
         self.session.add_assistant_text(text.clone());
+
+        // Persist assistant message via hook.
+        if let Some(ref hook) = self.persist_hook {
+            if let Some(msg) = self.session.history.last() {
+                hook.persist_message(&self.session.key, msg);
+            }
+        }
 
         Ok(text)
     }
@@ -444,6 +471,13 @@ impl AgentLoop {
                 response.reasoning_content.clone(),
             );
 
+            // Persist assistant tool-call message via hook.
+            if let Some(ref hook) = self.persist_hook {
+                if let Some(msg) = self.session.history.last() {
+                    hook.persist_message(&self.session.key, msg);
+                }
+            }
+
             for call in &response.tool_calls {
                 tool_calls_count += 1;
 
@@ -495,6 +529,13 @@ impl AgentLoop {
 
                 // Persist tool result to session history.
                 self.session.add_tool_result(call.id.clone(), result_content, is_error);
+
+                // Persist tool result via hook.
+                if let Some(ref hook) = self.persist_hook {
+                    if let Some(msg) = self.session.history.last() {
+                        hook.persist_message(&self.session.key, msg);
+                    }
+                }
             }
         }
     }
@@ -841,9 +882,28 @@ impl AgentLoop {
                 );
                 let summary_tokens = estimate_message_tokens(&summary_msg);
 
+                // Track the last message id that was compacted.
+                let last_compacted_id = self.session.message_ids
+                    .get(compact_count.saturating_sub(1))
+                    .copied()
+                    .unwrap_or(0);
+
                 // Remove compacted messages and insert summary at the front.
                 self.session.history.drain(..compact_count);
                 self.session.history.insert(0, summary_msg);
+                self.session.message_ids.drain(..compact_count);
+                self.session.message_ids.insert(0, 0); // summary placeholder
+
+                // Persist the compaction summary.
+                if let Some(ref hook) = self.persist_hook {
+                    hook.save_compaction(&self.session.key, &SummaryRecord {
+                        id: 0,
+                        summary: summary.clone(),
+                        up_to_message: last_compacted_id,
+                        token_estimate: Some(summary_tokens),
+                        created_at: chrono::Utc::now(),
+                    });
+                }
 
                 // Recalculate token tracker.
                 let removed_tokens: u64 = to_compact.iter()
@@ -930,6 +990,11 @@ impl AgentLoop {
             let removed_tokens = estimate_message_tokens(&removed);
             let new_total = total.saturating_sub(removed_tokens);
             self.token_tracker.update_from_usage(new_total, 0);
+
+            // Drain the corresponding message_id.
+            if !self.session.message_ids.is_empty() {
+                self.session.message_ids.remove(0);
+            }
         }
     }
 }

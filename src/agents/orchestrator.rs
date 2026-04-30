@@ -21,7 +21,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::agents::agent_impl::{Agent, AgentLoop, AskUserHandler, DelegateHandler};
-use crate::agents::session_manager::SessionManager;
+use crate::agents::session_manager::{SessionManager, PersistHook, BackendPersistHook};
 
 const CHANNEL_QUEUE_SIZE: usize = 100;
 /// Timeout for ask_user waiting for user reply (5 minutes).
@@ -57,6 +57,8 @@ pub struct Orchestrator {
     delegation_manager: Option<Arc<DelegationManager>>,
     /// Delegation event receiver.
     delegation_rx: Arc<TokioMutex<Option<mpsc::Receiver<DelegationEvent>>>>,
+    /// Backend for session persistence (shared with persist hooks).
+    persist_backend: Arc<dyn crate::storage::SessionBackend>,
 }
 
 /// Parse a session key like "telegram:12345" into (channel_name, sender).
@@ -83,6 +85,8 @@ pub struct OrchestratorParts {
     pub delegation_manager: Option<Arc<DelegationManager>>,
     /// Delegation event receiver (conditional).
     pub delegation_rx: Option<mpsc::Receiver<DelegationEvent>>,
+    /// Backend for session persistence (shared with persist hooks).
+    pub persist_backend: Arc<dyn crate::storage::SessionBackend>,
 }
 
 impl Orchestrator {
@@ -120,6 +124,7 @@ impl Orchestrator {
             sub_delegator: parts.sub_delegator,
             delegation_manager: parts.delegation_manager,
             delegation_rx: Arc::new(TokioMutex::new(parts.delegation_rx)),
+            persist_backend: parts.persist_backend,
         };
 
         info!(channels = orchestrator.channels.len(), "orchestrator initialized");
@@ -164,12 +169,18 @@ impl Orchestrator {
         reply_target: &str,
         sub_delegator: &Option<Arc<SubAgentDelegator>>,
         delegation_manager: &Option<Arc<DelegationManager>>,
+        persist_backend: &Arc<dyn crate::storage::SessionBackend>,
     ) -> Arc<TokioMutex<AgentLoop>> {
         if let Some(existing) = sessions.get(sk) {
             return existing.clone();
         }
         let session = session_manager.get_or_create(sk);
-        let loop_ = agent.loop_for(session);
+
+        // Create persist hook from the shared backend.
+        let persist_hook: Arc<dyn PersistHook> = Arc::new(
+            BackendPersistHook::new(Arc::clone(persist_backend))
+        );
+        let loop_ = agent.loop_for_with_persist(session, Some(persist_hook));
 
         // Wire up the ask_user handler.
         let channels = channels.clone();
@@ -317,6 +328,7 @@ impl Orchestrator {
                         &sessions, &agent, &self.session_manager, &sk,
                         &channels, &self.pending_asks, &reply_target,
                         &sub_delegator, &delegation_manager,
+                        &self.persist_backend,
                     );
 
                     let ch = channels.clone();
