@@ -162,7 +162,19 @@ fn convert_markdown_tables(markdown: &str) -> String {
                 break;
             }
 
-            // 4. Compute per-column widths (max over header + data rows).
+            // 4. If no data rows, not a valid table — pass through as-is.
+            if data_rows.is_empty() {
+                result.push_str(line);
+                result.push('\n');
+                result.push_str(lines[i + 1]);
+                i += 2;
+                if i < lines.len() {
+                    result.push('\n');
+                }
+                continue;
+            }
+
+            // 5. Compute per-column widths (max over header + data rows).
             let mut col_widths: Vec<usize> = header.iter().map(|c| c.len()).collect();
             for row in &data_rows {
                 for (k, cell) in row.iter().enumerate() {
@@ -172,7 +184,7 @@ fn convert_markdown_tables(markdown: &str) -> String {
                 }
             }
 
-            // 5. Format a row with alignment.
+            // 6. Format a row with alignment, trimming trailing whitespace.
             let format_row = |cells: &[String]| -> String {
                 let mut parts = Vec::with_capacity(cells.len());
                 for (k, cell) in cells.iter().enumerate() {
@@ -181,7 +193,7 @@ fn convert_markdown_tables(markdown: &str) -> String {
                     match a {
                         'C' => {
                             let total = w.saturating_sub(cell.len());
-                            let left = total / 2;
+                            let left = (total + 1) / 2;
                             let right = total - left;
                             parts.push(format!(
                                 "{}{}{}",
@@ -202,19 +214,23 @@ fn convert_markdown_tables(markdown: &str) -> String {
                         }
                     }
                 }
-                parts.join("  ")
+                let row = parts.join("  ");
+                row.trim_end().to_string()
             };
 
-            // 6. Build the <pre> block.
-            result.push_str("<pre>");
+            // 7. Build sentinel-wrapped block (actual <pre> tags are emitted
+            //    by the main markdown_to_telegram_html loop so that the
+            //    content is not re-processed for inline formatting or HTML
+            //    escaping.
+            result.push('\x00');
             result.push_str(&format_row(&header));
             for row in &data_rows {
                 result.push('\n');
                 result.push_str(&format_row(row));
             }
-            result.push_str("</pre>");
+            result.push('\x00');
 
-            // 7. Advance past all consumed table lines.
+            // 8. Advance past all consumed table lines.
             i = j;
             if i < lines.len() {
                 result.push('\n');
@@ -254,6 +270,18 @@ pub fn markdown_to_telegram_html(markdown: &str) -> String {
     let mut i = 0;
 
     while i < len {
+        // ── Table pre block (\x00...\x00) from convert_markdown_tables ──
+        if chars[i] == '\x00' {
+            if let Some(end) = chars[i + 1..].iter().position(|&c| c == '\x00') {
+                let content: String = chars[i + 1..i + 1 + end].iter().collect();
+                out.push_str("<pre>");
+                out.push_str(&escape_html(&content));
+                out.push_str("</pre>");
+                i = i + 1 + end + 1;
+                continue;
+            }
+        }
+
         // ── Fenced code block (```) ─────────────────────────────────────
         if i + 2 < len && chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
             // Collect the optional language identifier (e.g. "rust", "python").
@@ -1522,7 +1550,7 @@ Here is some <code>inline code</code> and a <a href=\"https://example.com\">link
     #[test]
     fn test_md_table_alignment_marks() {
         let input = "| Left | Center | Right |\n|:-----|:------:|------:|\n| a    |   b    |     c |";
-        let expected = "<pre>Left  Center  Right\na     b           c</pre>";
+        let expected = "<pre>Left  Center  Right\na        b        c</pre>";
         assert_eq!(markdown_to_telegram_html(input), expected);
     }
 
@@ -1572,7 +1600,7 @@ Here is some <code>inline code</code> and a <a href=\"https://example.com\">link
     #[test]
     fn test_md_table_center_alignment() {
         let input = "| Name  |\n|:-----:|\n| Alice |";
-        let expected = "<pre> Name \nAlice</pre>";
+        let expected = "<pre> Name\nAlice</pre>";
         assert_eq!(markdown_to_telegram_html(input), expected);
     }
 
