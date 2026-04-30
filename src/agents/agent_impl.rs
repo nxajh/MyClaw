@@ -740,29 +740,150 @@ impl AgentLoop {
         Some(max.max(256) as u32)
     }
 
-    /// Check if compaction is needed and perform it.
-    /// Currently a stub — will be implemented with LLM-based summarization.
+    /// Check if compaction is needed and perform LLM-based summarization.
     async fn maybe_compact(&mut self, model_id: &str) -> anyhow::Result<()> {
         let model_config = self.registry.get_chat_model_config(model_id)?;
         let context_window = match model_config.context_window {
             Some(cw) => cw,
-            None => return Ok(()), // no context_window configured, skip
+            None => return Ok(()),
         };
 
         let threshold = (context_window as f64 * self.config.context.compact_threshold) as u64;
         let total = self.token_tracker.total_tokens();
 
-        if total > threshold {
-            tracing::info!(
-                total_tokens = total,
-                threshold,
-                context_window,
-                "context compaction needed (stub)"
-            );
-            // TODO: Part 3 — implement LLM-based compaction
+        if total <= threshold {
+            return Ok(());
+        }
+
+        tracing::info!(
+            total_tokens = total,
+            threshold,
+            context_window,
+            "starting context compaction"
+        );
+
+        // Determine how many messages to compact.
+        let history_len = self.session.history.len();
+        if history_len <= 1 {
+            return Ok(()); // nothing to compact
+        }
+
+        let compact_ratio = self.config.context.compact_ratio;
+        let compact_count = ((history_len as f64) * compact_ratio).ceil() as usize;
+        // Ensure we keep at least the last message.
+        let compact_count = compact_count.min(history_len - 1).max(1);
+
+        // Take the oldest messages for compaction.
+        let to_compact: Vec<ChatMessage> = self.session.history[..compact_count].to_vec();
+
+        // Don't compact messages that are already summaries.
+        if to_compact.iter().any(|m| {
+            m.role == "system" && m.text_content().starts_with("[summary]")
+        }) {
+            // Already has a summary at the start, just trim oldest non-summary messages.
+            self.trim_oldest(threshold);
+            return Ok(());
+        }
+
+        // Call LLM to generate summary.
+        match self.summarize_messages(&to_compact, model_id).await {
+            Ok(summary) => {
+                // Replace compacted messages with the summary.
+                let summary_msg = ChatMessage::system_text(
+                    format!("[summary] {}", summary)
+                );
+                let summary_tokens = estimate_message_tokens(&summary_msg);
+
+                // Remove compacted messages and insert summary at the front.
+                self.session.history.drain(..compact_count);
+                self.session.history.insert(0, summary_msg);
+
+                // Recalculate token tracker.
+                let removed_tokens: u64 = to_compact.iter()
+                    .map(estimate_message_tokens)
+                    .sum();
+                let new_total = self.token_tracker.total_tokens()
+                    .saturating_sub(removed_tokens)
+                    .saturating_add(summary_tokens);
+                // Reset tracker with new baseline.
+                self.token_tracker.update_from_usage(new_total, 0);
+
+                tracing::info!(
+                    compacted_messages = compact_count,
+                    summary_tokens,
+                    new_total_tokens = new_total,
+                    "context compaction completed"
+                );
+
+                // If still over threshold after compaction, trim oldest.
+                if new_total > threshold {
+                    self.trim_oldest(threshold);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "LLM summarization failed, falling back to trim");
+                self.trim_oldest(threshold);
+            }
         }
 
         Ok(())
+    }
+
+    /// Call LLM to summarize a set of messages.
+    async fn summarize_messages(
+        &self,
+        messages: &[ChatMessage],
+        model_id: &str,
+    ) -> anyhow::Result<String> {
+        let (provider, _) = self.registry.get_chat_provider(Capability::Chat)?;
+
+        let system_text = "You are a conversation summarizer. \
+            Summarize the following conversation concisely, preserving: \
+            key decisions, file paths, code changes, user preferences, \
+            tool usage patterns, and any unresolved questions. \
+            Output only the summary, no preamble or explanation.";
+
+        let mut compact_messages = vec![ChatMessage::system_text(system_text)];
+        for msg in messages {
+            compact_messages.push(msg.clone());
+        }
+
+        let req = ChatRequest {
+            model: model_id,
+            messages: &compact_messages,
+            temperature: Some(0.3),
+            max_tokens: Some(1024),
+            thinking: None,
+            stop: None,
+            seed: None,
+            tools: None,
+            stream: true,
+        };
+
+        let stream = provider.chat(req)?;
+        let response = crate::providers::ChatResponse::from_stream(stream).await?;
+        Ok(response.text)
+    }
+
+    /// Trim oldest messages until total tokens are below threshold.
+    /// Preserves system messages and the last user message.
+    fn trim_oldest(&mut self, threshold: u64) {
+        loop {
+            let total = self.token_tracker.total_tokens();
+            if total <= threshold || self.session.history.len() <= 2 {
+                break;
+            }
+            // Skip system messages at the front (but not summaries).
+            if self.session.history[0].role == "system"
+                && !self.session.history[0].text_content().starts_with("[summary]")
+            {
+                break;
+            }
+            let removed = self.session.history.remove(0);
+            let removed_tokens = estimate_message_tokens(&removed);
+            let new_total = total.saturating_sub(removed_tokens);
+            self.token_tracker.update_from_usage(new_total, 0);
+        }
     }
 }
 
