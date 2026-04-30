@@ -441,6 +441,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         max_tool_calls: config.agent.max_tool_calls,
         max_history: config.agent.max_history,
         prompt_config: build_prompt_config(&config.agent.prompt),
+        context: config.agent.context.clone(),
     };
     let agent = Agent::new(registry_arc, skills_arc, agent_config);
 

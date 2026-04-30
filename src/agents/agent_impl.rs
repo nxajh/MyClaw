@@ -13,10 +13,11 @@ use std::sync::Arc;
 
 use crate::providers::Capability;
 use crate::providers::{
-    BoxStream, ChatMessage, ChatRequest, StopReason, StreamEvent, ToolCall,
+    BoxStream, ChatMessage, ChatRequest, ChatUsage, StopReason, StreamEvent, ToolCall,
 };
 use crate::providers::ServiceRegistry;
 use crate::providers::capability_tool::ToolResult;
+use crate::config::agent::ContextConfig;
 use futures_util::StreamExt;
 
 /// Callback for ask_user tool: (session_key, question) → user_answer.
@@ -46,7 +47,7 @@ use crate::agents::prompt::{SystemPromptBuilder, SystemPromptConfig};
 
 /// Estimate token count from text length (~4 bytes per token).
 pub(crate) fn estimate_tokens(text: &str) -> u64 {
-    (text.len() as u64 + 3) / 4
+    (text.len() as u64).div_ceil(4)
 }
 
 /// Estimate token count for a ChatMessage.
@@ -110,6 +111,8 @@ pub struct AgentConfig {
     pub max_history: usize,
     /// System prompt builder config.
     pub prompt_config: SystemPromptConfig,
+    /// Context window management settings.
+    pub context: ContextConfig,
 }
 
 impl Default for AgentConfig {
@@ -118,6 +121,7 @@ impl Default for AgentConfig {
             max_tool_calls: 100,
             max_history: 200,
             prompt_config: SystemPromptConfig::default(),
+            context: ContextConfig::default(),
         }
     }
 }
@@ -225,8 +229,17 @@ impl AgentLoop {
         // Reset loop breaker for new turn.
         self.loop_breaker.reset();
 
+        // Reset token tracker for new turn.
+        self.token_tracker.reset();
+
         // 1. Add user message to session (text only; images attached per-model in chat_loop).
         self.session.add_user_text(user_message.to_string());
+
+        // Estimate and track the new user message tokens.
+        if let Some(last_msg) = self.session.history.last() {
+            self.token_tracker.record_pending(estimate_message_tokens(last_msg));
+        }
+
         self.pending_image_urls = image_urls;
 
         // 2. Build the full message list for this turn.
@@ -299,6 +312,11 @@ impl AgentLoop {
                 .registry
                 .get_chat_provider(Capability::Chat)?;
 
+            // Check if context compaction is needed.
+            if let Err(e) = self.maybe_compact(&model_id).await {
+                tracing::warn!(error = %e, "compaction failed, continuing");
+            }
+
             // Attach pending images to the last user message if model supports it.
             self.attach_images_if_supported(&mut messages, &model_id);
 
@@ -306,11 +324,14 @@ impl AgentLoop {
             let tools = self.build_tool_specs();
 
             // 3. Build request.
+            // Calculate max_tokens based on context window and current usage.
+            let max_tokens = self.calculate_max_tokens(&model_id);
+
             let req = ChatRequest {
                 model: &model_id,
                 messages: &messages,
                 temperature: None,
-                max_tokens: None,
+                max_tokens,
                 thinking: None,
                 stop: None,
                 seed: None,
@@ -342,6 +363,20 @@ impl AgentLoop {
 
             let response = self.collect_stream(stream).await?;
             tracing::info!(text_len = response.text.len(), tool_calls = response.tool_calls.len(), stop = ?response.stop_reason, "chat stream collected");
+
+            // Record token usage from API response.
+            if let Some(ref usage) = response.usage {
+                self.token_tracker.update_from_usage(
+                    usage.input_tokens.unwrap_or(0),
+                    usage.output_tokens.unwrap_or(0),
+                );
+                tracing::debug!(
+                    input_tokens = usage.input_tokens.unwrap_or(0),
+                    output_tokens = usage.output_tokens.unwrap_or(0),
+                    total_tracked = self.token_tracker.total_tokens(),
+                    "token usage recorded"
+                );
+            }
 
             // Log raw response.
             Self::log_chat_io("response", &model_id, &[], &[], Some(&response));
@@ -428,6 +463,11 @@ impl AgentLoop {
                 tool_msg.is_error = Some(is_error);
                 messages.push(tool_msg);
 
+                // Record estimated tokens for the tool result message.
+                self.token_tracker.record_pending(
+                    estimate_message_tokens(messages.last().unwrap())
+                );
+
                 // Persist tool result to session history.
                 self.session.add_tool_result(call.id.clone(), result_content, is_error);
             }
@@ -443,6 +483,7 @@ impl AgentLoop {
         let mut reasoning_content: Option<String> = None;
         let mut tool_calls = Vec::new();
         let mut stop_reason = StopReason::EndTurn;
+        let mut usage: Option<ChatUsage> = None;
 
         while let Some(event) = stream.next().await {
             match event {
@@ -489,8 +530,8 @@ impl AgentLoop {
                         call.arguments = arguments;
                     }
                 }
-                StreamEvent::Usage(_) => {
-                    // TODO: record usage.
+                StreamEvent::Usage(u) => {
+                    usage = Some(u);
                 }
                 StreamEvent::Done { reason } => {
                     stop_reason = reason;
@@ -510,6 +551,7 @@ impl AgentLoop {
             reasoning_content,
             tool_calls,
             stop_reason,
+            usage,
         })
     }
 
@@ -674,6 +716,54 @@ impl AgentLoop {
             let _ = writeln!(f, "{}", entry);
         }
     }
+
+    /// Calculate max_tokens for the current request based on context window.
+    fn calculate_max_tokens(&self, model_id: &str) -> Option<u32> {
+        let model_config = self.registry.get_chat_model_config(model_id).ok()?;
+        let context_window = model_config.context_window?;
+        let max_output = model_config.max_output_tokens.unwrap_or(4096) as u64;
+
+        let total_tokens = self.token_tracker.total_tokens();
+        let available = context_window.saturating_sub(total_tokens);
+        let max = max_output.min(available).min(u32::MAX as u64);
+
+        if max < 256 {
+            tracing::warn!(
+                model = %model_id,
+                context_window,
+                total_tokens,
+                available,
+                "very little context space remaining"
+            );
+        }
+
+        Some(max.max(256) as u32)
+    }
+
+    /// Check if compaction is needed and perform it.
+    /// Currently a stub — will be implemented with LLM-based summarization.
+    async fn maybe_compact(&mut self, model_id: &str) -> anyhow::Result<()> {
+        let model_config = self.registry.get_chat_model_config(model_id)?;
+        let context_window = match model_config.context_window {
+            Some(cw) => cw,
+            None => return Ok(()), // no context_window configured, skip
+        };
+
+        let threshold = (context_window as f64 * self.config.context.compact_threshold) as u64;
+        let total = self.token_tracker.total_tokens();
+
+        if total > threshold {
+            tracing::info!(
+                total_tokens = total,
+                threshold,
+                context_window,
+                "context compaction needed (stub)"
+            );
+            // TODO: Part 3 — implement LLM-based compaction
+        }
+
+        Ok(())
+    }
 }
 
 /// Response collected from a chat stream.
@@ -683,6 +773,7 @@ struct CollectedResponse {
     tool_calls: Vec<ToolCall>,
     #[allow(dead_code)]
     stop_reason: StopReason,
+    usage: Option<ChatUsage>,
 }
 
 // ── Extension trait for ChatMessage ──────────────────────────────────────────

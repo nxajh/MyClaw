@@ -196,6 +196,7 @@ impl TaskDelegator for SubAgentDelegator {
                 channel_name: None,
                 host_info: None,
             },
+            context: crate::config::agent::ContextConfig::default(),
         };
 
         // We need to create an AgentLoop manually since we don't have an Agent factory.
