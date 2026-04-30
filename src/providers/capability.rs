@@ -30,18 +30,21 @@ impl Capability {
             Capability::Search => "search",
         }
     }
+}
 
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for Capability {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "chat" => Some(Capability::Chat),
-            "embedding" => Some(Capability::Embedding),
-            "image-generation" => Some(Capability::ImageGeneration),
-            "text-to-speech" => Some(Capability::TextToSpeech),
-            "speech-to-text" => Some(Capability::SpeechToText),
-            "video-generation" => Some(Capability::VideoGeneration),
-            "search" => Some(Capability::Search),
-            _ => None,
+            "chat" => Ok(Capability::Chat),
+            "embedding" => Ok(Capability::Embedding),
+            "image-generation" => Ok(Capability::ImageGeneration),
+            "text-to-speech" => Ok(Capability::TextToSpeech),
+            "speech-to-text" => Ok(Capability::SpeechToText),
+            "video-generation" => Ok(Capability::VideoGeneration),
+            "search" => Ok(Capability::Search),
+            _ => Err(format!("unknown capability: {}", s)),
         }
     }
 }
@@ -73,14 +76,18 @@ impl Modality {
             Modality::Video => "video",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for Modality {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "text" => Some(Modality::Text),
-            "image" => Some(Modality::Image),
-            "audio" => Some(Modality::Audio),
-            "video" => Some(Modality::Video),
-            _ => None,
+            "text" => Ok(Modality::Text),
+            "image" => Ok(Modality::Image),
+            "audio" => Ok(Modality::Audio),
+            "video" => Ok(Modality::Video),
+            _ => Err(format!("unknown modality: {}", s)),
         }
     }
 }
