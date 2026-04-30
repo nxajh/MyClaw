@@ -271,9 +271,14 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                 }
             }
             let non_empty_parts: Vec<serde_json::Value> = parts_json.into_iter().filter(is_non_empty_block).collect();
-            let has_non_empty_part = !non_empty_parts.is_empty();
 
-            let final_content = if !has_non_empty_part {
+            // If an assistant message has no text, no tool_use, and no useful thinking,
+            // skip it entirely — sending content:null to the API causes repeated failures.
+            if role == "assistant" && non_empty_parts.is_empty() {
+                return None;
+            }
+
+            let final_content = if non_empty_parts.is_empty() {
                 serde_json::Value::Null
             } else {
                 serde_json::json!(non_empty_parts)
@@ -284,8 +289,8 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
             let mut msg_json = serde_json::Map::new();
             msg_json.insert("role".to_string(), serde_json::json!(role));
             msg_json.insert("content".to_string(), final_content);
-            serde_json::json!(msg_json)
-        })
+            Some(serde_json::json!(msg_json))
+        .filter_map(|opt| opt)
         .collect();
 
     let mut body = json!({
