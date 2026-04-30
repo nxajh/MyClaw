@@ -384,7 +384,13 @@ impl AgentLoop {
             // 5. No tool calls → return text.
             if response.tool_calls.is_empty() {
                 if response.text.is_empty() {
-                    tracing::warn!("chat response text is empty");
+                    tool_calls_count += 1;
+                    if tool_calls_count > 3 {
+                        tracing::error!("empty response after 3 retries, giving up");
+                        return Ok(String::new());
+                    }
+                    tracing::warn!(attempt = tool_calls_count, "chat response text is empty (thinking-only), retrying...");
+                    continue;
                 }
                 return Ok(response.text);
             }
