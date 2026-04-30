@@ -19,6 +19,8 @@ pub struct ChannelMessage {
     pub thread_ts: Option<String>,
     pub interruption_scope_id: Option<String>,
     pub attachments: Vec<MediaAttachment>,
+    /// URLs of images attached to this message (e.g. from Telegram photo messages).
+    pub image_urls: Option<Vec<String>>,
 }
 
 /// A message to send through a channel.

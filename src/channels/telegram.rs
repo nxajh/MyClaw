@@ -324,6 +324,20 @@ struct Update {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct PhotoSize {
+    #[serde(default)]
+    file_id: String,
+    #[serde(default)]
+    file_unique_id: String,
+    #[serde(default)]
+    width: i32,
+    #[serde(default)]
+    height: i32,
+    #[serde(default)]
+    file_size: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct Message {
     #[serde(default)]
     message_id: i64,
@@ -333,6 +347,10 @@ struct Message {
     chat: Chat,
     #[serde(default)]
     text: Option<String>,
+    #[serde(default)]
+    caption: Option<String>,
+    #[serde(default)]
+    photo: Option<Vec<PhotoSize>>,
     #[serde(default)]
     forward_from: Option<User>,
     #[serde(default)]
@@ -693,6 +711,26 @@ impl TelegramChannel {
 
         content
     }
+
+    /// Call Telegram `getFile` API and return the direct file download URL.
+    async fn get_file_url(&self, file_id: &str) -> anyhow::Result<String> {
+        let client = self.http_client();
+        let url = format!("{}?file_id={}", self.api_url("getFile"), file_id);
+        let resp = client.get(&url).send().await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("getFile failed: status={}", resp.status());
+        }
+        let data: serde_json::Value = resp.json().await?;
+        let file_path = data
+            .get("result")
+            .and_then(|r| r.get("file_path"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("getFile response missing file_path"))?;
+        Ok(format!(
+            "{}/file/bot{}/{}",
+            self.api_base, self.bot_token, file_path
+        ))
+    }
 }
 
 impl TelegramChannel {
@@ -752,11 +790,13 @@ impl TelegramChannel {
                 let chat = msg.chat.clone();
                 let from = msg.from.clone();
 
-                if msg.text.is_none()
-                    && msg.forward_from.is_none()
-                    && msg.forward_from_chat.is_none()
-                    && msg.forward_sender_name.is_none()
-                {
+                let has_text = msg.text.is_some();
+                let has_photo = msg.photo.is_some();
+                let has_forward = msg.forward_from.is_some()
+                    || msg.forward_from_chat.is_some()
+                    || msg.forward_sender_name.is_some();
+
+                if !has_text && !has_photo && !has_forward {
                     continue;
                 }
 
@@ -780,7 +820,29 @@ impl TelegramChannel {
                     continue;
                 }
 
-                let content = self.parse_message_content(&msg);
+                let mut content = self.parse_message_content(&msg);
+                let mut image_urls: Option<Vec<String>> = None;
+
+                // Handle photo messages: get the largest photo's URL
+                if let Some(photos) = &msg.photo {
+                    if let Some(largest) = photos.last() {
+                        match self.get_file_url(&largest.file_id).await {
+                            Ok(url) => {
+                                image_urls = Some(vec![url]);
+                            }
+                            Err(e) => {
+                                warn!("Telegram getFile failed for photo {}: {e}", largest.file_id);
+                            }
+                        }
+                    }
+                    // Use caption if available, otherwise default to "[图片]"
+                    if content.is_empty() {
+                        content = msg
+                            .caption
+                            .clone()
+                            .unwrap_or_else(|| "[图片]".to_string());
+                    }
+                }
 
                 let channel_msg = ChannelMessage {
                     id: update_id,
@@ -795,6 +857,7 @@ impl TelegramChannel {
                     thread_ts: None,
                     interruption_scope_id: None,
                     attachments: vec![],
+                    image_urls,
                 };
 
                 if let Err(e) = tx.send(channel_msg).await {
@@ -927,6 +990,8 @@ mod tests {
                 title: None,
             },
             text: Some("hello".into()),
+            caption: None,
+            photo: None,
             forward_from: Some(User {
                 id: 42,
                 username: Some("bob".into()),
@@ -954,6 +1019,8 @@ mod tests {
                 title: None,
             },
             text: Some("news".into()),
+            caption: None,
+            photo: None,
             forward_from: None,
             forward_from_chat: Some(Chat {
                 id: -1_001_234_567_890_i64,
@@ -982,6 +1049,8 @@ mod tests {
                 title: None,
             },
             text: Some("secret".into()),
+            caption: None,
+            photo: None,
             forward_from: None,
             forward_from_chat: None,
             forward_sender_name: Some("Hidden User".into()),

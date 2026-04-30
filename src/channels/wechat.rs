@@ -691,6 +691,7 @@ impl Channel for WechatChannel {
                                 thread_ts: None,
                                 interruption_scope_id: None,
                                 attachments: vec![],
+                                image_urls: None,
                             };
                             // tx is moved into the async block; we send on it directly.
                             if let Err(e) = tx.send(channel_msg).await {
