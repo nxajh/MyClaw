@@ -291,7 +291,7 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
             msg_json.insert("content".to_string(), final_content);
             Some(serde_json::json!(msg_json))
         })
-        .filter_map(|opt| opt)
+        .flatten()
         .collect();
 
     let mut body = json!({
