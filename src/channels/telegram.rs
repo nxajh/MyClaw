@@ -193,7 +193,7 @@ fn convert_markdown_tables(markdown: &str) -> String {
                     match a {
                         'C' => {
                             let total = w.saturating_sub(cell.len());
-                            let left = (total + 1) / 2;
+                            let left = total.div_ceil(2);
                             let right = total - left;
                             parts.push(format!(
                                 "{}{}{}",
