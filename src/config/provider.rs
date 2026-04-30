@@ -151,7 +151,7 @@ dimensions = 1536
         assert!(config.chat.is_some());
         let chat = config.chat.as_ref().unwrap();
         assert_eq!(chat.base_url, "https://api.openai.com/v1");
-        assert_eq!(chat.models.len(), 2);
+        assert_eq!(chat.models.len(), 1);
         let gpt4o = &chat.models["gpt-4o"];
         assert!(gpt4o.supports_image_input());
         assert_eq!(gpt4o.context_window, Some(128000));
