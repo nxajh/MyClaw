@@ -9,7 +9,9 @@
 // Re-export everything from the module tree at crate::providers
 pub use crate::providers::{
     // Traits
-    Capability, ChatFeatures,
+    Capability, Modality,
+    ChatModelConfig, EmbeddingModelConfig, BasicModelConfig,
+    ChatPricing, EmbeddingPricing, BasicPricing,
     ChatProvider, ChatRequest, ChatResponse, ChatMessage, ContentPart,
     StopReason, StreamEvent, ToolCall, ToolSpec, ThinkingConfig, ImageDetail, ChatUsage,
     BoxStream,

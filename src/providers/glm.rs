@@ -48,7 +48,13 @@ impl GlmProvider {
     }
 
     fn auth(&self) -> String {
-        format!("Bearer {}", self.api_key)
+        // If api_key contains '.', treat it as id.secret format and generate JWT.
+        if self.api_key.contains('.') {
+            generate_zhipu_jwt(&self.api_key)
+                .unwrap_or_else(|_| format!("Bearer {}", self.api_key))
+        } else {
+            format!("Bearer {}", self.api_key)
+        }
     }
 
     fn embeddings_url(&self) -> String {
@@ -441,4 +447,67 @@ impl SearchProvider for GlmProvider {
             query: req.query,
         })
     }
+}
+
+// ── JWT generation (Zhipu / GLM) ─────────────────────────────────────────────
+
+/// Generate a JWT for Zhipu/GLM authentication from an `id.secret` API key.
+fn generate_zhipu_jwt(credential: &str) -> Result<String, String> {
+    use base64::Engine;
+    use sha2::Digest;
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let (id, secret) = credential
+        .split_once('.')
+        .ok_or_else(|| "GLM API key must be in 'id.secret' format".to_string())?;
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis() as u64;
+    let exp_ms = now_ms + 210_000; // 3.5 minutes
+
+    #[derive(serde::Serialize)]
+    struct JwtHeader { alg: String, typ: String }
+    #[derive(serde::Serialize)]
+    struct JwtPayload { api_key: String, exp: u64, timestamp: u64 }
+
+    let header = JwtHeader { alg: "HS256".to_string(), typ: "JWT".to_string() };
+    let payload = JwtPayload {
+        api_key: id.to_string(),
+        exp: exp_ms / 1000,
+        timestamp: now_ms / 1000,
+    };
+
+    let header_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+        &serde_json::to_vec(&header).map_err(|e| e.to_string())?
+    );
+    let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+        &serde_json::to_vec(&payload).map_err(|e| e.to_string())?
+    );
+    let signing_input = format!("{}.{}", header_b64, payload_b64);
+
+    // HMAC-SHA256: H((K ⊕ 0x5c..) || H((K ⊕ 0x36..) || data))
+    let ipad: [u8; 64] = [0x36u8; 64];
+    let opad: [u8; 64] = [0x5cu8; 64];
+    let mut key = secret.as_bytes().to_vec();
+    key.resize(64, 0);
+    let mut inner_key = [0u8; 64];
+    let mut outer_key = [0u8; 64];
+    for i in 0..64 { inner_key[i] = key[i] ^ ipad[i]; outer_key[i] = key[i] ^ opad[i]; }
+
+    let inner = {
+        let mut h = sha2::Sha256::default();
+        h.write_all(&inner_key).unwrap();
+        h.write_all(signing_input.as_bytes()).unwrap();
+        h.finalize()
+    };
+    let mut h = sha2::Sha256::default();
+    h.write_all(&outer_key).unwrap();
+    h.write_all(&inner).unwrap();
+    let sig = h.finalize();
+    let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
+
+    Ok(format!("{}.{}.{}", header_b64, payload_b64, sig_b64))
 }

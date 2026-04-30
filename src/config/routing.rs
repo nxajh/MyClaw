@@ -52,8 +52,6 @@ impl RoutingConfig {
     pub fn get(&self, cap: Capability) -> Option<&RouteEntry> {
         let key = match cap {
             Capability::Chat => "chat",
-            Capability::Vision => "vision",
-            Capability::NativeTools => "native_tools",
             Capability::Search => "search",
             Capability::Embedding => "embedding",
             Capability::ImageGeneration => "image_generation",
@@ -68,8 +66,6 @@ impl RoutingConfig {
     pub fn insert(&mut self, cap: Capability, entry: RouteEntry) {
         let key = match cap {
             Capability::Chat => "chat",
-            Capability::Vision => "vision",
-            Capability::NativeTools => "native_tools",
             Capability::Search => "search",
             Capability::Embedding => "embedding",
             Capability::ImageGeneration => "image_generation",

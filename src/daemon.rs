@@ -128,88 +128,141 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
         crate::registry::Registry::from_config(config.providers.clone(), &config.routing)
             .context("failed to build registry")?;
 
-    for (provider_key, provider_cfg) in &config.providers.clone() {
-        let api_key = provider_cfg
-            .api_key
-            .as_ref()
-            .with_context(|| format!("no API key for '{}'", provider_key))?;
+    for (provider_key, provider_cfg) in &config.providers {
+        // ── Chat ──────────────────────────────────────────────────────
+        if let Some(ref chat) = provider_cfg.chat {
+            let api_key = provider_cfg.effective_api_key(chat.api_key.as_deref());
+            let api_key = api_key
+                .with_context(|| format!("no API key for '{}'", provider_key))?;
+            let user_agent = chat.user_agent.as_deref();
 
-        for (model_id, model_cfg) in &provider_cfg.models {
-            tracing::info!(
-                provider = %provider_key,
-                model = %model_id,
-                capabilities = ?model_cfg.capabilities,
-                "registering provider for model"
-            );
+            for (model_id, model_cfg) in &chat.models {
+                tracing::info!(
+                    provider = %provider_key,
+                    model = %model_id,
+                    capability = "chat",
+                    "registering chat provider"
+                );
 
-            let user_agent = provider_cfg.chat.user_agent.as_deref();
+                let handle = crate::providers::ProviderHandle::from_url_with_user_agent(
+                    api_key.clone(),
+                    &chat.base_url,
+                    user_agent,
+                ).with_context(|| format!(
+                    "cannot determine provider type from base_url '{}' (key='{}')",
+                    chat.base_url, provider_key
+                ))?;
 
-            let handle = crate::providers::ProviderHandle::from_url_with_user_agent(
-                api_key.clone(),
-                &provider_cfg.base_url,
-                user_agent,
-            ).with_context(|| format!(
-                "cannot determine provider type from base_url '{}' (key='{}')",
-                provider_cfg.base_url, provider_key
-            ))?;
+                let chat_provider: Box<dyn crate::providers::ChatProvider> = handle.into_chat_provider();
+                registry.register_chat(chat_provider, model_id.clone(), model_cfg.clone());
+            }
+        }
 
-            use crate::providers::Capability;
+        // ── Embedding ─────────────────────────────────────────────────
+        if let Some(ref emb) = provider_cfg.embedding {
+            let api_key = provider_cfg.effective_api_key(emb.api_key.as_deref());
+            let api_key = api_key
+                .with_context(|| format!("no API key for '{}' embedding", provider_key))?;
+            let user_agent = emb.user_agent.as_deref();
 
-            for cap in &model_cfg.capabilities {
-                match cap {
-                    Capability::Chat | Capability::Vision | Capability::NativeTools => {}
-                    Capability::Embedding => {
-                        if let Some(emb) = crate::providers::ProviderHandle::from_url_with_user_agent(
-                            api_key.clone(), &provider_cfg.base_url, user_agent,
-                        ).and_then(|h| h.into_embedding_provider()) {
-                            registry.register_embedding(emb, model_id.clone());
-                        }
-                    }
-                    Capability::ImageGeneration => {
-                        if let Some(img) = crate::providers::ProviderHandle::from_url_with_user_agent(
-                            api_key.clone(), &provider_cfg.base_url, user_agent,
-                        ).and_then(|h| h.into_image_provider()) {
-                            registry.register_image(img, model_id.clone());
-                        }
-                    }
-                    Capability::TextToSpeech => {
-                        if let Some(tts) = crate::providers::ProviderHandle::from_url_with_user_agent(
-                            api_key.clone(), &provider_cfg.base_url, user_agent,
-                        ).and_then(|h| h.into_tts_provider()) {
-                            registry.register_tts(tts, model_id.clone());
-                        }
-                    }
-                    Capability::VideoGeneration => {
-                        if let Some(vid) = crate::providers::ProviderHandle::from_url_with_user_agent(
-                            api_key.clone(), &provider_cfg.base_url, user_agent,
-                        ).and_then(|h| h.into_video_provider()) {
-                            registry.register_video(vid, model_id.clone());
-                        }
-                    }
-                    Capability::Search => {
-                        if let Some(srch) = crate::providers::ProviderHandle::from_url_with_user_agent(
-                            api_key.clone(), &provider_cfg.base_url, user_agent,
-                        ).and_then(|h| h.into_search_provider()) {
-                            registry.register_search(srch, model_id.clone());
-                        }
-                    }
-                    Capability::SpeechToText => {
-                        if let Some(stt) = crate::providers::ProviderHandle::from_url_with_user_agent(
-                            api_key.clone(), &provider_cfg.base_url, user_agent,
-                        ).and_then(|h| h.into_stt_provider()) {
-                            registry.register_stt(stt, model_id.clone());
-                        }
-                    }
+            for model_id in emb.models.keys() {
+                tracing::info!(
+                    provider = %provider_key,
+                    model = %model_id,
+                    capability = "embedding",
+                    "registering embedding provider"
+                );
+
+                if let Some(emb_provider) = crate::providers::ProviderHandle::from_url_with_user_agent(
+                    api_key.clone(), &emb.base_url, user_agent,
+                ).and_then(|h| h.into_embedding_provider()) {
+                    registry.register_embedding(emb_provider, model_id.clone());
                 }
             }
+        }
 
-            let chat_provider: Box<dyn crate::providers::ChatProvider> = handle.into_chat_provider();
-            registry.register_chat(chat_provider, model_id.clone());
+        // ── ImageGeneration ───────────────────────────────────────────
+        if let Some(ref sec) = provider_cfg.image_generation {
+            let api_key = provider_cfg.effective_api_key(sec.api_key.as_deref());
+            let api_key = api_key
+                .with_context(|| format!("no API key for '{}' image_generation", provider_key))?;
+            let user_agent = sec.user_agent.as_deref();
+
+            for model_id in sec.models.keys() {
+                if let Some(img) = crate::providers::ProviderHandle::from_url_with_user_agent(
+                    api_key.clone(), &sec.base_url, user_agent,
+                ).and_then(|h| h.into_image_provider()) {
+                    registry.register_image(img, model_id.clone());
+                }
+            }
+        }
+
+        // ── TTS ───────────────────────────────────────────────────────
+        if let Some(ref sec) = provider_cfg.tts {
+            let api_key = provider_cfg.effective_api_key(sec.api_key.as_deref());
+            let api_key = api_key
+                .with_context(|| format!("no API key for '{}' tts", provider_key))?;
+            let user_agent = sec.user_agent.as_deref();
+
+            for model_id in sec.models.keys() {
+                if let Some(tts) = crate::providers::ProviderHandle::from_url_with_user_agent(
+                    api_key.clone(), &sec.base_url, user_agent,
+                ).and_then(|h| h.into_tts_provider()) {
+                    registry.register_tts(tts, model_id.clone());
+                }
+            }
+        }
+
+        // ── Video ─────────────────────────────────────────────────────
+        if let Some(ref sec) = provider_cfg.video {
+            let api_key = provider_cfg.effective_api_key(sec.api_key.as_deref());
+            let api_key = api_key
+                .with_context(|| format!("no API key for '{}' video", provider_key))?;
+            let user_agent = sec.user_agent.as_deref();
+
+            for model_id in sec.models.keys() {
+                if let Some(vid) = crate::providers::ProviderHandle::from_url_with_user_agent(
+                    api_key.clone(), &sec.base_url, user_agent,
+                ).and_then(|h| h.into_video_provider()) {
+                    registry.register_video(vid, model_id.clone());
+                }
+            }
+        }
+
+        // ── Search ────────────────────────────────────────────────────
+        if let Some(ref sec) = provider_cfg.search {
+            let api_key = provider_cfg.effective_api_key(sec.api_key.as_deref());
+            let api_key = api_key
+                .with_context(|| format!("no API key for '{}' search", provider_key))?;
+            let user_agent = sec.user_agent.as_deref();
+
+            for model_id in sec.models.keys() {
+                if let Some(srch) = crate::providers::ProviderHandle::from_url_with_user_agent(
+                    api_key.clone(), &sec.base_url, user_agent,
+                ).and_then(|h| h.into_search_provider()) {
+                    registry.register_search(srch, model_id.clone());
+                }
+            }
+        }
+
+        // ── STT ───────────────────────────────────────────────────────
+        if let Some(ref sec) = provider_cfg.stt {
+            let api_key = provider_cfg.effective_api_key(sec.api_key.as_deref());
+            let api_key = api_key
+                .with_context(|| format!("no API key for '{}' stt", provider_key))?;
+            let user_agent = sec.user_agent.as_deref();
+
+            for model_id in sec.models.keys() {
+                if let Some(stt) = crate::providers::ProviderHandle::from_url_with_user_agent(
+                    api_key.clone(), &sec.base_url, user_agent,
+                ).and_then(|h| h.into_stt_provider()) {
+                    registry.register_stt(stt, model_id.clone());
+                }
+            }
         }
     }
 
     // --- Wrap with FallbackChatProvider if strategy is Fallback ---
-    // This must happen after all providers are registered above.
     registry.maybe_wrap_chat_fallback(&config.routing);
 
     Ok(registry)

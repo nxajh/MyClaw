@@ -1,7 +1,7 @@
 //! ServiceRegistry trait: the single routing point for all provider capabilities.
 
 use std::sync::Arc;
-use super::capability::Capability;
+use super::capability::{Capability, ChatModelConfig};
 use super::capability_chat::ChatProvider;
 use super::capability_embedding::EmbeddingProvider;
 use super::image::ImageGenerationProvider;
@@ -21,4 +21,7 @@ pub trait ServiceRegistry: Send + Sync {
     fn get_video_provider(&self) -> anyhow::Result<(Arc<dyn VideoGenerationProvider>, String)>;
     fn get_search_provider(&self) -> anyhow::Result<(Arc<dyn SearchProvider>, String)>;
     fn get_stt_provider(&self) -> anyhow::Result<(Arc<dyn SttProvider>, String)>;
+    
+    /// 获取 chat model 配置（含 input/output/pricing 等）
+    fn get_chat_model_config(&self, model_id: &str) -> anyhow::Result<&ChatModelConfig>;
 }

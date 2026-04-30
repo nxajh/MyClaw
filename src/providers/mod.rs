@@ -2,7 +2,7 @@
 
 // ── Capability traits (defs live here, impls below) ───────────────────────────
 
-pub mod capability;           // Capability enum, ChatFeatures
+pub mod capability;           // Capability, Modality, model configs
 pub mod capability_chat;     // ChatProvider, ChatMessage, StreamEvent, etc.
 pub mod capability_embedding; // EmbeddingProvider, EmbedRequest, etc.
 pub mod capability_tool;      // Tool, ToolResult
@@ -14,7 +14,11 @@ pub mod video;               // VideoGenerationProvider
 pub mod service_registry;    // ServiceRegistry trait
 
 // Re-export traits at crate level for external consumers
-pub use capability::{Capability, ChatFeatures};
+pub use capability::{
+    Capability, Modality,
+    ChatModelConfig, EmbeddingModelConfig, BasicModelConfig,
+    ChatPricing, EmbeddingPricing, BasicPricing,
+};
 pub use capability_chat::{
     BoxStream, ChatProvider, ChatRequest, ChatResponse, ChatMessage, ContentPart,
     StopReason, StreamEvent, ToolCall, ToolSpec as ChatToolSpec, ThinkingConfig, ImageDetail, ChatUsage,

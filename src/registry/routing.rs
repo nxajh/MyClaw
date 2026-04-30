@@ -52,7 +52,6 @@ impl RoutingConfig {
             Capability::TextToSpeech => self.text_to_speech.as_ref(),
             Capability::SpeechToText => self.speech_to_text.as_ref(),
             Capability::VideoGeneration => self.video_generation.as_ref(),
-            Capability::Vision | Capability::NativeTools => self.chat.as_ref(),
         }
     }
 }

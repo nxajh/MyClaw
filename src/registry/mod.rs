@@ -51,6 +51,7 @@ pub struct Registry {
     providers: HashMap<String, ProviderConfig>,
     routing: RoutingConfig,
     chat_providers: HashMap<String, Arc<dyn ChatProvider>>,
+    chat_model_configs: HashMap<String, crate::providers::capability::ChatModelConfig>,
     embedding_providers: HashMap<String, Arc<dyn EmbeddingProvider>>,
     image_providers: HashMap<String, Arc<dyn ImageGenerationProvider>>,
     tts_providers: HashMap<String, Arc<dyn TtsProvider>>,
@@ -65,6 +66,7 @@ impl Registry {
             providers,
             routing,
             chat_providers: HashMap::new(),
+            chat_model_configs: HashMap::new(),
             embedding_providers: HashMap::new(),
             image_providers: HashMap::new(),
             tts_providers: HashMap::new(),
@@ -146,14 +148,99 @@ impl Registry {
         let registry_providers: HashMap<String, ProviderConfig> = providers
             .into_iter()
             .map(|(api, cfg)| {
-                let models = cfg.models
-                    .into_iter()
-                    .map(|(id, mc)| ModelConfig::from((id.as_str(), mc)))
-                    .collect();
+                let mut models = Vec::new();
+                let mut base_url: Option<String> = None;
+
+                // Collect models from all capability sections
+                if let Some(ref chat) = cfg.chat {
+                    base_url = base_url.or_else(|| Some(chat.base_url.clone()));
+                    for (id, mc) in &chat.models {
+                        models.push(ModelConfig {
+                            model_id: id.clone(),
+                            capabilities: vec![Capability::Chat],
+                            context_window: mc.context_window,
+                            max_tokens: mc.max_output_tokens,
+                            reasoning: mc.reasoning,
+                        });
+                    }
+                }
+                if let Some(ref emb) = cfg.embedding {
+                    base_url = base_url.or_else(|| Some(emb.base_url.clone()));
+                    for (id, _mc) in &emb.models {
+                        models.push(ModelConfig {
+                            model_id: id.clone(),
+                            capabilities: vec![Capability::Embedding],
+                            context_window: None,
+                            max_tokens: None,
+                            reasoning: false,
+                        });
+                    }
+                }
+                if let Some(ref sec) = cfg.image_generation {
+                    base_url = base_url.or_else(|| Some(sec.base_url.clone()));
+                    for (id, _) in &sec.models {
+                        models.push(ModelConfig {
+                            model_id: id.clone(),
+                            capabilities: vec![Capability::ImageGeneration],
+                            context_window: None,
+                            max_tokens: None,
+                            reasoning: false,
+                        });
+                    }
+                }
+                if let Some(ref sec) = cfg.tts {
+                    base_url = base_url.or_else(|| Some(sec.base_url.clone()));
+                    for (id, _) in &sec.models {
+                        models.push(ModelConfig {
+                            model_id: id.clone(),
+                            capabilities: vec![Capability::TextToSpeech],
+                            context_window: None,
+                            max_tokens: None,
+                            reasoning: false,
+                        });
+                    }
+                }
+                if let Some(ref sec) = cfg.stt {
+                    base_url = base_url.or_else(|| Some(sec.base_url.clone()));
+                    for (id, _) in &sec.models {
+                        models.push(ModelConfig {
+                            model_id: id.clone(),
+                            capabilities: vec![Capability::SpeechToText],
+                            context_window: None,
+                            max_tokens: None,
+                            reasoning: false,
+                        });
+                    }
+                }
+                if let Some(ref sec) = cfg.video {
+                    base_url = base_url.or_else(|| Some(sec.base_url.clone()));
+                    for (id, _) in &sec.models {
+                        models.push(ModelConfig {
+                            model_id: id.clone(),
+                            capabilities: vec![Capability::VideoGeneration],
+                            context_window: None,
+                            max_tokens: None,
+                            reasoning: false,
+                        });
+                    }
+                }
+                if let Some(ref sec) = cfg.search {
+                    base_url = base_url.or_else(|| Some(sec.base_url.clone()));
+                    for (id, _) in &sec.models {
+                        models.push(ModelConfig {
+                            model_id: id.clone(),
+                            capabilities: vec![Capability::Search],
+                            context_window: None,
+                            max_tokens: None,
+                            reasoning: false,
+                        });
+                    }
+                }
+
                 let pc = ProviderConfig {
                     api: api.clone(),
                     api_key: cfg.api_key,
-                    base_url: Some(cfg.base_url),
+                    base_url,
                     models,
                 };
                 (api, pc)
@@ -168,24 +255,12 @@ impl Registry {
 
 // ── Type conversions (config → registry) ─────────────────────────────────────
 
-impl From<(&str, crate::config::provider::ModelConfig)> for ModelConfig {
-    fn from((model_id, cfg): (&str, crate::config::provider::ModelConfig)) -> Self {
-        Self {
-            model_id: model_id.to_string(),
-            capabilities: cfg.capabilities,
-            context_window: cfg.context_window,
-            max_tokens: cfg.max_output_tokens,
-            reasoning: cfg.reasoning,
-        }
-    }
-}
-
 impl From<crate::config::provider::ProviderConfig> for ProviderConfig {
     fn from(cfg: crate::config::provider::ProviderConfig) -> Self {
         Self {
             api: String::new(),
             api_key: cfg.api_key,
-            base_url: Some(cfg.base_url),
+            base_url: None,
             models: vec![],
         }
     }
@@ -221,11 +296,6 @@ impl RoutingConfig {
                 "text_to_speech" => cfg.text_to_speech = Some(e),
                 "speech_to_text" => cfg.speech_to_text = Some(e),
                 "video_generation" => cfg.video_generation = Some(e),
-                "vision" | "native_tools"
-                    if cfg.chat.is_none() =>
-                {
-                    cfg.chat = Some(e);
-                }
                 _ => {}
             }
         }
@@ -236,7 +306,8 @@ impl RoutingConfig {
 // ── Registry registration methods ─────────────────────────────────────────────
 
 impl Registry {
-    pub fn register_chat(&mut self, provider: Box<dyn ChatProvider>, model_id: String) {
+    pub fn register_chat(&mut self, provider: Box<dyn ChatProvider>, model_id: String, model_config: crate::providers::capability::ChatModelConfig) {
+        self.chat_model_configs.insert(model_id.clone(), model_config);
         self.chat_providers.insert(model_id, provider.into());
     }
 
@@ -386,6 +457,11 @@ impl ServiceRegistry for Registry {
 
     fn get_stt_provider(&self) -> anyhow::Result<(Arc<dyn SttProvider>, String)> {
         self.route_capability(Capability::SpeechToText, &self.stt_providers)
+    }
+
+    fn get_chat_model_config(&self, model_id: &str) -> anyhow::Result<&crate::providers::capability::ChatModelConfig> {
+        self.chat_model_configs.get(model_id)
+            .with_context(|| format!("No chat model config found for model: {}", model_id))
     }
 }
 

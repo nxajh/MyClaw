@@ -8,16 +8,27 @@
 //! ```toml
 //! workspace_dir = "~/.myclaw/workspace"
 //!
-//! [providers.minimax]
-//! base_url = "https://api.minimaxi.com/v1"
-//! api_key = "${MINIMAX_API_KEY}"
+//! [providers.openai]
+//! api_key = "${OPENAI_API_KEY}"
 //!
-//! [providers.minimax.models.minimax-m2.7]
-//! capabilities = ["chat", "vision"]
+//! [providers.openai.chat]
+//! base_url = "https://api.openai.com/v1"
+//!
+//! [providers.openai.chat.models.gpt-4o]
+//! input = ["text", "image"]
+//! output = ["text"]
+//! context_window = 128000
+//! max_output_tokens = 16384
+//!
+//! [providers.openai.embedding]
+//! base_url = "https://api.openai.com/v1"
+//!
+//! [providers.openai.embedding.models.text-embedding-3-small]
+//! dimensions = 1536
 //!
 //! [routing.chat]
 //! strategy = "fallback"
-//! models = ["minimax-m2.7"]
+//! models = ["gpt-4o"]
 //!
 //! [channels.wechat]
 //! api_base = "https://ilink.bot.weixin.qq.com"
@@ -225,13 +236,46 @@ impl ConfigLoader {
 
     /// Expand `${ENV_VAR}` patterns in all string fields.
     fn expand_env_vars(config: &mut RawConfig) {
-        // Expand provider api_keys.
+        // Expand provider-level and capability-level api_keys.
         for provider in config.providers.values_mut() {
             if let Some(ref key) = provider.api_key {
                 provider.api_key = Some(Self::expand_string(key));
             }
-            for value in provider.extra_headers.values_mut() {
-                *value = Self::expand_string(value);
+            // Expand capability-level api_keys
+            if let Some(ref mut chat) = provider.chat {
+                if let Some(ref key) = chat.api_key {
+                    chat.api_key = Some(Self::expand_string(key));
+                }
+            }
+            if let Some(ref mut emb) = provider.embedding {
+                if let Some(ref key) = emb.api_key {
+                    emb.api_key = Some(Self::expand_string(key));
+                }
+            }
+            if let Some(ref mut sec) = provider.image_generation {
+                if let Some(ref key) = sec.api_key {
+                    sec.api_key = Some(Self::expand_string(key));
+                }
+            }
+            if let Some(ref mut sec) = provider.tts {
+                if let Some(ref key) = sec.api_key {
+                    sec.api_key = Some(Self::expand_string(key));
+                }
+            }
+            if let Some(ref mut sec) = provider.stt {
+                if let Some(ref key) = sec.api_key {
+                    sec.api_key = Some(Self::expand_string(key));
+                }
+            }
+            if let Some(ref mut sec) = provider.video {
+                if let Some(ref key) = sec.api_key {
+                    sec.api_key = Some(Self::expand_string(key));
+                }
+            }
+            if let Some(ref mut sec) = provider.search {
+                if let Some(ref key) = sec.api_key {
+                    sec.api_key = Some(Self::expand_string(key));
+                }
             }
         }
 
@@ -270,18 +314,21 @@ mod tests {
     #[test]
     fn parse_minimal_config() {
         let toml_str = r#"
-[providers.minimax]
-base_url = "https://api.minimaxi.com/v1"
+[providers.openai]
 
-[providers.minimax.models.minimax-m2.7]
-capabilities = ["chat"]
+[providers.openai.chat]
+base_url = "https://api.openai.com/v1"
+
+[providers.openai.chat.models.gpt-4o]
+input = ["text"]
+output = ["text"]
 
 [routing.chat]
 strategy = "fixed"
-models = ["minimax-m2.7"]
+models = ["gpt-4o"]
 "#;
         let config = ConfigLoader::from_toml(toml_str).unwrap();
-        assert!(config.providers.contains_key("minimax"));
+        assert!(config.providers.contains_key("openai"));
         assert_eq!(config.routing.len(), 1);
         assert!(config.routing.get(provider::Capability::Chat).is_some());
     }
@@ -299,21 +346,31 @@ models = ["minimax-m2.7"]
         let toml_str = r#"
 workspace_dir = "/tmp/myclaw"
 
-[providers.minimax]
-base_url = "https://api.minimaxi.com/v1"
+[providers.openai]
 api_key = "test-key"
 
-[providers.minimax.models.minimax-m2-7]
-capabilities = ["chat", "vision"]
-max_output_tokens = 32768
+[providers.openai.chat]
+base_url = "https://api.openai.com/v1"
 
-[providers.minimax.models.minimax-m2-7.pricing]
-input_per_million = 1.0
-output_per_million = 2.0
+[providers.openai.chat.models.gpt-4o]
+input = ["text", "image"]
+output = ["text"]
+max_output_tokens = 16384
+context_window = 128000
+
+[providers.openai.chat.models.gpt-4o.pricing]
+input = 2.5
+output = 10.0
+
+[providers.openai.embedding]
+base_url = "https://api.openai.com/v1"
+
+[providers.openai.embedding.models.text-embedding-3-small]
+dimensions = 1536
 
 [routing.chat]
 strategy = "fallback"
-models = ["minimax-m2-7"]
+models = ["gpt-4o"]
 
 [channels.wechat]
 api_base = "https://ilink.bot.weixin.qq.com"
@@ -341,7 +398,7 @@ command = "npx"
 args = ["mcp-server-filesystem"]
 
 [defaults]
-model = "minimax-m2-7"
+model = "gpt-4o"
 
 [logging]
 level = "INFO"
@@ -353,13 +410,15 @@ level = "INFO"
 
         // Providers
         assert_eq!(config.providers.len(), 1);
-        let minimax = &config.providers["minimax"];
-        assert_eq!(minimax.base_url, "https://api.minimaxi.com/v1");
-        assert!(minimax.models.contains_key("minimax-m2-7"));
+        let openai = &config.providers["openai"];
+        assert!(openai.chat.is_some());
+        let chat = openai.chat.as_ref().unwrap();
+        assert_eq!(chat.base_url, "https://api.openai.com/v1");
+        assert!(chat.models.contains_key("gpt-4o"));
 
         // Routing
         let chat_route = config.routing.get(provider::Capability::Chat).unwrap();
-        assert_eq!(chat_route.models, vec!["minimax-m2-7"]);
+        assert_eq!(chat_route.models, vec!["gpt-4o"]);
 
         // Channels
         assert_eq!(config.channels.enabled_channels(), vec!["wechat", "telegram"]);
@@ -384,12 +443,18 @@ level = "INFO"
 
         let toml_str = r#"
 [providers.test]
+
+[providers.test.chat]
 base_url = "https://api.test.com"
 api_key = "${TEST_MYCLAW_KEY}"
+
+[providers.test.chat.models.test-model]
+input = ["text"]
+output = ["text"]
 "#;
         let config = ConfigLoader::from_toml(toml_str).unwrap();
         assert_eq!(
-            config.providers["test"].api_key.as_deref(),
+            config.providers["test"].chat.as_ref().unwrap().api_key.as_deref(),
             Some("secret123")
         );
 

@@ -1,34 +1,33 @@
-//! Capability enum and ChatFeatures configuration marker.
+//! Capability enum, Modality enum, and per-capability model configs.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+// ── Capability ────────────────────────────────────────────────────────────────
+
+/// Top-level routing capabilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
     Chat,
-    Vision,
-    NativeTools,
-    Search,
     Embedding,
     ImageGeneration,
     TextToSpeech,
     SpeechToText,
     VideoGeneration,
+    Search,
 }
 
 impl Capability {
     pub fn as_str(&self) -> &'static str {
         match self {
             Capability::Chat => "chat",
-            Capability::Vision => "vision",
-            Capability::NativeTools => "native-tools",
-            Capability::Search => "search",
             Capability::Embedding => "embedding",
             Capability::ImageGeneration => "image-generation",
             Capability::TextToSpeech => "text-to-speech",
             Capability::SpeechToText => "speech-to-text",
             Capability::VideoGeneration => "video-generation",
+            Capability::Search => "search",
         }
     }
 
@@ -36,14 +35,12 @@ impl Capability {
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "chat" => Some(Capability::Chat),
-            "vision" => Some(Capability::Vision),
-            "native-tools" => Some(Capability::NativeTools),
-            "search" => Some(Capability::Search),
             "embedding" => Some(Capability::Embedding),
             "image-generation" => Some(Capability::ImageGeneration),
             "text-to-speech" => Some(Capability::TextToSpeech),
             "speech-to-text" => Some(Capability::SpeechToText),
             "video-generation" => Some(Capability::VideoGeneration),
+            "search" => Some(Capability::Search),
             _ => None,
         }
     }
@@ -55,26 +52,93 @@ impl fmt::Display for Capability {
     }
 }
 
-/// Chat capability feature flags.
-/// These are configuration markers, not independent capabilities.
+// ── Modality ──────────────────────────────────────────────────────────────────
+
+/// Input/output modality for a model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Modality {
+    Text,
+    Image,
+    Audio,
+    Video,
+}
+
+impl Modality {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Modality::Text => "text",
+            Modality::Image => "image",
+            Modality::Audio => "audio",
+            Modality::Video => "video",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "text" => Some(Modality::Text),
+            "image" => Some(Modality::Image),
+            "audio" => Some(Modality::Audio),
+            "video" => Some(Modality::Video),
+            _ => None,
+        }
+    }
+}
+
+// ── Pricing ───────────────────────────────────────────────────────────────────
+
+/// Per-model pricing for chat models (USD per million tokens).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ChatFeatures {
-    /// Supports vision / image input
+pub struct ChatPricing {
+    pub input: Option<f64>,
+    pub output: Option<f64>,
+    pub cache_write: Option<f64>,
+    pub cache_read: Option<f64>,
+}
+
+/// Per-model pricing for embedding models (USD per million tokens).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EmbeddingPricing {
+    pub input: Option<f64>,
+}
+
+/// Per-model pricing for non-token-based models.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BasicPricing {
+    pub per_unit: Option<f64>,
+}
+
+// ── Per-capability model configs ──────────────────────────────────────────────
+
+/// Configuration for a chat model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatModelConfig {
+    pub input: Vec<Modality>,
+    pub output: Vec<Modality>,
+    pub context_window: Option<u64>,
+    pub max_output_tokens: Option<u32>,
+    pub pricing: Option<ChatPricing>,
     #[serde(default)]
-    pub vision: bool,
-    /// Supports audio input
-    #[serde(default)]
-    pub audio_input: bool,
-    /// Supports video input
-    #[serde(default)]
-    pub video_input: bool,
-    /// Supports native tool calling (not via text-modeling workaround)
-    #[serde(default)]
-    pub native_tools: bool,
-    /// Maximum image size in pixels (HxW), if known
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_image_size: Option<u64>,
-    /// Supported image formats
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub supported_image_formats: Vec<String>,
+    pub reasoning: bool,
+}
+
+impl ChatModelConfig {
+    /// Whether the model supports image input.
+    pub fn supports_image_input(&self) -> bool {
+        self.input.contains(&Modality::Image)
+    }
+}
+
+/// Configuration for an embedding model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingModelConfig {
+    pub dimensions: Option<u32>,
+    pub max_tokens: Option<u32>,
+    pub pricing: Option<EmbeddingPricing>,
+}
+
+/// Generic configuration for image / TTS / STT / video / search models.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BasicModelConfig {
+    pub pricing: Option<BasicPricing>,
 }
