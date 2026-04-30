@@ -120,6 +120,7 @@ impl Agent {
                 max_tool_calls: self.config.max_tool_calls,
                 ..LoopBreakerConfig::default()
             }),
+            pending_image_urls: None,
         }
     }
 }
@@ -138,6 +139,8 @@ pub struct AgentLoop {
     delegate_handler: Option<DelegateHandler>,
     /// Loop breaker — detects repetitive tool-call patterns.
     loop_breaker: LoopBreaker,
+    /// Pending image URLs from the current user message (attached per-model in chat_loop).
+    pending_image_urls: Option<Vec<String>>,
 }
 
 impl AgentLoop {
@@ -156,14 +159,15 @@ impl AgentLoop {
     /// Process a user message and return the assistant's text response.
     ///
     /// This is the main entry point called by the orchestrator.
-    pub async fn run(&mut self, user_message: &str) -> anyhow::Result<String> {
+    pub async fn run(&mut self, user_message: &str, image_urls: Option<Vec<String>>) -> anyhow::Result<String> {
         tracing::info!(user_input = %user_message, "user message received");
 
         // Reset loop breaker for new turn.
         self.loop_breaker.reset();
 
-        // 1. Add user message to session.
+        // 1. Add user message to session (text only; images attached per-model in chat_loop).
         self.session.add_user_text(user_message.to_string());
+        self.pending_image_urls = image_urls;
 
         // 2. Build the full message list for this turn.
         let messages = self.build_messages().await?;
@@ -175,6 +179,39 @@ impl AgentLoop {
         self.session.add_assistant_text(text.clone());
 
         Ok(text)
+    }
+
+    /// Attach pending image URLs to the last user message if model supports it.
+    fn attach_images_if_supported(&self, messages: &mut [ChatMessage], model_id: &str) {
+        let image_urls = match self.pending_image_urls.as_ref() {
+            Some(urls) if !urls.is_empty() => urls,
+            _ => return,
+        };
+
+        let supports_image = self
+            .registry
+            .get_chat_model_config(model_id)
+            .map(|cfg| cfg.supports_image_input())
+            .unwrap_or(false);
+
+        if !supports_image {
+            tracing::debug!(
+                model = %model_id,
+                "model does not support image input, ignoring image_urls"
+            );
+            return;
+        }
+
+        // Find the last user message and attach images.
+        if let Some(last_user) = messages.iter_mut().rev().find(|m| m.role == "user") {
+            for url in image_urls {
+                last_user.parts.push(crate::providers::ContentPart::ImageUrl {
+                    url: url.clone(),
+                    detail: crate::providers::ImageDetail::Auto,
+                });
+            }
+            tracing::info!("attached {} image(s) to user message", image_urls.len());
+        }
     }
 
     /// Build the message list: system prompt + history.
@@ -201,6 +238,9 @@ impl AgentLoop {
             let (provider, model_id) = self
                 .registry
                 .get_chat_provider(Capability::Chat)?;
+
+            // Attach pending images to the last user message if model supports it.
+            self.attach_images_if_supported(&mut messages, &model_id);
 
             // 2. Build tool specs from skills manager.
             let tools = self.build_tool_specs();
