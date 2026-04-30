@@ -103,7 +103,7 @@
 | **Provider Config** | `src/config/provider.rs` | 159 | Provider 连接/认证/模型声明 |
 | **Channel Config** | `src/config/channel.rs` | 163 | WeChat/Telegram 通道配置 |
 | **Routing Config** | `src/config/routing.rs` | 127 | 模型选择策略 |
-| **Agent Config** | `src/config/agent.rs` | 146 | 自治级别、循环熔断、提示词设置 |
+| **Agent Config** | `src/config/agent.rs` | 146 | 自治级别、循环熔断、提示词设置、上下文管理 |
 | **MCP Config** | `src/config/mcp.rs` | 83 | MCP 服务器配置 |
 | **Memory Config** | `src/config/memory.rs` | 84 | Memory 存储后端配置 |
 | **SubAgent Config** | `src/config/sub_agent.rs` | 65 | 子 Agent 定义 |

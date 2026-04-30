@@ -44,6 +44,63 @@ use super::session_manager::Session;
 use super::skills::SkillsManager;
 use crate::agents::prompt::{SystemPromptBuilder, SystemPromptConfig};
 
+/// Estimate token count from text length (~4 bytes per token).
+pub(crate) fn estimate_tokens(text: &str) -> u64 {
+    (text.len() as u64 + 3) / 4
+}
+
+/// Estimate token count for a ChatMessage.
+pub(crate) fn estimate_message_tokens(msg: &crate::providers::ChatMessage) -> u64 {
+    use crate::providers::ContentPart;
+    let mut tokens = 4u64; // metadata overhead
+    for part in &msg.parts {
+        tokens += match part {
+            ContentPart::Text { text } => estimate_tokens(text),
+            ContentPart::ImageUrl { .. } => 800,
+            ContentPart::ImageB64 { .. } => 800,
+            ContentPart::Thinking { thinking } => estimate_tokens(thinking),
+        };
+    }
+    tokens
+}
+
+/// Token usage tracker — combines precise API-reported usage with estimated pending tokens.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TokenTracker {
+    /// Last API response's input_tokens (precise).
+    last_input_tokens: u64,
+    /// Last API response's output_tokens (precise).
+    last_output_tokens: u64,
+    /// Estimated tokens of items added to history after the last API response.
+    pending_estimated_tokens: u64,
+}
+
+impl TokenTracker {
+    /// Update with precise usage from API response. Resets pending estimates.
+    pub fn update_from_usage(&mut self, input_tokens: u64, output_tokens: u64) {
+        self.last_input_tokens = input_tokens;
+        self.last_output_tokens = output_tokens;
+        self.pending_estimated_tokens = 0;
+    }
+
+    /// Record estimated tokens for a new item added to history.
+    pub fn record_pending(&mut self, tokens: u64) {
+        self.pending_estimated_tokens += tokens;
+    }
+
+    /// Total estimated token usage.
+    pub fn total_tokens(&self) -> u64 {
+        self.last_input_tokens
+            .saturating_add(self.last_output_tokens)
+            .saturating_add(self.pending_estimated_tokens)
+    }
+
+    /// Reset for a new conversation.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// AgentConfig controls loop breaker thresholds and tool call limits.
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
@@ -121,6 +178,7 @@ impl Agent {
                 ..LoopBreakerConfig::default()
             }),
             pending_image_urls: None,
+            token_tracker: TokenTracker::default(),
         }
     }
 }
@@ -141,6 +199,8 @@ pub struct AgentLoop {
     loop_breaker: LoopBreaker,
     /// Pending image URLs from the current user message (attached per-model in chat_loop).
     pending_image_urls: Option<Vec<String>>,
+    /// Token usage tracker for context window management.
+    token_tracker: TokenTracker,
 }
 
 impl AgentLoop {

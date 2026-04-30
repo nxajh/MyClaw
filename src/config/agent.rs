@@ -17,6 +17,33 @@ pub enum AutonomyLevel {
     ReadOnly,
 }
 
+// ── ContextConfig ─────────────────────────────────────────────────────────────
+
+/// Context window management configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextConfig {
+    /// Compact threshold: trigger compaction when token usage exceeds
+    /// this fraction of context_window. Default: 0.7
+    #[serde(default = "default_compact_threshold")]
+    pub compact_threshold: f64,
+
+    /// Compact ratio: fraction of history to compact. 1.0 = full (default).
+    #[serde(default = "default_compact_ratio")]
+    pub compact_ratio: f64,
+}
+
+fn default_compact_threshold() -> f64 { 0.7 }
+fn default_compact_ratio() -> f64 { 1.0 }
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            compact_threshold: default_compact_threshold(),
+            compact_ratio: default_compact_ratio(),
+        }
+    }
+}
+
 // ── AgentConfig ───────────────────────────────────────────────────────────────
 
 /// Agent behavior configuration.
@@ -45,6 +72,10 @@ pub struct AgentConfig {
     /// System prompt configuration.
     #[serde(default)]
     pub prompt: PromptConfig,
+
+    /// Context window management settings.
+    #[serde(default)]
+    pub context: ContextConfig,
 }
 
 fn default_max_tool_calls() -> usize { 100 }
@@ -61,6 +92,7 @@ impl Default for AgentConfig {
             tool_timeout_secs: default_tool_timeout(),
             loop_breaker_threshold: default_loop_breaker_threshold(),
             prompt: PromptConfig::default(),
+            context: ContextConfig::default(),
         }
     }
 }
