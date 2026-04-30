@@ -77,6 +77,10 @@ impl Tool for WebFetchTool {
         })
     }
 
+    fn max_output_tokens(&self) -> usize {
+        20_000
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let url = args["url"]
             .as_str()
@@ -127,14 +131,6 @@ impl Tool for WebFetchTool {
             strip_html(&body)
         } else {
             body
-        };
-
-        // Truncate if too large.
-        let max_len = 50_000;
-        let output = if output.len() > max_len {
-            format!("{}... (truncated at {} chars)", &output[..max_len], max_len)
-        } else {
-            output
         };
 
         Ok(ToolResult {

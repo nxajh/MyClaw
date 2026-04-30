@@ -66,6 +66,10 @@ impl Tool for HttpRequestTool {
         })
     }
 
+    fn max_output_tokens(&self) -> usize {
+        20_000
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let url = args["url"]
             .as_str()
@@ -133,15 +137,7 @@ impl Tool for HttpRequestTool {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
 
-        // Truncate if too large.
-        let max_len = 50_000;
-        let body_display = if body.len() > max_len {
-            format!("{}... (truncated at {} chars)", &body[..max_len], max_len)
-        } else {
-            body
-        };
-
-        let output = format!("HTTP {}\n\n{}", status, body_display);
+        let output = format!("HTTP {}\n\n{}", status, body);
 
         Ok(ToolResult {
             success: status.is_success(),

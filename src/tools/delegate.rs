@@ -75,6 +75,10 @@ impl Tool for DelegateTaskTool {
         })
     }
 
+    fn max_output_tokens(&self) -> usize {
+        20_000
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let agent_name = args["agent"]
             .as_str()

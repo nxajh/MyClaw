@@ -43,6 +43,10 @@ impl Tool for CalculatorTool {
         })
     }
 
+    fn max_output_tokens(&self) -> usize {
+        1_000
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let expr = args["expression"]
             .as_str()

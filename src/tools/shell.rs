@@ -46,6 +46,10 @@ impl Tool for ShellTool {
         })
     }
 
+    fn max_output_tokens(&self) -> usize {
+        5_000
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let command = args["command"]
             .as_str()
@@ -77,21 +81,9 @@ impl Tool for ShellTool {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
 
-                // Truncate if output is too large (keep 50KB).
-                let max_len = 50_000;
-                let truncated = stdout.len() + stderr.len() > max_len;
-                let stdout = if stdout.len() > max_len {
-                    format!("{}... (truncated)", &stdout[..max_len])
-                } else {
-                    stdout.into_owned()
-                };
-
-                let mut output_text = format!("exit code: {}\n{}", output.status.code().unwrap_or(-1), stdout);
+                let mut output_text = format!("exit code: {}\n{}", output.status.code().unwrap_or(-1), stdout.into_owned());
                 if !stderr.is_empty() {
                     output_text.push_str(&format!("\nstderr:\n{}", stderr));
-                }
-                if truncated {
-                    output_text.push_str("\n(output truncated at 50KB)");
                 }
 
                 Ok(ToolResult {

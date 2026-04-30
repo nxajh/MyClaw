@@ -133,6 +133,10 @@ impl Tool for MemoryStoreTool {
         })
     }
 
+    fn max_output_tokens(&self) -> usize {
+        5_000
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let key = args["key"]
             .as_str()
@@ -192,6 +196,10 @@ impl Tool for MemoryRecallTool {
                 }
             }
         })
+    }
+
+    fn max_output_tokens(&self) -> usize {
+        5_000
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
@@ -264,6 +272,10 @@ impl Tool for MemoryForgetTool {
             },
             "required": ["key"]
         })
+    }
+
+    fn max_output_tokens(&self) -> usize {
+        1_000
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {

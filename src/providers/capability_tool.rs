@@ -37,6 +37,12 @@ pub trait Tool: Send + Sync {
     /// JSON Schema describing the tool's parameters.
     fn parameters_schema(&self) -> serde_json::Value;
 
+    /// Maximum output tokens before framework-level truncation kicks in.
+    /// Override per-tool for tighter/looser limits. Default: 10,000.
+    fn max_output_tokens(&self) -> usize {
+        10_000
+    }
+
     /// Execute the tool with the given arguments.
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult>;
 

@@ -48,6 +48,10 @@ impl Tool for WebSearchTool {
         })
     }
 
+    fn max_output_tokens(&self) -> usize {
+        5_000
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let query = args["query"]
             .as_str()

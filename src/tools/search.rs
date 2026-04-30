@@ -109,6 +109,10 @@ impl Tool for GlobSearchTool {
         })
     }
 
+    fn max_output_tokens(&self) -> usize {
+        3_000
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let pattern = args["pattern"]
             .as_str()
@@ -226,6 +230,10 @@ impl Tool for ContentSearchTool {
             },
             "required": ["pattern"]
         })
+    }
+
+    fn max_output_tokens(&self) -> usize {
+        3_000
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {

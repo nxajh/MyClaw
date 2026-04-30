@@ -48,6 +48,10 @@ impl Tool for AskUserTool {
         })
     }
 
+    fn max_output_tokens(&self) -> usize {
+        1_000
+    }
+
     /// Fallback: returns the question so the LLM can surface it to the user.
     ///
     /// When the Orchestrator is active, this code path is NOT reached —

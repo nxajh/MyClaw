@@ -640,6 +640,7 @@ impl AgentLoop {
 
     /// Execute a single tool call.
     /// Special-cases `ask_user` and `delegate_task` to use handlers when available.
+    /// Applies framework-level truncation based on the tool's `max_output_tokens()`.
     async fn execute_tool(&mut self, call: &ToolCall) -> anyhow::Result<ToolResult> {
         // Special handling for ask_user tool.
         if call.name == "ask_user" {
@@ -715,7 +716,29 @@ impl AgentLoop {
             })
         };
 
-        tool.execute(args).await
+        let result = tool.execute(args).await?;
+
+        // Framework-level truncation based on tool's declared limit.
+        let max_tokens = tool.max_output_tokens();
+        let truncated_output = crate::tools::truncation::truncate_tool_result(
+            &result.output,
+            max_tokens,
+        );
+        if truncated_output.len() != result.output.len() {
+            tracing::debug!(
+                tool = %call.name,
+                original_len = result.output.len(),
+                truncated_len = truncated_output.len(),
+                max_tokens,
+                "tool output truncated by framework"
+            );
+        }
+
+        Ok(ToolResult {
+            success: result.success,
+            output: truncated_output,
+            error: result.error,
+        })
     }
 
     /// Append raw chat I/O to a debug log file for post-mortem analysis.

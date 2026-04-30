@@ -281,6 +281,27 @@ async fn build_skills(
         skills.register_tool(&name, tool);
     }
 
+    // Register new built-in tools (planning, discovery, etc.).
+    skills.register_tool("list_dir", Arc::new(crate::tools::ListDirTool::new()));
+    skills.register_tool(
+        "update_plan",
+        Arc::new(crate::tools::UpdatePlanTool::new(
+            crate::tools::UpdatePlanTool::shared_state(),
+        )),
+    );
+    skills.register_tool(
+        "goal_manager",
+        Arc::new(crate::tools::GoalManagerTool::new(
+            crate::tools::GoalManagerTool::shared_state(),
+        )),
+    );
+    skills.register_tool(
+        "task_manager",
+        Arc::new(crate::tools::TaskManagerTool::new(
+            crate::tools::TaskManagerTool::shared_state(),
+        )),
+    );
+
     // Inject MCP tools (if any servers are configured and connected).
     if mcp_manager.is_connected().await {
         let mcp_tools = mcp_manager.tools().await;
@@ -300,6 +321,9 @@ async fn build_skills(
         skills.register_tool("delegate_task", Arc::new(delegate_tool));
         tracing::info!("delegate_task tool registered (multi-agent mode)");
     }
+
+    // Note: tool_search is registered after build_skills returns,
+    // in run(), once we have Arc<SkillsManager> available.
 
     tracing::info!(tool_count = skills.tool_count(), "skills manager built");
     skills
@@ -393,7 +417,19 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // all the same tools + delegate_task. Tool instances (Arc<dyn Tool>) are shared.
 
     let (skills_arc, sub_agent_delegator_arc) = if config.agents.is_empty() {
-        (Arc::new(skills), None)
+        // Create base skills, wrap in Arc for tool_search reference.
+        let base_arc = Arc::new(skills);
+        let tool_search = crate::tools::ToolSearchTool::new(Arc::clone(&base_arc));
+
+        // Rebuild with tool_search added.
+        let mut final_skills = SkillsManager::new();
+        for tool in base_arc.all_tools() {
+            let name = tool.name().to_string();
+            final_skills.register_tool(&name, tool);
+        }
+        final_skills.register_tool("tool_search", Arc::new(tool_search));
+
+        (Arc::new(final_skills), None)
     } else {
         tracing::info!(agents = config.agents.len(), "multi-agent mode enabled");
 
@@ -412,7 +448,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             Arc::clone(&delegator_arc) as Arc<dyn TaskDelegator>,
         );
 
-        // Rebuild parent skills: same tool instances + delegate_task.
+        // Rebuild parent skills: same tool instances + delegate_task + tool_search.
         let mut parent_skills = SkillsManager::new();
         for tool in skills_arc.all_tools() {
             let name = tool.name().to_string();
@@ -420,6 +456,10 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         }
         parent_skills.register_tool("delegate_task", Arc::new(delegate_tool));
         tracing::info!("delegate_task tool registered (multi-agent mode)");
+
+        // tool_search holds reference to base skills (without delegate_task/tool_search).
+        let tool_search = crate::tools::ToolSearchTool::new(Arc::clone(&skills_arc));
+        parent_skills.register_tool("tool_search", Arc::new(tool_search));
 
         (Arc::new(parent_skills), Some(delegator_arc))
     };
