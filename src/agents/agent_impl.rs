@@ -100,6 +100,13 @@ impl TokenTracker {
     pub fn reset(&mut self) {
         *self = Self::default();
     }
+
+    /// Override total token count (used after compaction).
+    pub fn force_set(&mut self, total: u64) {
+        self.last_input_tokens = total;
+        self.last_output_tokens = 0;
+        self.pending_estimated_tokens = 0;
+    }
 }
 
 /// AgentConfig controls loop breaker thresholds and tool call limits.
@@ -389,7 +396,22 @@ impl AgentLoop {
                         tracing::error!("empty response after 3 retries, giving up");
                         return Ok(String::new());
                     }
-                    tracing::warn!(attempt = tool_calls_count, "chat response text is empty (thinking-only), retrying...");
+
+                    match response.stop_reason {
+                        StopReason::MaxTokens => {
+                            // Output budget exhausted by thinking.
+                            // Force compaction to free context, then retry.
+                            tracing::warn!(attempt = tool_calls_count, "output hit max_tokens with no text, forcing compaction...");
+                            if let Err(e) = self.force_compact(&model_id).await {
+                                tracing::warn!(error = %e, "compaction failed, retrying anyway");
+                            }
+                        }
+                        _ => {
+                            // Model returned end_turn/content_filter but no text (thinking-only).
+                            // Just retry — the model may produce text on the next attempt.
+                            tracing::warn!(attempt = tool_calls_count, stop = ?response.stop_reason, "chat response text is empty (thinking-only), retrying...");
+                        }
+                    }
                     continue;
                 }
                 return Ok(response.text);
@@ -823,6 +845,68 @@ impl AgentLoop {
 
                 // If still over threshold after compaction, trim oldest.
                 if new_total > threshold {
+                    self.trim_oldest(threshold);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "LLM summarization failed, falling back to trim");
+                self.trim_oldest(threshold);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Force compaction regardless of token threshold.
+    /// Used when max_tokens is hit with no text output — thinking consumed
+    /// the output budget because the context window is too full.
+    async fn force_compact(&mut self, model_id: &str) -> anyhow::Result<()> {
+        let model_config = self.registry.get_chat_model_config(model_id)?;
+        let context_window = match model_config.context_window {
+            Some(cw) => cw,
+            None => return Ok(()),
+        };
+
+        let threshold = (context_window as f64 * self.config.context.compact_threshold) as u64;
+
+        let history_len = self.session.history.len();
+        if history_len <= 1 {
+            return Ok(());
+        }
+
+        // Compact a larger portion than usual (60% instead of compact_ratio).
+        let compact_count = ((history_len as f64) * 0.6).ceil() as usize;
+        let compact_count = compact_count.min(history_len - 1).max(1);
+
+        let to_compact: Vec<ChatMessage> = self.session.history[..compact_count].to_vec();
+
+        if to_compact.iter().any(|m| {
+            m.role == "system" && m.text_content().starts_with("[summary]")
+        }) {
+            self.trim_oldest(threshold);
+            return Ok(());
+        }
+
+        tracing::info!(
+            compact_count,
+            history_len,
+            "force compacting context due to max_tokens exhaustion"
+        );
+
+        match self.summarize_messages(&to_compact, model_id).await {
+            Ok(summary) => {
+                let summary_msg = ChatMessage::system_text(format!("[summary] {}", summary));
+                let removed_tokens: u64 = to_compact.iter()
+                    .map(estimate_message_tokens)
+                    .sum();
+                self.session.history.drain(..compact_count);
+                self.session.history.insert(0, summary_msg);
+                let new_total = self.token_tracker.total_tokens()
+                    .saturating_sub(removed_tokens)
+                    .saturating_add(estimate_message_tokens(&summary_msg));
+                self.token_tracker.force_set(new_total);
+
+                if self.token_tracker.total_tokens() > threshold {
                     self.trim_oldest(threshold);
                 }
             }
