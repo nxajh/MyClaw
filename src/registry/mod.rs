@@ -166,7 +166,7 @@ impl Registry {
                 }
                 if let Some(ref emb) = cfg.embedding {
                     base_url = base_url.or_else(|| Some(emb.base_url.clone()));
-                    for (id, _mc) in &emb.models {
+                    for id in emb.models.keys() {
                         models.push(ModelConfig {
                             model_id: id.clone(),
                             capabilities: vec![Capability::Embedding],
@@ -178,7 +178,7 @@ impl Registry {
                 }
                 if let Some(ref sec) = cfg.image_generation {
                     base_url = base_url.or_else(|| Some(sec.base_url.clone()));
-                    for (id, _) in &sec.models {
+                    for id in sec.models.keys() {
                         models.push(ModelConfig {
                             model_id: id.clone(),
                             capabilities: vec![Capability::ImageGeneration],
@@ -190,7 +190,7 @@ impl Registry {
                 }
                 if let Some(ref sec) = cfg.tts {
                     base_url = base_url.or_else(|| Some(sec.base_url.clone()));
-                    for (id, _) in &sec.models {
+                    for id in sec.models.keys() {
                         models.push(ModelConfig {
                             model_id: id.clone(),
                             capabilities: vec![Capability::TextToSpeech],
@@ -202,7 +202,7 @@ impl Registry {
                 }
                 if let Some(ref sec) = cfg.stt {
                     base_url = base_url.or_else(|| Some(sec.base_url.clone()));
-                    for (id, _) in &sec.models {
+                    for id in sec.models.keys() {
                         models.push(ModelConfig {
                             model_id: id.clone(),
                             capabilities: vec![Capability::SpeechToText],
@@ -214,7 +214,7 @@ impl Registry {
                 }
                 if let Some(ref sec) = cfg.video {
                     base_url = base_url.or_else(|| Some(sec.base_url.clone()));
-                    for (id, _) in &sec.models {
+                    for id in sec.models.keys() {
                         models.push(ModelConfig {
                             model_id: id.clone(),
                             capabilities: vec![Capability::VideoGeneration],
@@ -226,7 +226,7 @@ impl Registry {
                 }
                 if let Some(ref sec) = cfg.search {
                     base_url = base_url.or_else(|| Some(sec.base_url.clone()));
-                    for (id, _) in &sec.models {
+                    for id in sec.models.keys() {
                         models.push(ModelConfig {
                             model_id: id.clone(),
                             capabilities: vec![Capability::Search],
