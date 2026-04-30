@@ -1078,6 +1078,8 @@ mod tests {
                 title: None,
             },
             text: Some("hello".into()),
+            caption: None,
+            photo: None,
             forward_from: None,
             forward_from_chat: None,
             forward_sender_name: None,
