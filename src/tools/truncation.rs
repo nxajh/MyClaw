@@ -6,7 +6,7 @@ use std::cmp;
 
 /// 估算 token 数（粗略：4 字符 ≈ 1 token）
 pub fn approx_tokens(text: &str) -> usize {
-    (text.len() + 3) / 4
+    text.len().div_ceil(4)
 }
 
 /// 截断工具输出文本

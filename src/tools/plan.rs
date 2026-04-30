@@ -4,7 +4,7 @@
 //! Agent 可以维护一个步骤列表，追踪任务进度。
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 

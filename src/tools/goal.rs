@@ -4,7 +4,7 @@
 //! 在上下文压缩后可以恢复目标。
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
