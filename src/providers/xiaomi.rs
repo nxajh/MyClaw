@@ -186,7 +186,7 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
         .messages
         .iter()
         .filter(|m| m.role != "system")
-        .map(|msg| {
+        .filter_map(|msg| {
             let role = if msg.role == "assistant" { "assistant" } else { "user" };
 
             // Build content array from parts (text, image, thinking).
@@ -291,7 +291,6 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
             msg_json.insert("content".to_string(), final_content);
             Some(serde_json::json!(msg_json))
         })
-        .flatten()
         .collect();
 
     let mut body = json!({
