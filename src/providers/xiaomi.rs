@@ -52,7 +52,7 @@ impl XiaomiProvider {
     }
 
     fn chat_url(&self) -> String {
-        format!("{}/v1/messages", self.base_url)
+        format!("{}/messages", self.base_url)
     }
 }
 
