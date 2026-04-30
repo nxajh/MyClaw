@@ -1,0 +1,238 @@
+# MyClaw 配置文件
+# 文档: https://github.com/nxajh/MyClaw
+
+workspace_dir = "~/.myclaw/workspace"
+
+# ── 全局默认 ───────────────────────────────────────────────────────
+
+[defaults]
+model = "gpt-4o"
+
+[logging]
+level = "info"
+
+# ── Provider: OpenAI ───────────────────────────────────────────────
+
+[providers.openai]
+api_key = "${OPENAI_API_KEY}"
+
+[providers.openai.chat]
+base_url = "https://api.openai.com/v1"
+user_agent = "MyClaw/0.1"
+
+[providers.openai.chat.models.gpt-4o]
+input = ["text", "image"]
+output = ["text"]
+context_window = 128000
+max_output_tokens = 16384
+
+[providers.openai.chat.models.gpt-4o.pricing]
+input = 2.5
+output = 10.0
+cache_read = 1.25
+
+[providers.openai.chat.models.gpt-4o-mini]
+input = ["text", "image"]
+output = ["text"]
+context_window = 128000
+max_output_tokens = 16384
+
+[providers.openai.chat.models.gpt-4o-mini.pricing]
+input = 0.15
+output = 0.6
+cache_read = 0.075
+
+[providers.openai.embedding]
+base_url = "https://api.openai.com/v1"
+
+[providers.openai.embedding.models.text-embedding-3-small]
+dimensions = 1536
+
+[providers.openai.embedding.models.text-embedding-3-small.pricing]
+input = 0.02
+
+[providers.openai.image_generation]
+base_url = "https://api.openai.com/v1"
+
+[providers.openai.image_generation.models.dall-e-3]
+
+[providers.openai.image_generation.models.dall-e-3.pricing]
+per_unit = 0.04
+
+[providers.openai.tts]
+base_url = "https://api.openai.com/v1"
+
+[providers.openai.tts.models.tts-1]
+
+[providers.openai.tts.models.tts-1.pricing]
+per_unit = 15.0
+
+# ── Provider: MiniMax ──────────────────────────────────────────────
+
+[providers.minimax]
+api_key = "${MINIMAX_API_KEY}"
+
+[providers.minimax.chat]
+base_url = "https://api.minimaxi.chat/v1"
+
+[providers.minimax.chat.models.minimax-m2.7]
+input = ["text", "image"]
+output = ["text"]
+context_window = 131072
+max_output_tokens = 32768
+
+[providers.minimax.chat.models.minimax-m2.7.pricing]
+input = 1.0
+output = 2.0
+
+# ── Provider: GLM (智谱) ──────────────────────────────────────────
+
+[providers.glm]
+api_key = "${GLM_API_KEY}"
+auth_style = "bearer"
+
+[providers.glm.chat]
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+
+[providers.glm.chat.models.glm-4-plus]
+input = ["text", "image"]
+output = ["text"]
+context_window = 128000
+reasoning = true
+
+[providers.glm.chat.models.glm-4-plus.pricing]
+input = 50.0
+output = 50.0
+
+[providers.glm.embedding]
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+
+[providers.glm.embedding.models.embedding-3]
+dimensions = 2048
+
+# ── Provider: Kimi (月之暗面) ──────────────────────────────────────
+
+[providers.kimi]
+api_key = "${KIMI_API_KEY}"
+
+[providers.kimi.chat]
+base_url = "https://api.moonshot.cn/v1"
+
+[providers.kimi.chat.models.moonshot-v1-8k]
+input = ["text"]
+output = ["text"]
+context_window = 8192
+max_output_tokens = 4096
+
+[providers.kimi.chat.models.moonshot-v1-32k]
+input = ["text"]
+output = ["text"]
+context_window = 32768
+max_output_tokens = 8192
+
+# ── Provider: Anthropic ────────────────────────────────────────────
+
+[providers.anthropic]
+api_key = "${ANTHROPIC_API_KEY}"
+auth_style = "x_api_key"
+
+[providers.anthropic.chat]
+base_url = "https://api.anthropic.com/v1"
+
+[providers.anthropic.chat.models.claude-sonnet-4-20250514]
+input = ["text", "image"]
+output = ["text"]
+context_window = 200000
+max_output_tokens = 8192
+
+[providers.anthropic.chat.models.claude-sonnet-4-20250514.pricing]
+input = 3.0
+output = 15.0
+cache_read = 0.3
+
+# ── Provider: Xiaomi MiMo ─────────────────────────────────────────
+
+[providers.xiaomi]
+api_key = "${XIAOMI_API_KEY}"
+
+[providers.xiaomi.chat]
+base_url = "https://api.xiaomimimo.com/anthropic/v1"
+
+[providers.xiaomi.chat.models.mimo-7b]
+input = ["text"]
+output = ["text"]
+context_window = 131072
+reasoning = true
+
+# ── 路由配置 ───────────────────────────────────────────────────────
+
+[routing.chat]
+strategy = "fallback"
+models = ["gpt-4o", "minimax-m2.7"]
+
+[routing.embedding]
+strategy = "fixed"
+models = ["text-embedding-3-small"]
+
+# ── 通道配置 ───────────────────────────────────────────────────────
+
+[channels.telegram]
+bot_token = "${TELEGRAM_BOT_TOKEN}"
+allowed_users = ["*"]
+mention_only = false
+enabled = true
+ack_reactions = true
+approval_timeout_secs = 120
+
+# [channels.wechat]
+# api_base = "https://ilink.bot.weixin.qq.com"
+# bot_token = "${WECHAT_BOT_TOKEN}"
+# aes_key = "${WECHAT_AES_KEY}"
+# allowed_users = ["*"]
+# enabled = true
+
+# ── Agent 配置 ─────────────────────────────────────────────────────
+
+[agent]
+max_tool_calls = 100
+max_history = 200
+autonomy_level = "default"
+tool_timeout_secs = 180
+
+[agent.prompt]
+compact = false
+native_tools = true
+bootstrap_max_chars = 8000
+model_name = "gpt-4o"
+channel_name = "telegram"
+
+# ── Memory 配置 ────────────────────────────────────────────────────
+
+[memory]
+storage = "sqlite"
+db_path = "memory.db"
+search_limit = 10
+consolidation_age_days = 30
+
+# ── MCP 服务器 ─────────────────────────────────────────────────────
+
+# [[mcp_servers]]
+# name = "filesystem"
+# command = "npx"
+# args = ["mcp-server-filesystem", "/tmp"]
+
+# ── 子 Agent（多 Agent 模式）──────────────────────────────────────
+
+# [[agents]]
+# name = "coder"
+# system_prompt = "You are an expert programmer. Write clean, idiomatic code."
+# tools = ["shell", "file_read", "file_write", "file_edit", "glob_search", "content_search"]
+# max_tool_calls = 30
+# description = "Writes and edits code"
+
+# [[agents]]
+# name = "researcher"
+# system_prompt = "You are a research specialist. Find and summarize information."
+# tools = ["web_search", "web_fetch", "http_request", "memory_store", "memory_recall"]
+# max_tool_calls = 20
+# description = "Searches the web and summarizes findings"
