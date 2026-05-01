@@ -331,6 +331,26 @@ impl AgentLoop {
         }
     }
 
+    /// Select a vision-capable model from the fallback chain.
+    /// Falls back to the default chat provider if no vision model is found.
+    async fn select_vision_provider(&self) -> anyhow::Result<(Arc<dyn crate::providers::ChatProvider>, String)> {
+        // Try to find a vision-capable model in the fallback chain.
+        if let Ok(chain) = self.registry.get_chat_fallback_chain(Capability::Chat) {
+            for (provider, model_id) in &chain {
+                if let Ok(cfg) = self.registry.get_chat_model_config(model_id) {
+                    if cfg.supports_image_input() {
+                        tracing::info!(model = %model_id, "selected vision-capable model for image input");
+                        return Ok((Arc::clone(provider), model_id.clone()));
+                    }
+                }
+            }
+        }
+
+        // No vision model found — warn and fall back to default.
+        tracing::warn!("no vision-capable model in fallback chain, images may be ignored");
+        self.registry.get_chat_provider(Capability::Chat)
+    }
+
     /// Build the message list: system prompt + history.
     async fn build_messages(&self) -> anyhow::Result<Vec<ChatMessage>> {
         let mut messages = Vec::with_capacity(self.session.history.len() + 4);
@@ -351,11 +371,18 @@ impl AgentLoop {
         let mut tool_calls_count = 0usize;
         let mut boosted_max_tokens = false;
 
+        // Check if we have pending images that need a vision-capable model.
+        let has_images = self.pending_image_urls.as_ref().is_some_and(|v| !v.is_empty())
+            || self.pending_image_base64.as_ref().is_some_and(|v| !v.is_empty());
+
         loop {
             // 1. Get a chat provider via registry.
-            let (provider, model_id) = self
-                .registry
-                .get_chat_provider(Capability::Chat)?;
+            // If images are pending, prefer a vision-capable model from the fallback chain.
+            let (provider, model_id) = if has_images {
+                self.select_vision_provider().await?
+            } else {
+                self.registry.get_chat_provider(Capability::Chat)?
+            };
 
             // Check if context compaction is needed.
             if let Err(e) = self.maybe_compact(&model_id).await {
