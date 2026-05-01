@@ -287,8 +287,8 @@ impl AgentLoop {
 
     /// Attach pending image URLs and base64 data to the last user message if model supports it.
     fn attach_images_if_supported(&self, messages: &mut [ChatMessage], model_id: &str) {
-        let has_urls = self.pending_image_urls.as_ref().map_or(false, |v| !v.is_empty());
-        let has_b64 = self.pending_image_base64.as_ref().map_or(false, |v| !v.is_empty());
+        let has_urls = self.pending_image_urls.as_ref().is_some_and(|v| !v.is_empty());
+        let has_b64 = self.pending_image_base64.as_ref().is_some_and(|v| !v.is_empty());
 
         if !has_urls && !has_b64 {
             return;
