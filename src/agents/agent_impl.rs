@@ -69,9 +69,11 @@ pub(crate) fn estimate_message_tokens(msg: &crate::providers::ChatMessage) -> u6
 /// Token usage tracker — combines precise API-reported usage with estimated pending tokens.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TokenTracker {
-    /// Last API response's input_tokens (precise).
+    /// Last API response's input_tokens (new, non-cached).
     last_input_tokens: u64,
-    /// Last API response's output_tokens (precise).
+    /// Last API response's cached_input_tokens.
+    last_cached_tokens: u64,
+    /// Last API response's output_tokens.
     last_output_tokens: u64,
     /// Estimated tokens of items added to history after the last API response.
     pending_estimated_tokens: u64,
@@ -79,9 +81,12 @@ pub(crate) struct TokenTracker {
 
 impl TokenTracker {
     /// Update with precise usage from API response. Resets pending estimates.
-    pub fn update_from_usage(&mut self, input_tokens: u64, output_tokens: u64) {
+    /// `input_tokens` = new (non-cached) tokens, `cached_tokens` = cache-hit tokens.
+    /// Real context size = input_tokens + cached_tokens + output_tokens.
+    pub fn update_from_usage(&mut self, input_tokens: u64, output_tokens: u64, cached_tokens: u64) {
         self.last_input_tokens = input_tokens;
         self.last_output_tokens = output_tokens;
+        self.last_cached_tokens = cached_tokens;
         self.pending_estimated_tokens = 0;
     }
 
@@ -90,9 +95,10 @@ impl TokenTracker {
         self.pending_estimated_tokens += tokens;
     }
 
-    /// Total estimated token usage.
+    /// Total estimated token usage (includes cached tokens for accurate context tracking).
     pub fn total_tokens(&self) -> u64 {
         self.last_input_tokens
+            .saturating_add(self.last_cached_tokens)
             .saturating_add(self.last_output_tokens)
             .saturating_add(self.pending_estimated_tokens)
     }
@@ -450,13 +456,17 @@ impl AgentLoop {
             tracing::info!(text_len = response.text.len(), tool_calls = response.tool_calls.len(), stop = ?response.stop_reason, "chat stream collected");
 
             // Record token usage from API response.
+            // Real context = input_tokens (new) + cached_input_tokens + output_tokens.
             if let Some(ref usage) = response.usage {
+                let cached = usage.cached_input_tokens.unwrap_or(0);
                 self.token_tracker.update_from_usage(
                     usage.input_tokens.unwrap_or(0),
                     usage.output_tokens.unwrap_or(0),
+                    cached,
                 );
                 tracing::debug!(
                     input_tokens = usage.input_tokens.unwrap_or(0),
+                    cached_tokens = cached,
                     output_tokens = usage.output_tokens.unwrap_or(0),
                     total_tracked = self.token_tracker.total_tokens(),
                     "token usage recorded"
@@ -999,7 +1009,7 @@ impl AgentLoop {
                     .saturating_sub(removed_tokens)
                     .saturating_add(summary_tokens);
                 // Reset tracker with new baseline.
-                self.token_tracker.update_from_usage(new_total, 0);
+                self.token_tracker.update_from_usage(new_total, 0, 0);
 
                 tracing::info!(
                     compacted_messages = compact_count,
@@ -1075,7 +1085,7 @@ impl AgentLoop {
             let removed = self.session.history.remove(0);
             let removed_tokens = estimate_message_tokens(&removed);
             let new_total = total.saturating_sub(removed_tokens);
-            self.token_tracker.update_from_usage(new_total, 0);
+            self.token_tracker.update_from_usage(new_total, 0, 0);
 
             // Drain the corresponding message_id.
             if !self.session.message_ids.is_empty() {
