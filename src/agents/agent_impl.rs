@@ -335,19 +335,33 @@ impl AgentLoop {
     /// Falls back to the default chat provider if no vision model is found.
     async fn select_vision_provider(&self) -> anyhow::Result<(Arc<dyn crate::providers::ChatProvider>, String)> {
         // Try to find a vision-capable model in the fallback chain.
-        if let Ok(chain) = self.registry.get_chat_fallback_chain(Capability::Chat) {
-            for (provider, model_id) in &chain {
-                if let Ok(cfg) = self.registry.get_chat_model_config(model_id) {
-                    if cfg.supports_image_input() {
-                        tracing::info!(model = %model_id, "selected vision-capable model for image input");
-                        return Ok((Arc::clone(provider), model_id.clone()));
+        match self.registry.get_chat_fallback_chain(Capability::Chat) {
+            Ok(chain) => {
+                tracing::info!(chain_len = chain.len(), model_ids = ?chain.iter().map(|(_, id)| id.as_str()).collect::<Vec<_>>(), "fallback chain for vision routing");
+                for (provider, model_id) in &chain {
+                    match self.registry.get_chat_model_config(model_id) {
+                        Ok(cfg) => {
+                            let has_image = cfg.supports_image_input();
+                            tracing::info!(model = %model_id, input = ?cfg.input, supports_image = has_image, "checking model for vision");
+                            if has_image {
+                                tracing::info!(model = %model_id, "selected vision-capable model for image input");
+                                return Ok((Arc::clone(provider), model_id.clone()));
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(model = %model_id, error = %e, "failed to get chat model config");
+                        }
                     }
                 }
+                tracing::warn!("no vision-capable model found in fallback chain");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to get fallback chain for vision routing");
             }
         }
 
         // No vision model found — warn and fall back to default.
-        tracing::warn!("no vision-capable model in fallback chain, images may be ignored");
+        tracing::warn!("falling back to default chat provider (images may be ignored)");
         self.registry.get_chat_provider(Capability::Chat)
     }
 
