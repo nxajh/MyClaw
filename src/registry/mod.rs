@@ -353,9 +353,9 @@ impl Registry {
 
         let mut chain: Vec<FallbackEntry> = Vec::new();
         for model_id in &entry.models {
-            if let Some(provider) = self.chat_providers.remove(model_id) {
+            if let Some(provider) = self.chat_providers.get(model_id) {
                 chain.push(FallbackEntry {
-                    provider,
+                    provider: Arc::clone(provider),
                     model_id: model_id.clone(),
                 });
             } else {
@@ -376,6 +376,8 @@ impl Registry {
 
         let fallback_provider = FallbackChatProvider::new(chain);
         let primary_model = entry.models[0].clone();
+        // Insert fallback wrapper under the primary model key.
+        // Individual model entries remain in the map for direct access (e.g. vision routing).
         self.chat_providers.insert(
             primary_model,
             Arc::new(fallback_provider),
@@ -462,6 +464,18 @@ impl ServiceRegistry for Registry {
     fn get_chat_model_config(&self, model_id: &str) -> anyhow::Result<&crate::providers::capability::ChatModelConfig> {
         self.chat_model_configs.get(model_id)
             .with_context(|| format!("No chat model config found for model: {}", model_id))
+    }
+
+    fn get_chat_provider_by_model(&self, model_id: &str) -> Option<(Arc<dyn ChatProvider>, String)> {
+        self.chat_providers.get(model_id)
+            .map(|p| (Arc::clone(p), model_id.to_string()))
+    }
+
+    fn get_chat_routing_models(&self) -> Vec<String> {
+        self.routing
+            .get(Capability::Chat)
+            .map(|e| e.models.clone())
+            .unwrap_or_default()
     }
 }
 

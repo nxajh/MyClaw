@@ -24,4 +24,11 @@ pub trait ServiceRegistry: Send + Sync {
     
     /// 获取 chat model 配置（含 input/output/pricing 等）
     fn get_chat_model_config(&self, model_id: &str) -> anyhow::Result<&ChatModelConfig>;
+
+    /// Get a chat provider by exact model_id, bypassing fallback routing.
+    /// Returns None if the model_id is not directly registered.
+    fn get_chat_provider_by_model(&self, model_id: &str) -> Option<(Arc<dyn ChatProvider>, String)>;
+
+    /// Get the list of model IDs in the chat routing config (in fallback order).
+    fn get_chat_routing_models(&self) -> Vec<String>;
 }
