@@ -359,9 +359,9 @@ fn build_channels(config: &crate::config::AppConfig) -> Vec<(&'static str, Arc<d
 }
 
 /// Convert config prompt settings into Application-layer type.
-fn build_prompt_config(cfg: &crate::config::agent::PromptConfig) -> SystemPromptConfig {
+fn build_prompt_config(cfg: &crate::config::agent::PromptConfig, workspace_dir: &std::path::Path) -> SystemPromptConfig {
     SystemPromptConfig {
-        workspace_dir: String::new(),
+        workspace_dir: workspace_dir.to_string_lossy().to_string(),
         model_name: cfg.model_name.clone().unwrap_or_default(),
         autonomy: match crate::config::agent::AutonomyLevel::default() {
             crate::config::agent::AutonomyLevel::Full => AutonomyLevel::Full,
@@ -477,7 +477,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let agent_config = AgentConfig {
         max_tool_calls: config.agent.max_tool_calls,
         max_history: config.agent.max_history,
-        prompt_config: build_prompt_config(&config.agent.prompt),
+        prompt_config: build_prompt_config(&config.agent.prompt, &config.workspace_dir),
         context: config.agent.context.clone(),
     };
     let agent = Agent::new(registry_arc, skills_arc, agent_config);
