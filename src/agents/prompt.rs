@@ -15,9 +15,8 @@
 //! - 3. Skills (Full or Compact)
 //! - 4. Workspace
 //! - 5. Bootstrap files (OpenClaw format)
-//! - 6. Date & Time
-//! - 7. Runtime
-//! - 8. Channel Capabilities (skip in compact)
+//! - 6. Runtime
+//! - 7. Channel Capabilities (skip in compact)
 //! - 9. Truncation (max_system_prompt_chars)
 
 use std::path::Path;
@@ -75,18 +74,10 @@ pub struct SystemPromptConfig {
     pub channel_name: Option<String>,
     /// Host information for Runtime section.
     pub host_info: Option<String>,
-    /// Pre-computed datetime string for the session (stable across requests).
-    /// Generated once at session start to preserve provider prompt cache prefix.
-    pub session_datetime: String,
 }
 
 impl Default for SystemPromptConfig {
     fn default() -> Self {
-        use chrono::TimeZone;
-        let utc = chrono::Utc::now();
-        let beijing = chrono::FixedOffset::east_opt(8 * 3600)
-            .unwrap()
-            .from_utc_datetime(&utc.naive_utc());
         Self {
             workspace_dir: String::new(),
             model_name: String::new(),
@@ -98,7 +89,6 @@ impl Default for SystemPromptConfig {
             native_tools: true,
             channel_name: None,
             host_info: None,
-            session_datetime: beijing.format("%Y-%m-%d %H:%M:%S").to_string(),
         }
     }
 }
@@ -131,7 +121,6 @@ impl SystemPromptBuilder {
             self.build_skills(skills),
             self.build_workspace(),
             self.build_bootstrap_files(),
-            self.build_datetime(),
             self.build_runtime(),
         ];
 
@@ -274,14 +263,6 @@ impl SystemPromptBuilder {
         } else {
             format!("## Workspace Bootstrap Files\n\n{}", sections.join("\n\n"))
         }
-    }
-
-    fn build_datetime(&self) -> String {
-        // Use pre-computed datetime from session start to preserve provider prompt cache.
-        format!(
-            "## Date & Time\n\nCurrent Date & Time: {} (Beijing Time, UTC+8)",
-            self.config.session_datetime
-        )
     }
 
     fn build_runtime(&self) -> String {

@@ -195,7 +195,6 @@ impl TaskDelegator for SubAgentDelegator {
                 native_tools: true,
                 channel_name: None,
                 host_info: None,
-                session_datetime: crate::agents::SystemPromptConfig::default().session_datetime,
             },
             context: crate::config::agent::ContextConfig::default(),
         };
