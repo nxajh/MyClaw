@@ -360,6 +360,11 @@ fn build_channels(config: &crate::config::AppConfig) -> Vec<(&'static str, Arc<d
 
 /// Convert config prompt settings into Application-layer type.
 fn build_prompt_config(cfg: &crate::config::agent::PromptConfig, workspace_dir: &std::path::Path) -> SystemPromptConfig {
+    use chrono::TimeZone;
+    let utc = chrono::Utc::now();
+    let beijing = chrono::FixedOffset::east_opt(8 * 3600)
+        .unwrap()
+        .from_utc_datetime(&utc.naive_utc());
     SystemPromptConfig {
         workspace_dir: workspace_dir.to_string_lossy().to_string(),
         model_name: cfg.model_name.clone().unwrap_or_default(),
@@ -375,6 +380,7 @@ fn build_prompt_config(cfg: &crate::config::agent::PromptConfig, workspace_dir: 
         native_tools: cfg.native_tools,
         channel_name: cfg.channel_name.clone(),
         host_info: None,
+        session_datetime: beijing.format("%Y-%m-%d %H:%M:%S").to_string(),
     }
 }
 
