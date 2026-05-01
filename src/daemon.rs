@@ -79,6 +79,42 @@ pub fn init_tracing(config: &crate::config::AppConfig) {
         .expect("failed to set tracing subscriber");
 }
 
+/// Calculate max output bytes from model config (max_output_tokens).
+/// Approximate: 1 token ≈ 4 bytes, with 100KB minimum as safety floor.
+fn calculate_max_output_bytes(
+    config: &crate::config::AppConfig,
+    _registry: &Arc<dyn crate::providers::ServiceRegistry>,
+) -> usize {
+    // Try to get max_output_tokens from the first chat model
+    let default_bytes = 100 * 1024; // 100KB default
+    
+    if let Some(chat_route) = config.routing.get(crate::providers::Capability::Chat) {
+        if let Some(model_id) = chat_route.models.first() {
+            // Search through all providers for this model
+            for provider_config in config.providers.values() {
+                if let Some(chat_config) = &provider_config.chat {
+                    if let Some(model_config) = chat_config.models.get(model_id) {
+                        if let Some(max_tokens) = model_config.max_output_tokens {
+                            // 1 token ≈ 4 bytes, minimum 100KB
+                            let bytes = (max_tokens as usize * 4).max(default_bytes);
+                            tracing::info!(
+                                model = %model_id,
+                                max_output_tokens = max_tokens,
+                                max_output_bytes = bytes,
+                                "calculated max output bytes from model config"
+                            );
+                            return bytes;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    tracing::info!(max_output_bytes = default_bytes, "using default max output bytes");
+    default_bytes
+}
+
 /// Print startup banner with config summary.
 fn print_banner(config: &crate::config::AppConfig, mcp_servers: usize, mcp_tools: usize, sub_agents: usize) {
     println!();
@@ -479,6 +515,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         max_history: config.agent.max_history,
         prompt_config: build_prompt_config(&config.agent.prompt, &config.workspace_dir),
         context: config.agent.context.clone(),
+        stream_chunk_timeout_secs: config.agent.stream_chunk_timeout_secs,
+        max_output_bytes: calculate_max_output_bytes(&config, &registry_arc),
     };
     let agent = Agent::new(registry_arc, skills_arc, agent_config);
 

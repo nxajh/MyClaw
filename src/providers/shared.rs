@@ -1,6 +1,21 @@
 //! Shared utilities for providers: auth, SSE parsing, body building, factory.
 
 use crate::providers::{ChatRequest, ContentPart, StreamEvent, StopReason};
+use std::io::Write;
+
+// ── Debug logging ─────────────────────────────────────────────────────────────
+
+const PROVIDER_DEBUG_LOG: &str = "/tmp/myclaw_providers_debug.log";
+
+pub fn append_to_debug_log(content: &str) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(PROVIDER_DEBUG_LOG)
+    {
+        let _ = writeln!(f, "{}", content);
+    }
+}
 
 // ── Auth ───────────────────────────────────────────────────────────────────────
 

@@ -43,7 +43,10 @@ impl ChatProvider for MiniMaxProvider {
         let url = format!("{}/text/chatcompletion_v2", self.base_url);
         let body = build_minimax_body(&req);
         let body_str = serde_json::to_string_pretty(&body).unwrap_or_default();
-        tracing::debug!(url, body = %body_str, "minimax: sending chat request");
+        crate::providers::append_to_debug_log(&format!(
+            "=== REQUEST ===\nURL: {}\nBody:\n{}\n",
+            url, body_str
+        ));
         let auth = crate::providers::shared::build_auth(&crate::providers::shared::AuthStyle::Bearer, &self.api_key);
         let client = self.client.clone();
         let user_agent = self.user_agent.clone();
@@ -65,6 +68,10 @@ impl ChatProvider for MiniMaxProvider {
             if resp.error_for_status_ref().is_err() {
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_default();
+                crate::providers::append_to_debug_log(&format!(
+                    "=== HTTP ERROR ===\nURL: {}\nStatus: {}\nBody: {}\n",
+                    url, status, text
+                ));
                 let _ = tx.send(StreamEvent::HttpError {
                     status: status.as_u16(),
                     message: format!("HTTP {}: {}", status, text),
@@ -76,6 +83,7 @@ impl ChatProvider for MiniMaxProvider {
             let mut buffer = String::new();
             let mut utf8_buf = Vec::new();
             let mut stream = resp.bytes_stream();
+            crate::providers::append_to_debug_log(&format!("=== SSE STREAM START ===\nURL: {}\n", url));
 
             // Accumulator for leaked tool-call detection.
             // MiniMax occasionally sends tool-call JSON as plain `content`
@@ -107,7 +115,12 @@ impl ChatProvider for MiniMaxProvider {
                 while let Some(pos) = buffer.find('\n') {
                     let line = buffer[..pos].to_string();
                     buffer.drain(..=pos);
-                    if let Some(event) = parse_minimax_sse(&line, &mut saw_tool_call, &mut content_buf) {
+                    let event = parse_minimax_sse(&line, &mut saw_tool_call, &mut content_buf);
+                    crate::providers::append_to_debug_log(&format!(
+                        "SSE LINE: {}\nEVENT: {:?}\n",
+                        line, event
+                    ));
+                    if let Some(event) = event {
                         let _ = tx.send(event).await;
                     }
                 }
@@ -154,6 +167,7 @@ impl ChatProvider for MiniMaxProvider {
                 let _ = tx.send(StreamEvent::Delta { text: content_buf }).await;
             }
 
+            crate::providers::append_to_debug_log(&format!("=== SSE STREAM END ===\nURL: {}\n\n", url));
             let final_reason = if saw_tool_call { StopReason::ToolUse } else { StopReason::EndTurn };
             let _ = tx.send(StreamEvent::Done { reason: final_reason }).await;
         });

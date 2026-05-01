@@ -197,6 +197,8 @@ impl TaskDelegator for SubAgentDelegator {
                 host_info: None,
             },
             context: crate::config::agent::ContextConfig::default(),
+            stream_chunk_timeout_secs: 90, // Default for sub-agents
+            max_output_bytes: 100 * 1024, // 100KB default for sub-agents
         };
 
         // We need to create an AgentLoop manually since we don't have an Agent factory.

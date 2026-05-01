@@ -63,7 +63,10 @@ impl ChatProvider for XiaomiProvider {
         let auth = format!("Bearer {}", self.api_key);
         let body = build_xiaomi_body(&req);
         let body_str = serde_json::to_string_pretty(&body).unwrap_or_default();
-        tracing::debug!(url, body = %body_str, "xiaomi: sending chat request");
+        crate::providers::append_to_debug_log(&format!(
+            "=== REQUEST ===\nURL: {}\nBody:\n{}\n",
+            url, body_str
+        ));
         let client = self.client.clone();
         let user_agent = self.user_agent.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(100);
@@ -88,6 +91,10 @@ impl ChatProvider for XiaomiProvider {
             if resp.error_for_status_ref().is_err() {
                 let status = resp.status();
                 let body_text = resp.text().await.unwrap_or_default();
+                crate::providers::append_to_debug_log(&format!(
+                    "=== HTTP ERROR ===\nURL: {}\nStatus: {}\nBody: {}\n",
+                    url, status, body_text
+                ));
                 let _ = tx
                     .send(StreamEvent::HttpError {
                         status: status.as_u16(),
@@ -104,13 +111,17 @@ impl ChatProvider for XiaomiProvider {
             let mut buffer = String::new();
             let mut utf8_buf = Vec::new();
             let mut stream = resp.bytes_stream();
-            tracing::debug!(url, "xiaomi: starting SSE stream");
+            crate::providers::append_to_debug_log(&format!("=== SSE STREAM START ===\nURL: {}\n", url));
 
             while let Some(item) = stream.next().await {
                 let bytes = match item {
                     Ok(b) => b,
                     Err(e) => {
                         tracing::warn!(url, error = %e, "xiaomi: bytes stream error");
+                        crate::providers::append_to_debug_log(&format!(
+                            "=== SSE STREAM ERROR ===\nURL: {}\nError: {}\n",
+                            url, e
+                        ));
                         let _ = tx.send(StreamEvent::Error(e.to_string())).await;
                         return;
                     }
@@ -141,12 +152,16 @@ impl ChatProvider for XiaomiProvider {
                     let line = buffer[..pos].to_string();
                     buffer.drain(..=pos);
                     let event = parse_xiaomi_sse(&line, &mut tool_index_map);
-                    tracing::debug!(line = %line, event = ?event, "xiaomi: SSE line parsed");
+                    crate::providers::append_to_debug_log(&format!(
+                        "SSE LINE: {}\nEVENT: {:?}\n",
+                        line, event
+                    ));
                     if let Some(ev) = event {
                         let _ = tx.send(ev).await;
                     }
                 }
             }
+            crate::providers::append_to_debug_log(&format!("=== SSE STREAM END ===\nURL: {}\n\n", url));
             let _ = tx.send(StreamEvent::Done { reason: StopReason::EndTurn }).await;
         });
 

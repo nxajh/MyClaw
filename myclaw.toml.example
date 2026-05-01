@@ -198,6 +198,8 @@ max_tool_calls = 100
 max_history = 200
 autonomy_level = "default"
 tool_timeout_secs = 180
+# Stream chunk timeout: max seconds to wait for next chunk from LLM
+stream_chunk_timeout_secs = 90
 
 [agent.prompt]
 compact = false

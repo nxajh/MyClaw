@@ -74,7 +74,10 @@ impl ChatProvider for GlmProvider {
         let url = format!("{}/chat/completions", self.base_url);
         let body = build_glm_body(&req);
         let body_str = serde_json::to_string_pretty(&body).unwrap_or_default();
-        tracing::debug!(url, body = %body_str, "glm: sending chat request");
+        crate::providers::append_to_debug_log(&format!(
+            "=== REQUEST ===\nURL: {}\nBody:\n{}\n",
+            url, body_str
+        ));
         let auth = self.auth();
         let client = self.client.clone();
         let user_agent = self.user_agent.clone();
@@ -96,6 +99,10 @@ impl ChatProvider for GlmProvider {
             if resp.error_for_status_ref().is_err() {
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_default();
+                crate::providers::append_to_debug_log(&format!(
+                    "=== HTTP ERROR ===\nURL: {}\nStatus: {}\nBody: {}\n",
+                    url, status, text
+                ));
                 let _ = tx.send(StreamEvent::HttpError {
                     status: status.as_u16(),
                     message: format!("HTTP {}: {}", status, text),
@@ -107,6 +114,7 @@ impl ChatProvider for GlmProvider {
             let mut buffer = String::new();
             let mut utf8_buf = Vec::new();
             let mut stream = resp.bytes_stream();
+            crate::providers::append_to_debug_log(&format!("=== SSE STREAM START ===\nURL: {}\n", url));
 
             while let Some(item) = stream.next().await {
                 let bytes = match item {
@@ -131,11 +139,17 @@ impl ChatProvider for GlmProvider {
                 while let Some(pos) = buffer.find('\n') {
                     let line = buffer[..pos].to_string();
                     buffer.drain(..=pos);
-                    if let Some(event) = parse_glm_sse(&line, &mut saw_tool_call) {
+                    let event = parse_glm_sse(&line, &mut saw_tool_call);
+                    crate::providers::append_to_debug_log(&format!(
+                        "SSE LINE: {}\nEVENT: {:?}\n",
+                        line, event
+                    ));
+                    if let Some(event) = event {
                         let _ = tx.send(event).await;
                     }
                 }
             }
+            crate::providers::append_to_debug_log(&format!("=== SSE STREAM END ===\nURL: {}\n\n", url));
             // GLM may report finish_reason="stop" even when tool calls were present.
             let final_reason = if saw_tool_call { StopReason::ToolUse } else { StopReason::EndTurn };
             let _ = tx.send(StreamEvent::Done { reason: final_reason }).await;

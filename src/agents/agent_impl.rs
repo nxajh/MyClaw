@@ -10,6 +10,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::providers::Capability;
 use crate::providers::{
@@ -120,6 +121,10 @@ pub struct AgentConfig {
     pub prompt_config: SystemPromptConfig,
     /// Context window management settings.
     pub context: ContextConfig,
+    /// Stream chunk timeout in seconds — max time to wait for next chunk.
+    pub stream_chunk_timeout_secs: u64,
+    /// Max output bytes before forcing stream stop (derived from max_output_tokens).
+    pub max_output_bytes: usize,
 }
 
 impl Default for AgentConfig {
@@ -129,6 +134,8 @@ impl Default for AgentConfig {
             max_history: 200,
             prompt_config: SystemPromptConfig::default(),
             context: ContextConfig::default(),
+            stream_chunk_timeout_secs: 90,
+            max_output_bytes: 100 * 1024, // 100KB default
         }
     }
 }
@@ -613,63 +620,92 @@ impl AgentLoop {
         let mut stop_reason = StopReason::EndTurn;
         let mut usage: Option<ChatUsage> = None;
 
-        while let Some(event) = stream.next().await {
-            match event {
-                StreamEvent::Delta { text: delta } => text.push_str(&delta),
-                StreamEvent::Thinking { text: delta } => {
-                    if !delta.is_empty() {
-                        if let Some(rc) = &mut reasoning_content {
-                            rc.push_str(&delta);
-                        } else {
-                            reasoning_content = Some(delta);
+        let chunk_timeout = Duration::from_secs(self.config.stream_chunk_timeout_secs);
+        let max_output_bytes = self.config.max_output_bytes;
+
+        loop {
+            // Check output length limit
+            if text.len() > max_output_bytes {
+                tracing::warn!(
+                    output_bytes = text.len(),
+                    max_bytes = max_output_bytes,
+                    "stream output exceeded max size, forcing stop"
+                );
+                stop_reason = StopReason::MaxTokens;
+                break;
+            }
+
+            // Wait for next chunk with timeout
+            match tokio::time::timeout(chunk_timeout, stream.next()).await {
+                Ok(Some(event)) => {
+                    match event {
+                        StreamEvent::Delta { text: delta } => text.push_str(&delta),
+                        StreamEvent::Thinking { text: delta } => {
+                            if !delta.is_empty() {
+                                if let Some(rc) = &mut reasoning_content {
+                                    rc.push_str(&delta);
+                                } else {
+                                    reasoning_content = Some(delta);
+                                }
+                            }
                         }
-                    }
-                }
-                StreamEvent::ToolCallStart { id, name, initial_arguments } => {
-                    tool_calls.push(ToolCall {
-                        id,
-                        name,
-                        arguments: initial_arguments,
-                    });
-                }
-                StreamEvent::ToolCallDelta { id, delta } => {
-                    // OpenAI-compatible streaming: only the first chunk carries
-                    // id + name; subsequent chunks may have empty id.
-                    // Match by id if present, otherwise append to last tool call.
-                    if !id.is_empty() {
-                        if let Some(call) = tool_calls.iter_mut().find(|c| c.id == id) {
-                            call.arguments.push_str(&delta);
-                        } else {
+                        StreamEvent::ToolCallStart { id, name, initial_arguments } => {
                             tool_calls.push(ToolCall {
-                                id: id.clone(),
-                                name: String::new(),
-                                arguments: delta,
+                                id,
+                                name,
+                                arguments: initial_arguments,
                             });
-                            tracing::debug!(tool_call_id = %id, "auto-created tool call from delta");
                         }
-                    } else if let Some(last) = tool_calls.last_mut() {
-                        // No id — append arguments to the most recent tool call.
-                        last.arguments.push_str(&delta);
+                        StreamEvent::ToolCallDelta { id, delta } => {
+                            if !id.is_empty() {
+                                if let Some(call) = tool_calls.iter_mut().find(|c| c.id == id) {
+                                    call.arguments.push_str(&delta);
+                                } else {
+                                    tool_calls.push(ToolCall {
+                                        id: id.clone(),
+                                        name: String::new(),
+                                        arguments: delta,
+                                    });
+                                    tracing::debug!(tool_call_id = %id, "auto-created tool call from delta");
+                                }
+                            } else if let Some(last) = tool_calls.last_mut() {
+                                last.arguments.push_str(&delta);
+                            }
+                        }
+                        StreamEvent::ToolCallEnd { id, name, arguments } => {
+                            if let Some(call) = tool_calls.iter_mut().find(|c| c.id == id) {
+                                call.name = name;
+                                call.arguments = arguments;
+                            }
+                        }
+                        StreamEvent::Usage(u) => {
+                            usage = Some(u);
+                        }
+                        StreamEvent::Done { reason } => {
+                            stop_reason = reason;
+                            break;
+                        }
+                        StreamEvent::HttpError { message, .. } => {
+                            anyhow::bail!("Stream error: {}", message);
+                        }
+                        StreamEvent::Error(e) => {
+                            anyhow::bail!("Stream error: {}", e);
+                        }
                     }
                 }
-                StreamEvent::ToolCallEnd { id, name, arguments } => {
-                    if let Some(call) = tool_calls.iter_mut().find(|c| c.id == id) {
-                        call.name = name;
-                        call.arguments = arguments;
-                    }
-                }
-                StreamEvent::Usage(u) => {
-                    usage = Some(u);
-                }
-                StreamEvent::Done { reason } => {
-                    stop_reason = reason;
+                Ok(None) => {
+                    // Stream ended without Done event
+                    tracing::warn!("stream ended without Done event");
                     break;
                 }
-                StreamEvent::HttpError { message, .. } => {
-                    anyhow::bail!("Stream error: {}", message);
-                }
-                StreamEvent::Error(e) => {
-                    anyhow::bail!("Stream error: {}", e);
+                Err(_) => {
+                    // Chunk timeout
+                    tracing::warn!(
+                        chunk_timeout_secs = self.config.stream_chunk_timeout_secs,
+                        "stream chunk timeout, no data received"
+                    );
+                    stop_reason = StopReason::MaxTokens;
+                    break;
                 }
             }
         }

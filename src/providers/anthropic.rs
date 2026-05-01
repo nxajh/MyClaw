@@ -42,7 +42,10 @@ impl ChatProvider for AnthropicProvider {
         let auth = format!("Bearer {}", self.api_key);
         let body = build_anthropic_body(&req);
         let body_str = serde_json::to_string_pretty(&body).unwrap_or_default();
-        tracing::debug!(url, body = %body_str, "anthropic: sending chat request");
+        crate::providers::append_to_debug_log(&format!(
+            "=== REQUEST ===\nURL: {}\nBody:\n{}\n",
+            url, body_str
+        ));
         let client = self.client.clone();
         let user_agent = self.user_agent.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(100);
@@ -64,6 +67,10 @@ impl ChatProvider for AnthropicProvider {
             if resp.error_for_status_ref().is_err() {
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_default();
+                crate::providers::append_to_debug_log(&format!(
+                    "=== HTTP ERROR ===\nURL: {}\nStatus: {}\nBody: {}\n",
+                    url, status, text
+                ));
                 let _ = tx.send(StreamEvent::HttpError {
                     status: status.as_u16(),
                     message: format!("HTTP {}: {}", status, text),
@@ -74,6 +81,7 @@ impl ChatProvider for AnthropicProvider {
             let mut buffer = String::new();
             let mut utf8_buf = Vec::new();
             let mut stream = resp.bytes_stream();
+            crate::providers::append_to_debug_log(&format!("=== SSE STREAM START ===\nURL: {}\n", url));
 
             while let Some(item) = stream.next().await {
                 let bytes = match item {
@@ -97,11 +105,17 @@ impl ChatProvider for AnthropicProvider {
                 while let Some(pos) = buffer.find('\n') {
                     let line = buffer[..pos].to_string();
                     buffer.drain(..=pos);
-                    if let Some(event) = parse_anthropic_sse(&line) {
+                    let event = parse_anthropic_sse(&line);
+                    crate::providers::append_to_debug_log(&format!(
+                        "SSE LINE: {}\nEVENT: {:?}\n",
+                        line, event
+                    ));
+                    if let Some(event) = event {
                         let _ = tx.send(event).await;
                     }
                 }
             }
+            crate::providers::append_to_debug_log(&format!("=== SSE STREAM END ===\nURL: {}\n\n", url));
             let _ = tx.send(StreamEvent::Done { reason: StopReason::EndTurn }).await;
         });
 
