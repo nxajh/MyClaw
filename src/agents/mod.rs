@@ -6,7 +6,7 @@ mod loop_breaker;
 mod orchestrator;
 mod prompt;
 mod session_manager;
-mod skill_loader;
+pub mod skill_loader;
 mod skills;
 mod mcp_manager;
 mod sub_agent;
