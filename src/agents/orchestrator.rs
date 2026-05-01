@@ -322,6 +322,7 @@ impl Orchestrator {
 
                     let content = msg.content.clone();
                     let image_urls = msg.image_urls.clone();
+                    let image_base64 = msg.image_base64.clone();
                     let reply_target = msg.reply_target.clone();
                     let channel_name_clone = channel_name.clone();
                     let loop_ = Self::get_or_create_loop(
@@ -349,7 +350,7 @@ impl Orchestrator {
 
                         let response = {
                             let mut guard = loop_.lock().await;
-                            guard.run(&content, image_urls).await
+                            guard.run(&content, image_urls, image_base64).await
                         };
 
                         // Stop typing indicator before sending the response.
@@ -413,7 +414,7 @@ impl Orchestrator {
                 // Run the main agent with the synthetic message.
                 let response = {
                     let mut guard = loop_.lock().await;
-                    guard.run(&synthetic_msg, None).await
+                    guard.run(&synthetic_msg, None, None).await
                 };
 
                 // Send the main agent's response to the user.
@@ -465,7 +466,7 @@ impl Orchestrator {
 
                 let response = {
                     let mut guard = loop_.lock().await;
-                    guard.run(&synthetic_msg, None).await
+                    guard.run(&synthetic_msg, None, None).await
                 };
 
                 match response {

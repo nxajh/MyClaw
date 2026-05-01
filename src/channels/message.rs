@@ -21,6 +21,9 @@ pub struct ChannelMessage {
     pub attachments: Vec<MediaAttachment>,
     /// URLs of images attached to this message (e.g. from Telegram photo messages).
     pub image_urls: Option<Vec<String>>,
+    /// Base64-encoded image data (used when the source URL is not directly
+    /// accessible by the LLM provider, e.g. Telegram file API).
+    pub image_base64: Option<Vec<String>>,
 }
 
 /// A message to send through a channel.

@@ -919,8 +919,9 @@ impl TelegramChannel {
         content
     }
 
-    /// Call Telegram `getFile` API and return the direct file download URL.
-    async fn get_file_url(&self, file_id: &str) -> anyhow::Result<String> {
+    /// Download a Telegram file by file_id and return its base64-encoded content.
+    async fn download_file_base64(&self, file_id: &str) -> anyhow::Result<String> {
+        // Step 1: Get the file_path from Telegram.
         let client = self.http_client();
         let url = format!("{}?file_id={}", self.api_url("getFile"), file_id);
         let resp = client.get(&url).send().await?;
@@ -933,10 +934,24 @@ impl TelegramChannel {
             .and_then(|r| r.get("file_path"))
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("getFile response missing file_path"))?;
-        Ok(format!(
+
+        // Step 2: Download the file content.
+        let download_url = format!(
             "{}/file/bot{}/{}",
             self.api_base, self.bot_token, file_path
-        ))
+        );
+        let file_resp = client.get(&download_url).send().await?;
+        if !file_resp.status().is_success() {
+            anyhow::bail!(
+                "file download failed: status={}",
+                file_resp.status()
+            );
+        }
+        let bytes = file_resp.bytes().await?;
+
+        // Step 3: Encode to base64.
+        use base64::Engine;
+        Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
     }
 }
 
@@ -1028,17 +1043,17 @@ impl TelegramChannel {
                 }
 
                 let mut content = self.parse_message_content(&msg);
-                let mut image_urls: Option<Vec<String>> = None;
+                let mut image_base64: Option<Vec<String>> = None;
 
-                // Handle photo messages: get the largest photo's URL
+                // Handle photo messages: download the largest photo as base64
                 if let Some(photos) = &msg.photo {
                     if let Some(largest) = photos.last() {
-                        match self.get_file_url(&largest.file_id).await {
-                            Ok(url) => {
-                                image_urls = Some(vec![url]);
+                        match self.download_file_base64(&largest.file_id).await {
+                            Ok(b64) => {
+                                image_base64 = Some(vec![b64]);
                             }
                             Err(e) => {
-                                warn!("Telegram getFile failed for photo {}: {e}", largest.file_id);
+                                warn!("Telegram download failed for photo {}: {e}", largest.file_id);
                             }
                         }
                     }
@@ -1064,7 +1079,8 @@ impl TelegramChannel {
                     thread_ts: None,
                     interruption_scope_id: None,
                     attachments: vec![],
-                    image_urls,
+                    image_urls: None,
+                    image_base64,
                 };
 
                 if let Err(e) = tx.send(channel_msg).await {

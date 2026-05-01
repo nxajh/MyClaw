@@ -192,6 +192,7 @@ impl Agent {
                 ..LoopBreakerConfig::default()
             }),
             pending_image_urls: None,
+            pending_image_base64: None,
             token_tracker: TokenTracker::default(),
             persist_hook,
         }
@@ -214,6 +215,8 @@ pub struct AgentLoop {
     loop_breaker: LoopBreaker,
     /// Pending image URLs from the current user message (attached per-model in chat_loop).
     pending_image_urls: Option<Vec<String>>,
+    /// Pending base64 image data from the current user message.
+    pending_image_base64: Option<Vec<String>>,
     /// Token usage tracker for context window management.
     token_tracker: TokenTracker,
     /// Optional hook for persisting messages to the backend.
@@ -236,7 +239,7 @@ impl AgentLoop {
     /// Process a user message and return the assistant's text response.
     ///
     /// This is the main entry point called by the orchestrator.
-    pub async fn run(&mut self, user_message: &str, image_urls: Option<Vec<String>>) -> anyhow::Result<String> {
+    pub async fn run(&mut self, user_message: &str, image_urls: Option<Vec<String>>, image_base64: Option<Vec<String>>) -> anyhow::Result<String> {
         tracing::info!(user_input = %user_message, "user message received");
 
         // Reset loop breaker for new turn.
@@ -261,6 +264,7 @@ impl AgentLoop {
         }
 
         self.pending_image_urls = image_urls;
+        self.pending_image_base64 = image_base64;
 
         // 2. Build the full message list for this turn.
         let messages = self.build_messages().await?;
@@ -281,12 +285,14 @@ impl AgentLoop {
         Ok(text)
     }
 
-    /// Attach pending image URLs to the last user message if model supports it.
+    /// Attach pending image URLs and base64 data to the last user message if model supports it.
     fn attach_images_if_supported(&self, messages: &mut [ChatMessage], model_id: &str) {
-        let image_urls = match self.pending_image_urls.as_ref() {
-            Some(urls) if !urls.is_empty() => urls,
-            _ => return,
-        };
+        let has_urls = self.pending_image_urls.as_ref().map_or(false, |v| !v.is_empty());
+        let has_b64 = self.pending_image_base64.as_ref().map_or(false, |v| !v.is_empty());
+
+        if !has_urls && !has_b64 {
+            return;
+        }
 
         let supports_image = self
             .registry
@@ -297,20 +303,31 @@ impl AgentLoop {
         if !supports_image {
             tracing::debug!(
                 model = %model_id,
-                "model does not support image input, ignoring image_urls"
+                "model does not support image input, ignoring images"
             );
             return;
         }
 
-        // Find the last user message and attach images.
         if let Some(last_user) = messages.iter_mut().rev().find(|m| m.role == "user") {
-            for url in image_urls {
-                last_user.parts.push(crate::providers::ContentPart::ImageUrl {
-                    url: url.clone(),
-                    detail: crate::providers::ImageDetail::Auto,
-                });
+            if let Some(urls) = self.pending_image_urls.as_ref() {
+                for url in urls {
+                    last_user.parts.push(crate::providers::ContentPart::ImageUrl {
+                        url: url.clone(),
+                        detail: crate::providers::ImageDetail::Auto,
+                    });
+                }
             }
-            tracing::info!("attached {} image(s) to user message", image_urls.len());
+            if let Some(b64s) = self.pending_image_base64.as_ref() {
+                for b64 in b64s {
+                    last_user.parts.push(crate::providers::ContentPart::ImageB64 {
+                        b64_json: b64.clone(),
+                        detail: crate::providers::ImageDetail::Auto,
+                    });
+                }
+            }
+            let total = self.pending_image_urls.as_ref().map_or(0, |v| v.len())
+                + self.pending_image_base64.as_ref().map_or(0, |v| v.len());
+            tracing::info!("attached {} image(s) to user message", total);
         }
     }
 

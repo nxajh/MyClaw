@@ -210,7 +210,7 @@ impl TaskDelegator for SubAgentDelegator {
         let mut loop_ = agent.with_system_prompt(system_prompt).loop_for(session);
 
         tracing::info!(agent = %config.name, "sub-agent started");
-        let result = loop_.run(task, None).await;
+        let result = loop_.run(task, None, None).await;
         match &result {
             Ok(text) => tracing::info!(agent = %config.name, text_len = text.len(), "sub-agent completed"),
             Err(e) => tracing::warn!(agent = %config.name, err = %e, "sub-agent failed"),
