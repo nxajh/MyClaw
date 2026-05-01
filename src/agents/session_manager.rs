@@ -244,8 +244,8 @@ impl SessionManager {
                 }
                 Session {
                     key: key.to_string(),
+                    message_ids: vec![0; full.len()],
                     history: full,
-                    message_ids: Vec::new(), // will be populated as messages are re-persisted
                 }
             }
         };

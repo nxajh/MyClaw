@@ -875,8 +875,19 @@ impl AgentLoop {
 
         // Determine how many messages to compact.
         let history_len = self.session.history.len();
+        let ids_len = self.session.message_ids.len();
         if history_len <= 1 {
             return Ok(()); // nothing to compact
+        }
+
+        // Defensive: ensure message_ids is in sync with history.
+        if ids_len < history_len {
+            tracing::warn!(
+                history_len,
+                ids_len,
+                "message_ids out of sync with history, padding with zeros"
+            );
+            self.session.message_ids.resize(history_len, 0);
         }
 
         let compact_ratio = self.config.context.compact_ratio;
