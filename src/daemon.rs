@@ -281,20 +281,8 @@ async fn build_skills(
         skills.register_tool(&name, tool);
     }
 
-    // Register new built-in tools (planning, discovery, etc.).
+    // Register new built-in tools.
     skills.register_tool("list_dir", Arc::new(crate::tools::ListDirTool::new()));
-    skills.register_tool(
-        "update_plan",
-        Arc::new(crate::tools::UpdatePlanTool::new(
-            crate::tools::UpdatePlanTool::shared_state(),
-        )),
-    );
-    skills.register_tool(
-        "goal_manager",
-        Arc::new(crate::tools::GoalManagerTool::new(
-            crate::tools::GoalManagerTool::shared_state(),
-        )),
-    );
     skills.register_tool(
         "task_manager",
         Arc::new(crate::tools::TaskManagerTool::new(

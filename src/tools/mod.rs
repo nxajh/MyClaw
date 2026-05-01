@@ -7,18 +7,16 @@
 //! **Utility:** CalculatorTool, AskUserTool
 //! **Multi-Agent:** DelegateTaskTool
 //! **Memory:** MemoryStoreTool, MemoryRecallTool, MemoryForgetTool
-//! **Planning:** UpdatePlanTool, GoalManagerTool, TaskManagerTool
+//! **Planning:** TaskManagerTool
 //! **Discovery:** ToolSearchTool, ListDirTool
 
 mod ask_user;
 mod calculator;
 mod delegate;
 mod file_ops;
-mod goal;
 mod http;
 mod list_dir;
 mod memory;
-mod plan;
 mod search;
 mod shell;
 mod task;
@@ -32,11 +30,9 @@ pub use ask_user::AskUserTool;
 pub use calculator::CalculatorTool;
 pub use delegate::{DelegateTaskTool, TaskDelegator};
 pub use file_ops::{FileEditTool, FileReadTool, FileWriteTool};
-pub use goal::{GoalManagerTool, GoalState};
 pub use http::HttpRequestTool;
 pub use list_dir::ListDirTool;
 pub use memory::{MemoryForgetTool, MemoryRecallTool, MemoryStore, MemoryStoreTool};
-pub use plan::{PlanState, UpdatePlanTool};
 pub use search::{ContentSearchTool, GlobSearchTool};
 pub use shell::ShellTool;
 pub use task::{TaskManagerTool, TaskState};
