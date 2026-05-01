@@ -193,6 +193,7 @@ impl SystemPromptBuilder {
 
         let mut lines = vec!["## Skills".to_string()];
 
+        // 先输出 skill 名称列表
         for (name, skill) in skills.skills_iter() {
             match self.config.skills_mode {
                 SkillsPromptInjectionMode::Full => {
@@ -201,6 +202,15 @@ impl SystemPromptBuilder {
                 SkillsPromptInjectionMode::Compact => {
                     lines.push(format!("- **{}**: {}", name, skill.description));
                 }
+            }
+        }
+
+        // 注入 skill 提示词（prompt_body）
+        let skill_prompts = skills.skill_prompts();
+        if !skill_prompts.is_empty() {
+            lines.push("\n## Available Skills\n".to_string());
+            for (name, prompt) in &skill_prompts {
+                lines.push(format!("### Skill: {}\n\n{}", name, prompt));
             }
         }
 

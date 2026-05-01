@@ -390,7 +390,17 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     }
 
     // Build base skills (all built-in + MCP tools).
-    let skills = build_skills(&mcp_manager, None).await;
+    let mut skills = build_skills(&mcp_manager, None).await;
+
+    // 加载 workspace skills (SKILL.md files)
+    let skills_dir = config.workspace_dir.join("skills");
+    let skill_defs = crate::agents::skill_loader::load_skills_from_dir(&skills_dir);
+    for def in &skill_defs {
+        let skill = crate::agents::Skill::from_definition(def);
+        skills.register(skill);
+    }
+    tracing::info!(count = skill_defs.len(), "workspace skills loaded");
+
     let registry_arc: Arc<dyn crate::providers::ServiceRegistry> = Arc::new(registry);
 
     // ── Sub-agent delegator (conditional) ──────────────────────────────────────
