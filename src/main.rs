@@ -3,7 +3,7 @@
 use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]
-#[structopt(name = "myclaw", about = "MyClaw daemon")]
+#[structopt(name = "myclaw", about = "MyClaw daemon", version = env!("MYCLAW_VERSION"))]
 enum Commands {
     /// Run the MyClaw daemon (starts all configured channels and agents).
     Run {
