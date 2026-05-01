@@ -166,7 +166,11 @@ impl SystemPromptBuilder {
 
     fn build_action_instruction(&self) -> String {
         if self.config.native_tools {
-            "## Actions\n\nYou can execute code, read/write files, search the web, and more using your available tools. Use them proactively.".to_string()
+            match self.config.autonomy {
+                AutonomyLevel::Full => "## Actions\n\nExecute directly using your available tools. No confirmation needed for routine operations.".to_string(),
+                AutonomyLevel::Default => "## Actions\n\nYou can execute code, read/write files, search the web, and more using your available tools. Use them proactively for internal actions; ask before external ones.".to_string(),
+                AutonomyLevel::ReadOnly => "## Actions\n\nYou have read-only tools available (search, read, analyze). Do not write or execute.".to_string(),
+            }
         } else {
             "## Actions\n\nWhen you need to perform an action, use the <tool_call> XML format shown above.".to_string()
         }
@@ -222,7 +226,7 @@ impl SystemPromptBuilder {
             return String::new();
         }
         format!(
-            "## Workspace\n\nWorking directory: {}\n\nYour workspace files (SOUL.md, USER.md, AGENTS.md, etc.) are pre-loaded. Read them on startup.",
+            "## Workspace\n\nWorking directory: {}\n\nYour workspace files (SOUL.md, USER.md, AGENTS.md, etc.) are pre-loaded below.",
             self.config.workspace_dir
         )
     }
@@ -290,9 +294,15 @@ impl SystemPromptBuilder {
 
     fn build_channel_caps(&self) -> String {
         let channel = self.config.channel_name.as_deref().unwrap_or("unknown");
+        let caps = match channel {
+            "wechat" => "- Markdown fully supported (tables, code blocks, bold, etc.)",
+            "telegram" => "- Markdown formatting is supported.\n- Code blocks, tables, and bold text are rendered correctly.",
+            "discord" | "whatsapp" => "- No markdown tables — use bullet lists instead.\n- No headers — use **bold** or CAPS for emphasis.",
+            _ => "- Markdown formatting is supported.",
+        };
         format!(
-            "## Channel Capabilities\n\nYou are responding via {} channel.\n\n- Markdown formatting is supported.\n- Code blocks, tables, and bold text are rendered correctly.\n- TTS is handled by the channel transport — do not synthesize speech yourself.",
-            channel
+            "## Channel Capabilities\n\nYou are responding via {} channel.\n\n{}\n- TTS is handled by the channel transport — do not synthesize speech yourself.",
+            channel, caps
         )
     }
 
@@ -323,7 +333,7 @@ impl SystemPromptBuilder {
 
 const SECTION_ANTI_NARRATION: &str = r#"## CRITICAL: No Tool Narration
 
-NEVER narrate, announce, describe, or explain your tool usage to the user. Do NOT say things like 'Let me check...', 'I will use http_request to...', 'I'll fetch that for you', 'Searching now...', or 'Using the web_search tool'. The user must ONLY see the final answer. Tool calls are invisible infrastructure — never reference them. If you catch yourself starting a sentence about what tool you are about to use or just used, DELETE it and give the answer directly."#;
+Do NOT narrate tool usage. Never say "Let me check...", "I'll fetch that...", "Searching now...", or describe which tool you're using. The user sees only the final answer. Tool calls are invisible infrastructure — skip straight to the answer."#;
 
 const SECTION_TOOL_HONESTY: &str = r#"## CRITICAL: Tool Honesty
 
@@ -377,5 +387,35 @@ mod tests {
         let skills = SkillsManager::new();
         let prompt = builder.build(&skills, &[]);
         assert!(prompt.contains("read-only mode"));
+    }
+
+    #[test]
+    fn test_channel_caps_wechat_has_tables() {
+        let mut config = SystemPromptConfig::default();
+        config.channel_name = Some("wechat".to_string());
+        let builder = SystemPromptBuilder::new(config);
+        let skills = SkillsManager::new();
+        let prompt = builder.build(&skills, &[]);
+        assert!(prompt.contains("Markdown fully supported"));
+    }
+
+    #[test]
+    fn test_channel_caps_discord_no_tables() {
+        let mut config = SystemPromptConfig::default();
+        config.channel_name = Some("discord".to_string());
+        let builder = SystemPromptBuilder::new(config);
+        let skills = SkillsManager::new();
+        let prompt = builder.build(&skills, &[]);
+        assert!(prompt.contains("No markdown tables"));
+    }
+
+    #[test]
+    fn test_action_instruction_readonly() {
+        let mut config = SystemPromptConfig::default();
+        config.autonomy = AutonomyLevel::ReadOnly;
+        let builder = SystemPromptBuilder::new(config);
+        let skills = SkillsManager::new();
+        let prompt = builder.build(&skills, &[]);
+        assert!(prompt.contains("read-only tools"));
     }
 }
