@@ -79,7 +79,7 @@ impl Tool for TaskManagerTool {
 
     fn description(&self) -> &str {
         "Manage tasks and goals in a tree structure. Supports: create, list, update, delete, progress.\n\n\
-         - **create**: Create a goal (no parent) or a task (with parent). Goals are top-level objectives.\n\
+         - **create**: Create a goal (no parent) or a task (with parent). Supports batch creation by passing an array of subjects.\n\
          - **list**: List tasks. Filter by parent to see sub-tasks of a goal.\n\
          - **update**: Change task status (pending/in_progress/completed/cancelled).\n\
          - **delete**: Delete a task and all its sub-tasks.\n\
@@ -101,8 +101,11 @@ impl Tool for TaskManagerTool {
                     "description": "Task ID (required for update/delete/progress)"
                 },
                 "subject": {
-                    "type": "string",
-                    "description": "Brief title (required for create)"
+                    "oneOf": [
+                        { "type": "string", "description": "A single task/goal subject" },
+                        { "type": "array", "items": { "type": "string" }, "description": "Multiple subjects for batch creation" }
+                    ],
+                    "description": "Brief title. Pass a string for single creation, or an array for batch creation."
                 },
                 "description": {
                     "type": "string",
@@ -148,11 +151,8 @@ impl Tool for TaskManagerTool {
 
 impl TaskManagerTool {
     async fn handle_create(&self, args: &Value) -> anyhow::Result<ToolResult> {
-        let subject = args["subject"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("missing 'subject' for create"))?;
-        let description = args["description"].as_str().unwrap_or("");
         let parent = args["parent"].as_str();
+        let description = args["description"].as_str().unwrap_or("");
 
         let mut state = self.state.write().await;
 
@@ -167,27 +167,74 @@ impl TaskManagerTool {
             }
         }
 
-        let id = state.next_id();
-        let task = Task {
-            id: id.clone(),
-            parent_id: parent.map(String::from),
-            subject: subject.to_string(),
-            description: description.to_string(),
-            status: "pending".to_string(),
-            created_at: Utc::now().to_rfc3339(),
+        let kind = if parent.is_some() { "task" } else { "goal" };
+
+        // 支持 string 或 array
+        let subjects: Vec<String> = match &args["subject"] {
+            Value::String(s) => vec![s.clone()],
+            Value::Array(arr) => {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            }
+            _ => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some("subject must be a string or array of strings".to_string()),
+                })
+            }
         };
 
-        let kind = if parent.is_some() { "task" } else { "goal" };
-        state.tasks.push(task);
+        if subjects.is_empty() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("subject cannot be empty".to_string()),
+            });
+        }
+
+        let mut created = Vec::new();
+        for subject in &subjects {
+            let id = state.next_id();
+            let task = Task {
+                id: id.clone(),
+                parent_id: parent.map(String::from),
+                subject: subject.clone(),
+                description: if subjects.len() == 1 {
+                    description.to_string()
+                } else {
+                    String::new()
+                },
+                status: "pending".to_string(),
+                created_at: Utc::now().to_rfc3339(),
+            };
+            created.push(json!({
+                "task_id": id,
+                "subject": subject
+            }));
+            state.tasks.push(task);
+        }
+
+        let result = if created.len() == 1 {
+            json!({
+                "ok": true,
+                "kind": kind,
+                "task_id": created[0]["task_id"],
+                "subject": created[0]["subject"]
+            })
+        } else {
+            json!({
+                "ok": true,
+                "kind": kind,
+                "tasks": created,
+                "count": created.len()
+            })
+        };
 
         Ok(ToolResult {
             success: true,
-            output: serde_json::to_string(&json!({
-                "ok": true,
-                "kind": kind,
-                "task_id": id,
-                "subject": subject
-            }))?,
+            output: serde_json::to_string(&result)?,
             error: None,
         })
     }
@@ -373,5 +420,61 @@ impl TaskManagerTool {
             }))?,
             error: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_batch_create() {
+        let tool = TaskManagerTool::new(TaskManagerTool::shared_state());
+
+        // 批量创建 goals
+        let result = tool
+            .execute(json!({
+                "action": "create",
+                "subject": ["Goal A", "Goal B", "Goal C"]
+            }))
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        let output: Value = serde_json::from_str(&result.output).unwrap();
+        assert!(output["ok"].as_bool().unwrap());
+        assert_eq!(output["count"].as_u64().unwrap(), 3);
+        assert_eq!(output["tasks"].as_array().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_batch_create_subtasks() {
+        let tool = TaskManagerTool::new(TaskManagerTool::shared_state());
+
+        // 先创建 goal
+        let goal = tool
+            .execute(json!({
+                "action": "create",
+                "subject": "My Goal"
+            }))
+            .await
+            .unwrap();
+        let goal_output: Value = serde_json::from_str(&goal.output).unwrap();
+        let goal_id = goal_output["task_id"].as_str().unwrap();
+
+        // 批量创建子任务
+        let result = tool
+            .execute(json!({
+                "action": "create",
+                "subject": ["Task 1", "Task 2"],
+                "parent": goal_id
+            }))
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        let output: Value = serde_json::from_str(&result.output).unwrap();
+        assert!(output["ok"].as_bool().unwrap());
+        assert_eq!(output["count"].as_u64().unwrap(), 2);
     }
 }
