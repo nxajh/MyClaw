@@ -149,8 +149,8 @@ fn extract_yaml_list(yaml: &str, key: &str) -> Vec<String> {
         let trimmed = line.trim();
 
         if in_list {
-            if trimmed.starts_with("- ") {
-                let item = trimmed[2..].trim();
+            if let Some(item) = trimmed.strip_prefix("- ") {
+                let item = item.trim();
                 let item = if (item.starts_with('"') && item.ends_with('"'))
                     || (item.starts_with('\'') && item.ends_with('\''))
                 {
