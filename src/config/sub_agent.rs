@@ -42,6 +42,11 @@ pub struct SubAgentConfig {
     /// Optional description shown to the router agent in the delegate_task tool.
     #[serde(default)]
     pub description: Option<String>,
+
+    /// Optional model override — use a specific model instead of the default chat provider.
+    /// Useful for routing summarization to cheaper models.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[cfg(test)]

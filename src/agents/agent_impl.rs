@@ -167,6 +167,8 @@ pub struct Agent {
     skills: Arc<SkillsManager>,
     config: AgentConfig,
     system_prompt: String,
+    /// Optional model override for sub-agents (e.g. summarizer uses a cheaper model).
+    model_override: Option<String>,
 }
 
 impl Agent {
@@ -176,12 +178,19 @@ impl Agent {
             skills,
             config,
             system_prompt: String::new(),
+            model_override: None,
         }
     }
 
     /// Set the system prompt directly (overrides builder).
     pub fn with_system_prompt(mut self, prompt: String) -> Self {
         self.system_prompt = prompt;
+        self
+    }
+
+    /// Set a model override (used by sub-agents to route to specific models).
+    pub fn with_model(mut self, model: String) -> Self {
+        self.model_override = Some(model);
         self
     }
 
@@ -228,6 +237,8 @@ impl Agent {
             pending_image_base64: None,
             token_tracker: TokenTracker::default(),
             persist_hook,
+            sub_delegator: None,
+            model_override: self.model_override.clone(),
         }
     }
 }
@@ -254,6 +265,10 @@ pub struct AgentLoop {
     token_tracker: TokenTracker,
     /// Optional hook for persisting messages to the backend.
     persist_hook: Option<Arc<dyn PersistHook>>,
+    /// Optional sub-agent delegator for compaction (shared with Orchestrator).
+    sub_delegator: Option<Arc<super::sub_agent::SubAgentDelegator>>,
+    /// Optional model override — forces a specific model instead of registry default.
+    model_override: Option<String>,
 }
 
 impl AgentLoop {
@@ -266,6 +281,12 @@ impl AgentLoop {
     /// Set the delegate handler (called by Orchestrator to wire async delegation).
     pub fn with_delegate_handler(mut self, handler: DelegateHandler) -> Self {
         self.delegate_handler = Some(handler);
+        self
+    }
+
+    /// Set the sub-agent delegator (used for compaction summarization).
+    pub fn with_sub_delegator(mut self, delegator: Arc<super::sub_agent::SubAgentDelegator>) -> Self {
+        self.sub_delegator = Some(delegator);
         self
     }
 
@@ -416,8 +437,17 @@ impl AgentLoop {
 
         loop {
             // 1. Get a chat provider via registry.
+            // If model_override is set, use that model directly.
             // If images are pending, prefer a vision-capable model from the fallback chain.
-            let (provider, model_id) = if has_images {
+            let (provider, model_id) = if let Some(ref model) = self.model_override {
+                match self.registry.get_chat_provider_by_model(model) {
+                    Some((p, id)) => (p, id),
+                    None => {
+                        tracing::warn!(model = %model, "model_override not found, falling back to default");
+                        self.registry.get_chat_provider(Capability::Chat)?
+                    }
+                }
+            } else if has_images {
                 self.select_vision_provider().await?
             } else {
                 self.registry.get_chat_provider(Capability::Chat)?
@@ -1026,108 +1056,91 @@ impl AgentLoop {
             return Ok(());
         }
 
-        // Call LLM to generate summary.
-        match self.summarize_messages(&to_compact, model_id).await {
-            Ok(summary) => {
-                // Replace compacted messages with the summary.
-                let summary_msg = ChatMessage::system_text(
-                    format!("[summary] {}", summary)
-                );
-                let summary_tokens = estimate_message_tokens(&summary_msg);
+        // Build plain text content for the summarizer sub-agent.
+        let mut text_for_summary = String::new();
+        for msg in &to_compact {
+            let text = msg.text_content();
+            if !text.is_empty() {
+                text_for_summary.push_str(&format!("[{}] {}\n\n", msg.role, text));
+            }
+        }
 
-                // Track the last message id that was compacted.
-                let last_compacted_id = self.session.message_ids
-                    .get(compact_count.saturating_sub(1))
-                    .copied()
-                    .unwrap_or(0);
-
-                // Remove compacted messages and insert summary at the front.
-                self.session.history.drain(..compact_count);
-                self.session.history.insert(0, summary_msg);
-                self.session.message_ids.drain(..compact_count);
-                self.session.message_ids.insert(0, 0); // summary placeholder
-
-                // Persist the compaction summary.
-                if let Some(ref hook) = self.persist_hook {
-                    hook.save_compaction(&self.session.key, &SummaryRecord {
-                        id: 0,
-                        summary: summary.clone(),
-                        up_to_message: last_compacted_id,
-                        token_estimate: Some(summary_tokens),
-                        created_at: chrono::Utc::now(),
-                    });
-                }
-
-                // Adjust token tracker without overwriting output/cached data.
-                let removed_tokens: u64 = to_compact.iter()
-                    .map(estimate_message_tokens)
-                    .sum();
-                self.token_tracker.adjust_for_compaction(removed_tokens, summary_tokens);
-
-                let new_total = self.token_tracker.total_tokens();
-                tracing::info!(
-                    compacted_messages = compact_count,
-                    summary_tokens,
-                    removed_tokens,
-                    new_total_tokens = new_total,
-                    "context compaction completed"
-                );
-
-                // If still over threshold after compaction, trim oldest.
-                if new_total > threshold {
-                    self.trim_oldest(threshold);
+        // Call summarizer sub-agent or fall back to trim_oldest.
+        let summary = match &self.sub_delegator {
+            Some(delegator) => {
+                match delegator.delegate("summarizer", &text_for_summary).await {
+                    Ok(s) => {
+                        if s.trim().is_empty() {
+                            tracing::warn!("summarizer returned empty text, falling back to trim");
+                            self.trim_oldest(threshold);
+                            return Ok(());
+                        }
+                        s
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "summarizer sub-agent failed, falling back to trim");
+                        self.trim_oldest(threshold);
+                        return Ok(());
+                    }
                 }
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "LLM summarization failed, falling back to trim");
+            None => {
+                tracing::warn!("no sub_delegator configured, falling back to trim_oldest");
                 self.trim_oldest(threshold);
+                return Ok(());
             }
+        };
+
+        // Replace compacted messages with the summary.
+        let summary_msg = ChatMessage::system_text(
+            format!("[summary] {}", summary)
+        );
+        let summary_tokens = estimate_message_tokens(&summary_msg);
+
+        // Track the last message id that was compacted.
+        let last_compacted_id = self.session.message_ids
+            .get(compact_count.saturating_sub(1))
+            .copied()
+            .unwrap_or(0);
+
+        // Remove compacted messages and insert summary at the front.
+        self.session.history.drain(..compact_count);
+        self.session.history.insert(0, summary_msg);
+        self.session.message_ids.drain(..compact_count);
+        self.session.message_ids.insert(0, 0); // summary placeholder
+
+        // Persist the compaction summary.
+        if let Some(ref hook) = self.persist_hook {
+            hook.save_compaction(&self.session.key, &SummaryRecord {
+                id: 0,
+                summary: summary.clone(),
+                up_to_message: last_compacted_id,
+                token_estimate: Some(summary_tokens),
+                created_at: chrono::Utc::now(),
+            });
+        }
+
+        // Adjust token tracker without overwriting output/cached data.
+        let removed_tokens: u64 = to_compact.iter()
+            .map(estimate_message_tokens)
+            .sum();
+        self.token_tracker.adjust_for_compaction(removed_tokens, summary_tokens);
+
+        let new_total = self.token_tracker.total_tokens();
+        tracing::info!(
+            compacted_messages = compact_count,
+            summary_tokens,
+            removed_tokens,
+            new_total_tokens = new_total,
+            "context compaction completed"
+        );
+
+        // If still over threshold after compaction, trim oldest.
+        if new_total > threshold {
+            self.trim_oldest(threshold);
         }
 
         Ok(())
-    }
-
-    /// Call LLM to summarize a set of messages.
-    async fn summarize_messages(
-        &self,
-        messages: &[ChatMessage],
-        model_id: &str,
-    ) -> anyhow::Result<String> {
-        let (provider, _) = self.registry.get_chat_provider(Capability::Chat)?;
-
-        let system_text = "You are a conversation summarizer. \
-            Summarize the following conversation concisely, preserving: \
-            key decisions, file paths, code changes, user preferences, \
-            tool usage patterns, and any unresolved questions. \
-            Output only the summary, no preamble or explanation.";
-
-        let mut compact_messages = vec![ChatMessage::system_text(system_text)];
-        // Only pass plain text content — strip thinking, tool_calls, images, etc.
-        for msg in messages {
-            let text = msg.text_content();
-            if !text.is_empty() {
-                compact_messages.push(ChatMessage::text(&msg.role, &text));
-            }
-        }
-
-        let req = ChatRequest {
-            model: model_id,
-            messages: &compact_messages,
-            temperature: Some(0.3),
-            max_tokens: Some(1024),
-            thinking: None,
-            stop: None,
-            seed: None,
-            tools: None,
-            stream: true,
-        };
-
-        let stream = provider.chat(req)?;
-        let response = crate::providers::ChatResponse::from_stream(stream).await?;
-        if response.text.trim().is_empty() {
-            anyhow::bail!("summarizer returned empty text");
-        }
-        Ok(response.text)
     }
 
     /// Trim oldest messages until total tokens are below threshold.

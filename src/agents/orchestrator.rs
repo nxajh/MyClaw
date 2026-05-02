@@ -238,6 +238,11 @@ impl Orchestrator {
             loop_ = loop_.with_delegate_handler(delegate_handler);
         }
 
+        // Wire up the sub-agent delegator for compaction summarization.
+        if let Some(delegator) = sub_delegator.clone() {
+            loop_ = loop_.with_sub_delegator(delegator);
+        }
+
         let entry: Arc<TokioMutex<AgentLoop>> = Arc::new(TokioMutex::new(loop_));
         sessions.insert(sk.into(), entry.clone());
         entry

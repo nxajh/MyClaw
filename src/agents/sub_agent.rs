@@ -209,7 +209,13 @@ impl TaskDelegator for SubAgentDelegator {
             Arc::new(skills),
             agent_config,
         );
-        let mut loop_ = agent.with_system_prompt(system_prompt).loop_for(session);
+        let agent = agent.with_system_prompt(system_prompt);
+        // Apply model override if configured.
+        let agent = match &config.model {
+            Some(m) => agent.with_model(m.clone()),
+            None => agent,
+        };
+        let mut loop_ = agent.loop_for(session);
 
         tracing::info!(agent = %config.name, "sub-agent started");
         let result = loop_.run(task, None, None).await;
