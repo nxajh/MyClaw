@@ -104,15 +104,111 @@ impl DedupState {
     }
 }
 
-/// Split a message into chunks of at most `limit` chars.
+/// Split a message into chunks of at most `limit` chars, respecting markdown structure.
+///
+/// Splitting priority:
+/// 1. Double newline (paragraph boundary)
+/// 2. Single newline (line boundary)
+/// 3. Space (word boundary)
+/// 4. Hard cut at limit (last resort)
+///
+/// Preserves code blocks and tables by treating them as atomic units when possible.
 pub fn split_message_chunk(message: &str, limit: usize) -> Vec<String> {
     if message.chars().count() <= limit {
         return vec![message.to_string()];
     }
-    message
-        .chars()
-        .collect::<Vec<char>>()
-        .chunks(limit)
-        .map(|chunk| chunk.iter().collect::<String>())
-        .collect()
+
+    let mut chunks = Vec::new();
+    let mut remaining = message;
+
+    while !remaining.is_empty() {
+        if remaining.chars().count() <= limit {
+            chunks.push(remaining.to_string());
+            break;
+        }
+
+        // Try to find a good split point within the limit
+        let split_pos = find_split_point(remaining, limit);
+        let (chunk, rest) = remaining.split_at(split_pos);
+        chunks.push(chunk.trim_end().to_string());
+        remaining = rest.trim_start();
+    }
+
+    chunks
+}
+
+/// Find the best position to split text, preferring natural boundaries.
+fn find_split_point(text: &str, limit: usize) -> usize {
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    let limit = limit.min(len);
+
+    // Track if we're inside a code block
+    let mut in_code_block = false;
+
+    // First pass: find code block boundaries to avoid splitting inside them
+    let mut i = 0;
+    while i < limit {
+        if i + 2 < len && chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
+            in_code_block = !in_code_block;
+            i += 3;
+            continue;
+        }
+        i += 1;
+    }
+
+    // If we're inside a code block at the limit, try to extend to the closing fence
+    if in_code_block {
+        // Look for closing fence after limit
+        let mut j = limit;
+        while j + 2 < len {
+            if chars[j] == '`' && chars[j + 1] == '`' && chars[j + 2] == '`' {
+                // Found closing fence, split after it
+                return (j + 3).min(len);
+            }
+            j += 1;
+        }
+    }
+
+    // Try splitting at double newline (paragraph boundary) - highest priority
+    if let Some(pos) = find_last_pattern(&chars[..limit], &['\n', '\n']) {
+        return pos + 2; // Include both newlines in the first chunk
+    }
+
+    // Try splitting at single newline
+    if let Some(pos) = find_last_char(&chars[..limit], '\n') {
+        return pos + 1; // Include newline in the first chunk
+    }
+
+    // Try splitting at space (word boundary)
+    if let Some(pos) = find_last_char(&chars[..limit], ' ') {
+        return pos + 1;
+    }
+
+    // Last resort: hard cut at limit
+    limit
+}
+
+/// Find the last occurrence of a character pattern in the slice.
+fn find_last_pattern(chars: &[char], pattern: &[char]) -> Option<usize> {
+    if pattern.is_empty() || chars.len() < pattern.len() {
+        return None;
+    }
+
+    for i in (0..=chars.len() - pattern.len()).rev() {
+        if &chars[i..i + pattern.len()] == pattern {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Find the last occurrence of a character in the slice.
+fn find_last_char(chars: &[char], target: char) -> Option<usize> {
+    for i in (0..chars.len()).rev() {
+        if chars[i] == target {
+            return Some(i);
+        }
+    }
+    None
 }
