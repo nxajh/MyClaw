@@ -64,6 +64,16 @@ pub(crate) fn estimate_message_tokens(msg: &crate::providers::ChatMessage) -> u6
             ContentPart::Thinking { thinking } => estimate_tokens(thinking),
         };
     }
+    // Estimate tool_calls overhead (id + name + arguments).
+    if let Some(ref tool_calls) = msg.tool_calls {
+        for tc in tool_calls {
+            tokens += estimate_tokens(&tc.id) + estimate_tokens(&tc.name) + estimate_tokens(&tc.arguments) + 8;
+        }
+    }
+    // tool_call_id on tool result messages.
+    if let Some(ref tcid) = msg.tool_call_id {
+        tokens += estimate_tokens(tcid) + 4;
+    }
     tokens
 }
 
@@ -83,7 +93,6 @@ pub(crate) struct TokenTracker {
 impl TokenTracker {
     /// Update with precise usage from API response. Resets pending estimates.
     /// `input_tokens` = new (non-cached) tokens, `cached_tokens` = cache-hit tokens.
-    /// Real context size = input_tokens + cached_tokens + output_tokens.
     pub fn update_from_usage(&mut self, input_tokens: u64, output_tokens: u64, cached_tokens: u64) {
         self.last_input_tokens = input_tokens;
         self.last_output_tokens = output_tokens;
@@ -96,12 +105,23 @@ impl TokenTracker {
         self.pending_estimated_tokens += tokens;
     }
 
-    /// Total estimated token usage (includes cached tokens for accurate context tracking).
+    /// Total input context tokens (what the model sees as input).
+    /// Does NOT include output_tokens — those are the model's generation, not input context.
     pub fn total_tokens(&self) -> u64 {
         self.last_input_tokens
             .saturating_add(self.last_cached_tokens)
-            .saturating_add(self.last_output_tokens)
             .saturating_add(self.pending_estimated_tokens)
+    }
+
+    /// Adjust tracker after compaction: deduct removed tokens, add summary tokens.
+    /// Preserves output_tokens and only touches input/pending estimates.
+    pub fn adjust_for_compaction(&mut self, removed_tokens: u64, added_tokens: u64) {
+        let net_reduction = removed_tokens.saturating_sub(added_tokens);
+        // Deduct from pending first, then from input.
+        let from_pending = net_reduction.min(self.pending_estimated_tokens);
+        self.pending_estimated_tokens -= from_pending;
+        self.last_input_tokens = self.last_input_tokens
+            .saturating_sub(net_reduction - from_pending);
     }
 
     /// Reset for a new conversation.
@@ -258,8 +278,11 @@ impl AgentLoop {
         // Reset loop breaker for new turn.
         self.loop_breaker.reset();
 
-        // Reset token tracker for new turn.
+        // Reset token tracker for new turn, then estimate entire history.
         self.token_tracker.reset();
+        for msg in &self.session.history {
+            self.token_tracker.record_pending(estimate_message_tokens(msg));
+        }
 
         // 1. Add user message to session (text only; images attached per-model in chat_loop).
         self.session.add_user_text(user_message.to_string());
@@ -269,11 +292,6 @@ impl AgentLoop {
             if let Some(msg) = self.session.history.last() {
                 hook.persist_message(&self.session.key, msg);
             }
-        }
-
-        // Estimate and track the new user message tokens.
-        if let Some(last_msg) = self.session.history.last() {
-            self.token_tracker.record_pending(estimate_message_tokens(last_msg));
         }
 
         self.pending_image_urls = image_urls;
@@ -409,6 +427,9 @@ impl AgentLoop {
             if let Err(e) = self.maybe_compact(&model_id).await {
                 tracing::warn!(error = %e, "compaction failed, continuing");
             }
+
+            // Rebuild messages after compaction may have modified session.history.
+            messages = self.build_messages().await?;
 
             // Attach pending images to the last user message if model supports it.
             self.attach_images_if_supported(&mut messages, &model_id);
@@ -1037,19 +1058,17 @@ impl AgentLoop {
                     });
                 }
 
-                // Recalculate token tracker.
+                // Adjust token tracker without overwriting output/cached data.
                 let removed_tokens: u64 = to_compact.iter()
                     .map(estimate_message_tokens)
                     .sum();
-                let new_total = self.token_tracker.total_tokens()
-                    .saturating_sub(removed_tokens)
-                    .saturating_add(summary_tokens);
-                // Reset tracker with new baseline.
-                self.token_tracker.update_from_usage(new_total, 0, 0);
+                self.token_tracker.adjust_for_compaction(removed_tokens, summary_tokens);
 
+                let new_total = self.token_tracker.total_tokens();
                 tracing::info!(
                     compacted_messages = compact_count,
                     summary_tokens,
+                    removed_tokens,
                     new_total_tokens = new_total,
                     "context compaction completed"
                 );
@@ -1083,8 +1102,12 @@ impl AgentLoop {
             Output only the summary, no preamble or explanation.";
 
         let mut compact_messages = vec![ChatMessage::system_text(system_text)];
+        // Only pass plain text content — strip thinking, tool_calls, images, etc.
         for msg in messages {
-            compact_messages.push(msg.clone());
+            let text = msg.text_content();
+            if !text.is_empty() {
+                compact_messages.push(ChatMessage::text(&msg.role, &text));
+            }
         }
 
         let req = ChatRequest {
@@ -1101,6 +1124,9 @@ impl AgentLoop {
 
         let stream = provider.chat(req)?;
         let response = crate::providers::ChatResponse::from_stream(stream).await?;
+        if response.text.trim().is_empty() {
+            anyhow::bail!("summarizer returned empty text");
+        }
         Ok(response.text)
     }
 
@@ -1120,8 +1146,7 @@ impl AgentLoop {
             }
             let removed = self.session.history.remove(0);
             let removed_tokens = estimate_message_tokens(&removed);
-            let new_total = total.saturating_sub(removed_tokens);
-            self.token_tracker.update_from_usage(new_total, 0, 0);
+            self.token_tracker.adjust_for_compaction(removed_tokens, 0);
 
             // Drain the corresponding message_id.
             if !self.session.message_ids.is_empty() {

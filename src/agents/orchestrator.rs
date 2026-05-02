@@ -15,6 +15,7 @@ use crate::agents::sub_agent::SubAgentDelegator;
 use crate::channels::{Channel, ChannelMessage, SendMessage};
 use dashmap::DashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex as TokioMutex, oneshot};
 use tokio::task::JoinHandle;
@@ -344,16 +345,38 @@ impl Orchestrator {
                         };
 
                         // Start typing indicator while the agent processes the message.
+                        // Telegram's sendChatAction lasts ~5 seconds, so we spawn a
+                        // background task that refreshes it every 4 seconds until the
+                        // response is ready.
                         if let Err(e) = channel.start_typing(&reply_target).await {
                             tracing::debug!(session = %sk, err = %e, "start_typing failed (non-fatal)");
                         }
+                        let typing_channel = channel.clone();
+                        let typing_target = reply_target.clone();
+                        let typing_done = Arc::new(AtomicBool::new(false));
+                        let typing_handle = {
+                            let done = typing_done.clone();
+                            let ch = typing_channel;
+                            let target = typing_target;
+                            tokio::spawn(async move {
+                                loop {
+                                    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                                    if done.load(Ordering::Relaxed) {
+                                        break;
+                                    }
+                                    let _ = ch.start_typing(&target).await;
+                                }
+                            })
+                        };
 
                         let response = {
                             let mut guard = loop_.lock().await;
                             guard.run(&content, image_urls, image_base64).await
                         };
 
-                        // Stop typing indicator before sending the response.
+                        // Signal typing task to stop, then stop typing indicator.
+                        typing_done.store(true, Ordering::Relaxed);
+                        typing_handle.abort();
                         if let Err(e) = channel.stop_typing(&reply_target).await {
                             tracing::debug!(session = %sk, err = %e, "stop_typing failed (non-fatal)");
                         }
@@ -376,7 +399,24 @@ impl Orchestrator {
                             }
                             Ok(_) => {}
                             Err(e) => {
-                                error!(session = %sk, err = %e, "loop failed");
+                                // Send error message to user so they know what happened.
+                                let error_text = format!(
+                                    "⚠️ 处理消息时发生错误：\n\n`{}`\n\n请稍后重试，或联系管理员。",
+                                    e
+                                );
+                                error!(session = %sk, err = %e, "loop failed, notifying user");
+                                let send_msg = SendMessage {
+                                    recipient: reply_target,
+                                    content: error_text,
+                                    subject: None,
+                                    thread_ts: None,
+                                    cancellation_token: None,
+                                    attachments: vec![],
+                                    image_urls: None,
+                                };
+                                if let Err(send_err) = channel.send(&send_msg).await {
+                                    error!(session = %sk, err = %send_err, "failed to send error notification to user");
+                                }
                             }
                         }
                     });
