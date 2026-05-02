@@ -166,7 +166,8 @@ impl TaskDelegator for SubAgentDelegator {
         let skills = self.build_filtered_skills(&config.tools);
 
         // Build the tool specs for the system prompt.
-        let tool_names: Vec<String> = skills.all_tools().iter().map(|t| t.name().to_string()).collect();
+        let mut tool_names: Vec<String> = skills.all_tools().iter().map(|t| t.name().to_string()).collect();
+        tool_names.sort();
 
         // Build system prompt using the sub-agent's prompt + tool list.
         let system_prompt = if config.system_prompt.is_empty() {

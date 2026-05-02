@@ -213,12 +213,13 @@ impl Agent {
         } else {
             // Build from config
             let builder = SystemPromptBuilder::new(self.config.prompt_config.clone());
-            let tool_names: Vec<String> = self
+            let mut tool_names: Vec<String> = self
                 .skills
                 .all_tools()
                 .iter()
                 .map(|t| t.name().to_string())
                 .collect();
+            tool_names.sort();
             builder.build(&self.skills, &tool_names)
         };
 
