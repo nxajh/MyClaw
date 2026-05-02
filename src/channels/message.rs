@@ -195,20 +195,12 @@ fn find_last_pattern(chars: &[char], pattern: &[char]) -> Option<usize> {
         return None;
     }
 
-    for i in (0..=chars.len() - pattern.len()).rev() {
-        if &chars[i..i + pattern.len()] == pattern {
-            return Some(i);
-        }
-    }
-    None
+    (0..=chars.len() - pattern.len())
+        .rev()
+        .find(|&i| &chars[i..i + pattern.len()] == pattern)
 }
 
 /// Find the last occurrence of a character in the slice.
 fn find_last_char(chars: &[char], target: char) -> Option<usize> {
-    for i in (0..chars.len()).rev() {
-        if chars[i] == target {
-            return Some(i);
-        }
-    }
-    None
+    (0..chars.len()).rev().find(|&i| chars[i] == target)
 }
