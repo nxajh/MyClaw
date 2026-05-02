@@ -363,13 +363,18 @@ impl Orchestrator {
                             let done = typing_done.clone();
                             let ch = typing_channel;
                             let target = typing_target;
+                            let sk_clone = sk.clone();
                             tokio::spawn(async move {
                                 loop {
                                     tokio::time::sleep(std::time::Duration::from_secs(4)).await;
                                     if done.load(Ordering::Relaxed) {
+                                        tracing::debug!(session = %sk_clone, "typing refresh task: done flag set, exiting");
                                         break;
                                     }
-                                    let _ = ch.start_typing(&target).await;
+                                    match ch.start_typing(&target).await {
+                                        Ok(_) => tracing::debug!(session = %sk_clone, "typing refresh task: refreshed successfully"),
+                                        Err(e) => tracing::warn!(session = %sk_clone, err = %e, "typing refresh task: refresh failed"),
+                                    }
                                 }
                             })
                         };
