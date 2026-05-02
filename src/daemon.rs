@@ -420,7 +420,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     }
 
     // Build tool registry (all built-in + MCP tools).
-    let mut tools = build_tools(&mcp_manager).await;
+    let tools = build_tools(&mcp_manager).await;
 
     // Build skill manager (SKILL.md files).
     let skills = build_skill_manager(&config.workspace_dir);

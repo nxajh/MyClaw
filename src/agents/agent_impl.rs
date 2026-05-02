@@ -777,7 +777,7 @@ impl AgentLoop {
     /// Build tool specs from the skills manager.
     fn build_tool_specs(&self) -> Vec<crate::providers::capability_chat::ToolSpec> {
         use crate::providers::capability_chat::ToolSpec;
-        self.skills
+        self.tools
             .all_tools()
             .iter()
             .map(|t| {
