@@ -429,7 +429,7 @@ impl AgentLoop {
     }
 
     /// Core chat loop: call LLM, handle tool calls, repeat until text response.
-    async fn chat_loop(&mut self, mut messages: Vec<ChatMessage>) -> anyhow::Result<String> {
+    async fn chat_loop(&mut self, _initial_messages: Vec<ChatMessage>) -> anyhow::Result<String> {
         let mut tool_calls_count = 0usize;
         let mut boosted_max_tokens = false;
 
@@ -461,7 +461,7 @@ impl AgentLoop {
             }
 
             // Rebuild messages after compaction may have modified session.history.
-            messages = self.build_messages().await?;
+            let mut messages = self.build_messages().await?;
 
             // Attach pending images to the last user message if model supports it.
             self.attach_images_if_supported(&mut messages, &model_id);
