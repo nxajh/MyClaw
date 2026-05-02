@@ -20,6 +20,8 @@ use crate::providers::ServiceRegistry;
 use crate::providers::capability_tool::ToolResult;
 use crate::config::agent::ContextConfig;
 use crate::tools::TaskDelegator;
+use super::skills::SkillManager;
+use super::tool_registry::ToolRegistry;
 use futures_util::StreamExt;
 
 /// Callback for ask_user tool: (session_key, question) → user_answer.
@@ -44,7 +46,6 @@ pub type DelegateHandler = Arc<
 
 use super::loop_breaker::{LoopBreak, LoopBreaker, LoopBreakerConfig};
 use super::session_manager::{Session, PersistHook};
-use super::skills::SkillsManager;
 use crate::agents::prompt::{SystemPromptBuilder, SystemPromptConfig};
 use crate::storage::SummaryRecord;
 
@@ -165,7 +166,8 @@ impl Default for AgentConfig {
 #[derive(Clone)]
 pub struct Agent {
     registry: Arc<dyn ServiceRegistry>,
-    skills: Arc<SkillsManager>,
+    tools: Arc<ToolRegistry>,
+    skills: Arc<SkillManager>,
     config: AgentConfig,
     system_prompt: String,
     /// Optional model override for sub-agents (e.g. summarizer uses a cheaper model).
@@ -173,9 +175,15 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(registry: Arc<dyn ServiceRegistry>, skills: Arc<SkillsManager>, config: AgentConfig) -> Self {
+    pub fn new(
+        registry: Arc<dyn ServiceRegistry>,
+        tools: Arc<ToolRegistry>,
+        skills: Arc<SkillManager>,
+        config: AgentConfig,
+    ) -> Self {
         Self {
             registry,
+            tools,
             skills,
             config,
             system_prompt: String::new(),
@@ -196,7 +204,7 @@ impl Agent {
     }
 
     /// Create an AgentLoop for the given session.
-    /// The system prompt is built from SystemPromptConfig + SkillsManager.
+    /// The system prompt is built from SystemPromptConfig + SkillManager.
     pub fn loop_for(&self, session: Session) -> AgentLoop {
         self.loop_for_with_persist(session, None)
     }
@@ -213,19 +221,13 @@ impl Agent {
         } else {
             // Build from config
             let builder = SystemPromptBuilder::new(self.config.prompt_config.clone());
-            let mut tool_names: Vec<String> = self
-                .skills
-                .all_tools()
-                .iter()
-                .map(|t| t.name().to_string())
-                .collect();
-            tool_names.sort();
+            let tool_names = self.tools.tool_names_sorted();
             builder.build(&self.skills, &tool_names)
         };
 
         AgentLoop {
             registry: Arc::clone(&self.registry),
-            skills: Arc::clone(&self.skills),
+            tools: Arc::clone(&self.tools),
             config: self.config.clone(),
             session,
             system_prompt: prompt,
@@ -248,7 +250,7 @@ impl Agent {
 /// Per-session agent loop handle. Execute `run(user_message)` to process a message.
 pub struct AgentLoop {
     registry: Arc<dyn ServiceRegistry>,
-    skills: Arc<SkillsManager>,
+    tools: Arc<ToolRegistry>,
     config: AgentConfig,
     session: Session,
     /// Template for the system prompt.
@@ -855,7 +857,7 @@ impl AgentLoop {
             }
         }
 
-        let tool = self.skills.get(&call.name).ok_or_else(|| {
+        let tool = self.tools.get(&call.name).ok_or_else(|| {
             anyhow::anyhow!("Unknown tool: '{}'", call.name)
         })?;
 

@@ -23,7 +23,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::agents::SkillsManager;
+use crate::agents::SkillManager;
 
 // ── Config types ─────────────────────────────────────────────────────────────
 
@@ -109,7 +109,7 @@ impl SystemPromptBuilder {
     /// Build the full system prompt string.
     pub fn build(
         &self,
-        skills: &SkillsManager,
+        skills: &SkillManager,
         tool_names: &[String],
     ) -> String {
         let mut sections = vec![
@@ -188,7 +188,7 @@ impl SystemPromptBuilder {
         }
     }
 
-    fn build_skills(&self, skills: &SkillsManager) -> String {
+    fn build_skills(&self, skills: &SkillManager) -> String {
         if skills.skill_count() == 0 {
             return String::new();
         }
@@ -334,9 +334,9 @@ mod tests {
     fn test_anti_narration_present() {
         let config = SystemPromptConfig::default();
         let builder = SystemPromptBuilder::new(config);
-        // SkillsManager would be empty here; use a dummy
+        // SkillManager would be empty here; use a dummy
         // For unit test, we just verify build doesn't panic
-        let skills = SkillsManager::new();
+        let skills = SkillManager::new();
         let prompt = builder.build(&skills, &["calc".to_string()]);
         assert!(prompt.contains("No Tool Narration"));
         assert!(prompt.contains("Tool Honesty"));
@@ -348,7 +348,7 @@ mod tests {
         config.compact = true;
         config.channel_name = Some("wechat".to_string());
         let builder = SystemPromptBuilder::new(config);
-        let skills = SkillsManager::new();
+        let skills = SkillManager::new();
         let prompt = builder.build(&skills, &["calc".to_string()]);
         assert!(!prompt.contains("Channel Capabilities"));
     }
@@ -358,7 +358,7 @@ mod tests {
         let mut config = SystemPromptConfig::default();
         config.max_chars = 50;
         let builder = SystemPromptBuilder::new(config);
-        let skills = SkillsManager::new();
+        let skills = SkillManager::new();
         let prompt = builder.build(&skills, &[]);
         assert!(prompt.len() <= 100);
         assert!(prompt.contains("truncated"));
@@ -369,7 +369,7 @@ mod tests {
         let mut config = SystemPromptConfig::default();
         config.autonomy = AutonomyLevel::ReadOnly;
         let builder = SystemPromptBuilder::new(config);
-        let skills = SkillsManager::new();
+        let skills = SkillManager::new();
         let prompt = builder.build(&skills, &[]);
         assert!(prompt.contains("read-only mode"));
     }
@@ -379,7 +379,7 @@ mod tests {
         let mut config = SystemPromptConfig::default();
         config.channel_name = Some("wechat".to_string());
         let builder = SystemPromptBuilder::new(config);
-        let skills = SkillsManager::new();
+        let skills = SkillManager::new();
         let prompt = builder.build(&skills, &[]);
         assert!(prompt.contains("Markdown fully supported"));
     }
@@ -389,7 +389,7 @@ mod tests {
         let mut config = SystemPromptConfig::default();
         config.channel_name = Some("discord".to_string());
         let builder = SystemPromptBuilder::new(config);
-        let skills = SkillsManager::new();
+        let skills = SkillManager::new();
         let prompt = builder.build(&skills, &[]);
         assert!(prompt.contains("No markdown tables"));
     }
@@ -399,7 +399,7 @@ mod tests {
         let mut config = SystemPromptConfig::default();
         config.autonomy = AutonomyLevel::ReadOnly;
         let builder = SystemPromptBuilder::new(config);
-        let skills = SkillsManager::new();
+        let skills = SkillManager::new();
         let prompt = builder.build(&skills, &[]);
         assert!(prompt.contains("read-only tools"));
     }

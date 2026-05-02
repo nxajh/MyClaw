@@ -2,7 +2,7 @@
 //!
 //! Responsibilities:
 //! - Connect to all configured MCP servers on startup
-//! - Wrap discovered tools as `dyn Tool` so the SkillsManager can use them
+//! - Wrap discovered tools as `dyn Tool` so the ToolRegistry + ToolRegistry + SkillManager can use them
 //! - Expose connection status for health checks
 //!
 //! DDD: McpManager depends on `crate::providers::Tool` (Domain trait) and
@@ -102,7 +102,7 @@ impl McpManager {
         wrappers
     }
 
-    /// All MCP tool wrappers as `dyn Tool`, for injection into SkillsManager.
+    /// All MCP tool wrappers as `dyn Tool`, for injection into ToolRegistry + ToolRegistry + SkillManager.
     ///
     /// Returns an empty vec if `connect()` has not been called yet.
     pub async fn tools(&self) -> Vec<Arc<dyn crate::providers::Tool>> {

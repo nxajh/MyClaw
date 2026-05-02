@@ -8,7 +8,8 @@
 use std::sync::Arc;
 
 use crate::agents::delegation::{DelegationEvent, DelegationManager};
-use crate::agents::skills::SkillsManager;
+use crate::agents::tool_registry::ToolRegistry;
+use crate::agents::skills::SkillManager;
 use crate::agents::session_manager::Session;
 use crate::config::sub_agent::SubAgentConfig;
 use crate::providers::ServiceRegistry;
@@ -21,8 +22,10 @@ pub struct SubAgentDelegator {
     configs: Arc<Vec<SubAgentConfig>>,
     /// Shared service registry (for LLM access).
     registry: Arc<dyn ServiceRegistry>,
-    /// Parent skills manager (tools are filtered per sub-agent).
-    skills: Arc<SkillsManager>,
+    /// Parent tool registry (tools are filtered per sub-agent).
+    tools: Arc<ToolRegistry>,
+    /// Parent skill manager (shared read-only).
+    skills: Arc<SkillManager>,
     /// Default max_tool_calls from parent agent config.
     default_max_tool_calls: usize,
 }
@@ -31,12 +34,14 @@ impl SubAgentDelegator {
     pub fn new(
         configs: Vec<SubAgentConfig>,
         registry: Arc<dyn ServiceRegistry>,
-        skills: Arc<SkillsManager>,
+        tools: Arc<ToolRegistry>,
+        skills: Arc<SkillManager>,
         default_max_tool_calls: usize,
     ) -> Self {
         Self {
             configs: Arc::new(configs),
             registry,
+            tools,
             skills,
             default_max_tool_calls,
         }
@@ -46,12 +51,12 @@ impl SubAgentDelegator {
         self.configs.iter().find(|c| c.name == name)
     }
 
-    /// Build a filtered SkillsManager containing only the allowed tools.
-    fn build_filtered_skills(&self, allowed_tools: &[String]) -> SkillsManager {
-        let mut filtered = SkillsManager::new();
+    /// Build a filtered ToolRegistry containing only the allowed tools.
+    fn build_filtered_tools(&self, allowed_tools: &[String]) -> ToolRegistry {
+        let mut filtered = ToolRegistry::new();
         for tool_name in allowed_tools {
-            if let Some(tool) = self.skills.get(tool_name) {
-                filtered.register_tool(tool_name, tool);
+            if let Some(tool) = self.tools.get(tool_name) {
+                filtered.register(tool);
             } else {
                 tracing::warn!(tool = %tool_name, "sub-agent references unknown tool, skipping");
             }
@@ -94,6 +99,7 @@ impl SubAgentDelegator {
         // Clone everything needed for the spawned task.
         let configs = self.configs.clone();
         let registry = self.registry.clone();
+        let tools = self.tools.clone();
         let skills = self.skills.clone();
         let default_max_tool_calls = self.default_max_tool_calls;
         let config_clone = config.clone();
@@ -109,6 +115,7 @@ impl SubAgentDelegator {
             let sub_delegator = SubAgentDelegator {
                 configs,
                 registry,
+                tools,
                 skills,
                 default_max_tool_calls,
             };
@@ -162,12 +169,11 @@ impl TaskDelegator for SubAgentDelegator {
             "creating sub-agent for delegation"
         );
 
-        // Build a filtered skills manager with only the allowed tools.
-        let skills = self.build_filtered_skills(&config.tools);
+        // Build a filtered tool registry with only the allowed tools.
+        let tools = self.build_filtered_tools(&config.tools);
 
         // Build the tool specs for the system prompt.
-        let mut tool_names: Vec<String> = skills.all_tools().iter().map(|t| t.name().to_string()).collect();
-        tool_names.sort();
+        let tool_names = tools.tool_names_sorted();
 
         // Build system prompt using the sub-agent's prompt + tool list.
         let system_prompt = if config.system_prompt.is_empty() {
@@ -203,11 +209,11 @@ impl TaskDelegator for SubAgentDelegator {
         };
 
         // We need to create an AgentLoop manually since we don't have an Agent factory.
-        // AgentLoop is not Clone and needs registry, skills, etc.
         // Use a temporary Agent to create the loop.
         let agent = crate::agents::Agent::new(
             self.registry.clone(),
-            Arc::new(skills),
+            Arc::new(tools),
+            Arc::new(SkillManager::new()),
             agent_config,
         );
         let agent = agent.with_system_prompt(system_prompt);

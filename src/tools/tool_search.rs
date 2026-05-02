@@ -7,16 +7,16 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use crate::agents::SkillsManager;
+use crate::agents::ToolRegistry;
 use crate::providers::{Tool, ToolResult};
 
 pub struct ToolSearchTool {
-    skills: Arc<SkillsManager>,
+    tools: Arc<ToolRegistry>,
 }
 
 impl ToolSearchTool {
-    pub fn new(skills: Arc<SkillsManager>) -> Self {
-        Self { skills }
+    pub fn new(tools: Arc<ToolRegistry>) -> Self {
+        Self { tools }
     }
 }
 
@@ -59,7 +59,7 @@ impl Tool for ToolSearchTool {
             .to_lowercase();
         let limit = args["limit"].as_u64().unwrap_or(10) as usize;
 
-        let all_tools = self.skills.all_tools();
+        let all_tools = self.tools.all_tools();
 
         let mut matches: Vec<Value> = Vec::new();
         for tool in &all_tools {

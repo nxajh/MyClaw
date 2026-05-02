@@ -12,7 +12,7 @@
 use anyhow::{Context, Result};
 use crate::agents::{
     Agent, AgentConfig, InMemoryBackend, Orchestrator, OrchestratorParts, SessionManager,
-    SkillsManager, SystemPromptConfig, AutonomyLevel, SkillsPromptInjectionMode,
+    ToolRegistry, SkillManager, Skill, SystemPromptConfig, AutonomyLevel, SkillsPromptInjectionMode,
     McpManager, SubAgentDelegator, DelegationManager,
 };
 use crate::tools::TaskDelegator;
@@ -304,53 +304,47 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
     Ok(registry)
 }
 
-/// Build SkillsManager with all built-in tools registered.
-/// Optionally registers the `delegate_task` tool when sub-agents are configured.
-async fn build_skills(
-    mcp_manager: &McpManager,
-    sub_agent_delegator: Option<Arc<SubAgentDelegator>>,
-) -> SkillsManager {
-    let mut skills = SkillsManager::new();
+/// Build ToolRegistry with all built-in + MCP tools registered.
+async fn build_tools(mcp_manager: &McpManager) -> ToolRegistry {
+    let mut tools = ToolRegistry::new();
     let builtin = crate::tools::builtin_tools_with_memory(crate::tools::MemoryStore::new());
     for tool in builtin {
-        let name = tool.name().to_string();
-        skills.register_tool(&name, tool);
+        tools.register(tool);
     }
 
-    // Register new built-in tools.
-    skills.register_tool("list_dir", Arc::new(crate::tools::ListDirTool::new()));
-    skills.register_tool(
-        "task_manager",
-        Arc::new(crate::tools::TaskManagerTool::new(
-            crate::tools::TaskManagerTool::shared_state(),
-        )),
-    );
+    // Register additional built-in tools.
+    tools.register(Arc::new(crate::tools::ListDirTool::new()));
+    tools.register(Arc::new(crate::tools::TaskManagerTool::new(
+        crate::tools::TaskManagerTool::shared_state(),
+    )));
 
     // Inject MCP tools (if any servers are configured and connected).
     if mcp_manager.is_connected().await {
         let mcp_tools = mcp_manager.tools().await;
         let count = mcp_tools.len();
         for tool in mcp_tools {
-            let name = tool.name().to_string();
-            skills.register_tool(&name, tool);
+            tools.register(tool);
         }
-        tracing::info!(mcp_tools = count, "MCP tools registered in SkillsManager");
+        tracing::info!(mcp_tools = count, "MCP tools registered");
     } else {
         tracing::debug!("MCP manager not connected, skipping MCP tool injection");
     }
 
-    // Inject delegate_task tool when sub-agents are configured.
-    if let Some(delegator) = sub_agent_delegator {
-        let delegate_tool = crate::tools::DelegateTaskTool::new(delegator);
-        skills.register_tool("delegate_task", Arc::new(delegate_tool));
-        tracing::info!("delegate_task tool registered (multi-agent mode)");
+    tracing::info!(tool_count = tools.tool_count(), "tool registry built");
+    tools
+}
+
+/// Build SkillManager from SKILL.md files in workspace.
+fn build_skill_manager(workspace_dir: &std::path::Path) -> SkillManager {
+    let mut manager = SkillManager::new();
+    let skills_dir = workspace_dir.join("skills");
+    let definitions = crate::agents::skill_loader::load_skills_from_dir(&skills_dir);
+    for def in definitions {
+        tracing::info!(name = %def.name, "skill registered");
+        manager.register(Skill::from_definition(&def));
     }
-
-    // Note: tool_search is registered after build_skills returns,
-    // in run(), once we have Arc<SkillsManager> available.
-
-    tracing::info!(tool_count = skills.tool_count(), "skills manager built");
-    skills
+    tracing::info!(skill_count = manager.skill_count(), "skill manager built");
+    manager
 }
 
 /// Build the session backend (shared with SessionManager and persist hooks).
@@ -425,17 +419,11 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         tracing::warn!(error = %e, "MCP server connection had errors (non-fatal), continuing");
     }
 
-    // Build base skills (all built-in + MCP tools).
-    let mut skills = build_skills(&mcp_manager, None).await;
+    // Build tool registry (all built-in + MCP tools).
+    let mut tools = build_tools(&mcp_manager).await;
 
-    // 加载 workspace skills (SKILL.md files)
-    let skills_dir = config.workspace_dir.join("skills");
-    let skill_defs = crate::agents::skill_loader::load_skills_from_dir(&skills_dir);
-    for def in &skill_defs {
-        let skill = crate::agents::Skill::from_definition(def);
-        skills.register(skill);
-    }
-    tracing::info!(count = skill_defs.len(), "workspace skills loaded");
+    // Build skill manager (SKILL.md files).
+    let skills = build_skill_manager(&config.workspace_dir);
 
     let registry_arc: Arc<dyn crate::providers::ServiceRegistry> = Arc::new(registry);
 
@@ -443,35 +431,35 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     //
     // Dependency chain:
     //   delegate_task tool → needs Arc<dyn TaskDelegator>
-    //   SubAgentDelegator  → needs Arc<SkillsManager>
-    //   parent Agent       → needs Arc<SkillsManager> (with delegate_task registered)
+    //   SubAgentDelegator  → needs Arc<ToolRegistry> + Arc<SkillManager>
+    //   parent Agent       → needs Arc<ToolRegistry> + Arc<SkillManager>
     //
-    // Fix: build two separate Arc<SkillsManager>. The delegator gets its own Arc
-    // (for sub-agent tool filtering). The parent gets a rebuilt Arc that includes
-    // all the same tools + delegate_task. Tool instances (Arc<dyn Tool>) are shared.
+    // ToolRegistry is shared via Arc. delegate_task and tool_search are added
+    // to the parent's registry only — sub-agents get a filtered view.
 
-    let (skills_arc, sub_agent_delegator_arc) = if config.agents.is_empty() {
-        // Create base skills, wrap in Arc for tool_search reference.
-        let base_arc = Arc::new(skills);
-        let tool_search = crate::tools::ToolSearchTool::new(Arc::clone(&base_arc));
+    let (tools_arc, skills_arc, sub_agent_delegator_arc) = if config.agents.is_empty() {
+        // Single-agent mode: add tool_search to base registry.
+        let base_tools_arc: Arc<ToolRegistry> = Arc::new(tools);
+        let tool_search = crate::tools::ToolSearchTool::new(Arc::clone(&base_tools_arc));
 
-        // Rebuild with tool_search added.
-        let mut final_skills = SkillsManager::new();
-        for tool in base_arc.all_tools() {
-            let name = tool.name().to_string();
-            final_skills.register_tool(&name, tool);
+        // Add tool_search to a new registry (Arc is immutable, so rebuild).
+        let mut final_tools = ToolRegistry::new();
+        for tool in base_tools_arc.all_tools() {
+            final_tools.register(tool);
         }
-        final_skills.register_tool("tool_search", Arc::new(tool_search));
+        final_tools.register(Arc::new(tool_search));
 
-        (Arc::new(final_skills), None)
+        (Arc::new(final_tools), Arc::new(skills), None)
     } else {
         tracing::info!(agents = config.agents.len(), "multi-agent mode enabled");
 
-        // Wrap skills in Arc, create delegator (takes its own clone).
-        let skills_arc: Arc<SkillsManager> = Arc::new(skills);
+        let base_tools_arc: Arc<ToolRegistry> = Arc::new(tools);
+        let skills_arc: Arc<SkillManager> = Arc::new(skills);
+
         let delegator = SubAgentDelegator::new(
             config.agents.clone(),
             registry_arc.clone(),
+            Arc::clone(&base_tools_arc),
             Arc::clone(&skills_arc),
             config.agent.max_tool_calls,
         );
@@ -482,20 +470,18 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             Arc::clone(&delegator_arc) as Arc<dyn TaskDelegator>,
         );
 
-        // Rebuild parent skills: same tool instances + delegate_task + tool_search.
-        let mut parent_skills = SkillsManager::new();
-        for tool in skills_arc.all_tools() {
-            let name = tool.name().to_string();
-            parent_skills.register_tool(&name, tool);
+        // Build parent tool registry: same tools + delegate_task + tool_search.
+        let mut parent_tools = ToolRegistry::new();
+        for tool in base_tools_arc.all_tools() {
+            parent_tools.register(tool);
         }
-        parent_skills.register_tool("delegate_task", Arc::new(delegate_tool));
+        parent_tools.register(Arc::new(delegate_tool));
         tracing::info!("delegate_task tool registered (multi-agent mode)");
 
-        // tool_search holds reference to base skills (without delegate_task/tool_search).
-        let tool_search = crate::tools::ToolSearchTool::new(Arc::clone(&skills_arc));
-        parent_skills.register_tool("tool_search", Arc::new(tool_search));
+        let tool_search = crate::tools::ToolSearchTool::new(Arc::clone(&base_tools_arc));
+        parent_tools.register(Arc::new(tool_search));
 
-        (Arc::new(parent_skills), Some(delegator_arc))
+        (Arc::new(parent_tools), skills_arc, Some(delegator_arc))
     };
 
     // ── Delegation channel (conditional — only when sub-agents configured) ─────
@@ -518,7 +504,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         stream_chunk_timeout_secs: config.agent.stream_chunk_timeout_secs,
         max_output_bytes: calculate_max_output_bytes(&config, &registry_arc),
     };
-    let agent = Agent::new(registry_arc, skills_arc, agent_config);
+    let agent = Agent::new(registry_arc, tools_arc, skills_arc, agent_config);
 
     let parts = OrchestratorParts {
         agent,

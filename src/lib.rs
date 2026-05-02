@@ -13,7 +13,7 @@ pub mod tools;
 // Re-exports
 pub use agents::{
     Agent, AgentConfig, AgentLoop, InMemoryBackend, Session, SessionManager,
-    SkillsManager, Orchestrator, OrchestratorParts,
+    ToolRegistry, SkillManager, Orchestrator, OrchestratorParts,
     SystemPromptBuilder, SystemPromptConfig,
     AutonomyLevel, SkillsPromptInjectionMode,
     McpManager, AskUserHandler, DelegateHandler, SubAgentDelegator,
