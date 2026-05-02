@@ -19,6 +19,7 @@ use crate::providers::{
 use crate::providers::ServiceRegistry;
 use crate::providers::capability_tool::ToolResult;
 use crate::config::agent::ContextConfig;
+use crate::tools::delegate::TaskDelegator;
 use futures_util::StreamExt;
 
 /// Callback for ask_user tool: (session_key, question) → user_answer.
@@ -427,7 +428,7 @@ impl AgentLoop {
     }
 
     /// Core chat loop: call LLM, handle tool calls, repeat until text response.
-    async fn chat_loop(&mut self, mut messages: Vec<ChatMessage>) -> anyhow::Result<String> {
+    async fn chat_loop(&mut self, _messages: Vec<ChatMessage>) -> anyhow::Result<String> {
         let mut tool_calls_count = 0usize;
         let mut boosted_max_tokens = false;
 
