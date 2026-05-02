@@ -1103,6 +1103,7 @@ impl Channel for TelegramChannel {
             crate::channels::message::split_message_chunk(&message.content, MAX_MESSAGE_LENGTH - CONTINUATION_OVERHEAD);
 
         let count = chunks.len();
+        let mut last_error = None;
         for (i, chunk) in chunks.into_iter().enumerate() {
             let text = if count > 1 && i < count - 1 {
                 format!("{}\n\n(continues...)", chunk)
@@ -1111,7 +1112,15 @@ impl Channel for TelegramChannel {
             } else {
                 chunk
             };
-            self.send_raw(&chat_id, &text, thread_id.as_deref()).await?;
+            if let Err(e) = self.send_raw(&chat_id, &text, thread_id.as_deref()).await {
+                warn!("Failed to send chunk {}/{}: {}", i + 1, count, e);
+                last_error = Some(e);
+                // 继续尝试发送后续 chunk，不要因为一个 chunk 失败就中断
+            }
+        }
+        // 如果有任何 chunk 失败，返回最后一个错误
+        if let Some(e) = last_error {
+            return Err(e);
         }
         Ok(())
     }
