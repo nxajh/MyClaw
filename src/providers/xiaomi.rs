@@ -151,12 +151,12 @@ impl ChatProvider for XiaomiProvider {
                 while let Some(pos) = buffer.find('\n') {
                     let line = buffer[..pos].to_string();
                     buffer.drain(..=pos);
-                    let event = parse_xiaomi_sse(&line, &mut tool_index_map);
+                    let events = parse_xiaomi_sse(&line, &mut tool_index_map);
                     crate::providers::append_to_debug_log(&format!(
-                        "SSE LINE: {}\nEVENT: {:?}\n",
-                        line, event
+                        "SSE LINE: {}\nEVENTS: {:?}\n",
+                        line, events
                     ));
-                    if let Some(ev) = event {
+                    for ev in events {
                         let _ = tx.send(ev).await;
                     }
                 }
@@ -350,78 +350,104 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
 /// Parse Anthropic-style SSE events from Xiaomi MiMo.
 /// Handles: message_start, content_block_start, content_block_delta,
 /// content_block_stop, message_delta, message_stop.
+/// Returns a Vec because a single SSE line may contain multiple pieces of information
+/// (e.g., message_delta can have both usage and stop_reason).
 fn parse_xiaomi_sse(
     line: &str,
     tool_index_map: &mut std::collections::HashMap<u64, (String, String)>,
-) -> Option<StreamEvent> {
+) -> Vec<StreamEvent> {
     use crate::providers::StreamEvent as SE;
 
     let line = line.trim();
     if line.is_empty() || line.starts_with(':') {
-        return None;
+        return vec![];
     }
-    let data = line.strip_prefix("data:")?.trim();
+    let data = match line.strip_prefix("data:") {
+        Some(d) => d.trim(),
+        None => return vec![],
+    };
     if data == "[DONE]" {
-        return None;
+        return vec![];
     }
 
-    let evt = serde_json::from_str::<serde_json::Value>(data).ok()?;
-    let ty = evt.get("type")?.as_str()?;
+    let evt = match serde_json::from_str::<serde_json::Value>(data) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    let ty = match evt.get("type").and_then(|v| v.as_str()) {
+        Some(t) => t,
+        None => return vec![],
+    };
 
     match ty {
         "content_block_start" => {
-            let index = evt.get("index").and_then(|v| v.as_u64())?;
+            let index = match evt.get("index").and_then(|v| v.as_u64()) {
+                Some(i) => i,
+                None => return vec![],
+            };
             if let Some(cb) = evt.get("content_block") {
                 if cb.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
                     let id = cb.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     let name = cb.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     if !id.is_empty() && !name.is_empty() {
-                        // Store index → (id, name) so subsequent deltas can look it up.
                         tool_index_map.insert(index, (id.clone(), name.clone()));
-                        return Some(SE::ToolCallStart {
+                        return vec![SE::ToolCallStart {
                             id,
                             name,
                             initial_arguments: String::new(),
-                        });
+                        }];
                     }
                 }
             }
-            None
+            vec![]
         }
         "content_block_delta" => {
-            let delta = evt.get("delta")?;
+            let delta = match evt.get("delta") {
+                Some(d) => d,
+                None => return vec![],
+            };
             match delta.get("type").and_then(|v| v.as_str()).unwrap_or("") {
                 "text_delta" => {
                     let text = delta.get("text").and_then(|v| v.as_str()).unwrap_or("");
                     if !text.is_empty() {
-                        return Some(SE::Delta {
+                        vec![SE::Delta {
                             text: text.to_string(),
-                        });
+                        }]
+                    } else {
+                        vec![]
                     }
                 }
                 "thinking_delta" => {
                     let text = delta.get("thinking").and_then(|v| v.as_str()).unwrap_or("");
                     if !text.is_empty() {
-                        return Some(SE::Thinking {
+                        vec![SE::Thinking {
                             text: text.to_string(),
-                        });
+                        }]
+                    } else {
+                        vec![]
                     }
                 }
                 "input_json_delta" => {
-                    // Delta carries index, not id. Look up (id, name) from the map.
-                    let index = evt.get("index").and_then(|v| v.as_u64())?;
-                    let (id, _name) = tool_index_map.get(&index)?.clone();
+                    let index = match evt.get("index").and_then(|v| v.as_u64()) {
+                        Some(i) => i,
+                        None => return vec![],
+                    };
+                    let (id, _name) = match tool_index_map.get(&index) {
+                        Some(entry) => entry.clone(),
+                        None => return vec![],
+                    };
                     let args = delta.get("partial_json").and_then(|v| v.as_str()).unwrap_or("");
-                    return Some(SE::ToolCallDelta {
+                    vec![SE::ToolCallDelta {
                         id,
                         delta: args.to_string(),
-                    });
+                    }]
                 }
-                _ => {}
+                _ => vec![]
             }
-            None
         }
         "message_start" | "message_delta" => {
+            let mut events = Vec::new();
+
             // Usage may appear in message_start (via message.usage) or message_delta (via usage).
             let usage = evt
                 .get("message")
@@ -438,10 +464,10 @@ fn parse_xiaomi_sse(
                     reasoning_tokens: None,
                     cache_write_tokens: None,
                 };
-                return Some(SE::Usage(cu));
+                events.push(SE::Usage(cu));
             }
 
-            // message_delta may carry stop_reason.
+            // message_delta may also carry stop_reason.
             if ty == "message_delta" {
                 if let Some(delta) = evt.get("delta") {
                     if let Some(reason_str) = delta.get("stop_reason").and_then(|v| v.as_str()) {
@@ -452,16 +478,16 @@ fn parse_xiaomi_sse(
                             "content_filter" => StopReason::ContentFilter,
                             _ => StopReason::EndTurn, // covers repetition_truncation
                         };
-                        return Some(SE::Done { reason });
+                        events.push(SE::Done { reason });
                     }
                 }
             }
 
-            None
+            events
         }
-        "message_stop" => Some(SE::Done {
+        "message_stop" => vec![SE::Done {
             reason: StopReason::EndTurn,
-        }),
-        _ => None,
+        }],
+        _ => vec![],
     }
 }
