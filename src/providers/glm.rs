@@ -164,6 +164,8 @@ impl ChatProvider for GlmProvider {
 /// Build a request body tailored to GLM's API.
 ///
 /// Differences from the generic OpenAI body:
+/// - `reasoning_content` extracted from Thinking parts into top-level message field
+/// - `thinking` parameter added for GLM-5.1/5/4.7 models
 /// - `do_sample: true` is added when `temperature > 0` so GLM actually
 ///   samples (without it, temperature is silently ignored).
 /// - `tool_stream: true` when tools are present so that tool calls arrive
@@ -171,9 +173,23 @@ impl ChatProvider for GlmProvider {
 fn build_glm_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
     use serde_json::json;
 
+    let is_thinking_model = is_glm_thinking_model(req.model);
+
     let messages: Vec<serde_json::Value> = req.messages
         .iter()
         .map(|msg| {
+            // Extract reasoning_content from Thinking parts into top-level field.
+            let reasoning: Option<String> = {
+                let parts: Vec<&str> = msg.parts.iter()
+                    .filter_map(|p| match p {
+                        ContentPart::Thinking { thinking } => Some(thinking.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                if parts.is_empty() { None } else { Some(parts.join("")) }
+            };
+
+            // Build content parts, skipping Thinking.
             let content_vec: Vec<serde_json::Value> = msg.parts.iter().filter_map(|part| match part {
                 ContentPart::Text { text } => Some(json!({"type": "text", "text": text})),
                 ContentPart::ImageUrl { url, detail } => Some(json!({
@@ -184,10 +200,7 @@ fn build_glm_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                     "type": "image_url",
                     "image_url": { "url": format!("data:image;base64,{}", b64_json), "detail": format!("{:?}", detail).to_lowercase() }
                 })),
-                ContentPart::Thinking { .. } => {
-                    // GLM does not support thinking blocks — skip entirely.
-                    None
-                }
+                ContentPart::Thinking { .. } => None,
             }).collect();
 
             let content = if content_vec.len() == 1 {
@@ -225,6 +238,10 @@ fn build_glm_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                 } else {
                     json!(content)
                 };
+                // Attach reasoning_content as top-level field per GLM spec.
+                if let Some(ref rc) = reasoning {
+                    msg_json["reasoning_content"] = json!(rc);
+                }
                 if let Some(tcs) = &msg.tool_calls {
                     msg_json["tool_calls"] = serde_json::json!(tcs.iter().map(|tc| tc.to_openai()).collect::<Vec<_>>());
                 }
@@ -265,7 +282,20 @@ fn build_glm_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
         body["tool_stream"] = json!(true);
     }
 
+    // Enable thinking with Preserved Thinking for supported models.
+    if is_thinking_model {
+        body["thinking"] = json!({
+            "type": "enabled",
+            "clear_thinking": false
+        });
+    }
+
     body
+}
+
+/// Check if a GLM model supports the thinking parameter.
+fn is_glm_thinking_model(model: &str) -> bool {
+    model.starts_with("glm-5") || model.starts_with("glm-4.7")
 }
 
 // ── SSE parsing ───────────────────────────────────────────────────────────────
