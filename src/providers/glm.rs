@@ -173,8 +173,6 @@ impl ChatProvider for GlmProvider {
 fn build_glm_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
     use serde_json::json;
 
-    let is_thinking_model = is_glm_thinking_model(req.model);
-
     let messages: Vec<serde_json::Value> = req.messages
         .iter()
         .map(|msg| {
@@ -282,21 +280,19 @@ fn build_glm_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
         body["tool_stream"] = json!(true);
     }
 
-    // Enable thinking with Preserved Thinking for supported models.
-    if is_thinking_model {
-        body["thinking"] = json!({
-            "type": "enabled",
-            "clear_thinking": false
-        });
+    // Enable thinking with Preserved Thinking when configured.
+    if let Some(ref tc) = req.thinking {
+        let mut thinking_val = json!({"type": tc.type_});
+        if tc.type_ == "enabled" {
+            // Preserved Thinking: retain reasoning_content in history messages.
+            thinking_val["clear_thinking"] = json!(false);
+        }
+        body["thinking"] = thinking_val;
     }
 
     body
 }
 
-/// Check if a GLM model supports the thinking parameter.
-fn is_glm_thinking_model(model: &str) -> bool {
-    model.starts_with("glm-5") || model.starts_with("glm-4.7")
-}
 
 // ── SSE parsing ───────────────────────────────────────────────────────────────
 

@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use crate::providers::Capability;
 use crate::providers::{
-    BoxStream, ChatMessage, ChatRequest, ChatUsage, StopReason, StreamEvent, ToolCall,
+    BoxStream, ChatMessage, ChatRequest, ChatUsage, StopReason, StreamEvent, ToolCall, ThinkingConfig,
 };
 use crate::providers::ServiceRegistry;
 use crate::providers::capability_tool::ToolResult;
@@ -479,12 +479,26 @@ impl AgentLoop {
                 self.calculate_max_tokens(&model_id)
             };
 
+            // Derive thinking config from model config's `reasoning` field.
+            let thinking = self.registry.get_chat_model_config(&model_id)
+                .ok()
+                .and_then(|cfg| {
+                    if cfg.reasoning {
+                        Some(ThinkingConfig {
+                            type_: "enabled".to_string(),
+                            effort: None,
+                        })
+                    } else {
+                        None
+                    }
+                });
+
             let req = ChatRequest {
                 model: &model_id,
                 messages: &messages,
                 temperature: None,
                 max_tokens,
-                thinking: None,
+                thinking,
                 stop: None,
                 seed: None,
                 tools: if tools.is_empty() { None } else { Some(&tools[..]) },

@@ -326,10 +326,14 @@ fn build_xiaomi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
     if let Some(ref thinking) = req.thinking {
         // Build thinking config per Anthropic/Xiaomi protocol.
         // Xiaomi expects: {"type": "enabled", "budget_tokens": N}
-        // effort field maps to budget_tokens level when present.
         let mut t = serde_json::Map::new();
-        t.insert("type".to_string(), serde_json::json!("enabled"));
-        if let Some(budget) = thinking.budget_tokens {
+        t.insert("type".to_string(), serde_json::json!(thinking.type_));
+        if let Some(budget) = thinking.effort.as_ref().and_then(|e| match e.as_str() {
+            "high" => Some(10000u32),
+            "medium" => Some(5000u32),
+            "low" => Some(2000u32),
+            _ => None,
+        }) {
             t.insert("budget_tokens".to_string(), serde_json::json!(budget));
         }
         body["thinking"] = serde_json::json!(t);

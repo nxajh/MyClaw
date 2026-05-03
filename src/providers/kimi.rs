@@ -14,14 +14,6 @@ use crate::providers::{BoxStream, ChatProvider, ChatRequest, ContentPart, Stream
 
 const DEFAULT_BASE_URL: &str = "https://api.moonshot.cn/v1";
 
-/// Models that support the `thinking` parameter.
-const THINKING_MODELS: &[&str] = &[
-    "kimi-k2.6",
-    "kimi-k2.5",
-    "kimi-k2-thinking",
-    "kimi-k2-thinking-turbo",
-];
-
 #[derive(Clone)]
 pub struct KimiProvider {
     base_url: String,
@@ -50,15 +42,8 @@ impl KimiProvider {
     }
 }
 
-/// Build a Kimi-specific request body.
-///
-/// - Extracts `ContentPart::Thinking` into top-level `reasoning_content`
-/// - Assistant messages with empty content get `null` (Kimi rejects empty strings)
-/// - Adds `thinking` parameter for K2.5/K2.6 models
 fn build_kimi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
     use serde_json::json;
-
-    let is_thinking_model = THINKING_MODELS.iter().any(|m| req.model == *m);
 
     let messages: Vec<serde_json::Value> = req
         .messages
@@ -186,9 +171,14 @@ fn build_kimi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
         }).collect::<Vec<_>>());
     }
 
-    // Add thinking parameter for supported models (default: enabled).
-    if is_thinking_model {
-        body["thinking"] = json!({"type": "enabled"});
+    // Add thinking parameter when configured.
+    if let Some(ref tc) = req.thinking {
+        let mut thinking_val = json!({"type": tc.type_});
+        if tc.type_ == "enabled" {
+            // Preserved Thinking: keep all historical reasoning_content.
+            thinking_val["keep"] = json!("all");
+        }
+        body["thinking"] = thinking_val;
     }
 
     body

@@ -192,10 +192,10 @@ pub struct ChatRequest<'a> {
 
 #[derive(Debug, Clone)]
 pub struct ThinkingConfig {
-    /// Reasoning effort: "high" | "medium" | "low"
+    /// Thinking type: "enabled" or "disabled". Derived from model config's `reasoning` field.
+    pub type_: String,
+    /// Reasoning effort: "high" | "medium" | "low". Configurable at runtime.
     pub effort: Option<String>,
-    /// Reasoning token budget (upper bound).
-    pub budget_tokens: Option<u32>,
 }
 
 /// Non-streaming chat response (assembled from StreamEvent by caller).
