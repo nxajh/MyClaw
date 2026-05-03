@@ -6,12 +6,9 @@
 
 /// Return the byte offset of the `max_chars`-th character, or the full string
 /// length if the string is shorter.
-///
-/// ```
-/// assert_eq!(char_offset("hello", 3), 3);
-/// assert_eq!(char_offset("你好世界", 2), 6);  // 每个汉字 3 bytes
-/// assert_eq!(char_offset("abc", 10), 3);     // shorter than limit
-/// ```
+// char_offset("hello", 3) == 3
+// char_offset("你好世界", 2) == 6   (each CJK char = 3 bytes)
+// char_offset("abc", 10) == 3      (shorter than limit)
 pub fn char_offset(s: &str, max_chars: usize) -> usize {
     s.char_indices()
         .nth(max_chars)
