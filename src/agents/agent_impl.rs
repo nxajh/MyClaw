@@ -221,8 +221,7 @@ impl Agent {
         } else {
             // Build from config
             let builder = SystemPromptBuilder::new(self.config.prompt_config.clone());
-            let tool_names = self.tools.tool_names_sorted();
-            builder.build(&self.skills, &tool_names)
+            builder.build(&self.skills)
         };
 
         AgentLoop {

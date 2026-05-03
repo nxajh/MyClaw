@@ -6,10 +6,6 @@
 //!
 //! - 0. Anti-narration
 //! - 0b. Tool Honesty
-//! - 1. Tooling (Full or Compact)
-//!
-//!   Compact: name only, Full: name + description
-//! - 1b. Hardware (if gpio/arduino tools present)
 //! - 1c. Action instruction (native vs XML protocol)
 //! - 2. Safety (autonomy_level)
 //! - 3. Skills (Full or Compact)
@@ -110,12 +106,10 @@ impl SystemPromptBuilder {
     pub fn build(
         &self,
         skills: &SkillManager,
-        tool_names: &[String],
     ) -> String {
         let mut sections = vec![
             SECTION_ANTI_NARRATION.to_string(),
             SECTION_TOOL_HONESTY.to_string(),
-            self.build_tooling(tool_names),
             self.build_action_instruction(),
             self.build_safety(),
             self.build_skills(skills),
@@ -140,28 +134,6 @@ impl SystemPromptBuilder {
 
     // ── Section builders ────────────────────────────────────────────────────
 
-    fn build_tooling(&self, tool_names: &[String]) -> String {
-        if self.config.compact {
-            // Compact: name only
-            let names = tool_names.join(", ");
-            format!(
-                "## Available Tools\n\nYou have access to the following tools: {}\n\nUse tools when needed.",
-                names
-            )
-        } else {
-            // Full: handled by LLM provider's tool schema
-            // Only add instructions when native_tools = false
-            if !self.config.native_tools {
-                format!(
-                    "## Tool Calling\n\nUse the XML format for tool calls:\n\n<tool_call>\\n<tool_name>tool-name</tool_name>\\n<arguments>{{\"key\": \"value\"}}</arguments>\\n</tool_call>\n\nAvailable tools: {}",
-                    tool_names.join(", ")
-                )
-            } else {
-                String::new()
-            }
-        }
-    }
-
     fn build_action_instruction(&self) -> String {
         if self.config.native_tools {
             match self.config.autonomy {
@@ -170,7 +142,7 @@ impl SystemPromptBuilder {
                 AutonomyLevel::ReadOnly => "## Actions\n\nYou have read-only tools available (search, read, analyze). Do not write or execute.".to_string(),
             }
         } else {
-            "## Actions\n\nWhen you need to perform an action, use the <tool_call> XML format shown above.".to_string()
+            "## Actions\n\nWhen you need to perform an action, use the <invoke> XML format to call tools.".to_string()
         }
     }
 
@@ -334,10 +306,8 @@ mod tests {
     fn test_anti_narration_present() {
         let config = SystemPromptConfig::default();
         let builder = SystemPromptBuilder::new(config);
-        // SkillManager would be empty here; use a dummy
-        // For unit test, we just verify build doesn't panic
         let skills = SkillManager::new();
-        let prompt = builder.build(&skills, &["calc".to_string()]);
+        let prompt = builder.build(&skills);
         assert!(prompt.contains("No Tool Narration"));
         assert!(prompt.contains("Tool Honesty"));
     }
@@ -349,7 +319,7 @@ mod tests {
         config.channel_name = Some("wechat".to_string());
         let builder = SystemPromptBuilder::new(config);
         let skills = SkillManager::new();
-        let prompt = builder.build(&skills, &["calc".to_string()]);
+        let prompt = builder.build(&skills);
         assert!(!prompt.contains("Channel Capabilities"));
     }
 
@@ -359,7 +329,7 @@ mod tests {
         config.max_chars = 50;
         let builder = SystemPromptBuilder::new(config);
         let skills = SkillManager::new();
-        let prompt = builder.build(&skills, &[]);
+        let prompt = builder.build(&skills);
         assert!(prompt.len() <= 100);
         assert!(prompt.contains("truncated"));
     }
@@ -370,7 +340,7 @@ mod tests {
         config.autonomy = AutonomyLevel::ReadOnly;
         let builder = SystemPromptBuilder::new(config);
         let skills = SkillManager::new();
-        let prompt = builder.build(&skills, &[]);
+        let prompt = builder.build(&skills);
         assert!(prompt.contains("read-only mode"));
     }
 
@@ -380,7 +350,7 @@ mod tests {
         config.channel_name = Some("wechat".to_string());
         let builder = SystemPromptBuilder::new(config);
         let skills = SkillManager::new();
-        let prompt = builder.build(&skills, &[]);
+        let prompt = builder.build(&skills);
         assert!(prompt.contains("Markdown fully supported"));
     }
 
@@ -390,7 +360,7 @@ mod tests {
         config.channel_name = Some("discord".to_string());
         let builder = SystemPromptBuilder::new(config);
         let skills = SkillManager::new();
-        let prompt = builder.build(&skills, &[]);
+        let prompt = builder.build(&skills);
         assert!(prompt.contains("No markdown tables"));
     }
 
@@ -400,7 +370,18 @@ mod tests {
         config.autonomy = AutonomyLevel::ReadOnly;
         let builder = SystemPromptBuilder::new(config);
         let skills = SkillManager::new();
-        let prompt = builder.build(&skills, &[]);
+        let prompt = builder.build(&skills);
         assert!(prompt.contains("read-only tools"));
+    }
+
+    #[test]
+    fn test_no_tool_list_in_prompt() {
+        let mut config = SystemPromptConfig::default();
+        config.compact = true;
+        let builder = SystemPromptBuilder::new(config);
+        let skills = SkillManager::new();
+        let prompt = builder.build(&skills);
+        assert!(!prompt.contains("Available Tools"));
+        assert!(!prompt.contains("Tool Calling"));
     }
 }
