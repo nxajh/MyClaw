@@ -129,7 +129,13 @@ pub fn split_message_chunk(message: &str, limit: usize) -> Vec<String> {
 
         // Try to find a good split point within the limit
         let split_pos = find_split_point(remaining, limit);
-        let (chunk, rest) = remaining.split_at(split_pos);
+        // find_split_point returns a char index; convert to byte index for split_at
+        let byte_pos = remaining
+            .char_indices()
+            .nth(split_pos)
+            .map(|(i, _)| i)
+            .unwrap_or(remaining.len());
+        let (chunk, rest) = remaining.split_at(byte_pos);
         chunks.push(chunk.trim_end().to_string());
         remaining = rest.trim_start();
     }
