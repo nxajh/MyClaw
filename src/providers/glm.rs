@@ -282,12 +282,11 @@ fn build_glm_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
 
     // Enable thinking with Preserved Thinking when configured.
     if let Some(ref tc) = req.thinking {
-        let mut thinking_val = json!({"type": tc.type_});
-        if tc.type_ == "enabled" {
-            // Preserved Thinking: retain reasoning_content in history messages.
-            thinking_val["clear_thinking"] = json!(false);
+        if tc.enabled {
+            body["thinking"] = json!({"type": "enabled", "clear_thinking": false});
+        } else {
+            body["thinking"] = json!({"type": "disabled"});
         }
-        body["thinking"] = thinking_val;
     }
 
     body

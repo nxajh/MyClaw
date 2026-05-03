@@ -192,8 +192,8 @@ pub struct ChatRequest<'a> {
 
 #[derive(Debug, Clone)]
 pub struct ThinkingConfig {
-    /// Thinking type: "enabled" or "disabled". Derived from model config's `reasoning` field.
-    pub type_: String,
+    /// Whether thinking/reasoning is enabled. Derived from model config's `reasoning` field.
+    pub enabled: bool,
     /// Reasoning effort: "high" | "medium" | "low". Configurable at runtime.
     pub effort: Option<String>,
 }

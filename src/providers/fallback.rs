@@ -48,7 +48,7 @@ impl ChatProvider for FallbackChatProvider {
         let temperature = req.temperature;
         let max_tokens = req.max_tokens;
         let thinking: Option<ThinkingConfig> = req.thinking.map(|t| ThinkingConfig {
-            type_: t.type_.clone(),
+            enabled: t.enabled,
             effort: t.effort.clone(),
         });
         let stop = req.stop.clone();

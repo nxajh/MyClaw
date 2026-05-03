@@ -173,12 +173,12 @@ fn build_kimi_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
 
     // Add thinking parameter when configured.
     if let Some(ref tc) = req.thinking {
-        let mut thinking_val = json!({"type": tc.type_});
-        if tc.type_ == "enabled" {
+        if tc.enabled {
             // Preserved Thinking: keep all historical reasoning_content.
-            thinking_val["keep"] = json!("all");
+            body["thinking"] = json!({"type": "enabled", "keep": "all"});
+        } else {
+            body["thinking"] = json!({"type": "disabled"});
         }
-        body["thinking"] = thinking_val;
     }
 
     body

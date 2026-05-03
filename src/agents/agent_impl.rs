@@ -485,7 +485,7 @@ impl AgentLoop {
                 .and_then(|cfg| {
                     if cfg.reasoning {
                         Some(ThinkingConfig {
-                            type_: "enabled".to_string(),
+                            enabled: true,
                             effort: None,
                         })
                     } else {
