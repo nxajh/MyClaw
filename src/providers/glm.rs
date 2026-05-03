@@ -174,19 +174,19 @@ fn build_glm_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
     let messages: Vec<serde_json::Value> = req.messages
         .iter()
         .map(|msg| {
-            let content_vec: Vec<serde_json::Value> = msg.parts.iter().map(|part| match part {
-                ContentPart::Text { text } => json!({"type": "text", "text": text}),
-                ContentPart::ImageUrl { url, detail } => json!({
+            let content_vec: Vec<serde_json::Value> = msg.parts.iter().filter_map(|part| match part {
+                ContentPart::Text { text } => Some(json!({"type": "text", "text": text})),
+                ContentPart::ImageUrl { url, detail } => Some(json!({
                     "type": "image_url",
                     "image_url": { "url": url, "detail": format!("{:?}", detail).to_lowercase() }
-                }),
-                ContentPart::ImageB64 { b64_json, detail } => json!({
+                })),
+                ContentPart::ImageB64 { b64_json, detail } => Some(json!({
                     "type": "image_url",
                     "image_url": { "url": format!("data:image;base64,{}", b64_json), "detail": format!("{:?}", detail).to_lowercase() }
-                }),
+                })),
                 ContentPart::Thinking { .. } => {
-                    // GLM does not support thinking blocks — skip silently.
-                    json!({"type": "text", "text": ""})
+                    // GLM does not support thinking blocks — skip entirely.
+                    None
                 }
             }).collect();
 
@@ -199,6 +199,8 @@ fn build_glm_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                 } else {
                     content_vec.into_iter().next().unwrap()
                 }
+            } else if content_vec.is_empty() {
+                json!("")
             } else {
                 json!(content_vec)
             };
@@ -213,7 +215,12 @@ fn build_glm_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                 }
                 msg_json["content"] = json!(content);
             } else if msg.role == "assistant" {
-                msg_json["content"] = if content.is_string() && content.as_str().unwrap_or("").is_empty() {
+                let is_empty = match &content {
+                    serde_json::Value::String(s) => s.is_empty(),
+                    serde_json::Value::Array(arr) => arr.is_empty(),
+                    _ => false,
+                };
+                msg_json["content"] = if is_empty {
                     serde_json::Value::Null
                 } else {
                     json!(content)

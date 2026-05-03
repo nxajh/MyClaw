@@ -122,19 +122,19 @@ pub fn build_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
     let messages: Vec<serde_json::Value> = req.messages
         .iter()
         .map(|msg| {
-            let content_vec: Vec<serde_json::Value> = msg.parts.iter().map(|part| match part {
-                ContentPart::Text { text } => serde_json::json!({"type": "text", "text": text}),
-                ContentPart::ImageUrl { url, detail } => serde_json::json!({
+            let content_vec: Vec<serde_json::Value> = msg.parts.iter().filter_map(|part| match part {
+                ContentPart::Text { text } => Some(serde_json::json!({"type": "text", "text": text})),
+                ContentPart::ImageUrl { url, detail } => Some(serde_json::json!({
                     "type": "image_url",
                     "image_url": { "url": url, "detail": format!("{:?}", detail).to_lowercase() }
-                }),
-                ContentPart::ImageB64 { b64_json, detail } => serde_json::json!({
+                })),
+                ContentPart::ImageB64 { b64_json, detail } => Some(serde_json::json!({
                     "type": "image_url",
                     "image_url": { "url": format!("data:image;base64,{}", b64_json), "detail": format!("{:?}", detail).to_lowercase() }
-                }),
+                })),
                 ContentPart::Thinking { .. } => {
-                    // OpenAI does not support thinking blocks — skip silently.
-                    serde_json::json!({"type": "text", "text": ""})
+                    // OpenAI-compatible APIs do not support thinking blocks — skip entirely.
+                    None
                 }
             }).collect();
 
@@ -148,6 +148,9 @@ pub fn build_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                 } else {
                     content_vec.into_iter().next().unwrap()
                 }
+            } else if content_vec.is_empty() {
+                // All parts were filtered (e.g. only Thinking parts) — empty content.
+                serde_json::json!("")
             } else {
                 serde_json::json!(content_vec)
             };
@@ -165,7 +168,14 @@ pub fn build_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                 msg_json["content"] = serde_json::json!(content);
             } else if msg.role == "assistant" {
                 // Assistant message may carry tool_calls from a previous turn.
-                msg_json["content"] = if content.is_string() && content.as_str().unwrap_or("").is_empty() {
+                // For empty content (text-only with empty string, or all parts filtered),
+                // emit null — many providers reject empty string content.
+                let is_empty = match &content {
+                    serde_json::Value::String(s) => s.is_empty(),
+                    serde_json::Value::Array(arr) => arr.is_empty(),
+                    _ => false,
+                };
+                msg_json["content"] = if is_empty {
                     serde_json::Value::Null
                 } else {
                     serde_json::json!(content)
