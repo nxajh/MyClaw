@@ -277,9 +277,11 @@ fn find_line_number(haystack: &str, needle: &str) -> usize {
 /// Also collapses multi-line strings into the first line.
 fn truncate_line(s: &str, max_len: usize) -> String {
     let first_line = s.lines().next().unwrap_or("");
-    if first_line.len() <= max_len {
+    let char_count = first_line.chars().count();
+    if char_count <= max_len {
         first_line.to_string()
     } else {
-        format!("{}...", &first_line[..max_len - 3])
+        let end_byte = first_line.char_indices().nth(max_len - 3).map(|(i, _)| i).unwrap_or(first_line.len());
+        format!("{}...", &first_line[..end_byte])
     }
 }

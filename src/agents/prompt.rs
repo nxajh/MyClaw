@@ -270,16 +270,19 @@ impl SystemPromptBuilder {
             return text;
         }
         // Truncate to max_chars, keeping the beginning (system prompt priority).
-        text.truncate(self.config.max_chars);
+        // max_chars is a character count; find the corresponding byte boundary.
+        let end_byte = text.char_indices().nth(self.config.max_chars).map(|(i, _)| i).unwrap_or(text.len());
+        text.truncate(end_byte);
         text.push_str("\n\n[... system prompt truncated ...]");
         text
     }
 
     fn truncate_str(s: &str, max_chars: usize) -> String {
-        if s.len() <= max_chars {
+        if s.chars().count() <= max_chars {
             s.to_string()
         } else {
-            let mut r = s[..max_chars].to_string();
+            let end_byte = s.char_indices().nth(max_chars).map(|(i, _)| i).unwrap_or(s.len());
+            let mut r = s[..end_byte].to_string();
             r.push_str("\n\n[... truncated ...]");
             r
         }
