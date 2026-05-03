@@ -8,6 +8,7 @@ pub mod mcp;
 pub mod providers;
 pub mod registry;
 pub mod storage;
+pub mod str_utils;
 pub mod tools;
 
 // Re-exports

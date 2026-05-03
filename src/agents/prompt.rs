@@ -20,6 +20,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::agents::SkillManager;
+use crate::str_utils;
 
 // ── Config types ─────────────────────────────────────────────────────────────
 
@@ -266,12 +267,10 @@ impl SystemPromptBuilder {
     // ── Utilities ──────────────────────────────────────────────────────────
 
     fn truncate(&self, mut text: String) -> String {
-        if self.config.max_chars == 0 || text.len() <= self.config.max_chars {
+        if self.config.max_chars == 0 || text.chars().count() <= self.config.max_chars {
             return text;
         }
-        // Truncate to max_chars, keeping the beginning (system prompt priority).
-        // max_chars is a character count; find the corresponding byte boundary.
-        let end_byte = text.char_indices().nth(self.config.max_chars).map(|(i, _)| i).unwrap_or(text.len());
+        let end_byte = str_utils::char_offset(&text, self.config.max_chars);
         text.truncate(end_byte);
         text.push_str("\n\n[... system prompt truncated ...]");
         text
@@ -281,8 +280,7 @@ impl SystemPromptBuilder {
         if s.chars().count() <= max_chars {
             s.to_string()
         } else {
-            let end_byte = s.char_indices().nth(max_chars).map(|(i, _)| i).unwrap_or(s.len());
-            let mut r = s[..end_byte].to_string();
+            let mut r = str_utils::truncate_chars(s, max_chars).to_string();
             r.push_str("\n\n[... truncated ...]");
             r
         }

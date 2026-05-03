@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use crate::providers::{Tool, ToolResult};
+use crate::str_utils;
 use serde_json::json;
 use std::path::Path;
 
@@ -161,8 +162,8 @@ impl Tool for FileWriteTool {
                 byte_count,
                 line_count,
                 path,
-                content.lines().next().map(|l| truncate_line(l, 80)).unwrap_or_else(|| "(empty)".to_string()),
-                content.lines().last().map(|l| truncate_line(l, 80)).unwrap_or_else(|| "(empty)".to_string()),
+                content.lines().next().map(|l| str_utils::truncate_line(l, 80)).unwrap_or_else(|| "(empty)".to_string()),
+                content.lines().last().map(|l| str_utils::truncate_line(l, 80)).unwrap_or_else(|| "(empty)".to_string()),
             ),
             error: None,
         })
@@ -254,8 +255,8 @@ impl Tool for FileEditTool {
                 "replaced 1 occurrence in {} (line {}):\n  - {}\n  + {}",
                 path,
                 find_line_number(&content, old_string),
-                truncate_line(old_string, 80),
-                truncate_line(new_string, 80),
+                str_utils::truncate_line(old_string, 80),
+                str_utils::truncate_line(new_string, 80),
             ),
             error: None,
         })
@@ -270,18 +271,5 @@ fn find_line_number(haystack: &str, needle: &str) -> usize {
         haystack[..pos].lines().count() + 1
     } else {
         0
-    }
-}
-
-/// Truncate a string to `max_len` chars, appending "..." if truncated.
-/// Also collapses multi-line strings into the first line.
-fn truncate_line(s: &str, max_len: usize) -> String {
-    let first_line = s.lines().next().unwrap_or("");
-    let char_count = first_line.chars().count();
-    if char_count <= max_len {
-        first_line.to_string()
-    } else {
-        let end_byte = first_line.char_indices().nth(max_len - 3).map(|(i, _)| i).unwrap_or(first_line.len());
-        format!("{}...", &first_line[..end_byte])
     }
 }

@@ -48,6 +48,7 @@ use super::loop_breaker::{LoopBreak, LoopBreaker, LoopBreakerConfig};
 use super::session_manager::{Session, PersistHook};
 use crate::agents::prompt::{SystemPromptBuilder, SystemPromptConfig};
 use crate::storage::SummaryRecord;
+use crate::str_utils;
 
 /// Estimate token count from text length (~4 bytes per token).
 pub(crate) fn estimate_tokens(text: &str) -> u64 {
@@ -513,9 +514,8 @@ impl AgentLoop {
                 messages.iter().map(|m| {
                     let content = m.text_content();
                     let truncated = if content.len() > 100 {
-                        let end = content.char_indices().take_while(|(i, _)| *i < 100).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(100);
-                        format!("{}...", &content[..end])
-                    } else { content };
+                        format!("{}...", str_utils::truncate_chars(&content, 97))
+                    } else { content.to_string() };
                     format!("{}: {}", m.role, truncated)
                 }).collect::<Vec<_>>()
             );
