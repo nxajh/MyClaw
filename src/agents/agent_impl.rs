@@ -427,6 +427,9 @@ impl AgentLoop {
         // History.
         messages.extend(self.session.history.iter().cloned());
 
+        // Safety: remove orphan tool results before sending to provider.
+        super::session_manager::sanitize_history(&mut messages);
+
         Ok(messages)
     }
 

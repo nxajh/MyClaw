@@ -8,6 +8,44 @@ use parking_lot::RwLock;
 use crate::providers::capability_chat::ChatMessage;
 use crate::storage::{SessionBackend, SummaryRecord};
 
+/// Remove orphan tool results (tool messages whose tool_call_id has no matching
+/// assistant tool_call in the history). Also removes any trailing assistant
+/// message with tool_calls that has no subsequent tool results (incomplete round).
+///
+/// This must be called:
+/// 1. After loading session history from DB (recovery path)
+/// 2. Before sending messages to the provider (request path)
+pub fn sanitize_history(history: &mut Vec<ChatMessage>) {
+    // Pass 1: collect all tool_call IDs from assistant messages.
+    let mut known_tool_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for msg in history.iter() {
+        if msg.role == "assistant" {
+            if let Some(ref tcs) = msg.tool_calls {
+                for tc in tcs {
+                    known_tool_ids.insert(tc.id.clone());
+                }
+            }
+        }
+    }
+
+    // Pass 2: remove tool messages whose tool_call_id is unknown.
+    let before = history.len();
+    history.retain(|msg| {
+        if msg.role == "tool" {
+            if let Some(ref tc_id) = msg.tool_call_id {
+                return known_tool_ids.contains(tc_id);
+            }
+            return false; // tool message without tool_call_id is always invalid
+        }
+        true
+    });
+
+    let removed = before - history.len();
+    if removed > 0 {
+        tracing::warn!(removed, "sanitized orphan tool results from history");
+    }
+}
+
 /// In-memory session backend for development and testing.
 pub struct InMemoryBackend {
     /// session_key -> Vec<ChatMessage>
@@ -223,12 +261,17 @@ impl SessionManager {
                     message_ids.push(id);
                 }
 
+                sanitize_history(&mut history);
+
                 tracing::info!(
                     session = %key,
                     summary_tokens = ?summary.token_estimate,
                     incremental_count = history.len() - 1,
                     "session restored from summary"
                 );
+
+                // message_ids may be longer than history after sanitization; trim.
+                message_ids.truncate(history.len());
 
                 Session {
                     key: key.to_string(),
@@ -237,10 +280,11 @@ impl SessionManager {
                 }
             }
             None => {
-                let full = self.backend.load(key);
+                let mut full = self.backend.load(key);
                 let count = full.len();
+                sanitize_history(&mut full);
                 if count > 0 {
-                    tracing::info!(session = %key, message_count = count, "session restored from full history");
+                    tracing::info!(session = %key, message_count = count, sanitized = full.len(), "session restored from full history");
                 }
                 Session {
                     key: key.to_string(),
