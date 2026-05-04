@@ -1425,7 +1425,7 @@ impl AgentLoop {
                 ];
 
                 let old_est = est;
-                let new_est = estimate_tokens(&self.session.history[i].text_content()) as u64;
+                let new_est = estimate_tokens(&self.session.history[i].text_content());
                 self.token_tracker.adjust_for_compaction(old_est, new_est);
 
                 tracing::warn!(
