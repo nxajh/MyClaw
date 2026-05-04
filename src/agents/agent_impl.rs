@@ -201,6 +201,11 @@ impl Agent {
         &self.registry
     }
 
+    /// Access the tool registry (for slash commands).
+    pub fn tools(&self) -> &Arc<super::tool_registry::ToolRegistry> {
+        &self.tools
+    }
+
     /// Set the system prompt directly (overrides builder).
     pub fn with_system_prompt(mut self, prompt: String) -> Self {
         self.system_prompt = prompt;
