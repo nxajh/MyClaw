@@ -1313,13 +1313,27 @@ impl AgentLoop {
         let summary = match self.summarize_inline(&to_compact, existing_summary.as_deref(), model_id).await {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(error = %e, "summarizer failed, leaving history intact for next retry");
+                tracing::warn!(error = %e, "summarizer failed, dropping pre-boundary history");
+                let removed_tokens: u64 = self.session.history[..boundary]
+                    .iter()
+                    .map(estimate_message_tokens)
+                    .sum();
+                self.session.history.drain(..boundary);
+                self.session.message_ids.drain(..boundary);
+                self.token_tracker.adjust_for_compaction(removed_tokens, 0);
                 return Ok(());
             }
         };
 
         if summary.trim().is_empty() {
-            tracing::warn!("summarizer returned empty, leaving history intact for next retry");
+            tracing::warn!("summarizer returned empty, dropping pre-boundary history");
+            let removed_tokens: u64 = self.session.history[..boundary]
+                .iter()
+                .map(estimate_message_tokens)
+                .sum();
+            self.session.history.drain(..boundary);
+            self.session.message_ids.drain(..boundary);
+            self.token_tracker.adjust_for_compaction(removed_tokens, 0);
             return Ok(());
         }
 
