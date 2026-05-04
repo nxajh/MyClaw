@@ -1314,26 +1314,14 @@ impl AgentLoop {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(error = %e, "summarizer failed, dropping pre-boundary history");
-                let removed_tokens: u64 = self.session.history[..boundary]
-                    .iter()
-                    .map(estimate_message_tokens)
-                    .sum();
-                self.session.history.drain(..boundary);
-                self.session.message_ids.drain(..boundary);
-                self.token_tracker.adjust_for_compaction(removed_tokens, 0);
+                self.drop_pre_boundary(boundary);
                 return Ok(());
             }
         };
 
         if summary.trim().is_empty() {
             tracing::warn!("summarizer returned empty, dropping pre-boundary history");
-            let removed_tokens: u64 = self.session.history[..boundary]
-                .iter()
-                .map(estimate_message_tokens)
-                .sum();
-            self.session.history.drain(..boundary);
-            self.session.message_ids.drain(..boundary);
-            self.token_tracker.adjust_for_compaction(removed_tokens, 0);
+            self.drop_pre_boundary(boundary);
             return Ok(());
         }
 
@@ -1394,11 +1382,24 @@ impl AgentLoop {
         );
 
         // 7. Safety net: if still over threshold, truncate retention zone.
+        // After drain+insert, retention zone now starts at compact_start + 1.
+        let new_boundary = compact_start + 1;
         if new_total > threshold {
-            self.truncate_retention_zone(boundary, model_id);
+            self.truncate_retention_zone(new_boundary, model_id);
         }
 
         Ok(())
+    }
+
+    /// Drop all history before the boundary (no summary, no recovery).
+    fn drop_pre_boundary(&mut self, boundary: usize) {
+        let removed_tokens: u64 = self.session.history[..boundary]
+            .iter()
+            .map(estimate_message_tokens)
+            .sum();
+        self.session.history.drain(..boundary);
+        self.session.message_ids.drain(..boundary);
+        self.token_tracker.adjust_for_compaction(removed_tokens, 0);
     }
 
     /// Safety net: truncate oversized tool results in retention zone, or drop oldest unit.
