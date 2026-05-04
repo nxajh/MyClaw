@@ -347,6 +347,7 @@ impl Orchestrator {
                             agent: &agent,
                             agent_loop: session_loop.as_ref(),
                             mcp_manager: self.mcp_manager.as_ref(),
+                            sessions: &self.sessions,
                         };
                         if let Some(response) = super::slash_command::dispatch(cmd, cmd_args, cmd_ctx).await {
                             // Send command response directly, skip agent loop.

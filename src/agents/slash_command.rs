@@ -20,6 +20,8 @@ pub struct CommandContext<'a> {
     pub agent_loop: Option<&'a Arc<TokioMutex<AgentLoop>>>,
     /// MCP manager (for /mcp command).
     pub mcp_manager: Option<&'a Arc<McpManager>>,
+    /// Sessions cache — needed by /new to evict stale agent loops.
+    pub sessions: &'a dashmap::DashMap<String, Arc<tokio::sync::Mutex<AgentLoop>>>,
 }
 
 /// Parse a slash command from message content.
@@ -148,6 +150,9 @@ async fn cmd_status(ctx: CommandContext<'_>) -> String {
 }
 
 async fn cmd_new(ctx: CommandContext<'_>) -> String {
+    // Evict cached agent loop so next message creates a fresh one.
+    ctx.sessions.remove(ctx.session_key);
+    // Clear persistent session data.
     ctx.session_manager.reset(ctx.session_key);
     "🆕 会话已清空，开始新对话。".to_string()
 }
