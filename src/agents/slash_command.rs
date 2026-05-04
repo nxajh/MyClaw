@@ -70,6 +70,23 @@ pub async fn dispatch(cmd: &str, args: &str, ctx: CommandContext<'_>) -> Option<
     }
 }
 
+/// Get session history: from active agent loop if available, otherwise from session_manager.
+async fn get_history(ctx: &CommandContext<'_>) -> Option<Vec<crate::providers::ChatMessage>> {
+    if let Some(loop_arc) = ctx.agent_loop {
+        let guard = loop_arc.lock().await;
+        if !guard.session().history.is_empty() {
+            return Some(guard.session().history.clone());
+        }
+    }
+    // Fallback: get session from session_manager.
+    let session = ctx.session_manager.get_or_create(ctx.session_key);
+    if session.history.is_empty() {
+        None
+    } else {
+        Some(session.history)
+    }
+}
+
 // ════════════════════════════════════════════════════════════════════════════════
 // Batch 1: Core commands
 // ════════════════════════════════════════════════════════════════════════════════
@@ -427,75 +444,65 @@ async fn cmd_btw(args: &str, ctx: CommandContext<'_>) -> String {
 }
 
 async fn cmd_export(ctx: CommandContext<'_>) -> String {
-    if let Some(loop_arc) = ctx.agent_loop {
-        let guard = loop_arc.lock().await;
-        let history = &guard.session().history;
-        if history.is_empty() {
-            return "ℹ️ 当前会话为空，无法导出。".to_string();
-        }
+    let history = match get_history(&ctx).await {
+        Some(h) => h,
+        None => return "ℹ️ 当前会话为空，无法导出。".to_string(),
+    };
+    let sk_display = ctx.session_key.to_string();
 
-        let mut lines = vec![format!(
-            "📤 **会话导出** — {}\n\n---\n",
-            ctx.session_key
-        )];
-        for (i, msg) in history.iter().enumerate() {
-            let role_emoji = match msg.role.as_str() {
-                "user" => "👤",
-                "assistant" => "🤖",
-                "tool" => "🔧",
-                "system" => "📋",
-                _ => "❓",
-            };
-            let text = msg.text_content();
-            let display = if text.chars().count() > 200 {
-                format!("{}...", text.chars().take(197).collect::<String>())
-            } else if text.is_empty() {
-                "(无文本内容)".to_string()
-            } else {
-                text.clone()
-            };
-            lines.push(format!("**{}[{}]** {}\n", role_emoji, i, display));
-        }
-        lines.push(format!("\n---\n_共 {} 条消息_", history.len()));
-
-        lines.join("\n")
-    } else {
-        "ℹ️ 当前没有活跃会话。".to_string()
+    let mut lines = vec![format!(
+        "📤 **会话导出** — {}\n\n---\n",
+        sk_display
+    )];
+    for (i, msg) in history.iter().enumerate() {
+        let role_emoji = match msg.role.as_str() {
+            "user" => "👤",
+            "assistant" => "🤖",
+            "tool" => "🔧",
+            "system" => "📋",
+            _ => "❓",
+        };
+        let text = msg.text_content();
+        let display = if text.chars().count() > 200 {
+            format!("{}...", text.chars().take(197).collect::<String>())
+        } else if text.is_empty() {
+            "(无文本内容)".to_string()
+        } else {
+            text.clone()
+        };
+        lines.push(format!("**{}[{}]** {}\n", role_emoji, i, display));
     }
+    lines.push(format!("\n---\n_共 {} 条消息_", history.len()));
+    lines.join("\n")
 }
 
 async fn cmd_history(ctx: CommandContext<'_>) -> String {
-    if let Some(loop_arc) = ctx.agent_loop {
-        let guard = loop_arc.lock().await;
-        let history = &guard.session().history;
-        if history.is_empty() {
-            return "ℹ️ 当前会话为空。".to_string();
-        }
+    let history = match get_history(&ctx).await {
+        Some(h) => h,
+        None => return "ℹ️ 当前会话为空。".to_string(),
+    };
 
-        let mut lines = vec![format!("📜 **会话历史** ({}条消息)\n", history.len())];
-        for (i, msg) in history.iter().enumerate() {
-            let tag = match msg.role.as_str() {
-                "user" => "👤",
-                "assistant" => "🤖",
-                "tool" => "🔧",
-                "system" => "📋",
-                _ => "❓",
-            };
-            let text = msg.text_content();
-            let first_line = text.lines().next().unwrap_or("");
-            let display = if first_line.chars().count() > 80 {
-                format!("{}...", first_line.chars().take(77).collect::<String>())
-            } else if first_line.is_empty() {
-                "(无文本)".to_string()
-            } else {
-                first_line.to_string()
-            };
-            lines.push(format!("{} `[{}]` {}", tag, i, display));
-        }
-        lines.join("\n")
-    } else {
-        "ℹ️ 当前没有活跃会话。".to_string()
+    let mut lines = vec![format!("📜 **会话历史** ({}条消息)\n", history.len())];
+    for (i, msg) in history.iter().enumerate() {
+        let tag = match msg.role.as_str() {
+            "user" => "👤",
+            "assistant" => "🤖",
+            "tool" => "🔧",
+            "system" => "📋",
+            _ => "❓",
+        };
+        let text = msg.text_content();
+        let first_line = text.lines().next().unwrap_or("");
+        let display = if first_line.chars().count() > 80 {
+            format!("{}...", first_line.chars().take(77).collect::<String>())
+        } else if first_line.is_empty() {
+            "(无文本)".to_string()
+        } else {
+            first_line.to_string()
+        };
+        lines.push(format!("{} `[{}]` {}", tag, i, display));
     }
+    lines.join("\n")
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
