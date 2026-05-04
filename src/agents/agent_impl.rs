@@ -1148,19 +1148,23 @@ impl AgentLoop {
         existing_summary: Option<&str>,
         model_id: &str,
     ) -> anyhow::Result<String> {
-        // P1: cache-sharing mode (maximizes prefix cache hit).
+        // Single attempt: no tools, dedicated summary prompt, 20K output budget.
         match self.do_inline_summarize(to_compact, existing_summary, model_id).await {
-            Ok(s) if !s.trim().is_empty() => return Ok(s),
-            Ok(_) => tracing::warn!("summarize returned empty"),
-            Err(e) => tracing::warn!(error = %e, "summarize failed"),
+            Ok(s) if !s.trim().is_empty() => Ok(s),
+            Ok(_) => {
+                tracing::warn!("summarize returned empty text");
+                anyhow::bail!("summarize returned empty text")
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "summarize failed");
+                Err(e)
+            }
         }
-
-        // P2: sub-delegator fallback.
-        tracing::warn!("inline summarize failed, falling back to sub-delegator");
-        self.fallback_summarize(to_compact).await
     }
 
-    /// Cache-sharing inline summarize: same system prompt, tools, thinking config.
+    /// Inline summarize: same system prompt, tools, history as main request for
+    /// maximum prefix cache hit. Explicit prompt instructs model NOT to call tools.
+    /// 20K output budget (matching Claude Code's MAX_OUTPUT_TOKENS_FOR_SUMMARY).
     async fn do_inline_summarize(
         &self,
         to_compact: &[ChatMessage],
@@ -1171,12 +1175,13 @@ impl AgentLoop {
 
         let mut messages = Vec::new();
 
-        // 1. system prompt (same as main request).
+        // 1. system prompt — same as main request for prefix cache.
         if !self.system_prompt.is_empty() {
             messages.push(ChatMessage::system_text(&self.system_prompt));
         }
 
-        // 2. Strip images before feeding to summarizer (save tokens).
+        // 2. history — same as main request for prefix cache.
+        //    Strip images to save tokens.
         for msg in to_compact {
             let mut cleaned = msg.clone();
             cleaned.parts = cleaned.parts.into_iter().map(|part| {
@@ -1189,29 +1194,59 @@ impl AgentLoop {
             messages.push(cleaned);
         }
 
-        // 3. summarizer instruction.
+        // 3. summarizer instruction — explicitly forbid tool usage.
         let prompt = match existing_summary {
             Some(base) => format!(
-                "Previous context summary:\n{}\n\n\
-                 Merge the above events into the previous summary. \
-                 Keep it under 300 characters. Focus on: user goals, \
-                 key decisions, file paths, and errors.",
+                "IMPORTANT: Do NOT call any tools. Do NOT use any functions. \
+                 Output ONLY plain text summary, nothing else.\n\
+                 \n\
+                 Below is a PREVIOUS SUMMARY followed by NEW conversation messages.\n\
+                 \n\
+                 === PREVIOUS SUMMARY ===\n{}\n\
+                 === END PREVIOUS SUMMARY ===\n\
+                 \n\
+                 Merge the new messages into the previous summary. Produce a single \
+                 updated summary that covers everything.\n\
+                 \n\
+                 Requirements:\n\
+                 - Keep all user goals, tasks, and their current status\n\
+                 - Keep all key decisions, conclusions, and reasoning\n\
+                 - Keep all file paths, code locations, and variable names mentioned\n\
+                 - Keep all errors encountered and how they were resolved\n\
+                 - Omit raw tool output (large code blocks, logs, file contents)\n\
+                 - Use the same language as the conversation (Chinese or English)\n\
+                 - Be thorough but concise: every important detail should be preserved",
                 base
             ),
-            None => "请用简洁的中文总结上述对话历史，保留以下内容：\n\
-                     - 用户的原始目标和当前任务\n\
-                     - 关键决策和结论\n\
-                     - 涉及的文件路径和代码位置\n\
-                     - 遇到的错误和修复方案\n\
-                     省略工具输出的原始内容（如大段代码、日志），只保留关键指标。\n\
-                     不超过300字。".to_string(),
+            None => format!(
+                "IMPORTANT: Do NOT call any tools. Do NOT use any functions. \
+                 Output ONLY plain text summary, nothing else.\n\
+                 \n\
+                 Summarize the conversation history above. This summary will replace \
+                 the full history, so it MUST preserve all information needed to continue \
+                 the conversation seamlessly.\n\
+                 \n\
+                 Required sections:\n\
+                 1. **User Goals**: What is the user trying to accomplish? Current status of each goal.\n\
+                 2. **Key Decisions**: Important choices made and why.\n\
+                 3. **Technical Context**: Files modified, code locations, APIs used, configurations changed.\n\
+                 4. **Errors & Fixes**: Problems encountered and their solutions.\n\
+                 5. **Pending Work**: What still needs to be done.\n\
+                 \n\
+                 Rules:\n\
+                 - Omit raw tool output (large code blocks, logs, file dumps) — keep only key facts\n\
+                 - Use the same language as the conversation\n\
+                 - Be thorough: losing context means the user has to repeat themselves\n\
+                 - This conversation has {} messages to summarize",
+                to_compact.len()
+            ),
         };
         messages.push(ChatMessage::user_text(prompt));
 
-        // 4. tool definitions (same as main request for cache key match).
+        // 4. tool definitions — same as main request for prefix cache.
         let tools = self.build_tool_specs();
 
-        // 5. thinking config (same as main request for cache key match).
+        // 5. thinking config — same as main request for prefix cache.
         let thinking = self.registry.get_chat_model_config(model_id)
             .ok()
             .and_then(|cfg| {
@@ -1226,7 +1261,7 @@ impl AgentLoop {
             model: model_id,
             messages: &messages,
             temperature: None,
-            max_tokens: Some(500),
+            max_tokens: Some(20_000), // Reserve enough tokens for a thorough summary (Claude Code: 20K)
             thinking,
             stop: None,
             seed: None,
@@ -1248,23 +1283,15 @@ impl AgentLoop {
             }
         }
 
-        Ok(response.text)
-    }
-
-    /// Fallback: use sub-delegator for summarization (no prefix cache benefit).
-    async fn fallback_summarize(&self, to_compact: &[ChatMessage]) -> anyhow::Result<String> {
-        if let Some(ref delegator) = self.sub_delegator {
-            let mut text_for_summary = String::new();
-            for msg in to_compact {
-                let text = msg.text_content();
-                if !text.is_empty() {
-                    text_for_summary.push_str(&format!("[{}] {}\n\n", msg.role, text));
-                }
-            }
-            delegator.delegate("summarizer", &text_for_summary).await
-        } else {
-            anyhow::bail!("no sub-delegator configured for fallback summarization")
+        if response.text.trim().is_empty() {
+            tracing::warn!(
+                stop_reason = ?response.stop_reason,
+                tool_calls = response.tool_calls.len(),
+                "summarize produced empty text (model may have called tools despite instruction)"
+            );
         }
+
+        Ok(response.text)
     }
 
     /// Check if compaction is needed and perform incremental LLM-based summarization.
