@@ -196,6 +196,11 @@ impl Agent {
         }
     }
 
+    /// Access the service registry (for slash commands).
+    pub fn registry(&self) -> &Arc<dyn ServiceRegistry> {
+        &self.registry
+    }
+
     /// Set the system prompt directly (overrides builder).
     pub fn with_system_prompt(mut self, prompt: String) -> Self {
         self.system_prompt = prompt;
@@ -284,6 +289,21 @@ impl AgentLoop {
     pub fn with_ask_user_handler(mut self, handler: AskUserHandler) -> Self {
         self.ask_user_handler = Some(handler);
         self
+    }
+
+    /// Get a reference to the current session.
+    pub fn session(&self) -> &super::session_manager::Session {
+        &self.session
+    }
+
+    /// Get the current estimated total tokens.
+    pub fn token_total(&self) -> u64 {
+        self.token_tracker.total_tokens()
+    }
+
+    /// Manually trigger compaction (used by /compact command).
+    pub async fn compact_now(&mut self, model_id: &str) -> anyhow::Result<()> {
+        self.maybe_compact(model_id).await
     }
 
     /// Set the delegate handler (called by Orchestrator to wire async delegation).

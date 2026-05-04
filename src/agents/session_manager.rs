@@ -341,6 +341,13 @@ impl SessionManager {
     pub fn list_sessions(&self) -> Vec<String> {
         self.backend.list_sessions()
     }
+
+    /// Reset (clear) a session by key. Removes it from the active cache
+    /// so the next get_or_create will start fresh.
+    pub fn reset(&self, session_key: &str) {
+        self.active.write().remove(session_key);
+        tracing::info!(session = %session_key, "session reset");
+    }
 }
 
 impl Default for SessionManager {

@@ -331,6 +331,43 @@ impl Orchestrator {
                     let image_base64 = msg.image_base64.clone();
                     let reply_target = msg.reply_target.clone();
                     let channel_name_clone = channel_name.clone();
+
+                    // Intercept slash commands before reaching agent loop.
+                    if let Some((cmd, cmd_args)) = super::slash_command::parse_command(&content) {
+                        let session_loop = sessions.get(&sk).map(|r| r.clone());
+                        let cmd_ctx = super::slash_command::CommandContext {
+                            session_key: &sk,
+                            registry: agent.registry(),
+                            session_manager: &self.session_manager,
+                            agent: &agent,
+                            agent_loop: session_loop.as_ref(),
+                        };
+                        if let Some(response) = super::slash_command::dispatch(cmd, cmd_args, cmd_ctx).await {
+                            // Send command response directly, skip agent loop.
+                            let ch = channels.clone();
+                            tokio::spawn(async move {
+                                let channel: Option<Arc<dyn Channel>> = {
+                                    ch.get(&channel_name_clone).map(|r| r.clone())
+                                };
+                                if let Some(channel) = channel {
+                                    let send_msg = SendMessage {
+                                        recipient: reply_target,
+                                        content: response,
+                                        subject: None,
+                                        thread_ts: None,
+                                        cancellation_token: None,
+                                        attachments: vec![],
+                                        image_urls: None,
+                                    };
+                                    if let Err(e) = channel.send(&send_msg).await {
+                                        error!(session = %sk, err = %e, "command response send failed");
+                                    }
+                                }
+                            });
+                            continue;
+                        }
+                    }
+
                     let loop_ = Self::get_or_create_loop(
                         &sessions, &agent, &self.session_manager, &sk,
                         &channels, &self.pending_asks, &reply_target,
