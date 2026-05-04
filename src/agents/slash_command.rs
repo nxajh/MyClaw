@@ -65,7 +65,7 @@ pub async fn dispatch(cmd: &str, args: &str, ctx: CommandContext<'_>) -> Option<
         "export" => Some(cmd_export(ctx).await),
         "history" => Some(cmd_history(ctx).await),
         // ── Batch 3 ──
-        "skill" | "skills" => Some(cmd_skill(ctx)),
+        "skills" => Some(cmd_skill(ctx)),
         _ => None,
     }
 }
@@ -86,7 +86,7 @@ fn cmd_help() -> String {
      /stop — 中断当前运行\n\n\
      **工具与配置**\n\
      /tools — 列出可用工具及说明\n\
-     /skill — 列出已加载的 skill\n\
+     /skills — 列出已加载的 skill\n\
      /config [key] — 查看运行时配置\n\
      /think [on|off|minimal|low|medium|high] — 控制推理模式\n\n\
      **上下文**\n\
@@ -254,7 +254,7 @@ fn cmd_config(args: &str, ctx: CommandContext<'_>) -> String {
         match key.as_str() {
             "model" | "模型" => cmd_model("", ctx),
             "tools" | "工具" => cmd_tools(ctx),
-            "skill" | "skills" => cmd_skill(ctx),
+            "skills" => cmd_skill(ctx),
             _ => format!("⚠️ 未知配置项: `{}`\n可查看: model, tools, skill", args),
         }
     }
