@@ -19,7 +19,7 @@ use crate::providers::{
 use crate::providers::ServiceRegistry;
 use crate::providers::capability_tool::ToolResult;
 use crate::config::agent::ContextConfig;
-use crate::tools::TaskDelegator;
+
 use super::skills::SkillManager;
 use super::tool_registry::ToolRegistry;
 use futures_util::StreamExt;
@@ -1195,7 +1195,8 @@ impl AgentLoop {
             messages.push(cleaned);
         }
 
-        // 3. summarizer instruction.
+        // 3. summarizer instruction — guide model to output summary directly,
+        //    but if it calls tools, let it complete the round.
         let prompt = match existing_summary {
             Some(base) => format!(
                 "Below is a PREVIOUS SUMMARY followed by NEW conversation messages.\n\
@@ -1206,6 +1207,8 @@ impl AgentLoop {
                  Merge the new messages into the previous summary. Produce a single \
                  updated summary that covers everything.\n\
                  \n\
+                 IMPORTANT: Output the summary as plain text. Do NOT use any tools.\n\
+                 \n\
                  Requirements:\n\
                  - Keep all user goals, tasks, and their current status\n\
                  - Keep all key decisions, conclusions, and reasoning\n\
@@ -1213,14 +1216,15 @@ impl AgentLoop {
                  - Keep all errors encountered and how they were resolved\n\
                  - Omit raw tool output (large code blocks, logs, file contents)\n\
                  - Use the same language as the conversation (Chinese or English)\n\
-                 - Be thorough but concise: every important detail should be preserved\n\
-                 - Output the summary as plain text, do not use tools to write it anywhere",
+                 - Be thorough but concise: every important detail should be preserved",
                 base
             ),
             None => format!(
                 "Summarize the conversation history above. This summary will replace \
                  the full history, so it MUST preserve all information needed to continue \
                  the conversation seamlessly.\n\
+                 \n\
+                 IMPORTANT: Output the summary as plain text. Do NOT use any tools.\n\
                  \n\
                  Required sections:\n\
                  1. **User Goals**: What is the user trying to accomplish? Current status of each goal.\n\
@@ -1230,7 +1234,6 @@ impl AgentLoop {
                  5. **Pending Work**: What still needs to be done.\n\
                  \n\
                  Rules:\n\
-                 - You may use tools (e.g. file_read) if you need to check details, but output the final summary as plain text\n\
                  - Omit raw tool output (large code blocks, logs, file dumps) — keep only key facts\n\
                  - Use the same language as the conversation\n\
                  - Be thorough: losing context means the user has to repeat themselves\n\
