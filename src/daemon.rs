@@ -506,6 +506,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     };
     let agent = Agent::new(registry_arc, tools_arc, skills_arc, agent_config);
 
+    let mcp_manager_arc = Arc::new(mcp_manager);
+
     let parts = OrchestratorParts {
         agent,
         session_manager,
@@ -514,12 +516,13 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         delegation_manager,
         delegation_rx,
         persist_backend: session_backend,
+        mcp_manager: Some(Arc::clone(&mcp_manager_arc)),
     };
 
     // ── Launch ─────────────────────────────────────────────────────────────
 
     let (mut orchestrator, _msg_tx) = Orchestrator::new(parts);
-    print_banner(&config, mcp_manager.server_count().await, mcp_manager.tool_count().await, config.agents.len());
+    print_banner(&config, mcp_manager_arc.server_count().await, mcp_manager_arc.tool_count().await, config.agents.len());
 
     // Shutdown channel.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

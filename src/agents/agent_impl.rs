@@ -206,6 +206,11 @@ impl Agent {
         &self.tools
     }
 
+    /// Access the skill manager (for slash commands).
+    pub fn skills(&self) -> &Arc<super::skills::SkillManager> {
+        &self.skills
+    }
+
     /// Set the system prompt directly (overrides builder).
     pub fn with_system_prompt(mut self, prompt: String) -> Self {
         self.system_prompt = prompt;

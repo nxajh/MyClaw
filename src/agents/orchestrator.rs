@@ -60,6 +60,8 @@ pub struct Orchestrator {
     delegation_rx: Arc<TokioMutex<Option<mpsc::Receiver<DelegationEvent>>>>,
     /// Backend for session persistence (shared with persist hooks).
     persist_backend: Arc<dyn crate::storage::SessionBackend>,
+    /// MCP manager (for /mcp command).
+    mcp_manager: Option<Arc<crate::agents::McpManager>>,
 }
 
 /// Parse a session key like "telegram:12345" into (channel_name, sender).
@@ -88,6 +90,8 @@ pub struct OrchestratorParts {
     pub delegation_rx: Option<mpsc::Receiver<DelegationEvent>>,
     /// Backend for session persistence (shared with persist hooks).
     pub persist_backend: Arc<dyn crate::storage::SessionBackend>,
+    /// MCP manager (conditional — only when MCP servers are configured).
+    pub mcp_manager: Option<Arc<crate::agents::McpManager>>,
 }
 
 impl Orchestrator {
@@ -126,6 +130,7 @@ impl Orchestrator {
             delegation_manager: parts.delegation_manager,
             delegation_rx: Arc::new(TokioMutex::new(parts.delegation_rx)),
             persist_backend: parts.persist_backend,
+            mcp_manager: parts.mcp_manager,
         };
 
         info!(channels = orchestrator.channels.len(), "orchestrator initialized");
@@ -341,6 +346,7 @@ impl Orchestrator {
                             session_manager: &self.session_manager,
                             agent: &agent,
                             agent_loop: session_loop.as_ref(),
+                            mcp_manager: self.mcp_manager.as_ref(),
                         };
                         if let Some(response) = super::slash_command::dispatch(cmd, cmd_args, cmd_ctx).await {
                             // Send command response directly, skip agent loop.

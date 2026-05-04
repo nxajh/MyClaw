@@ -4,6 +4,7 @@
 //! Each command returns a text response sent directly through the channel.
 
 use crate::agents::agent_impl::{Agent, AgentLoop};
+use crate::agents::mcp_manager::McpManager;
 use crate::agents::session_manager::SessionManager;
 use crate::providers::ServiceRegistry;
 use std::sync::Arc;
@@ -17,6 +18,8 @@ pub struct CommandContext<'a> {
     pub agent: &'a Agent,
     /// Access to the current session's agent loop (if it exists).
     pub agent_loop: Option<&'a Arc<TokioMutex<AgentLoop>>>,
+    /// MCP manager (for /mcp command).
+    pub mcp_manager: Option<&'a Arc<McpManager>>,
 }
 
 /// Parse a slash command from message content.
@@ -55,12 +58,14 @@ pub async fn dispatch(cmd: &str, args: &str, ctx: CommandContext<'_>) -> Option<
         // ── Batch 2: enhanced ──
         "tools" => Some(cmd_tools(ctx)),
         "config" => Some(cmd_config(args, ctx)),
-        "think" => Some(cmd_think(args, ctx)),
-        "mcp" => Some(cmd_mcp(ctx)),
+        "think" => Some(cmd_think(args)),
+        "mcp" => Some(cmd_mcp(ctx).await),
         "context" => Some(cmd_context(ctx).await),
-        "btw" => Some(cmd_btw(args)),
+        "btw" => Some(cmd_btw(args, ctx).await),
         "export" => Some(cmd_export(ctx).await),
         "history" => Some(cmd_history(ctx).await),
+        // ── Batch 3 ──
+        "skill" | "skills" => Some(cmd_skill(ctx)),
         _ => None,
     }
 }
@@ -81,6 +86,7 @@ fn cmd_help() -> String {
      /stop — 中断当前运行\n\n\
      **工具与配置**\n\
      /tools — 列出可用工具及说明\n\
+     /skill — 列出已加载的 skill\n\
      /config [key] — 查看运行时配置\n\
      /think [on|off|minimal|low|medium|high] — 控制推理模式\n\n\
      **上下文**\n\
@@ -226,33 +232,35 @@ fn cmd_tools(ctx: CommandContext<'_>) -> String {
 
 fn cmd_config(args: &str, ctx: CommandContext<'_>) -> String {
     if args.is_empty() {
-        // Show key config summary.
         let model_info = match ctx.registry.get_chat_provider(crate::providers::Capability::Chat) {
             Ok((_, model_id)) => model_id,
             Err(_) => "未配置".to_string(),
         };
         let tools = ctx.agent.tools();
+        let skills = ctx.agent.skills();
         format!(
             "⚙️ **运行时配置**\n\n\
              模型: `{}`\n\
              工具数: {}\n\
+             Skill数: {}\n\
              会话: `{}`",
             model_info,
             tools.tool_count(),
+            skills.skill_count(),
             ctx.session_key,
         )
     } else {
-        // Specific key lookup — just report what we know.
         let key = args.trim().to_lowercase();
         match key.as_str() {
             "model" | "模型" => cmd_model("", ctx),
             "tools" | "工具" => cmd_tools(ctx),
-            _ => format!("⚠️ 未知配置项: `{}`\n可查看: model, tools", args),
+            "skill" | "skills" => cmd_skill(ctx),
+            _ => format!("⚠️ 未知配置项: `{}`\n可查看: model, tools, skill", args),
         }
     }
 }
 
-fn cmd_think(args: &str, _ctx: CommandContext<'_>) -> String {
+fn cmd_think(args: &str) -> String {
     let level = args.trim().to_lowercase();
     if level.is_empty() {
         return "🧠 **推理模式**\n\n\
@@ -275,12 +283,27 @@ fn cmd_think(args: &str, _ctx: CommandContext<'_>) -> String {
     }
 }
 
-fn cmd_mcp(_ctx: CommandContext<'_>) -> String {
-    // MCP server status is not directly queryable from this context yet.
-    // Show what we can.
-    "🔌 **MCP 服务器**\n\n\
-     MCP 连接状态需要从 daemon 层查询。\n\
-     请检查配置文件中的 `[mcp_servers]` 部分。".to_string()
+async fn cmd_mcp(ctx: CommandContext<'_>) -> String {
+    match ctx.mcp_manager {
+        Some(mgr) => {
+            let connected = mgr.is_connected().await;
+            let servers = mgr.server_count().await;
+            let tools = mgr.tool_count().await;
+            if connected {
+                format!(
+                    "🔌 **MCP 状态**\n\n\
+                     状态: ✅ 已连接\n\
+                     服务器: {} 个\n\
+                     MCP 工具: {} 个",
+                    servers, tools
+                )
+            } else {
+                "🔌 **MCP 状态**\n\n状态: ❌ 未连接\n\n\
+                 请检查配置文件中的 `[mcp_servers]` 部分。".to_string()
+            }
+        }
+        None => "🔌 **MCP 状态**\n\n未配置 MCP 服务器。".to_string(),
+    }
 }
 
 async fn cmd_context(ctx: CommandContext<'_>) -> String {
@@ -344,21 +367,60 @@ async fn cmd_context(ctx: CommandContext<'_>) -> String {
     }
 }
 
-fn cmd_btw(args: &str) -> String {
+async fn cmd_btw(args: &str, ctx: CommandContext<'_>) -> String {
     if args.is_empty() {
         return "💡 **旁路提问**\n\n\
                用法: `/btw 你的问题`\n\n\
-               旁路提问不会影响会话上下文和未来对话。\n\
-               注意：当前版本中 /btw 仍会经过 agent 处理。".to_string();
+               旁路提问使用独立请求回答，不影响当前会话上下文。".to_string();
     }
-    // In the current architecture, we can't easily do a one-shot query
-    // without affecting the session. Return a hint for now.
-    format!(
-        "💡 旁路提问: *{}*\n\n\
-         _当前版本中，旁路提问功能尚未完全实现。\
-         请直接发送消息给 agent，或等待后续更新。_",
-        args
-    )
+
+    // Run a one-shot query using the same model, without touching session history.
+    match ctx.registry.get_chat_provider(crate::providers::Capability::Chat) {
+        Ok((provider, model_id)) => {
+            let messages = vec![
+                crate::providers::ChatMessage::system_text(
+                    "你是一个简洁有用的助手。用中文简要回答以下问题，不超过200字。"
+                ),
+                crate::providers::ChatMessage::user_text(args.to_string()),
+            ];
+            let req = crate::providers::ChatRequest {
+                model: &model_id,
+                messages: &messages,
+                temperature: None,
+                max_tokens: Some(800),
+                thinking: None,
+                stop: None,
+                seed: None,
+                tools: None,
+                stream: true,
+            };
+            match provider.chat(req) {
+                Ok(stream) => {
+                    // Collect the stream.
+                    use futures_util::StreamExt;
+                    let mut text = String::new();
+                    let mut rx = stream;
+                    while let Some(event) = rx.next().await {
+                        match event {
+                            crate::providers::StreamEvent::Delta { text: delta } => text.push_str(&delta),
+                            crate::providers::StreamEvent::Error(e) => {
+                                return format!("❌ 旁路提问失败: {}", e);
+                            }
+                            crate::providers::StreamEvent::Done { .. } => break,
+                            _ => {}
+                        }
+                    }
+                    if text.trim().is_empty() {
+                        "⚠️ 旁路提问返回空结果。".to_string()
+                    } else {
+                        format!("💡 *（旁路提问，不影响上下文）*\n\n{}", text)
+                    }
+                }
+                Err(e) => format!("❌ 旁路提问请求失败: {}", e),
+            }
+        }
+        Err(e) => format!("❌ 无法获取模型: {}", e),
+    }
 }
 
 async fn cmd_export(ctx: CommandContext<'_>) -> String {
@@ -382,7 +444,6 @@ async fn cmd_export(ctx: CommandContext<'_>) -> String {
                 _ => "❓",
             };
             let text = msg.text_content();
-            // Truncate individual messages to keep output manageable.
             let display = if text.chars().count() > 200 {
                 format!("{}...", text.chars().take(197).collect::<String>())
             } else if text.is_empty() {
@@ -409,8 +470,6 @@ async fn cmd_history(ctx: CommandContext<'_>) -> String {
         }
 
         let mut lines = vec![format!("📜 **会话历史** ({}条消息)\n", history.len())];
-
-        // Show a condensed view: role + first line of each message.
         for (i, msg) in history.iter().enumerate() {
             let tag = match msg.role.as_str() {
                 "user" => "👤",
@@ -430,9 +489,41 @@ async fn cmd_history(ctx: CommandContext<'_>) -> String {
             };
             lines.push(format!("{} `[{}]` {}", tag, i, display));
         }
-
         lines.join("\n")
     } else {
         "ℹ️ 当前没有活跃会话。".to_string()
     }
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Batch 3: Skill
+// ════════════════════════════════════════════════════════════════════════════════
+
+fn cmd_skill(ctx: CommandContext<'_>) -> String {
+    let skills = ctx.agent.skills();
+    let count = skills.skill_count();
+    if count == 0 {
+        return "📚 没有加载任何 skill。".to_string();
+    }
+
+    let mut lines = vec![format!("📚 **已加载 Skill ({}个)**\n", count)];
+    let mut entries: Vec<_> = skills.skills_iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    for (name, skill) in entries {
+        let desc = if skill.description.is_empty() {
+            "（无描述）".to_string()
+        } else if skill.description.chars().count() > 80 {
+            format!("{}...", skill.description.chars().take(77).collect::<String>())
+        } else {
+            skill.description.clone()
+        };
+        let kw = if skill.keywords.is_empty() {
+            String::new()
+        } else {
+            let kw_str: Vec<&str> = skill.keywords.iter().map(|s| s.as_str()).take(5).collect();
+            format!(" `[{}]`", kw_str.join(", "))
+        };
+        lines.push(format!("• **{}**{} — {}", name, kw, desc));
+    }
+    lines.join("\n")
 }
