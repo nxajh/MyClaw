@@ -247,7 +247,6 @@ impl Agent {
             persist_hook,
             sub_delegator: None,
             model_override: self.model_override.clone(),
-            compact_failures: 0,
         }
     }
 }
@@ -278,8 +277,6 @@ pub struct AgentLoop {
     sub_delegator: Option<Arc<super::sub_agent::SubAgentDelegator>>,
     /// Optional model override — forces a specific model instead of registry default.
     model_override: Option<String>,
-    /// Consecutive compaction failure counter (circuit breaker).
-    compact_failures: usize,
 }
 
 impl AgentLoop {
@@ -1255,12 +1252,6 @@ impl AgentLoop {
             return Ok(());
         }
 
-        const MAX_COMPACT_FAILURES: usize = 3;
-        if self.compact_failures >= MAX_COMPACT_FAILURES {
-            tracing::warn!("compaction circuit breaker active, skipping");
-            return Ok(());
-        }
-
         tracing::info!(
             total_tokens = total,
             threshold,
@@ -1322,17 +1313,13 @@ impl AgentLoop {
         let summary = match self.summarize_inline(&to_compact, existing_summary.as_deref(), model_id).await {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(error = %e, "summarizer failed, falling back to truncation");
-                self.compact_failures += 1;
-                self.truncate_retention_zone(boundary, model_id);
+                tracing::warn!(error = %e, "summarizer failed, leaving history intact for next retry");
                 return Ok(());
             }
         };
 
         if summary.trim().is_empty() {
-            tracing::warn!("summarizer returned empty, falling back to truncation");
-            self.compact_failures += 1;
-            self.truncate_retention_zone(boundary, model_id);
+            tracing::warn!("summarizer returned empty, leaving history intact for next retry");
             return Ok(());
         }
 
@@ -1391,9 +1378,6 @@ impl AgentLoop {
             version,
             "context compaction completed"
         );
-
-        // Reset circuit breaker on success.
-        self.compact_failures = 0;
 
         // 7. Safety net: if still over threshold, truncate retention zone.
         if new_total > threshold {
