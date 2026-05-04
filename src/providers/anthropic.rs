@@ -236,9 +236,9 @@ fn parse_anthropic_sse(line: &str) -> Option<StreamEvent> {
                     let cu = ChatUsage {
                         input_tokens: usage.get("input_tokens").and_then(|v| v.as_u64()),
                         output_tokens: usage.get("output_tokens").and_then(|v| v.as_u64()),
-                        cached_input_tokens: None,
+                        cached_input_tokens: usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()),
                         reasoning_tokens: None,
-                        cache_write_tokens: None,
+                        cache_write_tokens: usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()),
                     };
                     return Some(SE::Usage(cu));
                 }

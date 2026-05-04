@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use crate::providers::Capability;
 use crate::providers::{
-    BoxStream, ChatMessage, ChatRequest, ChatUsage, StopReason, StreamEvent, ToolCall, ThinkingConfig,
+    BoxStream, ChatMessage, ChatRequest, ChatUsage, ContentPart, StopReason, StreamEvent, ToolCall, ThinkingConfig,
 };
 use crate::providers::ServiceRegistry;
 use crate::providers::capability_tool::ToolResult;
@@ -108,12 +108,19 @@ impl TokenTracker {
         self.pending_estimated_tokens += tokens;
     }
 
-    /// Total input context tokens (what the model sees as input).
-    /// Does NOT include output_tokens — those are the model's generation, not input context.
+    /// Total context tokens (input + cached + output now in history + pending).
     pub fn total_tokens(&self) -> u64 {
         self.last_input_tokens
             .saturating_add(self.last_cached_tokens)
+            .saturating_add(self.last_output_tokens)
             .saturating_add(self.pending_estimated_tokens)
+    }
+
+    /// Returns true if the tracker has never been updated (fresh session or recovery).
+    pub fn is_fresh(&self) -> bool {
+        self.last_input_tokens == 0
+            && self.last_cached_tokens == 0
+            && self.pending_estimated_tokens == 0
     }
 
     /// Adjust tracker after compaction: deduct removed tokens, add summary tokens.
@@ -127,10 +134,7 @@ impl TokenTracker {
             .saturating_sub(net_reduction - from_pending);
     }
 
-    /// Reset for a new conversation.
-    pub fn reset(&mut self) {
-        *self = Self::default();
-    }
+
 }
 
 /// AgentConfig controls loop breaker thresholds and tool call limits.
@@ -243,6 +247,7 @@ impl Agent {
             persist_hook,
             sub_delegator: None,
             model_override: self.model_override.clone(),
+            compact_failures: 0,
         }
     }
 }
@@ -273,6 +278,8 @@ pub struct AgentLoop {
     sub_delegator: Option<Arc<super::sub_agent::SubAgentDelegator>>,
     /// Optional model override — forces a specific model instead of registry default.
     model_override: Option<String>,
+    /// Consecutive compaction failure counter (circuit breaker).
+    compact_failures: usize,
 }
 
 impl AgentLoop {
@@ -303,13 +310,21 @@ impl AgentLoop {
         // Reset loop breaker for new turn.
         self.loop_breaker.reset();
 
-        // Reset token tracker for new turn, then estimate entire history.
-        self.token_tracker.reset();
-        for msg in &self.session.history {
-            self.token_tracker.record_pending(estimate_message_tokens(msg));
+        // Initialize token tracker for fresh session / recovery.
+        if self.token_tracker.is_fresh() {
+            if !self.system_prompt.is_empty() {
+                self.token_tracker.record_pending(
+                    estimate_tokens(&self.system_prompt) + 4 // metadata overhead
+                );
+            }
+            for msg in &self.session.history {
+                self.token_tracker.record_pending(estimate_message_tokens(msg));
+            }
         }
 
-        // 1. Add user message to session (text only; images attached per-model in chat_loop).
+        // 1. Account for the new user message before adding to history.
+        let user_msg = ChatMessage::user_text(user_message.to_string());
+        self.token_tracker.record_pending(estimate_message_tokens(&user_msg));
         self.session.add_user_text(user_message.to_string());
 
         // Persist user message via hook.
@@ -1020,7 +1035,212 @@ impl AgentLoop {
         Some(max.max(256) as u32)
     }
 
-    /// Check if compaction is needed and perform LLM-based summarization.
+    /// Check whether the summary retains key information from the original dialogue.
+    fn audit_summary_quality(
+        &self,
+        to_compact: &[ChatMessage],
+        summary: &str,
+    ) -> (bool, Vec<String>) {
+        let mut reasons = Vec::new();
+
+        // Check 1: length reasonable (no more than 500 chars).
+        if summary.chars().count() > 500 {
+            reasons.push(format!(
+                "summary too long: {} chars (limit 500)",
+                summary.chars().count()
+            ));
+        }
+
+        // Check 2: file paths preserved.
+        let original_paths = Self::extract_file_paths(to_compact);
+        if !original_paths.is_empty() {
+            let preserved = original_paths.iter()
+                .filter(|p| summary.contains(*p))
+                .count();
+            if preserved == 0 && original_paths.len() <= 5 {
+                reasons.push(format!(
+                    "no file paths preserved (original had {})",
+                    original_paths.len()
+                ));
+            }
+        }
+
+        // Check 3: tool errors mentioned.
+        let has_errors = to_compact.iter().any(|m| {
+            m.role == "tool" && m.is_error == Some(true)
+        });
+        if has_errors {
+            let mentions_error = summary.contains("错误")
+                || summary.contains("error")
+                || summary.contains("失败")
+                || summary.contains("异常");
+            if !mentions_error {
+                reasons.push("original had tool errors but summary doesn't mention them".to_string());
+            }
+        }
+
+        (reasons.is_empty(), reasons)
+    }
+
+    /// Extract likely file paths from messages (simplified).
+    fn extract_file_paths(messages: &[ChatMessage]) -> Vec<String> {
+        let re = regex::Regex::new(r"(?:/[\w/.-]+\.\w{1,5})|(?:src/[\w/.-]+)").unwrap();
+        let mut paths = Vec::new();
+        for msg in messages {
+            for cap in re.captures_iter(&msg.text_content()) {
+                if let Some(m) = cap.get(0) {
+                    let p = m.as_str().to_string();
+                    if !paths.contains(&p) {
+                        paths.push(p);
+                    }
+                }
+            }
+        }
+        paths
+    }
+
+    /// Find the incremental compaction range and any existing summary to merge.
+    fn find_incremental_range(&self, boundary: usize) -> (usize, usize, Option<String>) {
+        let history = &self.session.history;
+        let last_summary = history[..boundary].iter().rposition(|m| {
+            m.role == "user" && m.text_content().starts_with("[Context Summary]")
+        });
+        match last_summary {
+            Some(idx) => {
+                let existing = history[idx].text_content();
+                (idx, boundary, Some(existing))
+            }
+            None => (0, boundary, None),
+        }
+    }
+
+    /// Inline summarizer — cache-sharing primary + sub-delegator fallback.
+    async fn summarize_inline(
+        &self,
+        to_compact: &[ChatMessage],
+        existing_summary: Option<&str>,
+        model_id: &str,
+    ) -> anyhow::Result<String> {
+        // P1: cache-sharing mode (maximizes prefix cache hit).
+        match self.do_inline_summarize(to_compact, existing_summary, model_id).await {
+            Ok(s) if !s.trim().is_empty() => return Ok(s),
+            Ok(_) => tracing::warn!("summarize returned empty"),
+            Err(e) => tracing::warn!(error = %e, "summarize failed"),
+        }
+
+        // P2: sub-delegator fallback.
+        tracing::warn!("inline summarize failed, falling back to sub-delegator");
+        self.fallback_summarize(to_compact).await
+    }
+
+    /// Cache-sharing inline summarize: same system prompt, tools, thinking config.
+    async fn do_inline_summarize(
+        &self,
+        to_compact: &[ChatMessage],
+        existing_summary: Option<&str>,
+        model_id: &str,
+    ) -> anyhow::Result<String> {
+        let (provider, _) = self.registry.get_chat_provider(Capability::Chat)?;
+
+        let mut messages = Vec::new();
+
+        // 1. system prompt (same as main request).
+        if !self.system_prompt.is_empty() {
+            messages.push(ChatMessage::system_text(&self.system_prompt));
+        }
+
+        // 2. Strip images before feeding to summarizer (save tokens).
+        for msg in to_compact {
+            let mut cleaned = msg.clone();
+            cleaned.parts = cleaned.parts.into_iter().map(|part| {
+                match part {
+                    ContentPart::ImageUrl { .. } => ContentPart::Text { text: "[image]".into() },
+                    ContentPart::ImageB64 { .. } => ContentPart::Text { text: "[image]".into() },
+                    other => other,
+                }
+            }).collect();
+            messages.push(cleaned);
+        }
+
+        // 3. summarizer instruction.
+        let prompt = match existing_summary {
+            Some(base) => format!(
+                "Previous context summary:\n{}\n\n\
+                 Merge the above events into the previous summary. \
+                 Keep it under 300 characters. Focus on: user goals, \
+                 key decisions, file paths, and errors.",
+                base
+            ),
+            None => "请用简洁的中文总结上述对话历史，保留以下内容：\n\
+                     - 用户的原始目标和当前任务\n\
+                     - 关键决策和结论\n\
+                     - 涉及的文件路径和代码位置\n\
+                     - 遇到的错误和修复方案\n\
+                     省略工具输出的原始内容（如大段代码、日志），只保留关键指标。\n\
+                     不超过300字。".to_string(),
+        };
+        messages.push(ChatMessage::user_text(prompt));
+
+        // 4. tool definitions (same as main request for cache key match).
+        let tools = self.build_tool_specs();
+
+        // 5. thinking config (same as main request for cache key match).
+        let thinking = self.registry.get_chat_model_config(model_id)
+            .ok()
+            .and_then(|cfg| {
+                if cfg.reasoning {
+                    Some(ThinkingConfig { enabled: true, effort: None })
+                } else {
+                    None
+                }
+            });
+
+        let req = ChatRequest {
+            model: model_id,
+            messages: &messages,
+            temperature: None,
+            max_tokens: Some(500),
+            thinking,
+            stop: None,
+            seed: None,
+            tools: if tools.is_empty() { None } else { Some(&tools[..]) },
+            stream: true,
+        };
+
+        let stream = provider.chat(req)?;
+        let response = self.collect_stream(stream).await?;
+
+        // Log cache hit for monitoring.
+        if let Some(ref usage) = response.usage {
+            if let Some(cached) = usage.cached_input_tokens {
+                tracing::info!(
+                    cached_tokens = cached,
+                    total_input = usage.input_tokens.unwrap_or(0),
+                    "summarizer cache hit"
+                );
+            }
+        }
+
+        Ok(response.text)
+    }
+
+    /// Fallback: use sub-delegator for summarization (no prefix cache benefit).
+    async fn fallback_summarize(&self, to_compact: &[ChatMessage]) -> anyhow::Result<String> {
+        if let Some(ref delegator) = self.sub_delegator {
+            let mut text_for_summary = String::new();
+            for msg in to_compact {
+                let text = msg.text_content();
+                if !text.is_empty() {
+                    text_for_summary.push_str(&format!("[{}] {}\n\n", msg.role, text));
+                }
+            }
+            delegator.delegate("summarizer", &text_for_summary).await
+        } else {
+            anyhow::bail!("no sub-delegator configured for fallback summarization")
+        }
+    }
+
+    /// Check if compaction is needed and perform incremental LLM-based summarization.
     async fn maybe_compact(&mut self, model_id: &str) -> anyhow::Result<()> {
         let model_config = self.registry.get_chat_model_config(model_id)?;
         let context_window = match model_config.context_window {
@@ -1035,6 +1255,12 @@ impl AgentLoop {
             return Ok(());
         }
 
+        const MAX_COMPACT_FAILURES: usize = 3;
+        if self.compact_failures >= MAX_COMPACT_FAILURES {
+            tracing::warn!("compaction circuit breaker active, skipping");
+            return Ok(());
+        }
+
         tracing::info!(
             total_tokens = total,
             threshold,
@@ -1042,14 +1268,13 @@ impl AgentLoop {
             "starting context compaction"
         );
 
-        // Determine how many messages to compact.
         let history_len = self.session.history.len();
-        let ids_len = self.session.message_ids.len();
         if history_len <= 1 {
-            return Ok(()); // nothing to compact
+            return Ok(());
         }
 
         // Defensive: ensure message_ids is in sync with history.
+        let ids_len = self.session.message_ids.len();
         if ids_len < history_len {
             tracing::warn!(
                 history_len,
@@ -1059,80 +1284,94 @@ impl AgentLoop {
             self.session.message_ids.resize(history_len, 0);
         }
 
-        let compact_ratio = self.config.context.compact_ratio;
-        let compact_count = ((history_len as f64) * compact_ratio).ceil() as usize;
-        // Ensure we keep at least the last message.
-        let compact_count = compact_count.min(history_len - 1).max(1);
+        // 1. Find retention boundary (keep recent N work units).
+        let retain_count = self.config.context.retain_work_units.max(1);
+        let boundary = super::work_unit::find_compaction_boundary(&self.session.history, retain_count);
 
-        // Take the oldest messages for compaction.
-        let to_compact: Vec<ChatMessage> = self.session.history[..compact_count].to_vec();
-
-        // Don't compact messages that are already summaries.
-        if to_compact.iter().any(|m| {
-            m.role == "system" && m.text_content().starts_with("[summary]")
-        }) {
-            // Already has a summary at the start, just trim oldest non-summary messages.
-            self.trim_oldest(threshold);
+        if boundary >= history_len {
+            tracing::info!("no compaction needed: conversation within retention");
+            return Ok(());
+        }
+        if boundary == 0 {
+            tracing::info!("no compaction needed: all history must be retained");
             return Ok(());
         }
 
-        // Build plain text content for the summarizer sub-agent.
-        let mut text_for_summary = String::new();
-        for msg in &to_compact {
-            let text = msg.text_content();
-            if !text.is_empty() {
-                text_for_summary.push_str(&format!("[{}] {}\n\n", msg.role, text));
-            }
+        // 2. Find incremental range and extract old summary for merging.
+        let (compact_start, compact_end, existing_summary) = self.find_incremental_range(boundary);
+        let to_compact: Vec<ChatMessage> = self.session.history[compact_start..compact_end].to_vec();
+
+        if to_compact.is_empty() {
+            tracing::info!("no new content to compact");
+            return Ok(());
         }
 
-        // Call summarizer sub-agent or fall back to trim_oldest.
-        let summary = match &self.sub_delegator {
-            Some(delegator) => {
-                match delegator.delegate("summarizer", &text_for_summary).await {
-                    Ok(s) => {
-                        if s.trim().is_empty() {
-                            tracing::warn!("summarizer returned empty text, falling back to trim");
-                            self.trim_oldest(threshold);
-                            return Ok(());
-                        }
-                        s
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "summarizer sub-agent failed, falling back to trim");
-                        self.trim_oldest(threshold);
-                        return Ok(());
-                    }
-                }
-            }
-            None => {
-                tracing::warn!("no sub_delegator configured, falling back to trim_oldest");
-                self.trim_oldest(threshold);
+        let compacted_count = to_compact.len();
+        let removed_tokens: u64 = to_compact.iter().map(estimate_message_tokens).sum();
+
+        tracing::info!(
+            compact_start,
+            compact_end,
+            boundary,
+            retain_count,
+            has_existing_summary = existing_summary.is_some(),
+            "compaction range determined"
+        );
+
+        // 3. Generate summary (incrementally merge old summary).
+        let summary = match self.summarize_inline(&to_compact, existing_summary.as_deref(), model_id).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "summarizer failed, falling back to truncation");
+                self.compact_failures += 1;
+                self.truncate_retention_zone(boundary, model_id);
                 return Ok(());
             }
         };
 
-        // Replace compacted messages with the summary.
-        let summary_msg = ChatMessage::system_text(
-            format!("[summary] {}", summary)
+        if summary.trim().is_empty() {
+            tracing::warn!("summarizer returned empty, falling back to truncation");
+            self.compact_failures += 1;
+            self.truncate_retention_zone(boundary, model_id);
+            return Ok(());
+        }
+
+        // Quality audit (non-blocking).
+        let (ok, reasons) = self.audit_summary_quality(&to_compact, &summary);
+        if !ok {
+            tracing::warn!(reasons = ?reasons, "summary quality audit failed (non-blocking)");
+        }
+
+        // 4. Replace history.
+        let version = self.session.compact_version + 1;
+        let summary_msg = ChatMessage::user_text(
+            format!("[Context Summary] {}", summary)
         );
         let summary_tokens = estimate_message_tokens(&summary_msg);
 
-        // Track the last message id that was compacted.
         let last_compacted_id = self.session.message_ids
-            .get(compact_count.saturating_sub(1))
+            .get(compact_end.saturating_sub(1))
             .copied()
             .unwrap_or(0);
 
-        // Remove compacted messages and insert summary at the front.
-        self.session.history.drain(..compact_count);
-        self.session.history.insert(0, summary_msg);
-        self.session.message_ids.drain(..compact_count);
-        self.session.message_ids.insert(0, 0); // summary placeholder
+        self.session.history.drain(compact_start..compact_end);
+        self.session.history.insert(compact_start, summary_msg);
 
-        // Persist the compaction summary.
+        self.session.message_ids.drain(compact_start..compact_end);
+        self.session.message_ids.insert(compact_start, 0);
+
+        self.session.compact_version = version;
+        self.session.summary_metadata = Some(super::session_manager::SummaryMetadata {
+            version,
+            token_estimate: summary_tokens,
+            up_to_message: last_compacted_id,
+        });
+
+        // 5. Persist summary.
         if let Some(ref hook) = self.persist_hook {
             hook.save_compaction(&self.session.key, &SummaryRecord {
                 id: 0,
+                version,
                 summary: summary.clone(),
                 up_to_message: last_compacted_id,
                 token_estimate: Some(summary_tokens),
@@ -1140,52 +1379,99 @@ impl AgentLoop {
             });
         }
 
-        // Adjust token tracker without overwriting output/cached data.
-        let removed_tokens: u64 = to_compact.iter()
-            .map(estimate_message_tokens)
-            .sum();
+        // 6. Adjust token tracker.
         self.token_tracker.adjust_for_compaction(removed_tokens, summary_tokens);
 
         let new_total = self.token_tracker.total_tokens();
         tracing::info!(
-            compacted_messages = compact_count,
+            compacted_messages = compacted_count,
             summary_tokens,
             removed_tokens,
             new_total_tokens = new_total,
+            version,
             "context compaction completed"
         );
 
-        // If still over threshold after compaction, trim oldest.
+        // Reset circuit breaker on success.
+        self.compact_failures = 0;
+
+        // 7. Safety net: if still over threshold, truncate retention zone.
         if new_total > threshold {
-            self.trim_oldest(threshold);
+            self.truncate_retention_zone(boundary, model_id);
         }
 
         Ok(())
     }
 
-    /// Trim oldest messages until total tokens are below threshold.
-    /// Preserves system messages and the last user message.
-    fn trim_oldest(&mut self, threshold: u64) {
-        loop {
-            let total = self.token_tracker.total_tokens();
-            if total <= threshold || self.session.history.len() <= 2 {
-                break;
-            }
-            // Skip system messages at the front (but not summaries).
-            if self.session.history[0].role == "system"
-                && !self.session.history[0].text_content().starts_with("[summary]")
-            {
-                break;
-            }
-            let removed = self.session.history.remove(0);
-            let removed_tokens = estimate_message_tokens(&removed);
-            self.token_tracker.adjust_for_compaction(removed_tokens, 0);
+    /// Safety net: truncate oversized tool results in retention zone, or drop oldest unit.
+    fn truncate_retention_zone(&mut self, boundary: usize, model_id: &str) {
+        let safety_max_tokens = self.registry.get_chat_model_config(model_id)
+            .ok()
+            .and_then(|cfg| cfg.context_window)
+            .map(|cw| (cw / 20) as usize)
+            .unwrap_or(5_000);
 
-            // Drain the corresponding message_id.
-            if !self.session.message_ids.is_empty() {
-                self.session.message_ids.remove(0);
+        // 1. Truncate abnormally large tool results in retention zone.
+        for i in boundary..self.session.history.len() {
+            if self.session.history[i].role != "tool" {
+                continue;
+            }
+            let text = self.session.history[i].text_content();
+            let est = estimate_tokens(&text);
+            if est > safety_max_tokens as u64 {
+                let truncated = crate::tools::truncation::truncate_output(&text, safety_max_tokens);
+                self.session.history[i].parts = vec![
+                    ContentPart::Text { text: truncated }
+                ];
+
+                let old_est = est;
+                let new_est = estimate_tokens(&self.session.history[i].text_content()) as u64;
+                self.token_tracker.adjust_for_compaction(old_est, new_est);
+
+                tracing::warn!(
+                    idx = i,
+                    old_tokens = old_est,
+                    new_tokens = new_est,
+                    "safety-net truncated oversized tool result in retention zone"
+                );
             }
         }
+
+        // 2. Still over threshold? Drop oldest retained work unit.
+        let threshold = self.registry.get_chat_model_config(model_id)
+            .ok()
+            .and_then(|cfg| cfg.context_window)
+            .map(|cw| (cw as f64 * self.config.context.compact_threshold) as u64)
+            .unwrap_or(u64::MAX);
+        if self.token_tracker.total_tokens() > threshold {
+            self.drop_oldest_retained_work_unit(boundary);
+        }
+    }
+
+    /// Drop the oldest work unit in the retention zone (last resort).
+    fn drop_oldest_retained_work_unit(&mut self, boundary: usize) {
+        let retained = &self.session.history[boundary..];
+        let units = super::work_unit::extract_work_units(retained);
+
+        if units.len() <= 1 { return; }
+
+        let unit = &units[0];
+        let start = boundary + unit.user_start;
+        let end = boundary + unit.end + 1;
+
+        let to_remove = &self.session.history[start..end];
+        let removed_tokens: u64 = to_remove.iter().map(estimate_message_tokens).sum();
+
+        self.session.history.drain(start..end);
+        self.session.message_ids.drain(start..end);
+        self.token_tracker.adjust_for_compaction(removed_tokens, 0);
+
+        tracing::warn!(
+            dropped_start = start,
+            dropped_end = end,
+            removed_tokens,
+            "dropped oldest retained work unit after truncation insufficient"
+        );
     }
 }
 

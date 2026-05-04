@@ -27,19 +27,19 @@ pub struct ContextConfig {
     #[serde(default = "default_compact_threshold")]
     pub compact_threshold: f64,
 
-    /// Compact ratio: fraction of history to compact. 1.0 = full (default).
-    #[serde(default = "default_compact_ratio")]
-    pub compact_ratio: f64,
+    /// Number of recent complete work units to retain during compaction.
+    #[serde(default = "default_retain_work_units")]
+    pub retain_work_units: usize,
 }
 
 fn default_compact_threshold() -> f64 { 0.7 }
-fn default_compact_ratio() -> f64 { 1.0 }
+fn default_retain_work_units() -> usize { 2 }
 
 impl Default for ContextConfig {
     fn default() -> Self {
         Self {
             compact_threshold: default_compact_threshold(),
-            compact_ratio: default_compact_ratio(),
+            retain_work_units: default_retain_work_units(),
         }
     }
 }

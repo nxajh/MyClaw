@@ -47,7 +47,7 @@ impl Tool for ShellTool {
     }
 
     fn max_output_tokens(&self) -> usize {
-        5_000
+        3_000
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {

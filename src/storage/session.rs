@@ -34,6 +34,8 @@ pub struct SessionState {
 #[derive(Debug, Clone)]
 pub struct SummaryRecord {
     pub id: i64,
+    /// Session-level logical version (monotonic, caller-managed).
+    pub version: u32,
     pub summary: String,
     pub up_to_message: i64,
     pub token_estimate: Option<u64>,

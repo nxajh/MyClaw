@@ -78,7 +78,7 @@ impl Tool for WebFetchTool {
     }
 
     fn max_output_tokens(&self) -> usize {
-        20_000
+        8_000
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {

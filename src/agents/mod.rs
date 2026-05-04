@@ -11,6 +11,7 @@ mod skills;
 mod tool_registry;
 mod mcp_manager;
 mod sub_agent;
+pub mod work_unit;
 
 pub use agent_impl::{Agent, AgentConfig, AgentLoop, AskUserHandler, DelegateHandler};
 pub use delegation::{DelegationEvent, DelegationManager};

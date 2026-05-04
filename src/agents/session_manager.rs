@@ -131,6 +131,14 @@ impl PersistHook for BackendPersistHook {
     }
 }
 
+/// Summary metadata stored in Session memory (no text parsing needed).
+#[derive(Debug, Clone)]
+pub struct SummaryMetadata {
+    pub version: u32,
+    pub token_estimate: u64,
+    pub up_to_message: i64,
+}
+
 /// Per-session conversation state held by AgentLoop.
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -140,6 +148,10 @@ pub struct Session {
     pub history: Vec<ChatMessage>,
     /// Parallel to `history`: database message IDs, 0 for summary or unpersisted messages.
     pub message_ids: Vec<i64>,
+    /// Monotonic compaction version counter.
+    pub compact_version: u32,
+    /// In-memory summary metadata (restored from backend on load).
+    pub summary_metadata: Option<SummaryMetadata>,
 }
 
 impl Session {
@@ -148,6 +160,8 @@ impl Session {
             key,
             history: Vec::new(),
             message_ids: Vec::new(),
+            compact_version: 0,
+            summary_metadata: None,
         }
     }
 
@@ -253,7 +267,9 @@ impl SessionManager {
                 let mut history = Vec::with_capacity(incremental.len() + 1);
                 let mut message_ids = Vec::with_capacity(incremental.len() + 1);
 
-                history.push(ChatMessage::system_text(format!("[summary] {}", summary.summary)));
+                history.push(ChatMessage::user_text(
+                    format!("[Context Summary] {}", summary.summary)
+                ));
                 message_ids.push(0);
 
                 for (id, msg) in incremental {
@@ -277,6 +293,12 @@ impl SessionManager {
                     key: key.to_string(),
                     history,
                     message_ids,
+                    compact_version: summary.version,
+                    summary_metadata: Some(SummaryMetadata {
+                        version: summary.version,
+                        token_estimate: summary.token_estimate.unwrap_or(0),
+                        up_to_message: summary.up_to_message,
+                    }),
                 }
             }
             None => {
@@ -290,6 +312,8 @@ impl SessionManager {
                     key: key.to_string(),
                     message_ids: vec![0; full.len()],
                     history: full,
+                    compact_version: 0,
+                    summary_metadata: None,
                 }
             }
         };

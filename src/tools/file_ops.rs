@@ -49,7 +49,7 @@ impl Tool for FileReadTool {
     }
 
     fn max_output_tokens(&self) -> usize {
-        50_000
+        10_000
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {

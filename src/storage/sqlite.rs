@@ -470,6 +470,7 @@ impl SessionBackend for SqliteSessionBackend {
                 let created_at: String = row.get(4)?;
                 Ok(SummaryRecord {
                     id,
+                    version: 0, // legacy records default to 0
                     summary,
                     up_to_message,
                     token_estimate: token_estimate.map(|t| t as u64),
@@ -674,6 +675,7 @@ mod tests {
 
         let summary = SummaryRecord {
             id: 0,
+            version: 1,
             summary: "User said a, assistant replied b".to_string(),
             up_to_message: 2,
             token_estimate: Some(50),
@@ -699,6 +701,7 @@ mod tests {
 
         let summary = SummaryRecord {
             id: 0,
+            version: 1,
             summary: "summary".to_string(),
             up_to_message: 2,
             token_estimate: Some(10),
@@ -719,6 +722,7 @@ mod tests {
         backend.append("s:clr", &ChatMessage::user_text("a")).unwrap();
         let summary = SummaryRecord {
             id: 0,
+            version: 1,
             summary: "test".to_string(),
             up_to_message: 1,
             token_estimate: None,
