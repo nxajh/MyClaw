@@ -1143,7 +1143,7 @@ impl AgentLoop {
 
     /// Inline summarizer — cache-sharing primary + sub-delegator fallback.
     async fn summarize_inline(
-        &self,
+        &mut self,
         to_compact: &[ChatMessage],
         existing_summary: Option<&str>,
         model_id: &str,
@@ -1163,25 +1163,26 @@ impl AgentLoop {
     }
 
     /// Inline summarize: same system prompt, tools, history as main request for
-    /// maximum prefix cache hit. Explicit prompt instructs model NOT to call tools.
-    /// 20K output budget (matching Claude Code's MAX_OUTPUT_TOKENS_FOR_SUMMARY).
+    /// maximum prefix cache hit. Runs a full mini chat_loop so the model can
+    /// use tools if needed. 20K output budget (Claude Code: 20K).
+    /// Final text output on EndTurn becomes the summary.
     async fn do_inline_summarize(
-        &self,
+        &mut self,
         to_compact: &[ChatMessage],
         existing_summary: Option<&str>,
         model_id: &str,
     ) -> anyhow::Result<String> {
         let (provider, _) = self.registry.get_chat_provider(Capability::Chat)?;
 
-        let mut messages = Vec::new();
+        // Build messages that mirror the main request for prefix cache hit.
+        let mut messages: Vec<ChatMessage> = Vec::new();
 
-        // 1. system prompt — same as main request for prefix cache.
+        // 1. system prompt — same as main request.
         if !self.system_prompt.is_empty() {
             messages.push(ChatMessage::system_text(&self.system_prompt));
         }
 
-        // 2. history — same as main request for prefix cache.
-        //    Strip images to save tokens.
+        // 2. history — same as main request (strip images to save tokens).
         for msg in to_compact {
             let mut cleaned = msg.clone();
             cleaned.parts = cleaned.parts.into_iter().map(|part| {
@@ -1194,13 +1195,10 @@ impl AgentLoop {
             messages.push(cleaned);
         }
 
-        // 3. summarizer instruction — explicitly forbid tool usage.
+        // 3. summarizer instruction.
         let prompt = match existing_summary {
             Some(base) => format!(
-                "IMPORTANT: Do NOT call any tools. Do NOT use any functions. \
-                 Output ONLY plain text summary, nothing else.\n\
-                 \n\
-                 Below is a PREVIOUS SUMMARY followed by NEW conversation messages.\n\
+                "Below is a PREVIOUS SUMMARY followed by NEW conversation messages.\n\
                  \n\
                  === PREVIOUS SUMMARY ===\n{}\n\
                  === END PREVIOUS SUMMARY ===\n\
@@ -1215,14 +1213,12 @@ impl AgentLoop {
                  - Keep all errors encountered and how they were resolved\n\
                  - Omit raw tool output (large code blocks, logs, file contents)\n\
                  - Use the same language as the conversation (Chinese or English)\n\
-                 - Be thorough but concise: every important detail should be preserved",
+                 - Be thorough but concise: every important detail should be preserved\n\
+                 - Output the summary as plain text, do not use tools to write it anywhere",
                 base
             ),
             None => format!(
-                "IMPORTANT: Do NOT call any tools. Do NOT use any functions. \
-                 Output ONLY plain text summary, nothing else.\n\
-                 \n\
-                 Summarize the conversation history above. This summary will replace \
+                "Summarize the conversation history above. This summary will replace \
                  the full history, so it MUST preserve all information needed to continue \
                  the conversation seamlessly.\n\
                  \n\
@@ -1234,6 +1230,7 @@ impl AgentLoop {
                  5. **Pending Work**: What still needs to be done.\n\
                  \n\
                  Rules:\n\
+                 - You may use tools (e.g. file_read) if you need to check details, but output the final summary as plain text\n\
                  - Omit raw tool output (large code blocks, logs, file dumps) — keep only key facts\n\
                  - Use the same language as the conversation\n\
                  - Be thorough: losing context means the user has to repeat themselves\n\
@@ -1243,7 +1240,7 @@ impl AgentLoop {
         };
         messages.push(ChatMessage::user_text(prompt));
 
-        // 4. tool definitions — same as main request for prefix cache.
+        // 4. tools — same as main request for prefix cache.
         let tools = self.build_tool_specs();
 
         // 5. thinking config — same as main request for prefix cache.
@@ -1257,41 +1254,96 @@ impl AgentLoop {
                 }
             });
 
-        let req = ChatRequest {
-            model: model_id,
-            messages: &messages,
-            temperature: None,
-            max_tokens: Some(20_000), // Reserve enough tokens for a thorough summary (Claude Code: 20K)
-            thinking,
-            stop: None,
-            seed: None,
-            tools: if tools.is_empty() { None } else { Some(&tools[..]) },
-            stream: true,
-        };
+        // Mini chat_loop: keep calling the model until EndTurn.
+        // Tool calls are executed using the main agent's tool executor,
+        // but results are appended to the local messages Vec only —
+        // NOT to self.session.history (which is the real conversation).
+        let max_rounds = 10;
+        let mut round = 0;
 
-        let stream = provider.chat(req)?;
-        let response = self.collect_stream(stream).await?;
+        let final_text = loop {
+            round += 1;
+            if round > max_rounds {
+                tracing::warn!(rounds = round, "summarize loop exceeded max rounds");
+                anyhow::bail!("summarize loop exceeded {} rounds", max_rounds);
+            }
 
-        // Log cache hit for monitoring.
-        if let Some(ref usage) = response.usage {
-            if let Some(cached) = usage.cached_input_tokens {
-                tracing::info!(
-                    cached_tokens = cached,
-                    total_input = usage.input_tokens.unwrap_or(0),
-                    "summarizer cache hit"
+            let req = ChatRequest {
+                model: model_id,
+                messages: &messages,
+                temperature: None,
+                max_tokens: Some(20_000),
+                thinking: thinking.clone(),
+                stop: None,
+                seed: None,
+                tools: if tools.is_empty() { None } else { Some(&tools[..]) },
+                stream: true,
+            };
+
+            let stream = provider.chat(req)?;
+            let response = self.collect_stream(stream).await?;
+
+            // Log cache hit for monitoring.
+            if let Some(ref usage) = response.usage {
+                if let Some(cached) = usage.cached_input_tokens {
+                    tracing::info!(
+                        round,
+                        cached_tokens = cached,
+                        total_input = usage.input_tokens.unwrap_or(0),
+                        "summarizer cache hit"
+                    );
+                }
+            }
+
+            // No tool calls → final text, exit loop.
+            if response.tool_calls.is_empty() {
+                break response.text;
+            }
+
+            // Tool calls present → execute and append results to local messages.
+            tracing::info!(
+                round,
+                tool_calls = response.tool_calls.len(),
+                text_len = response.text.len(),
+                "summarize: model requested tool calls"
+            );
+
+            // Append assistant message with tool_calls.
+            let mut assistant_msg = ChatMessage::assistant_text(&response.text);
+            assistant_msg.tool_calls = Some(response.tool_calls.clone());
+            if let Some(ref thinking_text) = response.reasoning_content {
+                assistant_msg.parts.insert(
+                    0,
+                    ContentPart::Thinking { thinking: thinking_text.clone() },
                 );
             }
-        }
+            messages.push(assistant_msg);
 
-        if response.text.trim().is_empty() {
-            tracing::warn!(
-                stop_reason = ?response.stop_reason,
-                tool_calls = response.tool_calls.len(),
-                "summarize produced empty text (model may have called tools despite instruction)"
-            );
-        }
+            // Execute each tool call.
+            for call in &response.tool_calls {
+                tracing::info!(tool = %call.name, id = %call.id, "summarize: executing tool");
+                let result = self.execute_tool(call).await;
+                let result_content = match &result {
+                    Ok(r) => {
+                        let mut out = r.output.clone();
+                        if let Some(ref err) = r.error {
+                            if out.is_empty() {
+                                out = format!("error: {}", err);
+                            }
+                        }
+                        out
+                    }
+                    Err(e) => format!("error: {}", e),
+                };
 
-        Ok(response.text)
+                let mut tool_msg = ChatMessage::text("tool", &result_content);
+                tool_msg.tool_call_id = Some(call.id.clone());
+                tool_msg.is_error = Some(result.is_err());
+                messages.push(tool_msg);
+            }
+        };
+
+        Ok(final_text)
     }
 
     /// Check if compaction is needed and perform incremental LLM-based summarization.
