@@ -7,6 +7,7 @@ use crate::agents::agent_impl::{Agent, AgentLoop};
 use crate::agents::mcp_manager::McpManager;
 use crate::agents::session_manager::SessionManager;
 use crate::providers::ServiceRegistry;
+use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 
@@ -21,7 +22,7 @@ pub struct CommandContext<'a> {
     /// MCP manager (for /mcp command).
     pub mcp_manager: Option<&'a Arc<McpManager>>,
     /// Sessions cache — needed by /new to evict stale agent loops.
-    pub sessions: &'a dashmap::DashMap<String, Arc<tokio::sync::Mutex<AgentLoop>>>,
+    pub sessions: &'a DashMap<String, Arc<TokioMutex<AgentLoop>>>,
 }
 
 /// Parse a slash command from message content.
