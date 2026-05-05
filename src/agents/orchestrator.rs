@@ -344,7 +344,7 @@ impl Orchestrator {
                     if let Some((cmd, cmd_args)) = super::slash_command::parse_command(&content) {
                         let session_loop = sessions.get(&sk).map(|r| r.clone());
                         let cmd_ctx = super::slash_command::CommandContext {
-                            session_key: &sk,
+                            user_id: &sk,
                             registry: agent.registry(),
                             session_manager: &self.session_manager,
                             agent: &agent,

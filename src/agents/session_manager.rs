@@ -1,23 +1,17 @@
-//! Session manager — manages session lifecycle and persistence.
+//! Session manager — manages multi-session lifecycle and persistence.
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use parking_lot::RwLock;
 
 use crate::providers::capability_chat::ChatMessage;
-use crate::storage::{SessionBackend, SummaryRecord};
+use crate::storage::{SessionBackend, SessionInfo, SummaryRecord};
 
 /// Remove orphan tool results (tool messages whose tool_call_id has no matching
 /// assistant tool_call in the history). Also removes any trailing assistant
 /// message with tool_calls that has no subsequent tool results (incomplete round).
-///
-/// This must be called:
-/// 1. After loading session history from DB (recovery path)
-/// 2. Before sending messages to the provider (request path)
 pub fn sanitize_history(history: &mut Vec<ChatMessage>) {
-    // Pass 1: collect all tool_call IDs from assistant messages.
     let mut known_tool_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for msg in history.iter() {
         if msg.role == "assistant" {
@@ -29,14 +23,13 @@ pub fn sanitize_history(history: &mut Vec<ChatMessage>) {
         }
     }
 
-    // Pass 2: remove tool messages whose tool_call_id is unknown.
     let before = history.len();
     history.retain(|msg| {
         if msg.role == "tool" {
             if let Some(ref tc_id) = msg.tool_call_id {
                 return known_tool_ids.contains(tc_id);
             }
-            return false; // tool message without tool_call_id is always invalid
+            return false;
         }
         true
     });
@@ -49,14 +42,21 @@ pub fn sanitize_history(history: &mut Vec<ChatMessage>) {
 
 /// In-memory session backend for development and testing.
 pub struct InMemoryBackend {
-    /// session_key -> Vec<ChatMessage>
-    messages: RwLock<HashMap<String, Vec<ChatMessage>>>,
+    sessions: RwLock<HashMap<String, (String, Option<String>)>>, // id → (owner, display_name)
+    messages: RwLock<HashMap<String, Vec<ChatMessage>>>,         // session_id → messages
+    summaries: RwLock<HashMap<String, Vec<SummaryRecord>>>,      // session_id → summaries
+    active: RwLock<HashMap<String, String>>,                     // user_id → session_id
+    counter: std::sync::atomic::AtomicU32,
 }
 
 impl InMemoryBackend {
     pub fn new() -> Self {
         Self {
+            sessions: RwLock::new(HashMap::new()),
             messages: RwLock::new(HashMap::new()),
+            summaries: RwLock::new(HashMap::new()),
+            active: RwLock::new(HashMap::new()),
+            counter: std::sync::atomic::AtomicU32::new(0),
         }
     }
 }
@@ -68,26 +68,93 @@ impl Default for InMemoryBackend {
 }
 
 impl SessionBackend for InMemoryBackend {
-    fn load(&self, session_key: &str) -> Vec<ChatMessage> {
-        self.messages
-            .read()
-            .get(session_key)
-            .cloned()
-            .unwrap_or_default()
+    fn create_session(&self, owner: &str, display_name: Option<&str>) -> std::io::Result<SessionInfo> {
+        use std::sync::atomic::Ordering;
+        let id = format!("{:08x}", self.counter.fetch_add(1, Ordering::Relaxed));
+        let info = SessionInfo {
+            id: id.clone(),
+            owner: owner.to_string(),
+            display_name: display_name.map(|s| s.to_string()),
+            created_at: chrono::Utc::now(),
+            last_activity: chrono::Utc::now(),
+            message_count: 0,
+        };
+        self.sessions.write().insert(id.clone(), (owner.to_string(), display_name.map(|s| s.to_string())));
+        self.messages.write().insert(id, Vec::new());
+        Ok(info)
     }
 
-    fn append(&self, session_key: &str, message: &ChatMessage) -> std::io::Result<()> {
-        let mut guard = self.messages.write();
-        guard
-            .entry(session_key.to_string())
+    fn delete_session(&self, session_id: &str) -> std::io::Result<()> {
+        self.sessions.write().remove(session_id);
+        self.messages.write().remove(session_id);
+        self.summaries.write().remove(session_id);
+        // Clean up any user_state pointing to this session.
+        let mut active = self.active.write();
+        active.retain(|_, v| v != session_id);
+        Ok(())
+    }
+
+    fn rename_session(&self, session_id: &str, name: &str) -> std::io::Result<()> {
+        if let Some(entry) = self.sessions.write().get_mut(session_id) {
+            entry.1 = Some(name.to_string());
+        }
+        Ok(())
+    }
+
+    fn get_session(&self, session_id: &str) -> Option<SessionInfo> {
+        self.sessions.read().get(session_id).map(|(owner, name)| {
+            let msgs = self.messages.read().get(session_id).map(|v| v.len()).unwrap_or(0);
+            SessionInfo {
+                id: session_id.to_string(),
+                owner: owner.clone(),
+                display_name: name.clone(),
+                created_at: chrono::Utc::now(),
+                last_activity: chrono::Utc::now(),
+                message_count: msgs,
+            }
+        })
+    }
+
+    fn list_sessions(&self, owner: &str) -> Vec<SessionInfo> {
+        self.sessions.read().iter()
+            .filter(|(_, (o, _))| o == owner)
+            .map(|(id, (owner, name))| {
+                let msgs = self.messages.read().get(id).map(|v| v.len()).unwrap_or(0);
+                SessionInfo {
+                    id: id.clone(),
+                    owner: owner.clone(),
+                    display_name: name.clone(),
+                    created_at: chrono::Utc::now(),
+                    last_activity: chrono::Utc::now(),
+                    message_count: msgs,
+                }
+            })
+            .collect()
+    }
+
+    fn get_active_session(&self, user_id: &str) -> Option<String> {
+        self.active.read().get(user_id).cloned()
+    }
+
+    fn set_active_session(&self, user_id: &str, session_id: &str) -> std::io::Result<()> {
+        self.active.write().insert(user_id.to_string(), session_id.to_string());
+        Ok(())
+    }
+
+    fn load_messages(&self, session_id: &str) -> Vec<ChatMessage> {
+        self.messages.read().get(session_id).cloned().unwrap_or_default()
+    }
+
+    fn append_message(&self, session_id: &str, message: &ChatMessage) -> std::io::Result<()> {
+        self.messages.write()
+            .entry(session_id.to_string())
             .or_default()
             .push(message.clone());
         Ok(())
     }
 
-    fn remove_last(&self, session_key: &str) -> std::io::Result<bool> {
-        let mut guard = self.messages.write();
-        if let Some(msgs) = guard.get_mut(session_key) {
+    fn remove_last_message(&self, session_id: &str) -> std::io::Result<bool> {
+        if let Some(msgs) = self.messages.write().get_mut(session_id) {
             if !msgs.is_empty() {
                 msgs.pop();
                 return Ok(true);
@@ -96,15 +163,43 @@ impl SessionBackend for InMemoryBackend {
         Ok(false)
     }
 
-    fn list_sessions(&self) -> Vec<String> {
-        self.messages.read().keys().cloned().collect()
+    fn save_summary(&self, session_id: &str, summary: &SummaryRecord) -> std::io::Result<()> {
+        self.summaries.write()
+            .entry(session_id.to_string())
+            .or_default()
+            .push(summary.clone());
+        Ok(())
+    }
+
+    fn load_latest_summary(&self, session_id: &str) -> Option<SummaryRecord> {
+        self.summaries.read().get(session_id).and_then(|v| v.last().cloned())
+    }
+
+    fn load_incremental(&self, session_id: &str, after_message_id: i64) -> Vec<(i64, ChatMessage)> {
+        self.messages.read().get(session_id)
+            .map(|msgs| {
+                msgs.iter().enumerate()
+                    .filter(|(i, _)| (*i as i64) > after_message_id)
+                    .map(|(i, m)| (i as i64, m.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn clear_summary(&self, session_id: &str) -> std::io::Result<()> {
+        self.summaries.write().remove(session_id);
+        Ok(())
+    }
+
+    fn cleanup_stale(&self, _ttl_hours: u32) -> std::io::Result<usize> {
+        Ok(0)
     }
 }
 
 /// Trait for hooks that persist session messages to the backend.
 pub trait PersistHook: Send + Sync {
-    fn persist_message(&self, session_key: &str, message: &ChatMessage);
-    fn save_compaction(&self, session_key: &str, summary: &SummaryRecord);
+    fn persist_message(&self, session_id: &str, message: &ChatMessage);
+    fn save_compaction(&self, session_id: &str, summary: &SummaryRecord);
 }
 
 /// PersistHook implementation backed by a SessionBackend.
@@ -119,15 +214,15 @@ impl BackendPersistHook {
 }
 
 impl PersistHook for BackendPersistHook {
-    fn persist_message(&self, session_key: &str, message: &ChatMessage) {
-        if let Err(e) = self.backend.append(session_key, message) {
-            tracing::warn!(session = %session_key, err = %e, "persist failed");
+    fn persist_message(&self, session_id: &str, message: &ChatMessage) {
+        if let Err(e) = self.backend.append_message(session_id, message) {
+            tracing::warn!(session = %session_id, err = %e, "persist failed");
         }
     }
 
-    fn save_compaction(&self, session_key: &str, summary: &SummaryRecord) {
-        if let Err(e) = self.backend.save_summary(session_key, summary) {
-            tracing::warn!(session = %session_key, err = %e, "save compaction failed");
+    fn save_compaction(&self, session_id: &str, summary: &SummaryRecord) {
+        if let Err(e) = self.backend.save_summary(session_id, summary) {
+            tracing::warn!(session = %session_id, err = %e, "save compaction failed");
         }
     }
 }
@@ -143,8 +238,10 @@ pub struct SummaryMetadata {
 /// Per-session conversation state held by AgentLoop.
 #[derive(Debug, Clone)]
 pub struct Session {
-    /// Unique session key, e.g. "wechat:o9cq80zXpSX1Hz0ph_QNs591k4PA".
-    pub key: String,
+    /// Session ID (e.g. "k3jr9px2").
+    pub id: String,
+    /// Owner user ID (e.g. "telegram:12345").
+    pub owner: String,
     /// Current conversation history (in-memory).
     pub history: Vec<ChatMessage>,
     /// Parallel to `history`: database message IDs, 0 for summary or unpersisted messages.
@@ -156,9 +253,10 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(key: String) -> Self {
+    pub fn new(id: String) -> Self {
         Self {
-            key,
+            owner: String::new(),
+            id,
             history: Vec::new(),
             message_ids: Vec::new(),
             compact_version: 0,
@@ -168,20 +266,17 @@ impl Session {
 
     /// Append a user message to history.
     pub fn add_user_text(&mut self, text: String) {
-        self.history
-            .push(ChatMessage::user_text(text));
+        self.history.push(ChatMessage::user_text(text));
         self.message_ids.push(0);
     }
 
     /// Append an assistant text message to history.
     pub fn add_assistant_text(&mut self, text: String) {
-        self.history
-            .push(ChatMessage::assistant_text(text));
+        self.history.push(ChatMessage::assistant_text(text));
         self.message_ids.push(0);
     }
 
     /// Append an assistant message with tool_calls to history.
-    /// Preserves tool_calls and thinking content for correct request formatting.
     pub fn add_assistant_with_tools(
         &mut self,
         text: String,
@@ -199,7 +294,6 @@ impl Session {
     }
 
     /// Append a tool result message to history.
-    /// Preserves tool_call_id so providers can format it as tool_result block.
     pub fn add_tool_result(&mut self, tool_call_id: String, content: String, is_error: bool) {
         let mut msg = ChatMessage::text("tool", &content);
         msg.tool_call_id = Some(tool_call_id);
@@ -210,8 +304,7 @@ impl Session {
 
     /// Add a system message to history.
     pub fn add_system_text(&mut self, text: String) {
-        self.history
-            .push(ChatMessage::system_text(text));
+        self.history.push(ChatMessage::system_text(text));
         self.message_ids.push(0);
     }
 
@@ -229,56 +322,43 @@ impl Session {
 /// Manages session lifecycle — creates, retrieves, and persists sessions.
 pub struct SessionManager {
     backend: Arc<dyn SessionBackend>,
-    /// Active sessions (in-memory cache), keyed by actual backend key.
-    active: RwLock<HashMap<String, Session>>,
-    /// Aliases: user-facing key → actual backend session key.
-    /// When /new is called, a new backend key is generated and mapped here.
-    aliases: RwLock<HashMap<String, String>>,
-    /// Monotonic counter for generating unique backend keys.
-    alias_counter: AtomicU32,
+    /// In-memory session cache: session_id → Session.
+    cache: RwLock<HashMap<String, Session>>,
+    /// User's active session: user_id → session_id.
+    active: RwLock<HashMap<String, String>>,
 }
 
 impl SessionManager {
-    /// Create a new SessionManager with the given backend.
     pub fn new(backend: Arc<dyn SessionBackend>) -> Self {
         Self {
             backend,
+            cache: RwLock::new(HashMap::new()),
             active: RwLock::new(HashMap::new()),
-            aliases: RwLock::new(HashMap::new()),
-            alias_counter: AtomicU32::new(0),
         }
     }
 
-    /// Create a new in-memory SessionManager (for development).
     pub fn in_memory() -> Self {
         Self::new(Arc::new(InMemoryBackend::new()))
     }
 
-    /// Resolve the actual backend session key for a user-facing key.
-    fn resolve_key(&self, key: &str) -> String {
-        self.aliases.read().get(key).cloned().unwrap_or_else(|| key.to_string())
-    }
-
-    /// Get or create a session by key.
+    /// Get the active session for a user. Auto-creates if none exists.
     /// Attempts summary-based recovery first, then falls back to full load.
-    pub fn get_or_create(&self, key: &str) -> Session {
-        let actual_key = self.resolve_key(key);
+    pub fn get_or_create(&self, user_id: &str) -> Session {
+        // 1. Resolve active session_id.
+        let session_id = self.resolve_active(user_id);
 
-        // 1. Check in-memory cache.
+        // 2. Check cache.
         {
-            let active = self.active.read();
-            if let Some(s) = active.get(&actual_key) {
+            let cache = self.cache.read();
+            if let Some(s) = cache.get(&session_id) {
                 return s.clone();
             }
         }
 
-        // 2. Ensure session exists in backend.
-        self.backend.ensure_session(&actual_key).ok();
-
-        // 3. Try summary-based recovery.
-        let session = match self.backend.load_latest_summary(&actual_key) {
+        // 3. Load from backend.
+        let session = match self.backend.load_latest_summary(&session_id) {
             Some(summary) => {
-                let incremental = self.backend.load_incremental(&actual_key, summary.up_to_message);
+                let incremental = self.backend.load_incremental(&session_id, summary.up_to_message);
                 let mut history = Vec::with_capacity(incremental.len() + 1);
                 let mut message_ids = Vec::with_capacity(incremental.len() + 1);
 
@@ -295,17 +375,17 @@ impl SessionManager {
                 sanitize_history(&mut history);
 
                 tracing::info!(
-                    session = %actual_key,
+                    session = %session_id,
                     summary_tokens = ?summary.token_estimate,
                     incremental_count = history.len() - 1,
                     "session restored from summary"
                 );
 
-                // message_ids may be longer than history after sanitization; trim.
                 message_ids.truncate(history.len());
 
                 Session {
-                    key: actual_key.clone(),
+                    id: session_id.clone(),
+                    owner: user_id.to_string(),
                     history,
                     message_ids,
                     compact_version: summary.version,
@@ -317,14 +397,15 @@ impl SessionManager {
                 }
             }
             None => {
-                let mut full = self.backend.load(&actual_key);
+                let mut full = self.backend.load_messages(&session_id);
                 let count = full.len();
                 sanitize_history(&mut full);
                 if count > 0 {
-                    tracing::info!(session = %actual_key, message_count = count, sanitized = full.len(), "session restored from full history");
+                    tracing::info!(session = %session_id, message_count = count, sanitized = full.len(), "session restored from full history");
                 }
                 Session {
-                    key: actual_key.clone(),
+                    id: session_id.clone(),
+                    owner: user_id.to_string(),
                     message_ids: vec![0; full.len()],
                     history: full,
                     compact_version: 0,
@@ -335,42 +416,113 @@ impl SessionManager {
 
         // 4. Cache.
         {
-            let mut active = self.active.write();
-            active.insert(actual_key, session.clone());
+            let mut cache = self.cache.write();
+            cache.insert(session_id, session.clone());
         }
 
         session
     }
 
-    /// Add a message to a session and persist.
-    pub fn append_message(&self, session_key: &str, message: ChatMessage) {
-        let actual_key = self.resolve_key(session_key);
-        self.backend.append(&actual_key, &message).ok();
-        let mut active = self.active.write();
-        if let Some(session) = active.get_mut(&actual_key) {
+    /// Resolve the active session_id for a user. Creates one if none exists.
+    fn resolve_active(&self, user_id: &str) -> String {
+        // 1. Check in-memory mapping.
+        if let Some(sid) = self.active.read().get(user_id) {
+            return sid.clone();
+        }
+
+        // 2. Check backend.
+        if let Some(sid) = self.backend.get_active_session(user_id) {
+            self.active.write().insert(user_id.to_string(), sid.clone());
+            return sid;
+        }
+
+        // 3. Auto-create.
+        let info = self.backend.create_session(user_id, None)
+            .expect("failed to auto-create session");
+        let _ = self.backend.set_active_session(user_id, &info.id);
+        self.active.write().insert(user_id.to_string(), info.id.clone());
+        tracing::info!(user = %user_id, session = %info.id, "auto-created first session");
+        info.id
+    }
+
+    /// Create a new session and make it active for the user.
+    pub fn new_session(&self, user_id: &str, name: Option<&str>) -> std::io::Result<SessionInfo> {
+        // Invalidate old cached session.
+        if let Some(old_id) = self.active.read().get(user_id).cloned() {
+            self.cache.write().remove(&old_id);
+        }
+
+        let info = self.backend.create_session(user_id, name)?;
+        self.backend.set_active_session(user_id, &info.id)?;
+        self.active.write().insert(user_id.to_string(), info.id.clone());
+        tracing::info!(user = %user_id, session = %info.id, "new session created");
+        Ok(info)
+    }
+
+    /// Switch to an existing session.
+    pub fn switch_session(&self, user_id: &str, session_id: &str) -> std::io::Result<SessionInfo> {
+        let info = self.backend.get_session(session_id)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "session not found"))?;
+
+        if info.owner != user_id {
+            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "not your session"));
+        }
+
+        // Invalidate old cached session.
+        if let Some(old_id) = self.active.read().get(user_id).cloned() {
+            self.cache.write().remove(&old_id);
+        }
+
+        self.backend.set_active_session(user_id, session_id)?;
+        self.active.write().insert(user_id.to_string(), session_id.to_string());
+        tracing::info!(user = %user_id, session = %session_id, "switched session");
+        Ok(info)
+    }
+
+    /// Delete a session. Cannot delete the active session.
+    pub fn delete_session(&self, user_id: &str, session_id: &str) -> std::io::Result<()> {
+        // Check not active.
+        if self.active.read().get(user_id).map(|s| s.as_str()) == Some(session_id) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "cannot delete the active session"));
+        }
+
+        let info = self.backend.get_session(session_id)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "session not found"))?;
+
+        if info.owner != user_id {
+            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "not your session"));
+        }
+
+        self.cache.write().remove(session_id);
+        self.backend.delete_session(session_id)?;
+        tracing::info!(user = %user_id, session = %session_id, "session deleted");
+        Ok(())
+    }
+
+    /// Rename a session.
+    pub fn rename_session(&self, session_id: &str, name: &str) -> std::io::Result<()> {
+        self.backend.rename_session(session_id, name)
+    }
+
+    /// List all sessions for a user.
+    pub fn list_sessions(&self, user_id: &str) -> Vec<SessionInfo> {
+        self.backend.list_sessions(user_id)
+    }
+
+    /// Get the active session_id for a user (None if not resolved yet).
+    pub fn active_session_id(&self, user_id: &str) -> Option<String> {
+        self.active.read().get(user_id).cloned()
+            .or_else(|| self.backend.get_active_session(user_id))
+    }
+
+    /// Append a message to a session and persist.
+    pub fn append_message(&self, session_id: &str, message: ChatMessage) {
+        self.backend.append_message(session_id, &message).ok();
+        let mut cache = self.cache.write();
+        if let Some(session) = cache.get_mut(session_id) {
             session.history.push(message);
             session.message_ids.push(0);
         }
-    }
-
-    /// List all session keys.
-    pub fn list_sessions(&self) -> Vec<String> {
-        self.backend.list_sessions()
-    }
-
-    /// Reset a session by creating a new backend key instead of clearing old data.
-    /// The old session data remains untouched in the backend.
-    pub fn reset(&self, session_key: &str) {
-        // Get the current actual key before we change the alias.
-        let old_actual_key = self.resolve_key(session_key);
-        // Generate new backend key.
-        let n = self.alias_counter.fetch_add(1, Ordering::Relaxed) + 1;
-        let new_backend_key = format!("{}#s{}", session_key, n);
-        // Update alias mapping.
-        self.aliases.write().insert(session_key.to_string(), new_backend_key.clone());
-        // Remove old cached session.
-        self.active.write().remove(&old_actual_key);
-        tracing::info!(session = %session_key, old_backend = %old_actual_key, new_backend = %new_backend_key, "session reset (new session created)");
     }
 }
 

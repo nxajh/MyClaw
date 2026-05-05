@@ -13,7 +13,7 @@ use tokio::sync::Mutex as TokioMutex;
 
 /// Context available to all command handlers.
 pub struct CommandContext<'a> {
-    pub session_key: &'a str,
+    pub user_id: &'a str,
     pub registry: &'a Arc<dyn ServiceRegistry>,
     pub session_manager: &'a SessionManager,
     pub agent: &'a Agent,
@@ -53,7 +53,7 @@ pub async fn dispatch(cmd: &str, args: &str, ctx: CommandContext<'_>) -> Option<
         // ── Batch 1: core ──
         "help" | "h" | "?" => Some(cmd_help()),
         "status" => Some(cmd_status(ctx).await),
-        "new" | "reset" => Some(cmd_new(ctx).await),
+        "new" | "reset" => Some(cmd_new(args, ctx).await),
         "compact" => Some(cmd_compact(ctx).await),
         "model" => Some(cmd_model(args, ctx)),
         "models" => Some(cmd_models(ctx)),
@@ -69,6 +69,11 @@ pub async fn dispatch(cmd: &str, args: &str, ctx: CommandContext<'_>) -> Option<
         "history" => Some(cmd_history(ctx).await),
         // ── Batch 3 ──
         "skills" | "skill" => Some(cmd_skill(ctx)),
+        // ── Batch 4: session management ──
+        "sessions" | "ss" => Some(cmd_sessions(ctx)),
+        "switch" | "sw" => Some(cmd_switch(args, ctx).await),
+        "rename" | "rn" => Some(cmd_rename(args, ctx)),
+        "delete" | "del" => Some(cmd_delete(args, ctx).await),
         _ => None,
     }
 }
@@ -81,8 +86,7 @@ async fn get_history(ctx: &CommandContext<'_>) -> Option<Vec<crate::providers::C
             return Some(guard.session().history.clone());
         }
     }
-    // Fallback: get session from session_manager.
-    let session = ctx.session_manager.get_or_create(ctx.session_key);
+    let session = ctx.session_manager.get_or_create(ctx.user_id);
     if session.history.is_empty() {
         None
     } else {
@@ -99,7 +103,11 @@ fn cmd_help() -> String {
      **基础**\n\
      /help — 显示此帮助信息\n\
      /status — 当前会话状态（模型、token 用量）\n\
-     /new — 清空会话，开始新对话\n\
+     /new [名称] — 创建新会话\n\
+     /sessions — 列出所有会话\n\
+     /switch <序号> — 切换到指定会话\n\
+     /rename <序号> <名称> — 重命名会话\n\
+     /delete <序号> — 删除会话\n\
      /compact — 手动触发上下文压缩\n\
      /model [name] — 查看或切换当前模型\n\
      /models — 列出可用模型\n\
@@ -116,7 +124,7 @@ fn cmd_help() -> String {
      **其他**\n\
      /mcp — 查看 MCP 服务器状态\n\
      /btw <问题> — 旁路提问，不影响上下文\n\n\
-     _别名: /h=/help, /n=/new_".to_string()
+     _别名: /h=/help, /n=/new, /ss=/sessions, /sw=/switch, /rn=/rename, /del=/delete_".to_string()
 }
 
 async fn cmd_status(ctx: CommandContext<'_>) -> String {
@@ -141,21 +149,26 @@ async fn cmd_status(ctx: CommandContext<'_>) -> String {
         let total_tokens = guard.token_total();
         format!(
             "会话: `{}`\n历史: {} 条消息\nToken: {}",
-            ctx.session_key, history_len, total_tokens
+            ctx.user_id, history_len, total_tokens
         )
     } else {
-        format!("会话: `{}`\n状态: 新会话", ctx.session_key)
+        format!("会话: `{}`\n状态: 新会话", ctx.user_id)
     };
 
     format!("📊 **状态**\n\n{}\n{}", model_info, session_info)
 }
 
-async fn cmd_new(ctx: CommandContext<'_>) -> String {
+async fn cmd_new(args: &str, ctx: CommandContext<'_>) -> String {
+    let name = if args.trim().is_empty() { None } else { Some(args.trim()) };
     // Evict cached agent loop so next message creates a fresh one.
-    ctx.sessions.remove(ctx.session_key);
-    // Clear persistent session data.
-    ctx.session_manager.reset(ctx.session_key);
-    "🆕 会话已清空，开始新对话。".to_string()
+    ctx.sessions.remove(ctx.user_id);
+    match ctx.session_manager.new_session(ctx.user_id, name) {
+        Ok(info) => {
+            let display = info.display_name.as_deref().unwrap_or("(未命名)");
+            format!("🆕 新会话已创建：**{}** (`{}`)", display, info.id)
+        }
+        Err(e) => format!("❌ 创建会话失败: {}", e),
+    }
 }
 
 async fn cmd_compact(ctx: CommandContext<'_>) -> String {
@@ -270,7 +283,7 @@ fn cmd_config(args: &str, ctx: CommandContext<'_>) -> String {
             model_info,
             tools.tool_count(),
             skills.skill_count(),
-            ctx.session_key,
+            ctx.user_id,
         )
     } else {
         let key = args.trim().to_lowercase();
@@ -464,7 +477,7 @@ async fn cmd_export(ctx: CommandContext<'_>) -> String {
         Some(h) => h,
         None => return "ℹ️ 当前会话为空，无法导出。".to_string(),
     };
-    let sk_display = ctx.session_key.to_string();
+    let sk_display = ctx.user_id.to_string();
 
     let mut lines = vec![format!(
         "📤 **会话导出** — {}\n\n---\n",
@@ -572,4 +585,97 @@ fn cmd_skill(ctx: CommandContext<'_>) -> String {
         lines.push(format!("• **{}**{} — {}", name, kw, desc));
     }
     lines.join("\n")
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Batch 4: Session management
+// ════════════════════════════════════════════════════════════════════════════════
+
+fn cmd_sessions(ctx: CommandContext<'_>) -> String {
+    let sessions = ctx.session_manager.list_sessions(ctx.user_id);
+    if sessions.is_empty() {
+        return "ℹ️ 没有会话记录。".to_string();
+    }
+
+    let active_id = ctx.session_manager.active_session_id(ctx.user_id);
+
+    let mut lines = vec!["📂 **会话列表**\n".to_string()];
+    for (i, s) in sessions.iter().enumerate() {
+        let marker = if active_id.as_deref() == Some(&s.id) { " ← 当前" } else { "" };
+        let name = s.display_name.as_deref().unwrap_or("(未命名)");
+        let msg_count = s.message_count;
+        lines.push(format!("{}. **{}**{} — {}条消息 — `{}`",
+            i + 1, name, marker, msg_count, s.id));
+    }
+    lines.push("\n/new [名称] — 新建  /switch <N> — 切换  /rename <N> <名称> — 重命名  /delete <N> — 删除".to_string());
+    lines.join("\n")
+}
+
+async fn cmd_switch(args: &str, ctx: CommandContext<'_>) -> String {
+    let n = match args.trim().parse::<usize>() {
+        Ok(n) if n > 0 => n - 1,
+        _ => return "⚠️ 用法: /switch <序号>\n用 /sessions 查看会话列表。".to_string(),
+    };
+
+    let sessions = ctx.session_manager.list_sessions(ctx.user_id);
+    let target = match sessions.get(n) {
+        Some(s) => s.clone(),
+        None => return format!("⚠️ 序号 {} 无效，当前共 {} 个会话。", n + 1, sessions.len()),
+    };
+
+    // Evict cached agent loop.
+    ctx.sessions.remove(ctx.user_id);
+
+    match ctx.session_manager.switch_session(ctx.user_id, &target.id) {
+        Ok(info) => {
+            let name = info.display_name.as_deref().unwrap_or("(未命名)");
+            format!("✅ 已切换到：**{}** (`{}`)", name, info.id)
+        }
+        Err(e) => format!("❌ 切换失败: {}", e),
+    }
+}
+
+fn cmd_rename(args: &str, ctx: CommandContext<'_>) -> String {
+    let parts: Vec<&str> = args.trim().splitn(2, char::is_whitespace).collect();
+    if parts.len() < 2 || parts[1].trim().is_empty() {
+        return "⚠️ 用法: /rename <序号> <名称>".to_string();
+    }
+
+    let n = match parts[0].parse::<usize>() {
+        Ok(n) if n > 0 => n - 1,
+        _ => return "⚠️ 序号必须是正整数。".to_string(),
+    };
+
+    let sessions = ctx.session_manager.list_sessions(ctx.user_id);
+    let target = match sessions.get(n) {
+        Some(s) => s,
+        None => return format!("⚠️ 序号 {} 无效，当前共 {} 个会话。", n + 1, sessions.len()),
+    };
+
+    let new_name = parts[1].trim();
+    match ctx.session_manager.rename_session(&target.id, new_name) {
+        Ok(()) => format!("✅ 已重命名为：**{}**", new_name),
+        Err(e) => format!("❌ 重命名失败: {}", e),
+    }
+}
+
+async fn cmd_delete(args: &str, ctx: CommandContext<'_>) -> String {
+    let n = match args.trim().parse::<usize>() {
+        Ok(n) if n > 0 => n - 1,
+        _ => return "⚠️ 用法: /delete <序号>\n用 /sessions 查看会话列表。".to_string(),
+    };
+
+    let sessions = ctx.session_manager.list_sessions(ctx.user_id);
+    let target = match sessions.get(n) {
+        Some(s) => s,
+        None => return format!("⚠️ 序号 {} 无效，当前共 {} 个会话。", n + 1, sessions.len()),
+    };
+
+    match ctx.session_manager.delete_session(ctx.user_id, &target.id) {
+        Ok(()) => {
+            let name = target.display_name.as_deref().unwrap_or("(未命名)");
+            format!("🗑️ 已删除会话：**{}**", name)
+        }
+        Err(e) => format!("❌ 删除失败: {}", e),
+    }
 }

@@ -378,7 +378,7 @@ impl AgentLoop {
         // Persist user message via hook.
         if let Some(ref hook) = self.persist_hook {
             if let Some(msg) = self.session.history.last() {
-                hook.persist_message(&self.session.key, msg);
+                hook.persist_message(&self.session.id, msg);
             }
         }
 
@@ -397,7 +397,7 @@ impl AgentLoop {
         // Persist assistant message via hook.
         if let Some(ref hook) = self.persist_hook {
             if let Some(msg) = self.session.history.last() {
-                hook.persist_message(&self.session.key, msg);
+                hook.persist_message(&self.session.id, msg);
             }
         }
 
@@ -677,7 +677,7 @@ impl AgentLoop {
             // Persist assistant tool-call message via hook.
             if let Some(ref hook) = self.persist_hook {
                 if let Some(msg) = self.session.history.last() {
-                    hook.persist_message(&self.session.key, msg);
+                    hook.persist_message(&self.session.id, msg);
                 }
             }
 
@@ -736,7 +736,7 @@ impl AgentLoop {
                 // Persist tool result via hook.
                 if let Some(ref hook) = self.persist_hook {
                     if let Some(msg) = self.session.history.last() {
-                        hook.persist_message(&self.session.key, msg);
+                        hook.persist_message(&self.session.id, msg);
                     }
                 }
             }
@@ -891,7 +891,7 @@ impl AgentLoop {
                 // Record the assistant's question in session history.
                 self.session.add_assistant_text(question.to_string());
 
-                let answer = handler(self.session.key.clone(), question.to_string()).await?;
+                let answer = handler(self.session.id.clone(), question.to_string()).await?;
 
                 // Record the user's answer in session history.
                 self.session.add_user_text(answer.clone());
@@ -1482,7 +1482,7 @@ impl AgentLoop {
 
         // 5. Persist summary.
         if let Some(ref hook) = self.persist_hook {
-            hook.save_compaction(&self.session.key, &SummaryRecord {
+            hook.save_compaction(&self.session.id, &SummaryRecord {
                 id: 0,
                 version,
                 summary: summary.clone(),
