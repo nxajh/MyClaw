@@ -190,28 +190,14 @@ impl SessionBackend for SqliteSessionBackend {
         .map_err(std::io::Error::other)?;
 
         // If this was the active session, clear user_state or switch to another session.
-        let users_to_fix: Vec<String> = conn
-            .query_row(
-                "SELECT user_id FROM user_state WHERE active_session = ?1",
-                params![session_id],
-                |row| row.get(0),
-            )
-            .into_iter()
-            .filter_map(|r: Result<String, _>| r.ok())
+        let mut fix_stmt = conn
+            .prepare("SELECT user_id FROM user_state WHERE active_session = ?1")
+            .map_err(std::io::Error::other)?;
+        let users_to_fix: Vec<String> = fix_stmt
+            .query_map(params![session_id], |row| row.get(0))
+            .map_err(std::io::Error::other)?
+            .filter_map(|r| r.ok())
             .collect();
-
-        // Also try query_map for multiple users (shouldn't happen, but be safe).
-        let users_to_fix = if users_to_fix.is_empty() {
-            let mut stmt = conn
-                .prepare("SELECT user_id FROM user_state WHERE active_session = ?1")
-                .map_err(std::io::Error::other)?;
-            stmt.query_map(params![session_id], |row| row.get(0))
-                .map_err(std::io::Error::other)?
-                .filter_map(|r: Result<String, _>| r.ok())
-                .collect()
-        } else {
-            users_to_fix
-        };
 
         for user_id in users_to_fix {
             // Try to switch to another session for this user.
