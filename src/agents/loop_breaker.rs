@@ -175,6 +175,11 @@ impl LoopBreaker {
         let mut count = 1usize;
         for inv in window.iter().skip(1) {
             if inv.tool_name == first.tool_name && inv.args_hash == first.args_hash {
+                // If the result differs, this is a polling pattern (same args,
+                // evolving output) — not a true loop. Reset the count.
+                if inv.result_hash != first.result_hash {
+                    break;
+                }
                 count += 1;
             } else {
                 break;
@@ -411,6 +416,62 @@ mod tests {
             LoopBreak::None
         );
         assert_eq!(lb.total_calls(), 3);
+    }
+
+    #[test]
+    fn exact_repeat_allows_polling_different_results() {
+        // Same tool + same args, but results differ each time (polling pattern).
+        // Should NOT trigger ExactRepeat.
+        let mut lb = default_breaker();
+        let args = r#"{"command": "gh run view 123"}"#;
+        assert_eq!(
+            lb.record_and_check("shell", args, "status: in_progress"),
+            LoopBreak::None
+        );
+        assert_eq!(
+            lb.record_and_check("shell", args, "status: in_progress, 2 jobs running"),
+            LoopBreak::None
+        );
+        assert_eq!(
+            lb.record_and_check("shell", args, "status: completed, conclusion: success"),
+            LoopBreak::None
+        );
+        assert_eq!(
+            lb.record_and_check("shell", args, "status: completed, conclusion: success"),
+            LoopBreak::None
+        );
+    }
+
+    #[test]
+    fn exact_repeat_polling_then_stall_triggers() {
+        // Polling with changing results, then result stabilizes → should trigger.
+        let mut lb = default_breaker();
+        let args = r#"{"command": "gh run view 123"}"#;
+        assert_eq!(
+            lb.record_and_check("shell", args, "status: in_progress"),
+            LoopBreak::None
+        );
+        assert_eq!(
+            lb.record_and_check("shell", args, "status: in_progress, 2 jobs running"),
+            LoopBreak::None
+        );
+        // Now the result stabilizes (same result repeated).
+        assert_eq!(
+            lb.record_and_check("shell", args, "status: completed, success"),
+            LoopBreak::None
+        );
+        assert_eq!(
+            lb.record_and_check("shell", args, "status: completed, success"),
+            LoopBreak::None
+        );
+        // Third identical call: now triggers.
+        match lb.record_and_check("shell", args, "status: completed, success") {
+            LoopBreak::Detected(LoopBreakReason::ExactRepeat { tool, count, .. }) => {
+                assert_eq!(tool, "shell");
+                assert_eq!(count, 3);
+            }
+            other => panic!("expected ExactRepeat after stall, got {:?}", other),
+        }
     }
 
     // ── Ping-pong ──────────────────────────────────────────────────────────
