@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use parking_lot::RwLock;
 
@@ -228,8 +229,13 @@ impl Session {
 /// Manages session lifecycle — creates, retrieves, and persists sessions.
 pub struct SessionManager {
     backend: Arc<dyn SessionBackend>,
-    /// Active sessions (in-memory cache).
+    /// Active sessions (in-memory cache), keyed by actual backend key.
     active: RwLock<HashMap<String, Session>>,
+    /// Aliases: user-facing key → actual backend session key.
+    /// When /new is called, a new backend key is generated and mapped here.
+    aliases: RwLock<HashMap<String, String>>,
+    /// Monotonic counter for generating unique backend keys.
+    alias_counter: AtomicU32,
 }
 
 impl SessionManager {
@@ -238,6 +244,8 @@ impl SessionManager {
         Self {
             backend,
             active: RwLock::new(HashMap::new()),
+            aliases: RwLock::new(HashMap::new()),
+            alias_counter: AtomicU32::new(0),
         }
     }
 
@@ -246,24 +254,31 @@ impl SessionManager {
         Self::new(Arc::new(InMemoryBackend::new()))
     }
 
+    /// Resolve the actual backend session key for a user-facing key.
+    fn resolve_key(&self, key: &str) -> String {
+        self.aliases.read().get(key).cloned().unwrap_or_else(|| key.to_string())
+    }
+
     /// Get or create a session by key.
     /// Attempts summary-based recovery first, then falls back to full load.
     pub fn get_or_create(&self, key: &str) -> Session {
+        let actual_key = self.resolve_key(key);
+
         // 1. Check in-memory cache.
         {
             let active = self.active.read();
-            if let Some(s) = active.get(key) {
+            if let Some(s) = active.get(&actual_key) {
                 return s.clone();
             }
         }
 
         // 2. Ensure session exists in backend.
-        self.backend.ensure_session(key).ok();
+        self.backend.ensure_session(&actual_key).ok();
 
         // 3. Try summary-based recovery.
-        let session = match self.backend.load_latest_summary(key) {
+        let session = match self.backend.load_latest_summary(&actual_key) {
             Some(summary) => {
-                let incremental = self.backend.load_incremental(key, summary.up_to_message);
+                let incremental = self.backend.load_incremental(&actual_key, summary.up_to_message);
                 let mut history = Vec::with_capacity(incremental.len() + 1);
                 let mut message_ids = Vec::with_capacity(incremental.len() + 1);
 
@@ -280,7 +295,7 @@ impl SessionManager {
                 sanitize_history(&mut history);
 
                 tracing::info!(
-                    session = %key,
+                    session = %actual_key,
                     summary_tokens = ?summary.token_estimate,
                     incremental_count = history.len() - 1,
                     "session restored from summary"
@@ -290,7 +305,7 @@ impl SessionManager {
                 message_ids.truncate(history.len());
 
                 Session {
-                    key: key.to_string(),
+                    key: actual_key.clone(),
                     history,
                     message_ids,
                     compact_version: summary.version,
@@ -302,14 +317,14 @@ impl SessionManager {
                 }
             }
             None => {
-                let mut full = self.backend.load(key);
+                let mut full = self.backend.load(&actual_key);
                 let count = full.len();
                 sanitize_history(&mut full);
                 if count > 0 {
-                    tracing::info!(session = %key, message_count = count, sanitized = full.len(), "session restored from full history");
+                    tracing::info!(session = %actual_key, message_count = count, sanitized = full.len(), "session restored from full history");
                 }
                 Session {
-                    key: key.to_string(),
+                    key: actual_key.clone(),
                     message_ids: vec![0; full.len()],
                     history: full,
                     compact_version: 0,
@@ -321,7 +336,7 @@ impl SessionManager {
         // 4. Cache.
         {
             let mut active = self.active.write();
-            active.insert(key.to_string(), session.clone());
+            active.insert(actual_key, session.clone());
         }
 
         session
@@ -329,9 +344,10 @@ impl SessionManager {
 
     /// Add a message to a session and persist.
     pub fn append_message(&self, session_key: &str, message: ChatMessage) {
-        self.backend.append(session_key, &message).ok();
+        let actual_key = self.resolve_key(session_key);
+        self.backend.append(&actual_key, &message).ok();
         let mut active = self.active.write();
-        if let Some(session) = active.get_mut(session_key) {
+        if let Some(session) = active.get_mut(&actual_key) {
             session.history.push(message);
             session.message_ids.push(0);
         }
@@ -342,15 +358,19 @@ impl SessionManager {
         self.backend.list_sessions()
     }
 
-    /// Reset (clear) a session by key. Removes it from the active cache
-    /// so the next get_or_create will start fresh.
+    /// Reset a session by creating a new backend key instead of clearing old data.
+    /// The old session data remains untouched in the backend.
     pub fn reset(&self, session_key: &str) {
-        // Clear backend storage so old messages don't resurface on next get_or_create.
-        if let Err(e) = self.backend.clear_session(session_key) {
-            tracing::warn!(session = %session_key, err = %e, "failed to clear session backend");
-        }
-        self.active.write().remove(session_key);
-        tracing::info!(session = %session_key, "session reset");
+        // Get the current actual key before we change the alias.
+        let old_actual_key = self.resolve_key(session_key);
+        // Generate new backend key.
+        let n = self.alias_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        let new_backend_key = format!("{}#s{}", session_key, n);
+        // Update alias mapping.
+        self.aliases.write().insert(session_key.to_string(), new_backend_key.clone());
+        // Remove old cached session.
+        self.active.write().remove(&old_actual_key);
+        tracing::info!(session = %session_key, old_backend = %old_actual_key, new_backend = %new_backend_key, "session reset (new session created)");
     }
 }
 

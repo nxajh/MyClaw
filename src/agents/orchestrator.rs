@@ -192,10 +192,12 @@ impl Orchestrator {
         let channels = channels.clone();
         let pending_asks = pending_asks.clone();
         let reply_target_owned = reply_target.to_string();
+        let user_facing_key = sk.to_string();
         let handler: AskUserHandler = Arc::new(move |session_key: String, question: String| {
             let channels = channels.clone();
             let pending_asks = pending_asks.clone();
             let reply_target = reply_target_owned.clone();
+            let user_facing_key = user_facing_key.clone();
             Box::pin(async move {
                 // 1. Send the question through the channel.
                 let (ch_name, _) = parse_session_key(&session_key)
@@ -210,8 +212,9 @@ impl Orchestrator {
                 channel.send(&send_msg).await?;
 
                 // 2. Create a oneshot channel and register as pending.
+                //    Use the user-facing key so the run loop can find it.
                 let (tx, rx) = oneshot::channel();
-                pending_asks.insert(session_key.clone(), (tx, reply_target.clone()));
+                pending_asks.insert(user_facing_key, (tx, reply_target.clone()));
 
                 // 3. Wait for the user's reply (delivered by the run loop) with timeout.
                 let answer = tokio::time::timeout(ASK_USER_TIMEOUT, rx)

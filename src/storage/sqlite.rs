@@ -536,28 +536,6 @@ impl SessionBackend for SqliteSessionBackend {
         Ok(())
     }
 
-    fn clear_session(&self, session_key: &str) -> std::io::Result<()> {
-        let conn = self.conn.lock();
-        let table_m = messages_table(session_key);
-        let table_s = summaries_table(session_key);
-
-        // Delete all rows from both tables (keep table structure for future use).
-        conn.execute_batch(&format!(
-            "DELETE FROM {}; DELETE FROM {};",
-            table_m, table_s,
-        ))
-        .map_err(std::io::Error::other)?;
-
-        // Update message count in session index.
-        conn.execute(
-            "UPDATE session_index SET message_count = 0 WHERE session_key = ?1",
-            params![session_key],
-        )
-        .map_err(std::io::Error::other)?;
-
-        tracing::info!(session = %session_key, "session cleared (backend)");
-        Ok(())
-    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
