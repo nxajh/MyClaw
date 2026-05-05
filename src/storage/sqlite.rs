@@ -1,30 +1,11 @@
 //! SQLite-backed session storage.
 //!
-//! Stores conversation messages in per-session tables using a session_index
-//! for global session tracking. Each session gets its own `messages_{key}`
-//! and `summaries_{key}` tables.
+//! Uses a unified schema with `sessions`, `messages`, `summaries`, and
+//! `user_state` tables for multi-session management.
 
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
-use crate::storage::{ChatMessage, SessionBackend, SessionMetadata, SessionQuery, SummaryRecord};
-
-/// Sanitize a session key into a valid SQL table name suffix.
-fn sanitize_table_name(session_key: &str) -> String {
-    session_key
-        .chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
-        .collect()
-}
-
-/// Compute the per-session messages table name.
-fn messages_table(key: &str) -> String {
-    format!("messages_{}", sanitize_table_name(key))
-}
-
-/// Compute the per-session summaries table name.
-fn summaries_table(key: &str) -> String {
-    format!("summaries_{}", sanitize_table_name(key))
-}
+use crate::storage::{ChatMessage, SessionBackend, SessionInfo, SummaryRecord};
 
 /// SQLite-backed session persistence.
 pub struct SqliteSessionBackend {
@@ -60,55 +41,43 @@ impl SqliteSessionBackend {
     fn init_tables(&self) -> anyhow::Result<()> {
         let conn = self.conn.lock();
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS session_index (
-                session_key    TEXT PRIMARY KEY,
-                table_name     TEXT NOT NULL,
-                created_at     TEXT NOT NULL DEFAULT (datetime('now')),
-                last_activity  TEXT NOT NULL DEFAULT (datetime('now')),
-                message_count  INTEGER DEFAULT 0,
-                has_summary    INTEGER DEFAULT 0
-            );",
-        )?;
-        Ok(())
-    }
+            "CREATE TABLE IF NOT EXISTS sessions (
+                id            TEXT PRIMARY KEY,
+                owner         TEXT NOT NULL,
+                display_name  TEXT,
+                created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                last_activity TEXT NOT NULL DEFAULT (datetime('now')),
+                message_count INTEGER DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_sessions_owner ON sessions(owner, last_activity DESC);
 
-    /// Ensure a session exists in the session_index and its per-session
-    /// messages table is created.
-    fn ensure_session_internal(&self, key: &str) -> anyhow::Result<()> {
-        let table = messages_table(key);
-        let conn = self.conn.lock();
-        conn.execute(
-            "INSERT OR IGNORE INTO session_index (session_key, table_name) VALUES (?1, ?2)",
-            params![key, table],
-        )?;
-        conn.execute_batch(&format!(
-            "CREATE TABLE IF NOT EXISTS {} (
+            CREATE TABLE IF NOT EXISTS messages (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                seq         INTEGER NOT NULL UNIQUE,
+                session_id  TEXT NOT NULL,
+                seq         INTEGER NOT NULL,
                 role        TEXT NOT NULL,
                 content     TEXT NOT NULL,
-                name        TEXT,
-                created_at  TEXT NOT NULL DEFAULT (datetime('now'))
-            );",
-            table,
-        ))?;
-        Ok(())
-    }
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(session_id, seq)
+            );
+            CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq);
 
-    /// Ensure the summaries table exists for a session.
-    fn ensure_summaries_table(&self, key: &str) -> anyhow::Result<()> {
-        let table = summaries_table(key);
-        let conn = self.conn.lock();
-        conn.execute_batch(&format!(
-            "CREATE TABLE IF NOT EXISTS {} (
+            CREATE TABLE IF NOT EXISTS summaries (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id      TEXT NOT NULL,
                 summary         TEXT NOT NULL,
                 up_to_message   INTEGER NOT NULL,
                 token_estimate  INTEGER,
+                version         INTEGER DEFAULT 0,
                 created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_summaries_session ON summaries(session_id);
+
+            CREATE TABLE IF NOT EXISTS user_state (
+                user_id         TEXT PRIMARY KEY,
+                active_session  TEXT NOT NULL
             );",
-            table,
-        ))?;
+        )?;
         Ok(())
     }
 
@@ -121,30 +90,270 @@ impl SqliteSessionBackend {
     fn deserialize_message(json: &str) -> anyhow::Result<ChatMessage> {
         Ok(serde_json::from_str(json)?)
     }
+
+    /// Parse a datetime string from SQLite into DateTime<Utc>.
+    fn parse_datetime(s: &str) -> DateTime<Utc> {
+        // SQLite datetime format: "YYYY-MM-DD HH:MM:SS"
+        // Try RFC 3339 first, then fall back to SQLite format.
+        DateTime::parse_from_rfc3339(s)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|_| {
+                // Try parsing as SQLite format "YYYY-MM-DD HH:MM:SS"
+                chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+                    .map(|dt| dt.and_utc())
+                    .unwrap_or_else(|_| Utc::now())
+            })
+    }
+
+    /// Generate a random 8-hex-char session ID.
+    fn generate_session_id() -> String {
+        format!("{:08x}", rand::random::<u32>())
+    }
 }
 
 impl SessionBackend for SqliteSessionBackend {
-    fn load(&self, session_key: &str) -> Vec<ChatMessage> {
-        // Ensure the session tables exist (no-op if already created).
-        if let Err(e) = self.ensure_session_internal(session_key) {
-            tracing::warn!(session_key, error = %e, "ensure_session failed in load");
-            return Vec::new();
+    fn create_session(&self, owner: &str, display_name: Option<&str>) -> std::io::Result<SessionInfo> {
+        let id = Self::generate_session_id();
+        let conn = self.conn.lock();
+
+        conn.execute(
+            "INSERT INTO sessions (id, owner, display_name) VALUES (?1, ?2, ?3)",
+            params![id, owner, display_name],
+        )
+        .map_err(std::io::Error::other)?;
+
+        // If user has no active session, set this one as active.
+        let has_active: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM user_state WHERE user_id = ?1",
+                params![owner],
+                |row| {
+                    let c: i64 = row.get(0)?;
+                    Ok(c > 0)
+                },
+            )
+            .unwrap_or(false);
+
+        if !has_active {
+            conn.execute(
+                "INSERT INTO user_state (user_id, active_session) VALUES (?1, ?2)",
+                params![owner, id],
+            )
+            .map_err(std::io::Error::other)?;
         }
 
-        let table = messages_table(session_key);
+        let created_at: String = conn
+            .query_row(
+                "SELECT created_at FROM sessions WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(std::io::Error::other)?;
+
+        let last_activity: String = conn
+            .query_row(
+                "SELECT last_activity FROM sessions WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(std::io::Error::other)?;
+
+        Ok(SessionInfo {
+            id,
+            owner: owner.to_string(),
+            display_name: display_name.map(|s| s.to_string()),
+            created_at: Self::parse_datetime(&created_at),
+            last_activity: Self::parse_datetime(&last_activity),
+            message_count: 0,
+        })
+    }
+
+    fn delete_session(&self, session_id: &str) -> std::io::Result<()> {
         let conn = self.conn.lock();
-        let mut stmt = match conn.prepare(&format!(
-            "SELECT content FROM {} ORDER BY seq ASC",
-            table,
-        )) {
+
+        conn.execute(
+            "DELETE FROM messages WHERE session_id = ?1",
+            params![session_id],
+        )
+        .map_err(std::io::Error::other)?;
+
+        conn.execute(
+            "DELETE FROM summaries WHERE session_id = ?1",
+            params![session_id],
+        )
+        .map_err(std::io::Error::other)?;
+
+        conn.execute(
+            "DELETE FROM sessions WHERE id = ?1",
+            params![session_id],
+        )
+        .map_err(std::io::Error::other)?;
+
+        // If this was the active session, clear user_state or switch to another session.
+        let users_to_fix: Vec<String> = conn
+            .query_row(
+                "SELECT user_id FROM user_state WHERE active_session = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .into_iter()
+            .filter_map(|r: Result<String, _>| r.ok())
+            .collect();
+
+        // Also try query_map for multiple users (shouldn't happen, but be safe).
+        let users_to_fix = if users_to_fix.is_empty() {
+            let mut stmt = conn
+                .prepare("SELECT user_id FROM user_state WHERE active_session = ?1")
+                .map_err(std::io::Error::other)?;
+            stmt.query_map(params![session_id], |row| row.get(0))
+                .map_err(std::io::Error::other)?
+                .filter_map(|r: Result<String, _>| r.ok())
+                .collect()
+        } else {
+            users_to_fix
+        };
+
+        for user_id in users_to_fix {
+            // Try to switch to another session for this user.
+            let next_session: Option<String> = conn
+                .query_row(
+                    "SELECT id FROM sessions WHERE owner = ?1 ORDER BY last_activity DESC LIMIT 1",
+                    params![user_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(std::io::Error::other)?;
+
+            match next_session {
+                Some(sid) => {
+                    conn.execute(
+                        "UPDATE user_state SET active_session = ?1 WHERE user_id = ?2",
+                        params![sid, user_id],
+                    )
+                    .map_err(std::io::Error::other)?;
+                }
+                None => {
+                    conn.execute(
+                        "DELETE FROM user_state WHERE user_id = ?1",
+                        params![user_id],
+                    )
+                    .map_err(std::io::Error::other)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn rename_session(&self, session_id: &str, name: &str) -> std::io::Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE sessions SET display_name = ?1 WHERE id = ?2",
+            params![name, session_id],
+        )
+        .map_err(std::io::Error::other)?;
+        Ok(())
+    }
+
+    fn get_session(&self, session_id: &str) -> Option<SessionInfo> {
+        let conn = self.conn.lock();
+        let result = conn.query_row(
+            "SELECT id, owner, display_name, created_at, last_activity, message_count
+             FROM sessions WHERE id = ?1",
+            params![session_id],
+            |row| {
+                let id: String = row.get(0)?;
+                let owner: String = row.get(1)?;
+                let display_name: Option<String> = row.get(2)?;
+                let created_at: String = row.get(3)?;
+                let last_activity: String = row.get(4)?;
+                let message_count: usize = row.get(5)?;
+                Ok((id, owner, display_name, created_at, last_activity, message_count))
+            },
+        );
+
+        match result {
+            Ok((id, owner, display_name, created_at, last_activity, message_count)) => Some(SessionInfo {
+                id,
+                owner,
+                display_name,
+                created_at: Self::parse_datetime(&created_at),
+                last_activity: Self::parse_datetime(&last_activity),
+                message_count,
+            }),
+            Err(_) => None,
+        }
+    }
+
+    fn list_sessions(&self, owner: &str) -> Vec<SessionInfo> {
+        let conn = self.conn.lock();
+        let mut stmt = match conn.prepare(
+            "SELECT id, owner, display_name, created_at, last_activity, message_count
+             FROM sessions WHERE owner = ?1 ORDER BY last_activity DESC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        let rows = stmt.query_map(params![owner], |row| {
+            let id: String = row.get(0)?;
+            let owner: String = row.get(1)?;
+            let display_name: Option<String> = row.get(2)?;
+            let created_at: String = row.get(3)?;
+            let last_activity: String = row.get(4)?;
+            let message_count: usize = row.get(5)?;
+            Ok((id, owner, display_name, created_at, last_activity, message_count))
+        });
+
+        match rows {
+            Ok(iter) => iter
+                .filter_map(|r| r.ok())
+                .map(|(id, owner, display_name, created_at, last_activity, message_count)| SessionInfo {
+                    id,
+                    owner,
+                    display_name,
+                    created_at: Self::parse_datetime(&created_at),
+                    last_activity: Self::parse_datetime(&last_activity),
+                    message_count,
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn get_active_session(&self, user_id: &str) -> Option<String> {
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT active_session FROM user_state WHERE user_id = ?1",
+            params![user_id],
+            |row| row.get(0),
+        )
+        .ok()
+    }
+
+    fn set_active_session(&self, user_id: &str, session_id: &str) -> std::io::Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT OR REPLACE INTO user_state (user_id, active_session) VALUES (?1, ?2)",
+            params![user_id, session_id],
+        )
+        .map_err(std::io::Error::other)?;
+        Ok(())
+    }
+
+    fn load_messages(&self, session_id: &str) -> Vec<ChatMessage> {
+        let conn = self.conn.lock();
+        let mut stmt = match conn.prepare(
+            "SELECT content FROM messages WHERE session_id = ?1 ORDER BY seq ASC",
+        ) {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(session_key, error = %e, "failed to prepare load query");
+                tracing::warn!(session_id, error = %e, "failed to prepare load_messages query");
                 return Vec::new();
             }
         };
 
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(params![session_id], |row| {
             let content: String = row.get(0)?;
             Ok(content)
         });
@@ -155,65 +364,50 @@ impl SessionBackend for SqliteSessionBackend {
                 .filter_map(|json| Self::deserialize_message(&json).ok())
                 .collect(),
             Err(e) => {
-                tracing::warn!(session_key, error = %e, "failed to load messages");
+                tracing::warn!(session_id, error = %e, "failed to load messages");
                 Vec::new()
             }
         }
     }
 
-    fn append(&self, session_key: &str, message: &ChatMessage) -> std::io::Result<()> {
-        // Ensure session exists.
-        self.ensure_session_internal(session_key)
-            .map_err(std::io::Error::other)?;
+    fn append_message(&self, session_id: &str, message: &ChatMessage) -> std::io::Result<()> {
+        let json = Self::serialize_message(message).map_err(std::io::Error::other)?;
 
-        let json = Self::serialize_message(message)
-            .map_err(std::io::Error::other)?;
-
-        let table = messages_table(session_key);
         let conn = self.conn.lock();
 
         // Get next sequence number.
         let next_seq: i64 = conn
             .query_row(
-                &format!("SELECT COALESCE(MAX(seq), 0) + 1 FROM {}", table),
-                [],
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM messages WHERE session_id = ?1",
+                params![session_id],
                 |row| row.get(0),
             )
             .unwrap_or(1);
 
         conn.execute(
-            &format!(
-                "INSERT INTO {} (seq, role, content, name) VALUES (?1, ?2, ?3, ?4)",
-                table,
-            ),
-            params![
-                next_seq,
-                message.role,
-                json,
-                message.name,
-            ],
+            "INSERT INTO messages (session_id, seq, role, content) VALUES (?1, ?2, ?3, ?4)",
+            params![session_id, next_seq, message.role, json],
         )
         .map_err(std::io::Error::other)?;
 
-        // Touch activity timestamp and bump message_count.
+        // Update last_activity and bump message_count.
         conn.execute(
-            "UPDATE session_index SET last_activity = datetime('now'), message_count = message_count + 1 WHERE session_key = ?1",
-            params![session_key],
+            "UPDATE sessions SET last_activity = datetime('now'), message_count = message_count + 1 WHERE id = ?1",
+            params![session_id],
         )
         .map_err(std::io::Error::other)?;
 
         Ok(())
     }
 
-    fn remove_last(&self, session_key: &str) -> std::io::Result<bool> {
-        let table = messages_table(session_key);
+    fn remove_last_message(&self, session_id: &str) -> std::io::Result<bool> {
         let conn = self.conn.lock();
 
         // Find the max seq for this session.
         let max_seq: Option<i64> = conn
             .query_row(
-                &format!("SELECT MAX(seq) FROM {}", table),
-                [],
+                "SELECT MAX(seq) FROM messages WHERE session_id = ?1",
+                params![session_id],
                 |row| row.get(0),
             )
             .optional()
@@ -226,15 +420,15 @@ impl SessionBackend for SqliteSessionBackend {
 
         let deleted = conn
             .execute(
-                &format!("DELETE FROM {} WHERE seq = ?1", table),
-                params![seq],
+                "DELETE FROM messages WHERE session_id = ?1 AND seq = ?2",
+                params![session_id, seq],
             )
             .map_err(std::io::Error::other)?;
 
         if deleted > 0 {
             conn.execute(
-                "UPDATE session_index SET message_count = MAX(message_count - 1, 0) WHERE session_key = ?1",
-                params![session_key],
+                "UPDATE sessions SET message_count = MAX(message_count - 1, 0) WHERE id = ?1",
+                params![session_id],
             )
             .map_err(std::io::Error::other)?;
         }
@@ -242,241 +436,45 @@ impl SessionBackend for SqliteSessionBackend {
         Ok(deleted > 0)
     }
 
-    fn list_sessions(&self) -> Vec<String> {
-        let conn = self.conn.lock();
-        let mut stmt = match conn.prepare(
-            "SELECT session_key FROM session_index ORDER BY last_activity DESC",
-        ) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        let rows = stmt.query_map([], |row| row.get(0));
-        match rows {
-            Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
-            Err(_) => Vec::new(),
-        }
-    }
-
-    fn list_sessions_with_metadata(&self) -> Vec<SessionMetadata> {
-        let conn = self.conn.lock();
-        let mut stmt = match conn.prepare(
-            "SELECT session_key, created_at, last_activity, message_count
-             FROM session_index
-             ORDER BY last_activity DESC",
-        ) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-
-        let rows = stmt.query_map([], |row| {
-            let key: String = row.get(0)?;
-            let created_at: String = row.get(1)?;
-            let last_activity: String = row.get(2)?;
-            let message_count: usize = row.get(3)?;
-            Ok((key, created_at, last_activity, message_count))
-        });
-
-        match rows {
-            Ok(iter) => iter
-                .filter_map(|r| r.ok())
-                .map(|(key, created_at, last_activity, message_count)| {
-                    SessionMetadata {
-                        key,
-                        name: None,
-                        created_at: DateTime::parse_from_rfc3339(&created_at)
-                            .map(|dt| dt.with_timezone(&Utc))
-                            .unwrap_or_else(|_| Utc::now()),
-                        last_activity: DateTime::parse_from_rfc3339(&last_activity)
-                            .map(|dt| dt.with_timezone(&Utc))
-                            .unwrap_or_else(|_| Utc::now()),
-                        message_count,
-                    }
-                })
-                .collect(),
-            Err(_) => Vec::new(),
-        }
-    }
-
-    fn compact(&self, _session_key: &str) -> std::io::Result<()> {
-        // No-op: per-session tables use AUTOINCREMENT and don't have seq gaps.
-        Ok(())
-    }
-
-    fn cleanup_stale(&self, ttl_hours: u32) -> std::io::Result<usize> {
-        let conn = self.conn.lock();
-
-        // Find stale sessions first so we can drop their tables.
-        let mut stmt = conn
-            .prepare(
-                "SELECT session_key FROM session_index WHERE last_activity < datetime('now', ?1)",
-            )
-            .map_err(std::io::Error::other)?;
-
-        let stale_keys: Vec<String> = stmt
-            .query_map([format!("-{} hours", ttl_hours)], |row| row.get(0))
-            .map_err(std::io::Error::other)?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        drop(stmt);
-
-        let count = stale_keys.len();
-
-        for key in &stale_keys {
-            let table_m = messages_table(key);
-            let table_s = summaries_table(key);
-            let _ = conn.execute_batch(&format!(
-                "DROP TABLE IF EXISTS {}; DROP TABLE IF EXISTS {};",
-                table_m, table_s,
-            ));
-        }
-
-        conn.execute(
-            "DELETE FROM session_index WHERE last_activity < datetime('now', ?1)",
-            [format!("-{} hours", ttl_hours)],
-        )
-        .map_err(std::io::Error::other)?;
-
-        Ok(count)
-    }
-
-    fn search(&self, query: &SessionQuery) -> Vec<SessionMetadata> {
-        let keyword = match &query.keyword {
-            Some(k) => k,
-            None => return self.list_sessions_with_metadata(),
-        };
-
-        let limit = query.limit.unwrap_or(50);
-
-        // Get all sessions from the index, then search each session's messages table.
-        let sessions = self.list_sessions_with_metadata();
-        let pattern = format!("%{}%", keyword);
-
-        let conn = self.conn.lock();
-        let mut results = Vec::new();
-
-        for meta in sessions {
-            let table = messages_table(&meta.key);
-            let count: i64 = conn
-                .query_row(
-                    &format!(
-                        "SELECT COUNT(*) FROM {} WHERE content LIKE ?1",
-                        table,
-                    ),
-                    params![pattern],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0);
-
-            if count > 0 {
-                results.push(meta);
-                if results.len() >= limit {
-                    break;
-                }
-            }
-        }
-
-        results
-    }
-
-    // ── Session persistence + compaction methods ──────────────────────────
-
-    fn ensure_session(&self, session_key: &str) -> std::io::Result<()> {
-        self.ensure_session_internal(session_key)
-            .map_err(std::io::Error::other)
-    }
-
-    fn touch_session(&self, session_key: &str) -> std::io::Result<()> {
-        let conn = self.conn.lock();
-        conn.execute(
-            "UPDATE session_index SET last_activity = datetime('now') WHERE session_key = ?1",
-            params![session_key],
-        )
-        .map_err(std::io::Error::other)?;
-        Ok(())
-    }
-
-    fn update_message_count(&self, session_key: &str, count: usize) -> std::io::Result<()> {
-        let conn = self.conn.lock();
-        conn.execute(
-            "UPDATE session_index SET message_count = ?1 WHERE session_key = ?2",
-            params![count as i64, session_key],
-        )
-        .map_err(std::io::Error::other)?;
-        Ok(())
-    }
-
-    fn save_summary(&self, session_key: &str, summary: &SummaryRecord) -> std::io::Result<()> {
-        self.ensure_summaries_table(session_key)
-            .map_err(std::io::Error::other)?;
-
-        let table = summaries_table(session_key);
+    fn save_summary(&self, session_id: &str, summary: &SummaryRecord) -> std::io::Result<()> {
         let conn = self.conn.lock();
 
         conn.execute(
-            &format!(
-                "INSERT INTO {} (summary, up_to_message, token_estimate) VALUES (?1, ?2, ?3)",
-                table,
-            ),
+            "INSERT INTO summaries (session_id, summary, up_to_message, token_estimate, version) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
+                session_id,
                 summary.summary,
                 summary.up_to_message,
                 summary.token_estimate.map(|t| t as i64),
+                summary.version as i64,
             ],
         )
         .map_err(std::io::Error::other)?;
 
-        conn.execute(
-            "UPDATE session_index SET has_summary = 1 WHERE session_key = ?1",
-            params![session_key],
-        )
-        .map_err(std::io::Error::other)?;
-
         Ok(())
     }
 
-    fn load_latest_summary(&self, session_key: &str) -> Option<SummaryRecord> {
-        // Check if summaries table exists first.
-        let table = summaries_table(session_key);
+    fn load_latest_summary(&self, session_id: &str) -> Option<SummaryRecord> {
         let conn = self.conn.lock();
 
-        // Verify the table exists.
-        let table_exists: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
-                params![table],
-                |row| {
-                    let c: i64 = row.get(0)?;
-                    Ok(c > 0)
-                },
-            )
-            .unwrap_or(false);
-
-        if !table_exists {
-            return None;
-        }
-
         let result = conn.query_row(
-            &format!(
-                "SELECT id, summary, up_to_message, token_estimate, created_at FROM {} ORDER BY id DESC LIMIT 1",
-                table,
-            ),
-            [],
+            "SELECT id, summary, up_to_message, token_estimate, version, created_at
+             FROM summaries WHERE session_id = ?1 ORDER BY id DESC LIMIT 1",
+            params![session_id],
             |row| {
                 let id: i64 = row.get(0)?;
                 let summary: String = row.get(1)?;
                 let up_to_message: i64 = row.get(2)?;
                 let token_estimate: Option<i64> = row.get(3)?;
-                let created_at: String = row.get(4)?;
+                let version: i64 = row.get(4)?;
+                let created_at: String = row.get(5)?;
                 Ok(SummaryRecord {
                     id,
-                    version: 0, // legacy records default to 0
+                    version: version as u32,
                     summary,
                     up_to_message,
                     token_estimate: token_estimate.map(|t| t as u64),
-                    created_at: DateTime::parse_from_rfc3339(&created_at)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(|_| Utc::now()),
+                    created_at: Self::parse_datetime(&created_at),
                 })
             },
         );
@@ -484,22 +482,20 @@ impl SessionBackend for SqliteSessionBackend {
         result.ok()
     }
 
-    fn load_incremental(&self, session_key: &str, after_message_id: i64) -> Vec<(i64, ChatMessage)> {
-        let table = messages_table(session_key);
+    fn load_incremental(&self, session_id: &str, after_message_id: i64) -> Vec<(i64, ChatMessage)> {
         let conn = self.conn.lock();
 
-        let mut stmt = match conn.prepare(&format!(
-            "SELECT id, content FROM {} WHERE id > ?1 ORDER BY id ASC",
-            table,
-        )) {
+        let mut stmt = match conn.prepare(
+            "SELECT id, content FROM messages WHERE session_id = ?1 AND id > ?2 ORDER BY id ASC",
+        ) {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(session_key, error = %e, "failed to prepare load_incremental query");
+                tracing::warn!(session_id, error = %e, "failed to prepare load_incremental query");
                 return Vec::new();
             }
         };
 
-        let rows = stmt.query_map(params![after_message_id], |row| {
+        let rows = stmt.query_map(params![session_id, after_message_id], |row| {
             let id: i64 = row.get(0)?;
             let content: String = row.get(1)?;
             Ok((id, content))
@@ -513,29 +509,99 @@ impl SessionBackend for SqliteSessionBackend {
                 })
                 .collect(),
             Err(e) => {
-                tracing::warn!(session_key, error = %e, "failed to load incremental messages");
+                tracing::warn!(session_id, error = %e, "failed to load incremental messages");
                 Vec::new()
             }
         }
     }
 
-    fn clear_summary(&self, session_key: &str) -> std::io::Result<()> {
-        let table = summaries_table(session_key);
+    fn clear_summary(&self, session_id: &str) -> std::io::Result<()> {
         let conn = self.conn.lock();
-
-        // Drop the summaries table entirely.
-        conn.execute_batch(&format!("DROP TABLE IF EXISTS {};", table))
-            .map_err(std::io::Error::other)?;
-
         conn.execute(
-            "UPDATE session_index SET has_summary = 0 WHERE session_key = ?1",
-            params![session_key],
+            "DELETE FROM summaries WHERE session_id = ?1",
+            params![session_id],
         )
         .map_err(std::io::Error::other)?;
-
         Ok(())
     }
 
+    fn cleanup_stale(&self, ttl_hours: u32) -> std::io::Result<usize> {
+        let conn = self.conn.lock();
+
+        // Find stale sessions.
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM sessions WHERE last_activity < datetime('now', ?1)",
+            )
+            .map_err(std::io::Error::other)?;
+
+        let stale_ids: Vec<String> = stmt
+            .query_map([format!("-{} hours", ttl_hours)], |row| row.get(0))
+            .map_err(std::io::Error::other)?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        drop(stmt);
+
+        let count = stale_ids.len();
+
+        for id in &stale_ids {
+            let _ = conn.execute(
+                "DELETE FROM messages WHERE session_id = ?1",
+                params![id],
+            );
+            let _ = conn.execute(
+                "DELETE FROM summaries WHERE session_id = ?1",
+                params![id],
+            );
+            let _ = conn.execute(
+                "DELETE FROM sessions WHERE id = ?1",
+                params![id],
+            );
+        }
+
+        // Clean up user_state entries pointing to deleted sessions.
+        for id in &stale_ids {
+            // Try to switch to another session, or delete the user_state entry.
+            let users_to_fix: Vec<String> = {
+                let mut s = conn
+                    .prepare("SELECT user_id FROM user_state WHERE active_session = ?1")
+                    .map_err(std::io::Error::other)?;
+                s.query_map(params![id], |row| row.get(0))
+                    .map_err(std::io::Error::other)?
+                    .filter_map(|r: Result<String, _>| r.ok())
+                    .collect()
+            };
+
+            for user_id in users_to_fix {
+                let next_session: Option<String> = conn
+                    .query_row(
+                        "SELECT id FROM sessions WHERE owner = ?1 ORDER BY last_activity DESC LIMIT 1",
+                        params![user_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(std::io::Error::other)?;
+
+                match next_session {
+                    Some(sid) => {
+                        let _ = conn.execute(
+                            "UPDATE user_state SET active_session = ?1 WHERE user_id = ?2",
+                            params![sid, user_id],
+                        );
+                    }
+                    None => {
+                        let _ = conn.execute(
+                            "DELETE FROM user_state WHERE user_id = ?1",
+                            params![user_id],
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(count)
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -547,7 +613,7 @@ mod tests {
     #[test]
     fn open_in_memory() {
         let backend = SqliteSessionBackend::in_memory().unwrap();
-        let sessions = backend.list_sessions();
+        let sessions = backend.list_sessions("test_user");
         assert!(sessions.is_empty());
     }
 
@@ -555,13 +621,16 @@ mod tests {
     fn append_and_load() {
         let backend = SqliteSessionBackend::in_memory().unwrap();
 
+        let session = backend.create_session("alice", None).unwrap();
+        let session_id = &session.id;
+
         let msg1 = ChatMessage::user_text("hello");
         let msg2 = ChatMessage::assistant_text("hi there");
 
-        backend.append("test:1", &msg1).unwrap();
-        backend.append("test:1", &msg2).unwrap();
+        backend.append_message(session_id, &msg1).unwrap();
+        backend.append_message(session_id, &msg2).unwrap();
 
-        let loaded = backend.load("test:1");
+        let loaded = backend.load_messages(session_id);
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].text_content(), "hello");
         assert_eq!(loaded[1].text_content(), "hi there");
@@ -570,22 +639,25 @@ mod tests {
     #[test]
     fn load_nonexistent_returns_empty() {
         let backend = SqliteSessionBackend::in_memory().unwrap();
-        let loaded = backend.load("no:such:key");
+        let loaded = backend.load_messages("no:such:session");
         assert!(loaded.is_empty());
     }
 
     #[test]
-    fn remove_last() {
+    fn remove_last_message() {
         let backend = SqliteSessionBackend::in_memory().unwrap();
 
-        backend.append("test:2", &ChatMessage::user_text("a")).unwrap();
-        backend.append("test:2", &ChatMessage::assistant_text("b")).unwrap();
-        backend.append("test:2", &ChatMessage::user_text("c")).unwrap();
+        let session = backend.create_session("alice", None).unwrap();
+        let session_id = &session.id;
 
-        let removed = backend.remove_last("test:2").unwrap();
+        backend.append_message(session_id, &ChatMessage::user_text("a")).unwrap();
+        backend.append_message(session_id, &ChatMessage::assistant_text("b")).unwrap();
+        backend.append_message(session_id, &ChatMessage::user_text("c")).unwrap();
+
+        let removed = backend.remove_last_message(session_id).unwrap();
         assert!(removed);
 
-        let loaded = backend.load("test:2");
+        let loaded = backend.load_messages(session_id);
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[1].text_content(), "b");
     }
@@ -594,59 +666,31 @@ mod tests {
     fn list_sessions() {
         let backend = SqliteSessionBackend::in_memory().unwrap();
 
-        backend.append("s:1", &ChatMessage::user_text("a")).unwrap();
-        backend.append("s:2", &ChatMessage::user_text("b")).unwrap();
+        backend.create_session("alice", None).unwrap();
+        backend.create_session("alice", None).unwrap();
 
-        let sessions = backend.list_sessions();
+        let sessions = backend.list_sessions("alice");
         assert_eq!(sessions.len(), 2);
-    }
-
-    #[test]
-    fn list_sessions_with_metadata() {
-        let backend = SqliteSessionBackend::in_memory().unwrap();
-
-        backend.append("s:1", &ChatMessage::user_text("a")).unwrap();
-        backend.append("s:1", &ChatMessage::assistant_text("b")).unwrap();
-
-        let meta = backend.list_sessions_with_metadata();
-        assert_eq!(meta.len(), 1);
-        assert_eq!(meta[0].message_count, 2);
-        assert_eq!(meta[0].key, "s:1");
-    }
-
-    #[test]
-    fn search_by_keyword() {
-        let backend = SqliteSessionBackend::in_memory().unwrap();
-
-        backend.append("s:1", &ChatMessage::user_text("discuss rust programming")).unwrap();
-        backend.append("s:2", &ChatMessage::user_text("talk about python")).unwrap();
-
-        let results = backend.search(&SessionQuery {
-            keyword: Some("rust".to_string()),
-            limit: Some(10),
-        });
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].key, "s:1");
     }
 
     #[test]
     fn cleanup_stale() {
         let backend = SqliteSessionBackend::in_memory().unwrap();
 
-        backend.append("s:old", &ChatMessage::user_text("old")).unwrap();
+        let session = backend.create_session("alice", None).unwrap();
 
         // Manually set last_activity to far past.
         {
             let conn = backend.conn.lock();
             conn.execute(
-                "UPDATE session_index SET last_activity = datetime('now', '-100 hours') WHERE session_key = 's:old'",
-                [],
+                "UPDATE sessions SET last_activity = datetime('now', '-100 hours') WHERE id = ?1",
+                params![session.id],
             ).unwrap();
         }
 
         let deleted = backend.cleanup_stale(24).unwrap();
         assert_eq!(deleted, 1);
-        assert!(backend.load("s:old").is_empty());
+        assert!(backend.load_messages(&session.id).is_empty());
     }
 
     #[test]
@@ -655,14 +699,17 @@ mod tests {
         let db_path = dir.path().join("test.db");
         let db_str = db_path.to_string_lossy().to_string();
 
-        {
+        let session_id = {
             let backend = SqliteSessionBackend::open(&db_str).unwrap();
-            backend.append("s:1", &ChatMessage::user_text("persistent")).unwrap();
-        }
+            let session = backend.create_session("alice", None).unwrap();
+            let sid = session.id.clone();
+            backend.append_message(&sid, &ChatMessage::user_text("persistent")).unwrap();
+            sid
+        };
 
         // Reopen.
         let backend = SqliteSessionBackend::open(&db_str).unwrap();
-        let loaded = backend.load("s:1");
+        let loaded = backend.load_messages(&session_id);
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].text_content(), "persistent");
     }
@@ -671,8 +718,11 @@ mod tests {
     fn save_and_load_summary() {
         let backend = SqliteSessionBackend::in_memory().unwrap();
 
-        backend.append("s:sum", &ChatMessage::user_text("a")).unwrap();
-        backend.append("s:sum", &ChatMessage::assistant_text("b")).unwrap();
+        let session = backend.create_session("alice", None).unwrap();
+        let session_id = &session.id;
+
+        backend.append_message(session_id, &ChatMessage::user_text("a")).unwrap();
+        backend.append_message(session_id, &ChatMessage::assistant_text("b")).unwrap();
 
         let summary = SummaryRecord {
             id: 0,
@@ -683,8 +733,8 @@ mod tests {
             created_at: Utc::now(),
         };
 
-        backend.save_summary("s:sum", &summary).unwrap();
-        let loaded = backend.load_latest_summary("s:sum");
+        backend.save_summary(session_id, &summary).unwrap();
+        let loaded = backend.load_latest_summary(session_id);
         assert!(loaded.is_some());
         let loaded = loaded.unwrap();
         assert_eq!(loaded.summary, "User said a, assistant replied b");
@@ -696,9 +746,12 @@ mod tests {
     fn load_incremental_after_summary() {
         let backend = SqliteSessionBackend::in_memory().unwrap();
 
-        backend.append("s:inc", &ChatMessage::user_text("msg1")).unwrap();
-        backend.append("s:inc", &ChatMessage::assistant_text("msg2")).unwrap();
-        backend.append("s:inc", &ChatMessage::user_text("msg3")).unwrap();
+        let session = backend.create_session("alice", None).unwrap();
+        let session_id = &session.id;
+
+        backend.append_message(session_id, &ChatMessage::user_text("msg1")).unwrap();
+        backend.append_message(session_id, &ChatMessage::assistant_text("msg2")).unwrap();
+        backend.append_message(session_id, &ChatMessage::user_text("msg3")).unwrap();
 
         let summary = SummaryRecord {
             id: 0,
@@ -708,10 +761,10 @@ mod tests {
             token_estimate: Some(10),
             created_at: Utc::now(),
         };
-        backend.save_summary("s:inc", &summary).unwrap();
+        backend.save_summary(session_id, &summary).unwrap();
 
         // load_incremental with after_message_id=2 should return only msg3
-        let incremental = backend.load_incremental("s:inc", 2);
+        let incremental = backend.load_incremental(session_id, 2);
         assert_eq!(incremental.len(), 1);
         assert_eq!(incremental[0].1.text_content(), "msg3");
     }
@@ -720,7 +773,10 @@ mod tests {
     fn clear_summary() {
         let backend = SqliteSessionBackend::in_memory().unwrap();
 
-        backend.append("s:clr", &ChatMessage::user_text("a")).unwrap();
+        let session = backend.create_session("alice", None).unwrap();
+        let session_id = &session.id;
+
+        backend.append_message(session_id, &ChatMessage::user_text("a")).unwrap();
         let summary = SummaryRecord {
             id: 0,
             version: 1,
@@ -729,21 +785,24 @@ mod tests {
             token_estimate: None,
             created_at: Utc::now(),
         };
-        backend.save_summary("s:clr", &summary).unwrap();
-        assert!(backend.load_latest_summary("s:clr").is_some());
+        backend.save_summary(session_id, &summary).unwrap();
+        assert!(backend.load_latest_summary(session_id).is_some());
 
-        backend.clear_summary("s:clr").unwrap();
-        assert!(backend.load_latest_summary("s:clr").is_none());
+        backend.clear_summary(session_id).unwrap();
+        assert!(backend.load_latest_summary(session_id).is_none());
     }
 
     #[test]
     fn ensure_session_idempotent() {
         let backend = SqliteSessionBackend::in_memory().unwrap();
 
-        backend.ensure_session("s:idem").unwrap();
-        backend.ensure_session("s:idem").unwrap();
+        let s1 = backend.create_session("alice", None).unwrap();
+        let fetched = backend.get_session(&s1.id);
+        assert!(fetched.is_some());
+        assert_eq!(fetched.unwrap().owner, "alice");
 
-        let sessions = backend.list_sessions();
-        assert_eq!(sessions.len(), 1);
+        // Creating another session should yield a different id (probabilistically).
+        let s2 = backend.create_session("alice", None).unwrap();
+        assert_ne!(s1.id, s2.id);
     }
 }

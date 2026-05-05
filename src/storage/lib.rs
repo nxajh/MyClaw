@@ -18,4 +18,4 @@ pub use memory::{Memory, MemoryCategory, MemoryEntry, ExportFilter, ProceduralMe
 pub use shared::SharedMemory;
 pub use private::PrivateMemory;
 pub use types::{SearchMode, MemoryConfig, MemoryPolicyConfig, Provider, build_proxy_client};
-pub use session::{SessionBackend, SessionMetadata, SessionQuery, SessionState, ChatMessage};
+pub use session::{SessionBackend, SessionInfo, SummaryRecord, ChatMessage};
