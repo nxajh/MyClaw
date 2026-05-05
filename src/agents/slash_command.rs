@@ -68,7 +68,7 @@ pub async fn dispatch(cmd: &str, args: &str, ctx: CommandContext<'_>) -> Option<
         "export" => Some(cmd_export(ctx).await),
         "history" => Some(cmd_history(ctx).await),
         // ── Batch 3 ──
-        "skills" => Some(cmd_skill(ctx)),
+        "skills" | "skill" => Some(cmd_skill(ctx)),
         _ => None,
     }
 }
