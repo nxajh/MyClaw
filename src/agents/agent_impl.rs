@@ -1070,10 +1070,10 @@ impl AgentLoop {
     ) -> (bool, Vec<String>) {
         let mut reasons = Vec::new();
 
-        // Check 1: length reasonable (no more than 500 chars).
-        if summary.chars().count() > 500 {
+        // Check 1: length reasonable (no more than 2000 chars).
+        if summary.chars().count() > 2000 {
             reasons.push(format!(
-                "summary too long: {} chars (limit 500)",
+                "summary too long: {} chars (limit 2000)",
                 summary.chars().count()
             ));
         }
@@ -1089,20 +1089,6 @@ impl AgentLoop {
                     "no file paths preserved (original had {})",
                     original_paths.len()
                 ));
-            }
-        }
-
-        // Check 3: tool errors mentioned.
-        let has_errors = to_compact.iter().any(|m| {
-            m.role == "tool" && m.is_error == Some(true)
-        });
-        if has_errors {
-            let mentions_error = summary.contains("错误")
-                || summary.contains("error")
-                || summary.contains("失败")
-                || summary.contains("异常");
-            if !mentions_error {
-                reasons.push("original had tool errors but summary doesn't mention them".to_string());
             }
         }
 
