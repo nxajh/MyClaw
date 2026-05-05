@@ -7,7 +7,7 @@
 //!   3. **No progress**    — same tool called ≥ P times with different args but
 //!      the same result hash (suggesting the tool keeps returning the same output).
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -71,7 +71,7 @@ impl Default for LoopBreakerConfig {
             max_tool_calls: 100,
             window_size: 20,
             exact_repeat_threshold: 3,
-            ping_pong_rounds: 4,
+            ping_pong_rounds: 6,
             no_progress_threshold: 5,
             relaxed_tools: vec!["shell".to_string()],
         }
@@ -216,6 +216,16 @@ impl LoopBreaker {
             if &inv.tool_name != expected {
                 return None;
             }
+        }
+
+        // If all args for each tool are unique, the model is making progress
+        // (different inputs each time), not stuck in a true loop.
+        let args_a: Vec<u64> = tail.iter().step_by(2).map(|inv| inv.args_hash).collect();
+        let args_b: Vec<u64> = tail.iter().skip(1).step_by(2).map(|inv| inv.args_hash).collect();
+        let unique_a = args_a.iter().collect::<HashSet<_>>().len();
+        let unique_b = args_b.iter().collect::<HashSet<_>>().len();
+        if unique_a == args_a.len() && unique_b == args_b.len() {
+            return None; // All args unique — genuine progress, not a loop.
         }
 
         Some(LoopBreakReason::PingPong {
@@ -407,8 +417,13 @@ mod tests {
 
     #[test]
     fn ping_pong_triggers_after_four_rounds() {
-        // Verify that call 8 (end of 4th round) triggers ping-pong.
-        let mut lb = default_breaker();
+        // Verify that call 8 (end of 4th round) triggers ping-pong
+        // when using a config with ping_pong_rounds: 4.
+        let config = LoopBreakerConfig {
+            ping_pong_rounds: 4,
+            ..LoopBreakerConfig::default()
+        };
+        let mut lb = LoopBreaker::new(config);
         for i in 0..8 {
             let tool = if i % 2 == 0 { "read_file" } else { "write_file" };
             let result = lb.record_and_check(tool, "{}", "data");
