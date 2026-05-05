@@ -345,6 +345,10 @@ impl SessionManager {
     /// Reset (clear) a session by key. Removes it from the active cache
     /// so the next get_or_create will start fresh.
     pub fn reset(&self, session_key: &str) {
+        // Clear backend storage so old messages don't resurface on next get_or_create.
+        if let Err(e) = self.backend.clear_session(session_key) {
+            tracing::warn!(session = %session_key, err = %e, "failed to clear session backend");
+        }
         self.active.write().remove(session_key);
         tracing::info!(session = %session_key, "session reset");
     }

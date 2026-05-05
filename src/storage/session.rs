@@ -90,4 +90,7 @@ pub trait SessionBackend: Send + Sync {
 
     /// Clear all summaries for a session.
     fn clear_summary(&self, _session_key: &str) -> std::io::Result<()> { Ok(()) }
+
+    /// Clear all messages and summaries for a session (used by /new).
+    fn clear_session(&self, _session_key: &str) -> std::io::Result<()> { Ok(()) }
 }
