@@ -49,6 +49,20 @@ pub struct SubAgentConfig {
     pub model: Option<String>,
 }
 
+impl SubAgentConfig {
+    /// Returns the description, falling back to system_prompt (truncated).
+    pub fn description(&self) -> &str {
+        self.description.as_deref().unwrap_or_else(|| {
+            // Use system_prompt as fallback; truncate for display
+            if self.system_prompt.len() > 80 {
+                &self.system_prompt[..80]
+            } else {
+                &self.system_prompt
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
