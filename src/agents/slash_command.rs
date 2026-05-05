@@ -343,9 +343,17 @@ async fn cmd_context(ctx: CommandContext<'_>) -> String {
 
     if let Some(loop_arc) = ctx.agent_loop {
         let guard = loop_arc.lock().await;
-        let total = guard.token_total();
+        let tracker_total = guard.token_total();
         let history_len = guard.session().history.len();
         let session = guard.session();
+
+        // Estimate actual context size from current history (system prompt + all messages).
+        let estimated_total: u64 = session.history.iter()
+            .map(crate::agents::agent_impl::estimate_message_tokens)
+            .sum();
+
+        // Use the larger of tracker and estimate for display.
+        let total = std::cmp::max(tracker_total, estimated_total);
 
         let summary_info = if let Some(ref meta) = session.summary_metadata {
             format!(
@@ -362,9 +370,11 @@ async fn cmd_context(ctx: CommandContext<'_>) -> String {
             "未知".to_string()
         };
 
+        // Use actual config threshold instead of hardcoded 0.7.
+        let compact_threshold = guard.compact_threshold();
         let threshold = if context_window > 0 {
-            let t = (context_window as f64 * 0.7) as u64;
-            format!("{} token (70%)", t)
+            let t = (context_window as f64 * compact_threshold) as u64;
+            format!("{} token ({:.0}%)", t, compact_threshold * 100.0)
         } else {
             "未知".to_string()
         };

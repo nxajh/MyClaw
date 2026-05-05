@@ -311,6 +311,11 @@ impl AgentLoop {
         self.token_tracker.total_tokens()
     }
 
+    /// Get the compact threshold ratio from config.
+    pub fn compact_threshold(&self) -> f64 {
+        self.config.context.compact_threshold
+    }
+
     /// Manually trigger compaction (used by /compact command).
     /// Skips the token threshold check — always attempts compression.
     pub async fn compact_now(&mut self, model_id: &str) -> anyhow::Result<()> {
