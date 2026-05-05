@@ -144,12 +144,14 @@ pub fn load_config_opt(cli: &Cli) -> Option<myclaw::config::AppConfig> {
 fn resolve_config_path(cli: &Cli) -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
 
-    // 1. Explicit --config flag
+    // 1. Explicit --config flag — if specified, must exist (no fallback)
     if let Some(ref path) = cli.config {
         let p = PathBuf::from(shellexpand::tilde(path).to_string());
         if p.exists() {
             return Some(p);
         }
+        // Explicit path given but doesn't exist → stop here, don't fallback
+        return None;
     }
 
     // 2. MYCLAW_CONFIG env var
