@@ -1,6 +1,7 @@
 //! agents — Agent loop, session management, and prompt construction.
 
 mod agent_impl;
+pub mod agent_loader;
 mod delegation;
 mod loop_breaker;
 mod orchestrator;

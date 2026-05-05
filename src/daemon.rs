@@ -116,7 +116,7 @@ fn calculate_max_output_bytes(
 }
 
 /// Print startup banner with config summary.
-fn print_banner(config: &crate::config::AppConfig, mcp_servers: usize, mcp_tools: usize, sub_agents: usize) {
+fn print_banner(config: &crate::config::AppConfig, mcp_servers: usize, mcp_tools: usize, sub_agent_count: usize, sub_agent_names: &[String]) {
     println!();
     println!("🐾 MyClaw Daemon");
     println!("  📁 Workspace: {}", config.workspace_dir.display());
@@ -144,9 +144,9 @@ fn print_banner(config: &crate::config::AppConfig, mcp_servers: usize, mcp_tools
         println!("  🔌 MCP servers: {} ({} tools)", mcp_servers, mcp_tools);
     }
 
-    if sub_agents > 0 {
-        let names: Vec<&str> = config.agents.iter().map(|a| a.name.as_str()).collect();
-        println!("  🤝 Sub-agents: {} ({})", sub_agents, names.join(", "));
+    if sub_agent_count > 0 {
+        let names: Vec<&str> = sub_agent_names.iter().map(|s| s.as_str()).collect();
+        println!("  🤝 Sub-agents: {} ({})", sub_agent_count, names.join(", "));
     }
 
     println!();
@@ -347,6 +347,19 @@ fn build_skill_manager(workspace_dir: &std::path::Path) -> SkillManager {
     manager
 }
 
+/// Build sub-agent configs from AGENT.md files in workspace.
+///
+/// Sub-agents are defined in `workspace/agents/<name>/AGENT.md` — each file
+/// contains YAML front matter (metadata) and Markdown body (system prompt).
+fn build_sub_agents(workspace_dir: &std::path::Path) -> Vec<crate::config::sub_agent::SubAgentConfig> {
+    let agents_dir = workspace_dir.join("agents");
+    let agents = crate::agents::agent_loader::load_agents_from_dir(&agents_dir);
+    if !agents.is_empty() {
+        tracing::info!(agent_count = agents.len(), "sub-agents loaded from workspace");
+    }
+    agents
+}
+
 /// Build the session backend (shared with SessionManager and persist hooks).
 fn build_session_backend(config: &crate::config::AppConfig) -> Arc<dyn crate::storage::SessionBackend> {
     let db_path = config.workspace_dir.join("sessions.db");
@@ -425,6 +438,11 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // Build skill manager (SKILL.md files).
     let skills = build_skill_manager(&config.workspace_dir);
 
+    // Build sub-agent configs (AGENT.md files from workspace/agents/).
+    let sub_agent_configs = build_sub_agents(&config.workspace_dir);
+    let sub_agent_count = sub_agent_configs.len();
+    let sub_agent_names: Vec<String> = sub_agent_configs.iter().map(|a| a.name.clone()).collect();
+
     let registry_arc: Arc<dyn crate::providers::ServiceRegistry> = Arc::new(registry);
 
     // ── Sub-agent delegator (conditional) ──────────────────────────────────────
@@ -437,7 +455,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // ToolRegistry is shared via Arc. delegate_task and tool_search are added
     // to the parent's registry only — sub-agents get a filtered view.
 
-    let (tools_arc, skills_arc, sub_agent_delegator_arc) = if config.agents.is_empty() {
+    let (tools_arc, skills_arc, sub_agent_delegator_arc) = if sub_agent_configs.is_empty() {
         // Single-agent mode: add tool_search to base registry.
         let base_tools_arc: Arc<ToolRegistry> = Arc::new(tools);
         let tool_search = crate::tools::ToolSearchTool::new(Arc::clone(&base_tools_arc));
@@ -451,13 +469,13 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
         (Arc::new(final_tools), Arc::new(skills), None)
     } else {
-        tracing::info!(agents = config.agents.len(), "multi-agent mode enabled");
+        tracing::info!(agents = sub_agent_configs.len(), "multi-agent mode enabled");
 
         let base_tools_arc: Arc<ToolRegistry> = Arc::new(tools);
         let skills_arc: Arc<SkillManager> = Arc::new(skills);
 
         let delegator = SubAgentDelegator::new(
-            config.agents.clone(),
+            sub_agent_configs,
             registry_arc.clone(),
             Arc::clone(&base_tools_arc),
             Arc::clone(&skills_arc),
@@ -522,7 +540,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // ── Launch ─────────────────────────────────────────────────────────────
 
     let (mut orchestrator, _msg_tx) = Orchestrator::new(parts);
-    print_banner(&config, mcp_manager_arc.server_count().await, mcp_manager_arc.tool_count().await, config.agents.len());
+    print_banner(&config, mcp_manager_arc.server_count().await, mcp_manager_arc.tool_count().await, sub_agent_count, &sub_agent_names);
 
     // Shutdown channel.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

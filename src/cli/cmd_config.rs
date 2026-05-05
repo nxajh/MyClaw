@@ -61,22 +61,25 @@ pub async fn run(cli: &Cli, action: ConfigAction) -> Result<()> {
                 println!("  bot_token = <configured>");
                 println!();
             }
-            if !cfg.agents.is_empty() {
-                println!("[[agents]]");
-                for agent in &cfg.agents {
-                    println!("  name = \"{}\"", agent.name);
-                    if let Some(ref desc) = agent.description {
-                        println!("  description = \"{desc}\"");
-                    }
-                }
-                println!();
-            }
             if !cfg.mcp_servers.is_empty() {
                 println!("[[mcp_servers]]");
                 for server in &cfg.mcp_servers {
                     println!("  name = \"{}\"", server.name);
                     println!("  command = \"{}\"", server.command);
                 }
+            }
+
+            // Sub-agents are loaded from workspace/agents/, not from config
+            let agents = myclaw::agents::agent_loader::load_agents_from_dir(&cfg.workspace_dir.join("agents"));
+            if !agents.is_empty() {
+                println!("[[agents]] (from workspace/agents/)");
+                for agent in &agents {
+                    println!("  name = \"{}\"", agent.name);
+                    if let Some(ref desc) = agent.description {
+                        println!("  description = \"{desc}\"");
+                    }
+                }
+                println!();
             }
         }
         ConfigAction::Get { path } => {

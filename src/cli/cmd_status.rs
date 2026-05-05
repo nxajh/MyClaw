@@ -34,7 +34,8 @@ fn print_text_status(cfg: &Option<myclaw::config::AppConfig>) {
             ].into_iter().flatten().collect();
             println!("  Channels: {}", if channels.is_empty() { "none".to_string() } else { channels.join(", ") });
 
-            println!("  Sub-agents: {}", cfg.agents.len());
+            let agents = myclaw::agents::agent_loader::load_agents_from_dir(&cfg.workspace_dir.join("agents"));
+            println!("  Sub-agents: {}", agents.len());
             println!("  MCP servers: {}", cfg.mcp_servers.len());
         }
         None => {
@@ -53,7 +54,8 @@ fn print_json_status(cfg: &Option<myclaw::config::AppConfig>) -> Result<()> {
         status["default_model"] = serde_json::json!(c.defaults.model);
         status["workspace"] = serde_json::json!(c.workspace_dir.to_string_lossy().as_ref());
         status["providers"] = serde_json::json!(c.providers.keys().collect::<Vec<_>>());
-        status["sub_agents"] = serde_json::json!(c.agents.len());
+        let agents = myclaw::agents::agent_loader::load_agents_from_dir(&c.workspace_dir.join("agents"));
+        status["sub_agents"] = serde_json::json!(agents.len());
         status["mcp_servers"] = serde_json::json!(c.mcp_servers.len());
     }
     println!("{}", serde_json::to_string_pretty(&status)?);

@@ -224,17 +224,12 @@ consolidation_age_days = 30
 # args = ["mcp-server-filesystem", "/tmp"]
 
 # ── 子 Agent（多 Agent 模式）──────────────────────────────────────
-
-# [[agents]]
-# name = "coder"
-# system_prompt = "You are an expert programmer. Write clean, idiomatic code."
-# tools = ["shell", "file_read", "file_write", "file_edit", "glob_search", "content_search"]
-# max_tool_calls = 30
-# description = "Writes and edits code"
-
-# [[agents]]
-# name = "researcher"
-# system_prompt = "You are a research specialist. Find and summarize information."
-# tools = ["web_search", "web_fetch", "http_request", "memory_store", "memory_recall"]
-# max_tool_calls = 20
-# description = "Searches the web and summarizes findings"
+#
+# Sub-agents are now defined as AGENT.md files in workspace/agents/<name>/.
+# See workspace/agents/coder/AGENT.md for an example.
+#
+# To add a new sub-agent:
+#   1. Create workspace/agents/<name>/AGENT.md
+#   2. Add YAML front matter with name, description, tools, max_tool_calls
+#   3. Write the system prompt as Markdown body
+#   4. Restart MyClaw daemon (or reload if hot-reload is enabled)

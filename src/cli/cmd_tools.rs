@@ -78,16 +78,22 @@ fn list_agents(cli: &Cli, format: &str) -> Result<()> {
 
     match format {
         "json" => {
-            let agents: Vec<_> = cfg.as_ref().map(|c| c.agents.iter().map(|a| &a.name).collect()).unwrap_or_default();
+            let agents: Vec<String> = cfg.as_ref()
+                .map(|c| {
+                    myclaw::agents::agent_loader::load_agents_from_dir(&c.workspace_dir.join("agents"))
+                        .into_iter().map(|a| a.name).collect()
+                })
+                .unwrap_or_default();
             println!("{}", serde_json::to_string_pretty(&agents)?);
         }
         _ => {
             println!("🤖 Configured Sub-Agents\n");
             if let Some(cfg) = cfg {
-                if cfg.agents.is_empty() {
-                    println!("  (none configured)");
+                let agents = myclaw::agents::agent_loader::load_agents_from_dir(&cfg.workspace_dir.join("agents"));
+                if agents.is_empty() {
+                    println!("  (none configured — add AGENT.md files to workspace/agents/)");
                 }
-                for agent in &cfg.agents {
+                for agent in &agents {
                     let desc = agent.description.as_deref().unwrap_or("(no description)");
                     println!("  • {} — {desc}", agent.name);
                 }
