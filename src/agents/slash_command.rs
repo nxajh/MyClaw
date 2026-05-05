@@ -498,6 +498,14 @@ async fn cmd_history(ctx: CommandContext<'_>) -> String {
         None => return "ℹ️ 当前会话为空。".to_string(),
     };
 
+    let truncate = |s: &str, limit: usize| -> String {
+        if s.chars().count() > limit {
+            format!("{}...", s.chars().take(limit - 3).collect::<String>())
+        } else {
+            s.to_string()
+        }
+    };
+
     let mut lines = vec![format!("📜 **会话历史** ({}条消息)\n", history.len())];
     for (i, msg) in history.iter().enumerate() {
         let tag = match msg.role.as_str() {
@@ -509,12 +517,24 @@ async fn cmd_history(ctx: CommandContext<'_>) -> String {
         };
         let text = msg.text_content();
         let first_line = text.lines().next().unwrap_or("");
-        let display = if first_line.chars().count() > 80 {
-            format!("{}...", first_line.chars().take(77).collect::<String>())
-        } else if first_line.is_empty() {
-            "(无文本)".to_string()
+
+        // Build display: use text if present, otherwise show tool calls.
+        let display = if !first_line.is_empty() {
+            truncate(first_line, 80)
+        } else if let Some(ref tool_calls) = msg.tool_calls {
+            if tool_calls.is_empty() {
+                "(无文本)".to_string()
+            } else {
+                tool_calls.iter()
+                    .map(|tc| {
+                        let args = truncate(&tc.arguments, 50);
+                        format!("🔧{}({})", tc.name, args)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            }
         } else {
-            first_line.to_string()
+            "(无文本)".to_string()
         };
         lines.push(format!("{} `[{}]` {}", tag, i, display));
     }
