@@ -52,7 +52,7 @@ pub fn builtin_tools_with_memory(mem: MemoryStore) -> Vec<Arc<dyn Tool>> {
         // Web tools
         Arc::new(WebFetchTool::new()),
         Arc::new(HttpRequestTool::new()),
-        Arc::new(WebSearchTool::new()),
+        // WebSearchTool requires a ServiceRegistry — registered separately in daemon.rs
         // Utility tools
         Arc::new(CalculatorTool::new()),
         Arc::new(AskUserTool::new()),

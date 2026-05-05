@@ -1,23 +1,21 @@
 //! Web search tool — searches the web via a search provider.
 //!
-//! This tool is a placeholder that performs basic web searches.
-//! In the future, it will route through the Registry's SearchProvider capability.
+//! Routes search queries through the Registry's SearchProvider capability.
+//! If no SearchProvider is configured, returns a helpful error message.
 
 use async_trait::async_trait;
-use crate::providers::{Tool, ToolResult};
+use std::sync::Arc;
+use crate::providers::{ServiceRegistry, Tool, ToolResult};
+use crate::providers::search::SearchRequest;
 use serde_json::json;
 
-pub struct WebSearchTool;
-
-impl WebSearchTool {
-    pub fn new() -> Self {
-        Self
-    }
+pub struct WebSearchTool {
+    registry: Arc<dyn ServiceRegistry>,
 }
 
-impl Default for WebSearchTool {
-    fn default() -> Self {
-        Self::new()
+impl WebSearchTool {
+    pub fn new(registry: Arc<dyn ServiceRegistry>) -> Self {
+        Self { registry }
     }
 }
 
@@ -57,18 +55,77 @@ impl Tool for WebSearchTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'query' is required"))?;
 
-        let _limit = args["limit"].as_u64().unwrap_or(5) as usize;
+        let limit = args["limit"].as_u64().unwrap_or(5) as usize;
 
-        // TODO: Route through Registry's SearchProvider capability.
-        // For now, return a helpful message indicating the search query was received
-        // but no search backend is configured yet.
+        // Obtain a search provider from the registry.
+        let (provider, model_id) = match self.registry.get_search_provider() {
+            Ok(tuple) => tuple,
+            Err(e) => {
+                tracing::debug!(error = %e, "no search provider available");
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "No search provider is configured. To enable web search, \
+                         add a search provider (e.g., GLM) to your routing config. \
+                         (details: {})",
+                        e
+                    )),
+                });
+            }
+        };
+
+        tracing::debug!(
+            query = %query,
+            limit = limit,
+            provider_model = %model_id,
+            "executing web search"
+        );
+
+        let request = SearchRequest {
+            query: query.to_string(),
+            limit: Some(limit),
+            search_type: None,
+        };
+
+        let results = match provider.search(request) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "search provider failed");
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Search failed: {}", e)),
+                });
+            }
+        };
+
+        if results.results.is_empty() {
+            return Ok(ToolResult {
+                success: true,
+                output: format!("No results found for \"{}\".", query),
+                error: None,
+            });
+        }
+
+        // Format results into a readable text response.
+        let mut output = format!("Search results for \"{}\" ({} found):\n\n", query, results.results.len());
+        for (i, result) in results.results.iter().enumerate() {
+            output.push_str(&format!("{}. {}\n", i + 1, result.title));
+            output.push_str(&format!("   URL: {}\n", result.url));
+            if !result.snippet.is_empty() {
+                output.push_str(&format!("   {}\n", result.snippet));
+            }
+            if let Some(ref published) = result.published_at {
+                output.push_str(&format!("   Published: {}\n", published));
+            }
+            output.push('\n');
+        }
+
         Ok(ToolResult {
-            success: false,
-            output: String::new(),
-            error: Some(format!(
-                "web_search for '{}' not yet connected to a search provider. Configure a SearchProvider in routing to enable web search.",
-                query
-            )),
+            success: true,
+            output,
+            error: None,
         })
     }
 }
