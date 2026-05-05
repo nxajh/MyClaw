@@ -57,8 +57,12 @@ pub struct LoopBreakerConfig {
     pub exact_repeat_threshold: usize,
     /// Ping-pong threshold: alternating rounds before breaking.
     pub ping_pong_rounds: usize,
-    /// No-progress threshold: same tool + same result hash N times → break.
+    /// No-progress threshold: same tool + same result hash N consecutive times → break.
     pub no_progress_threshold: usize,
+    /// Tools that are inherently exploratory (e.g. "shell") and need a higher threshold
+    /// before NoProgress is triggered. These tools naturally produce similar results
+    /// (empty grep, exit code 0) across different args without actually looping.
+    pub relaxed_tools: Vec<String>,
 }
 
 impl Default for LoopBreakerConfig {
@@ -69,6 +73,7 @@ impl Default for LoopBreakerConfig {
             exact_repeat_threshold: 3,
             ping_pong_rounds: 4,
             no_progress_threshold: 5,
+            relaxed_tools: vec!["shell".to_string()],
         }
     }
 }
@@ -221,7 +226,11 @@ impl LoopBreaker {
     }
 
     fn check_no_progress(&self) -> Option<LoopBreakReason> {
-        // Group by tool name, check if same result hash appears too many times.
+        // Count CONSECUTIVE calls from the end of the window where:
+        //   - same tool name
+        //   - same result hash (suggesting no progress)
+        //   - different args_hash from the latest call (exact repeats handled separately)
+        // Stop immediately when a different tool or different result is encountered.
         let window: Vec<_> = self.window.iter().rev().collect();
         if window.is_empty() {
             return None;
@@ -229,18 +238,29 @@ impl LoopBreaker {
 
         let target_tool = &window[0].tool_name;
         let target_result_hash = window[0].result_hash;
+        let target_args_hash = window[0].args_hash;
         let mut count = 1usize;
 
         for inv in window.iter().skip(1) {
-            if inv.tool_name == *target_tool
-                && inv.result_hash == target_result_hash
-                && inv.args_hash != window[0].args_hash
-            {
-                count += 1;
+            // Must be strictly consecutive — break on any mismatch.
+            if inv.tool_name != *target_tool || inv.result_hash != target_result_hash {
+                break;
             }
+            // Skip if same args as the latest (exact repeat is handled separately).
+            if inv.args_hash == target_args_hash {
+                continue;
+            }
+            count += 1;
         }
 
-        if count >= self.config.no_progress_threshold {
+        // Use a higher threshold for relaxed tools.
+        let threshold = if self.config.relaxed_tools.iter().any(|t| t == target_tool) {
+            self.config.no_progress_threshold.saturating_mul(2).max(8)
+        } else {
+            self.config.no_progress_threshold
+        };
+
+        if count >= threshold {
             return Some(LoopBreakReason::NoProgress {
                 tool: target_tool.clone(),
                 count,
@@ -453,6 +473,64 @@ mod tests {
                     other => panic!("expected NoProgress, got {:?}", other),
                 }
             }
+        }
+    }
+
+    #[test]
+    fn no_progress_broken_by_different_tool() {
+        let mut lb = default_breaker();
+        // 4 "search" calls with same result — not enough to trigger (threshold = 5).
+        for i in 0..4 {
+            let args = format!(r#"{{"query": "attempt {}"}}"#, i);
+            let result = lb.record_and_check("search", &args, "no results found");
+            assert_eq!(result, LoopBreak::None);
+        }
+        // Insert a different tool — breaks the consecutive streak.
+        lb.record_and_check("read_file", "{}", "data");
+        // 4 more "search" calls — still not enough, streak was reset.
+        for i in 0..4 {
+            let args = format!(r#"{{"query": "attempt2 {}"}}"#, i);
+            let result = lb.record_and_check("search", &args, "no results found");
+            assert_eq!(result, LoopBreak::None, "should not trigger after streak break");
+        }
+    }
+
+    #[test]
+    fn no_progress_relaxed_tool_uses_higher_threshold() {
+        // "shell" is in the default relaxed_tools list, so it needs 2x threshold (10).
+        let mut lb = default_breaker();
+        // 9 calls with same result — should NOT trigger for relaxed tool.
+        for i in 0..9 {
+            let args = format!(r#"{{"command": "grep pattern{} file"}}"#, i);
+            let result = lb.record_and_check("shell", &args, "exit code: 0");
+            assert_eq!(result, LoopBreak::None, "relaxed tool: call {} should not trigger", i + 1);
+        }
+        // 10th call — triggers with relaxed threshold.
+        match lb.record_and_check("shell", r#"{"command": "grep pattern10 file"}"#, "exit code: 0") {
+            LoopBreak::Detected(LoopBreakReason::NoProgress { tool, count }) => {
+                assert_eq!(tool, "shell");
+                assert_eq!(count, 10);
+            }
+            other => panic!("expected NoProgress for shell at relaxed threshold, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn no_progress_broken_by_different_result() {
+        let mut lb = default_breaker();
+        // 4 same results, then a different result, then more same — streak resets.
+        for i in 0..4 {
+            let args = format!(r#"{{"query": "attempt {}"}}"#, i);
+            let result = lb.record_and_check("search", &args, "no results found");
+            assert_eq!(result, LoopBreak::None);
+        }
+        // Different result breaks the streak.
+        lb.record_and_check("search", r#"{"query": "lucky"}"#, "found something!");
+        // 4 more same results — still not enough.
+        for i in 0..4 {
+            let args = format!(r#"{{"query": "attempt2 {}"}}"#, i);
+            let result = lb.record_and_check("search", &args, "no results found");
+            assert_eq!(result, LoopBreak::None);
         }
     }
 
