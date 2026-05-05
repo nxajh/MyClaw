@@ -312,8 +312,24 @@ impl AgentLoop {
     }
 
     /// Manually trigger compaction (used by /compact command).
+    /// Skips the token threshold check — always attempts compression.
     pub async fn compact_now(&mut self, model_id: &str) -> anyhow::Result<()> {
-        self.maybe_compact(model_id).await
+        let model_config = self.registry.get_chat_model_config(model_id)?;
+        if model_config.context_window.is_none() {
+            anyhow::bail!("模型未配置 context_window，无法压缩");
+        }
+
+        let history_len = self.session.history.len();
+        if history_len <= 1 {
+            anyhow::bail!("历史消息太少，无需压缩");
+        }
+
+        tracing::info!(
+            total_tokens = self.token_tracker.total_tokens(),
+            "starting manual compaction (/compact)"
+        );
+
+        self.compact_impl(model_id).await
     }
 
     /// Set the delegate handler (called by Orchestrator to wire async delegation).
@@ -1357,6 +1373,11 @@ impl AgentLoop {
             "starting context compaction"
         );
 
+        self.compact_impl(model_id).await
+    }
+
+    /// Core compaction logic: find range, summarize, replace history.
+    async fn compact_impl(&mut self, model_id: &str) -> anyhow::Result<()> {
         let history_len = self.session.history.len();
         if history_len <= 1 {
             return Ok(());
@@ -1482,6 +1503,11 @@ impl AgentLoop {
         // 7. Safety net: if still over threshold, truncate retention zone.
         // After drain+insert, retention zone now starts at compact_start + 1.
         let new_boundary = compact_start + 1;
+        let context_window = self.registry.get_chat_model_config(model_id)
+            .ok()
+            .and_then(|cfg| cfg.context_window)
+            .unwrap_or(u64::MAX);
+        let threshold = (context_window as f64 * self.config.context.compact_threshold) as u64;
         if new_total > threshold {
             self.truncate_retention_zone(new_boundary, model_id);
         }
