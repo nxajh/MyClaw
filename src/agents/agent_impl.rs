@@ -614,10 +614,7 @@ impl AgentLoop {
                     msg_len = msg.text_content().len(),
                     "build_messages: persisting attachment to history"
                 );
-                // Remove previous <system-reminder> from history
-                self.session.history.retain(|m| {
-                    !m.text_content().trim().starts_with("<system-reminder>")
-                });
+                // Append to history (previous system-reminders are kept)
                 self.session.add_user_text(msg.text_content().to_string());
                 self.attachments.clear_pending();
             }
