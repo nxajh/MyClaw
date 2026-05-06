@@ -724,6 +724,22 @@ impl AgentLoop {
             // compaction or when tool results need to be included).
             let mut messages = if first_iteration {
                 first_iteration = false;
+                tracing::info!(
+                    msg_count = initial_messages.len(),
+                    "chat_loop: first iteration using initial_messages"
+                );
+                for (i, m) in initial_messages.iter().enumerate() {
+                    let text = m.text_content();
+                    let has_reminder = text.contains("<system-reminder>");
+                    tracing::info!(
+                        idx = i,
+                        role = %m.role,
+                        len = text.len(),
+                        has_reminder,
+                        preview = %text.chars().take(80).collect::<String>(),
+                        "chat_loop: initial_messages entry"
+                    );
+                }
                 initial_messages.clone()
             } else {
                 self.build_messages().await?
