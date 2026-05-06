@@ -714,14 +714,19 @@ impl AgentLoop {
             };
 
             // Check if context compaction is needed.
+            // Track compact_version before so we can detect if compaction actually ran.
+            let pre_compact_version = self.session.compact_version;
             if let Err(e) = self.maybe_compact(&model_id).await {
                 tracing::warn!(error = %e, "compaction failed, continuing");
             }
+            let did_compact = self.session.compact_version != pre_compact_version;
 
             // Use initial_messages on the first iteration (includes system-reminder
             // from AttachmentManager), rebuild on subsequent iterations (e.g. after
             // compaction or when tool results need to be included).
-            let mut messages = if first_iteration {
+            // If compaction ran on the first iteration, rebuild from the compacted
+            // history rather than sending the stale pre-compaction message list.
+            let mut messages = if first_iteration && !did_compact {
                 first_iteration = false;
                 tracing::info!(
                     msg_count = initial_messages.len(),
@@ -741,6 +746,7 @@ impl AgentLoop {
                 }
                 initial_messages.clone()
             } else {
+                first_iteration = false;
                 self.build_messages().await?
             };
 
@@ -1026,7 +1032,17 @@ impl AgentLoop {
                             }
                         }
                         StreamEvent::Usage(u) => {
-                            usage = Some(u);
+                            // Merge rather than overwrite: Anthropic sends two Usage events
+                            // (message_start with input_tokens, message_delta with output_tokens).
+                            if let Some(ref mut existing) = usage {
+                                if u.input_tokens.is_some() { existing.input_tokens = u.input_tokens; }
+                                if u.output_tokens.is_some() { existing.output_tokens = u.output_tokens; }
+                                if u.cached_input_tokens.is_some() { existing.cached_input_tokens = u.cached_input_tokens; }
+                                if u.reasoning_tokens.is_some() { existing.reasoning_tokens = u.reasoning_tokens; }
+                                if u.cache_write_tokens.is_some() { existing.cache_write_tokens = u.cache_write_tokens; }
+                            } else {
+                                usage = Some(u);
+                            }
                         }
                         StreamEvent::Done { reason } => {
                             stop_reason = reason;
@@ -1331,7 +1347,8 @@ impl AgentLoop {
 
     /// Extract likely file paths from messages (simplified).
     fn extract_file_paths(messages: &[ChatMessage]) -> Vec<String> {
-        let re = regex::Regex::new(r"(?:/[\w/.-]+\.\w{1,5})|(?:src/[\w/.-]+)").unwrap();
+        static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let re = RE.get_or_init(|| regex::Regex::new(r"(?:/[\w/.-]+\.\w{1,5})|(?:src/[\w/.-]+)").unwrap());
         let mut paths = Vec::new();
         for msg in messages {
             for cap in re.captures_iter(&msg.text_content()) {

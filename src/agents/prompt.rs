@@ -296,9 +296,11 @@ mod tests {
 
     #[test]
     fn test_compact_skips_channel_caps() {
-        let mut config = SystemPromptConfig::default();
-        config.compact = true;
-        config.channel_name = Some("wechat".to_string());
+        let config = SystemPromptConfig {
+            compact: true,
+            channel_name: Some("wechat".to_string()),
+            ..SystemPromptConfig::default()
+        };
         let builder = SystemPromptBuilder::new(config);
         let skills = SkillManager::new();
         let prompt = builder.build(&skills);
@@ -307,8 +309,10 @@ mod tests {
 
     #[test]
     fn test_truncation() {
-        let mut config = SystemPromptConfig::default();
-        config.max_chars = 50;
+        let config = SystemPromptConfig {
+            max_chars: 50,
+            ..SystemPromptConfig::default()
+        };
         let builder = SystemPromptBuilder::new(config);
         let skills = SkillManager::new();
         let prompt = builder.build(&skills);
@@ -318,8 +322,10 @@ mod tests {
 
     #[test]
     fn test_readonly_safety() {
-        let mut config = SystemPromptConfig::default();
-        config.autonomy = AutonomyLevel::ReadOnly;
+        let config = SystemPromptConfig {
+            autonomy: AutonomyLevel::ReadOnly,
+            ..SystemPromptConfig::default()
+        };
         let builder = SystemPromptBuilder::new(config);
         let skills = SkillManager::new();
         let prompt = builder.build(&skills);
@@ -328,8 +334,10 @@ mod tests {
 
     #[test]
     fn test_channel_caps_wechat_has_tables() {
-        let mut config = SystemPromptConfig::default();
-        config.channel_name = Some("wechat".to_string());
+        let config = SystemPromptConfig {
+            channel_name: Some("wechat".to_string()),
+            ..SystemPromptConfig::default()
+        };
         let builder = SystemPromptBuilder::new(config);
         let skills = SkillManager::new();
         let prompt = builder.build(&skills);
@@ -338,8 +346,10 @@ mod tests {
 
     #[test]
     fn test_channel_caps_discord_no_tables() {
-        let mut config = SystemPromptConfig::default();
-        config.channel_name = Some("discord".to_string());
+        let config = SystemPromptConfig {
+            channel_name: Some("discord".to_string()),
+            ..SystemPromptConfig::default()
+        };
         let builder = SystemPromptBuilder::new(config);
         let skills = SkillManager::new();
         let prompt = builder.build(&skills);
@@ -348,8 +358,10 @@ mod tests {
 
     #[test]
     fn test_action_instruction_readonly() {
-        let mut config = SystemPromptConfig::default();
-        config.autonomy = AutonomyLevel::ReadOnly;
+        let config = SystemPromptConfig {
+            autonomy: AutonomyLevel::ReadOnly,
+            ..SystemPromptConfig::default()
+        };
         let builder = SystemPromptBuilder::new(config);
         let skills = SkillManager::new();
         let prompt = builder.build(&skills);
@@ -358,8 +370,10 @@ mod tests {
 
     #[test]
     fn test_no_tool_list_in_prompt() {
-        let mut config = SystemPromptConfig::default();
-        config.compact = true;
+        let config = SystemPromptConfig {
+            compact: true,
+            ..SystemPromptConfig::default()
+        };
         let builder = SystemPromptBuilder::new(config);
         let skills = SkillManager::new();
         let prompt = builder.build(&skills);

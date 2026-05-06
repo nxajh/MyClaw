@@ -27,13 +27,13 @@ impl ToolRegistry {
         }
     }
 
-    /// Register a tool. Panics if a tool with the same name already exists.
+    /// Register a tool. Logs a warning and overwrites if a tool with the same name already exists.
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
-        let existing = self.tools.insert(name.clone(), tool);
-        if existing.is_some() {
-            panic!("Tool '{}' is already registered", name);
+        if self.tools.contains_key(&name) {
+            tracing::warn!(tool_name = %name, "tool already registered, overwriting");
         }
+        self.tools.insert(name, tool);
     }
 
     /// Get a tool by name.
