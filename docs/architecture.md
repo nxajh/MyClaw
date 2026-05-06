@@ -1,6 +1,9 @@
-# MyClaw 新架构设计
+# MyClaw 架构设计文档
 
-> 2026-04-24 · 基于架构分析和讨论
+> 2026-04-24 初版 · **2026-04-29 更新（实现状态）**
+>
+> ⚠️ **状态说明**：Phase 1-4 全部已完成。本文档描述的是最终目标架构，
+> 部分细节（如 LoopBreakerAgent）仍在实现中，详见各章节标注。
 
 ---
 
@@ -10,47 +13,53 @@
 
 ```┌─────────────────────────────────────────────────┐
 │           Orchestration Layer（编排层）              │
-│  Orchestrator (启动 Channels, 消息路由)            │
+│  src/agents/orchestrator.rs                       │
 ├─────────────────────────────────────────────────┤
 │           Interface Layer（接口层）                │
-│  Channel Adapters (WeChat, Telegram, ...)        │
+│  src/channels/wechat.rs                         │
+│  src/channels/telegram.rs                       │
 ├─────────────────────────────────────────────────┤
 │           Application Layer（应用层）              │
 │  ┌─────────────────────────────────────────┐   │
-│  │  Agent orchestration                    │   │
+│  │  src/agents/agent_impl.rs               │   │
 │  │  - AgentLoop (核心循环)                  │   │
 │  │  - SkillsManager (Skills 管理)          │   │
-│  │  - McpManager (MCP 管理)                │   │
+│  │  - McpManager (MCP 管理)               │   │
 │  │  - SystemPromptBuilder (Prompt 构建)    │   │
 │  └─────────────────────────────────────────┘   │
 ├─────────────────────────────────────────────────┤
 │               Domain Layer（核心域）               │
 │  ┌───────────────┬─────────────────────────┐   │
 │  │  Session      │  Memory                 │   │
-│  │  (myclaw-  │  (myclaw-memory/     │   │
-│  │   session/)  │   独立模块)              │   │
+│  │  src/agents/ │  src/storage/           │   │
+│  │  session_mgr  │  memory.rs, shared.rs   │   │
 │  ├───────────────┼─────────────────────────┤   │
-│  │  Provider    │  Tool trait            │   │
-│  │  trait       │                         │   │
-│  ├───────────────┼─────────────────────────┤   │
-│  │  PromptSection│                        │   │
+│  │  Provider     │  Tool trait            │   │
+│  │  src/providers│                         │   │
+│  │  /capability_│                         │   │
+│  │  chat.rs     │                         │   │
 │  └───────────────┴─────────────────────────┘   │
 ├─────────────────────────────────────────────────┤
 │           Infrastructure Layer（基础设施）        │
 │  ┌───────────────┬─────────────────────────┐   │
-│  │  ServiceRegistry │  LoopBreakerAgent    │   │
-│  │  (myclaw-   │  (装饰器)                │   │
-│  │   registry/)  │                         │   │
+│  │  Registry     │  LoopBreakerAgent       │   │
+│  │  src/registry│  (待实现)               │   │
 │  ├───────────────┼─────────────────────────┤   │
 │  │  Provider 实现│  Memory 存储实现        │   │
-│  │  (OpenAI,    │  (myclaw-memory-      │   │
-│  │   Anthropic) │   storage/)            │   │
+│  │  src/providers│  src/storage/sqlite.rs  │   │
+│  │  openai.rs   │  src/storage/embedding  │   │
+│  │  minimax.rs  │                        │   │
+│  │  glm.rs      │                        │   │
 │  ├───────────────┼─────────────────────────┤   │
-│  │  Tool 实现    │  Channel Transport     │   │
-│  │  (70+ 工具)  │  (Stdio/HTTP/SSE)     │   │
+│  │  Tool 实现    │  MCP Protocol          │   │
+│  │  src/tools/  │  src/mcp/               │   │
+│  │  (13个工具) │  (Stdio/HTTP/SSE)     │   │
 │  └───────────────┴─────────────────────────┘   │
 └─────────────────────────────────────────────────┘
 ```
+
+> **注意**：当前采用单体 crate 结构（`src/` 下分模块），而非多 crate workspace。
+> 编译时通过 Cargo feature flags 选择 Channel（`wechat`、`telegram`）。
 
 ### 1.2 各层职责
 
@@ -113,60 +122,45 @@ impl EmbeddingProvider for OllamaProvider { ... }
 
 ### 1.4 Loop Breaker 装饰器
 
-**Domain 层：定义 AgentLoop trait**
+> ⚠️ **状态**：待实现（`src/agents/loop_breaker.rs`）
 
-```rust
-trait AgentLoop: Send {
-    async fn run(&mut self, msg: &str) -> Result<String>;
-}
-```
+**目标**：检测 AgentLoop 中的循环模式，防止无限 tool 调用。
 
-**Infrastructure 层：装饰器实现**
+**三种循环模式检测**：
 
-```rust
-pub struct LoopBreakerAgent<A: AgentLoop> {
-    inner: A,
-    breaker: CircuitBreaker,
-}
+| 模式 | 条件 | 阈值 |
+|------|------|------|
+| **Exact repeat** | 同一 tool + 同一 args 连续调用 | ≥3 |
+| **Ping-pong** | 两个 tool 来回切换 | ≥4 轮 |
+| **No progress** | 同一 tool 调用 args 不同但结果 hash 相同 | ≥5 |
 
-impl<A: AgentLoop> AgentLoop for LoopBreakerAgent<A> {
-    async fn run(&mut self, msg: &str) -> Result<String> {
-        if self.breaker.should_break() {
-            return Err(anyhow!("Loop detected: {}", self.breaker.reason()));
-        }
-        self.inner.run(msg).await
-    }
-}
+**配置参数**：
 
-// 使用
-let agent = LoopBreakerAgent {
-    inner: AgentLoopImpl::new(...),
-    breaker: CircuitBreaker::new(config),
-};
+```toml
+[agent.loop_breaker]
+max_tool_calls = 100      # 硬限制兜底
+window_size = 20           # 滑动窗口大小
+max_repeats = 3           # Exact repeat 阈值
 ```
 
 ### 1.5 ServiceRegistry 位置
 
-ServiceRegistry 属于 Infrastructure Layer（技术实现，路由外部 Provider）。
+ServiceRegistry 属于 Infrastructure Layer。
 
 ```rust
-// infrastructure/myclaw-registry/src/lib.rs
+// src/providers/service_registry.rs — trait 定义
+// src/registry/mod.rs — 具体实现
 
-pub struct ServiceRegistry {
-    chat_providers: Vec<Box<dyn ChatProvider>>,
-    search_providers: Vec<Box<dyn SearchProvider>>,
-    embedding_providers: Vec<Box<dyn EmbeddingProvider>>,
-    image_providers: Vec<Box<dyn ImageGenerationProvider>>,
-    tts_providers: Vec<Box<dyn TtsProvider>>,
-    // ... 按能力类型分别存储
-}
-
-impl ServiceRegistry {
-    pub fn get_chat_provider(&self) -> Result<(Box<dyn ChatProvider>, String)> { ... }
-    pub fn get_search_provider(&self) -> Result<(Box<dyn SearchProvider>, String)> { ... }
-    pub fn get_embedding_provider(&self) -> Result<(Box<dyn EmbeddingProvider>, String)> { ... }
-    pub fn get_image_provider(&self) -> Result<(Box<dyn ImageGenerationProvider>, String)> { ... }
-    pub fn get_tts_provider(&self) -> Result<(Box<dyn TtsProvider>, String)> { ... }
+pub trait ServiceRegistry: Send + Sync {
+    fn get_chat_provider(&self, capability: Capability) -> anyhow::Result<(Arc<dyn ChatProvider>, String)>;
+    fn get_chat_provider_with_hint(&self, capability: Capability, provider_hint: Option<&str>) -> anyhow::Result<(Arc<dyn ChatProvider>, String)>;
+    fn get_chat_fallback_chain(&self, capability: Capability) -> anyhow::Result<Vec<(Arc<dyn ChatProvider>, String)>>;
+    fn get_embedding_provider(&self) -> anyhow::Result<(Arc<dyn EmbeddingProvider>, String)>;
+    fn get_image_provider(&self) -> anyhow::Result<(Arc<dyn ImageGenerationProvider>, String)>;
+    fn get_tts_provider(&self) -> anyhow::Result<(Arc<dyn TtsProvider>, String)>;
+    fn get_search_provider(&self) -> anyhow::Result<(Arc<dyn SearchProvider>, String)>;
+    fn get_stt_provider(&self) -> anyhow::Result<(Arc<dyn SttProvider>, String)>;
+    fn get_video_provider(&self) -> anyhow::Result<(Arc<dyn VideoGenerationProvider>, String)>;
 }
 ```
 
@@ -177,51 +171,40 @@ Application 层依赖 ServiceRegistry 获取 Provider 能力。
 Orchestrator 是 Interface Layer 和 Application Layer 之间的"编排层"：
 
 ```rust
-// orchestration/myclaw-orchestrator/src/lib.rs
+// src/agents/orchestrator.rs
 
 pub struct Orchestrator {
-    channels: Vec<Box<dyn Channel>>,
-    agent: Arc<Mutex<dyn AgentLoop>>,
-    registry: Arc<ServiceRegistry>,
+    channels: Arc<DashMap<String, Arc<dyn Channel>>>,  // channel name → Channel
+    sessions: Arc<DashMap<String, Arc<TokioMutex<AgentLoop>>>>,  // session key → AgentLoop
+    agent: Agent,
+    session_manager: SessionManager,
+    pending_asks: Arc<DashMap<String, (oneshot::Sender<String>, String)>>,  // ask_user 处理
 }
 
 impl Orchestrator {
-    pub async fn run(&self) -> Result<()> {
-        // 1. 启动所有 Channel listeners
-        let handles = self.start_channels().await?;
-
-        // 2. 主循环：接收 Channel 消息，路由到 Agent
-        loop {
-            let msg = self.rx.recv().await;
-            let session = self.get_or_create_session(&msg);
-            let response = session.run(msg.content).await?;
-            self.send_response(msg.reply_target, response).await?;
-        }
-    }
+    pub async fn run(&self, shutdown_rx: watch::Receiver<bool>) -> anyhow::Result<()>;
+    pub async fn shutdown_listeners(&mut self);
 }
 ```
 
 ### 1.7 Memory 独立 Domain 模块
 
 ```
-domain/
-├── myclaw-session/           # Session 领域
-│   └── src/
-│       └── session.rs
-│
-└── myclaw-memory/            # Memory 领域（独立模块）
-    └── src/
-        ├── memory.rs            # Memory trait
-        ├── shared.rs            # Shared Memory 逻辑
-        └── private.rs           # Private Memory 逻辑
-
-infrastructure/
-└── myclaw-memory-storage/    # 存储实现
-    └── src/
-        ├── sqlite.rs
-        ├── embedding.rs
-        └── mod.rs
+src/storage/
+├── lib.rs              # 模块入口，导出
+├── memory.rs           # Memory trait 定义
+├── shared.rs           # SharedMemory 装饰器
+├── private.rs          # PrivateMemory 装饰器
+├── session.rs          # SessionBackend trait
+├── sqlite.rs           # SqliteSessionBackend 实现（472行）
+├── embedding.rs         # Embedding 存储
+├── vector.rs           # 向量存储
+├── policy.rs           # 记忆策略
+└── types.rs            # MemoryEntry 等类型
 ```
+
+> **MemoryStore**（`src/tools/memory.rs`）是内置工具，持有 `Arc<Memory>` 后端。
+> **MCP** 通过 `McpManager` 连接外部 MCP Server，发现工具并包装为 `dyn Tool`。
 
 ### 1.8 Channel 独立 Crates（编译时选择）
 
@@ -265,35 +248,36 @@ pub trait Channel: Send + Sync {
 
 ### 1.9 依赖关系
 
-```Interface (Channels)
+```
+Interface (Channels: wechat.rs, telegram.rs)
         ↓ (依赖)
-Orchestration (Orchestrator)
+Orchestration (Orchestrator: orchestrator.rs)
         ↓ (依赖)
-Application (AgentLoop, Skills, MCP, SystemPrompt)
+Application (AgentLoop, SkillsManager, McpManager, SystemPromptBuilder)
         ↓ (依赖)
-Domain (Session, Memory, Provider trait, Tool trait)
+Domain (Session, Memory trait, Provider trait, Tool trait)
         ↑ (实现)
-Infrastructure (Registry, Provider 实现, Storage, LoopBreakerAgent)
+Infrastructure (Registry, Provider 实现, Storage, Tools, MCP)
 ```
 
 ### 1.10 Section 映射
 
-| Section | 所属层次 | 说明 |
-|---------|---------|------|
-| §2 设计原则 | - | 文档 |
-| §3 核心 trait 体系 | Domain | Provider 能力 trait, Tool trait 等 |
-| §4 Provider + Model 层 | Domain + Infrastructure | Provider 抽象 + 实现 |
-| §5 Chat 能力的协议实现 | Infrastructure | Provider 的 Chat 实现 |
-| §6 ServiceRegistry | Infrastructure | 能力路由 |
-| §7 差异处理机制 | Infrastructure | Provider 间的差异处理 |
-| §8 Agent Loop | Application | 核心循环 |
-| §9 System Prompt | Application | Prompt 构建 |
-| §10 Skills | Application | Skills 管理 |
-| §11 MCP | Application | MCP 管理 |
-| §12 配置层 | Infrastructure | 配置结构体 |
-| §13 工厂函数 | Infrastructure | 对象创建 |
-| §14 对现有代码的改造映射 | - | 迁移指南 |
-| §15 重构路径 | - | 实施路线图 |
+| Section | 所属层次 | 实现状态 |
+|---------|---------|---------|
+| §2 设计原则 | - | ✅ |
+| §3 核心 trait 体系 | Domain | ✅ `src/providers/capability*.rs` |
+| §4 Provider + Model 层 | Domain + Infrastructure | ✅ `src/providers/` |
+| §5 Chat 能力的协议实现 | Infrastructure | ✅ `src/providers/openai.rs` 等 |
+| §6 ServiceRegistry | Infrastructure | ✅ `src/registry/mod.rs` |
+| §7 差异处理机制 | Infrastructure | ✅ 各 provider 自己实现 |
+| §8 Agent Loop | Application | ✅ `src/agents/agent_impl.rs` |
+| §9 System Prompt | Application | ✅ `src/agents/prompt.rs` |
+| §10 Skills | Application | ✅ `src/agents/skills.rs` |
+| §11 MCP | Application | ✅ `src/agents/mcp_manager.rs` + `src/mcp/` |
+| §12 配置层 | Infrastructure | ✅ `src/config/` |
+| §13 工厂函数 | Infrastructure | ✅ `src/providers/shared.rs` |
+| §14 重构路径 | - | ✅ Phase 1-4 全部完成 |
+| §15 设计边界 | - | ✅ |
 
 ---
 
@@ -2928,35 +2912,33 @@ impl ServiceRegistry {
 
 ---
 
-## 16. 重构路径
+## 14. 重构路径
 
-### 16.1 Phase 1：不改变 trait，修复已知问题
-- 删除 `glm.rs` 死代码
-- `UsageInfo` 加 `completion_tokens_details`，修复 MiniMax reasoning_tokens 丢失
-- 验证现有 provider 的 token usage 解析是否正确
-- **风险：低。不改变外部接口。**
+> ✅ **2026-04-29：所有 Phase 已完成**
 
-### 16.2 Phase 2：引入 Provider + Model 两层 + ServiceRegistry
-- 配置从 `provider → capabilities` 改为 `provider → models → capabilities`
-- 新增 `Provider`、`ProviderModel` 结构体
-- 新增 `ServiceRegistry`，按 model 查找 + provider 连接
-- 路由从选 provider 改为选 model
-- **风险：中。新旧可并存。**
+### Phase 1：不改变 trait，修复已知问题 ✅
+- ✅ 删除 `glm.rs` 死代码
+- ✅ `UsageInfo` 加 `completion_tokens_details`，修复 MiniMax reasoning_tokens 丢失
+- ✅ 验证现有 provider 的 token usage 解析
 
-### 16.3 Phase 3：Provider trait 拆分为独立能力 trait + 每个 provider 一个 struct
-- `Provider` trait 拆分为 `ChatProvider`、`SearchProvider`、`EmbeddingProvider`、`ImageGenerationProvider`、`TtsProvider`、`SttProvider`、`VideoGenerationProvider`
-- 每个 provider 一个 struct，实现其支持的能力 trait
-- `compatible.rs` → `providers/mod.rs`（共享网络函数）+ 每个 provider 独立文件
-- `router.rs` 删除
-- `lib.rs` 工厂简化为一个 match
-- **风险：高。核心改造。**
+### Phase 2：引入 Provider + Model 两层 + ServiceRegistry ✅
+- ✅ 配置从 `provider → capabilities` 改为 `provider → models → capabilities`
+- ✅ 新增 `Provider`、`ProviderModel` 结构体
+- ✅ 新增 `ServiceRegistry`，按 model 查找 + provider 连接
+- ✅ 路由从选 provider 改为选 model
 
-### 16.4 Phase 4：工具系统接入 Capability + 策略化路由
-- `web_search_tool` 通过 registry 获取 SearchProvider 能力
-- MCP 工具通过 registry 获取能力
-- RoutingStrategy 接入（fallback、cheapest、fastest）
-- 编排层支持策略化路由
-- **风险：中。依赖 Phase 3 完成。**
+### Phase 3：Provider trait 拆分为独立能力 trait + 每个 provider 一个 struct ✅
+- ✅ `Provider` trait 拆分为 `ChatProvider`、`SearchProvider`、`EmbeddingProvider`、`ImageGenerationProvider`、`TtsProvider`、`SttProvider`、`VideoGenerationProvider`
+- ✅ 每个 provider 一个 struct，实现其支持的能力 trait
+- ✅ `providers/mod.rs`（共享网络函数）+ 每个 provider 独立文件
+- ✅ `router.rs` 删除
+- ✅ `lib.rs` 工厂简化为一个 match
+
+### Phase 4：工具系统接入 Capability + 策略化路由 ✅
+- ✅ `web_search_tool` 通过 registry 获取 SearchProvider 能力
+- ✅ MCP 工具通过 registry 获取能力
+- ✅ RoutingStrategy 接入（fallback、cheapest、fastest）
+- ✅ 编排层支持策略化路由
 
 
 ---

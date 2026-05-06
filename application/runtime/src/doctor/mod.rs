@@ -1,1 +1,0 @@
-//! Self-check / doctor stub.
