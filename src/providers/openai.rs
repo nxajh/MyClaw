@@ -316,11 +316,17 @@ fn parse_openai_sse(line: &str, saw_tool_call: &mut bool) -> Option<StreamEvent>
     // Final usage chunk (choices is empty).
     if let Some(usage) = chunk.usage {
         if chunk.choices.is_empty() {
+            // OpenAI's prompt_tokens = total input (cached + non-cached).
+            // Normalize to non-cached only so token_tracker semantics match Anthropic:
+            //   input_tokens = non-cached,  cached_input_tokens = cached portion.
+            let cached = usage.prompt_tokens_details.as_ref().and_then(|d| d.cached_tokens).unwrap_or(0);
+            let non_cached = usage.prompt_tokens.map(|t| t.saturating_sub(cached));
+            let reasoning = usage.completion_tokens_details.and_then(|d| d.reasoning_tokens);
             return Some(StreamEvent::Usage(crate::providers::ChatUsage {
-                input_tokens: usage.prompt_tokens,
+                input_tokens: non_cached,
                 output_tokens: usage.completion_tokens,
-                cached_input_tokens: usage.prompt_tokens_details.and_then(|d| d.cached_tokens),
-                reasoning_tokens: usage.completion_tokens_details.and_then(|d| d.reasoning_tokens),
+                cached_input_tokens: if cached > 0 { Some(cached) } else { None },
+                reasoning_tokens: reasoning,
                 ..Default::default()
             }));
         }

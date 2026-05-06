@@ -207,6 +207,20 @@ fn parse_anthropic_sse(line: &str) -> Option<StreamEvent> {
         let ty = evt.get("type")?.as_str()?;
 
         match ty {
+            "message_start" => {
+                // message_start carries input token counts under message.usage.
+                if let Some(usage) = evt.get("message").and_then(|m| m.get("usage")) {
+                    let cu = ChatUsage {
+                        input_tokens: usage.get("input_tokens").and_then(|v| v.as_u64()),
+                        output_tokens: usage.get("output_tokens").and_then(|v| v.as_u64()),
+                        cached_input_tokens: usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()),
+                        reasoning_tokens: None,
+                        cache_write_tokens: usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()),
+                    };
+                    return Some(SE::Usage(cu));
+                }
+                None
+            }
             "content_block_delta" => {
                 let delta = evt.get("delta")?;
                 if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
@@ -222,28 +236,17 @@ fn parse_anthropic_sse(line: &str) -> Option<StreamEvent> {
                 None
             }
             "message_delta" => {
-                let delta = evt.get("delta")?;
-                if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
-                    if !text.is_empty() {
-                        return Some(SE::Delta { text: text.to_string() });
-                    }
-                }
-                None
-            }
-            "message_stop" => Some(SE::Done { reason: StopReason::EndTurn }),
-            "message" => {
+                // message_delta carries the final output token count under usage.
                 if let Some(usage) = evt.get("usage") {
                     let cu = ChatUsage {
-                        input_tokens: usage.get("input_tokens").and_then(|v| v.as_u64()),
                         output_tokens: usage.get("output_tokens").and_then(|v| v.as_u64()),
-                        cached_input_tokens: usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()),
-                        reasoning_tokens: None,
-                        cache_write_tokens: usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()),
+                        ..ChatUsage::default()
                     };
                     return Some(SE::Usage(cu));
                 }
                 None
             }
+            "message_stop" => Some(SE::Done { reason: StopReason::EndTurn }),
             _ => None,
         }
     } else {

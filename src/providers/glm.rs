@@ -302,7 +302,7 @@ fn parse_glm_sse(line: &str, saw_tool_call: &mut bool) -> Option<StreamEvent> {
     if data == "[DONE]" { return None; }
 
     #[derive(serde::Deserialize)]
-    struct Chunk { choices: Vec<Choice> }
+    struct Chunk { choices: Vec<Choice>, #[serde(default)] usage: Option<Usage> }
     #[derive(serde::Deserialize)]
     struct Choice { delta: Delta, finish_reason: Option<String> }
     #[derive(serde::Deserialize)]
@@ -317,8 +317,25 @@ fn parse_glm_sse(line: &str, saw_tool_call: &mut bool) -> Option<StreamEvent> {
     #[derive(serde::Deserialize)]
     #[allow(dead_code)]
     struct FuncDelta { name: Option<String>, arguments: Option<String> }
+    #[derive(serde::Deserialize)]
+    struct Usage {
+        #[serde(default)] prompt_tokens: Option<u64>,
+        #[serde(default)] completion_tokens: Option<u64>,
+    }
 
     let chunk: Chunk = serde_json::from_str(data).ok()?;
+
+    // Final usage chunk (choices is empty, usage present).
+    if chunk.choices.is_empty() {
+        if let Some(usage) = chunk.usage {
+            return Some(StreamEvent::Usage(crate::providers::ChatUsage {
+                input_tokens: usage.prompt_tokens,
+                output_tokens: usage.completion_tokens,
+                ..Default::default()
+            }));
+        }
+        return None;
+    }
 
     for choice in &chunk.choices {
         // Tool calls take priority — GLM occasionally sends both content
