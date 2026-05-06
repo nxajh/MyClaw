@@ -610,11 +610,7 @@ async fn cmd_reload(ctx: CommandContext<'_>) -> String {
         *configs = new_agents;
     }
 
-    // 3. Reset attachment manager on active session
-    if let Some(loop_arc) = ctx.agent_loop {
-        let mut guard = loop_arc.lock().await;
-        guard.attachments().reset_all();
-    }
+    // 3. No need to reset attachment manager — next diff rebuilds from history.
 
     let skill_count = ctx.agent.skills().read().skill_count();
     let agent_count = ctx.agent.sub_agent_configs().read().len();

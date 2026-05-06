@@ -1,12 +1,11 @@
 //! Attachment manager — 增量注入 skills/agents/MCP 列表。
 //!
-//! 每轮 turn 最多生成一条 `<system-reminder>` user 消息，不存 history。
-//! Compaction / restart / reload 后全量重建。
+//! 每轮 turn 最多生成一条 `<system-reminder>` user 消息，存入 history。
 //!
-//! 设计参照 Claude Code 的统一增量 delta 模式：
+//! 设计参照 Claude Code 的增量 delta 模式：
 //! - 三类信息（skills, agents, MCP）分别 diff，合并为一条消息
-//! - `announced_*` sets 追踪已通知 LLM 的内容
-//! - `first_turn` 控制首次全量 vs 后续增量
+//! - 从 history 中的 `<system-reminder>` 重建 announced 状态
+//! - Compaction 后旧 attachment 自然消失 → 自动触发全量重建
 
 use std::collections::{HashMap, HashSet};
 
@@ -31,33 +30,29 @@ struct Delta {
     removed: Vec<String>,
 }
 
+/// Reconstructed announced state from history.
+struct AnnouncedState {
+    skills: HashSet<String>,
+    agents: HashSet<String>,
+    mcp: HashSet<String>,
+}
+
 // ── AttachmentManager ─────────────────────────────────────────────────────
 
 /// 附件管理器 — 每个 AgentLoop 持有一个。
 ///
-/// 追踪已通知 LLM 的 skills / agents / MCP 列表，每 turn 计算差异，
+/// 不维护内存中的 announced 状态。
+/// 每轮 turn 从 session history 中重建，然后与当前状态做 diff，
 /// 合并渲染为一条 `<system-reminder>` 消息。
 pub struct AttachmentManager {
-    /// 已通知 LLM 的 skill 名称集合
-    announced_skills: HashSet<String>,
-    /// 已通知 LLM 的 agent 名称集合
-    announced_agents: HashSet<String>,
-    /// 已通知 LLM 的 MCP server 名称集合
-    announced_mcp: HashSet<String>,
     /// 本轮待发送增量
     pending: HashMap<AttachmentKind, Delta>,
-    /// 首轮标记 — 首次全量发送
-    first_turn: bool,
 }
 
 impl Default for AttachmentManager {
     fn default() -> Self {
         Self {
-            announced_skills: HashSet::new(),
-            announced_agents: HashSet::new(),
-            announced_mcp: HashSet::new(),
             pending: HashMap::new(),
-            first_turn: true,
         }
     }
 }
@@ -67,129 +62,181 @@ impl AttachmentManager {
         Self::default()
     }
 
+    // ── Rebuild ──────────────────────────────────────────────────────
+
+    /// 从 session history 中的 `<system-reminder>` 消息重建 announced 状态。
+    ///
+    /// 解析规则：
+    /// - `- **name**` / `- **name**: desc` → added skill/agent
+    /// - `- ~~name~~` → removed skill/agent
+    /// - `### ServerName` → added MCP server
+    fn rebuild_from_history(history: &[ChatMessage]) -> AnnouncedState {
+        let mut skills = HashSet::new();
+        let mut agents = HashSet::new();
+        let mut mcp = HashSet::new();
+
+        for msg in history {
+            let text = msg.text_content();
+            if !text.starts_with("<system-reminder>") || msg.role != "user" {
+                continue;
+            }
+
+            let mut current_section: Option<&str> = None;
+
+            for line in text.lines() {
+                let trimmed = line.trim();
+
+                // Section headers
+                if trimmed.starts_with("## Skills") {
+                    current_section = Some("skills");
+                    continue;
+                }
+                if trimmed.starts_with("## Available Sub-Agents") {
+                    current_section = Some("agents");
+                    continue;
+                }
+                if trimmed.starts_with("## MCP Server Instructions") {
+                    current_section = Some("mcp");
+                    continue;
+                }
+
+                // Removed: - ~~name~~
+                if trimmed.starts_with("- ~~") && trimmed.ends_with("~~") {
+                    let inner = trimmed
+                        .strip_prefix("- ~~")
+                        .unwrap()
+                        .strip_suffix("~~")
+                        .unwrap()
+                        .trim();
+                    if !inner.is_empty() {
+                        match current_section {
+                            Some("skills") => { skills.remove(inner); }
+                            Some("agents") => { agents.remove(inner); }
+                            Some("mcp") => { mcp.remove(inner); }
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
+
+                // Added: - **name** or - **name: desc**
+                if trimmed.starts_with("- **") {
+                    if let Some(rest) = trimmed.strip_prefix("- **") {
+                        if let Some(end) = rest.find("**") {
+                            let raw = &rest[..end];
+                            if !raw.is_empty() {
+                                match current_section {
+                                    Some("skills") => { skills.insert(raw.to_string()); }
+                                    Some("agents") => {
+                                        // Agent lines render as "- **name: desc**"
+                                        // Extract just the name part before the colon.
+                                        let name = raw.split(':').next().unwrap_or(raw).trim();
+                                        agents.insert(name.to_string());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                // MCP: ### ServerName
+                if current_section == Some("mcp") && trimmed.starts_with("### ") {
+                    let name = trimmed.strip_prefix("### ").unwrap().trim();
+                    if !name.is_empty() {
+                        mcp.insert(name.to_string());
+                    }
+                    continue;
+                }
+            }
+        }
+
+        AnnouncedState { skills, agents, mcp }
+    }
+
     // ── Diff ────────────────────────────────────────────────────────────
 
     /// 与当前 SkillManager 做 diff，生成 skill listing delta。
-    pub fn diff_skills(&mut self, skills: &SkillManager) {
+    /// 从 history 重建 announced 状态。
+    pub fn diff_skills(&mut self, skills: &SkillManager, history: &[ChatMessage]) {
+        let announced = Self::rebuild_from_history(history);
         let current: HashSet<String> =
             skills.skills_iter().map(|(n, _)| n.to_string()).collect();
 
-        if self.first_turn {
-            tracing::debug!(
-                current_count = current.len(),
-                "diff_skills: first_turn full listing"
-            );
+        let added: Vec<String> = current.difference(&announced.skills).cloned().collect();
+        let removed: Vec<String> = announced.skills.difference(&current).cloned().collect();
+
+        tracing::debug!(
+            announced = ?announced.skills,
+            current = ?current,
+            added = ?added,
+            removed = ?removed,
+            "diff_skills: incremental diff from history"
+        );
+
+        if !added.is_empty() || !removed.is_empty() {
             self.pending.insert(
                 AttachmentKind::SkillListing,
-                Delta {
-                    added: current.iter().cloned().collect(),
-                    removed: vec![],
-                },
+                Delta { added, removed },
             );
-        } else {
-            let added: Vec<String> = current.difference(&self.announced_skills).cloned().collect();
-            let removed: Vec<String> = self.announced_skills.difference(&current).cloned().collect();
-            tracing::debug!(
-                announced = ?self.announced_skills,
-                current = ?current,
-                added = ?added,
-                removed = ?removed,
-                "diff_skills: incremental diff"
-            );
-            if !added.is_empty() || !removed.is_empty() {
-                self.pending
-                    .insert(AttachmentKind::SkillListing, Delta { added, removed });
-            }
         }
-
-        self.announced_skills = current;
     }
 
     /// 与当前 agent 列表做 diff。
+    /// 从 history 重建 announced 状态。
     ///
     /// `agents`: `Vec<(name, description)>`
-    pub fn diff_agents(&mut self, agents: &[(String, String)]) {
+    pub fn diff_agents(&mut self, agents: &[(String, String)], history: &[ChatMessage]) {
+        let announced = Self::rebuild_from_history(history);
         let current: HashSet<String> = agents.iter().map(|(n, _)| n.clone()).collect();
 
-        if self.first_turn {
+        let added_names: Vec<String> = current.difference(&announced.agents).cloned().collect();
+        let removed: Vec<String> = announced.agents.difference(&current).cloned().collect();
+
+        if !added_names.is_empty() || !removed.is_empty() {
+            let desc_map: HashMap<&str, &str> =
+                agents.iter().map(|(n, d)| (n.as_str(), d.as_str())).collect();
+            let added: Vec<String> = added_names
+                .iter()
+                .map(|name| {
+                    let desc = desc_map.get(name.as_str()).copied().unwrap_or("");
+                    if desc.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{}: {}", name, desc)
+                    }
+                })
+                .collect();
             self.pending.insert(
                 AttachmentKind::AgentListing,
-                Delta {
-                    added: agents
-                        .iter()
-                        .map(|(name, desc)| {
-                            if desc.is_empty() {
-                                name.clone()
-                            } else {
-                                format!("{}: {}", name, desc)
-                            }
-                        })
-                        .collect(),
-                    removed: vec![],
-                },
+                Delta { added, removed },
             );
-        } else {
-            let added_names: Vec<String> =
-                current.difference(&self.announced_agents).cloned().collect();
-            let removed: Vec<String> =
-                self.announced_agents.difference(&current).cloned().collect();
-
-            if !added_names.is_empty() || !removed.is_empty() {
-                let desc_map: HashMap<&str, &str> =
-                    agents.iter().map(|(n, d)| (n.as_str(), d.as_str())).collect();
-                let added: Vec<String> = added_names
-                    .iter()
-                    .map(|name| {
-                        let desc = desc_map.get(name.as_str()).copied().unwrap_or("");
-                        if desc.is_empty() {
-                            name.clone()
-                        } else {
-                            format!("{}: {}", name, desc)
-                        }
-                    })
-                    .collect();
-                self.pending
-                    .insert(AttachmentKind::AgentListing, Delta { added, removed });
-            }
         }
-
-        self.announced_agents = current;
     }
 
     /// 与当前 MCP server instructions 做 diff。
+    /// 从 history 重建 announced 状态。
     ///
     /// `servers`: `Vec<(server_name, instructions)>`
-    pub fn diff_mcp(&mut self, servers: &[(String, String)]) {
+    pub fn diff_mcp(&mut self, servers: &[(String, String)], history: &[ChatMessage]) {
+        let announced = Self::rebuild_from_history(history);
         let current: HashSet<String> = servers.iter().map(|(n, _)| n.clone()).collect();
 
-        if self.first_turn {
+        let added: Vec<String> = servers
+            .iter()
+            .filter(|(name, _)| !announced.mcp.contains(name))
+            .filter(|(_, inst)| !inst.is_empty())
+            .map(|(name, inst)| format!("### {}\n{}", name, inst))
+            .collect();
+        let removed: Vec<String> = announced.mcp.difference(&current).cloned().collect();
+
+        if !added.is_empty() || !removed.is_empty() {
             self.pending.insert(
                 AttachmentKind::McpInstructions,
-                Delta {
-                    added: servers
-                        .iter()
-                        .filter(|(_, inst)| !inst.is_empty())
-                        .map(|(name, inst)| format!("### {}\n{}", name, inst))
-                        .collect(),
-                    removed: vec![],
-                },
+                Delta { added, removed },
             );
-        } else {
-            let added: Vec<String> = servers
-                .iter()
-                .filter(|(name, _)| !self.announced_mcp.contains(name))
-                .filter(|(_, inst)| !inst.is_empty())
-                .map(|(name, inst)| format!("### {}\n{}", name, inst))
-                .collect();
-            let removed: Vec<String> =
-                self.announced_mcp.difference(&current).cloned().collect();
-            if !added.is_empty() || !removed.is_empty() {
-                self.pending
-                    .insert(AttachmentKind::McpInstructions, Delta { added, removed });
-            }
         }
-
-        self.announced_mcp = current;
     }
 
     // ── Render ──────────────────────────────────────────────────────────
@@ -197,7 +244,6 @@ impl AttachmentManager {
     /// 将 pending delta 合并为一条 ChatMessage。
     ///
     /// 无 delta 时返回 `None`。
-    /// 返回的消息由调用方决定是否存入 session history。
     pub fn build_message(&self, skills: &SkillManager) -> Option<ChatMessage> {
         let mut sections = Vec::new();
 
@@ -224,17 +270,6 @@ impl AttachmentManager {
     /// 清空 pending（每 turn 结算后调用）。
     pub fn clear_pending(&mut self) {
         self.pending.clear();
-        self.first_turn = false;
-    }
-
-    /// 是否尚未执行过首次 diff。
-    pub fn is_fresh(&self) -> bool {
-        self.first_turn
-    }
-
-    /// Debug helper: number of announced skills.
-    pub fn announced_skill_count(&self) -> usize {
-        self.announced_skills.len()
     }
 
     /// Debug helper: pending delta kinds.
@@ -244,21 +279,6 @@ impl AttachmentManager {
             AttachmentKind::AgentListing => "agents",
             AttachmentKind::McpInstructions => "mcp",
         }).collect()
-    }
-
-    // ── Lifecycle ───────────────────────────────────────────────────────
-
-    /// Compaction 后全量重建 — 下一 turn 重新发送完整列表。
-    pub fn on_compaction(&mut self) {
-        self.announced_skills.clear();
-        self.announced_agents.clear();
-        self.announced_mcp.clear();
-        self.first_turn = true;
-    }
-
-    /// /reload 后全量重建。
-    pub fn reset_all(&mut self) {
-        self.on_compaction();
     }
 
     // ── Private render ──────────────────────────────────────────────────
@@ -353,11 +373,15 @@ mod tests {
         mgr
     }
 
+    fn empty_history() -> Vec<ChatMessage> {
+        vec![]
+    }
+
     #[test]
-    fn first_turn_sends_all_skills() {
+    fn empty_history_sends_all_skills() {
         let mut am = AttachmentManager::new();
         let skills = make_skills(&["a", "b"]);
-        am.diff_skills(&skills);
+        am.diff_skills(&skills, &empty_history());
 
         let msg = am.build_message(&skills).unwrap();
         let text = msg.text_content();
@@ -369,11 +393,16 @@ mod tests {
     fn no_change_no_message() {
         let mut am = AttachmentManager::new();
         let skills = make_skills(&["a"]);
-        am.diff_skills(&skills);
+
+        // First: produce a system-reminder and "persist" it into a fake history.
+        am.diff_skills(&skills, &empty_history());
+        let msg = am.build_message(&skills).unwrap();
         am.clear_pending();
 
-        // Second diff with same skills → no pending
-        am.diff_skills(&skills);
+        let history = vec![msg];
+
+        // Second diff with same skills + history containing the prior reminder → no pending
+        am.diff_skills(&skills, &history);
         assert!(am.build_message(&skills).is_none());
     }
 
@@ -381,14 +410,17 @@ mod tests {
     fn added_skill_appears_in_delta() {
         let mut am = AttachmentManager::new();
         let skills = make_skills(&["a"]);
-        am.diff_skills(&skills);
+        am.diff_skills(&skills, &empty_history());
+        let msg = am.build_message(&skills).unwrap();
         am.clear_pending();
 
-        let skills2 = make_skills(&["a", "b"]);
-        am.diff_skills(&skills2);
+        let history = vec![msg];
 
-        let msg = am.build_message(&skills2).unwrap();
-        let text = msg.text_content();
+        let skills2 = make_skills(&["a", "b"]);
+        am.diff_skills(&skills2, &history);
+
+        let msg2 = am.build_message(&skills2).unwrap();
+        let text = msg2.text_content();
         assert!(text.contains("- **b**"));
         assert!(!text.contains("- **a**")); // a was already announced
     }
@@ -397,29 +429,32 @@ mod tests {
     fn removed_skill_appears_in_delta() {
         let mut am = AttachmentManager::new();
         let skills = make_skills(&["a", "b"]);
-        am.diff_skills(&skills);
+        am.diff_skills(&skills, &empty_history());
+        let msg = am.build_message(&skills).unwrap();
         am.clear_pending();
 
-        let skills2 = make_skills(&["a"]);
-        am.diff_skills(&skills2);
+        let history = vec![msg];
 
-        let msg = am.build_message(&skills2).unwrap();
-        let text = msg.text_content();
+        let skills2 = make_skills(&["a"]);
+        am.diff_skills(&skills2, &history);
+
+        let msg2 = am.build_message(&skills2).unwrap();
+        let text = msg2.text_content();
         assert!(text.contains("- ~~b~~"));
     }
 
     #[test]
-    fn on_compaction_resets_to_full() {
+    fn compaction_naturally_resets() {
+        // After compaction, history is empty → next diff sends full listing.
         let mut am = AttachmentManager::new();
         let skills = make_skills(&["a"]);
-        am.diff_skills(&skills);
+        am.diff_skills(&skills, &empty_history());
         am.clear_pending();
 
-        am.on_compaction();
+        // Simulate compaction: history is gone.
+        let compacted_history: Vec<ChatMessage> = vec![];
 
-        // Should behave like first turn
-        assert!(am.is_fresh());
-        am.diff_skills(&skills);
+        am.diff_skills(&skills, &compacted_history);
         let msg = am.build_message(&skills).unwrap();
         assert!(msg.text_content().contains("- **a**"));
     }
@@ -427,17 +462,26 @@ mod tests {
     #[test]
     fn agents_diff_works() {
         let mut am = AttachmentManager::new();
-        am.diff_agents(&[("coder".into(), "expert programmer".into())]);
+        am.diff_agents(
+            &[("coder".into(), "expert programmer".into())],
+            &empty_history(),
+        );
+        let msg = am.build_message(&SkillManager::new()).unwrap();
         am.clear_pending();
 
-        am.diff_agents(&[
-            ("coder".into(), "expert programmer".into()),
-            ("researcher".into(), "research specialist".into()),
-        ]);
+        let history = vec![msg];
+
+        am.diff_agents(
+            &[
+                ("coder".into(), "expert programmer".into()),
+                ("researcher".into(), "research specialist".into()),
+            ],
+            &history,
+        );
 
         let skills = SkillManager::new();
-        let msg = am.build_message(&skills).unwrap();
-        let text = msg.text_content();
+        let msg2 = am.build_message(&skills).unwrap();
+        let text = msg2.text_content();
         assert!(text.contains("researcher"));
         assert!(!text.contains("coder")); // already announced
     }
@@ -446,8 +490,8 @@ mod tests {
     fn merged_sections_in_single_message() {
         let mut am = AttachmentManager::new();
         let skills = make_skills(&["a"]);
-        am.diff_skills(&skills);
-        am.diff_agents(&[("coder".into(), "programmer".into())]);
+        am.diff_skills(&skills, &empty_history());
+        am.diff_agents(&[("coder".into(), "programmer".into())], &empty_history());
 
         let msg = am.build_message(&skills).unwrap();
         let text = msg.text_content();
@@ -455,5 +499,29 @@ mod tests {
         assert!(text.contains("## Available Sub-Agents"));
         assert!(text.starts_with("<system-reminder>"));
         assert!(text.ends_with("</system-reminder>"));
+    }
+
+    #[test]
+    fn rebuild_parses_removed_items() {
+        let history = vec![ChatMessage::user_text(
+            "<system-reminder>\n## Skills\n- **a**\n- **b**\n</system-reminder>"
+        )];
+        let announced = AttachmentManager::rebuild_from_history(&history);
+        assert!(announced.skills.contains("a"));
+        assert!(announced.skills.contains("b"));
+
+        // Now add a removal
+        let history2 = vec![
+            ChatMessage::user_text(
+                "<system-reminder>\n## Skills\n- **a**\n- **b**\n</system-reminder>"
+            ),
+            ChatMessage::user_text(
+                "<system-reminder>\n## Skills\nThe following skills are no longer available:\n- ~~a~~\n\nSkills provide behavioral instructions for specific tasks.\n- **c**\n</system-reminder>"
+            ),
+        ];
+        let announced2 = AttachmentManager::rebuild_from_history(&history2);
+        assert!(!announced2.skills.contains("a")); // removed
+        assert!(announced2.skills.contains("b"));   // still there
+        assert!(announced2.skills.contains("c"));   // added
     }
 }

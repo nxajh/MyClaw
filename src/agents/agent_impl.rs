@@ -448,35 +448,36 @@ impl AgentLoop {
             }
         }
 
-        // First turn: compute initial diff (full listing of skills/agents/MCP).
-        if self.attachments.is_fresh() {
-            tracing::info!("run: first_turn detected, computing initial diff");
+        // Compute initial diff (full listing of skills/agents/MCP) against history.
+        // If history is empty (first turn or post-compaction), this sends a full listing.
+        {
+            tracing::info!("run: computing diff against history");
+            let history = self.session.history.clone();
             {
                 let skills = self.skills.read();
                 tracing::info!(
+                    history_len = history.len(),
                     skill_count = skills.skill_count(),
-                    "run: diff_skills for initial listing"
+                    "run: diff_skills"
                 );
-                self.attachments.diff_skills(&skills);
+                self.attachments.diff_skills(&skills, &history);
             }
             // Agent listing: read from sub_delegator if available.
             if let Some(ref delegator) = self.sub_delegator {
                 let agents = delegator.available_agents();
-                tracing::info!(agent_count = agents.len(), "run: diff_agents for initial listing");
-                self.attachments.diff_agents(&agents);
+                tracing::info!(agent_count = agents.len(), "run: diff_agents");
+                self.attachments.diff_agents(&agents, &history);
             } else {
                 tracing::info!("run: no sub_delegator, skipping agent diff");
             }
             if !self.mcp_instructions.is_empty() {
-                tracing::info!(mcp_count = self.mcp_instructions.len(), "run: diff_mcp for initial listing");
-                self.attachments.diff_mcp(&self.mcp_instructions);
+                tracing::info!(mcp_count = self.mcp_instructions.len(), "run: diff_mcp");
+                self.attachments.diff_mcp(&self.mcp_instructions, &history);
             }
             tracing::info!(
                 pending_keys = ?self.attachments.pending_keys(),
-                "run: initial diff complete"
+                "run: diff complete"
             );
-        } else {
-            tracing::info!("run: not first_turn, skipping initial diff");
         }
 
         // 1. Account for the new user message before adding to history.
@@ -600,11 +601,10 @@ impl AgentLoop {
         self.check_changes();
 
         // If there's a pending attachment delta, persist it into session history.
-        // Replace any existing <system-reminder> message so only the latest is kept.
+        // All system-reminders are kept in history — compaction naturally removes old ones.
         {
             let skills = self.skills.read();
             tracing::info!(
-                first_turn = self.attachments.is_fresh(),
                 pending_keys = ?self.attachments.pending_keys(),
                 skill_count = skills.skill_count(),
                 "build_messages: checking attachment delta"
@@ -658,13 +658,13 @@ impl AgentLoop {
                     skills.reload(new_skills);
                 }
                 let skills = self.skills.read();
+                let history = self.session.history.clone();
                 tracing::debug!(
-                    first_turn = self.attachments.is_fresh(),
-                    announced_count = self.attachments.announced_skill_count(),
+                    history_len = history.len(),
                     current_count = skills.skill_count(),
                     "check_changes: calling diff_skills"
                 );
-                self.attachments.diff_skills(&skills);
+                self.attachments.diff_skills(&skills, &history);
                 tracing::info!(skill_count = skills.skill_count(), "skills hot-reloaded");
             }
 
@@ -678,7 +678,8 @@ impl AgentLoop {
                     let mut configs = self.sub_agent_configs.write();
                     *configs = new_agents;
                 }
-                self.attachments.diff_agents(&agent_list);
+                let history = self.session.history.clone();
+                self.attachments.diff_agents(&agent_list, &history);
                 tracing::info!(agent_count = agent_list.len(), "agents hot-reloaded");
             }
         }
@@ -1729,8 +1730,9 @@ impl AgentLoop {
             self.truncate_retention_zone(new_boundary, model_id);
         }
 
-        // 8. Reset attachment state — next build_messages() will send full listing.
-        self.attachments.on_compaction();
+        // 8. No need to reset attachment state — compaction removes old history
+        //    entries, so the next diff will naturally rebuild from the remaining
+        //    history (which may be empty → full re-listing).
 
         Ok(())
     }
