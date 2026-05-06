@@ -1347,7 +1347,8 @@ impl AgentLoop {
 
     /// Extract likely file paths from messages (simplified).
     fn extract_file_paths(messages: &[ChatMessage]) -> Vec<String> {
-        let re = regex::Regex::new(r"(?:/[\w/.-]+\.\w{1,5})|(?:src/[\w/.-]+)").unwrap();
+        static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let re = RE.get_or_init(|| regex::Regex::new(r"(?:/[\w/.-]+\.\w{1,5})|(?:src/[\w/.-]+)").unwrap());
         let mut paths = Vec::new();
         for msg in messages {
             for cap in re.captures_iter(&msg.text_content()) {

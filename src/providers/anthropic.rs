@@ -2,10 +2,11 @@
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use std::collections::HashMap;
 
 use crate::providers::Client;
 use crate::providers::{
-    BoxStream, ChatProvider, ChatRequest, StreamEvent, StopReason,
+    BoxStream, ChatProvider, ChatRequest, ChatUsage, StreamEvent, StopReason,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -78,6 +79,8 @@ impl ChatProvider for AnthropicProvider {
                 return;
             }
 
+            // index → (tool_id, tool_name) mapping for Anthropic's block-indexed SSE.
+            let mut tool_index_map: HashMap<u64, (String, String)> = HashMap::new();
             let mut buffer = String::new();
             let mut utf8_buf = Vec::new();
             let mut stream = resp.bytes_stream();
@@ -105,12 +108,12 @@ impl ChatProvider for AnthropicProvider {
                 while let Some(pos) = buffer.find('\n') {
                     let line = buffer[..pos].to_string();
                     buffer.drain(..=pos);
-                    let event = parse_anthropic_sse(&line);
+                    let events = parse_anthropic_sse(&line, &mut tool_index_map);
                     crate::providers::append_to_debug_log(&format!(
-                        "SSE LINE: {}\nEVENT: {:?}\n",
-                        line, event
+                        "SSE LINE: {}\nEVENTS: {:?}\n",
+                        line, events
                     ));
-                    if let Some(event) = event {
+                    for event in events {
                         let _ = tx.send(event).await;
                     }
                 }
@@ -141,36 +144,72 @@ fn build_anthropic_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
     let messages: Vec<serde_json::Value> = req.messages
         .iter()
         .filter(|m| m.role != "system")
-        .map(|msg| {
-            let content: Vec<serde_json::Value> = msg.parts.iter().map(|part| match part {
-                crate::providers::ContentPart::Text { text } =>
-                    serde_json::json!({"type": "text", "text": text}),
-                crate::providers::ContentPart::ImageUrl { url, detail } =>
-                    serde_json::json!({"type": "image", "source": {
-                        "type": "url", "url": url,
-                        "media_type": "image/jpeg",
-                        "detail": format!("{:?}", detail).to_lowercase(),
-                    }}),
-                crate::providers::ContentPart::ImageB64 { b64_json, detail } =>
-                    serde_json::json!({"type": "image", "source": {
-                        "type": "base64", "media_type": "image/jpeg",
-                        "data": b64_json,
-                        "detail": format!("{:?}", detail).to_lowercase(),
-                    }}),
-                crate::providers::ContentPart::Thinking { thinking } =>
-                    serde_json::json!({"type": "thinking", "thinking": thinking}),
-            }).collect();
+        .filter_map(|msg| {
+            let role = if msg.role == "assistant" { "assistant" } else { "user" };
 
-            let content = if content.len() == 1 {
-                content.into_iter().next().unwrap()
+            let has_tool_result = msg.tool_call_id.is_some();
+            let mut parts: Vec<serde_json::Value> = if has_tool_result {
+                let content = msg.parts.iter().map(|p| match p {
+                    crate::providers::ContentPart::Text { text } => text.clone(),
+                    _ => String::new(),
+                }).collect::<String>();
+                vec![serde_json::json!({
+                    "type": "tool_result",
+                    "tool_use_id": msg.tool_call_id.as_ref().unwrap(),
+                    "content": content,
+                    "is_error": msg.is_error.unwrap_or(false),
+                })]
             } else {
-                serde_json::json!(content)
+                let mut p: Vec<serde_json::Value> = msg.parts.iter().map(|part| match part {
+                    crate::providers::ContentPart::Text { text } =>
+                        serde_json::json!({"type": "text", "text": text}),
+                    crate::providers::ContentPart::ImageUrl { url, .. } =>
+                        serde_json::json!({"type": "image", "source": {"type": "url", "url": url}}),
+                    crate::providers::ContentPart::ImageB64 { b64_json, .. } =>
+                        serde_json::json!({"type": "image", "source": {
+                            "type": "base64", "media_type": "image/jpeg", "data": b64_json,
+                        }}),
+                    crate::providers::ContentPart::Thinking { thinking } =>
+                        serde_json::json!({"type": "thinking", "thinking": thinking}),
+                }).collect();
+
+                if msg.role == "assistant" {
+                    if let Some(ref tcs) = msg.tool_calls {
+                        for tc in tcs {
+                            let input = serde_json::from_str::<serde_json::Value>(&tc.arguments)
+                                .unwrap_or(serde_json::Value::Object(Default::default()));
+                            p.push(serde_json::json!({
+                                "type": "tool_use",
+                                "id": tc.id,
+                                "name": tc.name,
+                                "input": input,
+                            }));
+                        }
+                    }
+                }
+                p
             };
 
-            serde_json::json!({
-                "role": if msg.role == "assistant" { "assistant" } else { "user" },
-                "content": content,
-            })
+            let non_empty: Vec<serde_json::Value> = parts.drain(..).filter(|p| {
+                match p.get("type").and_then(|v| v.as_str()) {
+                    Some("text") => !p.get("text").and_then(|v| v.as_str()).unwrap_or("").is_empty(),
+                    Some("tool_result") => true,
+                    Some("tool_use") => !p.get("id").and_then(|v| v.as_str()).unwrap_or("").is_empty(),
+                    _ => true,
+                }
+            }).collect();
+
+            if role == "assistant" && non_empty.is_empty() {
+                return None;
+            }
+
+            let content = if non_empty.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(non_empty)
+            };
+
+            Some(serde_json::json!({"role": role, "content": content}))
         })
         .collect();
 
@@ -195,61 +234,107 @@ fn build_anthropic_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
     body
 }
 
-fn parse_anthropic_sse(line: &str) -> Option<StreamEvent> {
-    use crate::providers::{ChatUsage, StreamEvent as SE, StopReason};
+fn parse_anthropic_sse(
+    line: &str,
+    tool_index_map: &mut HashMap<u64, (String, String)>,
+) -> Vec<StreamEvent> {
+    use crate::providers::StreamEvent as SE;
 
     let line = line.trim();
-    if line.is_empty() || line.starts_with(':') { return None; }
-    let data = line.strip_prefix("data:")?.trim();
-    if data == "[DONE]" { return None; }
+    if line.is_empty() || line.starts_with(':') { return vec![]; }
+    let data = match line.strip_prefix("data:") {
+        Some(d) => d.trim(),
+        None => return vec![],
+    };
+    if data == "[DONE]" { return vec![]; }
 
-    if let Ok(evt) = serde_json::from_str::<serde_json::Value>(data) {
-        let ty = evt.get("type")?.as_str()?;
+    let evt = match serde_json::from_str::<serde_json::Value>(data) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    let ty = match evt.get("type").and_then(|v| v.as_str()) {
+        Some(t) => t,
+        None => return vec![],
+    };
 
-        match ty {
-            "message_start" => {
-                // message_start carries input token counts under message.usage.
-                if let Some(usage) = evt.get("message").and_then(|m| m.get("usage")) {
-                    let cu = ChatUsage {
-                        input_tokens: usage.get("input_tokens").and_then(|v| v.as_u64()),
-                        output_tokens: usage.get("output_tokens").and_then(|v| v.as_u64()),
-                        cached_input_tokens: usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()),
-                        reasoning_tokens: None,
-                        cache_write_tokens: usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()),
-                    };
-                    return Some(SE::Usage(cu));
-                }
-                None
-            }
-            "content_block_delta" => {
-                let delta = evt.get("delta")?;
-                if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
-                    if !text.is_empty() {
-                        return Some(SE::Delta { text: text.to_string() });
+    match ty {
+        "content_block_start" => {
+            let index = match evt.get("index").and_then(|v| v.as_u64()) {
+                Some(i) => i,
+                None => return vec![],
+            };
+            if let Some(cb) = evt.get("content_block") {
+                if cb.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
+                    let id = cb.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let name = cb.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    if !id.is_empty() && !name.is_empty() {
+                        tool_index_map.insert(index, (id.clone(), name.clone()));
+                        return vec![SE::ToolCallStart { id, name, initial_arguments: String::new() }];
                     }
                 }
-                if delta.get("type").and_then(|v| v.as_str()) == Some("input_json_delta") {
-                    let id = evt.get("index").and_then(|v| v.as_u64()).unwrap_or(0).to_string();
-                    let args = delta.get("partial_json").and_then(|v| v.as_str()).unwrap_or("");
-                    return Some(SE::ToolCallDelta { id, delta: args.to_string() });
-                }
-                None
             }
-            "message_delta" => {
-                // message_delta carries the final output token count under usage.
-                if let Some(usage) = evt.get("usage") {
-                    let cu = ChatUsage {
-                        output_tokens: usage.get("output_tokens").and_then(|v| v.as_u64()),
-                        ..ChatUsage::default()
-                    };
-                    return Some(SE::Usage(cu));
-                }
-                None
-            }
-            "message_stop" => Some(SE::Done { reason: StopReason::EndTurn }),
-            _ => None,
+            vec![]
         }
-    } else {
-        None
+        "content_block_delta" => {
+            let delta = match evt.get("delta") {
+                Some(d) => d,
+                None => return vec![],
+            };
+            match delta.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+                "text_delta" => {
+                    let text = delta.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    if !text.is_empty() { vec![SE::Delta { text: text.to_string() }] } else { vec![] }
+                }
+                "thinking_delta" => {
+                    let text = delta.get("thinking").and_then(|v| v.as_str()).unwrap_or("");
+                    if !text.is_empty() { vec![SE::Thinking { text: text.to_string() }] } else { vec![] }
+                }
+                "input_json_delta" => {
+                    let index = match evt.get("index").and_then(|v| v.as_u64()) {
+                        Some(i) => i,
+                        None => return vec![],
+                    };
+                    let (id, _name) = match tool_index_map.get(&index) {
+                        Some(entry) => entry.clone(),
+                        None => return vec![],
+                    };
+                    let args = delta.get("partial_json").and_then(|v| v.as_str()).unwrap_or("");
+                    vec![SE::ToolCallDelta { id, delta: args.to_string() }]
+                }
+                _ => vec![],
+            }
+        }
+        "message_start" | "message_delta" => {
+            let mut events = Vec::new();
+            let usage = evt
+                .get("message").and_then(|m| m.get("usage"))
+                .or_else(|| evt.get("usage"));
+            if let Some(usage) = usage {
+                events.push(SE::Usage(ChatUsage {
+                    input_tokens: usage.get("input_tokens").and_then(|v| v.as_u64()),
+                    output_tokens: usage.get("output_tokens").and_then(|v| v.as_u64()),
+                    cached_input_tokens: usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()),
+                    reasoning_tokens: None,
+                    cache_write_tokens: usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()),
+                }));
+            }
+            if ty == "message_delta" {
+                if let Some(delta) = evt.get("delta") {
+                    if let Some(reason_str) = delta.get("stop_reason").and_then(|v| v.as_str()) {
+                        let reason = match reason_str {
+                            "end_turn" => StopReason::EndTurn,
+                            "max_tokens" => StopReason::MaxTokens,
+                            "tool_use" => StopReason::ToolUse,
+                            "content_filter" => StopReason::ContentFilter,
+                            _ => StopReason::EndTurn,
+                        };
+                        events.push(SE::Done { reason });
+                    }
+                }
+            }
+            events
+        }
+        "message_stop" => vec![SE::Done { reason: StopReason::EndTurn }],
+        _ => vec![],
     }
 }

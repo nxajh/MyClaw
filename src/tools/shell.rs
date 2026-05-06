@@ -57,7 +57,8 @@ impl Tool for ShellTool {
 
         let timeout_secs = args["timeout_secs"]
             .as_u64()
-            .unwrap_or(120);
+            .unwrap_or(120)
+            .min(300); // hard cap at 5 minutes
 
         let workdir = args["workdir"].as_str();
 

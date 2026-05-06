@@ -6,6 +6,40 @@ use crate::str_utils;
 use serde_json::json;
 use std::path::Path;
 
+/// Resolve `path` to an absolute path and check it stays within the user's
+/// home directory (or current working directory for relative paths).
+/// Returns `Err` with a descriptive message if the resolved path would escape.
+fn validate_path(path: &str) -> anyhow::Result<std::path::PathBuf> {
+    let p = std::path::Path::new(path);
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(p)
+    };
+
+    // Normalize without requiring the path to exist yet (for writes).
+    let mut normalized = std::path::PathBuf::new();
+    for component in abs.components() {
+        match component {
+            std::path::Component::ParentDir => { normalized.pop(); }
+            std::path::Component::CurDir => {}
+            c => normalized.push(c),
+        }
+    }
+
+    // Disallow paths outside home or cwd — catches ../../etc/passwd patterns.
+    let home = std::env::var("HOME").map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("/home"));
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    if !normalized.starts_with(&home) && !normalized.starts_with(&cwd) {
+        anyhow::bail!(
+            "path '{}' resolves outside allowed directories (home: {}, cwd: {})",
+            path, home.display(), cwd.display()
+        );
+    }
+    Ok(normalized)
+}
+
 // ── FileReadTool ─────────────────────────────────────────────────────────────
 
 #[derive(Default)]
@@ -56,6 +90,9 @@ impl Tool for FileReadTool {
         let path = args["path"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'path' is required"))?;
+
+        let resolved = validate_path(path)?;
+        let path = resolved.to_str().unwrap_or(path);
 
         let offset = args["offset"].as_u64().unwrap_or(0) as usize; // 0 means from start
         let limit = args["limit"].as_u64().map(|l| l as usize);
@@ -139,6 +176,9 @@ impl Tool for FileWriteTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'content' is required"))?;
 
+        let resolved = validate_path(path)?;
+        let path = resolved.to_str().unwrap_or(path);
+
         // Create parent directories if needed.
         if let Some(parent) = Path::new(path).parent() {
             if !parent.as_os_str().is_empty() {
@@ -216,6 +256,8 @@ impl Tool for FileEditTool {
         let path = args["path"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'path' is required"))?;
+        let resolved = validate_path(path)?;
+        let path = resolved.to_str().unwrap_or(path);
         let old_string = args["old_string"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'old_string' is required"))?;
