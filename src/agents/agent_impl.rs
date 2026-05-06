@@ -450,18 +450,33 @@ impl AgentLoop {
 
         // First turn: compute initial diff (full listing of skills/agents/MCP).
         if self.attachments.is_fresh() {
+            tracing::info!("run: first_turn detected, computing initial diff");
             {
                 let skills = self.skills.read();
+                tracing::info!(
+                    skill_count = skills.skill_count(),
+                    "run: diff_skills for initial listing"
+                );
                 self.attachments.diff_skills(&skills);
             }
             // Agent listing: read from sub_delegator if available.
             if let Some(ref delegator) = self.sub_delegator {
                 let agents = delegator.available_agents();
+                tracing::info!(agent_count = agents.len(), "run: diff_agents for initial listing");
                 self.attachments.diff_agents(&agents);
+            } else {
+                tracing::info!("run: no sub_delegator, skipping agent diff");
             }
             if !self.mcp_instructions.is_empty() {
+                tracing::info!(mcp_count = self.mcp_instructions.len(), "run: diff_mcp for initial listing");
                 self.attachments.diff_mcp(&self.mcp_instructions);
             }
+            tracing::info!(
+                pending_keys = ?self.attachments.pending_keys(),
+                "run: initial diff complete"
+            );
+        } else {
+            tracing::info!("run: not first_turn, skipping initial diff");
         }
 
         // 1. Account for the new user message before adding to history.
