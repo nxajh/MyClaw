@@ -75,6 +75,10 @@ impl AttachmentManager {
             skills.skills_iter().map(|(n, _)| n.to_string()).collect();
 
         if self.first_turn {
+            tracing::debug!(
+                current_count = current.len(),
+                "diff_skills: first_turn full listing"
+            );
             self.pending.insert(
                 AttachmentKind::SkillListing,
                 Delta {
@@ -85,6 +89,13 @@ impl AttachmentManager {
         } else {
             let added: Vec<String> = current.difference(&self.announced_skills).cloned().collect();
             let removed: Vec<String> = self.announced_skills.difference(&current).cloned().collect();
+            tracing::debug!(
+                announced = ?self.announced_skills,
+                current = ?current,
+                added = ?added,
+                removed = ?removed,
+                "diff_skills: incremental diff"
+            );
             if !added.is_empty() || !removed.is_empty() {
                 self.pending
                     .insert(AttachmentKind::SkillListing, Delta { added, removed });
@@ -219,6 +230,20 @@ impl AttachmentManager {
     /// 是否尚未执行过首次 diff。
     pub fn is_fresh(&self) -> bool {
         self.first_turn
+    }
+
+    /// Debug helper: number of announced skills.
+    pub fn announced_skill_count(&self) -> usize {
+        self.announced_skills.len()
+    }
+
+    /// Debug helper: pending delta kinds.
+    pub fn pending_keys(&self) -> Vec<&'static str> {
+        self.pending.keys().map(|k| match k {
+            AttachmentKind::SkillListing => "skills",
+            AttachmentKind::AgentListing => "agents",
+            AttachmentKind::McpInstructions => "mcp",
+        }).collect()
     }
 
     // ── Lifecycle ───────────────────────────────────────────────────────

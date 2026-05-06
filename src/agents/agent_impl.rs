@@ -588,9 +588,21 @@ impl AgentLoop {
         // Not persisted to session history.
         {
             let skills = self.skills.read();
+            tracing::info!(
+                first_turn = self.attachments.is_fresh(),
+                pending_keys = ?self.attachments.pending_keys(),
+                skill_count = skills.skill_count(),
+                "build_messages: before build_message"
+            );
             if let Some(msg) = self.attachments.build_message(&skills) {
+                tracing::info!(
+                    msg_len = msg.text_content().len(),
+                    "build_messages: attachment message injected"
+                );
                 self.token_tracker.record_pending(estimate_message_tokens(&msg));
                 messages.push(msg);
+            } else {
+                tracing::warn!("build_messages: no attachment message (no pending delta)");
             }
         }
         self.attachments.clear_pending();
@@ -608,11 +620,21 @@ impl AgentLoop {
     fn check_changes(&mut self) {
         let rx = match self.change_rx.as_mut() {
             Some(rx) => rx,
-            None => return,
+            None => {
+                tracing::debug!("check_changes: change_rx is None, skipping");
+                return;
+            }
         };
+
+        let changed = rx.has_changed();
+        tracing::info!(
+            has_changed = ?changed,
+            "check_changes: polled watcher"
+        );
 
         while rx.has_changed().unwrap_or(false) {
             let changes = rx.borrow_and_update().clone();
+            tracing::info!(?changes, "check_changes: processing change");
 
             if changes.skills_changed {
                 let new_defs = super::skill_loader::load_skills_from_dir(&self.skills_dir);
@@ -623,6 +645,12 @@ impl AgentLoop {
                     skills.reload(new_skills);
                 }
                 let skills = self.skills.read();
+                tracing::debug!(
+                    first_turn = self.attachments.is_fresh(),
+                    announced_count = self.attachments.announced_skill_count(),
+                    current_count = skills.skill_count(),
+                    "check_changes: calling diff_skills"
+                );
                 self.attachments.diff_skills(&skills);
                 tracing::info!(skill_count = skills.skill_count(), "skills hot-reloaded");
             }
