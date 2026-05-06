@@ -599,31 +599,32 @@ impl AgentLoop {
         // Check for file changes (hot-reload).
         self.check_changes();
 
-        // History.
-        messages.extend(self.session.history.iter().cloned());
-
-        // Attachment: build message (renders pending delta or reuses cached).
-        // Placed AFTER history so the LLM sees it as the most recent context.
-        // Not persisted to session history.
+        // If there's a pending attachment delta, persist it into session history.
+        // Replace any existing <system-reminder> message so only the latest is kept.
         {
             let skills = self.skills.read();
             tracing::info!(
                 first_turn = self.attachments.is_fresh(),
                 pending_keys = ?self.attachments.pending_keys(),
                 skill_count = skills.skill_count(),
-                "build_messages: before build_message"
+                "build_messages: checking attachment delta"
             );
             if let Some(msg) = self.attachments.build_message(&skills) {
                 tracing::info!(
                     msg_len = msg.text_content().len(),
-                    "build_messages: attachment message included"
+                    "build_messages: persisting attachment to history"
                 );
-                self.token_tracker.record_pending(estimate_message_tokens(&msg));
-                messages.push(msg);
-            } else {
-                tracing::info!("build_messages: no attachment message");
+                // Remove previous <system-reminder> from history
+                self.session.history.retain(|m| {
+                    !m.text_content().trim().starts_with("<system-reminder>")
+                });
+                self.session.add_user_text(msg.text_content().to_string());
+                self.attachments.clear_pending();
             }
         }
+
+        // History (includes the attachment if just persisted).
+        messages.extend(self.session.history.iter().cloned());
 
         // Safety: remove orphan tool results before sending to provider.
         super::session_manager::sanitize_history(&mut messages);

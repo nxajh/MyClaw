@@ -48,8 +48,6 @@ pub struct AttachmentManager {
     pending: HashMap<AttachmentKind, Delta>,
     /// 首轮标记 — 首次全量发送
     first_turn: bool,
-    /// 上次渲染的完整 attachment 消息 — 持续携带直到被新 delta 替换
-    last_rendered: Option<ChatMessage>,
 }
 
 impl Default for AttachmentManager {
@@ -60,7 +58,6 @@ impl Default for AttachmentManager {
             announced_mcp: HashSet::new(),
             pending: HashMap::new(),
             first_turn: true,
-            last_rendered: None,
         }
     }
 }
@@ -197,13 +194,11 @@ impl AttachmentManager {
 
     // ── Render ──────────────────────────────────────────────────────────
 
-    /// 将 pending delta 合并为一条 ChatMessage 并缓存。
+    /// 将 pending delta 合并为一条 ChatMessage。
     ///
-    /// 如果有 pending delta，渲染新消息并缓存（替换旧缓存）。
-    /// 如果没有 pending delta 但有缓存，返回缓存的消息。
-    /// 两者都没有时返回 `None`。
-    /// 返回的消息**不**存入 session history。
-    pub fn build_message(&mut self, skills: &SkillManager) -> Option<ChatMessage> {
+    /// 无 delta 时返回 `None`。
+    /// 返回的消息由调用方决定是否存入 session history。
+    pub fn build_message(&self, skills: &SkillManager) -> Option<ChatMessage> {
         let mut sections = Vec::new();
 
         if let Some(delta) = self.pending.get(&AttachmentKind::SkillListing) {
@@ -216,19 +211,20 @@ impl AttachmentManager {
             sections.push(Self::render_mcp(delta));
         }
 
-        if !sections.is_empty() {
-            let msg = ChatMessage::user_text(format!(
-                "<system-reminder>\n{}\n</system-reminder>",
-                sections.join("\n\n")
-            ));
-            self.last_rendered = Some(msg.clone());
-            self.pending.clear();
-            self.first_turn = false;
-            return Some(msg);
+        if sections.is_empty() {
+            return None;
         }
 
-        // No new delta — reuse last rendered message if available.
-        self.last_rendered.clone()
+        Some(ChatMessage::user_text(format!(
+            "<system-reminder>\n{}\n</system-reminder>",
+            sections.join("\n\n")
+        )))
+    }
+
+    /// 清空 pending（每 turn 结算后调用）。
+    pub fn clear_pending(&mut self) {
+        self.pending.clear();
+        self.first_turn = false;
     }
 
     /// 是否尚未执行过首次 diff。
@@ -258,7 +254,6 @@ impl AttachmentManager {
         self.announced_agents.clear();
         self.announced_mcp.clear();
         self.first_turn = true;
-        self.last_rendered = None;
     }
 
     /// /reload 后全量重建。
@@ -371,16 +366,15 @@ mod tests {
     }
 
     #[test]
-    fn no_change_returns_cached_message() {
+    fn no_change_no_message() {
         let mut am = AttachmentManager::new();
         let skills = make_skills(&["a"]);
         am.diff_skills(&skills);
-        let first = am.build_message(&skills).unwrap();
+        am.clear_pending();
 
-        // Second diff with same skills → no new pending, but cached message returned
+        // Second diff with same skills → no pending
         am.diff_skills(&skills);
-        let cached = am.build_message(&skills).unwrap();
-        assert_eq!(first.text_content(), cached.text_content());
+        assert!(am.build_message(&skills).is_none());
     }
 
     #[test]
@@ -388,7 +382,7 @@ mod tests {
         let mut am = AttachmentManager::new();
         let skills = make_skills(&["a"]);
         am.diff_skills(&skills);
-        let _ = am.build_message(&skills); // consume & cache
+        am.clear_pending();
 
         let skills2 = make_skills(&["a", "b"]);
         am.diff_skills(&skills2);
@@ -404,7 +398,7 @@ mod tests {
         let mut am = AttachmentManager::new();
         let skills = make_skills(&["a", "b"]);
         am.diff_skills(&skills);
-        let _ = am.build_message(&skills); // consume & cache
+        am.clear_pending();
 
         let skills2 = make_skills(&["a"]);
         am.diff_skills(&skills2);
@@ -419,7 +413,7 @@ mod tests {
         let mut am = AttachmentManager::new();
         let skills = make_skills(&["a"]);
         am.diff_skills(&skills);
-        let _ = am.build_message(&skills); // consume & cache
+        am.clear_pending();
 
         am.on_compaction();
 
@@ -434,8 +428,7 @@ mod tests {
     fn agents_diff_works() {
         let mut am = AttachmentManager::new();
         am.diff_agents(&[("coder".into(), "expert programmer".into())]);
-        let skills = SkillManager::new();
-        let _ = am.build_message(&skills); // consume & cache
+        am.clear_pending();
 
         am.diff_agents(&[
             ("coder".into(), "expert programmer".into()),
