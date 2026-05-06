@@ -771,7 +771,7 @@ impl AgentLoop {
             };
 
             // Log the message sequence being sent to the model.
-            tracing::debug!(
+            tracing::info!(
                 msg_count = messages.len(),
                 tool_count = tool_calls_count,
                 "sending messages to model: {:?}",
