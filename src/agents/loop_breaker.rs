@@ -507,11 +507,8 @@ mod tests {
         for _ in 0..10 {
             let result = lb.record_and_check("read_file", "{}", "data");
             // Same tool repeated — should not be ping-pong (it's an exact repeat instead).
-            match result {
-                LoopBreak::Detected(LoopBreakReason::PingPong { .. }) => {
-                    panic!("same tool should not trigger ping-pong");
-                }
-                _ => {}
+            if let LoopBreak::Detected(LoopBreakReason::PingPong { .. }) = result {
+                panic!("same tool should not trigger ping-pong");
             }
         }
     }
@@ -620,11 +617,8 @@ mod tests {
             let result = lb.record_and_check("search", &args, &result_text);
             // May trigger exact repeat if args happen to hash same, but they won't
             // since each args string is different.
-            match result {
-                LoopBreak::Detected(LoopBreakReason::NoProgress { .. }) => {
-                    panic!("should not trigger NoProgress with different results");
-                }
-                _ => {}
+            if let LoopBreak::Detected(LoopBreakReason::NoProgress { .. }) = result {
+                panic!("should not trigger NoProgress with different results");
             }
         }
     }
@@ -668,11 +662,8 @@ mod tests {
         // Make 50 calls — should never trigger MaxCalls.
         for i in 0..50 {
             let args = format!(r#"{{"n": {}}}"#, i);
-            match lb.record_and_check("tool", &args, "ok") {
-                LoopBreak::Detected(LoopBreakReason::MaxCalls { .. }) => {
-                    panic!("should not trigger MaxCalls when max_tool_calls=0");
-                }
-                _ => {}
+            if let LoopBreak::Detected(LoopBreakReason::MaxCalls { .. }) = lb.record_and_check("tool", &args, "ok") {
+                panic!("should not trigger MaxCalls when max_tool_calls=0");
             }
         }
         assert_eq!(lb.total_calls(), 50);

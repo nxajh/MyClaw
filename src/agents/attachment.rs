@@ -44,17 +44,10 @@ struct AnnouncedState {
 /// 不维护内存中的 announced 状态。
 /// 每轮 turn 从 session history 中重建，然后与当前状态做 diff，
 /// 合并渲染为一条 `<system-reminder>` 消息。
+#[derive(Default)]
 pub struct AttachmentManager {
     /// 本轮待发送增量
     pending: HashMap<AttachmentKind, Delta>,
-}
-
-impl Default for AttachmentManager {
-    fn default() -> Self {
-        Self {
-            pending: HashMap::new(),
-        }
-    }
 }
 
 impl AttachmentManager {
