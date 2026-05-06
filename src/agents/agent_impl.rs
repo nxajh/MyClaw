@@ -644,9 +644,10 @@ impl AgentLoop {
     }
 
     /// Core chat loop: call LLM, handle tool calls, repeat until text response.
-    async fn chat_loop(&mut self, _initial_messages: Vec<ChatMessage>) -> anyhow::Result<String> {
+    async fn chat_loop(&mut self, initial_messages: Vec<ChatMessage>) -> anyhow::Result<String> {
         let mut tool_calls_count = 0usize;
         let mut boosted_max_tokens = false;
+        let mut first_iteration = true;
 
         // Check if we have pending images that need a vision-capable model.
         let has_images = self.pending_image_urls.as_ref().is_some_and(|v| !v.is_empty())
@@ -675,8 +676,15 @@ impl AgentLoop {
                 tracing::warn!(error = %e, "compaction failed, continuing");
             }
 
-            // Rebuild messages after compaction may have modified session.history.
-            let mut messages = self.build_messages().await?;
+            // Use initial_messages on the first iteration (includes system-reminder
+            // from AttachmentManager), rebuild on subsequent iterations (e.g. after
+            // compaction or when tool results need to be included).
+            let mut messages = if first_iteration {
+                first_iteration = false;
+                initial_messages.clone()
+            } else {
+                self.build_messages().await?
+            };
 
             // Attach pending images to the last user message if model supports it.
             self.attach_images_if_supported(&mut messages, &model_id);
