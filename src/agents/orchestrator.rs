@@ -62,6 +62,8 @@ pub struct Orchestrator {
     persist_backend: Arc<dyn crate::storage::SessionBackend>,
     /// MCP manager (for /mcp command).
     mcp_manager: Option<Arc<crate::agents::McpManager>>,
+    /// File change receiver for hot-reload.
+    change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
 }
 
 /// Parse a session key like "telegram:12345" into (channel_name, sender).
@@ -92,6 +94,8 @@ pub struct OrchestratorParts {
     pub persist_backend: Arc<dyn crate::storage::SessionBackend>,
     /// MCP manager (conditional — only when MCP servers are configured).
     pub mcp_manager: Option<Arc<crate::agents::McpManager>>,
+    /// File change receiver for hot-reload (shared across all AgentLoops).
+    pub change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
 }
 
 impl Orchestrator {
@@ -131,6 +135,7 @@ impl Orchestrator {
             delegation_rx: Arc::new(TokioMutex::new(parts.delegation_rx)),
             persist_backend: parts.persist_backend,
             mcp_manager: parts.mcp_manager,
+            change_rx: parts.change_rx,
         };
 
         info!(channels = orchestrator.channels.len(), "orchestrator initialized");
@@ -176,6 +181,7 @@ impl Orchestrator {
         sub_delegator: &Option<Arc<SubAgentDelegator>>,
         delegation_manager: &Option<Arc<DelegationManager>>,
         persist_backend: &Arc<dyn crate::storage::SessionBackend>,
+        change_rx: &Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
     ) -> Arc<TokioMutex<AgentLoop>> {
         if let Some(existing) = sessions.get(sk) {
             return existing.clone();
@@ -249,6 +255,11 @@ impl Orchestrator {
         // Wire up the sub-agent delegator for compaction summarization.
         if let Some(delegator) = sub_delegator.clone() {
             loop_ = loop_.with_sub_delegator(delegator);
+        }
+
+        // Wire up the file change receiver for hot-reload.
+        if let Some(rx) = change_rx.clone() {
+            loop_ = loop_.with_change_rx(rx);
         }
 
         let entry: Arc<TokioMutex<AgentLoop>> = Arc::new(TokioMutex::new(loop_));
@@ -383,6 +394,7 @@ impl Orchestrator {
                         &channels, &self.pending_asks, &reply_target,
                         &sub_delegator, &delegation_manager,
                         &self.persist_backend,
+                        &self.change_rx,
                     );
 
                     let ch = channels.clone();

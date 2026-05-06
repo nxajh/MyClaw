@@ -11,6 +11,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
+use std::path::PathBuf;
+
+use parking_lot::RwLock;
+use tokio::sync::watch;
 
 use crate::providers::Capability;
 use crate::providers::{
@@ -47,6 +51,9 @@ pub type DelegateHandler = Arc<
 use super::loop_breaker::{LoopBreak, LoopBreaker, LoopBreakerConfig};
 use super::session_manager::{Session, PersistHook};
 use crate::agents::prompt::{SystemPromptBuilder, SystemPromptConfig};
+use crate::agents::attachment::AttachmentManager;
+use crate::config::sub_agent::SubAgentConfig;
+use crate::tools::TaskDelegator;
 use crate::storage::SummaryRecord;
 use crate::str_utils;
 
@@ -172,18 +179,25 @@ impl Default for AgentConfig {
 pub struct Agent {
     registry: Arc<dyn ServiceRegistry>,
     tools: Arc<ToolRegistry>,
-    skills: Arc<SkillManager>,
+    skills: Arc<RwLock<SkillManager>>,
     config: AgentConfig,
     system_prompt: String,
     /// Optional model override for sub-agents (e.g. summarizer uses a cheaper model).
     model_override: Option<String>,
+    /// MCP server instructions: Vec<(server_name, instructions)>
+    mcp_instructions: Vec<(String, String)>,
+    /// Sub-agent configs (hot-reloadable).
+    sub_agent_configs: Arc<RwLock<Vec<SubAgentConfig>>>,
+    /// Workspace dirs for hot-reload scanning.
+    skills_dir: PathBuf,
+    agents_dir: PathBuf,
 }
 
 impl Agent {
     pub fn new(
         registry: Arc<dyn ServiceRegistry>,
         tools: Arc<ToolRegistry>,
-        skills: Arc<SkillManager>,
+        skills: Arc<RwLock<SkillManager>>,
         config: AgentConfig,
     ) -> Self {
         Self {
@@ -193,6 +207,10 @@ impl Agent {
             config,
             system_prompt: String::new(),
             model_override: None,
+            mcp_instructions: Vec::new(),
+            sub_agent_configs: Arc::new(RwLock::new(Vec::new())),
+            skills_dir: PathBuf::new(),
+            agents_dir: PathBuf::new(),
         }
     }
 
@@ -207,8 +225,18 @@ impl Agent {
     }
 
     /// Access the skill manager (for slash commands).
-    pub fn skills(&self) -> &Arc<super::skills::SkillManager> {
+    pub fn skills(&self) -> &Arc<RwLock<SkillManager>> {
         &self.skills
+    }
+
+    /// Access sub-agent configs (for slash commands and reload).
+    pub fn sub_agent_configs(&self) -> &Arc<RwLock<Vec<SubAgentConfig>>> {
+        &self.sub_agent_configs
+    }
+
+    /// Access workspace dirs.
+    pub fn workspace_dir(&self) -> &str {
+        &self.config.prompt_config.workspace_dir
     }
 
     /// Set the system prompt directly (overrides builder).
@@ -220,6 +248,25 @@ impl Agent {
     /// Set a model override (used by sub-agents to route to specific models).
     pub fn with_model(mut self, model: String) -> Self {
         self.model_override = Some(model);
+        self
+    }
+
+    /// Set MCP server instructions.
+    pub fn with_mcp_instructions(mut self, instructions: Vec<(String, String)>) -> Self {
+        self.mcp_instructions = instructions;
+        self
+    }
+
+    /// Set sub-agent configs.
+    pub fn with_sub_agent_configs(mut self, configs: Arc<RwLock<Vec<SubAgentConfig>>>) -> Self {
+        self.sub_agent_configs = configs;
+        self
+    }
+
+    /// Set workspace dirs for hot-reload scanning.
+    pub fn with_workspace_dirs(mut self, skills_dir: PathBuf, agents_dir: PathBuf) -> Self {
+        self.skills_dir = skills_dir;
+        self.agents_dir = agents_dir;
         self
     }
 
@@ -236,12 +283,11 @@ impl Agent {
         persist_hook: Option<Arc<dyn PersistHook>>,
     ) -> AgentLoop {
         let prompt = if !self.system_prompt.is_empty() {
-            // Direct prompt set via with_system_prompt()
             self.system_prompt.clone()
         } else {
-            // Build from config
+            let skills = self.skills.read();
             let builder = SystemPromptBuilder::new(self.config.prompt_config.clone());
-            builder.build(&self.skills)
+            builder.build(&skills)
         };
 
         AgentLoop {
@@ -262,6 +308,13 @@ impl Agent {
             persist_hook,
             sub_delegator: None,
             model_override: self.model_override.clone(),
+            attachments: AttachmentManager::new(),
+            mcp_instructions: self.mcp_instructions.clone(),
+            skills: Arc::clone(&self.skills),
+            sub_agent_configs: Arc::clone(&self.sub_agent_configs),
+            skills_dir: self.skills_dir.clone(),
+            agents_dir: self.agents_dir.clone(),
+            change_rx: None,
         }
     }
 }
@@ -292,6 +345,20 @@ pub struct AgentLoop {
     sub_delegator: Option<Arc<super::sub_agent::SubAgentDelegator>>,
     /// Optional model override — forces a specific model instead of registry default.
     model_override: Option<String>,
+    // ── Attachment (增量注入) ──
+    /// Attachment manager — 追踪已通知 LLM 的 skills/agents/MCP 列表。
+    attachments: AttachmentManager,
+    /// MCP server instructions (startup 时一次性获取)。
+    mcp_instructions: Vec<(String, String)>,
+    /// Shared skill manager (RwLock for hot-reload).
+    skills: Arc<RwLock<SkillManager>>,
+    /// Sub-agent configs (RwLock for hot-reload).
+    sub_agent_configs: Arc<RwLock<Vec<SubAgentConfig>>>,
+    /// Workspace dirs for hot-reload scanning.
+    skills_dir: PathBuf,
+    agents_dir: PathBuf,
+    /// File change receiver (None for sub-agents).
+    change_rx: Option<watch::Receiver<super::watcher::ChangeSet>>,
 }
 
 impl AgentLoop {
@@ -349,6 +416,17 @@ impl AgentLoop {
         self
     }
 
+    /// Set the file change receiver (for hot-reload).
+    pub fn with_change_rx(mut self, rx: watch::Receiver<super::watcher::ChangeSet>) -> Self {
+        self.change_rx = Some(rx);
+        self
+    }
+
+    /// Access the attachment manager (for /reload command).
+    pub fn attachments(&mut self) -> &mut AttachmentManager {
+        &mut self.attachments
+    }
+
     /// Process a user message and return the assistant's text response.
     ///
     /// This is the main entry point called by the orchestrator.
@@ -367,6 +445,22 @@ impl AgentLoop {
             }
             for msg in &self.session.history {
                 self.token_tracker.record_pending(estimate_message_tokens(msg));
+            }
+        }
+
+        // First turn: compute initial diff (full listing of skills/agents/MCP).
+        if self.attachments.is_fresh() {
+            {
+                let skills = self.skills.read();
+                self.attachments.diff_skills(&skills);
+            }
+            // Agent listing: read from sub_delegator if available.
+            if let Some(ref delegator) = self.sub_delegator {
+                let agents = delegator.available_agents();
+                self.attachments.diff_agents(&agents);
+            }
+            if !self.mcp_instructions.is_empty() {
+                self.attachments.diff_mcp(&self.mcp_instructions);
             }
         }
 
@@ -478,14 +572,28 @@ impl AgentLoop {
         self.registry.get_chat_provider(Capability::Chat)
     }
 
-    /// Build the message list: system prompt + history.
-    async fn build_messages(&self) -> anyhow::Result<Vec<ChatMessage>> {
-        let mut messages = Vec::with_capacity(self.session.history.len() + 4);
+    /// Build the message list: system prompt + attachment (delta) + history.
+    async fn build_messages(&mut self) -> anyhow::Result<Vec<ChatMessage>> {
+        let mut messages = Vec::with_capacity(self.session.history.len() + 8);
 
-        // System prompt.
+        // System prompt (static).
         if !self.system_prompt.is_empty() {
             messages.push(ChatMessage::system_text(&self.system_prompt));
         }
+
+        // Check for file changes (hot-reload).
+        self.check_changes();
+
+        // Attachment: merged delta for skills/agents/MCP (at most 1 user message).
+        // Not persisted to session history.
+        {
+            let skills = self.skills.read();
+            if let Some(msg) = self.attachments.build_message(&skills) {
+                self.token_tracker.record_pending(estimate_message_tokens(&msg));
+                messages.push(msg);
+            }
+        }
+        self.attachments.clear_pending();
 
         // History.
         messages.extend(self.session.history.iter().cloned());
@@ -494,6 +602,45 @@ impl AgentLoop {
         super::session_manager::sanitize_history(&mut messages);
 
         Ok(messages)
+    }
+
+    /// Check for file changes (hot-reload).
+    fn check_changes(&mut self) {
+        let rx = match self.change_rx.as_mut() {
+            Some(rx) => rx,
+            None => return,
+        };
+
+        while rx.has_changed().unwrap_or(false) {
+            let changes = rx.borrow_and_update().clone();
+
+            if changes.skills_changed {
+                let new_defs = super::skill_loader::load_skills_from_dir(&self.skills_dir);
+                let new_skills: Vec<super::skills::Skill> =
+                    new_defs.iter().map(super::skills::Skill::from_definition).collect();
+                {
+                    let mut skills = self.skills.write();
+                    skills.reload(new_skills);
+                }
+                let skills = self.skills.read();
+                self.attachments.diff_skills(&skills);
+                tracing::info!(skill_count = skills.skill_count(), "skills hot-reloaded");
+            }
+
+            if changes.agents_changed {
+                let new_agents = super::agent_loader::load_agents_from_dir(&self.agents_dir);
+                let agent_list: Vec<(String, String)> = new_agents
+                    .iter()
+                    .map(|a| (a.name.clone(), a.description.clone().unwrap_or_default()))
+                    .collect();
+                {
+                    let mut configs = self.sub_agent_configs.write();
+                    *configs = new_agents;
+                }
+                self.attachments.diff_agents(&agent_list);
+                tracing::info!(agent_count = agent_list.len(), "agents hot-reloaded");
+            }
+        }
     }
 
     /// Core chat loop: call LLM, handle tool calls, repeat until text response.
@@ -1516,6 +1663,9 @@ impl AgentLoop {
         if new_total > threshold {
             self.truncate_retention_zone(new_boundary, model_id);
         }
+
+        // 8. Reset attachment state — next build_messages() will send full listing.
+        self.attachments.on_compaction();
 
         Ok(())
     }

@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+use parking_lot::RwLock;
+
 use crate::agents::delegation::{DelegationEvent, DelegationManager};
 use crate::agents::tool_registry::ToolRegistry;
 use crate::agents::skills::SkillManager;
@@ -19,27 +21,27 @@ use crate::tools::TaskDelegator;
 #[derive(Clone)]
 pub struct SubAgentDelegator {
     /// Sub-agent configurations, keyed by name.
-    configs: Arc<Vec<SubAgentConfig>>,
+    configs: Arc<RwLock<Vec<SubAgentConfig>>>,
     /// Shared service registry (for LLM access).
     registry: Arc<dyn ServiceRegistry>,
     /// Parent tool registry (tools are filtered per sub-agent).
     tools: Arc<ToolRegistry>,
     /// Parent skill manager (shared read-only).
-    skills: Arc<SkillManager>,
+    skills: Arc<RwLock<SkillManager>>,
     /// Default max_tool_calls from parent agent config.
     default_max_tool_calls: usize,
 }
 
 impl SubAgentDelegator {
     pub fn new(
-        configs: Vec<SubAgentConfig>,
+        configs: Arc<RwLock<Vec<SubAgentConfig>>>,
         registry: Arc<dyn ServiceRegistry>,
         tools: Arc<ToolRegistry>,
-        skills: Arc<SkillManager>,
+        skills: Arc<RwLock<SkillManager>>,
         default_max_tool_calls: usize,
     ) -> Self {
         Self {
-            configs: Arc::new(configs),
+            configs,
             registry,
             tools,
             skills,
@@ -47,8 +49,8 @@ impl SubAgentDelegator {
         }
     }
 
-    fn find_config(&self, name: &str) -> Option<&SubAgentConfig> {
-        self.configs.iter().find(|c| c.name == name)
+    fn find_config(&self, name: &str) -> Option<SubAgentConfig> {
+        self.configs.read().iter().find(|c| c.name == name).cloned()
     }
 
     /// Build a filtered ToolRegistry containing only the allowed tools.
@@ -79,7 +81,7 @@ impl SubAgentDelegator {
     ) -> anyhow::Result<String> {
         let config = self.find_config(agent_name)
             .ok_or_else(|| {
-                let available: Vec<&str> = self.configs.iter().map(|c| c.name.as_str()).collect();
+                let available: Vec<String> = self.configs.read().iter().map(|c| c.name.clone()).collect();
                 anyhow::anyhow!(
                     "Unknown sub-agent '{}'. Available: {}",
                     agent_name,
@@ -154,7 +156,7 @@ impl TaskDelegator for SubAgentDelegator {
     async fn delegate(&self, agent_name: &str, task: &str) -> anyhow::Result<String> {
         let config = self.find_config(agent_name)
             .ok_or_else(|| {
-                let available: Vec<&str> = self.configs.iter().map(|c| c.name.as_str()).collect();
+                let available: Vec<String> = self.configs.read().iter().map(|c| c.name.clone()).collect();
                 anyhow::anyhow!(
                     "Unknown sub-agent '{}'. Available: {}",
                     agent_name,
@@ -213,7 +215,7 @@ impl TaskDelegator for SubAgentDelegator {
         let agent = crate::agents::Agent::new(
             self.registry.clone(),
             Arc::new(tools),
-            Arc::new(SkillManager::new()),
+            Arc::new(RwLock::new(SkillManager::new())),
             agent_config,
         );
         let agent = agent.with_system_prompt(system_prompt);
@@ -235,6 +237,7 @@ impl TaskDelegator for SubAgentDelegator {
 
     fn available_agents(&self) -> Vec<(String, String)> {
         self.configs
+            .read()
             .iter()
             .map(|c| {
                 let desc = c.description.as_deref().unwrap_or("");

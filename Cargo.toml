@@ -54,6 +54,7 @@ tempfile = "3"
 directories = "5"
 toml = "0.8"
 async-trait = "0.1"
+notify = { version = "7", features = ["macos_kqueue"] }
 
 # Storage
 rusqlite = { version = "0.37", features = ["bundled"] }

@@ -39,6 +39,8 @@ struct McpServerInner {
     #[cfg(not(target_has_atomic = "64"))]
     next_id: AtomicU32,
     tools: Vec<McpToolDef>,
+    /// Server instructions from initialize response.
+    instructions: String,
 }
 
 // ── McpServer ──────────────────────────────────────────────────────────────
@@ -95,6 +97,21 @@ impl McpServer {
             );
         }
 
+        // Extract server instructions from initialize response.
+        let instructions = init_resp
+            .result
+            .as_ref()
+            .and_then(|r| r.get("instructions"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        tracing::debug!(
+            "MCP server `{}` instructions: {} chars",
+            config.name,
+            instructions.len()
+        );
+
         // Notify server that client is initialized (no response expected for notifications)
         // For notifications, we send but don't wait for response
         let notif = JsonRpcRequest::notification("notifications/initialized", json!({}));
@@ -133,6 +150,7 @@ impl McpServer {
             #[cfg(not(target_has_atomic = "64"))]
             next_id: AtomicU32::new(3), // Start at 3 since we used 1 and 2
             tools: tool_list.tools,
+            instructions,
         };
 
         tracing::info!(
@@ -154,6 +172,11 @@ impl McpServer {
     /// Server display name.
     pub async fn name(&self) -> String {
         self.inner.lock().await.config.name.clone()
+    }
+
+    /// Server instructions from initialize response.
+    pub async fn instructions(&self) -> String {
+        self.inner.lock().await.instructions.clone()
     }
 
     /// Call a tool on this server. Returns the raw JSON result.
@@ -288,6 +311,17 @@ impl McpRegistry {
 
     pub fn tool_count(&self) -> usize {
         self.tool_index.len()
+    }
+
+    /// Get (name, instructions) for all connected servers.
+    pub async fn server_instructions(&self) -> Vec<(String, String)> {
+        let mut result = Vec::new();
+        for server in &self.servers {
+            let name = server.name().await;
+            let instructions = server.instructions().await;
+            result.push((name, instructions));
+        }
+        result
     }
 }
 

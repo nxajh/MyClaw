@@ -123,6 +123,15 @@ impl McpManager {
     pub async fn is_connected(&self) -> bool {
         self.registry.read().await.is_some()
     }
+
+    /// Get (name, instructions) for all connected MCP servers.
+    pub async fn server_instructions(&self) -> Vec<(String, String)> {
+        let reg = self.registry.read().await;
+        match &*reg {
+            Some(r) => r.server_instructions().await,
+            None => vec![],
+        }
+    }
 }
 
 impl Default for McpManager {

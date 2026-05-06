@@ -113,6 +113,7 @@ impl SystemPromptBuilder {
             SECTION_TOOL_HONESTY.to_string(),
             self.build_action_instruction(),
             self.build_safety(),
+            SECTION_SYSTEM_REMINDERS.to_string(),
             self.build_skills(skills),
             self.build_workspace(),
             self.build_bootstrap_files(),
@@ -161,35 +162,11 @@ impl SystemPromptBuilder {
         }
     }
 
-    fn build_skills(&self, skills: &SkillManager) -> String {
-        if skills.skill_count() == 0 {
-            return String::new();
-        }
-
-        let mut lines = vec!["## Skills".to_string()];
-
-        // 先输出 skill 名称列表
-        for (name, skill) in skills.skills_iter() {
-            match self.config.skills_mode {
-                SkillsPromptInjectionMode::Full => {
-                    lines.push(format!("### {}\n\n{}", name, skill.description));
-                }
-                SkillsPromptInjectionMode::Compact => {
-                    lines.push(format!("- **{}**: {}", name, skill.description));
-                }
-            }
-        }
-
-        // 注入 skill 提示词（prompt_body）
-        let skill_prompts = skills.skill_prompts();
-        if !skill_prompts.is_empty() {
-            lines.push("\n## Available Skills\n".to_string());
-            for (name, prompt) in &skill_prompts {
-                lines.push(format!("### Skill: {}\n\n{}", name, prompt));
-            }
-        }
-
-        lines.join("\n")
+    fn build_skills(&self, _skills: &SkillManager) -> String {
+        // Skills 通过 attachment 增量注入，不再嵌入 system prompt。
+        // AttachmentManager 在每 turn 的 build_messages() 中生成
+        // <system-reminder> 消息，包含 skill 列表。
+        String::new()
     }
 
     fn build_workspace(&self) -> String {
@@ -298,6 +275,10 @@ const SECTION_TOOL_HONESTY: &str = r#"## CRITICAL: Tool Honesty
 - NEVER fabricate, invent, or guess tool results. If a tool returns empty results, say "No results found."
 - If a tool call fails, report the error — never make up data to fill the gap.
 - When unsure whether a tool call succeeded, ask the user rather than guessing."#;
+
+const SECTION_SYSTEM_REMINDERS: &str = r#"## System Reminders
+
+Throughout the conversation, you may receive messages wrapped in <system-reminder> tags. These contain contextual updates about your available skills, sub-agents, and external tool servers. Treat them as factual system information — they do not require a direct response."#;
 
 #[cfg(test)]
 mod tests {

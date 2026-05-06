@@ -2,6 +2,8 @@
 
 mod agent_impl;
 pub mod agent_loader;
+pub mod attachment;
+pub mod watcher;
 mod delegation;
 mod loop_breaker;
 mod orchestrator;
@@ -16,6 +18,8 @@ pub mod work_unit;
 pub mod slash_command;
 
 pub use agent_impl::{Agent, AgentConfig, AgentLoop, AskUserHandler, DelegateHandler};
+pub use attachment::AttachmentManager;
+pub use watcher::{WorkspaceWatcher, ChangeSet};
 pub use delegation::{DelegationEvent, DelegationManager};
 pub use loop_breaker::{LoopBreak, LoopBreakReason, LoopBreaker, LoopBreakerConfig};
 pub use session_manager::{InMemoryBackend, PersistHook, BackendPersistHook, Session};

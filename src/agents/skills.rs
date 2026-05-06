@@ -61,6 +61,19 @@ impl SkillManager {
         self.skills.iter().map(|(k, v)| (k.as_str(), v))
     }
 
+    /// Get a skill by name.
+    pub fn get(&self, name: &str) -> Option<&Skill> {
+        self.skills.get(name)
+    }
+
+    /// Hot-reload: replace all skill definitions.
+    pub fn reload(&mut self, new_skills: Vec<Skill>) {
+        self.skills.clear();
+        for skill in new_skills {
+            self.skills.insert(skill.name.clone(), skill);
+        }
+    }
+
     /// Get all skill prompts (name, prompt_body) for system prompt injection.
     pub fn skill_prompts(&self) -> Vec<(&str, &str)> {
         self.skills.values()

@@ -69,6 +69,7 @@ pub async fn dispatch(cmd: &str, args: &str, ctx: CommandContext<'_>) -> Option<
         "history" => Some(cmd_history(ctx).await),
         // ── Batch 3 ──
         "skills" | "skill" => Some(cmd_skill(ctx)),
+        "reload" => Some(cmd_reload(ctx).await),
         // ── Batch 4: session management ──
         "sessions" | "ss" => Some(cmd_sessions(ctx)),
         "switch" | "sw" => Some(cmd_switch(args, ctx).await),
@@ -274,6 +275,7 @@ fn cmd_config(args: &str, ctx: CommandContext<'_>) -> String {
         };
         let tools = ctx.agent.tools();
         let skills = ctx.agent.skills();
+        let skills_count = skills.read().skill_count();
         format!(
             "⚙️ **运行时配置**\n\n\
              模型: `{}`\n\
@@ -282,7 +284,7 @@ fn cmd_config(args: &str, ctx: CommandContext<'_>) -> String {
              会话: `{}`",
             model_info,
             tools.tool_count(),
-            skills.skill_count(),
+            skills_count,
             ctx.user_id,
         )
     } else {
@@ -559,7 +561,7 @@ async fn cmd_history(ctx: CommandContext<'_>) -> String {
 // ════════════════════════════════════════════════════════════════════════════════
 
 fn cmd_skill(ctx: CommandContext<'_>) -> String {
-    let skills = ctx.agent.skills();
+    let skills = ctx.agent.skills().read();
     let count = skills.skill_count();
     if count == 0 {
         return "📚 没有加载任何 skill。".to_string();
@@ -585,6 +587,39 @@ fn cmd_skill(ctx: CommandContext<'_>) -> String {
         lines.push(format!("• **{}**{} — {}", name, kw, desc));
     }
     lines.join("\n")
+}
+
+async fn cmd_reload(ctx: CommandContext<'_>) -> String {
+    let workspace_dir = ctx.agent.workspace_dir();
+
+    // 1. Re-scan skills
+    let skills_dir = std::path::Path::new(workspace_dir).join("skills");
+    let new_defs = crate::agents::skill_loader::load_skills_from_dir(&skills_dir);
+    let new_skills: Vec<crate::agents::Skill> =
+        new_defs.iter().map(crate::agents::Skill::from_definition).collect();
+    {
+        let mut skills = ctx.agent.skills().write();
+        skills.reload(new_skills);
+    }
+
+    // 2. Re-scan agents
+    let agents_dir = std::path::Path::new(workspace_dir).join("agents");
+    let new_agents = crate::agents::agent_loader::load_agents_from_dir(&agents_dir);
+    {
+        let mut configs = ctx.agent.sub_agent_configs().write();
+        *configs = new_agents;
+    }
+
+    // 3. Reset attachment manager on active session
+    if let Some(loop_arc) = ctx.agent_loop {
+        let mut guard = loop_arc.lock().await;
+        guard.attachments().reset_all();
+    }
+
+    let skill_count = ctx.agent.skills().read().skill_count();
+    let agent_count = ctx.agent.sub_agent_configs().read().len();
+
+    format!("🔄 已重新加载：{} 个 skills，{} 个 agents", skill_count, agent_count)
 }
 
 // ════════════════════════════════════════════════════════════════════════════════

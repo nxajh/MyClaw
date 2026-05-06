@@ -16,6 +16,7 @@ use crate::agents::{
     McpManager, SubAgentDelegator, DelegationManager,
 };
 use crate::tools::TaskDelegator;
+use crate::config::sub_agent::SubAgentConfig;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::signal::unix::{signal, SignalKind};
@@ -304,8 +305,8 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
     Ok(registry)
 }
 
-/// Build ToolRegistry with all built-in + MCP tools registered.
-async fn build_tools(mcp_manager: &McpManager) -> ToolRegistry {
+/// Build ToolRegistry with all built-in + MCP + SkillTool registered.
+async fn build_tools(mcp_manager: &McpManager, skills: &Arc<parking_lot::RwLock<SkillManager>>) -> ToolRegistry {
     let mut tools = ToolRegistry::new();
     let builtin = crate::tools::builtin_tools_with_memory(crate::tools::MemoryStore::new());
     for tool in builtin {
@@ -317,6 +318,9 @@ async fn build_tools(mcp_manager: &McpManager) -> ToolRegistry {
     tools.register(Arc::new(crate::tools::TaskManagerTool::new(
         crate::tools::TaskManagerTool::shared_state(),
     )));
+
+    // SkillTool — loads skill body on demand.
+    tools.register(Arc::new(crate::tools::SkillTool::new(Arc::clone(skills))));
 
     // Inject MCP tools (if any servers are configured and connected).
     if mcp_manager.is_connected().await {
@@ -432,16 +436,19 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         tracing::warn!(error = %e, "MCP server connection had errors (non-fatal), continuing");
     }
 
-    // Build tool registry (all built-in + MCP tools).
-    let mut tools = build_tools(&mcp_manager).await;
-
     // Build skill manager (SKILL.md files).
     let skills = build_skill_manager(&config.workspace_dir);
+    let skills_arc: Arc<parking_lot::RwLock<SkillManager>> = Arc::new(parking_lot::RwLock::new(skills));
+
+    // Build tool registry (all built-in + MCP + SkillTool).
+    let mut tools = build_tools(&mcp_manager, &skills_arc).await;
 
     // Build sub-agent configs (AGENT.md files from workspace/agents/).
     let sub_agent_configs = build_sub_agents(&config.workspace_dir);
     let sub_agent_count = sub_agent_configs.len();
     let sub_agent_names: Vec<String> = sub_agent_configs.iter().map(|a| a.name.clone()).collect();
+    let sub_agent_configs_arc: Arc<parking_lot::RwLock<Vec<SubAgentConfig>>> =
+        Arc::new(parking_lot::RwLock::new(sub_agent_configs));
 
     let registry_arc: Arc<dyn crate::providers::ServiceRegistry> = Arc::new(registry);
 
@@ -449,37 +456,31 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     tools.register(Arc::new(crate::tools::WebSearchTool::new(registry_arc.clone())));
     tracing::debug!("web_search tool registered (connected to ServiceRegistry)");
 
-    // ── Sub-agent delegator (conditional) ──────────────────────────────────────
-    //
-    // Dependency chain:
-    //   delegate_task tool → needs Arc<dyn TaskDelegator>
-    //   SubAgentDelegator  → needs Arc<ToolRegistry> + Arc<SkillManager>
-    //   parent Agent       → needs Arc<ToolRegistry> + Arc<SkillManager>
-    //
-    // ToolRegistry is shared via Arc. delegate_task and tool_search are added
-    // to the parent's registry only — sub-agents get a filtered view.
+    // WorkspaceWatcher for hot-reload.
+    let watcher = crate::agents::WorkspaceWatcher::new(&config.workspace_dir)?;
+    let change_rx = watcher.rx.clone();
 
-    let (tools_arc, skills_arc, sub_agent_delegator_arc) = if sub_agent_configs.is_empty() {
+    // ── Sub-agent delegator (conditional) ──────────────────────────────────────
+
+    let (tools_arc, sub_agent_delegator_arc) = if sub_agent_count == 0 {
         // Single-agent mode: add tool_search to base registry.
         let base_tools_arc: Arc<ToolRegistry> = Arc::new(tools);
         let tool_search = crate::tools::ToolSearchTool::new(Arc::clone(&base_tools_arc));
 
-        // Add tool_search to a new registry (Arc is immutable, so rebuild).
         let mut final_tools = ToolRegistry::new();
         for tool in base_tools_arc.all_tools() {
             final_tools.register(tool);
         }
         final_tools.register(Arc::new(tool_search));
 
-        (Arc::new(final_tools), Arc::new(skills), None)
+        (Arc::new(final_tools), None)
     } else {
-        tracing::info!(agents = sub_agent_configs.len(), "multi-agent mode enabled");
+        tracing::info!(agents = sub_agent_count, "multi-agent mode enabled");
 
         let base_tools_arc: Arc<ToolRegistry> = Arc::new(tools);
-        let skills_arc: Arc<SkillManager> = Arc::new(skills);
 
         let delegator = SubAgentDelegator::new(
-            sub_agent_configs,
+            Arc::clone(&sub_agent_configs_arc),
             registry_arc.clone(),
             Arc::clone(&base_tools_arc),
             Arc::clone(&skills_arc),
@@ -503,7 +504,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         let tool_search = crate::tools::ToolSearchTool::new(Arc::clone(&base_tools_arc));
         parent_tools.register(Arc::new(tool_search));
 
-        (Arc::new(parent_tools), skills_arc, Some(delegator_arc))
+        (Arc::new(parent_tools), Some(delegator_arc))
     };
 
     // ── Delegation channel (conditional — only when sub-agents configured) ─────
@@ -526,9 +527,18 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         stream_chunk_timeout_secs: config.agent.stream_chunk_timeout_secs,
         max_output_bytes: calculate_max_output_bytes(&config, &registry_arc),
     };
-    let agent = Agent::new(registry_arc, tools_arc, skills_arc, agent_config);
-
     let mcp_manager_arc = Arc::new(mcp_manager);
+
+    // Get MCP server instructions for attachment injection.
+    let mcp_instructions = mcp_manager_arc.server_instructions().await;
+
+    let agent = Agent::new(registry_arc, tools_arc, skills_arc, agent_config)
+        .with_mcp_instructions(mcp_instructions)
+        .with_sub_agent_configs(sub_agent_configs_arc)
+        .with_workspace_dirs(
+            config.workspace_dir.join("skills"),
+            config.workspace_dir.join("agents"),
+        );
 
     let parts = OrchestratorParts {
         agent,
@@ -539,6 +549,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         delegation_rx,
         persist_backend: session_backend,
         mcp_manager: Some(Arc::clone(&mcp_manager_arc)),
+        change_rx: Some(change_rx),
     };
 
     // ── Launch ─────────────────────────────────────────────────────────────

@@ -46,25 +46,12 @@ impl Tool for DelegateTaskTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        let agents: Vec<String> = self
-            .delegator
-            .available_agents()
-            .into_iter()
-            .map(|(name, desc)| {
-                if desc.is_empty() {
-                    name
-                } else {
-                    format!("{}: {}", name, desc)
-                }
-            })
-            .collect();
-
         json!({
             "type": "object",
             "properties": {
                 "agent": {
                     "type": "string",
-                    "description": format!("Name of the sub-agent to delegate to. Available: {}", agents.join(", "))
+                    "description": "Name of the sub-agent to delegate to."
                 },
                 "task": {
                     "type": "string",
