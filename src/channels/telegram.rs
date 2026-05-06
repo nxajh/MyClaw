@@ -858,7 +858,7 @@ impl TelegramChannel {
             return Ok(());
         }
 
-        // HTML parse failed (likely malformed tags) — fall back to plain text.
+        // HTML parse failed — fall back to plain text.
         let html_status = resp.status();
         let html_body = resp.text().await.unwrap_or_default();
         warn!(
@@ -866,10 +866,29 @@ impl TelegramChannel {
              falling back to plain text"
         );
 
+        // Ensure plain text fits Telegram's limit (truncate if necessary).
+        let plain_text = if text.chars().count() > MAX_MESSAGE_LENGTH {
+            warn!(
+                original_chars = text.chars().count(),
+                limit = MAX_MESSAGE_LENGTH,
+                "plain text exceeds Telegram limit, truncating"
+            );
+            let end_byte = text
+                .char_indices()
+                .nth(MAX_MESSAGE_LENGTH)
+                .map(|(i, _)| i)
+                .unwrap_or(text.len());
+            let mut truncated = text[..end_byte].to_string();
+            truncated.push_str("\n\n[... message truncated ...]");
+            truncated
+        } else {
+            text.to_string()
+        };
+
         let fallback_req = SendMessageRequest {
             chat_id: chat_id.to_string(),
             message_thread_id: thread_id.map(String::from),
-            text: text.to_string(),
+            text: plain_text,
             parse_mode: None,
         };
         let fallback_resp = client
@@ -1089,6 +1108,44 @@ impl TelegramChannel {
             }
         }
     }
+
+    /// Split message content into chunks that fit Telegram's 4096-char limit.
+    ///
+    /// `markdown_to_telegram_html()` can significantly expand text (HTML escaping
+    /// of `<>&"` chars, plus `<b>`, `<code>`, `<pre>` tags). A 4000-char Markdown
+    /// chunk can easily exceed 4096 chars as HTML.
+    ///
+    /// Strategy:
+    /// 1. Split by raw Markdown chars (conservative limit)
+    /// 2. For each chunk, check if its HTML conversion exceeds 4096
+    /// 3. If it does, re-split that chunk more aggressively using plain text limit
+    fn chunk_for_telegram(content: &str) -> Vec<String> {
+        let html_overhead_per_chunk = 200; // conservative estimate for HTML expansion
+        let raw_limit = MAX_MESSAGE_LENGTH
+            .saturating_sub(CONTINUATION_OVERHEAD)
+            .saturating_sub(html_overhead_per_chunk);
+
+        let raw_chunks = crate::channels::message::split_message_chunk(content, raw_limit);
+
+        let mut final_chunks = Vec::new();
+        for chunk in raw_chunks {
+            let html = markdown_to_telegram_html(&chunk);
+            if html.chars().count() <= MAX_MESSAGE_LENGTH {
+                // HTML fits — send_raw will try HTML first, then plain fallback
+                final_chunks.push(chunk);
+            } else {
+                // HTML exceeds limit — re-split this chunk more aggressively.
+                // Use plain text limit that accounts for continuation suffix.
+                let plain_limit = MAX_MESSAGE_LENGTH
+                    .saturating_sub(CONTINUATION_OVERHEAD)
+                    .saturating_sub(CONTINUATION_OVERHEAD); // double-subtract for safety
+                let sub_chunks = crate::channels::message::split_message_chunk(&chunk, plain_limit);
+                final_chunks.extend(sub_chunks);
+            }
+        }
+
+        final_chunks
+    }
 }
 
 #[async_trait]
@@ -1099,26 +1156,27 @@ impl Channel for TelegramChannel {
 
     async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
         let (chat_id, thread_id) = Self::parse_reply_target(&message.recipient);
-        let chunks =
-            crate::channels::message::split_message_chunk(&message.content, MAX_MESSAGE_LENGTH - CONTINUATION_OVERHEAD);
+
+        // Split into chunks that fit Telegram's 4096-char limit.
+        // We use a conservative limit because markdown_to_telegram_html() can
+        // expand the text (HTML escaping + tags). If a chunk's HTML exceeds
+        // 4096 after conversion, we re-split it using plain text.
+        let chunks = Self::chunk_for_telegram(&message.content);
 
         let count = chunks.len();
         let mut last_error = None;
         for (i, chunk) in chunks.into_iter().enumerate() {
             let text = if count > 1 && i < count - 1 {
                 format!("{}\n\n(continues...)", chunk)
-            } else if count > 1 && i == 0 {
-                format!("{}\n\n(continued)\n\n", chunk)
             } else {
                 chunk
             };
             if let Err(e) = self.send_raw(&chat_id, &text, thread_id.as_deref()).await {
                 warn!("Failed to send chunk {}/{}: {}", i + 1, count, e);
                 last_error = Some(e);
-                // 继续尝试发送后续 chunk，不要因为一个 chunk 失败就中断
+                // Continue trying subsequent chunks
             }
         }
-        // 如果有任何 chunk 失败，返回最后一个错误
         if let Some(e) = last_error {
             return Err(e);
         }
