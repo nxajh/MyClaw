@@ -599,9 +599,8 @@ impl AgentLoop {
         // Check for file changes (hot-reload).
         self.check_changes();
 
-        // Attachment: merged delta for skills/agents/MCP (at most 1 user message).
-        // Not persisted to session history.
-        {
+        // Attachment placeholder — will be inserted after history (below).
+        let attachment_msg = {
             let skills = self.skills.read();
             tracing::info!(
                 first_turn = self.attachments.is_fresh(),
@@ -609,21 +608,29 @@ impl AgentLoop {
                 skill_count = skills.skill_count(),
                 "build_messages: before build_message"
             );
-            if let Some(msg) = self.attachments.build_message(&skills) {
+            let msg = self.attachments.build_message(&skills);
+            if let Some(ref m) = msg {
                 tracing::info!(
-                    msg_len = msg.text_content().len(),
-                    "build_messages: attachment message injected"
+                    msg_len = m.text_content().len(),
+                    "build_messages: attachment message generated"
                 );
-                self.token_tracker.record_pending(estimate_message_tokens(&msg));
-                messages.push(msg);
+                self.token_tracker.record_pending(estimate_message_tokens(m));
             } else {
                 tracing::warn!("build_messages: no attachment message (no pending delta)");
             }
-        }
+            msg
+        };
         self.attachments.clear_pending();
 
         // History.
         messages.extend(self.session.history.iter().cloned());
+
+        // Attachment: merged delta for skills/agents/MCP (at most 1 user message).
+        // Placed AFTER history so the LLM sees it as the most recent context.
+        // Not persisted to session history.
+        if let Some(msg) = attachment_msg {
+            messages.push(msg);
+        }
 
         // Safety: remove orphan tool results before sending to provider.
         super::session_manager::sanitize_history(&mut messages);
