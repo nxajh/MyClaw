@@ -60,8 +60,8 @@ pub trait SessionBackend: Send + Sync {
     /// Load all messages for a session.
     fn load_messages(&self, session_id: &str) -> Vec<ChatMessage>;
 
-    /// Append a message to a session.
-    fn append_message(&self, session_id: &str, message: &ChatMessage) -> std::io::Result<()>;
+    /// Append a message to a session. Returns the assigned message ID.
+    fn append_message(&self, session_id: &str, message: &ChatMessage) -> std::io::Result<i64>;
 
     /// Remove the last message from a session.
     fn remove_last_message(&self, session_id: &str) -> std::io::Result<bool>;
