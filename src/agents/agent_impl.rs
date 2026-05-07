@@ -1980,15 +1980,12 @@ impl AgentLoop {
 
     /// Pre-fallback compaction: compact history to fit within a smaller model's context window.
     ///
-    /// Applies a 1.25× safety multiplier to the current token count to account for
-    /// tokenizer differences between the primary model and the fallback model (CJK text
-    /// in particular can differ significantly in token count across tokenizers).
     ///
-    /// Pre-fallback compaction: compact history to fit within a smaller model's context window.
+    /// compress_budget = target_window * compact_threshold - system_prompt_tokens - tool_spec_tokens
     ///
-    /// `compress_budget` = max input tokens the target model's summarizer can accept:
-    ///   `target_window − system_prompt_tokens − summary_output_reserve`
-    /// divided by 1.25 for cross-model tokenizer safety.
+    /// `compact_threshold` implicitly reserves `(1 - threshold)` for model output and headroom,
+    /// so no separate output_reserve parameter is needed.
+    /// Tool spec tokens are subtracted because the summarizer receives tool definitions too.
     ///
     /// `find_compaction_boundary_for_budget` finds the largest prefix that fits in this budget;
     /// the target model summarises that prefix, then continues with summary + retained tail.
@@ -1996,27 +1993,30 @@ impl AgentLoop {
         &mut self,
         target_model_id: &str,
         target_window: u64,
-        target_max_output: u64,
     ) -> anyhow::Result<()> {
-        // compress_budget = how many input tokens the target model's summarizer can accept.
-        // System prompt is included in every summarizer request so it counts against the budget.
-        // summary_output_reserve is headroom for the summary the model will produce.
-        // Apply 1.25× safety divisor: our token estimates come from the primary tokenizer;
-        // the target model may count differently (especially CJK text).
+        // Estimate overhead sent alongside the history in every summarizer request.
         let system_prompt_tokens = estimate_tokens(&self.system_prompt);
-        let summary_output_reserve = target_max_output.min(4_096) as u64;
-        let available = target_window
-            .saturating_sub(system_prompt_tokens)
-            .saturating_sub(summary_output_reserve);
+        let tool_spec_tokens: u64 = self.build_tool_specs().iter().map(|spec| {
+            let schema = spec.input_schema.to_string();
+            estimate_tokens(&spec.name)
+                + spec.description.as_deref().map_or(0, estimate_tokens)
+                + estimate_tokens(&schema)
+                + 8 // per-tool structural overhead
+        }).sum();
 
-        if available == 0 {
+        // Usable space up to the compaction threshold; the remaining (1-threshold) fraction
+        // is implicitly reserved for the summary output and safety headroom.
+        let threshold = self.config.context.compact_threshold;
+        let compress_budget = ((target_window as f64 * threshold) as u64)
+            .saturating_sub(system_prompt_tokens)
+            .saturating_sub(tool_spec_tokens);
+
+        if compress_budget == 0 {
             anyhow::bail!(
                 "target model '{}' context window ({}) too small to compact into",
                 target_model_id, target_window
             );
         }
-
-        let compress_budget = (available as f64 / 1.25) as u64;
 
         let retain_count = self.config.context.retain_work_units.max(1);
         let boundary = match super::work_unit::find_compaction_boundary_for_budget(
@@ -2044,12 +2044,12 @@ impl AgentLoop {
             target_model = %target_model_id,
             target_window,
             compress_budget,
+            system_prompt_tokens,
+            tool_spec_tokens,
             boundary,
             "pre-fallback compaction triggered"
         );
 
-        // Use the target model as the summarizer: it will handle the resulting
-        // (summary + retained) context, so it's appropriate for it to also produce the summary.
         self.compact_with_boundary(target_model_id, boundary, Some(target_model_id.to_string())).await
     }
 
@@ -2067,29 +2067,28 @@ impl AgentLoop {
         let conservative_total = (self.token_tracker.total_tokens() as f64 * 1.25) as u64;
 
         // Extract target model info without holding a borrow when we later call &mut self.
-        let target: Option<(String, u64, u64)> = routing_models
+        let target: Option<(String, u64)> = routing_models
             .iter()
             .skip(1) // skip primary model
             .find_map(|model_id| {
                 let cfg = self.registry.get_chat_model_config(model_id).ok()?;
                 let window = cfg.context_window?;
-                let max_output = cfg.max_output_tokens.unwrap_or(4096) as u64;
                 if conservative_total > window {
-                    Some((model_id.clone(), window, max_output))
+                    Some((model_id.clone(), window))
                 } else {
                     None
                 }
             });
         // All borrows from get_chat_model_config are dropped here.
 
-        if let Some((model_id, window, max_output)) = target {
+        if let Some((model_id, window)) = target {
             tracing::info!(
                 model = %model_id,
                 conservative_total,
                 window,
                 "pre-fallback: context would overflow fallback model, compacting"
             );
-            if let Err(e) = self.compact_to_budget(&model_id, window, max_output).await {
+            if let Err(e) = self.compact_to_budget(&model_id, window).await {
                 tracing::warn!(model = %model_id, error = %e, "pre-fallback compaction failed");
             }
         }
