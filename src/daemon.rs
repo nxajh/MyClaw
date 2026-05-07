@@ -427,6 +427,12 @@ fn build_prompt_config(cfg: &crate::config::agent::PromptConfig, workspace_dir: 
 
 /// Run the MyClaw daemon, blocking until shutdown.
 pub async fn run(config: crate::config::AppConfig) -> Result<()> {
+    // 让进程 cwd 与 workspace_dir 一致，保证 file_read 等工具的相对路径解析
+    // 和 system prompt 告诉 LLM 的 "Working directory" 一致
+    std::env::set_current_dir(&config.workspace_dir).with_context(|| {
+        format!("failed to set cwd to workspace_dir '{}'", config.workspace_dir.display())
+    })?;
+
     // ── Composition Root: assemble all components ──────────────────────────
 
     let registry = build_registry(&config)?;
