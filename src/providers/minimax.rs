@@ -224,7 +224,7 @@ fn build_minimax_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
 
     let mut body = json!({ "model": req.model, "messages": messages, "stream": true });
     if let Some(temp) = req.temperature { body["temperature"] = serde_json::json!(temp); }
-    if let Some(max) = req.max_tokens { body["max_tokens"] = serde_json::json!(max); }
+    if let Some(max) = req.max_tokens { body["max_completion_tokens"] = serde_json::json!(max); }
     if let Some(tools) = req.tools {
         body["tools"] = serde_json::json!(tools.iter().map(|t| {
             serde_json::json!({
