@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 use crate::providers::Client;
 use crate::providers::{BoxStream, ChatProvider, ChatRequest, ContentPart, StreamEvent, StopReason};
 
-const DEFAULT_BASE_URL: &str = "https://api.minimaxi.chat/v1";
+const DEFAULT_BASE_URL: &str = "https://api.minimaxi.com/v1";
 
 #[derive(Clone)]
 pub struct MiniMaxProvider {
@@ -180,7 +180,8 @@ fn build_minimax_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                 "image_url": { "url": format!("data:image;base64,{}", b64_json), "detail": format!("{:?}", detail).to_lowercase() }
             }),
             ContentPart::Thinking { .. } => {
-                // MiniMax does not support thinking blocks — skip silently.
+                // MiniMax uses reasoning_split=true to separate thinking via
+                // reasoning_content field — include empty text so the role is valid.
                 serde_json::json!({"type": "text", "text": ""})
             },
         }).collect();
@@ -231,6 +232,8 @@ fn build_minimax_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
             })
         }).collect::<Vec<_>>());
     }
+    // Request thinking/content separation instead of interleaved format.
+    body["reasoning_split"] = serde_json::json!(true);
 
     body
 }
