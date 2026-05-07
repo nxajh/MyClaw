@@ -92,6 +92,72 @@ pub fn find_compaction_boundary(history: &[ChatMessage], retain_count: usize) ->
     }
 }
 
+/// Rough per-message token estimator (4 chars ≈ 1 token + metadata overhead).
+/// Mirrors `estimate_message_tokens` in agent_impl without creating a circular import.
+fn estimate_msg_tokens(msg: &ChatMessage) -> u64 {
+    use crate::providers::ContentPart;
+    let text_len: usize = msg.parts.iter().map(|p| match p {
+        ContentPart::Text { text } => text.len(),
+        ContentPart::Thinking { thinking } => thinking.len(),
+        ContentPart::ImageUrl { .. } | ContentPart::ImageB64 { .. } => 400,
+    }).sum();
+    let tool_len: usize = msg.tool_calls.as_ref().map_or(0, |tcs| {
+        tcs.iter().map(|tc| tc.arguments.len() + 32).sum()
+    });
+    ((text_len + tool_len) as u64).div_ceil(4) + 4
+}
+
+/// Find the latest compaction boundary whose compressible prefix fits within `compress_budget`.
+///
+/// `compress_budget` = max input tokens the summarizer (target model) can accept in one call,
+/// computed as `target_window − system_prompt_tokens − summary_output_reserve`.
+///
+/// Walks work unit boundaries **front to back**, accumulating compressed-prefix tokens.
+/// Returns the **latest** boundary where `prefix_tokens ≤ compress_budget` — the maximum
+/// amount that can be handed to the summarizer in one pass.  Everything after the boundary
+/// is retained unchanged.
+///
+/// At least `retain_work_units` work units are always kept in the retained tail.
+/// Terminates early once the prefix exceeds the budget (prefix only grows monotonically).
+///
+/// Returns `None` if even the smallest prefix (one work unit) exceeds the budget,
+/// or if there are too few work units to compress anything.
+pub fn find_compaction_boundary_for_budget(
+    history: &[ChatMessage],
+    compress_budget: u64,
+    retain_work_units: usize,
+) -> Option<usize> {
+    let units = extract_work_units(history);
+
+    if units.len() <= retain_work_units {
+        return None;
+    }
+
+    let max_compress_count = units.len() - retain_work_units;
+
+    // Walk front-to-back, accumulating prefix tokens incrementally.
+    // Keep the latest boundary where the prefix still fits in compress_budget.
+    let mut prefix_tokens: u64 = 0;
+    let mut best_boundary: Option<usize> = None;
+
+    for compress_count in 1..=max_compress_count {
+        let prev = if compress_count == 1 { 0 } else { units[compress_count - 1].user_start };
+        let boundary = units[compress_count].user_start;
+
+        for msg in &history[prev..boundary] {
+            prefix_tokens += estimate_msg_tokens(msg);
+        }
+
+        if prefix_tokens <= compress_budget {
+            best_boundary = Some(boundary); // latest valid boundary so far
+        } else {
+            break; // prefix only grows; no later boundary can fit either
+        }
+    }
+
+    best_boundary
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
