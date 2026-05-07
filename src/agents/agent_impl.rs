@@ -648,19 +648,6 @@ impl AgentLoop {
                 }
 
                 self.attachments.clear_pending();
-
-                // Persist the system-reminder so it survives session switches/restarts.
-                // Without this, the message lives only in memory and is lost when the
-                // session is evicted from the DashMap.
-                if let Some(ref hook) = self.persist_hook {
-                    if let Some(reminder_msg) = self.session.history.last() {
-                        if let Some(id) = hook.persist_message(&self.session.id, reminder_msg) {
-                            if let Some(last_id) = self.session.message_ids.last_mut() {
-                                *last_id = id;
-                            }
-                        }
-                    }
-                }
             }
         }
 
