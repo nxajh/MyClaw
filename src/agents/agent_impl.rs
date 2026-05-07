@@ -820,6 +820,16 @@ impl AgentLoop {
         let has_images = self.pending_image_urls.as_ref().is_some_and(|v| !v.is_empty())
             || self.pending_image_base64.as_ref().is_some_and(|v| !v.is_empty());
 
+        // Pre-emptive compaction for fallback models: when the primary model is unavailable
+        // (rate-limit or server error) the FallbackChatProvider routes to a smaller model
+        // whose context window may be exceeded by the current history.
+        // Only runs when no model_override is active (overrides bypass the fallback chain).
+        if self.model_override.is_none() {
+            if let Err(e) = self.maybe_compact_for_fallback().await {
+                tracing::warn!(error = %e, "pre-fallback compaction check failed, continuing");
+            }
+        }
+
         loop {
             // 1. Get a chat provider via registry.
             // If model_override is set, use that model directly.
@@ -1783,6 +1793,24 @@ impl AgentLoop {
             return Ok(());
         }
 
+        // Find retention boundary (keep recent N work units).
+        let retain_count = self.config.context.retain_work_units.max(1);
+        let boundary = super::work_unit::find_compaction_boundary(&self.session.history, retain_count);
+
+        self.compact_with_boundary(model_id, boundary).await
+    }
+
+    /// Core compaction implementation given a pre-computed split boundary.
+    ///
+    /// `history[..boundary]` is summarised; `history[boundary..]` is retained.
+    /// Called by both regular threshold-based compaction and pre-fallback budget
+    /// compaction, so the boundary-finding policy lives in the caller.
+    async fn compact_with_boundary(&mut self, model_id: &str, boundary: usize) -> anyhow::Result<()> {
+        let history_len = self.session.history.len();
+        if history_len <= 1 {
+            return Ok(());
+        }
+
         // Defensive: ensure message_ids is in sync with history.
         let ids_len = self.session.message_ids.len();
         if ids_len < history_len {
@@ -1794,10 +1822,6 @@ impl AgentLoop {
             self.session.message_ids.resize(history_len, 0);
         }
 
-        // 1. Find retention boundary (keep recent N work units).
-        let retain_count = self.config.context.retain_work_units.max(1);
-        let boundary = super::work_unit::find_compaction_boundary(&self.session.history, retain_count);
-
         if boundary >= history_len {
             tracing::info!("no compaction needed: conversation within retention");
             return Ok(());
@@ -1807,7 +1831,7 @@ impl AgentLoop {
             return Ok(());
         }
 
-        // 2. Find incremental range and extract old summary for merging.
+        // 1. Find incremental range and extract old summary for merging.
         let (compact_start, compact_end, existing_summary) = self.find_incremental_range(boundary);
         let to_compact: Vec<ChatMessage> = self.session.history[compact_start..compact_end].to_vec();
 
@@ -1823,7 +1847,6 @@ impl AgentLoop {
             compact_start,
             compact_end,
             boundary,
-            retain_count,
             has_existing_summary = existing_summary.is_some(),
             "compaction range determined"
         );
@@ -1835,7 +1858,7 @@ impl AgentLoop {
             .copied()
             .unwrap_or(0);
 
-        // 3. Generate summary (incrementally merge old summary).
+        // 2. Generate summary (incrementally merge old summary).
         let summary = match self.summarize_inline(&to_compact, existing_summary.as_deref(), model_id).await {
             Ok(s) => s,
             Err(e) => {
@@ -1857,7 +1880,7 @@ impl AgentLoop {
             tracing::warn!(reasons = ?reasons, "summary quality audit failed (non-blocking)");
         }
 
-        // 4. Replace history.
+        // 3. Replace history.
         let version = self.session.compact_version + 1;
         let summary_msg = ChatMessage::user_text(
             format!("[Context Summary] {}", summary)
@@ -1877,7 +1900,7 @@ impl AgentLoop {
             up_to_message: last_compacted_id,
         });
 
-        // 5. Persist summary and rotate history file.
+        // 4. Persist summary and rotate history file.
         if let Some(ref hook) = self.persist_hook {
             hook.save_compaction(&self.session.id, &SummaryRecord {
                 id: 0,
@@ -1902,7 +1925,7 @@ impl AgentLoop {
             }
         }
 
-        // 6. Adjust token tracker.
+        // 5. Adjust token tracker.
         self.token_tracker.adjust_for_compaction(removed_tokens, summary_tokens);
 
         let new_total = self.token_tracker.total_tokens();
@@ -1915,7 +1938,7 @@ impl AgentLoop {
             "context compaction completed"
         );
 
-        // 7. Safety net: if still over threshold, truncate retention zone.
+        // 6. Safety net: if still over threshold, truncate retention zone.
         // After drain+insert, retention zone now starts at compact_start + 1.
         let new_boundary = compact_start + 1;
         let context_window = self.registry.get_chat_model_config(model_id)
@@ -1927,9 +1950,133 @@ impl AgentLoop {
             self.truncate_retention_zone(new_boundary, model_id);
         }
 
-        // 8. No need to reset attachment state — compaction removes old history
+        // 7. No need to reset attachment state — compaction removes old history
         //    entries, so the next diff will naturally rebuild from the remaining
         //    history (which may be empty → full re-listing).
+
+        Ok(())
+    }
+
+    /// Pre-fallback compaction: compact history to fit within a smaller model's context window.
+    ///
+    /// Applies a 1.25× safety multiplier to the current token count to account for
+    /// tokenizer differences between the primary model and the fallback model (CJK text
+    /// in particular can differ significantly in token count across tokenizers).
+    ///
+    /// The boundary is chosen via `find_compaction_boundary_for_budget`: we walk work
+    /// units front-to-back and return the first split where the accumulated compressed
+    /// prefix has freed enough tokens for the retained tail to fit in `target_window`.
+    async fn compact_to_budget(
+        &mut self,
+        target_model_id: &str,
+        target_window: u64,
+        target_max_output: u64,
+    ) -> anyhow::Result<()> {
+        // Reserve space for: system prompt estimate + output budget + safety gap.
+        const OVERHEAD: u64 = 2_000;
+        let output_reserve = target_max_output.min(8_192);
+        let available = target_window
+            .saturating_sub(OVERHEAD)
+            .saturating_sub(output_reserve);
+
+        if available == 0 {
+            anyhow::bail!(
+                "target model '{}' context window ({}) too small to compact into",
+                target_model_id, target_window
+            );
+        }
+
+        // Divide by 1.25: we want the retained tail (measured in the *target* tokenizer)
+        // to comfortably fit even when our counts came from the primary tokenizer.
+        let tail_budget = (available as f64 / 1.25) as u64;
+
+        // Conservative estimate for the current total in the target tokenizer.
+        let conservative_total = (self.token_tracker.total_tokens() as f64 * 1.25) as u64;
+
+        if conservative_total <= tail_budget {
+            tracing::debug!(
+                target_model = %target_model_id,
+                conservative_total,
+                tail_budget,
+                "pre-fallback compaction not needed (context already fits)"
+            );
+            return Ok(());
+        }
+
+        let retain_count = self.config.context.retain_work_units.max(1);
+        let boundary = match super::work_unit::find_compaction_boundary_for_budget(
+            &self.session.history,
+            conservative_total,
+            tail_budget,
+            retain_count,
+        ) {
+            Some(b) => b,
+            None => {
+                tracing::debug!(
+                    target_model = %target_model_id,
+                    "no compaction boundary available (too few work units)"
+                );
+                return Ok(());
+            }
+        };
+
+        let history_len = self.session.history.len();
+        if boundary == 0 || boundary >= history_len {
+            return Ok(());
+        }
+
+        tracing::info!(
+            target_model = %target_model_id,
+            target_window,
+            tail_budget,
+            conservative_total,
+            boundary,
+            "pre-fallback compaction triggered"
+        );
+
+        self.compact_with_boundary(target_model_id, boundary).await
+    }
+
+    /// Check the routing fallback chain and proactively compact if the current context
+    /// would overflow any fallback model's context window.
+    ///
+    /// Only the first (highest-priority) overflowing model triggers compaction;
+    /// we compact once per turn at most.
+    async fn maybe_compact_for_fallback(&mut self) -> anyhow::Result<()> {
+        let routing_models = self.registry.get_chat_routing_models();
+        if routing_models.len() <= 1 {
+            return Ok(()); // no fallback chain
+        }
+
+        let conservative_total = (self.token_tracker.total_tokens() as f64 * 1.25) as u64;
+
+        // Extract target model info without holding a borrow when we later call &mut self.
+        let target: Option<(String, u64, u64)> = routing_models
+            .iter()
+            .skip(1) // skip primary model
+            .find_map(|model_id| {
+                let cfg = self.registry.get_chat_model_config(model_id).ok()?;
+                let window = cfg.context_window?;
+                let max_output = cfg.max_output_tokens.unwrap_or(4096) as u64;
+                if conservative_total > window {
+                    Some((model_id.clone(), window, max_output))
+                } else {
+                    None
+                }
+            });
+        // All borrows from get_chat_model_config are dropped here.
+
+        if let Some((model_id, window, max_output)) = target {
+            tracing::info!(
+                model = %model_id,
+                conservative_total,
+                window,
+                "pre-fallback: context would overflow fallback model, compacting"
+            );
+            if let Err(e) = self.compact_to_budget(&model_id, window, max_output).await {
+                tracing::warn!(model = %model_id, error = %e, "pre-fallback compaction failed");
+            }
+        }
 
         Ok(())
     }

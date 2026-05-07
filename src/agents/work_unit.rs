@@ -92,6 +92,78 @@ pub fn find_compaction_boundary(history: &[ChatMessage], retain_count: usize) ->
     }
 }
 
+/// Rough per-message token estimator (4 chars ≈ 1 token + metadata overhead).
+/// Mirrors `estimate_message_tokens` in agent_impl without creating a circular import.
+fn estimate_msg_tokens(msg: &ChatMessage) -> u64 {
+    use crate::providers::ContentPart;
+    let text_len: usize = msg.parts.iter().map(|p| match p {
+        ContentPart::Text { text } => text.len(),
+        ContentPart::Thinking { thinking } => thinking.len(),
+        ContentPart::ImageUrl { .. } | ContentPart::ImageB64 { .. } => 400,
+    }).sum();
+    let tool_len: usize = msg.tool_calls.as_ref().map_or(0, |tcs| {
+        tcs.iter().map(|tc| tc.arguments.len() + 32).sum()
+    });
+    ((text_len + tool_len) as u64).div_ceil(4) + 4
+}
+
+/// Find the earliest compaction boundary where the retained tail fits within `tail_budget`.
+///
+/// Walks work unit boundaries **front to back**, accumulating compressed-prefix tokens.
+/// The "budget" is measured against the compressible content:
+/// `tokens_to_free = conservative_total_tokens - tail_budget`.
+/// Returns `Some(boundary)` at the first work-unit split where
+/// `accumulated_prefix_tokens >= tokens_to_free`, i.e. we have freed enough
+/// tokens for the retained tail to fit in the target model's window.
+///
+/// At least `retain_work_units` work units are always kept in the tail.
+/// If no single boundary frees enough (e.g. the target window is extremely small),
+/// the maximum-compression boundary (retaining exactly `retain_work_units` units)
+/// is returned as a best-effort fallback.
+///
+/// Returns `None` when there are too few work units to compress anything.
+pub fn find_compaction_boundary_for_budget(
+    history: &[ChatMessage],
+    conservative_total_tokens: u64,
+    tail_budget: u64,
+    retain_work_units: usize,
+) -> Option<usize> {
+    let units = extract_work_units(history);
+
+    if units.len() <= retain_work_units {
+        return None;
+    }
+
+    let max_compress_count = units.len() - retain_work_units;
+
+    let tokens_to_free = conservative_total_tokens.saturating_sub(tail_budget);
+    if tokens_to_free == 0 {
+        return None; // already fits, no compaction needed
+    }
+
+    // Walk work unit boundaries front to back.
+    // At step i (1-based), the candidate split compresses units[0..i] and retains units[i..].
+    // boundary = units[i].user_start  (start of the i-th unit = start of retained portion)
+    let mut accumulated: u64 = 0;
+
+    for compress_count in 1..=max_compress_count {
+        let prev_start = if compress_count == 1 { 0 } else { units[compress_count - 1].user_start };
+        let boundary = units[compress_count].user_start;
+
+        for msg in &history[prev_start..boundary] {
+            accumulated += estimate_msg_tokens(msg);
+        }
+
+        if accumulated >= tokens_to_free {
+            // First boundary where we've freed enough — return it.
+            return Some(boundary);
+        }
+    }
+
+    // No single boundary freed enough; return max-compression boundary as fallback.
+    Some(units[max_compress_count].user_start)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
