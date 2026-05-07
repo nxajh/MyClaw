@@ -182,6 +182,7 @@ impl SubAgentDelegator {
                 native_tools: true,
                 channel_name: None,
                 host_info: None,
+                timezone_offset: 8,
             },
             context: crate::config::agent::ContextConfig::default(),
             stream_chunk_timeout_secs: 90,

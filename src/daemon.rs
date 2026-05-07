@@ -425,6 +425,7 @@ fn build_prompt_config(
         native_tools: cfg.prompt.native_tools,
         channel_name: cfg.prompt.channel_name.clone(),
         host_info: None,
+        timezone_offset: cfg.prompt.timezone_offset,
     }
 }
 

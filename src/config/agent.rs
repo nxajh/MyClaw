@@ -129,9 +129,15 @@ pub struct PromptConfig {
 
     /// Default channel name shown in channel caps section.
     pub channel_name: Option<String>,
+
+    /// Timezone offset in hours (e.g. 8 for UTC+8).
+    /// Used for date injection via system-reminder.
+    #[serde(default = "default_timezone_offset")]
+    pub timezone_offset: i32,
 }
 
 fn default_bootstrap_max_chars() -> usize { 8000 }
+fn default_timezone_offset() -> i32 { 8 }
 
 fn default_true() -> bool { true }
 
@@ -144,6 +150,7 @@ impl Default for PromptConfig {
             native_tools: true,
             model_name: None,
             channel_name: None,
+            timezone_offset: default_timezone_offset(),
         }
     }
 }

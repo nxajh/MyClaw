@@ -71,6 +71,8 @@ pub struct SystemPromptConfig {
     pub channel_name: Option<String>,
     /// Host information for Runtime section.
     pub host_info: Option<String>,
+    /// Timezone offset in hours (e.g. 8 for UTC+8). Used for date injection.
+    pub timezone_offset: i32,
 }
 
 impl Default for SystemPromptConfig {
@@ -86,6 +88,7 @@ impl Default for SystemPromptConfig {
             native_tools: true,
             channel_name: None,
             host_info: None,
+            timezone_offset: 8,
         }
     }
 }

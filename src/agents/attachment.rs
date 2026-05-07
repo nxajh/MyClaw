@@ -20,6 +20,7 @@ enum AttachmentKind {
     AgentListing,
     McpInstructions,
     MemoryListing,
+    DateInjection,
 }
 
 /// 单类增量。
@@ -51,6 +52,8 @@ pub struct AttachmentManager {
     pending: HashMap<AttachmentKind, Delta>,
     /// 当前注入过的 memory 索引文本（用于跨 turn diff）
     memory_index: Option<String>,
+    /// 上次注入的日期 "YYYY-MM-DD"（用于区分首次 vs 日期变化）
+    last_injected_date: Option<String>,
 }
 
 impl AttachmentManager {
@@ -272,6 +275,57 @@ impl AttachmentManager {
         self.memory_index = Some(new_text);
     }
 
+    /// Check date injection. Generates a system-reminder with the current date
+    /// when needed: first turn, date change, or after compaction (date message
+    /// removed from history).
+    pub fn diff_date(&mut self, timezone_offset: i32, history: &[ChatMessage]) {
+        let now_utc = chrono::Utc::now();
+        let local = now_utc + chrono::Duration::hours(timezone_offset as i64);
+        let current_date = local.format("%Y-%m-%d").to_string();
+        let current_weekday = local.format("%A").to_string();
+
+        // Check if history already contains a date system-reminder for today.
+        let date_marker = format!("Current date: {}", current_date);
+        let date_in_history = history.iter().any(|msg| {
+            let text = msg.text_content();
+            text.contains("<system-reminder>") && text.contains(&date_marker)
+        });
+
+        if date_in_history {
+            self.last_injected_date = Some(current_date);
+            return;
+        }
+
+        // No date in history — inject.
+        let is_date_change = self.last_injected_date.is_some();
+        self.last_injected_date = Some(current_date.clone());
+
+        let msg = if is_date_change {
+            format!(
+                "The date has changed. Today's date is now {} ({}).",
+                current_date,
+                current_weekday,
+            )
+        } else {
+            let tz_str = if timezone_offset >= 0 {
+                format!("+{}", timezone_offset)
+            } else {
+                format!("{}", timezone_offset)
+            };
+            format!(
+                "Current date: {} ({}, UTC{}). Use this for any date-relative references.",
+                current_date,
+                current_weekday,
+                tz_str,
+            )
+        };
+
+        self.pending.insert(
+            AttachmentKind::DateInjection,
+            Delta { added: vec![msg], removed: vec![] },
+        );
+    }
+
     // ── Render ──────────────────────────────────────────────────────────
 
     /// 将 pending delta 合并为一条 ChatMessage。
@@ -280,6 +334,10 @@ impl AttachmentManager {
     pub fn build_message(&self, skills: &SkillManager) -> Option<ChatMessage> {
         let mut sections = Vec::new();
 
+        // Date injection comes first (not a section, just a plain line).
+        if let Some(delta) = self.pending.get(&AttachmentKind::DateInjection) {
+            sections.push(Self::render_date(delta));
+        }
         if let Some(delta) = self.pending.get(&AttachmentKind::SkillListing) {
             sections.push(Self::render_skills(delta, skills));
         }
@@ -315,6 +373,7 @@ impl AttachmentManager {
             AttachmentKind::AgentListing => "agents",
             AttachmentKind::McpInstructions => "mcp",
             AttachmentKind::MemoryListing => "memory",
+            AttachmentKind::DateInjection => "date",
         }).collect()
     }
 
@@ -395,6 +454,10 @@ impl AttachmentManager {
         }
 
         lines.join("\n")
+    }
+
+    fn render_date(delta: &Delta) -> String {
+        delta.added.join("\n")
     }
 }
 
@@ -566,5 +629,55 @@ mod tests {
         assert!(!announced2.skills.contains("a")); // removed
         assert!(announced2.skills.contains("b"));   // still there
         assert!(announced2.skills.contains("c"));   // added
+    }
+
+    #[test]
+    fn date_injection_on_empty_history() {
+        let mut am = AttachmentManager::new();
+        am.diff_date(8, &empty_history());
+        let msg = am.build_message(&SkillManager::new()).unwrap();
+        let text = msg.text_content();
+        assert!(text.contains("Current date:"));
+        assert!(text.contains("UTC+8"));
+        assert!(text.contains("<system-reminder>"));
+    }
+
+    #[test]
+    fn date_injection_skips_if_already_in_history() {
+        let mut am = AttachmentManager::new();
+
+        // First injection
+        am.diff_date(8, &empty_history());
+        let msg = am.build_message(&SkillManager::new()).unwrap();
+        am.clear_pending();
+
+        // Simulate the date message in history
+        let history = vec![msg];
+        am.diff_date(8, &history);
+        assert!(am.build_message(&SkillManager::new()).is_none());
+    }
+
+    #[test]
+    fn date_reinjects_after_compaction() {
+        let mut am = AttachmentManager::new();
+
+        // First injection
+        am.diff_date(8, &empty_history());
+        let first_msg = am.build_message(&SkillManager::new()).unwrap();
+        am.clear_pending();
+
+        // last_injected_date is set
+        assert!(am.last_injected_date.is_some());
+        // Verify first message was a proper date injection
+        assert!(first_msg.text_content().contains("Current date:"));
+
+        // Simulate compaction: history is empty but last_injected_date persists
+        let compacted_history: Vec<ChatMessage> = vec![];
+        am.diff_date(8, &compacted_history);
+
+        // Should re-inject because history doesn't contain the date message
+        let msg = am.build_message(&SkillManager::new()).unwrap();
+        let text = msg.text_content();
+        assert!(text.contains("The date has changed"));
     }
 }

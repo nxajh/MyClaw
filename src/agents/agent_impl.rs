@@ -729,6 +729,13 @@ impl AgentLoop {
         // Check for file changes (hot-reload).
         self.check_changes();
 
+        // Date injection: check if date system-reminder is needed.
+        {
+            let tz = self.config.prompt_config.timezone_offset;
+            let history = self.session.history.clone();
+            self.attachments.diff_date(tz, &history);
+        }
+
         // If there's a pending attachment delta, persist it into session history.
         // All system-reminders are kept in history — compaction naturally removes old ones.
         {
@@ -876,6 +883,13 @@ impl AgentLoop {
             } else {
                 self.registry.get_chat_provider(Capability::Chat)?
             };
+
+            // Pre-API compaction check: tool results from the previous round may have
+            // pushed context over threshold. Compact before building messages to avoid
+            // sending an oversized context. No-op on first iteration.
+            if let Err(e) = self.maybe_compact(&model_id).await {
+                tracing::warn!(error = %e, "pre-API compaction check failed, continuing");
+            }
 
             // Use initial_messages on the first iteration (includes system-reminder
             // from AttachmentManager), rebuild on subsequent iterations (after tool
