@@ -109,19 +109,24 @@ fn estimate_msg_tokens(msg: &ChatMessage) -> u64 {
 
 /// Find the earliest compaction boundary where the retained tail fits within `tail_budget`.
 ///
-/// Walks work unit boundaries **front to back**, accumulating compressed-prefix tokens.
-/// The "budget" is measured against the compressible content:
-/// `tokens_to_free = conservative_total_tokens - tail_budget`.
-/// Returns `Some(boundary)` at the first work-unit split where
-/// `accumulated_prefix_tokens >= tokens_to_free`, i.e. we have freed enough
-/// tokens for the retained tail to fit in the target model's window.
+/// Walks work unit boundaries **large-to-small** (most compression → least compression).
+/// Starts from maximum compression (retaining only `retain_work_units` units) and
+/// incrementally grows the retained tail by moving work units back one at a time,
+/// stopping as soon as the tail would exceed `tail_budget`.
 ///
-/// At least `retain_work_units` work units are always kept in the tail.
-/// If no single boundary frees enough (e.g. the target window is extremely small),
-/// the maximum-compression boundary (retaining exactly `retain_work_units` units)
-/// is returned as a best-effort fallback.
+/// This direction is optimal for the pre-fallback scenario where significant compression
+/// is typically required: we validate that maximum compression is even feasible in one
+/// O(n) pass over the retained tail, then back off with O(1) incremental updates per step.
 ///
-/// Returns `None` when there are too few work units to compress anything.
+/// Returns `Some(boundary)` where `history[..boundary]` is summarised and
+/// `history[boundary..]` (tail) fits within `tail_budget`.
+/// At least `retain_work_units` work units are always kept.
+///
+/// If even maximum compression can't satisfy the budget, returns the max-compression
+/// boundary as a best-effort fallback.
+///
+/// Returns `None` when there are too few work units to compress anything, or when
+/// `conservative_total_tokens <= tail_budget` (already fits, no compaction needed).
 pub fn find_compaction_boundary_for_budget(
     history: &[ChatMessage],
     conservative_total_tokens: u64,
@@ -134,34 +139,49 @@ pub fn find_compaction_boundary_for_budget(
         return None;
     }
 
-    let max_compress_count = units.len() - retain_work_units;
-
-    let tokens_to_free = conservative_total_tokens.saturating_sub(tail_budget);
-    if tokens_to_free == 0 {
+    if conservative_total_tokens <= tail_budget {
         return None; // already fits, no compaction needed
     }
 
-    // Walk work unit boundaries front to back.
-    // At step i (1-based), the candidate split compresses units[0..i] and retains units[i..].
-    // boundary = units[i].user_start  (start of the i-th unit = start of retained portion)
-    let mut accumulated: u64 = 0;
+    let max_compress_count = units.len() - retain_work_units;
+    // Maximum-compression boundary: compress units[0..max_compress_count], retain the rest.
+    let max_boundary = units[max_compress_count].user_start;
 
-    for compress_count in 1..=max_compress_count {
-        let prev_start = if compress_count == 1 { 0 } else { units[compress_count - 1].user_start };
-        let boundary = units[compress_count].user_start;
+    // Compute tail tokens at maximum compression (O(n) scan of the retained portion).
+    let mut tail_tokens: u64 = history[max_boundary..].iter().map(estimate_msg_tokens).sum();
 
-        for msg in &history[prev_start..boundary] {
-            accumulated += estimate_msg_tokens(msg);
-        }
-
-        if accumulated >= tokens_to_free {
-            // First boundary where we've freed enough — return it.
-            return Some(boundary);
-        }
+    if tail_tokens > tail_budget {
+        // Even maximum compression can't satisfy the budget — return max boundary as fallback.
+        return Some(max_boundary);
     }
 
-    // No single boundary freed enough; return max-compression boundary as fallback.
-    Some(units[max_compress_count].user_start)
+    // Walk from max_compress_count-1 down to 1.
+    // At each step we "un-compress" one more work unit (grow the retained tail).
+    // Stop when the tail would exceed tail_budget; the previous boundary is the answer.
+    let mut best_boundary = max_boundary;
+
+    for compress_count in (1..max_compress_count).rev() {
+        // The unit being moved from the compressed prefix back into the retained tail
+        // spans history[units[compress_count].user_start .. units[compress_count+1].user_start].
+        let unit_start = units[compress_count].user_start;
+        let unit_end = units[compress_count + 1].user_start;
+
+        for msg in &history[unit_start..unit_end] {
+            tail_tokens += estimate_msg_tokens(msg);
+        }
+
+        if tail_tokens > tail_budget {
+            // Growing the tail further breaks the budget.
+            // best_boundary (from the previous step) is the minimum-compression answer.
+            return Some(best_boundary);
+        }
+
+        // Still fits with less compression — record this boundary and keep backing off.
+        best_boundary = units[compress_count].user_start;
+    }
+
+    // Minimum compression (compress only unit[0]) also satisfies the budget.
+    Some(units[1].user_start)
 }
 
 #[cfg(test)]
