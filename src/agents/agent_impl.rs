@@ -443,13 +443,19 @@ impl AgentLoop {
 
         // Initialize token tracker for fresh session / recovery.
         if self.token_tracker.is_fresh() {
-            if !self.system_prompt.is_empty() {
-                self.token_tracker.record_pending(
-                    estimate_tokens(&self.system_prompt) + 4 // metadata overhead
-                );
-            }
-            for msg in &self.session.history {
-                self.token_tracker.record_pending(estimate_message_tokens(msg));
+            if let Some(stored) = self.session.last_total_tokens {
+                // Precise value persisted from last API response — use directly.
+                self.token_tracker.update_from_usage(stored, 0, 0);
+            } else {
+                // No stored value (brand-new session): estimate from history.
+                if !self.system_prompt.is_empty() {
+                    self.token_tracker.record_pending(
+                        estimate_tokens(&self.system_prompt) + 4
+                    );
+                }
+                for msg in &self.session.history {
+                    self.token_tracker.record_pending(estimate_message_tokens(msg));
+                }
             }
         }
 
@@ -834,6 +840,11 @@ impl AgentLoop {
                     total_tracked = self.token_tracker.total_tokens(),
                     "token usage recorded"
                 );
+
+                // Persist the precise total so it survives restarts.
+                if let Some(ref hook) = self.persist_hook {
+                    hook.save_token_count(&self.session.id, self.token_tracker.total_tokens());
+                }
             }
 
             // Check compaction using the precise token counts just reported by the API.

@@ -90,6 +90,18 @@ pub trait SessionBackend: Send + Sync {
         Ok(())
     }
 
+    /// Persist the last known total token count for a session.
+    /// Called after each API response so the value survives restarts.
+    /// Default: no-op (in-memory backend doesn't need this).
+    fn save_token_count(&self, _session_id: &str, _total: u64) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Load the last persisted total token count for a session.
+    fn load_token_count(&self, _session_id: &str) -> Option<u64> {
+        None
+    }
+
     // ── Maintenance ────────────────────────────────────────────────────────
 
     /// Clean up sessions older than ttl_hours.

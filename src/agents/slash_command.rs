@@ -420,11 +420,17 @@ async fn cmd_context(ctx: CommandContext<'_>) -> String {
                 model_id, context_window
             )
         } else {
-            let estimated_total: u64 = session.history.iter()
-                .map(crate::agents::agent_impl::estimate_message_tokens)
-                .sum();
+            // Prefer the persisted precise value; fall back to per-message estimate.
+            let (total, is_precise) = if let Some(stored) = session.last_total_tokens {
+                (stored, true)
+            } else {
+                let est: u64 = session.history.iter()
+                    .map(crate::agents::agent_impl::estimate_message_tokens)
+                    .sum();
+                (est, false)
+            };
             let usage_pct = if context_window > 0 {
-                format!("{:.1}%", (estimated_total as f64 / context_window as f64) * 100.0)
+                format!("{:.1}%", (total as f64 / context_window as f64) * 100.0)
             } else {
                 "未知".to_string()
             };
@@ -435,7 +441,7 @@ async fn cmd_context(ctx: CommandContext<'_>) -> String {
             } else {
                 "未知".to_string()
             };
-            let used_kb = estimated_total * 4 / 1024;
+            let used_kb = total * 4 / 1024;
             let window_kb = context_window * 4 / 1024;
             let summary_info = if let Some(ref meta) = session.summary_metadata {
                 format!(
@@ -445,16 +451,21 @@ async fn cmd_context(ctx: CommandContext<'_>) -> String {
             } else {
                 "尚未压缩".to_string()
             };
+            let title = if is_precise {
+                "📐 **上下文详情**"
+            } else {
+                "📐 **上下文详情** _(来自历史估算)_"
+            };
             format!(
-                "📐 **上下文详情** _(来自历史估算，发送消息后获取精确值)_\n\n\
+                "{}\n\n\
                  模型: `{}`\n\
                  上下文窗口: {} token (~{}KB)\n\
-                 当前使用: ~{} token (~{}KB, {})\n\
+                 当前使用: {} token (~{}KB, {})\n\
                  压缩阈值: {}\n\
                  历史消息: {} 条\n\
                  压缩状态: {}",
-                model_id, context_window, window_kb,
-                estimated_total, used_kb, usage_pct,
+                title, model_id, context_window, window_kb,
+                total, used_kb, usage_pct,
                 threshold, session.history.len(), summary_info
             )
         }
