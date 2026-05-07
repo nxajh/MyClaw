@@ -133,13 +133,15 @@ impl ChatProvider for GlmProvider {
                 while let Some(pos) = buffer.find('\n') {
                     let line = buffer[..pos].to_string();
                     buffer.drain(..=pos);
-                    let event = parse_glm_sse(&line, &mut saw_tool_call);
+                    let parsed = parse_glm_sse(&line, &mut saw_tool_call);
                     crate::providers::append_to_debug_log(&format!(
-                        "SSE LINE: {}\nEVENT: {:?}\n",
-                        line, event
+                        "SSE LINE: {}\nEVENTS: {:?}\n",
+                        line, parsed
                     ));
-                    if let Some(event) = event {
-                        let _ = tx.send(event).await;
+                    if let Some(events) = parsed {
+                        for ev in events {
+                            let _ = tx.send(ev).await;
+                        }
                     }
                 }
             }
@@ -295,7 +297,7 @@ fn build_glm_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
 /// - `finish_reason` can be `"sensitive"` (content filtered by GLM safety)
 /// - `finish_reason` may be `"stop"` even when `tool_calls` were emitted
 ///   in previous chunks; `saw_tool_call` tracks this and overrides the reason
-fn parse_glm_sse(line: &str, saw_tool_call: &mut bool) -> Option<StreamEvent> {
+fn parse_glm_sse(line: &str, saw_tool_call: &mut bool) -> Option<Vec<StreamEvent>> {
     let line = line.trim();
     if line.is_empty() || line.starts_with(':') { return None; }
     let data = line.strip_prefix("data:")?.trim();
@@ -321,20 +323,37 @@ fn parse_glm_sse(line: &str, saw_tool_call: &mut bool) -> Option<StreamEvent> {
     struct Usage {
         #[serde(default)] prompt_tokens: Option<u64>,
         #[serde(default)] completion_tokens: Option<u64>,
+        #[serde(default)] prompt_tokens_details: Option<PromptDetails>,
     }
+    #[derive(serde::Deserialize)]
+    struct PromptDetails { #[serde(default)] cached_tokens: Option<u64> }
 
     let chunk: Chunk = serde_json::from_str(data).ok()?;
 
-    // Final usage chunk (choices is empty, usage present).
+    // Extract usage whenever present — GLM sends usage in the final chunk
+    // alongside choices (with finish_reason), unlike standard OpenAI which
+    // sends it in a separate choices=[] chunk.  We must return both Usage
+    // and Done/ToolCall events from the same chunk.
+    let mut events: Vec<StreamEvent> = Vec::new();
+    if let Some(usage) = chunk.usage {
+        // GLM sends prompt_tokens_details.cached_tokens in the usage chunk.
+        // Normalize: input_tokens = non-cached portion, cached_input_tokens = cached.
+        let cached = usage
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|d| d.cached_tokens)
+            .unwrap_or(0);
+        let non_cached = usage.prompt_tokens.map(|t| t.saturating_sub(cached));
+        events.push(StreamEvent::Usage(crate::providers::ChatUsage {
+            input_tokens: non_cached,
+            output_tokens: usage.completion_tokens,
+            cached_input_tokens: if cached > 0 { Some(cached) } else { None },
+            ..Default::default()
+        }));
+    }
+
     if chunk.choices.is_empty() {
-        if let Some(usage) = chunk.usage {
-            return Some(StreamEvent::Usage(crate::providers::ChatUsage {
-                input_tokens: usage.prompt_tokens,
-                output_tokens: usage.completion_tokens,
-                ..Default::default()
-            }));
-        }
-        return None;
+        return if events.is_empty() { None } else { Some(events) };
     }
 
     for choice in &chunk.choices {
@@ -350,25 +369,35 @@ fn parse_glm_sse(line: &str, saw_tool_call: &mut bool) -> Option<StreamEvent> {
 
                 if !id.is_empty() && func.is_some_and(|f| f.name.is_some()) {
                     let initial_args = func.and_then(|f| f.arguments.clone()).unwrap_or_default();
-                    return Some(StreamEvent::ToolCallStart {
+                    events.push(StreamEvent::ToolCallStart {
                         id: id.clone(),
                         name: func.and_then(|f| f.name.clone()).unwrap_or_default(),
                         initial_arguments: initial_args,
                     });
+                    // Return immediately — Usage was already captured above if present.
+                    // The next chunk will continue the tool call stream.
+                    return Some(events);
                 }
 
                 let args = func.and_then(|f| f.arguments.clone()).unwrap_or_default();
                 if !args.is_empty() {
-                    return Some(StreamEvent::ToolCallDelta { id, delta: args });
+                    events.push(StreamEvent::ToolCallDelta { id, delta: args });
+                    return Some(events);
                 }
             }
         }
 
         if let Some(text) = &choice.delta.content {
-            if !text.is_empty() { return Some(StreamEvent::Delta { text: text.clone() }); }
+            if !text.is_empty() {
+                events.push(StreamEvent::Delta { text: text.clone() });
+                return Some(events);
+            }
         }
         if let Some(reasoning) = &choice.delta.reasoning_content {
-            if !reasoning.is_empty() { return Some(StreamEvent::Thinking { text: reasoning.clone() }); }
+            if !reasoning.is_empty() {
+                events.push(StreamEvent::Thinking { text: reasoning.clone() });
+                return Some(events);
+            }
         }
         if choice.finish_reason.is_some() {
             let raw = choice.finish_reason.as_ref().unwrap();
@@ -380,11 +409,12 @@ fn parse_glm_sse(line: &str, saw_tool_call: &mut bool) -> Option<StreamEvent> {
                 "content_filter" | "sensitive" => StopReason::ContentFilter,
                 _ => StopReason::EndTurn,
             };
-            return Some(StreamEvent::Done { reason });
+            events.push(StreamEvent::Done { reason });
+            // Don't return yet — continue to process any remaining choices.
         }
     }
 
-    None
+    if events.is_empty() { None } else { Some(events) }
 }
 
 // ── EmbeddingProvider ─────────────────────────────────────────────────────────
