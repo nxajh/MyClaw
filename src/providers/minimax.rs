@@ -1,7 +1,8 @@
 //! MiniMax provider — OpenAI-compatible protocol.
 //!
 //! Handles MiniMax-specific quirks:
-//! - SSE streaming via `/text/chatcompletion_v2`
+//! - SSE streaming via OpenAI-compatible `/chat/completions` endpoint
+//! - reasoning_split=true delivers thinking via reasoning_content field
 //! - Occasionally, the model emits tool-call JSON as plain text in `content`
 //!   instead of using the structured `tool_calls` field.  We detect and
 //!   correct this at the provider level so upstream consumers never see it.
@@ -40,7 +41,7 @@ impl MiniMaxProvider {
 #[async_trait]
 impl ChatProvider for MiniMaxProvider {
     fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
-        let url = format!("{}/text/chatcompletion_v2", self.base_url);
+        let url = format!("{}/chat/completions", self.base_url);
         let body = build_minimax_body(&req);
         let auth = crate::providers::shared::build_auth(&crate::providers::shared::AuthStyle::Bearer, &self.api_key);
         let client = self.client.clone();
