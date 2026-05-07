@@ -239,6 +239,11 @@ impl Agent {
         &self.config.prompt_config.workspace_dir
     }
 
+    /// Compact threshold ratio from agent config.
+    pub fn compact_threshold(&self) -> f64 {
+        self.config.context.compact_threshold
+    }
+
     /// Set the system prompt directly (overrides builder).
     pub fn with_system_prompt(mut self, prompt: String) -> Self {
         self.system_prompt = prompt;
@@ -438,13 +443,19 @@ impl AgentLoop {
 
         // Initialize token tracker for fresh session / recovery.
         if self.token_tracker.is_fresh() {
-            if !self.system_prompt.is_empty() {
-                self.token_tracker.record_pending(
-                    estimate_tokens(&self.system_prompt) + 4 // metadata overhead
-                );
-            }
-            for msg in &self.session.history {
-                self.token_tracker.record_pending(estimate_message_tokens(msg));
+            if let Some(stored) = self.session.last_total_tokens {
+                // Precise value persisted from last API response — use directly.
+                self.token_tracker.update_from_usage(stored, 0, 0);
+            } else {
+                // No stored value (brand-new session): estimate from history.
+                if !self.system_prompt.is_empty() {
+                    self.token_tracker.record_pending(
+                        estimate_tokens(&self.system_prompt) + 4
+                    );
+                }
+                for msg in &self.session.history {
+                    self.token_tracker.record_pending(estimate_message_tokens(msg));
+                }
             }
         }
 
@@ -625,6 +636,19 @@ impl AgentLoop {
                 // Append to history (previous system-reminders are kept)
                 self.session.add_user_text(msg.text_content().to_string());
                 self.attachments.clear_pending();
+
+                // Persist the system-reminder so it survives session switches/restarts.
+                // Without this, the message lives only in memory and is lost when the
+                // session is evicted from the DashMap.
+                if let Some(ref hook) = self.persist_hook {
+                    if let Some(reminder_msg) = self.session.history.last() {
+                        if let Some(id) = hook.persist_message(&self.session.id, reminder_msg) {
+                            if let Some(last_id) = self.session.message_ids.last_mut() {
+                                *last_id = id;
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -845,6 +869,11 @@ impl AgentLoop {
                     total_tracked = self.token_tracker.total_tokens(),
                     "token usage recorded"
                 );
+
+                // Persist the precise total so it survives restarts.
+                if let Some(ref hook) = self.persist_hook {
+                    hook.save_token_count(&self.session.id, self.token_tracker.total_tokens());
+                }
             }
 
             // Check compaction using the precise token counts just reported by the API.

@@ -52,6 +52,10 @@ struct SessionMeta {
     /// Token estimate from the last compaction summary, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     compact_token_estimate: Option<u64>,
+    /// Last known total token count (input + cached + output) from the API.
+    /// Persisted after each response so the value survives restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_total_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -229,6 +233,7 @@ impl SessionBackend for JsonFileBackend {
             segment: 0,
             compact_version: 0,
             compact_token_estimate: None,
+            last_total_tokens: None,
         };
         self.write_meta(&meta)?;
 
@@ -428,5 +433,17 @@ impl SessionBackend for JsonFileBackend {
         let _ = self.write_active(&active);
 
         Ok(count)
+    }
+
+    fn save_token_count(&self, session_id: &str, total: u64) -> std::io::Result<()> {
+        if let Some(mut meta) = self.read_meta(session_id) {
+            meta.last_total_tokens = Some(total);
+            self.write_meta(&meta)?;
+        }
+        Ok(())
+    }
+
+    fn load_token_count(&self, session_id: &str) -> Option<u64> {
+        self.read_meta(session_id)?.last_total_tokens
     }
 }

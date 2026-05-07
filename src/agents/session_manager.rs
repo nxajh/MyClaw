@@ -202,6 +202,8 @@ pub trait PersistHook: Send + Sync {
     fn save_compaction(&self, session_id: &str, summary: &SummaryRecord);
     /// Archive the current history segment; surviving messages are kept in the new file.
     fn rotate_history(&self, session_id: &str, surviving: &[(i64, ChatMessage)]);
+    /// Persist the last known total token count so it survives restarts.
+    fn save_token_count(&self, session_id: &str, total: u64);
 }
 
 /// PersistHook implementation backed by a SessionBackend.
@@ -237,6 +239,12 @@ impl PersistHook for BackendPersistHook {
             tracing::warn!(session = %session_id, err = %e, "history rotation failed");
         }
     }
+
+    fn save_token_count(&self, session_id: &str, total: u64) {
+        if let Err(e) = self.backend.save_token_count(session_id, total) {
+            tracing::warn!(session = %session_id, err = %e, "save token count failed");
+        }
+    }
 }
 
 /// Summary metadata stored in Session memory (no text parsing needed).
@@ -262,6 +270,9 @@ pub struct Session {
     pub compact_version: u32,
     /// In-memory summary metadata (restored from backend on load).
     pub summary_metadata: Option<SummaryMetadata>,
+    /// Last total token count reported by the API (input + cached + output).
+    /// Loaded from meta.json on session restore; None for brand-new sessions.
+    pub last_total_tokens: Option<u64>,
 }
 
 impl Session {
@@ -273,6 +284,7 @@ impl Session {
             message_ids: Vec::new(),
             compact_version: 0,
             summary_metadata: None,
+            last_total_tokens: None,
         }
     }
 
@@ -368,6 +380,7 @@ impl SessionManager {
         }
 
         // 3. Load from backend.
+        let last_total_tokens = self.backend.load_token_count(&session_id);
         let session = match self.backend.load_latest_summary(&session_id) {
             Some(summary) => {
                 // The summary message is already in history.jsonl (written during
@@ -382,6 +395,7 @@ impl SessionManager {
                     session = %session_id,
                     message_count = count,
                     sanitized = msgs.len(),
+                    last_total_tokens,
                     "session restored from compacted history"
                 );
 
@@ -396,6 +410,7 @@ impl SessionManager {
                         token_estimate: summary.token_estimate.unwrap_or(0),
                         up_to_message: summary.up_to_message,
                     }),
+                    last_total_tokens,
                 }
             }
             None => {
@@ -415,6 +430,7 @@ impl SessionManager {
                     history: msgs,
                     compact_version: 0,
                     summary_metadata: None,
+                    last_total_tokens,
                 }
             }
         };

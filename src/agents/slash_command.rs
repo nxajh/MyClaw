@@ -408,13 +408,70 @@ async fn cmd_context(ctx: CommandContext<'_>) -> String {
             model_id, context_window, window_kb, total, used_kb, usage_pct, threshold, history_len, summary_info
         )
     } else {
-        format!(
-            "📐 **上下文详情**\n\n\
-             模型: `{}`\n\
-             上下文窗口: {} token\n\
-             状态: 新会话，无历史",
-            model_id, context_window
-        )
+        // agent_loop is None: restart or session switch before first message.
+        let session = ctx.session_manager.get_or_create(ctx.user_id);
+        if session.history.is_empty() {
+            format!(
+                "📐 **上下文详情**\n\n\
+                 模型: `{}`\n\
+                 上下文窗口: {} token\n\
+                 状态: 新会话，无历史",
+                model_id, context_window
+            )
+        } else if let Some(total) = session.last_total_tokens {
+            let usage_pct = if context_window > 0 {
+                format!("{:.1}%", (total as f64 / context_window as f64) * 100.0)
+            } else {
+                "未知".to_string()
+            };
+            let compact_threshold = ctx.agent.compact_threshold();
+            let threshold = if context_window > 0 {
+                let t = (context_window as f64 * compact_threshold) as u64;
+                format!("{} token ({:.0}%)", t, compact_threshold * 100.0)
+            } else {
+                "未知".to_string()
+            };
+            let used_kb = total * 4 / 1024;
+            let window_kb = context_window * 4 / 1024;
+            let summary_info = if let Some(ref meta) = session.summary_metadata {
+                format!(
+                    "压缩版本: v{}\n压缩到消息: #{}\n摘要估算 token: {}",
+                    meta.version, meta.up_to_message, meta.token_estimate
+                )
+            } else {
+                "尚未压缩".to_string()
+            };
+            format!(
+                "📐 **上下文详情**\n\n\
+                 模型: `{}`\n\
+                 上下文窗口: {} token (~{}KB)\n\
+                 当前使用: {} token (~{}KB, {})\n\
+                 压缩阈值: {}\n\
+                 历史消息: {} 条\n\
+                 压缩状态: {}",
+                model_id, context_window, window_kb,
+                total, used_kb, usage_pct,
+                threshold, session.history.len(), summary_info
+            )
+        } else {
+            // History exists but no stored token count (e.g. session predates
+            // token persistence). Don't estimate — just report as unknown.
+            format!(
+                "📐 **上下文详情**\n\n\
+                 模型: `{}`\n\
+                 上下文窗口: {} token\n\
+                 当前使用: 暂无记录（发送一条消息后获取精确值）\n\
+                 历史消息: {} 条\n\
+                 压缩状态: {}",
+                model_id, context_window,
+                session.history.len(),
+                if let Some(ref meta) = session.summary_metadata {
+                    format!("已压缩 v{}", meta.version)
+                } else {
+                    "尚未压缩".to_string()
+                }
+            )
+        }
     }
 }
 
