@@ -22,7 +22,8 @@ use crate::providers::{
 };
 use crate::providers::ServiceRegistry;
 use crate::providers::capability_tool::ToolResult;
-use crate::config::agent::ContextConfig;
+use crate::config::agent::{AutonomyLevel, ContextConfig};
+use crate::agents::session_manager::SessionOverride;
 
 use super::skills::SkillManager;
 use super::tool_registry::ToolRegistry;
@@ -159,6 +160,11 @@ pub struct AgentConfig {
     pub stream_chunk_timeout_secs: u64,
     /// Max output bytes before forcing stream stop (derived from max_output_tokens).
     pub max_output_bytes: usize,
+    /// Loop breaker exact-repeat threshold: N identical consecutive calls → break.
+    pub loop_breaker_threshold: usize,
+    /// Per-tool execution timeout in seconds (0 = no timeout).
+    /// Does not apply to ask_user or delegate_task (those have their own timeouts).
+    pub tool_timeout_secs: u64,
 }
 
 impl Default for AgentConfig {
@@ -170,6 +176,8 @@ impl Default for AgentConfig {
             context: ContextConfig::default(),
             stream_chunk_timeout_secs: 90,
             max_output_bytes: 100 * 1024, // 100KB default
+            loop_breaker_threshold: 3,
+            tool_timeout_secs: 180,
         }
     }
 }
@@ -287,24 +295,69 @@ impl Agent {
         session: Session,
         persist_hook: Option<Arc<dyn PersistHook>>,
     ) -> AgentLoop {
+        let ov = &session.session_override;
+
+        // Apply autonomy override to prompt config if set.
+        let prompt_config = if let Some(ref autonomy) = ov.autonomy {
+            let mut pc = self.config.prompt_config.clone();
+            pc.autonomy = match autonomy {
+                AutonomyLevel::Full => crate::agents::prompt::AutonomyLevel::Full,
+                AutonomyLevel::Default => crate::agents::prompt::AutonomyLevel::Default,
+                AutonomyLevel::ReadOnly => crate::agents::prompt::AutonomyLevel::ReadOnly,
+            };
+            pc
+        } else {
+            self.config.prompt_config.clone()
+        };
+
         let prompt = if !self.system_prompt.is_empty() {
             self.system_prompt.clone()
         } else {
             let skills = self.skills.read();
-            let builder = SystemPromptBuilder::new(self.config.prompt_config.clone());
+            let builder = SystemPromptBuilder::new(prompt_config.clone());
             builder.build(&skills)
         };
+
+        // Apply context overrides from session override.
+        let context = {
+            let mut ctx = self.config.context.clone();
+            if let Some(t) = ov.compact_threshold { ctx.compact_threshold = t; }
+            if let Some(r) = ov.retain_work_units { ctx.retain_work_units = r; }
+            ctx
+        };
+
+        // Apply max_tool_calls override.
+        let max_tool_calls = ov.max_tool_calls.unwrap_or(self.config.max_tool_calls);
+
+        // Resolve model override (session override takes priority over Agent-level override).
+        let model_override = ov.model.clone().or_else(|| self.model_override.clone());
+
+        // Resolve thinking override from session override.
+        let thinking_override = match ov.thinking {
+            Some(true) => Some(ThinkingConfig {
+                enabled: true,
+                effort: ov.effort.clone(),
+            }),
+            Some(false) => Some(ThinkingConfig { enabled: false, effort: None }),
+            None => None,
+        };
+
+        let mut config = self.config.clone();
+        config.prompt_config = prompt_config;
+        config.context = context;
+        config.max_tool_calls = max_tool_calls;
 
         AgentLoop {
             registry: Arc::clone(&self.registry),
             tools: Arc::clone(&self.tools),
-            config: self.config.clone(),
+            config,
             session,
             system_prompt: prompt,
             ask_user_handler: None,
             delegate_handler: None,
             loop_breaker: LoopBreaker::new(LoopBreakerConfig {
-                max_tool_calls: self.config.max_tool_calls,
+                max_tool_calls,
+                exact_repeat_threshold: self.config.loop_breaker_threshold,
                 ..LoopBreakerConfig::default()
             }),
             pending_image_urls: None,
@@ -312,7 +365,8 @@ impl Agent {
             token_tracker: TokenTracker::default(),
             persist_hook,
             sub_delegator: None,
-            model_override: self.model_override.clone(),
+            model_override,
+            thinking_override,
             attachments: AttachmentManager::new(),
             mcp_instructions: self.mcp_instructions.clone(),
             skills: Arc::clone(&self.skills),
@@ -350,6 +404,8 @@ pub struct AgentLoop {
     sub_delegator: Option<Arc<super::sub_agent::SubAgentDelegator>>,
     /// Optional model override — forces a specific model instead of registry default.
     model_override: Option<String>,
+    /// Optional thinking override from session override (None = use model config).
+    thinking_override: Option<ThinkingConfig>,
     // ── Attachment (增量注入) ──
     /// Attachment manager — 追踪已通知 LLM 的 skills/agents/MCP 列表。
     attachments: AttachmentManager,
@@ -386,6 +442,43 @@ impl AgentLoop {
     /// Get the compact threshold ratio from config.
     pub fn compact_threshold(&self) -> f64 {
         self.config.context.compact_threshold
+    }
+
+    /// Get the current session override.
+    pub fn session_override(&self) -> &SessionOverride {
+        &self.session.session_override
+    }
+
+    /// Apply a new session override to this live agent loop.
+    /// Updates the in-flight state so the override takes effect on the next
+    /// message without waiting for the loop to be recreated.
+    pub fn apply_session_override(&mut self, ov: SessionOverride) {
+        // Update model override.
+        self.model_override = ov.model.clone();
+
+        // Update thinking override.
+        self.thinking_override = match ov.thinking {
+            Some(true) => Some(ThinkingConfig { enabled: true, effort: ov.effort.clone() }),
+            Some(false) => Some(ThinkingConfig { enabled: false, effort: None }),
+            None => None,
+        };
+
+        // Update max_tool_calls.
+        if let Some(mtc) = ov.max_tool_calls {
+            self.config.max_tool_calls = mtc;
+            self.loop_breaker = LoopBreaker::new(LoopBreakerConfig {
+                max_tool_calls: mtc,
+                exact_repeat_threshold: self.config.loop_breaker_threshold,
+                ..LoopBreakerConfig::default()
+            });
+        }
+
+        // Update context config.
+        if let Some(t) = ov.compact_threshold { self.config.context.compact_threshold = t; }
+        if let Some(r) = ov.retain_work_units { self.config.context.retain_work_units = r; }
+
+        // Store override in session for next loop_for_with_persist call.
+        self.session.session_override = ov;
     }
 
     /// Manually trigger compaction (used by /compact command).
@@ -788,19 +881,20 @@ impl AgentLoop {
                 self.calculate_max_tokens(&model_id)
             };
 
-            // Derive thinking config from model config's `reasoning` field.
-            let thinking = self.registry.get_chat_model_config(&model_id)
-                .ok()
-                .and_then(|cfg| {
-                    if cfg.reasoning {
-                        Some(ThinkingConfig {
-                            enabled: true,
-                            effort: None,
-                        })
-                    } else {
-                        None
-                    }
-                });
+            // Derive thinking config: session override takes priority over model config.
+            let thinking = if let Some(ref t) = self.thinking_override {
+                if t.enabled { Some(t.clone()) } else { None }
+            } else {
+                self.registry.get_chat_model_config(&model_id)
+                    .ok()
+                    .and_then(|cfg| {
+                        if cfg.reasoning {
+                            Some(ThinkingConfig { enabled: true, effort: None })
+                        } else {
+                            None
+                        }
+                    })
+            };
 
             let req = ChatRequest {
                 model: &model_id,
@@ -1249,7 +1343,23 @@ impl AgentLoop {
             })
         };
 
-        let result = tool.execute(args).await?;
+        let result = if self.config.tool_timeout_secs > 0 {
+            let timeout = Duration::from_secs(self.config.tool_timeout_secs);
+            tokio::time::timeout(timeout, tool.execute(args))
+                .await
+                .unwrap_or_else(|_| {
+                    Ok(crate::providers::capability_tool::ToolResult {
+                        success: false,
+                        output: format!(
+                            "Tool '{}' timed out after {}s",
+                            call.name, self.config.tool_timeout_secs
+                        ),
+                        error: Some("timeout".to_string()),
+                    })
+                })?
+        } else {
+            tool.execute(args).await?
+        };
 
         // Framework-level truncation based on tool's declared limit.
         let max_tokens = tool.max_output_tokens();

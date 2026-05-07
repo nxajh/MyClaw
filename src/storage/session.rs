@@ -102,6 +102,16 @@ pub trait SessionBackend: Send + Sync {
         None
     }
 
+    /// Persist per-session runtime overrides as a JSON string.
+    fn save_session_override(&self, _session_id: &str, _json: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Load persisted per-session runtime overrides (raw JSON string).
+    fn load_session_override(&self, _session_id: &str) -> Option<String> {
+        None
+    }
+
     // ── Maintenance ────────────────────────────────────────────────────────
 
     /// Clean up sessions older than ttl_hours.
