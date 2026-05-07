@@ -1553,15 +1553,15 @@ impl AgentLoop {
         }
     }
 
-    /// Inline summarizer — cache-sharing primary + sub-delegator fallback.
+    /// Inline summarizer — uses `summarizer` provider when given, otherwise the primary provider.
     async fn summarize_inline(
         &mut self,
         to_compact: &[ChatMessage],
         existing_summary: Option<&str>,
         model_id: &str,
+        summarizer: Option<Arc<dyn crate::providers::ChatProvider>>,
     ) -> anyhow::Result<String> {
-        // Single attempt: no tools, dedicated summary prompt, 20K output budget.
-        match self.do_inline_summarize(to_compact, existing_summary, model_id).await {
+        match self.do_inline_summarize(to_compact, existing_summary, model_id, summarizer).await {
             Ok(s) if !s.trim().is_empty() => Ok(s),
             Ok(_) => {
                 tracing::warn!("summarize returned empty text");
@@ -1578,13 +1578,24 @@ impl AgentLoop {
     /// maximum prefix cache hit. Runs a full mini chat_loop so the model can
     /// use tools if needed. 20K output budget (Claude Code: 20K).
     /// Final text output on EndTurn becomes the summary.
+    ///
+    /// When `summarizer` is `Some`, that provider is used instead of the primary chat provider.
+    /// This is used for pre-fallback compaction so the target (smaller) model performs the
+    /// summarization with knowledge of its own capacity.
     async fn do_inline_summarize(
         &mut self,
         to_compact: &[ChatMessage],
         existing_summary: Option<&str>,
         model_id: &str,
+        summarizer: Option<Arc<dyn crate::providers::ChatProvider>>,
     ) -> anyhow::Result<String> {
-        let (provider, _) = self.registry.get_chat_provider(Capability::Chat)?;
+        let provider = match summarizer {
+            Some(p) => p,
+            None => {
+                let (p, _) = self.registry.get_chat_provider(Capability::Chat)?;
+                p
+            }
+        };
 
         // Build messages that mirror the main request for prefix cache hit.
         let mut messages: Vec<ChatMessage> = Vec::new();
@@ -1797,7 +1808,7 @@ impl AgentLoop {
         let retain_count = self.config.context.retain_work_units.max(1);
         let boundary = super::work_unit::find_compaction_boundary(&self.session.history, retain_count);
 
-        self.compact_with_boundary(model_id, boundary).await
+        self.compact_with_boundary(model_id, boundary, None).await
     }
 
     /// Core compaction implementation given a pre-computed split boundary.
@@ -1805,7 +1816,16 @@ impl AgentLoop {
     /// `history[..boundary]` is summarised; `history[boundary..]` is retained.
     /// Called by both regular threshold-based compaction and pre-fallback budget
     /// compaction, so the boundary-finding policy lives in the caller.
-    async fn compact_with_boundary(&mut self, model_id: &str, boundary: usize) -> anyhow::Result<()> {
+    ///
+    /// `summarizer`: when `Some`, use this provider for the summarize LLM call instead of
+    /// the primary chat provider.  Pre-fallback compaction passes the target model's provider
+    /// so that the model that will handle the compacted context also performs the summarization.
+    async fn compact_with_boundary(
+        &mut self,
+        model_id: &str,
+        boundary: usize,
+        summarizer: Option<Arc<dyn crate::providers::ChatProvider>>,
+    ) -> anyhow::Result<()> {
         let history_len = self.session.history.len();
         if history_len <= 1 {
             return Ok(());
@@ -1859,7 +1879,7 @@ impl AgentLoop {
             .unwrap_or(0);
 
         // 2. Generate summary (incrementally merge old summary).
-        let summary = match self.summarize_inline(&to_compact, existing_summary.as_deref(), model_id).await {
+        let summary = match self.summarize_inline(&to_compact, existing_summary.as_deref(), model_id, summarizer).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(error = %e, "summarizer failed, dropping pre-boundary history");
@@ -1963,21 +1983,25 @@ impl AgentLoop {
     /// tokenizer differences between the primary model and the fallback model (CJK text
     /// in particular can differ significantly in token count across tokenizers).
     ///
-    /// The boundary is chosen via `find_compaction_boundary_for_budget`: we walk work
-    /// units front-to-back and return the first split where the accumulated compressed
-    /// prefix has freed enough tokens for the retained tail to fit in `target_window`.
+    /// The compress budget is: `target_window − system_prompt_tokens − summary_output_reserve`.
+    /// `find_compaction_boundary_for_budget` finds the largest prefix that fits in this budget;
+    /// the target model summarises that prefix, then continues with summary + retained tail.
     async fn compact_to_budget(
         &mut self,
         target_model_id: &str,
         target_window: u64,
         target_max_output: u64,
+        target_provider: Arc<dyn crate::providers::ChatProvider>,
     ) -> anyhow::Result<()> {
-        // Reserve space for: system prompt estimate + output budget + safety gap.
-        const OVERHEAD: u64 = 2_000;
-        let output_reserve = target_max_output.min(8_192);
+        // compress_budget = how many input tokens the target model's summarizer can accept.
+        // system_prompt_tokens: the system prompt is sent alongside the history to be summarised.
+        // summary_output_reserve: headroom for the summary the model will produce.
+        // Apply 1.25× safety divisor to account for cross-model tokenizer differences.
+        let system_prompt_tokens = estimate_tokens(&self.system_prompt);
+        let summary_output_reserve = target_max_output.min(4_096) as u64;
         let available = target_window
-            .saturating_sub(OVERHEAD)
-            .saturating_sub(output_reserve);
+            .saturating_sub(system_prompt_tokens)
+            .saturating_sub(summary_output_reserve);
 
         if available == 0 {
             anyhow::bail!(
@@ -1986,35 +2010,22 @@ impl AgentLoop {
             );
         }
 
-        // Divide by 1.25: we want the retained tail (measured in the *target* tokenizer)
-        // to comfortably fit even when our counts came from the primary tokenizer.
-        let tail_budget = (available as f64 / 1.25) as u64;
-
-        // Conservative estimate for the current total in the target tokenizer.
-        let conservative_total = (self.token_tracker.total_tokens() as f64 * 1.25) as u64;
-
-        if conservative_total <= tail_budget {
-            tracing::debug!(
-                target_model = %target_model_id,
-                conservative_total,
-                tail_budget,
-                "pre-fallback compaction not needed (context already fits)"
-            );
-            return Ok(());
-        }
+        // Divide by 1.25: our token estimates come from the primary model's tokenizer;
+        // the target model may count differently (especially CJK text).
+        let compress_budget = (available as f64 / 1.25) as u64;
 
         let retain_count = self.config.context.retain_work_units.max(1);
         let boundary = match super::work_unit::find_compaction_boundary_for_budget(
             &self.session.history,
-            conservative_total,
-            tail_budget,
+            compress_budget,
             retain_count,
         ) {
             Some(b) => b,
             None => {
                 tracing::debug!(
                     target_model = %target_model_id,
-                    "no compaction boundary available (too few work units)"
+                    compress_budget,
+                    "no compaction boundary for budget (prefix too large or too few work units)"
                 );
                 return Ok(());
             }
@@ -2028,13 +2039,12 @@ impl AgentLoop {
         tracing::info!(
             target_model = %target_model_id,
             target_window,
-            tail_budget,
-            conservative_total,
+            compress_budget,
             boundary,
             "pre-fallback compaction triggered"
         );
 
-        self.compact_with_boundary(target_model_id, boundary).await
+        self.compact_with_boundary(target_model_id, boundary, Some(target_provider)).await
     }
 
     /// Check the routing fallback chain and proactively compact if the current context
@@ -2067,14 +2077,29 @@ impl AgentLoop {
         // All borrows from get_chat_model_config are dropped here.
 
         if let Some((model_id, window, max_output)) = target {
-            tracing::info!(
-                model = %model_id,
-                conservative_total,
-                window,
-                "pre-fallback: context would overflow fallback model, compacting"
-            );
-            if let Err(e) = self.compact_to_budget(&model_id, window, max_output).await {
-                tracing::warn!(model = %model_id, error = %e, "pre-fallback compaction failed");
+            // Obtain the provider for the target model (borrow dropped before &mut self call).
+            let target_provider = self.registry
+                .get_chat_provider_by_model(&model_id)
+                .map(|(p, _)| p);
+
+            match target_provider {
+                Some(provider) => {
+                    tracing::info!(
+                        model = %model_id,
+                        conservative_total,
+                        window,
+                        "pre-fallback: context would overflow fallback model, compacting"
+                    );
+                    if let Err(e) = self.compact_to_budget(&model_id, window, max_output, provider).await {
+                        tracing::warn!(model = %model_id, error = %e, "pre-fallback compaction failed");
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        model = %model_id,
+                        "fallback model has no direct provider entry; skipping pre-compaction"
+                    );
+                }
             }
         }
 
