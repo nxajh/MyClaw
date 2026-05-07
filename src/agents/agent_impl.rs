@@ -1728,7 +1728,7 @@ impl AgentLoop {
             up_to_message: last_compacted_id,
         });
 
-        // 5. Persist summary.
+        // 5. Persist summary and rotate history file.
         if let Some(ref hook) = self.persist_hook {
             hook.save_compaction(&self.session.id, &SummaryRecord {
                 id: 0,
@@ -1738,6 +1738,19 @@ impl AgentLoop {
                 token_estimate: Some(summary_tokens),
                 created_at: chrono::Utc::now(),
             });
+
+            // Archive the pre-compaction segment; the summary message inserted
+            // above is part of surviving, so it lands in the new file on disk.
+            let surviving: Vec<(i64, ChatMessage)> = self.session.message_ids.iter()
+                .copied()
+                .zip(self.session.history.iter().cloned())
+                .collect();
+            hook.rotate_history(&self.session.id, &surviving);
+
+            // Reassign message_ids to match the new file's 1-based line numbers.
+            for (i, id) in self.session.message_ids.iter_mut().enumerate() {
+                *id = (i + 1) as i64;
+            }
         }
 
         // 6. Adjust token tracker.

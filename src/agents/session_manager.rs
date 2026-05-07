@@ -370,36 +370,26 @@ impl SessionManager {
         // 3. Load from backend.
         let session = match self.backend.load_latest_summary(&session_id) {
             Some(summary) => {
-                let incremental = self.backend.load_incremental(&session_id, summary.up_to_message);
-                let mut history = Vec::with_capacity(incremental.len() + 1);
-                let mut message_ids = Vec::with_capacity(incremental.len() + 1);
-
-                history.push(ChatMessage::user_text(
-                    format!("[Context Summary] {}", summary.summary)
-                ));
-                message_ids.push(0);
-
-                for (id, msg) in incremental {
-                    history.push(msg);
-                    message_ids.push(id);
-                }
-
-                sanitize_history(&mut history);
+                // The summary message is already in history.jsonl (written during
+                // rotation), so we simply load everything in the current file.
+                let rows = self.backend.load_incremental(&session_id, 0);
+                let count = rows.len();
+                let (ids, mut msgs): (Vec<i64>, Vec<_>) = rows.into_iter().unzip();
+                sanitize_history(&mut msgs);
+                let ids = ids[..msgs.len()].to_vec();
 
                 tracing::info!(
                     session = %session_id,
-                    summary_tokens = ?summary.token_estimate,
-                    incremental_count = history.len() - 1,
-                    "session restored from summary"
+                    message_count = count,
+                    sanitized = msgs.len(),
+                    "session restored from compacted history"
                 );
-
-                message_ids.truncate(history.len());
 
                 Session {
                     id: session_id.clone(),
                     owner: user_id.to_string(),
-                    history,
-                    message_ids,
+                    history: msgs,
+                    message_ids: ids,
                     compact_version: summary.version,
                     summary_metadata: Some(SummaryMetadata {
                         version: summary.version,
