@@ -13,11 +13,11 @@ mod shared;
 mod private;
 mod types;
 mod session;
-pub mod sqlite;
+pub mod json_file;
 
 pub use memory::{Memory, MemoryCategory, MemoryEntry, ExportFilter, ProceduralMessage};
 pub use shared::SharedMemory;
 pub use private::PrivateMemory;
 pub use types::{SearchMode, MemoryConfig, MemoryPolicyConfig, Provider, build_proxy_client};
 pub use session::{SessionBackend, SessionInfo, SummaryRecord, ChatMessage};
-pub use sqlite::SqliteSessionBackend;
+pub use json_file::JsonFileBackend;

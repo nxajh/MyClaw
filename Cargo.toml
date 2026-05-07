@@ -38,7 +38,7 @@ tokio-util = "0.7"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 
 # Utils
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 hex = "0.4"
 base64 = "0.22"
@@ -55,9 +55,6 @@ directories = "5"
 toml = "0.8"
 async-trait = "0.1"
 notify = { version = "7", features = ["macos_kqueue"] }
-
-# Storage
-rusqlite = { version = "0.37", features = ["bundled"] }
 
 # WeChat crypto (feature-gated)
 aes = { version = "0.8", optional = true }

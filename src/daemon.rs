@@ -366,14 +366,14 @@ fn build_sub_agents(workspace_dir: &std::path::Path) -> Vec<crate::config::sub_a
 
 /// Build the session backend (shared with SessionManager and persist hooks).
 fn build_session_backend(config: &crate::config::AppConfig) -> Arc<dyn crate::storage::SessionBackend> {
-    let db_path = config.workspace_dir.join("sessions.db");
-    match crate::storage::SqliteSessionBackend::open(&db_path.to_string_lossy()) {
-        Ok(db) => {
-            tracing::info!(path = %db_path.display(), "session database opened");
-            Arc::new(db)
+    let sessions_dir = config.workspace_dir.join("sessions");
+    match crate::storage::JsonFileBackend::open(&sessions_dir) {
+        Ok(backend) => {
+            tracing::info!(path = %sessions_dir.display(), "session storage opened");
+            Arc::new(backend)
         }
         Err(e) => {
-            tracing::warn!(error = %e, "failed to open session database, falling back to in-memory");
+            tracing::warn!(error = %e, "failed to open session storage, falling back to in-memory");
             Arc::new(InMemoryBackend::new())
         }
     }
