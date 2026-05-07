@@ -239,6 +239,11 @@ impl Agent {
         &self.config.prompt_config.workspace_dir
     }
 
+    /// Compact threshold ratio from agent config.
+    pub fn compact_threshold(&self) -> f64 {
+        self.config.context.compact_threshold
+    }
+
     /// Set the system prompt directly (overrides builder).
     pub fn with_system_prompt(mut self, prompt: String) -> Self {
         self.system_prompt = prompt;
