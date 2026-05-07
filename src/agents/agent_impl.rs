@@ -810,7 +810,23 @@ impl AgentLoop {
             // Log raw request.
             Self::log_chat_io("request", &model_id, &messages, &tools[..], None);
 
-            let response = self.collect_stream(stream).await?;
+            let response = match self.collect_stream(stream).await {
+                Ok(r) => r,
+                Err(e) if e.to_string().contains("stream chunk timeout") => {
+                    // Server hung without sending data — count as failed attempt.
+                    tool_calls_count += 1;
+                    if tool_calls_count > 3 {
+                        tracing::error!("stream timeout after 3 retries, giving up");
+                        return Ok(String::new());
+                    }
+                    tracing::warn!(
+                        attempt = tool_calls_count,
+                        "stream chunk timeout, server may be hung, retrying..."
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             tracing::info!(text_len = response.text.len(), tool_calls = response.tool_calls.len(), stop = ?response.stop_reason, "chat stream collected");
 
             // Record token usage from API response.
@@ -1075,13 +1091,13 @@ impl AgentLoop {
                     break;
                 }
                 Err(_) => {
-                    // Chunk timeout
-                    tracing::warn!(
-                        chunk_timeout_secs = self.config.stream_chunk_timeout_secs,
-                        "stream chunk timeout, no data received"
+                    // Chunk timeout — treat as server-side failure so the
+                    // caller (chat_loop) can distinguish this from a genuine
+                    // MaxTokens condition and take appropriate action.
+                    anyhow::bail!(
+                        "stream chunk timeout after {}s, no data received",
+                        chunk_timeout.as_secs()
                     );
-                    stop_reason = StopReason::MaxTokens;
-                    break;
                 }
             }
         }
