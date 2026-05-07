@@ -484,10 +484,9 @@ impl AgentLoop {
     /// Manually trigger compaction (used by /compact command).
     /// Skips the token threshold check — always attempts compression.
     pub async fn compact_now(&mut self, model_id: &str) -> anyhow::Result<()> {
-        let model_config = self.registry.get_chat_model_config(model_id)?;
-        if model_config.context_window.is_none() {
-            anyhow::bail!("模型未配置 context_window，无法压缩");
-        }
+        let context_window = self.registry.get_chat_model_config(model_id)?
+            .context_window
+            .ok_or_else(|| anyhow::anyhow!("模型未配置 context_window，无法压缩"))?;
 
         let history_len = self.session.history.len();
         if history_len <= 1 {
@@ -499,7 +498,7 @@ impl AgentLoop {
             "starting manual compaction (/compact)"
         );
 
-        self.compact_impl(model_id).await
+        self.compact_to_budget(model_id, context_window).await
     }
 
     /// Set the delegate handler (called by Orchestrator to wire async delegation).
@@ -1794,21 +1793,7 @@ impl AgentLoop {
             "starting context compaction"
         );
 
-        self.compact_impl(model_id).await
-    }
-
-    /// Core compaction logic: find range, summarize, replace history.
-    async fn compact_impl(&mut self, model_id: &str) -> anyhow::Result<()> {
-        let history_len = self.session.history.len();
-        if history_len <= 1 {
-            return Ok(());
-        }
-
-        // Find retention boundary (keep recent N work units).
-        let retain_count = self.config.context.retain_work_units.max(1);
-        let boundary = super::work_unit::find_compaction_boundary(&self.session.history, retain_count);
-
-        self.compact_with_boundary(model_id, boundary, None /* use primary model */).await
+        self.compact_to_budget(model_id, context_window).await
     }
 
     /// Core compaction implementation given a pre-computed split boundary.
@@ -1816,15 +1801,10 @@ impl AgentLoop {
     /// `history[..boundary]` is summarised; `history[boundary..]` is retained.
     /// Called by both regular threshold-based compaction and pre-fallback budget
     /// compaction, so the boundary-finding policy lives in the caller.
-    ///
-    /// `summarizer_model`: when `Some(id)`, route the summarize LLM call to that model
-    /// instead of the primary chat provider.  Pre-fallback compaction passes the target
-    /// (smaller) model's ID so it both summarises and continues handling the conversation.
     async fn compact_with_boundary(
         &mut self,
         model_id: &str,
         boundary: usize,
-        summarizer_model: Option<String>,
     ) -> anyhow::Result<()> {
         let history_len = self.session.history.len();
         if history_len <= 1 {
@@ -1879,8 +1859,7 @@ impl AgentLoop {
             .unwrap_or(0);
 
         // 2. Generate summary (incrementally merge old summary).
-        let summarizer_model_id = summarizer_model.as_deref().unwrap_or(model_id);
-        let summary = match self.summarize_inline(&to_compact, existing_summary.as_deref(), summarizer_model_id).await {
+        let summary = match self.summarize_inline(&to_compact, existing_summary.as_deref(), model_id).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(error = %e, "summarizer failed, dropping pre-boundary history");
@@ -1978,20 +1957,16 @@ impl AgentLoop {
         Ok(())
     }
 
-    /// Pre-fallback compaction: compact history to fit within a smaller model's context window.
-    ///
+    /// Compact history so that the compressible prefix fits within `target_window`.
     ///
     /// compress_budget = target_window * compact_threshold - system_prompt_tokens - tool_spec_tokens
     ///
-    /// `compact_threshold` implicitly reserves `(1 - threshold)` for model output and headroom,
-    /// so no separate output_reserve parameter is needed.
+    /// `compact_threshold` implicitly reserves `(1 - threshold)` for model output and headroom.
     /// Tool spec tokens are subtracted because the summarizer receives tool definitions too.
-    ///
-    /// `find_compaction_boundary_for_budget` finds the largest prefix that fits in this budget;
-    /// the target model summarises that prefix, then continues with summary + retained tail.
+    /// `model_id` is the primary (currently routing-selected) model used for summarization.
     async fn compact_to_budget(
         &mut self,
-        target_model_id: &str,
+        model_id: &str,
         target_window: u64,
     ) -> anyhow::Result<()> {
         // Estimate overhead sent alongside the history in every summarizer request.
@@ -2013,8 +1988,8 @@ impl AgentLoop {
 
         if compress_budget == 0 {
             anyhow::bail!(
-                "target model '{}' context window ({}) too small to compact into",
-                target_model_id, target_window
+                "context window ({}) too small to compact into (model '{}')",
+                target_window, model_id
             );
         }
 
@@ -2027,7 +2002,6 @@ impl AgentLoop {
             Some(b) => b,
             None => {
                 tracing::debug!(
-                    target_model = %target_model_id,
                     compress_budget,
                     "no compaction boundary for budget (prefix too large or too few work units)"
                 );
@@ -2041,16 +2015,15 @@ impl AgentLoop {
         }
 
         tracing::info!(
-            target_model = %target_model_id,
             target_window,
             compress_budget,
             system_prompt_tokens,
             tool_spec_tokens,
             boundary,
-            "pre-fallback compaction triggered"
+            "compaction triggered"
         );
 
-        self.compact_with_boundary(target_model_id, boundary, Some(target_model_id.to_string())).await
+        self.compact_with_boundary(model_id, boundary).await
     }
 
     /// Check the routing fallback chain and proactively compact if the current context
@@ -2064,32 +2037,29 @@ impl AgentLoop {
             return Ok(()); // no fallback chain
         }
 
+        let primary_model = routing_models[0].clone();
         let conservative_total = (self.token_tracker.total_tokens() as f64 * 1.25) as u64;
 
-        // Extract target model info without holding a borrow when we later call &mut self.
-        let target: Option<(String, u64)> = routing_models
+        // Find the first fallback model whose window the current context would overflow.
+        // Extract without holding a borrow before the mutable &mut self call below.
+        let overflow_window: Option<u64> = routing_models
             .iter()
             .skip(1) // skip primary model
             .find_map(|model_id| {
                 let cfg = self.registry.get_chat_model_config(model_id).ok()?;
                 let window = cfg.context_window?;
-                if conservative_total > window {
-                    Some((model_id.clone(), window))
-                } else {
-                    None
-                }
+                if conservative_total > window { Some(window) } else { None }
             });
-        // All borrows from get_chat_model_config are dropped here.
 
-        if let Some((model_id, window)) = target {
+        if let Some(window) = overflow_window {
             tracing::info!(
-                model = %model_id,
+                primary_model = %primary_model,
                 conservative_total,
                 window,
                 "pre-fallback: context would overflow fallback model, compacting"
             );
-            if let Err(e) = self.compact_to_budget(&model_id, window).await {
-                tracing::warn!(model = %model_id, error = %e, "pre-fallback compaction failed");
+            if let Err(e) = self.compact_to_budget(&primary_model, window).await {
+                tracing::warn!(error = %e, "pre-fallback compaction failed");
             }
         }
 
