@@ -721,20 +721,10 @@ impl AgentLoop {
                 self.registry.get_chat_provider(Capability::Chat)?
             };
 
-            // Check if context compaction is needed.
-            // Track compact_version before so we can detect if compaction actually ran.
-            let pre_compact_version = self.session.compact_version;
-            if let Err(e) = self.maybe_compact(&model_id).await {
-                tracing::warn!(error = %e, "compaction failed, continuing");
-            }
-            let did_compact = self.session.compact_version != pre_compact_version;
-
             // Use initial_messages on the first iteration (includes system-reminder
-            // from AttachmentManager), rebuild on subsequent iterations (e.g. after
-            // compaction or when tool results need to be included).
-            // If compaction ran on the first iteration, rebuild from the compacted
-            // history rather than sending the stale pre-compaction message list.
-            let mut messages = if first_iteration && !did_compact {
+            // from AttachmentManager), rebuild on subsequent iterations (after tool
+            // calls or compaction).
+            let mut messages = if first_iteration {
                 first_iteration = false;
                 tracing::info!(
                     msg_count = initial_messages.len(),
@@ -839,6 +829,13 @@ impl AgentLoop {
                     total_tracked = self.token_tracker.total_tokens(),
                     "token usage recorded"
                 );
+            }
+
+            // Check compaction using the precise token counts just reported by the API.
+            // This eliminates the one-turn delay that results from checking before the
+            // API call: we now always have accurate data when deciding to compact.
+            if let Err(e) = self.maybe_compact(&model_id).await {
+                tracing::warn!(error = %e, "compaction failed, continuing");
             }
 
             // Log raw response.
@@ -1626,7 +1623,7 @@ impl AgentLoop {
         let threshold = (context_window as f64 * self.config.context.compact_threshold) as u64;
         let total = self.token_tracker.total_tokens();
 
-        if total <= threshold {
+        if total < threshold {
             return Ok(());
         }
 
