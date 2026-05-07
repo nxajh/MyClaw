@@ -155,7 +155,7 @@ async fn cmd_status(ctx: CommandContext<'_>) -> String {
             match ctx.registry.get_chat_model_config(&model_id) {
                 Ok(cfg) => {
                     let cw = cfg.context_window
-                        .map(|v| format!("{}K", v / 1000))
+                        .map(|v| format!("{}K", v / 1024))
                         .unwrap_or_else(|| "未知".to_string());
                     format!("模型: `{}` (上下文: {})", model_id, cw)
                 }
@@ -250,7 +250,7 @@ async fn cmd_model(args: &str, ctx: CommandContext<'_>) -> String {
             match ctx.registry.get_chat_model_config(&model_id) {
                 Ok(cfg) => {
                     let cw = cfg.context_window
-                        .map(|v| format!(", 上下文: {}K", v / 1000))
+                        .map(|v| format!(", 上下文: {}K", v / 1024))
                         .unwrap_or_default();
                     format!("✅ 会话模型已覆盖为: `{}`{}\n_本会话后续所有请求均使用此模型。_", model_id, cw)
                 }
