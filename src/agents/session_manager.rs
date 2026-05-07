@@ -178,8 +178,8 @@ impl SessionBackend for InMemoryBackend {
         self.messages.read().get(session_id)
             .map(|msgs| {
                 msgs.iter().enumerate()
-                    .filter(|(i, _)| (*i as i64) > after_message_id)
-                    .map(|(i, m)| (i as i64, m.clone()))
+                    .filter(|(i, _)| ((*i + 1) as i64) > after_message_id)
+                    .map(|(i, m)| ((i + 1) as i64, m.clone()))
                     .collect()
             })
             .unwrap_or_default()
@@ -401,17 +401,20 @@ impl SessionManager {
                 }
             }
             None => {
-                let mut full = self.backend.load_messages(&session_id);
-                let count = full.len();
-                sanitize_history(&mut full);
+                // Load all messages with their backend IDs (id > 0 covers all rows).
+                let rows = self.backend.load_incremental(&session_id, 0);
+                let count = rows.len();
+                let (ids, mut msgs): (Vec<i64>, Vec<_>) = rows.into_iter().unzip();
+                sanitize_history(&mut msgs);
+                let ids = ids[..msgs.len()].to_vec();
                 if count > 0 {
-                    tracing::info!(session = %session_id, message_count = count, sanitized = full.len(), "session restored from full history");
+                    tracing::info!(session = %session_id, message_count = count, sanitized = msgs.len(), "session restored from full history");
                 }
                 Session {
                     id: session_id.clone(),
                     owner: user_id.to_string(),
-                    message_ids: vec![0; full.len()],
-                    history: full,
+                    message_ids: ids,
+                    history: msgs,
                     compact_version: 0,
                     summary_metadata: None,
                 }
