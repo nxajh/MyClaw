@@ -4,17 +4,36 @@
 //! with restricted tool sets and specialized system prompts.
 //!
 //! Also provides `delegate_async` for non-blocking background execution.
+//!
+//! ## History persistence
+//!
+//! When a `parent_session_id` is supplied each sub-agent invocation gets its
+//! own `JsonFileBackend` rooted at:
+//!
+//! ```text
+//! sessions/{parent_session_id}/subagents/
+//!   {sub_session_id}/
+//!     meta.json
+//!     history.jsonl
+//!     ...          ← same structure as a top-level session, incl. compaction
+//! ```
+//!
+//! Sub-agents therefore support context compaction and rotation identically
+//! to the parent agent.  If storage cannot be opened the sub-agent runs
+//! ephemerally (no history is saved).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
 
 use crate::agents::delegation::{DelegationEvent, DelegationManager};
-use crate::agents::tool_registry::ToolRegistry;
+use crate::agents::session_manager::{BackendPersistHook, PersistHook, Session};
 use crate::agents::skills::SkillManager;
-use crate::agents::session_manager::Session;
+use crate::agents::tool_registry::ToolRegistry;
 use crate::config::sub_agent::SubAgentConfig;
 use crate::providers::ServiceRegistry;
+use crate::storage::SessionBackend as _;
 use crate::tools::TaskDelegator;
 
 /// Holds sub-agent configs and creates temporary AgentLoops for delegation.
@@ -30,6 +49,8 @@ pub struct SubAgentDelegator {
     skills: Arc<RwLock<SkillManager>>,
     /// Default max_tool_calls from parent agent config.
     default_max_tool_calls: usize,
+    /// Root of the sessions directory — used to open per-invocation sub-backends.
+    sessions_root: PathBuf,
 }
 
 impl SubAgentDelegator {
@@ -39,6 +60,7 @@ impl SubAgentDelegator {
         tools: Arc<ToolRegistry>,
         skills: Arc<RwLock<SkillManager>>,
         default_max_tool_calls: usize,
+        sessions_root: PathBuf,
     ) -> Self {
         Self {
             configs,
@@ -46,6 +68,7 @@ impl SubAgentDelegator {
             tools,
             skills,
             default_max_tool_calls,
+            sessions_root,
         }
     }
 
@@ -66,118 +89,74 @@ impl SubAgentDelegator {
         filtered
     }
 
-    /// Delegate a task asynchronously — spawns sub-agent in a background tokio task.
+    /// Open (or create) a persisted session for a sub-agent invocation.
     ///
-    /// Returns the `task_id` immediately. When the sub-agent completes, it sends
-    /// a `DelegationEvent` via the `DelegationManager`'s channel, which the
-    /// Orchestrator listens for.
-    pub fn delegate_async(
+    /// Returns `(session_id, Some(hook))` on success, or `(random_id, None)` if
+    /// storage is unavailable — allowing the sub-agent to run ephemerally.
+    fn open_sub_session(
         &self,
+        parent_session_id: &str,
         agent_name: &str,
-        task: &str,
-        session_key: &str,
-        reply_target: &str,
-        delegation_manager: &DelegationManager,
-    ) -> anyhow::Result<String> {
-        let config = self.find_config(agent_name)
-            .ok_or_else(|| {
-                let available: Vec<String> = self.configs.read().iter().map(|c| c.name.clone()).collect();
-                anyhow::anyhow!(
-                    "Unknown sub-agent '{}'. Available: {}",
-                    agent_name,
-                    available.join(", ")
-                )
-            })?;
+    ) -> (String, Option<Arc<dyn PersistHook>>) {
+        if parent_session_id.is_empty() || self.sessions_root.as_os_str().is_empty() {
+            return (format!("{:016x}", rand::random::<u64>()), None);
+        }
 
-        let task_id = format!("del_{}", uuid::Uuid::new_v4());
-
-        tracing::info!(
-            agent = %config.name,
-            task_id = %task_id,
-            task_len = task.len(),
-            "spawning sub-agent in background"
-        );
-
-        // Clone everything needed for the spawned task.
-        let configs = self.configs.clone();
-        let registry = self.registry.clone();
-        let tools = self.tools.clone();
-        let skills = self.skills.clone();
-        let default_max_tool_calls = self.default_max_tool_calls;
-        let config_clone = config.clone();
-        let task_owned = task.to_string();
-        let session_key_owned = session_key.to_string();
-        let reply_target_owned = reply_target.to_string();
-        let event_tx = delegation_manager.event_sender();
-        let task_id_clone = task_id.clone();
-
-        let handle = tokio::spawn(async move {
-            // Build a new SubAgentDelegator inside the spawned task
-            // (all fields are Arc/Clone, so this is cheap).
-            let sub_delegator = SubAgentDelegator {
-                configs,
-                registry,
-                tools,
-                skills,
-                default_max_tool_calls,
-            };
-
-            let result = sub_delegator.delegate(&config_clone.name, &task_owned).await;
-
-            match result {
-                Ok(summary) => {
-                    tracing::info!(task_id = %task_id_clone, "sub-agent completed successfully");
-                    let _ = event_tx.send(DelegationEvent::Completed {
-                        task_id: task_id_clone.clone(),
-                        session_key: session_key_owned,
-                        reply_target: reply_target_owned,
-                        summary,
-                    }).await;
-                }
-                Err(e) => {
-                    tracing::warn!(task_id = %task_id_clone, err = %e, "sub-agent failed");
-                    let _ = event_tx.send(DelegationEvent::Failed {
-                        task_id: task_id_clone.clone(),
-                        session_key: session_key_owned,
-                        reply_target: reply_target_owned,
-                        error: e.to_string(),
-                    }).await;
-                }
+        let sub_root = self.sessions_root.join(parent_session_id).join("subagents");
+        let backend = match crate::storage::JsonFileBackend::open(&sub_root) {
+            Ok(b) => Arc::new(b),
+            Err(e) => {
+                tracing::warn!(parent = %parent_session_id, err = %e,
+                    "sub-agent storage unavailable, running ephemeral");
+                return (format!("{:016x}", rand::random::<u64>()), None);
             }
-        });
+        };
 
-        delegation_manager.register(task_id.clone(), handle);
-        Ok(task_id)
+        match backend.create_session(agent_name, None) {
+            Ok(info) => {
+                let hook = BackendPersistHook::new(backend.clone() as Arc<dyn crate::storage::SessionBackend>);
+                (info.id, Some(Arc::new(hook) as Arc<dyn PersistHook>))
+            }
+            Err(e) => {
+                tracing::warn!(parent = %parent_session_id, err = %e,
+                    "failed to create sub-agent session, running ephemeral");
+                (format!("{:016x}", rand::random::<u64>()), None)
+            }
+        }
     }
-}
 
-#[async_trait::async_trait]
-impl TaskDelegator for SubAgentDelegator {
-    async fn delegate(&self, agent_name: &str, task: &str) -> anyhow::Result<String> {
+    /// Core delegation logic — shared by sync and async paths.
+    ///
+    /// Returns a boxed future to break the async recursion cycle:
+    /// delegate_with_parent → AgentLoop::run → compact_impl → summarize_inline
+    /// → execute_tool → delegate_with_parent (nested sub-agent).
+    pub fn delegate_with_parent<'a>(
+        &'a self,
+        agent_name: &'a str,
+        task: &'a str,
+        parent_session_id: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'a>> {
+        Box::pin(async move {
         let config = self.find_config(agent_name)
             .ok_or_else(|| {
-                let available: Vec<String> = self.configs.read().iter().map(|c| c.name.clone()).collect();
+                let available: Vec<String> = self.configs.read()
+                    .iter().map(|c| c.name.clone()).collect();
                 anyhow::anyhow!(
                     "Unknown sub-agent '{}'. Available: {}",
-                    agent_name,
-                    available.join(", ")
+                    agent_name, available.join(", ")
                 )
             })?;
 
         tracing::info!(
             agent = %config.name,
+            parent = %parent_session_id,
             tools = ?config.tools,
             task_len = task.len(),
             "creating sub-agent for delegation"
         );
 
-        // Build a filtered tool registry with only the allowed tools.
         let tools = self.build_filtered_tools(&config.tools);
-
-        // Build the tool specs for the system prompt.
         let tool_names = tools.tool_names_sorted();
-
-        // Build system prompt using the sub-agent's prompt + tool list.
         let system_prompt = if config.system_prompt.is_empty() {
             format!("You are a specialized agent named '{}'.\nAvailable tools: {}",
                 config.name, tool_names.join(", "))
@@ -185,11 +164,10 @@ impl TaskDelegator for SubAgentDelegator {
             format!("{}\n\nAvailable tools: {}", config.system_prompt, tool_names.join(", "))
         };
 
-        // Create a throwaway session for this delegation.
-        let session_key = format!("__subagent:{}:{}", config.name, uuid::Uuid::new_v4());
-        let session = Session::new(session_key);
+        let (session_id, persist_hook) = self.open_sub_session(parent_session_id, &config.name);
 
-        // Create a temporary AgentLoop.
+        let session = Session::new(session_id);
+
         let agent_config = crate::agents::AgentConfig {
             max_tool_calls: config.max_tool_calls.unwrap_or(self.default_max_tool_calls),
             max_history: 100,
@@ -206,12 +184,10 @@ impl TaskDelegator for SubAgentDelegator {
                 host_info: None,
             },
             context: crate::config::agent::ContextConfig::default(),
-            stream_chunk_timeout_secs: 90, // Default for sub-agents
-            max_output_bytes: 100 * 1024, // 100KB default for sub-agents
+            stream_chunk_timeout_secs: 90,
+            max_output_bytes: 100 * 1024,
         };
 
-        // We need to create an AgentLoop manually since we don't have an Agent factory.
-        // Use a temporary Agent to create the loop.
         let agent = crate::agents::Agent::new(
             self.registry.clone(),
             Arc::new(tools),
@@ -219,12 +195,11 @@ impl TaskDelegator for SubAgentDelegator {
             agent_config,
         );
         let agent = agent.with_system_prompt(system_prompt);
-        // Apply model override if configured.
         let agent = match &config.model {
             Some(m) => agent.with_model(m.clone()),
             None => agent,
         };
-        let mut loop_ = agent.loop_for(session);
+        let mut loop_ = agent.loop_for_with_persist(session, persist_hook);
 
         tracing::info!(agent = %config.name, "sub-agent started");
         let result = loop_.run(task, None, None).await;
@@ -233,6 +208,98 @@ impl TaskDelegator for SubAgentDelegator {
             Err(e) => tracing::warn!(agent = %config.name, err = %e, "sub-agent failed"),
         }
         result
+        }) // end Box::pin
+    }
+
+    /// Delegate a task asynchronously — spawns sub-agent in a background tokio task.
+    ///
+    /// `parent_session_id` is the hex session ID of the calling agent; used to
+    /// locate the `subagents/` directory for history persistence.
+    pub fn delegate_async(
+        &self,
+        agent_name: &str,
+        task: &str,
+        parent_session_id: &str,
+        reply_target: &str,
+        delegation_manager: &DelegationManager,
+    ) -> anyhow::Result<String> {
+        let config = self.find_config(agent_name)
+            .ok_or_else(|| {
+                let available: Vec<String> = self.configs.read()
+                    .iter().map(|c| c.name.clone()).collect();
+                anyhow::anyhow!(
+                    "Unknown sub-agent '{}'. Available: {}",
+                    agent_name, available.join(", ")
+                )
+            })?;
+
+        let task_id = format!("del_{}", uuid::Uuid::new_v4());
+
+        tracing::info!(
+            agent = %config.name,
+            task_id = %task_id,
+            task_len = task.len(),
+            "spawning sub-agent in background"
+        );
+
+        let configs = self.configs.clone();
+        let registry = self.registry.clone();
+        let tools = self.tools.clone();
+        let skills = self.skills.clone();
+        let default_max_tool_calls = self.default_max_tool_calls;
+        let sessions_root = self.sessions_root.clone();
+        let task_owned = task.to_string();
+        let parent_session_id_owned = parent_session_id.to_string();
+        let reply_target_owned = reply_target.to_string();
+        let event_tx = delegation_manager.event_sender();
+        let task_id_clone = task_id.clone();
+        let agent_name_owned = agent_name.to_string();
+
+        tokio::spawn(async move {
+            let sub_delegator = SubAgentDelegator {
+                configs,
+                registry,
+                tools,
+                skills,
+                default_max_tool_calls,
+                sessions_root,
+            };
+
+            let result = sub_delegator
+                .delegate_with_parent(&agent_name_owned, &task_owned, &parent_session_id_owned)
+                .await;
+
+            match result {
+                Ok(summary) => {
+                    tracing::info!(task_id = %task_id_clone, "sub-agent completed successfully");
+                    let _ = event_tx.send(DelegationEvent::Completed {
+                        task_id: task_id_clone.clone(),
+                        session_key: parent_session_id_owned,
+                        reply_target: reply_target_owned,
+                        summary,
+                    }).await;
+                }
+                Err(e) => {
+                    tracing::warn!(task_id = %task_id_clone, err = %e, "sub-agent failed");
+                    let _ = event_tx.send(DelegationEvent::Failed {
+                        task_id: task_id_clone.clone(),
+                        session_key: parent_session_id_owned,
+                        reply_target: reply_target_owned,
+                        error: e.to_string(),
+                    }).await;
+                }
+            }
+        });
+
+        delegation_manager.register(task_id.clone(), tokio::spawn(async {}));
+        Ok(task_id)
+    }
+}
+
+#[async_trait::async_trait]
+impl TaskDelegator for SubAgentDelegator {
+    async fn delegate(&self, agent_name: &str, task: &str) -> anyhow::Result<String> {
+        self.delegate_with_parent(agent_name, task, "").await
     }
 
     fn available_agents(&self) -> Vec<(String, String)> {

@@ -1149,25 +1149,25 @@ impl AgentLoop {
             }
         }
 
-        // Special handling for delegate_task tool — async delegation via handler.
+        // Special handling for delegate_task: async handler takes priority,
+        // then sync delegation via sub_delegator (with parent session ID for persistence).
         if call.name == "delegate_task" {
+            let args: serde_json::Value = if call.arguments.is_empty() {
+                serde_json::Value::Object(serde_json::Map::new())
+            } else {
+                serde_json::from_str(&call.arguments).unwrap_or_else(|_| {
+                    serde_json::json!({ "raw": &call.arguments })
+                })
+            };
+            let agent_name = args["agent"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("'agent' is required"))?;
+            let task = args["task"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("'task' is required"))?;
+
             if let Some(ref handler) = self.delegate_handler {
-                let args: serde_json::Value = if call.arguments.is_empty() {
-                    serde_json::Value::Object(serde_json::Map::new())
-                } else {
-                    serde_json::from_str(&call.arguments).unwrap_or_else(|_| {
-                        serde_json::json!({ "raw": &call.arguments })
-                    })
-                };
-                let agent_name = args["agent"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("'agent' is required"))?;
-                let task = args["task"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("'task' is required"))?;
-
                 let task_id = handler(agent_name.to_string(), task.to_string())?;
-
                 return Ok(ToolResult {
                     success: true,
                     output: format!(
@@ -1177,6 +1177,19 @@ impl AgentLoop {
                         agent_name, task_id
                     ),
                     error: None,
+                });
+            }
+
+            if let Some(ref delegator) = self.sub_delegator {
+                let parent_id = self.session.id.clone();
+                let result = delegator.delegate_with_parent(agent_name, task, &parent_id).await;
+                return Ok(match result {
+                    Ok(output) => ToolResult { success: true, output, error: None },
+                    Err(e) => ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!("Sub-agent '{}' failed: {}", agent_name, e)),
+                    },
                 });
             }
         }
