@@ -485,10 +485,14 @@ impl AgentLoop {
         self.token_tracker.record_pending(estimate_message_tokens(&user_msg));
         self.session.add_user_text(user_message.to_string());
 
-        // Persist user message via hook.
+        // Persist user message via hook; capture the assigned DB id.
         if let Some(ref hook) = self.persist_hook {
             if let Some(msg) = self.session.history.last() {
-                hook.persist_message(&self.session.id, msg);
+                if let Some(id) = hook.persist_message(&self.session.id, msg) {
+                    if let Some(last_id) = self.session.message_ids.last_mut() {
+                        *last_id = id;
+                    }
+                }
             }
         }
 
@@ -504,10 +508,14 @@ impl AgentLoop {
         // 4. Persist assistant response.
         self.session.add_assistant_text(text.clone());
 
-        // Persist assistant message via hook.
+        // Persist assistant message via hook; capture the assigned DB id.
         if let Some(ref hook) = self.persist_hook {
             if let Some(msg) = self.session.history.last() {
-                hook.persist_message(&self.session.id, msg);
+                if let Some(id) = hook.persist_message(&self.session.id, msg) {
+                    if let Some(last_id) = self.session.message_ids.last_mut() {
+                        *last_id = id;
+                    }
+                }
             }
         }
 
@@ -893,10 +901,14 @@ impl AgentLoop {
                 response.reasoning_content.clone(),
             );
 
-            // Persist assistant tool-call message via hook.
+            // Persist assistant tool-call message via hook; capture DB id.
             if let Some(ref hook) = self.persist_hook {
                 if let Some(msg) = self.session.history.last() {
-                    hook.persist_message(&self.session.id, msg);
+                    if let Some(id) = hook.persist_message(&self.session.id, msg) {
+                        if let Some(last_id) = self.session.message_ids.last_mut() {
+                            *last_id = id;
+                        }
+                    }
                 }
             }
 
@@ -952,10 +964,14 @@ impl AgentLoop {
                 // Persist tool result to session history.
                 self.session.add_tool_result(call.id.clone(), result_content, is_error);
 
-                // Persist tool result via hook.
+                // Persist tool result via hook; capture DB id.
                 if let Some(ref hook) = self.persist_hook {
                     if let Some(msg) = self.session.history.last() {
-                        hook.persist_message(&self.session.id, msg);
+                        if let Some(id) = hook.persist_message(&self.session.id, msg) {
+                            if let Some(last_id) = self.session.message_ids.last_mut() {
+                                *last_id = id;
+                            }
+                        }
                     }
                 }
             }

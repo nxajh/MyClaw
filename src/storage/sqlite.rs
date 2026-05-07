@@ -356,7 +356,7 @@ impl SessionBackend for SqliteSessionBackend {
         }
     }
 
-    fn append_message(&self, session_id: &str, message: &ChatMessage) -> std::io::Result<()> {
+    fn append_message(&self, session_id: &str, message: &ChatMessage) -> std::io::Result<i64> {
         let json = Self::serialize_message(message).map_err(std::io::Error::other)?;
 
         let conn = self.conn.lock();
@@ -376,6 +376,8 @@ impl SessionBackend for SqliteSessionBackend {
         )
         .map_err(std::io::Error::other)?;
 
+        let row_id = conn.last_insert_rowid();
+
         // Update last_activity and bump message_count.
         conn.execute(
             "UPDATE sessions SET last_activity = datetime('now'), message_count = message_count + 1 WHERE id = ?1",
@@ -383,7 +385,7 @@ impl SessionBackend for SqliteSessionBackend {
         )
         .map_err(std::io::Error::other)?;
 
-        Ok(())
+        Ok(row_id)
     }
 
     fn remove_last_message(&self, session_id: &str) -> std::io::Result<bool> {

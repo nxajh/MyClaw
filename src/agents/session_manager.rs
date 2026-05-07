@@ -145,12 +145,11 @@ impl SessionBackend for InMemoryBackend {
         self.messages.read().get(session_id).cloned().unwrap_or_default()
     }
 
-    fn append_message(&self, session_id: &str, message: &ChatMessage) -> std::io::Result<()> {
-        self.messages.write()
-            .entry(session_id.to_string())
-            .or_default()
-            .push(message.clone());
-        Ok(())
+    fn append_message(&self, session_id: &str, message: &ChatMessage) -> std::io::Result<i64> {
+        let mut guard = self.messages.write();
+        let msgs = guard.entry(session_id.to_string()).or_default();
+        msgs.push(message.clone());
+        Ok(msgs.len() as i64)
     }
 
     fn remove_last_message(&self, session_id: &str) -> std::io::Result<bool> {
@@ -198,7 +197,8 @@ impl SessionBackend for InMemoryBackend {
 
 /// Trait for hooks that persist session messages to the backend.
 pub trait PersistHook: Send + Sync {
-    fn persist_message(&self, session_id: &str, message: &ChatMessage);
+    /// Persist a message and return its assigned backend ID (None on failure).
+    fn persist_message(&self, session_id: &str, message: &ChatMessage) -> Option<i64>;
     fn save_compaction(&self, session_id: &str, summary: &SummaryRecord);
 }
 
@@ -214,9 +214,13 @@ impl BackendPersistHook {
 }
 
 impl PersistHook for BackendPersistHook {
-    fn persist_message(&self, session_id: &str, message: &ChatMessage) {
-        if let Err(e) = self.backend.append_message(session_id, message) {
-            tracing::warn!(session = %session_id, err = %e, "persist failed");
+    fn persist_message(&self, session_id: &str, message: &ChatMessage) -> Option<i64> {
+        match self.backend.append_message(session_id, message) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                tracing::warn!(session = %session_id, err = %e, "persist failed");
+                None
+            }
         }
     }
 
@@ -517,11 +521,11 @@ impl SessionManager {
 
     /// Append a message to a session and persist.
     pub fn append_message(&self, session_id: &str, message: ChatMessage) {
-        self.backend.append_message(session_id, &message).ok();
+        let msg_id = self.backend.append_message(session_id, &message).unwrap_or(0);
         let mut cache = self.cache.write();
         if let Some(session) = cache.get_mut(session_id) {
             session.history.push(message);
-            session.message_ids.push(0);
+            session.message_ids.push(msg_id);
         }
     }
 }
