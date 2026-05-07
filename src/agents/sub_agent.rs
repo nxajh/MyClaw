@@ -186,6 +186,8 @@ impl SubAgentDelegator {
             context: crate::config::agent::ContextConfig::default(),
             stream_chunk_timeout_secs: 90,
             max_output_bytes: 100 * 1024,
+            loop_breaker_threshold: 3,
+            tool_timeout_secs: 180,
         };
 
         let agent = crate::agents::Agent::new(

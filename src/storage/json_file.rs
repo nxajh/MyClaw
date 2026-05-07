@@ -56,6 +56,9 @@ struct SessionMeta {
     /// Persisted after each response so the value survives restarts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_total_tokens: Option<u64>,
+    /// Per-session runtime overrides (JSON-encoded SessionOverride).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_override: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -234,6 +237,7 @@ impl SessionBackend for JsonFileBackend {
             compact_version: 0,
             compact_token_estimate: None,
             last_total_tokens: None,
+            session_override: None,
         };
         self.write_meta(&meta)?;
 
@@ -445,5 +449,17 @@ impl SessionBackend for JsonFileBackend {
 
     fn load_token_count(&self, session_id: &str) -> Option<u64> {
         self.read_meta(session_id)?.last_total_tokens
+    }
+
+    fn save_session_override(&self, session_id: &str, json: &str) -> std::io::Result<()> {
+        if let Some(mut meta) = self.read_meta(session_id) {
+            meta.session_override = if json.is_empty() { None } else { Some(json.to_string()) };
+            self.write_meta(&meta)?;
+        }
+        Ok(())
+    }
+
+    fn load_session_override(&self, session_id: &str) -> Option<String> {
+        self.read_meta(session_id)?.session_override
     }
 }

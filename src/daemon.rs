@@ -405,22 +405,25 @@ fn build_channels(config: &crate::config::AppConfig) -> Vec<(&'static str, Arc<d
     channels
 }
 
-/// Convert config prompt settings into Application-layer type.
-fn build_prompt_config(cfg: &crate::config::agent::PromptConfig, workspace_dir: &std::path::Path) -> SystemPromptConfig {
+/// Convert config agent settings into Application-layer prompt config.
+fn build_prompt_config(
+    cfg: &crate::config::agent::AgentConfig,
+    workspace_dir: &std::path::Path,
+) -> SystemPromptConfig {
     SystemPromptConfig {
         workspace_dir: workspace_dir.to_string_lossy().to_string(),
-        model_name: cfg.model_name.clone().unwrap_or_default(),
-        autonomy: match crate::config::agent::AutonomyLevel::default() {
+        model_name: cfg.prompt.model_name.clone().unwrap_or_default(),
+        autonomy: match cfg.autonomy_level {
             crate::config::agent::AutonomyLevel::Full => AutonomyLevel::Full,
             crate::config::agent::AutonomyLevel::Default => AutonomyLevel::Default,
             crate::config::agent::AutonomyLevel::ReadOnly => AutonomyLevel::ReadOnly,
         },
         skills_mode: SkillsPromptInjectionMode::Compact,
-        compact: cfg.compact,
-        max_chars: cfg.max_chars,
-        bootstrap_max_chars: cfg.bootstrap_max_chars,
-        native_tools: cfg.native_tools,
-        channel_name: cfg.channel_name.clone(),
+        compact: cfg.prompt.compact,
+        max_chars: cfg.prompt.max_chars,
+        bootstrap_max_chars: cfg.prompt.bootstrap_max_chars,
+        native_tools: cfg.prompt.native_tools,
+        channel_name: cfg.prompt.channel_name.clone(),
         host_info: None,
     }
 }
@@ -523,10 +526,12 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let agent_config = AgentConfig {
         max_tool_calls: config.agent.max_tool_calls,
         max_history: config.agent.max_history,
-        prompt_config: build_prompt_config(&config.agent.prompt, &config.workspace_dir),
+        prompt_config: build_prompt_config(&config.agent, &config.workspace_dir),
         context: config.agent.context.clone(),
         stream_chunk_timeout_secs: config.agent.stream_chunk_timeout_secs,
         max_output_bytes: calculate_max_output_bytes(&config, &registry_arc),
+        loop_breaker_threshold: config.agent.loop_breaker_threshold as usize,
+        tool_timeout_secs: config.agent.tool_timeout_secs,
     };
     let mcp_manager_arc = Arc::new(mcp_manager);
 

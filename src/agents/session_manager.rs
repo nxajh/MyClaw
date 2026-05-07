@@ -8,6 +8,50 @@ use parking_lot::RwLock;
 use crate::providers::capability_chat::ChatMessage;
 use crate::storage::{SessionBackend, SessionInfo, SummaryRecord};
 
+// ── SessionOverride ───────────────────────────────────────────────────────────
+
+/// Per-session runtime overrides applied by slash commands.
+///
+/// Each field is `None` = use global config default.
+/// Persisted in `meta.json` so overrides survive restarts.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SessionOverride {
+    /// Force a specific model ID instead of the routing default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Override thinking/reasoning mode. None = use model's `reasoning` field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<bool>,
+    /// Thinking effort level when thinking is enabled ("low"/"medium"/"high").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// Override autonomy level for this session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub autonomy: Option<crate::config::agent::AutonomyLevel>,
+    /// Override max tool calls per turn (0 = unlimited).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tool_calls: Option<usize>,
+    /// Override compaction trigger threshold (0.0..1.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compact_threshold: Option<f64>,
+    /// Override number of recent work units to retain during compaction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retain_work_units: Option<usize>,
+}
+
+impl SessionOverride {
+    /// Returns true if all fields are None (no active overrides).
+    pub fn is_empty(&self) -> bool {
+        self.model.is_none()
+            && self.thinking.is_none()
+            && self.effort.is_none()
+            && self.autonomy.is_none()
+            && self.max_tool_calls.is_none()
+            && self.compact_threshold.is_none()
+            && self.retain_work_units.is_none()
+    }
+}
+
 /// Remove orphan tool results (tool messages whose tool_call_id has no matching
 /// assistant tool_call in the history). Also removes any trailing assistant
 /// message with tool_calls that has no subsequent tool results (incomplete round).
@@ -204,6 +248,8 @@ pub trait PersistHook: Send + Sync {
     fn rotate_history(&self, session_id: &str, surviving: &[(i64, ChatMessage)]);
     /// Persist the last known total token count so it survives restarts.
     fn save_token_count(&self, session_id: &str, total: u64);
+    /// Persist the session override so it survives restarts.
+    fn save_session_override(&self, session_id: &str, override_json: &str);
 }
 
 /// PersistHook implementation backed by a SessionBackend.
@@ -245,6 +291,12 @@ impl PersistHook for BackendPersistHook {
             tracing::warn!(session = %session_id, err = %e, "save token count failed");
         }
     }
+
+    fn save_session_override(&self, session_id: &str, override_json: &str) {
+        if let Err(e) = self.backend.save_session_override(session_id, override_json) {
+            tracing::warn!(session = %session_id, err = %e, "save session override failed");
+        }
+    }
 }
 
 /// Summary metadata stored in Session memory (no text parsing needed).
@@ -273,6 +325,8 @@ pub struct Session {
     /// Last total token count reported by the API (input + cached + output).
     /// Loaded from meta.json on session restore; None for brand-new sessions.
     pub last_total_tokens: Option<u64>,
+    /// Per-session runtime overrides set by slash commands.
+    pub session_override: SessionOverride,
 }
 
 impl Session {
@@ -285,6 +339,7 @@ impl Session {
             compact_version: 0,
             summary_metadata: None,
             last_total_tokens: None,
+            session_override: SessionOverride::default(),
         }
     }
 
@@ -381,6 +436,9 @@ impl SessionManager {
 
         // 3. Load from backend.
         let last_total_tokens = self.backend.load_token_count(&session_id);
+        let session_override = self.backend.load_session_override(&session_id)
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default();
         let session = match self.backend.load_latest_summary(&session_id) {
             Some(summary) => {
                 // The summary message is already in history.jsonl (written during
@@ -411,6 +469,7 @@ impl SessionManager {
                         up_to_message: summary.up_to_message,
                     }),
                     last_total_tokens,
+                    session_override,
                 }
             }
             None => {
@@ -431,6 +490,7 @@ impl SessionManager {
                     compact_version: 0,
                     summary_metadata: None,
                     last_total_tokens,
+                    session_override,
                 }
             }
         };
@@ -534,6 +594,41 @@ impl SessionManager {
     pub fn active_session_id(&self, user_id: &str) -> Option<String> {
         self.active.read().get(user_id).cloned()
             .or_else(|| self.backend.get_active_session(user_id))
+    }
+
+    /// Save a session override for a user's active session.
+    /// Updates the in-memory cache and persists to the backend.
+    pub fn save_session_override(&self, user_id: &str, session_override: SessionOverride) {
+        let session_id = match self.active_session_id(user_id) {
+            Some(id) => id,
+            None => return,
+        };
+
+        // Update cache.
+        {
+            let mut cache = self.cache.write();
+            if let Some(session) = cache.get_mut(&session_id) {
+                session.session_override = session_override.clone();
+            }
+        }
+
+        // Persist.
+        if let Ok(json) = serde_json::to_string(&session_override) {
+            if let Err(e) = self.backend.save_session_override(&session_id, &json) {
+                tracing::warn!(session = %session_id, err = %e, "persist session override failed");
+            }
+        }
+    }
+
+    /// Get the current session override for the user's active session.
+    pub fn get_session_override(&self, user_id: &str) -> SessionOverride {
+        let session_id = match self.active_session_id(user_id) {
+            Some(id) => id,
+            None => return SessionOverride::default(),
+        };
+        self.cache.read().get(&session_id)
+            .map(|s| s.session_override.clone())
+            .unwrap_or_default()
     }
 
     /// Append a message to a session and persist.
