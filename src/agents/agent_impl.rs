@@ -635,6 +635,18 @@ impl AgentLoop {
                 );
                 // Append to history (previous system-reminders are kept)
                 self.session.add_user_text(msg.text_content().to_string());
+
+                // Persist to storage so system-reminders survive session switch/restart.
+                if let Some(ref hook) = self.persist_hook {
+                    if let Some(msg) = self.session.history.last() {
+                        if let Some(id) = hook.persist_message(&self.session.id, msg) {
+                            if let Some(last_id) = self.session.message_ids.last_mut() {
+                                *last_id = id;
+                            }
+                        }
+                    }
+                }
+
                 self.attachments.clear_pending();
 
                 // Persist the system-reminder so it survives session switches/restarts.
