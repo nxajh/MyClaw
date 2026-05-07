@@ -807,6 +807,17 @@ impl AgentLoop {
                 self.attachments.diff_agents(&agent_list, &history);
                 tracing::info!(agent_count = agent_list.len(), "agents hot-reloaded");
             }
+
+            if changes.memory_changed {
+                let memory_dir = std::path::Path::new(&self.config.prompt_config.workspace_dir)
+                    .join("memory");
+                let files = crate::memory::scan_memory_files(&memory_dir);
+                let entries: Vec<crate::memory::IndexEntry> =
+                    files.iter().map(crate::memory::IndexEntry::from).collect();
+                let history = self.session.history.clone();
+                self.attachments.diff_memory(&entries, &history);
+                tracing::info!(memory_count = entries.len(), "memory hot-reloaded");
+            }
         }
     }
 
@@ -1636,6 +1647,35 @@ impl AgentLoop {
 
         // 3. summarizer instruction — guide model to output summary directly,
         //    but if it calls tools, let it complete the round.
+        let memory_prompt = "\n\
+                 \n\
+                 You also have a persistent memory system. The memory directory is `memory/` and\n\
+                 its current index is in your system prompt above.\n\
+                 \n\
+                 Based on this conversation, decide if any memories should be saved, updated, or\n\
+                 deleted. Use file_write to create/update memory files and file_edit to modify them.\n\
+                 Use shell (rm) to delete memory files.\n\
+                 \n\
+                 Each memory file MUST have YAML frontmatter:\n\
+                 ---\n\
+                 name: short_snake_case_name\n\
+                 description: one-line description (under 150 chars)\n\
+                 type: user|feedback|project|reference\n\
+                 created_at: YYYY-MM-DD\n\
+                 ---\n\
+                 \n\
+                 Then the memory content in markdown.\n\
+                 \n\
+                 Rules:\n\
+                 - ONLY save things NOT derivable from code/git (user preferences, decisions, corrections)\n\
+                 - Check the existing memory index to avoid duplicates — update existing files instead of creating duplicates\n\
+                 - If existing memories are outdated or contradicted, update or delete them\n\
+                 - Keep name short, lowercase, underscores (becomes the filename: memory/{name}.md)\n\
+                 - If no memory changes needed, skip this entirely and just output the summary\n\
+                 \n\
+                 You may use file_write, file_edit, and file_read tools for memory operations ONLY.\n\
+                 Do not use other tools.";
+
         let prompt = match existing_summary {
             Some(base) => format!(
                 "Below is a PREVIOUS SUMMARY followed by NEW conversation messages.\n\
@@ -1646,7 +1686,9 @@ impl AgentLoop {
                  Merge the new messages into the previous summary. Produce a single \
                  updated summary that covers everything.\n\
                  \n\
-                 IMPORTANT: Output the summary as plain text. Do NOT use any tools.\n\
+                 Output the summary as plain text. If you also need to update memory files, \
+                 use the file_write/file_edit tools first, then output the summary as your \
+                 final response.\n\
                  \n\
                  Requirements:\n\
                  - Keep all user goals, tasks, and their current status\n\
@@ -1655,15 +1697,17 @@ impl AgentLoop {
                  - Keep all errors encountered and how they were resolved\n\
                  - Omit raw tool output (large code blocks, logs, file contents)\n\
                  - Use the same language as the conversation (Chinese or English)\n\
-                 - Be thorough but concise: every important detail should be preserved",
-                base
+                 - Be thorough but concise: every important detail should be preserved{}",
+                base, memory_prompt
             ),
             None => format!(
                 "Summarize the conversation history above. This summary will replace \
                  the full history, so it MUST preserve all information needed to continue \
                  the conversation seamlessly.\n\
                  \n\
-                 IMPORTANT: Output the summary as plain text. Do NOT use any tools.\n\
+                 Output the summary as plain text. If you also need to update memory files, \
+                 use the file_write/file_edit tools first, then output the summary as your \
+                 final response.\n\
                  \n\
                  Required sections:\n\
                  1. **User Goals**: What is the user trying to accomplish? Current status of each goal.\n\
@@ -1676,8 +1720,8 @@ impl AgentLoop {
                  - Omit raw tool output (large code blocks, logs, file dumps) — keep only key facts\n\
                  - Use the same language as the conversation\n\
                  - Be thorough: losing context means the user has to repeat themselves\n\
-                 - This conversation has {} messages to summarize",
-                to_compact.len()
+                 - This conversation has {} messages to summarize{}",
+                to_compact.len(), memory_prompt
             ),
         };
         messages.push(ChatMessage::user_text(prompt));
@@ -1895,6 +1939,18 @@ impl AgentLoop {
         let (ok, reasons) = self.audit_summary_quality(&to_compact, &summary);
         if !ok {
             tracing::warn!(reasons = ?reasons, "summary quality audit failed (non-blocking)");
+        }
+
+        // Refresh memory index (summarizer may have written memory files via tools).
+        {
+            let memory_dir = std::path::Path::new(&self.config.prompt_config.workspace_dir)
+                .join("memory");
+            let files = crate::memory::scan_memory_files(&memory_dir);
+            let entries: Vec<crate::memory::IndexEntry> =
+                files.iter().map(crate::memory::IndexEntry::from).collect();
+            let history = self.session.history.clone();
+            self.attachments.diff_memory(&entries, &history);
+            tracing::info!(memory_count = entries.len(), "memory index refreshed after compaction");
         }
 
         // 3. Replace history.

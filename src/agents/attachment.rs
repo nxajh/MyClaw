@@ -19,6 +19,7 @@ enum AttachmentKind {
     SkillListing,
     AgentListing,
     McpInstructions,
+    MemoryListing,
 }
 
 /// 单类增量。
@@ -48,6 +49,8 @@ struct AnnouncedState {
 pub struct AttachmentManager {
     /// 本轮待发送增量
     pending: HashMap<AttachmentKind, Delta>,
+    /// 当前注入过的 memory 索引文本（用于跨 turn diff）
+    memory_index: Option<String>,
 }
 
 impl AttachmentManager {
@@ -232,6 +235,43 @@ impl AttachmentManager {
         }
     }
 
+    /// 与 memory 索引做 diff，变更时生成 system-reminder。
+    pub fn diff_memory(
+        &mut self,
+        entries: &[crate::memory::IndexEntry],
+        history: &[ChatMessage],
+    ) {
+        let new_text = crate::memory::format_memory_index(entries);
+        let old_text = self.memory_index.take().unwrap_or_default();
+
+        if new_text == old_text {
+            self.memory_index = Some(old_text);
+            return;
+        }
+
+        // Check if history already contains this exact index (avoid duplicates)
+        let marker = format!("## Memory Index Updated\n\n{}", &new_text);
+        let already_injected = history.iter().any(|msg| {
+            msg.text_content().contains(&marker)
+        });
+
+        if !already_injected {
+            let msg = format!(
+                "## Memory Index Updated\n\n{}",
+                new_text
+            );
+            self.pending.insert(
+                AttachmentKind::MemoryListing,
+                Delta {
+                    added: vec![msg],
+                    removed: vec![],
+                },
+            );
+        }
+
+        self.memory_index = Some(new_text);
+    }
+
     // ── Render ──────────────────────────────────────────────────────────
 
     /// 将 pending delta 合并为一条 ChatMessage。
@@ -248,6 +288,9 @@ impl AttachmentManager {
         }
         if let Some(delta) = self.pending.get(&AttachmentKind::McpInstructions) {
             sections.push(Self::render_mcp(delta));
+        }
+        if let Some(delta) = self.pending.get(&AttachmentKind::MemoryListing) {
+            sections.push(Self::render_memory(delta));
         }
 
         if sections.is_empty() {
@@ -271,6 +314,7 @@ impl AttachmentManager {
             AttachmentKind::SkillListing => "skills",
             AttachmentKind::AgentListing => "agents",
             AttachmentKind::McpInstructions => "mcp",
+            AttachmentKind::MemoryListing => "memory",
         }).collect()
     }
 
@@ -327,6 +371,12 @@ impl AttachmentManager {
         }
 
         lines.join("\n")
+    }
+
+    fn render_memory(delta: &Delta) -> String {
+        delta.added.join("
+
+")
     }
 
     fn render_mcp(delta: &Delta) -> String {

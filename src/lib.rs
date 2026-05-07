@@ -5,6 +5,7 @@ pub mod channels;
 pub mod config;
 pub mod daemon;
 pub mod mcp;
+pub mod memory;
 pub mod providers;
 pub mod registry;
 pub mod storage;

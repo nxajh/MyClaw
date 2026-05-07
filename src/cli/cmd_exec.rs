@@ -14,8 +14,7 @@ pub async fn run(cli: &Cli, prompt: &str, agent: Option<&str>, model: Option<&st
     let registry_arc: Arc<dyn myclaw::ServiceRegistry> = Arc::new(registry);
 
     let mut tools = myclaw::ToolRegistry::new();
-    let mem = myclaw::tools::MemoryStore::new();
-    for t in myclaw::tools::builtin_tools_with_memory(mem) {
+    for t in myclaw::tools::builtin_tools() {
         tools.register(t);
     }
     tools.register(Arc::new(myclaw::tools::ListDirTool::new()));

@@ -6,7 +6,6 @@
 //! **Web:** WebFetchTool, HttpRequestTool, WebSearchTool
 //! **Utility:** CalculatorTool, AskUserTool
 //! **Multi-Agent:** DelegateTaskTool
-//! **Memory:** MemoryStoreTool, MemoryRecallTool, MemoryForgetTool
 //! **Planning:** TaskManagerTool
 //! **Discovery:** ToolSearchTool, ListDirTool
 
@@ -16,7 +15,6 @@ mod delegate;
 mod file_ops;
 mod http;
 mod list_dir;
-mod memory;
 mod search;
 mod shell;
 mod skill_tool;
@@ -33,7 +31,6 @@ pub use delegate::{DelegateTaskTool, TaskDelegator};
 pub use file_ops::{FileEditTool, FileReadTool, FileWriteTool};
 pub use http::HttpRequestTool;
 pub use list_dir::ListDirTool;
-pub use memory::{MemoryForgetTool, MemoryRecallTool, MemoryStore, MemoryStoreTool};
 pub use search::{ContentSearchTool, GlobSearchTool};
 pub use shell::ShellTool;
 pub use skill_tool::SkillTool;
@@ -46,16 +43,8 @@ pub use web_search::WebSearchTool;
 use crate::providers::Tool;
 use std::sync::Arc;
 
-/// Create all built-in tools with a shared memory store.
-/// Returns (tools_vec, memory_store).
-pub fn builtin_tools() -> (Vec<Arc<dyn Tool>>, MemoryStore) {
-    let mem = MemoryStore::new();
-    let tools = builtin_tools_with_memory(mem.clone());
-    (tools, mem)
-}
-
-/// Create all built-in tools sharing the given MemoryStore.
-pub fn builtin_tools_with_memory(mem: MemoryStore) -> Vec<Arc<dyn Tool>> {
+/// Create all built-in tools.
+pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
     vec![
         // Core tools
         Arc::new(ShellTool::new()),
@@ -71,9 +60,5 @@ pub fn builtin_tools_with_memory(mem: MemoryStore) -> Vec<Arc<dyn Tool>> {
         // Utility tools
         Arc::new(CalculatorTool::new()),
         Arc::new(AskUserTool::new()),
-        // Memory tools
-        Arc::new(MemoryStoreTool::new(mem.clone())),
-        Arc::new(MemoryRecallTool::new(mem.clone())),
-        Arc::new(MemoryForgetTool::new(mem)),
     ]
 }

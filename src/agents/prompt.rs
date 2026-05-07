@@ -117,6 +117,7 @@ impl SystemPromptBuilder {
             self.build_skills(skills),
             self.build_workspace(),
             self.build_bootstrap_files(),
+            self.build_memory_section(),
             self.build_runtime(),
         ];
 
@@ -192,7 +193,6 @@ impl SystemPromptBuilder {
             "TOOLS.md",
             "IDENTITY.md",
             "BOOTSTRAP.md",
-            "MEMORY.md",
         ];
 
         let mut sections = Vec::new();
@@ -213,6 +213,10 @@ impl SystemPromptBuilder {
         } else {
             format!("## Workspace Bootstrap Files\n\n{}", sections.join("\n\n"))
         }
+    }
+
+    fn build_memory_section(&self) -> String {
+        crate::memory::build_memory_section(&self.config.workspace_dir)
     }
 
     fn build_runtime(&self) -> String {

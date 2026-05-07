@@ -308,7 +308,7 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
 /// Build ToolRegistry with all built-in + MCP + SkillTool registered.
 async fn build_tools(mcp_manager: &McpManager, skills: &Arc<parking_lot::RwLock<SkillManager>>) -> ToolRegistry {
     let mut tools = ToolRegistry::new();
-    let builtin = crate::tools::builtin_tools_with_memory(crate::tools::MemoryStore::new());
+    let builtin = crate::tools::builtin_tools();
     for tool in builtin {
         tools.register(tool);
     }
@@ -435,6 +435,13 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     std::env::set_current_dir(&config.workspace_dir).with_context(|| {
         format!("failed to set cwd to workspace_dir '{}'", config.workspace_dir.display())
     })?;
+
+    // Ensure memory/ directory exists
+    if let Err(e) = crate::memory::ensure_memory_dir(
+        config.workspace_dir.to_str().unwrap_or("."),
+    ) {
+        tracing::warn!(error = %e, "failed to create memory/ directory (non-fatal)");
+    }
 
     // ── Composition Root: assemble all components ──────────────────────────
 

@@ -14,6 +14,7 @@ use tokio::sync::watch;
 pub struct ChangeSet {
     pub skills_changed: bool,
     pub agents_changed: bool,
+    pub memory_changed: bool,
 }
 
 /// 文件系统监视器。
@@ -33,9 +34,11 @@ impl WorkspaceWatcher {
 
         let skills_dir = workspace_dir.join("skills");
         let agents_dir = workspace_dir.join("agents");
+        let memory_dir = workspace_dir.join("memory");
 
         let skills_dir_c = skills_dir.clone();
         let agents_dir_c = agents_dir.clone();
+        let memory_dir_c = memory_dir.clone();
 
         let mut watcher = notify::recommended_watcher(
             move |res: std::result::Result<notify::Event, notify::Error>| {
@@ -61,9 +64,15 @@ impl WorkspaceWatcher {
                     if path.starts_with(&agents_dir_c) {
                         changes.agents_changed = true;
                     }
+                    if path.starts_with(&memory_dir_c) {
+                        // Only trigger for .md files
+                        if path.extension().map_or(false, |ext| ext == "md") {
+                            changes.memory_changed = true;
+                        }
+                    }
                 }
 
-                if changes.skills_changed || changes.agents_changed {
+                if changes.skills_changed || changes.agents_changed || changes.memory_changed {
                     let _ = tx.send(changes);
                 }
             },
@@ -74,6 +83,10 @@ impl WorkspaceWatcher {
         }
         if agents_dir.exists() {
             watcher.watch(&agents_dir, RecursiveMode::Recursive)?;
+        }
+        // memory dir is ensured by daemon startup
+        if memory_dir.exists() {
+            watcher.watch(&memory_dir, RecursiveMode::Recursive)?;
         }
 
         Ok(Self {
