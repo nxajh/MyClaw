@@ -66,7 +66,7 @@ impl WorkspaceWatcher {
                     }
                     if path.starts_with(&memory_dir_c) {
                         // Only trigger for .md files
-                        if path.extension().map_or(false, |ext| ext == "md") {
+                        if path.extension().is_some_and(|ext| ext == "md") {
                             changes.memory_changed = true;
                         }
                     }
