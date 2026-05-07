@@ -288,41 +288,10 @@ impl LoopBreaker {
 // ── Simple FNV-1a-style hash ──────────────────────────────────────────────────
 
 /// Simple deterministic hash for detecting identical content.
-/// Uses a basic FNV-like approach (no need for cryptographic strength).
+/// Uses a basic FNV-1a approach over the full string (no need for cryptographic strength).
 fn simple_hash(s: &str) -> u64 {
-    // Combine hashes of first 128 bytes and last 128 bytes to detect loops
-    // that produce similar beginnings but different endings. Truncate each
-    // end at a valid UTF-8 character boundary.
-    fn head128(s: &str) -> &str {
-        if s.len() <= 128 {
-            return s;
-        }
-        let mut end = 128;
-        while !s.is_char_boundary(end) && end > 0 {
-            end -= 1;
-        }
-        &s[..end]
-    }
-    fn tail128(s: &str) -> &str {
-        if s.len() <= 128 {
-            return s;
-        }
-        let mut start = s.len() - 128;
-        while !s.is_char_boundary(start) {
-            start += 1;
-        }
-        &s[start..]
-    }
-
-    let head = head128(s);
-    let tail = tail128(s);
-
     let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in head.bytes() {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    for byte in tail.bytes() {
+    for byte in s.bytes() {
         hash ^= byte as u64;
         hash = hash.wrapping_mul(0x100000001b3);
     }
@@ -730,9 +699,10 @@ mod tests {
     }
 
     #[test]
-    fn simple_hash_truncates_long_input() {
-        let long: String = "a".repeat(500);
-        let truncated: String = "a".repeat(256);
-        assert_eq!(simple_hash(&long), simple_hash(&truncated));
+    fn simple_hash_is_full_content() {
+        // Full hash should differ for strings that share head+tail but differ in the middle.
+        let long_a = format!("{}middle_A{}", "a".repeat(200), "z".repeat(200));
+        let long_b = format!("{}middle_B{}", "a".repeat(200), "z".repeat(200));
+        assert_ne!(simple_hash(&long_a), simple_hash(&long_b));
     }
 }
