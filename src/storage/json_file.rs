@@ -6,9 +6,8 @@
 //! sessions/
 //!   active.json              # { "user_id": "session_id", ... }
 //!   {session_id}/
-//!     meta.json              # SessionMeta (id, owner, name, timestamps, count, segment)
+//!     meta.json              # all session metadata (identity, counters, compaction state)
 //!     history.jsonl          # active segment: one ChatMessage JSON per line, append-only
-//!     compaction.json        # latest SummaryRecord; up_to_message=0 after rotation
 //!     archive/
 //!       history.0000.jsonl   # segments archived on each compaction
 //!       history.0001.jsonl
@@ -16,11 +15,12 @@
 //! ```
 //!
 //! Message IDs are 1-based line numbers within the active `history.jsonl`.
-//! On each compaction `rotate_history` is called: the current file is archived and
-//! surviving messages are written to a fresh file whose line numbers start at 1.
-//! `compaction.json` is also updated so that `up_to_message = 0`, meaning
-//! `load_incremental(0)` on the new file returns every line — which is exactly
-//! the set of post-compaction messages we want to restore on restart.
+//! Line numbers reset to 1 on each rotation.  `load_incremental(0)` therefore
+//! always returns the full active segment, which is already post-compaction.
+//!
+//! Compaction state (version, token estimate) lives in `meta.json`; there is
+//! no separate `compaction.json`.  The summary message text is stored as a
+//! regular line in `history.jsonl` and does not need to be reconstructed.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -46,23 +46,18 @@ struct SessionMeta {
     /// Number of completed rotations; used to name archive files.
     #[serde(default)]
     segment: u32,
+    /// Compaction version (0 = never compacted).
+    #[serde(default)]
+    compact_version: u32,
+    /// Token estimate from the last compaction summary, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compact_token_estimate: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct ActiveMap {
     #[serde(flatten)]
     map: std::collections::HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CompactionRecord {
-    id: i64,
-    version: u32,
-    summary: String,
-    up_to_message: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    token_estimate: Option<u64>,
-    created_at: DateTime<Utc>,
 }
 
 // ── Backend ───────────────────────────────────────────────────────────────────
@@ -92,10 +87,6 @@ impl JsonFileBackend {
 
     fn history_path(&self, session_id: &str) -> PathBuf {
         self.session_dir(session_id).join("history.jsonl")
-    }
-
-    fn compaction_path(&self, session_id: &str) -> PathBuf {
-        self.session_dir(session_id).join("compaction.json")
     }
 
     fn archive_dir(&self, session_id: &str) -> PathBuf {
@@ -171,11 +162,11 @@ impl JsonFileBackend {
             .collect()
     }
 
-    fn meta_to_info(meta: SessionMeta) -> SessionInfo {
+    fn meta_to_info(meta: &SessionMeta) -> SessionInfo {
         SessionInfo {
-            id: meta.id,
-            owner: meta.owner,
-            display_name: meta.display_name,
+            id: meta.id.clone(),
+            owner: meta.owner.clone(),
+            display_name: meta.display_name.clone(),
             created_at: meta.created_at,
             last_activity: meta.last_activity,
             message_count: meta.message_count,
@@ -184,12 +175,6 @@ impl JsonFileBackend {
 
     // ── History rotation ──────────────────────────────────────────────────────
 
-    /// Archive `history.jsonl` and write `surviving` into a fresh file.
-    ///
-    /// After rotation the new file's lines are numbered 1..N, so
-    /// `load_incremental(0)` correctly returns all of them.  We also
-    /// reset `compaction.json`'s `up_to_message` to 0 so that a restart
-    /// always uses the "load everything in current file" path.
     fn rotate_history_impl(
         &self,
         session_id: &str,
@@ -224,16 +209,6 @@ impl JsonFileBackend {
         meta.message_count = surviving.len();
         meta.segment += 1;
         self.write_meta(&meta)?;
-
-        // Reset up_to_message so that load_incremental(0) loads the whole file.
-        let cp = self.compaction_path(session_id);
-        if let Ok(bytes) = fs::read(&cp) {
-            if let Ok(mut rec) = serde_json::from_slice::<CompactionRecord>(&bytes) {
-                rec.up_to_message = 0;
-                let _ = Self::write_json_atomic(&cp, &rec);
-            }
-        }
-
         Ok(())
     }
 }
@@ -252,17 +227,18 @@ impl SessionBackend for JsonFileBackend {
             last_activity: now,
             message_count: 0,
             segment: 0,
+            compact_version: 0,
+            compact_token_estimate: None,
         };
         self.write_meta(&meta)?;
 
-        // Set as active if user has no active session yet.
         let mut active = self.read_active();
         if !active.map.contains_key(owner) {
             active.map.insert(owner.to_string(), id.clone());
             self.write_active(&active)?;
         }
 
-        Ok(Self::meta_to_info(meta))
+        Ok(Self::meta_to_info(&meta))
     }
 
     fn delete_session(&self, session_id: &str) -> std::io::Result<()> {
@@ -271,7 +247,6 @@ impl SessionBackend for JsonFileBackend {
             fs::remove_dir_all(&dir)?;
         }
 
-        // Fix active map: remove or switch to another session.
         let mut active = self.read_active();
         let owners_to_fix: Vec<String> = active.map.iter()
             .filter(|(_, sid)| sid.as_str() == session_id)
@@ -300,7 +275,7 @@ impl SessionBackend for JsonFileBackend {
     }
 
     fn get_session(&self, session_id: &str) -> Option<SessionInfo> {
-        self.read_meta(session_id).map(Self::meta_to_info)
+        self.read_meta(session_id).as_ref().map(Self::meta_to_info)
     }
 
     fn list_sessions(&self, owner: &str) -> Vec<SessionInfo> {
@@ -313,7 +288,7 @@ impl SessionBackend for JsonFileBackend {
                 self.read_meta(&id)
             })
             .filter(|m| m.owner == owner)
-            .map(Self::meta_to_info)
+            .map(|m| Self::meta_to_info(&m))
             .collect();
         sessions.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
         sessions
@@ -337,7 +312,6 @@ impl SessionBackend for JsonFileBackend {
     }
 
     fn append_message(&self, session_id: &str, message: &ChatMessage) -> std::io::Result<i64> {
-        // Derive the new line number from the counter in meta — no file rescan needed.
         let mut meta = self.read_meta(session_id).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::NotFound, "session not found")
         })?;
@@ -377,8 +351,6 @@ impl SessionBackend for JsonFileBackend {
         };
         fs::write(&path, new_content)?;
 
-        // Update last_activity but keep message_count unchanged — the counter
-        // must not decrease to avoid ID reuse after remove+append.
         if let Some(mut meta) = self.read_meta(session_id) {
             meta.last_activity = Utc::now();
             let _ = self.write_meta(&meta);
@@ -388,27 +360,26 @@ impl SessionBackend for JsonFileBackend {
     }
 
     fn save_summary(&self, session_id: &str, summary: &SummaryRecord) -> std::io::Result<()> {
-        let record = CompactionRecord {
-            id: summary.id,
-            version: summary.version,
-            summary: summary.summary.clone(),
-            up_to_message: summary.up_to_message,
-            token_estimate: summary.token_estimate,
-            created_at: summary.created_at,
-        };
-        Self::write_json_atomic(&self.compaction_path(session_id), &record)
+        if let Some(mut meta) = self.read_meta(session_id) {
+            meta.compact_version = summary.version;
+            meta.compact_token_estimate = summary.token_estimate;
+            self.write_meta(&meta)?;
+        }
+        Ok(())
     }
 
     fn load_latest_summary(&self, session_id: &str) -> Option<SummaryRecord> {
-        let bytes = fs::read(self.compaction_path(session_id)).ok()?;
-        let rec: CompactionRecord = serde_json::from_slice(&bytes).ok()?;
+        let meta = self.read_meta(session_id)?;
+        if meta.compact_version == 0 {
+            return None;
+        }
         Some(SummaryRecord {
-            id: rec.id,
-            version: rec.version,
-            summary: rec.summary,
-            up_to_message: rec.up_to_message,
-            token_estimate: rec.token_estimate,
-            created_at: rec.created_at,
+            id: 0,
+            version: meta.compact_version,
+            summary: String::new(),
+            up_to_message: 0,
+            token_estimate: meta.compact_token_estimate,
+            created_at: meta.last_activity,
         })
     }
 
@@ -420,9 +391,10 @@ impl SessionBackend for JsonFileBackend {
     }
 
     fn clear_summary(&self, session_id: &str) -> std::io::Result<()> {
-        let path = self.compaction_path(session_id);
-        if path.exists() {
-            fs::remove_file(path)?;
+        if let Some(mut meta) = self.read_meta(session_id) {
+            meta.compact_version = 0;
+            meta.compact_token_estimate = None;
+            self.write_meta(&meta)?;
         }
         Ok(())
     }
@@ -452,7 +424,6 @@ impl SessionBackend for JsonFileBackend {
             }
         }
 
-        // Clean up active map pointing to deleted sessions.
         let mut active = self.read_active();
         active.map.retain(|_, sid| self.session_dir(sid).exists());
         let _ = self.write_active(&active);
