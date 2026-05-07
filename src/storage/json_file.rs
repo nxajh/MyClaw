@@ -322,7 +322,6 @@ impl SessionBackend for JsonFileBackend {
         let mut f = fs::OpenOptions::new().create(true).append(true).open(&path)?;
         writeln!(f, "{json}")?;
         f.flush()?;
-        f.sync_all()?;
 
         meta.message_count = new_id as usize;
         meta.last_activity = Utc::now();
