@@ -593,7 +593,13 @@ async fn cmd_context(ctx: CommandContext<'_>) -> String {
         let window_kb = context_window * 4 / 1024;
 
         let usage_detail = if cached > 0 {
-            format!("(输入: {} | 缓存: {} | 输出: {})", input, cached, output)
+            let total_input = input.saturating_add(cached);
+            let cache_rate = if total_input > 0 {
+                format!(" | 缓存命中率: {:.0}%", (cached as f64 / total_input as f64) * 100.0)
+            } else {
+                String::new()
+            };
+            format!("(输入: {} | 缓存: {} | 输出: {}){}", input, cached, output, cache_rate)
         } else {
             format!("(输入: {} | 输出: {})", input, output)
         };
