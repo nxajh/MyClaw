@@ -1963,7 +1963,7 @@ impl AgentLoop {
     ///
     /// `compact_threshold` implicitly reserves `(1 - threshold)` for model output and headroom.
     /// Tool spec tokens are subtracted because the summarizer receives tool definitions too.
-    /// `model_id` is the primary (currently routing-selected) model used for summarization.
+    /// `model_id` is the model that will summarize and later consume the compacted context.
     async fn compact_to_budget(
         &mut self,
         model_id: &str,
@@ -2037,28 +2037,27 @@ impl AgentLoop {
             return Ok(()); // no fallback chain
         }
 
-        let primary_model = routing_models[0].clone();
         let conservative_total = (self.token_tracker.total_tokens() as f64 * 1.25) as u64;
 
         // Find the first fallback model whose window the current context would overflow.
         // Extract without holding a borrow before the mutable &mut self call below.
-        let overflow_window: Option<u64> = routing_models
+        let target: Option<(String, u64)> = routing_models
             .iter()
             .skip(1) // skip primary model
             .find_map(|model_id| {
                 let cfg = self.registry.get_chat_model_config(model_id).ok()?;
                 let window = cfg.context_window?;
-                if conservative_total > window { Some(window) } else { None }
+                if conservative_total > window { Some((model_id.clone(), window)) } else { None }
             });
 
-        if let Some(window) = overflow_window {
+        if let Some((fallback_model, window)) = target {
             tracing::info!(
-                primary_model = %primary_model,
+                fallback_model = %fallback_model,
                 conservative_total,
                 window,
                 "pre-fallback: context would overflow fallback model, compacting"
             );
-            if let Err(e) = self.compact_to_budget(&primary_model, window).await {
+            if let Err(e) = self.compact_to_budget(&fallback_model, window).await {
                 tracing::warn!(error = %e, "pre-fallback compaction failed");
             }
         }
