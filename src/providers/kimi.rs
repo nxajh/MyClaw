@@ -189,11 +189,6 @@ impl ChatProvider for KimiProvider {
     fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
         let url = format!("{}/chat/completions", self.base_url);
         let body = build_kimi_body(&req);
-        let body_str = serde_json::to_string_pretty(&body).unwrap_or_default();
-        crate::providers::append_to_debug_log(&format!(
-            "=== REQUEST ===\nURL: {}\nBody:\n{}\n",
-            url, body_str
-        ));
         let auth =
             crate::providers::shared::build_auth(
                 &crate::providers::shared::AuthStyle::Bearer,
@@ -234,10 +229,6 @@ impl ChatProvider for KimiProvider {
             if resp.error_for_status_ref().is_err() {
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_default();
-                crate::providers::append_to_debug_log(&format!(
-                    "=== HTTP ERROR ===\nURL: {}\nStatus: {}\nBody: {}\n",
-                    url, status, text
-                ));
                 let _ = tx
                     .send(StreamEvent::HttpError {
                         status: status.as_u16(),
@@ -250,10 +241,6 @@ impl ChatProvider for KimiProvider {
             let mut buffer = String::new();
             let mut utf8_buf = Vec::new();
             let byte_stream = resp.bytes_stream();
-            crate::providers::append_to_debug_log(&format!(
-                "=== SSE STREAM START ===\nURL: {}\n",
-                url
-            ));
 
             let mut stream = std::pin::pin!(byte_stream);
             while let Some(item) = stream.next().await {
@@ -291,19 +278,11 @@ impl ChatProvider for KimiProvider {
                     let line = buffer[..pos].to_string();
                     buffer.drain(..=pos);
                     let event = parse_openai_sse(&line);
-                    crate::providers::append_to_debug_log(&format!(
-                        "SSE LINE: {}\nEVENT: {:?}\n",
-                        line, event
-                    ));
                     if let Some(event) = event {
                         let _ = tx.send(event).await;
                     }
                 }
             }
-            crate::providers::append_to_debug_log(&format!(
-                "=== SSE STREAM END ===\nURL: {}\n\n",
-                url
-            ));
             let _ = tx
                 .send(StreamEvent::Done {
                     reason: StopReason::EndTurn,

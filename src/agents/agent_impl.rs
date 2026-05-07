@@ -946,9 +946,6 @@ impl AgentLoop {
             let stream = provider.chat(req)?;
             tracing::info!("chat stream started, collecting...");
 
-            // Log raw request.
-            Self::log_chat_io("request", &model_id, &messages, &tools[..], None);
-
             let response = match self.collect_stream(stream).await {
                 Ok(r) => r,
                 Err(e) if e.to_string().contains("stream chunk timeout") => {
@@ -997,9 +994,6 @@ impl AgentLoop {
             if let Err(e) = self.maybe_compact(&model_id).await {
                 tracing::warn!(error = %e, "compaction failed, continuing");
             }
-
-            // Log raw response.
-            Self::log_chat_io("response", &model_id, &[], &[], Some(&response));
 
             // 5. No tool calls → return text.
             if response.tool_calls.is_empty() {
@@ -1402,71 +1396,6 @@ impl AgentLoop {
             output: truncated_output,
             error: result.error,
         })
-    }
-
-    /// Append raw chat I/O to a debug log file for post-mortem analysis.
-    ///
-    /// Each entry is a JSON line with timestamp, direction, model, and payload.
-    /// The log file is `chat_debug.jsonl` in the current working directory.
-    /// Writes are best-effort — errors are silently ignored.
-    fn log_chat_io(
-        direction: &str,
-        model_id: &str,
-        messages: &[ChatMessage],
-        tools: &[crate::providers::capability_chat::ToolSpec],
-        response: Option<&CollectedResponse>,
-    ) {
-        use std::io::Write;
-
-        let entry = if direction == "request" {
-            serde_json::json!({
-                "ts": chrono::Utc::now().to_rfc3339(),
-                "dir": "request",
-                "model": model_id,
-                "messages": messages.iter().map(|m| {
-                    let mut obj = serde_json::json!({
-                        "role": m.role,
-                        "content": m.text_content(),
-                    });
-                    if let Some(tcs) = &m.tool_calls {
-                        obj["tool_calls"] = serde_json::json!(tcs);
-                    }
-                    if let Some(tc_id) = &m.tool_call_id {
-                        obj["tool_call_id"] = serde_json::json!(tc_id);
-                    }
-                    obj
-                }).collect::<Vec<_>>(),
-                "tools": tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
-            })
-        } else {
-            let resp = response.unwrap();
-            serde_json::json!({
-                "ts": chrono::Utc::now().to_rfc3339(),
-                "dir": "response",
-                "model": model_id,
-                "text": resp.text,
-                "text_len": resp.text.len(),
-                "tool_calls": resp.tool_calls.iter().map(|tc| {
-                    serde_json::json!({
-                        "id": tc.id,
-                        "name": tc.name,
-                        "arguments": tc.arguments,
-                    })
-                }).collect::<Vec<_>>(),
-                "tool_calls_count": resp.tool_calls.len(),
-                "stop_reason": format!("{:?}", resp.stop_reason),
-            })
-        };
-
-        // Best-effort write; don't propagate errors.
-        let path = "chat_debug.jsonl";
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            let _ = writeln!(f, "{}", entry);
-        }
     }
 
     /// Calculate max_tokens for the current request based on context window.
