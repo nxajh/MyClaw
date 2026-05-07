@@ -522,15 +522,32 @@ async fn cmd_mcp(ctx: CommandContext<'_>) -> String {
 }
 
 async fn cmd_context(ctx: CommandContext<'_>) -> String {
-    let (model_id, context_window) = match ctx.registry.get_chat_provider(crate::providers::Capability::Chat) {
-        Ok((_, id)) => {
-            let cw = ctx.registry.get_chat_model_config(&id)
-                .ok()
-                .and_then(|cfg| cfg.context_window)
-                .unwrap_or(0);
-            (id, cw)
+    // Prefer session-level model_override if available, otherwise fall back to registry default.
+    let (model_id, context_window) = if let Some(loop_arc) = ctx.agent_loop {
+        let guard = loop_arc.lock().await;
+        let model = guard.session_override().model.clone()
+            .unwrap_or_else(|| {
+                ctx.registry.get_chat_provider(crate::providers::Capability::Chat)
+                    .ok()
+                    .map(|(_, id)| id)
+                    .unwrap_or_default()
+            });
+        let cw = ctx.registry.get_chat_model_config(&model)
+            .ok()
+            .and_then(|cfg| cfg.context_window)
+            .unwrap_or(0);
+        (model, cw)
+    } else {
+        match ctx.registry.get_chat_provider(crate::providers::Capability::Chat) {
+            Ok((_, id)) => {
+                let cw = ctx.registry.get_chat_model_config(&id)
+                    .ok()
+                    .and_then(|cfg| cfg.context_window)
+                    .unwrap_or(0);
+                (id, cw)
+            }
+            Err(_) => return "❌ 无法获取模型信息。".to_string(),
         }
-        Err(_) => return "❌ 无法获取模型信息。".to_string(),
     };
 
     if let Some(loop_arc) = ctx.agent_loop {
