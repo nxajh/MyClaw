@@ -131,6 +131,15 @@ impl TokenTracker {
             && self.pending_estimated_tokens == 0
     }
 
+    /// Last input tokens (new, non-cached).
+    pub fn last_input(&self) -> u64 { self.last_input_tokens }
+
+    /// Last cached input tokens.
+    pub fn last_cached(&self) -> u64 { self.last_cached_tokens }
+
+    /// Last output tokens.
+    pub fn last_output(&self) -> u64 { self.last_output_tokens }
+
     /// Adjust tracker after compaction: deduct removed tokens, add summary tokens.
     /// Preserves output_tokens and only touches input/pending estimates.
     pub fn adjust_for_compaction(&mut self, removed_tokens: u64, added_tokens: u64) {
@@ -437,6 +446,15 @@ impl AgentLoop {
     /// Get the current estimated total tokens.
     pub fn token_total(&self) -> u64 {
         self.token_tracker.total_tokens()
+    }
+
+    /// Get a breakdown of the last API call's token usage.
+    pub fn last_usage(&self) -> (u64, u64, u64) {
+        (
+            self.token_tracker.last_input(),
+            self.token_tracker.last_cached(),
+            self.token_tracker.last_output(),
+        )
     }
 
     /// Get the compact threshold ratio from config.

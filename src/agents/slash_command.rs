@@ -588,18 +588,25 @@ async fn cmd_context(ctx: CommandContext<'_>) -> String {
             "未知".to_string()
         };
 
+        let (input, cached, output) = guard.last_usage();
         let used_kb = total * 4 / 1024;
         let window_kb = context_window * 4 / 1024;
+
+        let usage_detail = if cached > 0 {
+            format!("(输入: {} | 缓存: {} | 输出: {})", input, cached, output)
+        } else {
+            format!("(输入: {} | 输出: {})", input, output)
+        };
 
         format!(
             "📐 **上下文详情**\n\n\
              模型: `{}`\n\
              上下文窗口: {} token (~{}KB)\n\
-             当前使用: {} token (~{}KB, {})\n\
+             当前使用: {} token {} (~{}KB, {})\n\
              压缩阈值: {}\n\
              历史消息: {} 条\n\
              压缩状态: {}",
-            model_id, context_window, window_kb, total, used_kb, usage_pct, threshold, history_len, summary_info
+            model_id, context_window, window_kb, total, usage_detail, used_kb, usage_pct, threshold, history_len, summary_info
         )
     } else {
         // agent_loop is None: restart or session switch before first message.
