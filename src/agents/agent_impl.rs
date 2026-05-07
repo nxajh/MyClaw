@@ -1679,19 +1679,26 @@ impl AgentLoop {
             "compaction range determined"
         );
 
+        // Resolve the DB id of the last message being compacted (needed for both
+        // success and fallback paths so restart can skip pre-compaction messages).
+        let last_compacted_id = self.session.message_ids
+            .get(compact_end.saturating_sub(1))
+            .copied()
+            .unwrap_or(0);
+
         // 3. Generate summary (incrementally merge old summary).
         let summary = match self.summarize_inline(&to_compact, existing_summary.as_deref(), model_id).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(error = %e, "summarizer failed, dropping pre-boundary history");
-                self.drop_pre_boundary(boundary);
+                self.drop_pre_boundary_with_record(boundary, last_compacted_id);
                 return Ok(());
             }
         };
 
         if summary.trim().is_empty() {
             tracing::warn!("summarizer returned empty, dropping pre-boundary history");
-            self.drop_pre_boundary(boundary);
+            self.drop_pre_boundary_with_record(boundary, last_compacted_id);
             return Ok(());
         }
 
@@ -1707,11 +1714,6 @@ impl AgentLoop {
             format!("[Context Summary] {}", summary)
         );
         let summary_tokens = estimate_message_tokens(&summary_msg);
-
-        let last_compacted_id = self.session.message_ids
-            .get(compact_end.saturating_sub(1))
-            .copied()
-            .unwrap_or(0);
 
         self.session.history.drain(compact_start..compact_end);
         self.session.history.insert(compact_start, summary_msg);
@@ -1771,7 +1773,7 @@ impl AgentLoop {
     }
 
     /// Drop all history before the boundary (no summary, no recovery).
-    fn drop_pre_boundary(&mut self, boundary: usize) {
+    fn drop_pre_boundary_with_record(&mut self, boundary: usize, last_compacted_id: i64) {
         let removed_tokens: u64 = self.session.history[..boundary]
             .iter()
             .map(estimate_message_tokens)
@@ -1779,6 +1781,20 @@ impl AgentLoop {
         self.session.history.drain(..boundary);
         self.session.message_ids.drain(..boundary);
         self.token_tracker.adjust_for_compaction(removed_tokens, 0);
+
+        // Save a placeholder summary so restart skips pre-compaction messages.
+        let version = self.session.compact_version + 1;
+        self.session.compact_version = version;
+        if let Some(ref hook) = self.persist_hook {
+            hook.save_compaction(&self.session.id, &SummaryRecord {
+                id: 0,
+                version,
+                summary: "[历史已截断]".to_string(),
+                up_to_message: last_compacted_id,
+                token_estimate: None,
+                created_at: chrono::Utc::now(),
+            });
+        }
     }
 
     /// Safety net: truncate oversized tool results in retention zone, or drop oldest unit.
