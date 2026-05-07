@@ -721,20 +721,10 @@ impl AgentLoop {
                 self.registry.get_chat_provider(Capability::Chat)?
             };
 
-            // Check if context compaction is needed.
-            // Track compact_version before so we can detect if compaction actually ran.
-            let pre_compact_version = self.session.compact_version;
-            if let Err(e) = self.maybe_compact(&model_id).await {
-                tracing::warn!(error = %e, "compaction failed, continuing");
-            }
-            let did_compact = self.session.compact_version != pre_compact_version;
-
             // Use initial_messages on the first iteration (includes system-reminder
-            // from AttachmentManager), rebuild on subsequent iterations (e.g. after
-            // compaction or when tool results need to be included).
-            // If compaction ran on the first iteration, rebuild from the compacted
-            // history rather than sending the stale pre-compaction message list.
-            let mut messages = if first_iteration && !did_compact {
+            // from AttachmentManager), rebuild on subsequent iterations (after tool
+            // calls or compaction).
+            let mut messages = if first_iteration {
                 first_iteration = false;
                 tracing::info!(
                     msg_count = initial_messages.len(),
@@ -839,6 +829,13 @@ impl AgentLoop {
                     total_tracked = self.token_tracker.total_tokens(),
                     "token usage recorded"
                 );
+            }
+
+            // Check compaction using the precise token counts just reported by the API.
+            // This eliminates the one-turn delay that results from checking before the
+            // API call: we now always have accurate data when deciding to compact.
+            if let Err(e) = self.maybe_compact(&model_id).await {
+                tracing::warn!(error = %e, "compaction failed, continuing");
             }
 
             // Log raw response.
@@ -1149,25 +1146,25 @@ impl AgentLoop {
             }
         }
 
-        // Special handling for delegate_task tool — async delegation via handler.
+        // Special handling for delegate_task: async handler takes priority,
+        // then sync delegation via sub_delegator (with parent session ID for persistence).
         if call.name == "delegate_task" {
+            let args: serde_json::Value = if call.arguments.is_empty() {
+                serde_json::Value::Object(serde_json::Map::new())
+            } else {
+                serde_json::from_str(&call.arguments).unwrap_or_else(|_| {
+                    serde_json::json!({ "raw": &call.arguments })
+                })
+            };
+            let agent_name = args["agent"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("'agent' is required"))?;
+            let task = args["task"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("'task' is required"))?;
+
             if let Some(ref handler) = self.delegate_handler {
-                let args: serde_json::Value = if call.arguments.is_empty() {
-                    serde_json::Value::Object(serde_json::Map::new())
-                } else {
-                    serde_json::from_str(&call.arguments).unwrap_or_else(|_| {
-                        serde_json::json!({ "raw": &call.arguments })
-                    })
-                };
-                let agent_name = args["agent"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("'agent' is required"))?;
-                let task = args["task"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("'task' is required"))?;
-
                 let task_id = handler(agent_name.to_string(), task.to_string())?;
-
                 return Ok(ToolResult {
                     success: true,
                     output: format!(
@@ -1177,6 +1174,19 @@ impl AgentLoop {
                         agent_name, task_id
                     ),
                     error: None,
+                });
+            }
+
+            if let Some(ref delegator) = self.sub_delegator {
+                let parent_id = self.session.id.clone();
+                let result = delegator.delegate_with_parent(agent_name, task, &parent_id).await;
+                return Ok(match result {
+                    Ok(output) => ToolResult { success: true, output, error: None },
+                    Err(e) => ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!("Sub-agent '{}' failed: {}", agent_name, e)),
+                    },
                 });
             }
         }
@@ -1613,7 +1623,7 @@ impl AgentLoop {
         let threshold = (context_window as f64 * self.config.context.compact_threshold) as u64;
         let total = self.token_tracker.total_tokens();
 
-        if total <= threshold {
+        if total < threshold {
             return Ok(());
         }
 
@@ -1728,7 +1738,7 @@ impl AgentLoop {
             up_to_message: last_compacted_id,
         });
 
-        // 5. Persist summary.
+        // 5. Persist summary and rotate history file.
         if let Some(ref hook) = self.persist_hook {
             hook.save_compaction(&self.session.id, &SummaryRecord {
                 id: 0,
@@ -1738,6 +1748,19 @@ impl AgentLoop {
                 token_estimate: Some(summary_tokens),
                 created_at: chrono::Utc::now(),
             });
+
+            // Archive the pre-compaction segment; the summary message inserted
+            // above is part of surviving, so it lands in the new file on disk.
+            let surviving: Vec<(i64, ChatMessage)> = self.session.message_ids.iter()
+                .copied()
+                .zip(self.session.history.iter().cloned())
+                .collect();
+            hook.rotate_history(&self.session.id, &surviving);
+
+            // Reassign message_ids to match the new file's 1-based line numbers.
+            for (i, id) in self.session.message_ids.iter_mut().enumerate() {
+                *id = (i + 1) as i64;
+            }
         }
 
         // 6. Adjust token tracker.
@@ -1794,6 +1817,13 @@ impl AgentLoop {
                 token_estimate: None,
                 created_at: chrono::Utc::now(),
             });
+
+            // Archive the pre-compaction segment; surviving messages go into a new file.
+            let surviving: Vec<(i64, ChatMessage)> = self.session.message_ids.iter()
+                .copied()
+                .zip(self.session.history.iter().cloned())
+                .collect();
+            hook.rotate_history(&self.session.id, &surviving);
         }
     }
 

@@ -187,6 +187,7 @@ impl Orchestrator {
             return existing.clone();
         }
         let session = session_manager.get_or_create(sk);
+        let session_id = session.id.clone();
 
         // Create persist hook from the shared backend.
         let persist_hook: Arc<dyn PersistHook> = Arc::new(
@@ -236,14 +237,14 @@ impl Orchestrator {
 
         // Wire up the delegate handler (async delegation).
         if let (Some(delegator), Some(manager)) = (sub_delegator.clone(), delegation_manager.clone()) {
-            let session_key_owned = sk.to_string();
+            let session_id_for_delegate = session_id.clone();
             let reply_target_for_delegate = reply_target.to_string();
             let delegate_handler: DelegateHandler = Arc::new(
                 move |agent_name: String, task: String| {
                     delegator.delegate_async(
                         &agent_name,
                         &task,
-                        &session_key_owned,
+                        &session_id_for_delegate,
                         &reply_target_for_delegate,
                         &manager,
                     )
