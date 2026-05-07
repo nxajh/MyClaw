@@ -80,6 +80,16 @@ pub trait SessionBackend: Send + Sync {
     /// Clear all summaries for a session.
     fn clear_summary(&self, session_id: &str) -> std::io::Result<()>;
 
+    /// Archive the current history segment and write `surviving` messages into
+    /// a fresh file.  Called after each compaction.  Default: no-op.
+    fn rotate_history(
+        &self,
+        _session_id: &str,
+        _surviving: &[(i64, ChatMessage)],
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
+
     // ── Maintenance ────────────────────────────────────────────────────────
 
     /// Clean up sessions older than ttl_hours.

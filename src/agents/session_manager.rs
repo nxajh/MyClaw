@@ -200,6 +200,8 @@ pub trait PersistHook: Send + Sync {
     /// Persist a message and return its assigned backend ID (None on failure).
     fn persist_message(&self, session_id: &str, message: &ChatMessage) -> Option<i64>;
     fn save_compaction(&self, session_id: &str, summary: &SummaryRecord);
+    /// Archive the current history segment; surviving messages are kept in the new file.
+    fn rotate_history(&self, session_id: &str, surviving: &[(i64, ChatMessage)]);
 }
 
 /// PersistHook implementation backed by a SessionBackend.
@@ -227,6 +229,12 @@ impl PersistHook for BackendPersistHook {
     fn save_compaction(&self, session_id: &str, summary: &SummaryRecord) {
         if let Err(e) = self.backend.save_summary(session_id, summary) {
             tracing::warn!(session = %session_id, err = %e, "save compaction failed");
+        }
+    }
+
+    fn rotate_history(&self, session_id: &str, surviving: &[(i64, ChatMessage)]) {
+        if let Err(e) = self.backend.rotate_history(session_id, surviving) {
+            tracing::warn!(session = %session_id, err = %e, "history rotation failed");
         }
     }
 }

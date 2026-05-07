@@ -1794,6 +1794,13 @@ impl AgentLoop {
                 token_estimate: None,
                 created_at: chrono::Utc::now(),
             });
+
+            // Archive the pre-compaction segment; surviving messages go into a new file.
+            let surviving: Vec<(i64, ChatMessage)> = self.session.message_ids.iter()
+                .copied()
+                .zip(self.session.history.iter().cloned())
+                .collect();
+            hook.rotate_history(&self.session.id, &surviving);
         }
     }
 

@@ -6,13 +6,20 @@
 //! sessions/
 //!   active.json              # { "user_id": "session_id", ... }
 //!   {session_id}/
-//!     meta.json              # SessionMeta (id, owner, name, timestamps, count)
-//!     history.jsonl          # one ChatMessage JSON per line, append-only
+//!     meta.json              # SessionMeta (id, owner, name, timestamps, count, segment)
+//!     history.jsonl          # active segment: {"_id":N, ...ChatMessage...} per line
 //!     compaction.json        # latest SummaryRecord (overwritten each time)
+//!     archive/
+//!       history.0000.jsonl   # segments archived on each compaction
+//!       history.0001.jsonl
+//!       ...
 //! ```
 //!
-//! `append_message` returns the 1-based line number of the new line in
-//! history.jsonl; this is used as the `message_id` for `load_incremental`.
+//! `_id` is a global monotonically-increasing counter stored in `meta.message_count`.
+//! On each compaction, `history.jsonl` is archived and surviving messages are written
+//! to a fresh file — so the active file only ever contains post-compaction messages.
+//! `load_incremental(after_id)` only reads the active segment; archive files are
+//! never needed for normal operation.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -33,7 +40,11 @@ struct SessionMeta {
     display_name: Option<String>,
     created_at: DateTime<Utc>,
     last_activity: DateTime<Utc>,
+    /// Monotonically-increasing counter; equals the highest `_id` ever assigned.
     message_count: usize,
+    /// Number of completed archive rotations; used to name archive files.
+    #[serde(default)]
+    segment: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -51,6 +62,15 @@ struct CompactionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     token_estimate: Option<u64>,
     created_at: DateTime<Utc>,
+}
+
+/// Wrapper used in history.jsonl: embeds the stable message ID alongside the payload.
+#[derive(Serialize, Deserialize)]
+struct MessageRecord {
+    #[serde(rename = "_id")]
+    id: i64,
+    #[serde(flatten)]
+    message: ChatMessage,
 }
 
 // ── Backend ───────────────────────────────────────────────────────────────────
@@ -86,19 +106,22 @@ impl JsonFileBackend {
         self.session_dir(session_id).join("compaction.json")
     }
 
+    fn archive_dir(&self, session_id: &str) -> PathBuf {
+        self.session_dir(session_id).join("archive")
+    }
+
     fn active_path(&self) -> PathBuf {
         self.root.join("active.json")
     }
 
     // ── Atomic write helpers ──────────────────────────────────────────────────
 
-    /// Write JSON atomically via a temp file + rename.
+    /// Write compact JSON atomically via a temp file + rename.
     fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
         let tmp = path.with_extension("tmp");
         {
             let f = fs::File::create(&tmp)?;
-            serde_json::to_writer_pretty(f, value)
-                .map_err(std::io::Error::other)?;
+            serde_json::to_writer(f, value).map_err(std::io::Error::other)?;
         }
         fs::rename(&tmp, path)?;
         Ok(())
@@ -138,20 +161,18 @@ impl JsonFileBackend {
 
     // ── JSONL helpers ─────────────────────────────────────────────────────────
 
-    /// Read all (line_number, ChatMessage) pairs from history.jsonl.
-    /// Line numbers are 1-based.
+    /// Read all (id, ChatMessage) pairs from the active history.jsonl.
     fn read_history_with_ids(&self, session_id: &str) -> Vec<(i64, ChatMessage)> {
         let path = self.history_path(session_id);
         let Ok(f) = fs::File::open(&path) else { return vec![]; };
         BufReader::new(f)
             .lines()
-            .enumerate()
-            .filter_map(|(i, line)| {
+            .filter_map(|line| {
                 let line = line.ok()?;
                 let line = line.trim();
                 if line.is_empty() { return None; }
-                let msg: ChatMessage = serde_json::from_str(line).ok()?;
-                Some(((i + 1) as i64, msg))
+                let rec: MessageRecord = serde_json::from_str(line).ok()?;
+                Some((rec.id, rec.message))
             })
             .collect()
     }
@@ -165,6 +186,46 @@ impl JsonFileBackend {
             last_activity: meta.last_activity,
             message_count: meta.message_count,
         }
+    }
+
+    // ── History rotation ──────────────────────────────────────────────────────
+
+    /// Archive `history.jsonl` and write `surviving` messages into a fresh file.
+    /// Called after each successful compaction.
+    fn rotate_history_impl(
+        &self,
+        session_id: &str,
+        surviving: &[(i64, ChatMessage)],
+    ) -> std::io::Result<()> {
+        let history_path = self.history_path(session_id);
+        let mut meta = match self.read_meta(session_id) {
+            Some(m) => m,
+            None => return Ok(()),
+        };
+
+        // Archive the current active segment.
+        if history_path.exists() {
+            let archive_dir = self.archive_dir(session_id);
+            fs::create_dir_all(&archive_dir)?;
+            let archive_name = format!("history.{:04}.jsonl", meta.segment);
+            fs::rename(&history_path, archive_dir.join(archive_name))?;
+        }
+
+        // Write surviving messages to the new active segment.
+        if !surviving.is_empty() {
+            let mut f = fs::File::create(&history_path)?;
+            for (id, msg) in surviving {
+                let record = MessageRecord { id: *id, message: msg.clone() };
+                let json = serde_json::to_string(&record).map_err(std::io::Error::other)?;
+                writeln!(f, "{json}")?;
+            }
+            f.flush()?;
+            f.sync_all()?;
+        }
+
+        meta.segment += 1;
+        self.write_meta(&meta)?;
+        Ok(())
     }
 }
 
@@ -181,6 +242,7 @@ impl SessionBackend for JsonFileBackend {
             created_at: now,
             last_activity: now,
             message_count: 0,
+            segment: 0,
         };
         self.write_meta(&meta)?;
 
@@ -208,7 +270,6 @@ impl SessionBackend for JsonFileBackend {
             .collect();
 
         for owner in owners_to_fix {
-            // Find another session for this owner.
             let next = self.list_sessions(&owner)
                 .into_iter()
                 .find(|s| s.id != session_id)
@@ -267,26 +328,26 @@ impl SessionBackend for JsonFileBackend {
     }
 
     fn append_message(&self, session_id: &str, message: &ChatMessage) -> std::io::Result<i64> {
+        // Derive new ID from the counter in meta — no need to rescan the file.
+        let mut meta = self.read_meta(session_id).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "session not found")
+        })?;
+        let new_id = (meta.message_count as i64) + 1;
+
+        let record = MessageRecord { id: new_id, message: message.clone() };
+        let json = serde_json::to_string(&record).map_err(std::io::Error::other)?;
+
         let path = self.history_path(session_id);
-        let json = serde_json::to_string(message).map_err(std::io::Error::other)?;
-
         let mut f = fs::OpenOptions::new().create(true).append(true).open(&path)?;
-        writeln!(f, "{}", json)?;
+        writeln!(f, "{json}")?;
         f.flush()?;
+        f.sync_all()?;
 
-        // Count lines to get the 1-based line number of the appended message.
-        let line_num = BufReader::new(fs::File::open(&path)?)
-            .lines()
-            .count() as i64;
+        meta.message_count = new_id as usize;
+        meta.last_activity = Utc::now();
+        let _ = self.write_meta(&meta);
 
-        // Update metadata.
-        if let Some(mut meta) = self.read_meta(session_id) {
-            meta.message_count = line_num as usize;
-            meta.last_activity = Utc::now();
-            let _ = self.write_meta(&meta);
-        }
-
-        Ok(line_num)
+        Ok(new_id)
     }
 
     fn remove_last_message(&self, session_id: &str) -> std::io::Result<bool> {
@@ -294,7 +355,6 @@ impl SessionBackend for JsonFileBackend {
         let Ok(content) = fs::read_to_string(&path) else { return Ok(false); };
 
         let mut lines: Vec<&str> = content.split('\n').collect();
-        // Remove trailing empty element from final newline.
         if lines.last().map(|l| l.is_empty()).unwrap_or(false) {
             lines.pop();
         }
@@ -310,8 +370,9 @@ impl SessionBackend for JsonFileBackend {
         };
         fs::write(&path, new_content)?;
 
+        // Update last_activity but do NOT decrement message_count — the counter
+        // is monotonically increasing to prevent ID reuse after remove+append.
         if let Some(mut meta) = self.read_meta(session_id) {
-            meta.message_count = meta.message_count.saturating_sub(1);
             meta.last_activity = Utc::now();
             let _ = self.write_meta(&meta);
         }
@@ -357,6 +418,14 @@ impl SessionBackend for JsonFileBackend {
             fs::remove_file(path)?;
         }
         Ok(())
+    }
+
+    fn rotate_history(
+        &self,
+        session_id: &str,
+        surviving: &[(i64, ChatMessage)],
+    ) -> std::io::Result<()> {
+        self.rotate_history_impl(session_id, surviving)
     }
 
     fn cleanup_stale(&self, ttl_hours: u32) -> std::io::Result<usize> {
