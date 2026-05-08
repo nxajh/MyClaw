@@ -377,6 +377,7 @@ impl Orchestrator {
                     let image_urls = msg.image_urls.clone();
                     let image_base64 = msg.image_base64.clone();
                     let reply_target = msg.reply_target.clone();
+                    let reply_to_id = Some(msg.id.clone());
                     let channel_name_clone = channel_name.clone();
 
                     // Intercept slash commands before reaching agent loop.
@@ -403,7 +404,7 @@ impl Orchestrator {
                                         recipient: reply_target,
                                         content: response,
                                         subject: None,
-                                        thread_ts: None,
+                                        thread_ts: reply_to_id.clone(),
                                         cancellation_token: None,
                                         attachments: vec![],
                                         image_urls: None,
@@ -480,7 +481,7 @@ impl Orchestrator {
                                     recipient: reply_target,
                                     content: text,
                                     subject: None,
-                                    thread_ts: None,
+                                    thread_ts: reply_to_id.clone(),
                                     cancellation_token: None,
                                     attachments: vec![],
                                     image_urls: None,
@@ -501,7 +502,7 @@ impl Orchestrator {
                                     recipient: reply_target,
                                     content: error_text,
                                     subject: None,
-                                    thread_ts: None,
+                                    thread_ts: reply_to_id.clone(),
                                     cancellation_token: None,
                                     attachments: vec![],
                                     image_urls: None,

@@ -369,11 +369,13 @@ impl QQBotChannel {
         let token = self.token_manager.get_token().await?;
         let url = format!("{}/v2/users/{}/messages", API_BASE, openid);
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "content": content,
             "msg_type": 0,
-            "msg_id": msg_id,
         });
+        if !msg_id.is_empty() {
+            body["msg_id"] = serde_json::Value::String(msg_id.to_string());
+        }
 
         let resp = self
             .http_client
@@ -430,11 +432,13 @@ impl QQBotChannel {
         let token = self.token_manager.get_token().await?;
         let url = format!("{}/v2/groups/{}/messages", API_BASE, group_openid);
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "content": content,
             "msg_type": 0,
-            "msg_id": msg_id,
         });
+        if !msg_id.is_empty() {
+            body["msg_id"] = serde_json::Value::String(msg_id.to_string());
+        }
 
         let resp = self
             .http_client
@@ -496,12 +500,14 @@ impl Channel for QQBotChannel {
 
     async fn send(&self, msg: &SendMessage) -> anyhow::Result<()> {
         let chunks = split_message_chunk(&msg.content, QQ_MAX_MESSAGE_LENGTH);
+        // thread_ts carries the original message event ID for passive replies.
+        let msg_id = msg.thread_ts.as_deref().unwrap_or("");
 
         for (i, chunk) in chunks.iter().enumerate() {
             let result = if let Some(openid) = msg.recipient.strip_prefix("c2c:") {
-                self.send_c2c_message(openid, chunk, &msg.recipient).await
+                self.send_c2c_message(openid, chunk, msg_id).await
             } else if let Some(group_openid) = msg.recipient.strip_prefix("group:") {
-                self.send_group_message(group_openid, chunk, &msg.recipient).await
+                self.send_group_message(group_openid, chunk, msg_id).await
             } else {
                 Err(anyhow::anyhow!(
                     "invalid QQ Bot recipient format: {} (expected c2c:<openid> or group:<openid>)",
