@@ -252,7 +252,7 @@ impl QQBotChannel {
         let payload = serde_json::json!({
             "op": OP_IDENTIFY,
             "d": {
-                "token": format!("Bot {}.{}", self.config.app_id, token),
+                "token": format!("QQBot {}", token),
                 "intents": INTENTS,
                 "shard": [0, 1],
             }
