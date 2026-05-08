@@ -185,9 +185,12 @@ fn convert_markdown_tables(markdown: &str) -> String {
             }
 
             // 6. Format a row with alignment, trimming trailing whitespace.
+            //    Only format cells up to the number of table columns (num_cols)
+            //    to avoid width mismatch when a data row has extra cells.
             let format_row = |cells: &[String]| -> String {
-                let mut parts = Vec::with_capacity(cells.len());
-                for (k, cell) in cells.iter().enumerate() {
+                let mut parts = Vec::with_capacity(num_cols);
+                for k in 0..num_cols {
+                    let cell = cells.get(k).map(|s| s.as_str()).unwrap_or("");
                     let w = col_widths.get(k).copied().unwrap_or(0);
                     let a = aligns.get(k).copied().unwrap_or('L');
                     match a {
@@ -210,7 +213,7 @@ fn convert_markdown_tables(markdown: &str) -> String {
                             ));
                         }
                         _ => {
-                            parts.push(format!("{}{}", cell, " ".repeat(w - cell.len())));
+                            parts.push(format!("{}{}", cell, " ".repeat(w.saturating_sub(cell.len()))));
                         }
                     }
                 }
