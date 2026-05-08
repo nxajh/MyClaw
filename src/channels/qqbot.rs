@@ -25,7 +25,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
@@ -631,7 +631,7 @@ impl QQBotChannel {
             tokio::select! {
                 // Heartbeat tick.
                 _ = heartbeat_ticker.tick() => {
-                    let seq = self.last_seq.lock().clone();
+                    let seq = *self.last_seq.lock();
                     let payload = serde_json::json!({
                         "op": OP_HEARTBEAT,
                         "d": seq,
