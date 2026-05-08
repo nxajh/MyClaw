@@ -455,7 +455,7 @@ async fn handle_request(
             WebhookAuth::Bearer => {
                 let expected = format!("Bearer {}", secret);
                 match auth_header {
-                    Some(ref h) if h == expected => {}
+                    Some(ref h) if h == &expected => {}
                     _ => {
                         tracing::warn!(path = %path, "webhook: Bearer auth failed");
                         return ok_response(StatusCode::UNAUTHORIZED, "invalid token");
@@ -501,7 +501,7 @@ async fn handle_hooks_agent(
     if let Some(secret) = global_secret {
         let expected = format!("Bearer {}", secret);
         match req.headers().get("Authorization").and_then(|v| v.to_str().ok()) {
-            Some(h) if h == expected => {}
+            Some(h) if h == &expected => {}
             _ => return ok_response(StatusCode::UNAUTHORIZED, "invalid token"),
         }
     }
@@ -556,7 +556,7 @@ async fn handle_hooks_wake(
     if let Some(secret) = global_secret {
         let expected = format!("Bearer {}", secret);
         match req.headers().get("Authorization").and_then(|v| v.to_str().ok()) {
-            Some(h) if h == expected => {}
+            Some(h) if h == &expected => {}
             _ => return ok_response(StatusCode::UNAUTHORIZED, "invalid token"),
         }
     }
