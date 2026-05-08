@@ -513,7 +513,7 @@ fn extract_payload(body: &[u8], key: &str) -> Option<String> {
     let val: serde_json::Value = serde_json::from_slice(body).ok()?;
     let result = navigate_json(&val, key)?;
     match result {
-        serde_json::Value::String(s) => Some(s),
+        serde_json::Value::String(s) => Some(s.clone()),
         serde_json::Value::Number(n) => Some(n.to_string()),
         serde_json::Value::Bool(b) => Some(b.to_string()),
         serde_json::Value::Null => None,
