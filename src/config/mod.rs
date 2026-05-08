@@ -56,6 +56,7 @@ pub mod mcp;
 pub mod memory;
 pub mod provider;
 pub mod routing;
+pub mod scheduler;
 pub mod sub_agent;
 
 use std::collections::HashMap;

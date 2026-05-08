@@ -561,21 +561,51 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         );
 
     let parts = OrchestratorParts {
-        agent,
+        agent: agent.clone(),
         session_manager,
         channels,
         sub_delegator: sub_agent_delegator_arc,
         delegation_manager,
         delegation_rx,
-        persist_backend: session_backend,
+        persist_backend: session_backend.clone(),
         mcp_manager: Some(Arc::clone(&mcp_manager_arc)),
-        change_rx: Some(change_rx),
+        change_rx: Some(change_rx.clone()),
     };
 
     // ── Launch ─────────────────────────────────────────────────────────────
 
     let (mut orchestrator, _msg_tx) = Orchestrator::new(parts);
     print_banner(&config, mcp_manager_arc.server_count().await, mcp_manager_arc.tool_count().await, sub_agent_count, &sub_agent_names);
+
+    // ── Scheduler tasks ────────────────────────────────────────────────────
+    let scheduler_config = config.agent.scheduler.clone();
+    let shared = orchestrator.shared();
+
+    let scheduler_ctx = Arc::new(crate::agents::SchedulerContext {
+        agent: agent.clone(),
+        channels: shared.channels,
+        sessions: shared.sessions,
+        session_backend: session_backend.clone(),
+        timezone_offset: config.agent.prompt.timezone_offset,
+        last_channel: shared.last_channel,
+        change_rx: Some(change_rx.clone()),
+    });
+
+    if scheduler_config.heartbeat.enabled {
+        let hb_ctx = scheduler_ctx.clone();
+        let hb_config = scheduler_config.heartbeat.clone();
+        tokio::spawn(async move {
+            crate::agents::run_heartbeat(hb_ctx, hb_config).await;
+        });
+    }
+
+    if scheduler_config.cron.enabled && !scheduler_config.cron.jobs.is_empty() {
+        let cron_ctx = scheduler_ctx.clone();
+        let cron_config = scheduler_config.cron.clone();
+        tokio::spawn(async move {
+            crate::agents::run_cron_scheduler(cron_ctx, cron_config).await;
+        });
+    }
 
     // Shutdown channel.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

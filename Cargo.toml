@@ -56,6 +56,9 @@ toml = "0.8"
 async-trait = "0.1"
 notify = { version = "7", features = ["macos_kqueue"] }
 
+# Cron expression parsing
+cron = "0.15"
+
 # WeChat crypto (feature-gated)
 aes = { version = "0.8", optional = true }
 ecb = { version = "0.1", optional = true }

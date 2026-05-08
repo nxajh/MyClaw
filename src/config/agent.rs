@@ -80,6 +80,9 @@ pub struct AgentConfig {
     /// Context window management settings.
     #[serde(default)]
     pub context: ContextConfig,
+    /// Scheduler settings (heartbeat, cron, webhook).
+    #[serde(default)]
+    pub scheduler: crate::config::scheduler::SchedulerConfig,
 }
 
 fn default_max_tool_calls() -> usize { 100 }
@@ -99,6 +102,7 @@ impl Default for AgentConfig {
             loop_breaker_threshold: default_loop_breaker_threshold(),
             prompt: PromptConfig::default(),
             context: ContextConfig::default(),
+            scheduler: crate::config::scheduler::SchedulerConfig::default(),
         }
     }
 }

@@ -64,6 +64,15 @@ pub struct Orchestrator {
     mcp_manager: Option<Arc<crate::agents::McpManager>>,
     /// File change receiver for hot-reload.
     change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
+    /// Last channel that received a user message (shared with schedulers).
+    pub last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
+}
+
+/// Resources shared between Orchestrator and scheduler tasks.
+pub struct SharedSessions {
+    pub sessions: Arc<DashMap<String, Arc<TokioMutex<AgentLoop>>>>,
+    pub channels: Arc<DashMap<String, Arc<dyn Channel>>>,
+    pub last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
 }
 
 /// Parse a session key like "telegram:12345" into (channel_name, sender).
@@ -136,10 +145,20 @@ impl Orchestrator {
             persist_backend: parts.persist_backend,
             mcp_manager: parts.mcp_manager,
             change_rx: parts.change_rx,
+            last_channel: Arc::new(tokio::sync::Mutex::new(None)),
         };
 
         info!(channels = orchestrator.channels.len(), "orchestrator initialized");
         (orchestrator, (*msg_tx).clone())
+    }
+
+    /// Get shared resources for scheduler tasks.
+    pub fn shared(&self) -> SharedSessions {
+        SharedSessions {
+            sessions: self.sessions.clone(),
+            channels: self.channels.clone(),
+            last_channel: self.last_channel.clone(),
+        }
     }
 
     fn spawn_listener(
@@ -336,6 +355,12 @@ impl Orchestrator {
 
             match event {
                 ChannelEvent::UserMessage((channel_name, msg)) => {
+                    // Track last channel for scheduler target resolution.
+                    {
+                        let mut lc = self.last_channel.lock().await;
+                        *lc = Some(channel_name.clone());
+                    }
+
                     let sk = Self::session_key(&channel_name, &msg.sender);
 
                     // Check if this is a reply to a pending ask_user.
