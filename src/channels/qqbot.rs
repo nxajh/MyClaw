@@ -162,7 +162,7 @@ impl TokenManager {
         self.do_refresh().await
     }
 
-    /// Force refresh the access token (e.g. after receiving 11244 from the API).
+    /// Force refresh the access token.
     async fn refresh(&self) -> anyhow::Result<String> {
         self.do_refresh().await
     }
@@ -285,47 +285,30 @@ impl QQBotChannel {
     }
 
     /// Fetch WebSocket gateway URL from the API.
-    /// Retries once with a fresh token if the server rejects it (code 11244).
     async fn fetch_gateway_url(&self) -> anyhow::Result<String> {
-        let mut attempt = 0u8;
-        loop {
-            let token = if attempt == 0 {
-                self.token_manager.get_token().await?
-            } else {
-                // Force refresh on retry — server told us the token is expired.
-                self.token_manager.refresh().await?
-            };
-            let resp = self
-                .http_client
-                .get(GATEWAY_URL)
-                .header("Authorization", format!("QQBot {}", token))
-                .send()
+        let token = self.token_manager.get_token().await?;
+        let resp = self
+            .http_client
+            .get(GATEWAY_URL)
+            .header("Authorization", format!("QQBot {}", token))
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("gateway request failed: {}", e))?;
+
+        if resp.status().is_success() {
+            let data: serde_json::Value = resp
+                .json()
                 .await
-                .map_err(|e| anyhow::anyhow!("gateway request failed: {}", e))?;
-
-            if resp.status().is_success() {
-                let data: serde_json::Value = resp
-                    .json()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("gateway parse error: {}", e))?;
-                return data["url"]
-                    .as_str()
-                    .map(String::from)
-                    .ok_or_else(|| anyhow::anyhow!("missing url in gateway response"));
-            }
-
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-
-            // If the server says token expired, force-refresh and retry once.
-            if attempt == 0 && text.contains("11244") {
-                warn!("gateway rejected token (expired), force-refreshing and retrying");
-                attempt += 1;
-                continue;
-            }
-
-            return Err(anyhow::anyhow!("gateway returned {}: {}", status, text));
+                .map_err(|e| anyhow::anyhow!("gateway parse error: {}", e))?;
+            return data["url"]
+                .as_str()
+                .map(String::from)
+                .ok_or_else(|| anyhow::anyhow!("missing url in gateway response"));
         }
+
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        Err(anyhow::anyhow!("gateway returned {}: {}", status, text))
     }
 
     /// Build an Identify payload.
@@ -476,33 +459,7 @@ impl QQBotChannel {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            // Token may have expired — QQ Bot returns 500 with code 11244 (not 401).
-            // Background refresh should prevent this, but retry as safety net.
-            if status.as_u16() == 401 || text.contains("11244") {
-                warn!(status = %status, "C2C send got auth error, refreshing token and retrying");
-                let token = self.token_manager.refresh().await?;
-                let resp = self
-                    .http_client
-                    .post(&url)
-                    .header("Authorization", format!("QQBot {}", token))
-                    .header("Content-Type", "application/json")
-                    .json(&body)
-                    .send()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("C2C send retry failed: {}", e))?;
-
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
-                    return Err(anyhow::anyhow!(
-                        "C2C send retry returned {}: {}",
-                        status,
-                        text
-                    ));
-                }
-            } else {
-                return Err(anyhow::anyhow!("C2C send returned {}: {}", status, text));
-            }
+            return Err(anyhow::anyhow!("C2C send returned {}: {}", status, text));
         }
 
         debug!(openid = openid, "C2C message sent");
@@ -545,37 +502,11 @@ impl QQBotChannel {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            // Token may have expired — QQ Bot returns 500 with code 11244 (not 401).
-            // Background refresh should prevent this, but retry as safety net.
-            if status.as_u16() == 401 || text.contains("11244") {
-                warn!(status = %status, "group send got auth error, refreshing token and retrying");
-                let token = self.token_manager.refresh().await?;
-                let resp = self
-                    .http_client
-                    .post(&url)
-                    .header("Authorization", format!("QQBot {}", token))
-                    .header("Content-Type", "application/json")
-                    .json(&body)
-                    .send()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("group send retry failed: {}", e))?;
-
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
-                    return Err(anyhow::anyhow!(
-                        "group send retry returned {}: {}",
-                        status,
-                        text
-                    ));
-                }
-            } else {
-                return Err(anyhow::anyhow!(
-                    "group send returned {}: {}",
-                    status,
-                    text
-                ));
-            }
+            return Err(anyhow::anyhow!(
+                "group send returned {}: {}",
+                status,
+                text
+            ));
         }
 
         debug!(group = group_openid, "group message sent");
