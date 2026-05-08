@@ -76,6 +76,8 @@ struct TokenManager {
     app_id: String,
     client_secret: String,
     http_client: reqwest::Client,
+    /// Background refresh task handle.
+    bg_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl TokenManager {
@@ -88,45 +90,89 @@ impl TokenManager {
                 .timeout(Duration::from_secs(15))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
+            bg_handle: tokio::sync::Mutex::new(None),
         }
     }
 
-    /// Get a valid access token, refreshing if needed.
-    /// Uses a write lock during refresh so only one task hits the HTTP endpoint.
-    async fn get_token(&self) -> anyhow::Result<String> {
-        // Fast path: check under read lock first.
-        {
-            let state = self.state.read().await;
-            if let Some(ref s) = *state {
-                if s.expires_at > std::time::Instant::now() + Duration::from_secs(300) {
-                    return Ok(s.access_token.clone());
-                }
-            }
+    /// Start the background token refresh loop.
+    /// Refreshes the token before it expires, so callers always get a valid token.
+    fn start_background_refresh(self: &Arc<Self>) {
+        let mut handle = self.bg_handle.blocking_lock();
+        if handle.is_some() {
+            return; // Already running.
+        }
+        let this = Arc::clone(self);
+        *handle = Some(tokio::spawn(async move {
+            this.background_refresh_loop().await;
+        }));
+    }
+
+    /// Background loop: fetch initial token, then refresh before expiry.
+    async fn background_refresh_loop(&self) {
+        // Initial fetch.
+        if let Err(e) = self.do_refresh().await {
+            error!(error = %e, "QQ Bot initial token fetch failed, retrying in 5s");
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
 
-        // Slow path: acquire write lock and refresh (only one task does this).
-        let mut state = self.state.write().await;
-        // Re-check after acquiring write lock — another task may have refreshed.
+        loop {
+            // Calculate sleep duration until next refresh.
+            let sleep_duration = {
+                let state = self.state.read().await;
+                match *state {
+                    Some(ref s) => {
+                        let remaining = s.expires_at.saturating_duration_since(std::time::Instant::now());
+                        // Refresh 5 minutes before expiry, with up to 30s random jitter.
+                        let refresh_ahead = Duration::from_secs(300);
+                        let jitter = Duration::from_millis(
+                            (rand::random::<u64>() % 30_000)
+                        );
+                        remaining.saturating_sub(refresh_ahead).saturating_sub(jitter)
+                    }
+                    None => Duration::from_secs(5), // No token, retry soon.
+                }
+            };
+
+            if !sleep_duration.is_zero() {
+                tokio::time::sleep(sleep_duration).await;
+            }
+
+            if let Err(e) = self.do_refresh().await {
+                error!(error = %e, "QQ Bot background token refresh failed, retrying in 5s");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    }
+
+    /// Get a valid access token from cache.
+    /// The background task ensures the token is always fresh; this is a read-only fast path.
+    /// Falls back to a synchronous refresh only if the cache is empty (e.g. background
+    /// task hasn't completed its first fetch yet).
+    async fn get_token(&self) -> anyhow::Result<String> {
+        let state = self.state.read().await;
         if let Some(ref s) = *state {
-            if s.expires_at > std::time::Instant::now() + Duration::from_secs(300) {
+            if s.expires_at > std::time::Instant::now() {
                 return Ok(s.access_token.clone());
             }
         }
-        *state = Some(self.fetch_new_token().await?);
-        if let Some(ref s) = *state {
-            info!(expires_in_secs = s.expires_at.elapsed().as_secs(), "QQ Bot access token refreshed");
-        }
-        Ok(state.as_ref().unwrap().access_token.clone())
+        drop(state);
+
+        // Cache miss or expired — background task may not have finished yet.
+        // Do a one-shot refresh as fallback.
+        self.do_refresh().await
     }
 
-    /// Force refresh the access token (acquires write lock).
+    /// Force refresh the access token (e.g. after receiving 11244 from the API).
     async fn refresh(&self) -> anyhow::Result<String> {
-        let mut state = self.state.write().await;
-        *state = Some(self.fetch_new_token().await?);
-        if let Some(ref s) = *state {
-            info!(expires_in_secs = s.expires_at.elapsed().as_secs(), "QQ Bot access token refreshed");
-        }
-        Ok(state.as_ref().unwrap().access_token.clone())
+        self.do_refresh().await
+    }
+
+    /// Internal: fetch a new token and update the cache.
+    async fn do_refresh(&self) -> anyhow::Result<String> {
+        let token_state = self.fetch_new_token().await?;
+        let token = token_state.access_token.clone();
+        *self.state.write().await = Some(token_state);
+        Ok(token)
     }
 
     /// Actually fetch a new token from the API.
@@ -431,6 +477,7 @@ impl QQBotChannel {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             // Token may have expired — QQ Bot returns 500 with code 11244 (not 401).
+            // Background refresh should prevent this, but retry as safety net.
             if status.as_u16() == 401 || text.contains("11244") {
                 warn!(status = %status, "C2C send got auth error, refreshing token and retrying");
                 let token = self.token_manager.refresh().await?;
@@ -499,6 +546,7 @@ impl QQBotChannel {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             // Token may have expired — QQ Bot returns 500 with code 11244 (not 401).
+            // Background refresh should prevent this, but retry as safety net.
             if status.as_u16() == 401 || text.contains("11244") {
                 warn!(status = %status, "group send got auth error, refreshing token and retrying");
                 let token = self.token_manager.refresh().await?;
@@ -577,6 +625,9 @@ impl Channel for QQBotChannel {
     }
 
     async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>> {
+        // Start proactive background token refresh (OpenClaw-style).
+        self.token_manager.start_background_refresh();
+
         let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
 
         let channel = self.clone();
