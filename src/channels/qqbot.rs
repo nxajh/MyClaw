@@ -430,9 +430,9 @@ impl QQBotChannel {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            // Token may have expired; try once more after refresh.
-            if status.as_u16() == 401 {
-                warn!("C2C send got 401, refreshing token and retrying");
+            // Token may have expired — QQ Bot returns 500 with code 11244 (not 401).
+            if status.as_u16() == 401 || text.contains("11244") {
+                warn!(status = %status, "C2C send got auth error, refreshing token and retrying");
                 let token = self.token_manager.refresh().await?;
                 let resp = self
                     .http_client
@@ -498,9 +498,9 @@ impl QQBotChannel {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            // Token may have expired; try once more after refresh.
-            if status.as_u16() == 401 {
-                warn!("group send got 401, refreshing token and retrying");
+            // Token may have expired — QQ Bot returns 500 with code 11244 (not 401).
+            if status.as_u16() == 401 || text.contains("11244") {
+                warn!(status = %status, "group send got auth error, refreshing token and retrying");
                 let token = self.token_manager.refresh().await?;
                 let resp = self
                     .http_client
