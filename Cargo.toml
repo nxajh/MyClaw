@@ -15,7 +15,7 @@ path = "src/main.rs"
 tokio = { version = "1", features = ["full"] }
 
 # WebSocket (QQ Bot)
-tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.26", features = ["native-tls"], optional = true }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -77,8 +77,8 @@ md-5 = { version = "0.10", optional = true }
 urlencoding = { version = "2.1", optional = true }
 
 [features]
-default = []
-qqbot = []
+default = ["wechat", "qqbot", "telegram"]
+qqbot = ["tokio-tungstenite"]
 wechat = ["aes", "ecb", "md-5", "urlencoding"]
 telegram = []
 
