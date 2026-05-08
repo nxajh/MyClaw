@@ -1,7 +1,9 @@
 //! MiniMax provider — delegates to Anthropic-compatible API.
 //!
-//! MiniMax officially recommends using the Anthropic-compatible endpoint.
-//! This module is a thin wrapper around AnthropicProvider.
+//! MiniMax officially recommends using their Anthropic-compatible endpoint
+//! (`https://api.minimaxi.com/anthropic`).  This module is a thin wrapper
+//! around [`AnthropicProvider`], which already implements the full Anthropic
+//! SSE protocol (tools, thinking, streaming, tool_result).
 
 use async_trait::async_trait;
 
