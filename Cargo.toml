@@ -61,7 +61,7 @@ cron = "0.15"
 
 # HTTP server for webhook
 hyper = { version = "1", features = ["server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio", "server", "server-http"] }
+hyper-util = { version = "0.1", features = ["tokio", "server"] }
 http-body-util = "0.1"
 
 # HMAC for webhook signature verification
