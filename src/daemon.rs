@@ -607,6 +607,14 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         });
     }
 
+    if scheduler_config.webhook.enabled {
+        let wh_ctx = scheduler_ctx.clone();
+        let wh_config = scheduler_config.webhook.clone();
+        tokio::spawn(async move {
+            crate::agents::run_webhook_server(wh_ctx, wh_config).await;
+        });
+    }
+
     // Shutdown channel.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 

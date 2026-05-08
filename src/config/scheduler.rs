@@ -62,6 +62,22 @@ pub struct CronConfig {
     pub jobs: Vec<CronJob>,
 }
 
+/// A single webhook job — triggered by incoming HTTP POST.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookJob {
+    /// URL path that triggers this job, e.g. "/github".
+    pub path: String,
+    /// Prompt sent to the agent when webhook fires.
+    pub prompt: String,
+    /// Optional JSON path to extract payload field as conversation context.
+    /// e.g. "commits[0].message" extracts from POST body.
+    #[serde(default)]
+    pub payload_key: Option<String>,
+    /// Where to send output: "last" | "none" | channel name.
+    #[serde(default = "default_target")]
+    pub target: String,
+}
+
 /// Webhook server configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookConfig {
@@ -74,6 +90,9 @@ pub struct WebhookConfig {
     /// HMAC-SHA256 secret for request verification.
     #[serde(default)]
     pub secret: Option<String>,
+    /// Webhook jobs.
+    #[serde(default)]
+    pub jobs: Vec<WebhookJob>,
 }
 
 impl Default for WebhookConfig {
@@ -82,6 +101,7 @@ impl Default for WebhookConfig {
             enabled: false,
             port: default_webhook_port(),
             secret: None,
+            jobs: vec![],
         }
     }
 }

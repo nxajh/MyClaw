@@ -16,7 +16,7 @@ use crate::agents::Agent;
 use crate::agents::AgentLoop;
 use crate::agents::session_manager::SessionManager;
 use crate::channels::{Channel, SendMessage};
-use crate::config::scheduler::{CronConfig, CronJob, HeartbeatConfig};
+use crate::config::scheduler::{CronConfig, CronJob, HeartbeatConfig, WebhookConfig, WebhookJob};
 use crate::storage::SessionBackend;
 
 // ── Shared context ─────────────────────────────────────────────────────────
@@ -327,6 +327,242 @@ fn cron_matches(schedule: &cron::Schedule, now: &chrono::DateTime<chrono::Utc>) 
     })
 }
 
+// ── Webhook ────────────────────────────────────────────────────────────────
+
+use hyper::body::Bytes;
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::{Method, Request, Response, StatusCode};
+use hyper_util::rt::TokioIo;
+use http_body_util::Full;
+
+/// Run the webhook HTTP server.
+pub async fn run_webhook_server(ctx: Arc<SchedulerContext>, config: WebhookConfig) {
+    let listener = match tokio::net::TcpListener::bind(("0.0.0.0", config.port)).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(port = config.port, error = %e, "webhook: failed to bind");
+            return;
+        }
+    };
+
+    tracing::info!(port = config.port, "webhook server started");
+
+    // Build a route map: path → (job_index)
+    let routes: Vec<(String, usize)> = config
+        .jobs
+        .iter()
+        .enumerate()
+        .map(|(i, job)| {
+            let path = if job.path.starts_with('/') {
+                job.path.clone()
+            } else {
+                format!("/{}", job.path)
+            };
+            (path, i)
+        })
+        .collect();
+
+    let jobs = Arc::new(config.jobs);
+    let secret = config.secret.clone();
+
+    loop {
+        let (stream, _addr) = match listener.accept().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "webhook: accept failed");
+                continue;
+            }
+        };
+
+        let io = TokioIo::new(stream);
+        let ctx = ctx.clone();
+        let jobs = jobs.clone();
+        let secret = secret.clone();
+        let routes = routes.clone();
+
+        tokio::spawn(async move {
+            let service = service_fn(move |req| {
+                let ctx = ctx.clone();
+                let jobs = jobs.clone();
+                let secret = secret.clone();
+                let routes = routes.clone();
+                async move { handle_webhook(req, ctx, &jobs, &secret, &routes).await }
+            });
+
+            if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
+                tracing::debug!(error = %e, "webhook: connection error");
+            }
+        });
+    }
+}
+
+async fn handle_webhook(
+    req: Request<hyper::body::Incoming>,
+    ctx: Arc<SchedulerContext>,
+    jobs: &[WebhookJob],
+    secret: &Option<String>,
+    routes: &[(String, usize)],
+) -> anyhow::Result<Response<Full<Bytes>>> {
+    // Only accept POST.
+    if req.method() != Method::POST {
+        return ok_response(StatusCode::METHOD_NOT_ALLOWED, "POST only");
+    }
+
+    // Find matching job.
+    let path = req.uri().path().to_string();
+    let job_idx = match routes.iter().find(|(p, _)| p == &path) {
+        Some((_, idx)) => *idx,
+        None => return ok_response(StatusCode::NOT_FOUND, "no webhook at this path"),
+    };
+    let job = &jobs[job_idx];
+
+    // Extract signature header before consuming body.
+    let sig_header = req
+        .headers()
+        .get("X-Hub-Signature-256")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // Collect body bytes.
+    let body_bytes = match collect_body(req.into_body()).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "webhook: failed to read body");
+            return ok_response(StatusCode::BAD_REQUEST, "failed to read body");
+        }
+    };
+
+    // Verify HMAC signature if configured.
+    if let Some(secret) = secret {
+        match sig_header {
+            Some(ref sig) if !verify_signature(&body_bytes, secret, sig) => {
+                tracing::warn!(path = %path, "webhook: HMAC verification failed");
+                return ok_response(StatusCode::UNAUTHORIZED, "invalid signature");
+            }
+            None => {
+                tracing::warn!(path = %path, "webhook: missing signature header");
+                return ok_response(StatusCode::UNAUTHORIZED, "missing signature");
+            }
+            _ => {} // Signature valid
+        }
+    }
+
+    tracing::info!(path = %path, "webhook triggered");
+
+    // Extract payload field if configured.
+    let payload_context = match &job.payload_key {
+        Some(key) => extract_payload(&body_bytes, key),
+        None => None,
+    };
+
+    // Build prompt.
+    let prompt = match payload_context {
+        Some(ctx_text) => format!("{}\n\n---\nWebhook payload:\n{}", job.prompt, ctx_text),
+        None => job.prompt.clone(),
+    };
+
+    let session_key = format!("_webhook_{}", path.trim_start_matches('/').replace('/', "_"));
+    let result = run_scheduled_task(&ctx, &session_key, &prompt).await;
+
+    match result {
+        Ok(response) => {
+            if !response.trim().is_empty() && job.target != "none" {
+                send_to_target(&ctx, &job.target, &response).await;
+            }
+            ok_response(StatusCode::OK, "ok")
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "webhook: agent run failed");
+            ok_response(StatusCode::INTERNAL_SERVER_ERROR, "agent error")
+        }
+    }
+}
+
+/// Verify HMAC-SHA256 signature against the `X-Hub-Signature-256` header value.
+fn verify_signature(body: &[u8], secret: &str, header_value: &str) -> bool {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    type HmacSha256 = Hmac<Sha256>;
+
+    let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    mac.update(body);
+    let result = mac.finalize();
+    let expected_hex = format!("sha256={}", hex::encode(result.into_bytes()));
+
+    // Constant-time comparison.
+    let a = expected_hex.as_bytes();
+    let b = header_value.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
+/// Extract a value from a JSON body by dot-separated key path.
+/// e.g. "commits[0].message" or "action"
+fn extract_payload(body: &[u8], key: &str) -> Option<String> {
+    let val: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let result = navigate_json(&val, key)?;
+    match result {
+        serde_json::Value::String(s) => Some(s),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Null => None,
+        other => Some(serde_json::to_string_pretty(&other).unwrap_or_else(|_| other.to_string())),
+    }
+}
+
+/// Navigate a JSON value by a dot-separated path, supporting array indices.
+/// e.g. "commits[0].message" → val["commits"][0]["message"]
+fn navigate_json<'a>(val: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    let mut current = val;
+    for segment in path.split('.') {
+        // Check for array index: "field[0]"
+        if let Some(bracket) = segment.find('[') {
+            let field = &segment[..bracket];
+            if !field.is_empty() {
+                current = current.get(field)?;
+            }
+            // Parse all indices: [0][1] etc.
+            let rest = &segment[bracket..];
+            for idx_str in rest.split(']').filter(|s| !s.is_empty()) {
+                let idx: usize = idx_str.trim_start_matches('[').parse().ok()?;
+                current = current.get(idx)?;
+            }
+        } else {
+            current = current.get(segment)?;
+        }
+    }
+    Some(current)
+}
+
+/// Collect full body bytes from an incoming body stream.
+async fn collect_body<B>(body: B) -> anyhow::Result<Bytes>
+where
+    B: hyper::body::Body,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
+    use http_body_util::BodyExt;
+    let collected = body.collect().await?;
+    Ok(collected.to_bytes())
+}
+
+fn ok_response(status: StatusCode, body: &str) -> anyhow::Result<Response<Full<Bytes>>> {
+    Response::builder()
+        .status(status)
+        .body(Full::new(Bytes::from(body.to_string())))
+        .map_err(Into::into)
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -383,5 +619,76 @@ mod tests {
         assert!(is_silent_ok("Heartbeat_OK", "heartbeat"));
         assert!(is_silent_ok(" heartbeat_ok ", "heartbeat"));
         assert!(!is_silent_ok("I found something", "heartbeat"));
+    }
+
+    // ── Webhook tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn verify_signature_valid() {
+        let body = b"test payload";
+        let secret = "my-secret";
+        // Compute expected signature
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        type HmacSha256 = Hmac<Sha256>;
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        let sig = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+        assert!(verify_signature(body, secret, &sig));
+    }
+
+    #[test]
+    fn verify_signature_invalid() {
+        let body = b"test payload";
+        assert!(!verify_signature(body, "secret", "sha256=bad_hex"));
+    }
+
+    #[test]
+    fn verify_signature_wrong_length() {
+        assert!(!verify_signature(b"body", "secret", "sha256=abc"));
+    }
+
+    #[test]
+    fn extract_payload_string() {
+        let body = br#"{"action":"opened","title":"PR #1"}"#;
+        assert_eq!(extract_payload(body, "action"), Some("opened".to_string()));
+    }
+
+    #[test]
+    fn extract_payload_nested() {
+        let body = br#"{"pull_request":{"title":"Fix bug","number":42}}"#;
+        assert_eq!(extract_payload(body, "pull_request.title"), Some("Fix bug".to_string()));
+    }
+
+    #[test]
+    fn extract_payload_array_index() {
+        let body = br#"{"commits":[{"message":"fix"},{"message":"feat"}]}"#;
+        assert_eq!(extract_payload(body, "commits[0].message"), Some("fix".to_string()));
+    }
+
+    #[test]
+    fn extract_payload_missing_key() {
+        let body = br#"{"action":"opened"}"#;
+        assert_eq!(extract_payload(body, "nonexistent"), None);
+    }
+
+    #[test]
+    fn extract_payload_invalid_json() {
+        let body = b"not json";
+        assert_eq!(extract_payload(body, "key"), None);
+    }
+
+    #[test]
+    fn navigate_json_simple() {
+        let val: serde_json::Value = serde_json::json!({"foo": "bar"});
+        let result = navigate_json(&val, "foo");
+        assert_eq!(result.unwrap().as_str(), Some("bar"));
+    }
+
+    #[test]
+    fn navigate_json_deep() {
+        let val: serde_json::Value = serde_json::json!({"a": {"b": {"c": 42}}});
+        let result = navigate_json(&val, "a.b.c");
+        assert_eq!(result.unwrap().as_u64(), Some(42));
     }
 }
