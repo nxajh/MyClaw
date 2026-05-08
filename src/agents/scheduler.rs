@@ -4,6 +4,9 @@
 //!   construct prompt → AgentLoop::run() → handle response
 //!
 //! Each runs as an independent tokio task, sharing resources via Arc<SchedulerContext>.
+//!
+//! Job definitions come from files (`cron/*.md`, `webhooks/*.md`),
+//! not from TOML config. Config only holds global settings.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,8 +18,9 @@ use tokio::sync::{Mutex as TokioMutex, Mutex};
 use crate::agents::Agent;
 use crate::agents::AgentLoop;
 use crate::agents::session_manager::SessionManager;
+use crate::agents::webhook_loader::{WebhookAuth, WebhookJobDef, render_template};
 use crate::channels::{Channel, SendMessage};
-use crate::config::scheduler::{CronConfig, CronJob, HeartbeatConfig, WebhookConfig, WebhookJob};
+use crate::config::scheduler::{CronJob, HeartbeatConfig, WebhookConfig};
 use crate::storage::SessionBackend;
 
 // ── Shared context ─────────────────────────────────────────────────────────
@@ -169,11 +173,9 @@ pub async fn send_to_target(ctx: &SchedulerContext, target: &str, content: &str)
         }
     };
 
-    // Scheduler messages don't have a specific recipient; the channel
-    // adapter decides where to send (e.g. last active chat).
     let msg = SendMessage {
         content: content.to_string(),
-        recipient: String::new(), // Channel-specific routing handled by adapter
+        recipient: String::new(),
         subject: None,
         thread_ts: None,
         cancellation_token: None,
@@ -247,9 +249,10 @@ pub async fn run_heartbeat(ctx: Arc<SchedulerContext>, config: HeartbeatConfig) 
 // ── Cron ────────────────────────────────────────────────────────────────────
 
 /// Run the cron scheduler loop.
-pub async fn run_cron_scheduler(ctx: Arc<SchedulerContext>, config: CronConfig) {
-    let mut jobs: Vec<(cron::Schedule, CronJob)> = Vec::new();
-    for job in &config.jobs {
+/// Jobs are loaded from `cron/*.md` files, not from config.
+pub async fn run_cron_scheduler(ctx: Arc<SchedulerContext>, jobs: Vec<CronJob>) {
+    let mut parsed: Vec<(cron::Schedule, CronJob)> = Vec::new();
+    for job in &jobs {
         match job.schedule.parse::<cron::Schedule>() {
             Ok(schedule) => {
                 tracing::info!(
@@ -258,7 +261,7 @@ pub async fn run_cron_scheduler(ctx: Arc<SchedulerContext>, config: CronConfig) 
                     prompt_preview = %job.prompt.chars().take(50).collect::<String>(),
                     "cron job registered"
                 );
-                jobs.push((schedule, job.clone()));
+                parsed.push((schedule, job.clone()));
             }
             Err(e) => {
                 tracing::warn!(schedule = %job.schedule, error = %e, "invalid cron expression, skipping");
@@ -266,7 +269,7 @@ pub async fn run_cron_scheduler(ctx: Arc<SchedulerContext>, config: CronConfig) 
         }
     }
 
-    if jobs.is_empty() {
+    if parsed.is_empty() {
         tracing::info!("no valid cron jobs, cron scheduler idle");
         return;
     }
@@ -275,7 +278,7 @@ pub async fn run_cron_scheduler(ctx: Arc<SchedulerContext>, config: CronConfig) 
     let mut ticker = tokio::time::interval(Duration::from_secs(60));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-    tracing::info!(job_count = jobs.len(), "cron scheduler started");
+    tracing::info!(job_count = parsed.len(), "cron scheduler started");
 
     loop {
         ticker.tick().await;
@@ -285,17 +288,14 @@ pub async fn run_cron_scheduler(ctx: Arc<SchedulerContext>, config: CronConfig) 
             utc + chrono::Duration::hours(ctx.timezone_offset as i64)
         };
 
-        for (schedule, job) in &jobs {
+        for (schedule, job) in &parsed {
             if cron_matches(schedule, &now) {
                 let session_key = format!(
                     "_cron_{}",
                     job.schedule.replace([' ', '*'], "").replace('.', "_")
                 );
 
-                tracing::info!(
-                    schedule = %job.schedule,
-                    "cron job triggered"
-                );
+                tracing::info!(schedule = %job.schedule, "cron job triggered");
 
                 let result = run_scheduled_task(&ctx, &session_key, &job.prompt).await;
 
@@ -318,12 +318,10 @@ pub async fn run_cron_scheduler(ctx: Arc<SchedulerContext>, config: CronConfig) 
 /// Check if a cron schedule matches the current time.
 /// `now` should be a local time as DateTime<Utc> with the timezone offset applied.
 fn cron_matches(schedule: &cron::Schedule, now: &chrono::DateTime<chrono::Utc>) -> bool {
-    // cron::Schedule::after returns an iterator of upcoming datetimes.
-    // We check if the next fire time is within the current minute.
     let from = *now - chrono::Duration::seconds(61);
     schedule.after(&from).next().is_some_and(|next| {
         let diff = (next - *now).num_seconds().abs();
-        diff <= 30 // Within 30 seconds tolerance
+        diff <= 30
     })
 }
 
@@ -337,7 +335,13 @@ use hyper_util::rt::TokioIo;
 use http_body_util::Full;
 
 /// Run the webhook HTTP server.
-pub async fn run_webhook_server(ctx: Arc<SchedulerContext>, config: WebhookConfig) {
+/// Custom routes are loaded from `webhooks/*.md` files.
+/// Built-in endpoints: `/hooks/agent`, `/hooks/wake`.
+pub async fn run_webhook_server(
+    ctx: Arc<SchedulerContext>,
+    config: WebhookConfig,
+    jobs: Vec<WebhookJobDef>,
+) {
     let listener = match tokio::net::TcpListener::bind(("0.0.0.0", config.port)).await {
         Ok(l) => l,
         Err(e) => {
@@ -346,25 +350,14 @@ pub async fn run_webhook_server(ctx: Arc<SchedulerContext>, config: WebhookConfi
         }
     };
 
-    tracing::info!(port = config.port, "webhook server started");
+    let global_secret = config.secret.clone();
+    let jobs = Arc::new(jobs);
 
-    // Build a route map: path → (job_index)
-    let routes: Vec<(String, usize)> = config
-        .jobs
-        .iter()
-        .enumerate()
-        .map(|(i, job)| {
-            let path = if job.path.starts_with('/') {
-                job.path.clone()
-            } else {
-                format!("/{}", job.path)
-            };
-            (path, i)
-        })
-        .collect();
-
-    let jobs = Arc::new(config.jobs);
-    let secret = config.secret.clone();
+    tracing::info!(
+        port = config.port,
+        routes = jobs.len(),
+        "webhook server started"
+    );
 
     loop {
         let (stream, _addr) = match listener.accept().await {
@@ -378,16 +371,14 @@ pub async fn run_webhook_server(ctx: Arc<SchedulerContext>, config: WebhookConfi
         let io = TokioIo::new(stream);
         let ctx = ctx.clone();
         let jobs = jobs.clone();
-        let secret = secret.clone();
-        let routes = routes.clone();
+        let global_secret = global_secret.clone();
 
         tokio::spawn(async move {
             let service = service_fn(move |req| {
                 let ctx = ctx.clone();
                 let jobs = jobs.clone();
-                let secret = secret.clone();
-                let routes = routes.clone();
-                async move { handle_webhook(req, ctx, &jobs, &secret, &routes).await }
+                let global_secret = global_secret.clone();
+                async move { handle_request(req, ctx, &jobs, &global_secret).await }
             });
 
             if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
@@ -397,30 +388,42 @@ pub async fn run_webhook_server(ctx: Arc<SchedulerContext>, config: WebhookConfi
     }
 }
 
-async fn handle_webhook(
+/// Main request dispatcher — routes to built-in endpoints or custom webhook jobs.
+async fn handle_request(
     req: Request<hyper::body::Incoming>,
     ctx: Arc<SchedulerContext>,
-    jobs: &[WebhookJob],
-    secret: &Option<String>,
-    routes: &[(String, usize)],
+    jobs: &[WebhookJobDef],
+    global_secret: &Option<String>,
 ) -> anyhow::Result<Response<Full<Bytes>>> {
-    // Only accept POST.
     if req.method() != Method::POST {
         return ok_response(StatusCode::METHOD_NOT_ALLOWED, "POST only");
     }
 
-    // Find matching job.
     let path = req.uri().path().to_string();
-    let job_idx = match routes.iter().find(|(p, _)| p == &path) {
-        Some((_, idx)) => *idx,
+
+    // ── Built-in endpoints ────────────────────────────────────────────
+    match path.as_str() {
+        "/hooks/agent" => return handle_hooks_agent(req, ctx, global_secret).await,
+        "/hooks/wake" => return handle_hooks_wake(req, global_secret).await,
+        _ => {}
+    }
+
+    // ── Custom webhook routes ─────────────────────────────────────────
+    let job = match jobs.iter().find(|j| j.path == path) {
+        Some(j) => j,
         None => return ok_response(StatusCode::NOT_FOUND, "no webhook at this path"),
     };
-    let job = &jobs[job_idx];
 
-    // Extract signature header before consuming body.
+    // Extract auth headers before consuming body.
     let sig_header = req
         .headers()
         .get("X-Hub-Signature-256")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let auth_header = req
+        .headers()
+        .get("Authorization")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
@@ -433,34 +436,42 @@ async fn handle_webhook(
         }
     };
 
-    // Verify HMAC signature if configured.
-    if let Some(secret) = secret {
-        match sig_header {
-            Some(ref sig) if !verify_signature(&body_bytes, secret, sig) => {
-                tracing::warn!(path = %path, "webhook: HMAC verification failed");
-                return ok_response(StatusCode::UNAUTHORIZED, "invalid signature");
+    // Verify auth per-route.
+    if let Some(ref secret) = job.secret {
+        match job.auth {
+            WebhookAuth::Hmac => {
+                match sig_header {
+                    Some(ref sig) if !verify_hmac_signature(&body_bytes, secret, sig) => {
+                        tracing::warn!(path = %path, "webhook: HMAC verification failed");
+                        return ok_response(StatusCode::UNAUTHORIZED, "invalid signature");
+                    }
+                    None => {
+                        tracing::warn!(path = %path, "webhook: missing signature header");
+                        return ok_response(StatusCode::UNAUTHORIZED, "missing signature");
+                    }
+                    _ => {}
+                }
             }
-            None => {
-                tracing::warn!(path = %path, "webhook: missing signature header");
-                return ok_response(StatusCode::UNAUTHORIZED, "missing signature");
+            WebhookAuth::Bearer => {
+                let expected = format!("Bearer {}", secret);
+                match auth_header {
+                    Some(ref h) if h == expected => {}
+                    _ => {
+                        tracing::warn!(path = %path, "webhook: Bearer auth failed");
+                        return ok_response(StatusCode::UNAUTHORIZED, "invalid token");
+                    }
+                }
             }
-            _ => {} // Signature valid
         }
     }
 
     tracing::info!(path = %path, "webhook triggered");
 
-    // Extract payload field if configured.
-    let payload_context = match &job.payload_key {
-        Some(key) => extract_payload(&body_bytes, key),
-        None => None,
-    };
+    // Parse payload as JSON for template rendering.
+    let payload: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
 
-    // Build prompt.
-    let prompt = match payload_context {
-        Some(ctx_text) => format!("{}\n\n---\nWebhook payload:\n{}", job.prompt, ctx_text),
-        None => job.prompt.clone(),
-    };
+    // Render template with payload.
+    let prompt = render_template(&job.prompt_template, &payload);
 
     let session_key = format!("_webhook_{}", path.trim_start_matches('/').replace('/', "_"));
     let result = run_scheduled_task(&ctx, &session_key, &prompt).await;
@@ -479,8 +490,102 @@ async fn handle_webhook(
     }
 }
 
+/// `POST /hooks/agent` — Run an isolated agent turn.
+/// Body: `{"message": "...", "target": "last"}`
+async fn handle_hooks_agent(
+    req: Request<hyper::body::Incoming>,
+    ctx: Arc<SchedulerContext>,
+    global_secret: &Option<String>,
+) -> anyhow::Result<Response<Full<Bytes>>> {
+    // Verify global Bearer token.
+    if let Some(secret) = global_secret {
+        let expected = format!("Bearer {}", secret);
+        match req.headers().get("Authorization").and_then(|v| v.to_str().ok()) {
+            Some(h) if h == expected => {}
+            _ => return ok_response(StatusCode::UNAUTHORIZED, "invalid token"),
+        }
+    }
+
+    let body_bytes = collect_body(req.into_body()).await?;
+    let payload: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "/hooks/agent: invalid JSON body");
+            return ok_response(StatusCode::BAD_REQUEST, "invalid JSON");
+        }
+    };
+
+    let message = payload.get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if message.is_empty() {
+        return ok_response(StatusCode::BAD_REQUEST, "missing 'message' field");
+    }
+
+    let target = payload.get("target")
+        .and_then(|v| v.as_str())
+        .unwrap_or("last");
+
+    tracing::info!(target = target, "/hooks/agent triggered");
+
+    let result = run_scheduled_task(&ctx, "_hooks_agent", &message).await;
+
+    match result {
+        Ok(response) => {
+            if !response.trim().is_empty() && target != "none" {
+                send_to_target(&ctx, target, &response).await;
+            }
+            ok_response(StatusCode::OK, "ok")
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "/hooks/agent: agent run failed");
+            ok_response(StatusCode::INTERNAL_SERVER_ERROR, "agent error")
+        }
+    }
+}
+
+/// `POST /hooks/wake` — Trigger an immediate heartbeat.
+/// Body: `{"text": "..."}`
+async fn handle_hooks_wake(
+    req: Request<hyper::body::Incoming>,
+    global_secret: &Option<String>,
+) -> anyhow::Result<Response<Full<Bytes>>> {
+    // Verify global Bearer token.
+    if let Some(secret) = global_secret {
+        let expected = format!("Bearer {}", secret);
+        match req.headers().get("Authorization").and_then(|v| v.to_str().ok()) {
+            Some(h) if h == expected => {}
+            _ => return ok_response(StatusCode::UNAUTHORIZED, "invalid token"),
+        }
+    }
+
+    let body_bytes = collect_body(req.into_body()).await?;
+    let payload: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "/hooks/wake: invalid JSON body");
+            return ok_response(StatusCode::BAD_REQUEST, "invalid JSON");
+        }
+    };
+
+    let text = payload.get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    tracing::info!(text = %text, "/hooks/wake triggered");
+
+    // TODO: integrate with heartbeat wakeup mechanism (enqueue system event)
+    // For now, just acknowledge.
+    ok_response(StatusCode::OK, "wake acknowledged")
+}
+
+// ── Auth helpers ───────────────────────────────────────────────────────────
+
 /// Verify HMAC-SHA256 signature against the `X-Hub-Signature-256` header value.
-fn verify_signature(body: &[u8], secret: &str, header_value: &str) -> bool {
+fn verify_hmac_signature(body: &[u8], secret: &str, header_value: &str) -> bool {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
@@ -507,43 +612,7 @@ fn verify_signature(body: &[u8], secret: &str, header_value: &str) -> bool {
     diff == 0
 }
 
-/// Extract a value from a JSON body by dot-separated key path.
-/// e.g. "commits[0].message" or "action"
-fn extract_payload(body: &[u8], key: &str) -> Option<String> {
-    let val: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let result = navigate_json(&val, key)?;
-    match result {
-        serde_json::Value::String(s) => Some(s.clone()),
-        serde_json::Value::Number(n) => Some(n.to_string()),
-        serde_json::Value::Bool(b) => Some(b.to_string()),
-        serde_json::Value::Null => None,
-        other => Some(serde_json::to_string_pretty(&other).unwrap_or_else(|_| other.to_string())),
-    }
-}
-
-/// Navigate a JSON value by a dot-separated path, supporting array indices.
-/// e.g. "commits[0].message" → val["commits"][0]["message"]
-fn navigate_json<'a>(val: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
-    let mut current = val;
-    for segment in path.split('.') {
-        // Check for array index: "field[0]"
-        if let Some(bracket) = segment.find('[') {
-            let field = &segment[..bracket];
-            if !field.is_empty() {
-                current = current.get(field)?;
-            }
-            // Parse all indices: [0][1] etc.
-            let rest = &segment[bracket..];
-            for idx_str in rest.split(']').filter(|s| !s.is_empty()) {
-                let idx: usize = idx_str.trim_start_matches('[').parse().ok()?;
-                current = current.get(idx)?;
-            }
-        } else {
-            current = current.get(segment)?;
-        }
-    }
-    Some(current)
-}
+// ── HTTP helpers ───────────────────────────────────────────────────────────
 
 /// Collect full body bytes from an incoming body stream.
 async fn collect_body<B>(body: B) -> anyhow::Result<Bytes>
@@ -621,74 +690,26 @@ mod tests {
         assert!(!is_silent_ok("I found something", "heartbeat"));
     }
 
-    // ── Webhook tests ──────────────────────────────────────────────────────
-
     #[test]
-    fn verify_signature_valid() {
+    fn verify_hmac_signature_valid() {
         let body = b"test payload";
         let secret = "my-secret";
-        // Compute expected signature
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
         type HmacSha256 = Hmac<Sha256>;
         let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
         mac.update(body);
         let sig = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
-        assert!(verify_signature(body, secret, &sig));
+        assert!(verify_hmac_signature(body, secret, &sig));
     }
 
     #[test]
-    fn verify_signature_invalid() {
-        let body = b"test payload";
-        assert!(!verify_signature(body, "secret", "sha256=bad_hex"));
+    fn verify_hmac_signature_invalid() {
+        assert!(!verify_hmac_signature(b"test payload", "secret", "sha256=bad_hex"));
     }
 
     #[test]
-    fn verify_signature_wrong_length() {
-        assert!(!verify_signature(b"body", "secret", "sha256=abc"));
-    }
-
-    #[test]
-    fn extract_payload_string() {
-        let body = br#"{"action":"opened","title":"PR #1"}"#;
-        assert_eq!(extract_payload(body, "action"), Some("opened".to_string()));
-    }
-
-    #[test]
-    fn extract_payload_nested() {
-        let body = br#"{"pull_request":{"title":"Fix bug","number":42}}"#;
-        assert_eq!(extract_payload(body, "pull_request.title"), Some("Fix bug".to_string()));
-    }
-
-    #[test]
-    fn extract_payload_array_index() {
-        let body = br#"{"commits":[{"message":"fix"},{"message":"feat"}]}"#;
-        assert_eq!(extract_payload(body, "commits[0].message"), Some("fix".to_string()));
-    }
-
-    #[test]
-    fn extract_payload_missing_key() {
-        let body = br#"{"action":"opened"}"#;
-        assert_eq!(extract_payload(body, "nonexistent"), None);
-    }
-
-    #[test]
-    fn extract_payload_invalid_json() {
-        let body = b"not json";
-        assert_eq!(extract_payload(body, "key"), None);
-    }
-
-    #[test]
-    fn navigate_json_simple() {
-        let val: serde_json::Value = serde_json::json!({"foo": "bar"});
-        let result = navigate_json(&val, "foo");
-        assert_eq!(result.unwrap().as_str(), Some("bar"));
-    }
-
-    #[test]
-    fn navigate_json_deep() {
-        let val: serde_json::Value = serde_json::json!({"a": {"b": {"c": 42}}});
-        let result = navigate_json(&val, "a.b.c");
-        assert_eq!(result.unwrap().as_u64(), Some(42));
+    fn verify_hmac_signature_wrong_length() {
+        assert!(!verify_hmac_signature(b"body", "secret", "sha256=abc"));
     }
 }

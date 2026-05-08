@@ -599,19 +599,26 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         });
     }
 
-    if scheduler_config.cron.enabled && !scheduler_config.cron.jobs.is_empty() {
-        let cron_ctx = scheduler_ctx.clone();
-        let cron_config = scheduler_config.cron.clone();
-        tokio::spawn(async move {
-            crate::agents::run_cron_scheduler(cron_ctx, cron_config).await;
-        });
+    if scheduler_config.cron.enabled {
+        let cron_dir = config.workspace_dir.join("cron");
+        let cron_jobs = crate::agents::load_cron_jobs(&cron_dir);
+        if !cron_jobs.is_empty() {
+            let cron_ctx = scheduler_ctx.clone();
+            tokio::spawn(async move {
+                crate::agents::run_cron_scheduler(cron_ctx, cron_jobs).await;
+            });
+        } else {
+            tracing::info!("cron enabled but no jobs found in {}", cron_dir.display());
+        }
     }
 
     if scheduler_config.webhook.enabled {
+        let wh_dir = config.workspace_dir.join("webhooks");
+        let wh_jobs = crate::agents::load_webhook_jobs(&wh_dir);
         let wh_ctx = scheduler_ctx.clone();
         let wh_config = scheduler_config.webhook.clone();
         tokio::spawn(async move {
-            crate::agents::run_webhook_server(wh_ctx, wh_config).await;
+            crate::agents::run_webhook_server(wh_ctx, wh_config, wh_jobs).await;
         });
     }
 

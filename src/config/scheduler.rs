@@ -1,4 +1,7 @@
 //! Scheduler configuration — Heartbeat, Cron, Webhook.
+//!
+//! Job definitions come from files (`cron/*.md`, `webhooks/*.md`),
+//! not from TOML config. This module only holds global settings.
 
 use serde::{Deserialize, Serialize};
 
@@ -38,7 +41,7 @@ impl Default for HeartbeatConfig {
     }
 }
 
-/// A single cron job.
+/// A single cron job (loaded from `cron/*.md`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CronJob {
     /// Cron expression (5-field: min hour day month weekday).
@@ -51,34 +54,15 @@ pub struct CronJob {
     pub target: String,
 }
 
-/// Cron scheduler configuration.
+/// Cron scheduler configuration (global settings only).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CronConfig {
     /// Enable cron scheduler.
     #[serde(default)]
     pub enabled: bool,
-    /// Cron jobs.
-    #[serde(default)]
-    pub jobs: Vec<CronJob>,
 }
 
-/// A single webhook job — triggered by incoming HTTP POST.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WebhookJob {
-    /// URL path that triggers this job, e.g. "/github".
-    pub path: String,
-    /// Prompt sent to the agent when webhook fires.
-    pub prompt: String,
-    /// Optional JSON path to extract payload field as conversation context.
-    /// e.g. "commits[0].message" extracts from POST body.
-    #[serde(default)]
-    pub payload_key: Option<String>,
-    /// Where to send output: "last" | "none" | channel name.
-    #[serde(default = "default_target")]
-    pub target: String,
-}
-
-/// Webhook server configuration.
+/// Webhook server configuration (global settings only).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookConfig {
     /// Enable webhook HTTP server.
@@ -87,12 +71,10 @@ pub struct WebhookConfig {
     /// Port to listen on.
     #[serde(default = "default_webhook_port")]
     pub port: u16,
-    /// HMAC-SHA256 secret for request verification.
+    /// Default secret for built-in endpoints (`/hooks/agent`, `/hooks/wake`).
+    /// Individual webhook files can override with their own secret.
     #[serde(default)]
     pub secret: Option<String>,
-    /// Webhook jobs.
-    #[serde(default)]
-    pub jobs: Vec<WebhookJob>,
 }
 
 impl Default for WebhookConfig {
@@ -101,7 +83,6 @@ impl Default for WebhookConfig {
             enabled: false,
             port: default_webhook_port(),
             secret: None,
-            jobs: vec![],
         }
     }
 }

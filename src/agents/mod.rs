@@ -15,6 +15,8 @@ mod tool_registry;
 mod mcp_manager;
 mod scheduler;
 mod sub_agent;
+pub mod cron_loader;
+pub mod webhook_loader;
 pub mod work_unit;
 pub mod slash_command;
 
@@ -29,6 +31,8 @@ pub use prompt::{AutonomyLevel, SkillsPromptInjectionMode, SystemPromptBuilder, 
 pub use session_manager::SessionManager;
 pub use crate::storage::SessionBackend;
 pub use skill_loader::SkillDefinition;
+pub use cron_loader::load_cron_jobs;
+pub use webhook_loader::{WebhookJobDef, load_webhook_jobs};
 pub use skills::{Skill, SkillManager};
 pub use tool_registry::ToolRegistry;
 pub use mcp_manager::McpManager;
