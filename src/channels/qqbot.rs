@@ -77,7 +77,7 @@ struct TokenState {
 }
 
 struct TokenManager {
-    state: parking_lot::RwLock<Option<TokenState>>,
+    state: tokio::sync::RwLock<Option<TokenState>>,
     app_id: String,
     client_secret: String,
     http_client: reqwest::Client,
@@ -86,7 +86,7 @@ struct TokenManager {
 impl TokenManager {
     fn new(app_id: String, client_secret: String) -> Self {
         Self {
-            state: parking_lot::RwLock::new(None),
+            state: tokio::sync::RwLock::new(None),
             app_id,
             client_secret,
             http_client: reqwest::Client::builder()
@@ -97,10 +97,11 @@ impl TokenManager {
     }
 
     /// Get a valid access token, refreshing if needed.
+    /// Uses a write lock during refresh so only one task hits the HTTP endpoint.
     async fn get_token(&self) -> anyhow::Result<String> {
-        // Check if current token is still valid (with 5 min safety margin).
+        // Fast path: check under read lock first.
         {
-            let state = self.state.read();
+            let state = self.state.read().await;
             if let Some(ref s) = *state {
                 if s.expires_at > std::time::Instant::now() + Duration::from_secs(300) {
                     return Ok(s.access_token.clone());
@@ -108,12 +109,26 @@ impl TokenManager {
             }
         }
 
-        // Refresh token.
-        self.refresh().await
+        // Slow path: acquire write lock and refresh (only one task does this).
+        let mut state = self.state.write().await;
+        // Re-check after acquiring write lock — another task may have refreshed.
+        if let Some(ref s) = *state {
+            if s.expires_at > std::time::Instant::now() + Duration::from_secs(300) {
+                return Ok(s.access_token.clone());
+            }
+        }
+        let token = self.refresh_locked(&mut state).await?;
+        Ok(token)
     }
 
-    /// Force refresh the access token.
+    /// Force refresh the access token (acquires write lock).
     async fn refresh(&self) -> anyhow::Result<String> {
+        let mut state = self.state.write().await;
+        self.refresh_locked(&mut state).await
+    }
+
+    /// Actual refresh logic — caller must hold the write lock.
+    async fn refresh_locked(&self, state: &mut tokio::sync::RwLockWriteGuard<'_, Option<TokenState>>) -> anyhow::Result<String> {
         let body = serde_json::json!({
             "appId": self.app_id,
             "clientSecret": self.client_secret,
@@ -149,14 +164,14 @@ impl TokenManager {
 
         let expires_in: u64 = data["expires_in"]
             .as_u64()
-            .unwrap_or(7000); // Default ~2 hours minus safety margin.
+            .unwrap_or(7000);
 
         let token_state = TokenState {
             access_token: access_token.clone(),
             expires_at: std::time::Instant::now() + Duration::from_secs(expires_in),
         };
 
-        *self.state.write() = Some(token_state);
+        *state = Some(token_state);
         info!(expires_in_secs = expires_in, "QQ Bot access token refreshed");
 
         Ok(access_token)
