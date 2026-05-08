@@ -79,6 +79,26 @@ fn default_approval_timeout() -> u64 {
     120
 }
 
+// ── QQBotConfig ─────────────────────────────────────────────────────────────────
+
+/// QQ Bot channel configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QQBotConfig {
+    /// Whether this channel is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// QQ Bot App ID.
+    pub app_id: String,
+    /// QQ Bot Client Secret.
+    pub client_secret: String,
+    /// Allowed user OpenIDs for private chat. None = allow all.
+    #[serde(default)]
+    pub allow_from: Option<Vec<String>>,
+    /// Allowed group OpenIDs. None = allow all groups.
+    #[serde(default)]
+    pub group_allow_from: Option<Vec<String>>,
+}
+
 // ── ChannelConfigs ────────────────────────────────────────────────────────────
 
 /// All channel configurations.
@@ -86,6 +106,7 @@ fn default_approval_timeout() -> u64 {
 pub struct ChannelConfigs {
     pub wechat: Option<WechatConfig>,
     pub telegram: Option<TelegramConfig>,
+    pub qqbot: Option<QQBotConfig>,
 }
 
 impl ChannelConfigs {
@@ -97,6 +118,9 @@ impl ChannelConfigs {
         }
         if self.telegram.as_ref().is_some_and(|c| c.enabled) {
             names.push("telegram");
+        }
+        if self.qqbot.as_ref().is_some_and(|c| c.enabled) {
+            names.push("qqbot");
         }
         names
     }

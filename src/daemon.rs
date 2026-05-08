@@ -402,6 +402,16 @@ fn build_channels(config: &crate::config::AppConfig) -> Vec<(&'static str, Arc<d
         }
     }
 
+    #[cfg(feature = "qqbot")]
+    if let Some(ref cfg) = config.channels.qqbot {
+        if cfg.enabled {
+            channels.push((
+                "qqbot",
+                Arc::new(crate::channels::qqbot::QQBotChannel::new(cfg.clone())),
+            ));
+        }
+    }
+
     channels
 }
 
