@@ -96,8 +96,8 @@ impl TokenManager {
 
     /// Start the background token refresh loop.
     /// Refreshes the token before it expires, so callers always get a valid token.
-    fn start_background_refresh(self: &Arc<Self>) {
-        let mut handle = self.bg_handle.blocking_lock();
+    async fn start_background_refresh(self: &Arc<Self>) {
+        let mut handle = self.bg_handle.lock().await;
         if handle.is_some() {
             return; // Already running.
         }
@@ -557,7 +557,7 @@ impl Channel for QQBotChannel {
 
     async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>> {
         // Start proactive background token refresh (OpenClaw-style).
-        self.token_manager.start_background_refresh();
+        self.token_manager.start_background_refresh().await;
 
         let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
 
