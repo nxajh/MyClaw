@@ -125,7 +125,7 @@ impl TokenManager {
                         // Refresh 5 minutes before expiry, with up to 30s random jitter.
                         let refresh_ahead = Duration::from_secs(300);
                         let jitter = Duration::from_millis(
-                            (rand::random::<u64>() % 30_000)
+                            rand::random::<u64>() % 30_000
                         );
                         remaining.saturating_sub(refresh_ahead).saturating_sub(jitter)
                     }
