@@ -795,7 +795,7 @@ async fn cmd_history(ctx: CommandContext<'_>) -> String {
             _ => "❓",
         };
         let text = msg.text_content();
-        let first_line = text.lines().next().unwrap_or("");
+        let first_line = text.lines().find(|l| !l.is_empty()).unwrap_or("");
 
         // Build display: use text if present, otherwise show tool calls.
         let display = if !first_line.is_empty() {
