@@ -117,18 +117,25 @@ impl TokenManager {
                 return Ok(s.access_token.clone());
             }
         }
-        let token = self.refresh_locked(&mut state).await?;
-        Ok(token)
+        *state = Some(self.fetch_new_token().await?);
+        if let Some(ref s) = *state {
+            info!(expires_in_secs = s.expires_at.elapsed().as_secs(), "QQ Bot access token refreshed");
+        }
+        Ok(state.as_ref().unwrap().access_token.clone())
     }
 
     /// Force refresh the access token (acquires write lock).
     async fn refresh(&self) -> anyhow::Result<String> {
         let mut state = self.state.write().await;
-        self.refresh_locked(&mut state).await
+        *state = Some(self.fetch_new_token().await?);
+        if let Some(ref s) = *state {
+            info!(expires_in_secs = s.expires_at.elapsed().as_secs(), "QQ Bot access token refreshed");
+        }
+        Ok(state.as_ref().unwrap().access_token.clone())
     }
 
-    /// Actual refresh logic — caller must hold the write lock.
-    async fn refresh_locked(&self, state: &mut tokio::sync::RwLockWriteGuard<'_, Option<TokenState>>) -> anyhow::Result<String> {
+    /// Actually fetch a new token from the API.
+    async fn fetch_new_token(&self) -> anyhow::Result<TokenState> {
         let body = serde_json::json!({
             "appId": self.app_id,
             "clientSecret": self.client_secret,
@@ -171,10 +178,8 @@ impl TokenManager {
             expires_at: std::time::Instant::now() + Duration::from_secs(expires_in),
         };
 
-        *state = Some(token_state);
         info!(expires_in_secs = expires_in, "QQ Bot access token refreshed");
-
-        Ok(access_token)
+        Ok(token_state)
     }
 }
 
