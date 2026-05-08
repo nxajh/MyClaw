@@ -68,7 +68,11 @@ const RECONNECT_DELAY_SECS: u64 = 5;
 #[derive(Clone)]
 struct TokenState {
     access_token: String,
-    expires_at: std::time::Instant,
+    /// Wall-clock expiry time. Uses `SystemTime` instead of `Instant` so that
+    /// token expiry is correctly detected after system suspend (e.g. laptop
+    /// sleep). NTP adjustments of a few seconds are negligible compared to the
+    /// typical ~2-hour token lifetime.
+    expires_at: std::time::SystemTime,
 }
 
 struct TokenManager {
@@ -121,9 +125,15 @@ impl TokenManager {
                 let state = self.state.read().await;
                 match *state {
                     Some(ref s) => {
-                        let remaining = s.expires_at.saturating_duration_since(std::time::Instant::now());
-                        // Refresh 5 minutes before expiry, with up to 30s random jitter.
-                        let refresh_ahead = Duration::from_secs(300);
+                        let remaining = s.expires_at
+                            .duration_since(std::time::SystemTime::now())
+                            .unwrap_or(Duration::ZERO);
+                        // Refresh early — but never more than 1/3 of the remaining lifetime,
+                        // so short-lived tokens still get a reasonable sleep window.
+                        let refresh_ahead = Duration::min(
+                            Duration::from_secs(300),
+                            remaining / 3,
+                        );
                         let jitter = Duration::from_millis(
                             rand::random::<u64>() % 30_000
                         );
@@ -151,7 +161,7 @@ impl TokenManager {
     async fn get_token(&self) -> anyhow::Result<String> {
         let state = self.state.read().await;
         if let Some(ref s) = *state {
-            if s.expires_at > std::time::Instant::now() {
+            if s.expires_at > std::time::SystemTime::now() {
                 return Ok(s.access_token.clone());
             }
         }
@@ -216,7 +226,7 @@ impl TokenManager {
 
         let token_state = TokenState {
             access_token: access_token.clone(),
-            expires_at: std::time::Instant::now() + Duration::from_secs(expires_in),
+            expires_at: std::time::SystemTime::now() + Duration::from_secs(expires_in),
         };
 
         info!(expires_in_secs = expires_in, "QQ Bot access token refreshed");
@@ -459,7 +469,29 @@ impl QQBotChannel {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("C2C send returned {}: {}", status, text));
+
+            // Token-expired? Force-refresh and retry once.
+            if status.as_u16() == 401 || text.contains("11244") {
+                warn!(status = %status, "C2C send got token-expired error, refreshing and retrying");
+                let new_token = self.token_manager.refresh().await?;
+                let resp = self
+                    .http_client
+                    .post(&url)
+                    .header("Authorization", format!("QQBot {}", new_token))
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("C2C retry send failed: {}", e))?;
+
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    return Err(anyhow::anyhow!("C2C send returned {}: {}", status, text));
+                }
+            } else {
+                return Err(anyhow::anyhow!("C2C send returned {}: {}", status, text));
+            }
         }
 
         debug!(openid = openid, "C2C message sent");
@@ -502,11 +534,37 @@ impl QQBotChannel {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!(
-                "group send returned {}: {}",
-                status,
-                text
-            ));
+
+            // Token-expired? Force-refresh and retry once.
+            if status.as_u16() == 401 || text.contains("11244") {
+                warn!(status = %status, "group send got token-expired error, refreshing and retrying");
+                let new_token = self.token_manager.refresh().await?;
+                let resp = self
+                    .http_client
+                    .post(&url)
+                    .header("Authorization", format!("QQBot {}", new_token))
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("group retry send failed: {}", e))?;
+
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    return Err(anyhow::anyhow!(
+                        "group send returned {}: {}",
+                        status,
+                        text
+                    ));
+                }
+            } else {
+                return Err(anyhow::anyhow!(
+                    "group send returned {}: {}",
+                    status,
+                    text
+                ));
+            }
         }
 
         debug!(group = group_openid, "group message sent");
@@ -610,8 +668,32 @@ impl Channel for QQBotChannel {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            // Non-fatal: typing indicator failure should not break message flow.
-            debug!(status = %status, body = %text, "typing indicator failed (non-fatal)");
+
+            // Token-expired? Force-refresh and retry once (non-fatal).
+            if status.as_u16() == 401 || text.contains("11244") {
+                debug!(status = %status, "typing indicator got token-expired error, refreshing and retrying");
+                if let Ok(new_token) = self.token_manager.refresh().await {
+                    let retry_resp = self
+                        .http_client
+                        .post(&url)
+                        .header("Authorization", format!("QQBot {}", new_token))
+                        .header("Content-Type", "application/json")
+                        .json(&body)
+                        .send()
+                        .await;
+
+                    if let Ok(resp) = retry_resp {
+                        if !resp.status().is_success() {
+                            let status = resp.status();
+                            let text = resp.text().await.unwrap_or_default();
+                            debug!(status = %status, body = %text, "typing indicator retry failed (non-fatal)");
+                        }
+                    }
+                }
+            } else {
+                // Non-fatal: typing indicator failure should not break message flow.
+                debug!(status = %status, body = %text, "typing indicator failed (non-fatal)");
+            }
         }
 
         Ok(())
