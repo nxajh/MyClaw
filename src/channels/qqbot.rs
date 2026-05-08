@@ -9,12 +9,13 @@
 //! - C2C private chat message receive/send
 //! - Group @bot message receive/send
 //! - Text message chunking (QQ ~2000 char limit)
+//! - Markdown message format (no template needed, all bots can use)
 //! - Message dedup via DedupState
 //!
 //! # Not in v1
 //!
 //! - Media attachments (images, files, voice)
-//! - Rich message types (embed, markdown, keyboard)
+//! - Rich message types (embed, keyboard)
 //! - Typing indicators (QQ Bot API has no direct equivalent)
 
 #![allow(dead_code)]
@@ -362,7 +363,7 @@ impl QQBotChannel {
         })
     }
 
-    /// Send a C2C message via REST API.
+    /// Send a C2C message via REST API (markdown format).
     async fn send_c2c_message(
         &self,
         openid: &str,
@@ -374,8 +375,11 @@ impl QQBotChannel {
         let url = format!("{}/v2/users/{}/messages", API_BASE, openid);
 
         let mut body = serde_json::json!({
-            "content": content,
-            "msg_type": 0,
+            "content": "",
+            "msg_type": 2,
+            "markdown": {
+                "content": content,
+            },
         });
         if !msg_id.is_empty() {
             body["msg_id"] = serde_json::Value::String(msg_id.to_string());
@@ -427,7 +431,7 @@ impl QQBotChannel {
         Ok(())
     }
 
-    /// Send a group message via REST API.
+    /// Send a group message via REST API (markdown format).
     async fn send_group_message(
         &self,
         group_openid: &str,
@@ -439,8 +443,11 @@ impl QQBotChannel {
         let url = format!("{}/v2/groups/{}/messages", API_BASE, group_openid);
 
         let mut body = serde_json::json!({
-            "content": content,
-            "msg_type": 0,
+            "content": "",
+            "msg_type": 2,
+            "markdown": {
+                "content": content,
+            },
         });
         if !msg_id.is_empty() {
             body["msg_id"] = serde_json::Value::String(msg_id.to_string());
