@@ -62,6 +62,7 @@ const OP_HEARTBEAT: u32 = 1;
 const OP_HEARTBEAT_ACK: u32 = 11;
 const OP_DISPATCH: u32 = 0;
 const OP_RECONNECT: u32 = 7;
+const OP_INVALID_SESSION: u32 = 9;
 
 /// Reconnect delay base (seconds).
 const RECONNECT_DELAY_SECS: u64 = 5;
@@ -165,6 +166,8 @@ impl TokenManager {
 
 #[derive(Debug, Deserialize)]
 struct GatewayPayload {
+    #[serde(default)]
+    id: Option<String>,
     #[serde(default)]
     op: u32,
     #[serde(default)]
@@ -365,6 +368,7 @@ impl QQBotChannel {
         openid: &str,
         content: &str,
         msg_id: &str,
+        msg_seq: u32,
     ) -> anyhow::Result<()> {
         let token = self.token_manager.get_token().await?;
         let url = format!("{}/v2/users/{}/messages", API_BASE, openid);
@@ -375,6 +379,7 @@ impl QQBotChannel {
         });
         if !msg_id.is_empty() {
             body["msg_id"] = serde_json::Value::String(msg_id.to_string());
+            body["msg_seq"] = serde_json::Value::Number(msg_seq.into());
         }
 
         let resp = self
@@ -428,6 +433,7 @@ impl QQBotChannel {
         group_openid: &str,
         content: &str,
         msg_id: &str,
+        msg_seq: u32,
     ) -> anyhow::Result<()> {
         let token = self.token_manager.get_token().await?;
         let url = format!("{}/v2/groups/{}/messages", API_BASE, group_openid);
@@ -438,6 +444,7 @@ impl QQBotChannel {
         });
         if !msg_id.is_empty() {
             body["msg_id"] = serde_json::Value::String(msg_id.to_string());
+            body["msg_seq"] = serde_json::Value::Number(msg_seq.into());
         }
 
         let resp = self
@@ -504,10 +511,12 @@ impl Channel for QQBotChannel {
         let msg_id = msg.thread_ts.as_deref().unwrap_or("");
 
         for (i, chunk) in chunks.iter().enumerate() {
+            // msg_seq must be unique per chunk for the same msg_id (1-based).
+            let msg_seq = (i as u32) + 1;
             let result = if let Some(openid) = msg.recipient.strip_prefix("c2c:") {
-                self.send_c2c_message(openid, chunk, msg_id).await
+                self.send_c2c_message(openid, chunk, msg_id, msg_seq).await
             } else if let Some(group_openid) = msg.recipient.strip_prefix("group:") {
-                self.send_group_message(group_openid, chunk, msg_id).await
+                self.send_group_message(group_openid, chunk, msg_id, msg_seq).await
             } else {
                 Err(anyhow::anyhow!(
                     "invalid QQ Bot recipient format: {} (expected c2c:<openid> or group:<openid>)",
@@ -717,6 +726,11 @@ impl QQBotChannel {
             }
             OP_RECONNECT => {
                 warn!("server requested reconnect");
+                return true;
+            }
+            OP_INVALID_SESSION => {
+                warn!("invalid session (OpCode 9), clearing session for fresh identify");
+                *self.last_seq.lock() = None;
                 return true;
             }
             _ => {
