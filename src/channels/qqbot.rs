@@ -11,12 +11,7 @@
 //! - Text message chunking (QQ ~2000 char limit)
 //! - Markdown message format (no template needed, all bots can use)
 //! - Message dedup via DedupState
-//!
-//! # Not in v1
-//!
-//! - Media attachments (images, files, voice)
-//! - Rich message types (embed, keyboard)
-//! - Typing indicators (QQ Bot API has no direct equivalent)
+//! - Typing indicator (C2C only, msg_type=6, 60s validity, refreshed by orchestrator)
 
 #![allow(dead_code)]
 
@@ -597,13 +592,51 @@ impl Channel for QQBotChannel {
         self.token_manager.get_token().await.is_ok()
     }
 
-    async fn start_typing(&self, _recipient: &str) -> anyhow::Result<()> {
-        // QQ Bot API has no typing indicator — no-op.
+    /// Send typing indicator (C2C only).
+    ///
+    /// QQ Bot API: `POST /v2/users/{openid}/messages` with `msg_type: 6`
+    /// and `input_notify.input_second: 60`. Only works for C2C private chat.
+    /// The orchestrator refreshes this every ~4 seconds while waiting for a response.
+    async fn start_typing(&self, recipient: &str) -> anyhow::Result<()> {
+        // Only C2C supports typing indicator — group chat does not.
+        let openid = match recipient.strip_prefix("c2c:") {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+
+        let token = self.token_manager.get_token().await?;
+        let url = format!("{}/v2/users/{}/messages", API_BASE, openid);
+
+        let body = serde_json::json!({
+            "msg_type": 6,
+            "input_notify": {
+                "input_type": 1,
+                "input_second": 60,
+            },
+        });
+
+        let resp = self
+            .http_client
+            .post(&url)
+            .header("Authorization", format!("QQBot {}", token))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("typing indicator request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            // Non-fatal: typing indicator failure should not break message flow.
+            debug!(status = %status, body = %text, "typing indicator failed (non-fatal)");
+        }
+
         Ok(())
     }
 
     async fn stop_typing(&self, _recipient: &str) -> anyhow::Result<()> {
-        // QQ Bot API has no typing indicator — no-op.
+        // QQ Bot API has no "stop typing" — the indicator expires after input_second (60s).
         Ok(())
     }
 }
