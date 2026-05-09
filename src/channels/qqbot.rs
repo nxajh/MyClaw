@@ -105,20 +105,24 @@ impl TokenManager {
         if handle.is_some() {
             return; // Already running.
         }
+        // Synchronously fetch the first token before spawning the background loop,
+        // so that listen() returns with a populated cache and get_token() won't
+        // race with a fallback do_refresh().
+        if let Err(e) = self.do_refresh().await {
+            error!(error = %e, "QQ Bot initial token fetch failed");
+        }
         let this = Arc::clone(self);
         *handle = Some(tokio::spawn(async move {
             this.background_refresh_loop().await;
         }));
     }
 
-    /// Background loop: fetch initial token, then refresh before expiry.
+    /// Background loop: refresh token before expiry.
+    /// The initial fetch is already done by `start_background_refresh`; this loop
+    /// handles ongoing periodic refresh.  If the initial fetch failed, the token
+    /// cache is still empty, so the first sleep_duration will be 5 s and the loop
+    /// will retry naturally.
     async fn background_refresh_loop(&self) {
-        // Initial fetch.
-        if let Err(e) = self.do_refresh().await {
-            error!(error = %e, "QQ Bot initial token fetch failed, retrying in 5s");
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        }
-
         loop {
             // Calculate sleep duration until next refresh.
             let sleep_duration = {
@@ -156,8 +160,6 @@ impl TokenManager {
 
     /// Get a valid access token from cache.
     /// The background task ensures the token is always fresh; this is a read-only fast path.
-    /// Falls back to a synchronous refresh only if the cache is empty (e.g. background
-    /// task hasn't completed its first fetch yet).
     async fn get_token(&self) -> anyhow::Result<String> {
         let state = self.state.read().await;
         if let Some(ref s) = *state {
@@ -166,10 +168,7 @@ impl TokenManager {
             }
         }
         drop(state);
-
-        // Cache miss or expired — background task may not have finished yet.
-        // Do a one-shot refresh as fallback.
-        self.do_refresh().await
+        Err(anyhow::anyhow!("QQ Bot token not available (expired or not initialized)"))
     }
 
     /// Force refresh the access token.
@@ -318,6 +317,35 @@ impl QQBotChannel {
 
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
+
+        // Token expired? Force-refresh and retry once.
+        if status.as_u16() == 401 || text.contains("11244") {
+            warn!(status = %status, "gateway got token-expired error, refreshing and retrying");
+            let new_token = self.token_manager.refresh().await?;
+            let resp = self
+                .http_client
+                .get(GATEWAY_URL)
+                .header("Authorization", format!("QQBot {}", new_token))
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("gateway retry request failed: {}", e))?;
+
+            if resp.status().is_success() {
+                let data: serde_json::Value = resp
+                    .json()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("gateway parse error: {}", e))?;
+                return data["url"]
+                    .as_str()
+                    .map(String::from)
+                    .ok_or_else(|| anyhow::anyhow!("missing url in gateway response"));
+            }
+
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("gateway returned {}: {}", status, text));
+        }
+
         Err(anyhow::anyhow!("gateway returned {}: {}", status, text))
     }
 
