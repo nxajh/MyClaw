@@ -787,9 +787,21 @@ impl TelegramChannel {
         let bot_token = self.bot_token.clone();
         let api_base = self.api_base.clone();
         let recipient_key = recipient.to_string();
+        let recipient_key_clone = recipient_key.clone();
 
         let handle = tokio::spawn(async move {
+            let max_consecutive_failures: u32 = 2;
+            let max_duration = std::time::Duration::from_secs(60);
+            let start = tokio::time::Instant::now();
+            let mut consecutive_failures: u32 = 0;
+
             loop {
+                // TTL check
+                if start.elapsed() >= max_duration {
+                    warn!("Telegram typing TTL exceeded ({}s) for {}", max_duration.as_secs(), recipient_key);
+                    break;
+                }
+
                 // Send typing action
                 let client = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(10))
@@ -801,11 +813,21 @@ impl TelegramChannel {
                     message_thread_id: thread_id.clone(),
                     action: "typing".to_string(),
                 };
-                let _ = client.post(&url).json(&req).send().await;
+                match client.post(&url).json(&req).send().await {
+                    Ok(_) => consecutive_failures = 0,
+                    Err(e) => {
+                        consecutive_failures += 1;
+                        if consecutive_failures >= max_consecutive_failures {
+                            warn!("Telegram typing circuit breaker tripped after {consecutive_failures} consecutive failures for {}: {e}", recipient_key);
+                            break;
+                        }
+                    }
+                }
+
                 tokio::time::sleep(std::time::Duration::from_secs(4)).await;
             }
         });
-        tasks.insert(recipient_key, handle);
+        tasks.insert(recipient_key_clone, handle);
     }
 
     /// Stop (abort) the typing keep-alive task for a recipient.
