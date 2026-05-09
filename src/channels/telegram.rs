@@ -652,6 +652,35 @@ impl TelegramChannel {
             .send()
             .await?;
 
+        // Handle 429 Too Many Requests with retry
+        if resp.status().as_u16() == 429 {
+            let retry_after: u64 = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1);
+            warn!("Telegram 429 rate limited, retrying after {}s", retry_after);
+            tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
+            // Retry once
+            let client2 = self.http_client();
+            let resp2 = client2
+                .post(self.api_url("sendMessage"))
+                .json(&req)
+                .send()
+                .await?;
+            if !resp2.status().is_success() {
+                let status = resp2.status();
+                let body_text = resp2.text().await.unwrap_or_default();
+                return Err(anyhow::anyhow!(
+                    "Telegram API error after 429 retry: {} {}",
+                    status,
+                    body_text
+                ));
+            }
+            return Ok(());
+        }
+
         if resp.status().is_success() {
             return Ok(());
         }
@@ -1047,6 +1076,10 @@ impl Channel for TelegramChannel {
                 warn!("Failed to send chunk {}/{}: {}", i + 1, count, e);
                 last_error = Some(e);
                 // Continue trying subsequent chunks
+            }
+            // Throttle between chunks to avoid 429 rate limiting
+            if i + 1 < count {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
         }
 
