@@ -12,6 +12,7 @@
 //! - Markdown message format (no template needed, all bots can use)
 //! - Message dedup via DedupState
 //! - Typing indicator (C2C only, msg_type=6, 60s validity, refreshed by orchestrator)
+//! - Button interactions (keyboard send + click-to-text conversion)
 
 #![allow(dead_code)]
 
@@ -92,6 +93,61 @@ enum WsDisconnect {
     Fatal,
     /// Token-related — refresh token before reconnecting.
     TokenExpired,
+}
+
+// ── Interaction / Keyboard types ──────────────────────────────────────────────
+
+/// A single button in a keyboard row.
+#[derive(Clone, serde::Serialize)]
+struct Button {
+    /// Button display text.
+    label: String,
+    /// Click callback value — sent back as message content when user clicks.
+    data: String,
+    /// Button style: 0 = gray (secondary), 1 = blue (primary).
+    #[serde(skip_serializing_if = "is_zero")]
+    style: u32,
+    /// 0 = click, 1 = link.
+    #[serde(skip_serializing_if = "is_zero")]
+    r#type: u32,
+}
+
+fn is_zero(v: &u32) -> bool { *v == 0 }
+
+/// A row of buttons.
+#[derive(Clone, serde::Serialize)]
+struct ButtonRow {
+    buttons: Vec<Button>,
+}
+
+/// A keyboard (grid of button rows).
+#[derive(Clone, serde::Serialize)]
+struct Keyboard {
+    rows: Vec<ButtonRow>,
+}
+
+impl Keyboard {
+    /// Create a keyboard from a slice of label/value pairs (one row per pair).
+    /// Max 5 buttons per row, max 5 rows.
+    fn from_pairs(pairs: &[(impl AsRef<str>, impl AsRef<str>)]) -> Self {
+        let mut rows = Vec::new();
+        let mut current_row = Vec::new();
+        for (label, value) in pairs {
+            current_row.push(Button {
+                label: label.as_ref().to_string(),
+                data: value.as_ref().to_string(),
+                style: 0,
+                r#type: 0,
+            });
+            if current_row.len() >= 5 {
+                rows.push(ButtonRow { buttons: std::mem::take(&mut current_row) });
+            }
+        }
+        if !current_row.is_empty() {
+            rows.push(ButtonRow { buttons: current_row });
+        }
+        Self { rows }
+    }
 }
 
 // ── Token state ───────────────────────────────────────────────────────────────
@@ -450,6 +506,83 @@ impl QQBotChannel {
                 }
                 Some(msg)
             }
+            "INTERACTION_CREATE" => {
+                // QQ Bot interaction: button click -> convert to text message.
+                let resolved = data.get("data")
+                    .and_then(|d| d.get("resolved"))
+                    .or_else(|| data.get("resolved"));
+
+                // Try to get button callback data
+                let button_data = resolved
+                    .and_then(|r| r.get("button_data"))
+                    .or_else(|| resolved.and_then(|r| r.get("data")))
+                    .or_else(|| data.get("data").and_then(|d| d.get("button_data")))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                if button_data.is_empty() {
+                    debug!("INTERACTION_CREATE with empty button data, ignoring");
+                    return None;
+                }
+
+                let event_id = data.get("id").and_then(|v| v.as_str()).unwrap_or("");
+
+                // Determine sender and reply_target based on C2C vs group
+                let author = data.get("author");
+                let interaction_type = data.get("type").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                let (sender, reply_target) = if interaction_type == 2 {
+                    // Group interaction
+                    let member_openid = author
+                        .and_then(|a| a.get("member_openid"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let group_openid = data.get("group_openid")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    (member_openid.to_string(), format!("group:{}", group_openid))
+                } else {
+                    // C2C interaction (type 1)
+                    let user_openid = author
+                        .and_then(|a| a.get("user_openid"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    (user_openid.to_string(), format!("c2c:{}", user_openid))
+                };
+
+                // Access check for interaction
+                if let Some(openid) = reply_target.strip_prefix("c2c:") {
+                    if !self.is_user_allowed(openid) {
+                        debug!(sender = %sender, "interaction from disallowed user");
+                        return None;
+                    }
+                } else if let Some(group_id) = reply_target.strip_prefix("group:") {
+                    if !self.is_group_allowed(group_id) {
+                        debug!(group = group_id, "interaction from disallowed group");
+                        return None;
+                    }
+                }
+
+                // Acknowledge the interaction within 3 seconds (QQ Bot requirement).
+                self.ack_interaction(event_id);
+
+                Some(ChannelMessage {
+                    id: event_id.to_string(),
+                    sender,
+                    reply_target,
+                    content: button_data.to_string(),
+                    channel: "qqbot".to_string(),
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    thread_ts: None,
+                    interruption_scope_id: None,
+                    attachments: vec![],
+                    image_urls: None,
+                    image_base64: None,
+                })
+            }
             _ => {
                 debug!(event = event_type, "ignoring dispatch event");
                 None
@@ -803,6 +936,86 @@ impl QQBotChannel {
         }
     }
 
+    /// Send a C2C message with an inline keyboard.
+    async fn send_c2c_keyboard(
+        &self,
+        openid: &str,
+        content: &str,
+        keyboard: &Keyboard,
+        msg_id: &str,
+    ) -> anyhow::Result<()> {
+        let token = self.token_manager.get_token().await?;
+        let url = format!("{}/v2/users/{}/messages", API_BASE, openid);
+
+        let mut body = serde_json::json!({
+            "content": "",
+            "msg_type": 2,
+            "markdown": {
+                "content": content,
+            },
+            "keyboard": keyboard,
+        });
+
+        if !msg_id.is_empty() {
+            body["msg_id"] = serde_json::Value::String(msg_id.to_string());
+            body["msg_seq"] = serde_json::Value::Number(self.next_msg_seq().into());
+        } else {
+            body["msg_seq"] = serde_json::Value::Number(self.next_msg_seq().into());
+        }
+
+        let ua = user_agent();
+        let resp = self.http_client
+            .post(&url)
+            .header("Authorization", format!("QQBot {}", token))
+            .header("Content-Type", "application/json")
+            .header("User-Agent", &ua)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("C2C keyboard send failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("C2C keyboard send returned {}: {}", status, text));
+        }
+
+        debug!(openid = openid, "C2C keyboard message sent");
+        Ok(())
+    }
+
+    /// Acknowledge an interaction event (fire-and-forget).
+    /// QQ Bot requires acknowledging within 3 seconds.
+    fn ack_interaction(&self, event_id: &str) {
+        let http = self.http_client.clone();
+        let token_mgr = self.token_manager.clone();
+        let event_id = event_id.to_string();
+
+        tokio::spawn(async move {
+            let token = match token_mgr.get_token().await {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!(error = %e, "failed to get token for interaction ACK");
+                    return;
+                }
+            };
+
+            let url = format!("{}/v2/interactions/{}/ack", API_BASE, event_id);
+            let ua = user_agent();
+            let body = serde_json::json!({ "code": 0 });
+
+            let _ = http.put(&url)
+                .header("Authorization", format!("QQBot {}", token))
+                .header("Content-Type", "application/json")
+                .header("User-Agent", &ua)
+                .json(&body)
+                .send()
+                .await;
+
+            debug!(event_id = %event_id, "interaction acknowledged");
+        });
+    }
+
     /// Try to handle a bot- prefixed slash command.
     /// Returns true if the command was handled (message consumed), false to continue dispatch.
     async fn try_bot_command(
@@ -817,6 +1030,22 @@ impl QQBotChannel {
             "/bot-ping" => "pong 🏓".to_string(),
             "/bot-version" => format!("MyClaw {}", env!("MYCLAW_VERSION")),
             "/bot-help" => {
+                // C2C: send with keyboard buttons; group: fall through to cmd-input tags.
+                if let Some(openid) = reply_target.strip_prefix("c2c:") {
+                    let help_text = "**🤖 MyClaw Bot Commands**\n\n*Channel-level commands (handled locally)*\n• `/bot-ping` — Check bot latency\n• `/bot-version` — Show bot version\n• `/bot-help` — Show this help\n\n*Orchestrator commands (handled by AI)*\n• `/help` — Show AI commands\n• `/new` — New conversation\n• `/status` — Show status\n\nType any command or just chat!";
+                    let kb = Keyboard::from_pairs(&[
+                        ("/bot-ping", "/bot-ping"),
+                        ("/bot-version", "/bot-version"),
+                        ("/help", "/help"),
+                        ("/new", "/new"),
+                        ("/status", "/status"),
+                    ]);
+                    if self.send_c2c_keyboard(openid, help_text, &kb, msg_id).await.is_ok() {
+                        return true;
+                    }
+                    // Keyboard failed, fall through to text reply below.
+                }
+                // Group or keyboard fallback: use cmd-input tags.
                 let help_text = r#"**🤖 MyClaw Bot Commands**
 
 <qqbot-cmd-input text="/bot-ping" /> <qqbot-cmd-input text="/bot-version" /> <qqbot-cmd-input text="/bot-help" />
