@@ -16,6 +16,7 @@
 #![allow(dead_code)]
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -295,6 +296,8 @@ pub struct QQBotChannel {
     typing_tasks: Arc<Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>>,
     /// WebSocket session for Resume support.
     session: Arc<Mutex<Option<SessionState>>>,
+    /// Monotonic counter for proactive message msg_seq to avoid collisions.
+    msg_seq_counter: Arc<AtomicU32>,
 }
 
 impl QQBotChannel {
@@ -312,7 +315,13 @@ impl QQBotChannel {
                 .unwrap_or_else(|_| reqwest::Client::new()),
             typing_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session: Arc::new(Mutex::new(None)),
+            msg_seq_counter: Arc::new(AtomicU32::new(1)),
         }
+    }
+
+    /// Return the next proactive msg_seq value (monotonically increasing).
+    fn next_msg_seq(&self) -> u32 {
+        self.msg_seq_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Check if a C2C user is allowed.
@@ -557,11 +566,8 @@ impl QQBotChannel {
             body["msg_id"] = serde_json::Value::String(msg_id.to_string());
             body["msg_seq"] = serde_json::Value::Number(msg_seq.into());
         } else {
-            // Proactive message — generate unique msg_seq from timestamp.
-            let seq = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u32;
+            // Proactive message — generate unique msg_seq from atomic counter.
+            let seq = self.next_msg_seq();
             body["msg_seq"] = serde_json::Value::Number(seq.into());
         }
 
@@ -579,6 +585,7 @@ impl QQBotChannel {
 
         if !resp.status().is_success() {
             let status = resp.status();
+            let resp_headers = resp.headers().clone();
             let text = resp.text().await.unwrap_or_default();
 
             // Token-expired? Force-refresh and retry once.
@@ -597,6 +604,32 @@ impl QQBotChannel {
                     .await
                     .map_err(|e| anyhow::anyhow!("C2C retry send failed: {}", e))?;
 
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    return Err(anyhow::anyhow!("C2C send returned {}: {}", status, text));
+                }
+            } else if status.as_u16() == 429 {
+                // Rate limited — wait and retry once.
+                let retry_after = resp_headers
+                    .get("Retry-After")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(5);
+                warn!(retry_after_secs = retry_after, "C2C rate limited, retrying after delay");
+                tokio::time::sleep(Duration::from_secs(retry_after)).await;
+                let token = self.token_manager.get_token().await?;
+                let ua = user_agent();
+                let resp = self
+                    .http_client
+                    .post(&url)
+                    .header("Authorization", format!("QQBot {}", token))
+                    .header("Content-Type", "application/json")
+                    .header("User-Agent", &ua)
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("C2C retry send failed: {}", e))?;
                 if !resp.status().is_success() {
                     let status = resp.status();
                     let text = resp.text().await.unwrap_or_default();
@@ -633,11 +666,8 @@ impl QQBotChannel {
             body["msg_id"] = serde_json::Value::String(msg_id.to_string());
             body["msg_seq"] = serde_json::Value::Number(msg_seq.into());
         } else {
-            // Proactive message — generate unique msg_seq from timestamp.
-            let seq = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u32;
+            // Proactive message — generate unique msg_seq from atomic counter.
+            let seq = self.next_msg_seq();
             body["msg_seq"] = serde_json::Value::Number(seq.into());
         }
 
@@ -655,6 +685,7 @@ impl QQBotChannel {
 
         if !resp.status().is_success() {
             let status = resp.status();
+            let resp_headers = resp.headers().clone();
             let text = resp.text().await.unwrap_or_default();
 
             // Token-expired? Force-refresh and retry once.
@@ -681,6 +712,32 @@ impl QQBotChannel {
                         status,
                         text
                     ));
+                }
+            } else if status.as_u16() == 429 {
+                // Rate limited — wait and retry once.
+                let retry_after = resp_headers
+                    .get("Retry-After")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(5);
+                warn!(retry_after_secs = retry_after, "group rate limited, retrying after delay");
+                tokio::time::sleep(Duration::from_secs(retry_after)).await;
+                let token = self.token_manager.get_token().await?;
+                let ua = user_agent();
+                let resp = self
+                    .http_client
+                    .post(&url)
+                    .header("Authorization", format!("QQBot {}", token))
+                    .header("Content-Type", "application/json")
+                    .header("User-Agent", &ua)
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("group retry send failed: {}", e))?;
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    return Err(anyhow::anyhow!("group send returned {}: {}", status, text));
                 }
             } else {
                 return Err(anyhow::anyhow!(
@@ -759,7 +816,24 @@ impl QQBotChannel {
         let reply = match trimmed {
             "/bot-ping" => "pong 🏓".to_string(),
             "/bot-version" => format!("MyClaw {}", env!("MYCLAW_VERSION")),
-            "/bot-help" => "🤖 QQ Bot Plugin\n/bot-ping — test connection\n/bot-version — show version\n/bot-help — show this help\n\nOther /commands are handled by the AI assistant.".to_string(),
+            "/bot-help" => {
+                let help_text = r#"**🤖 MyClaw Bot Commands**
+
+<qqbot-cmd-input text="/bot-ping" /> <qqbot-cmd-input text="/bot-version" /> <qqbot-cmd-input text="/bot-help" />
+
+*Channel-level commands (handled locally)*
+• `/bot-ping` — Check bot latency
+• `/bot-version` — Show bot version
+• `/bot-help` — Show this help
+
+*Orchestrator commands (handled by AI)*
+• `/help` — Show AI commands
+• `/new` — New conversation
+• `/status` — Show status
+
+Type any command or just chat!"#;
+                help_text.to_string()
+            }
             _ => return false,
         };
 
@@ -811,9 +885,9 @@ impl Channel for QQBotChannel {
                 return Err(e);
             }
 
-            // Small delay between chunks to avoid rate limiting.
-            if i + 1 < chunks.len() {
-                tokio::time::sleep(Duration::from_millis(200)).await;
+            // Throttle between chunks to avoid rate limiting.
+            if i < chunks.len() - 1 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
 
