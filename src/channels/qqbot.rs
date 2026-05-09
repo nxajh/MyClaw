@@ -45,11 +45,12 @@ const TOKEN_URL: &str = "https://bots.qq.com/app/getAppAccessToken";
 const API_BASE: &str = "https://api.sgroup.qq.com";
 
 /// WebSocket intents:
-///   PUBLIC_GUILD_MESSAGES  = 1 << 30 = 1073741824
+///   PUBLIC_GUILD_MESSAGES   = 1 << 30 = 1073741824
 ///   GROUP_AT_MESSAGE_CREATE = 1 << 25 = 33554432
 ///   C2C_MESSAGE_CREATE      = 1 << 25 = 33554432
-///   Combined: 1073741824 | 33554432 = 1107296256
-const INTENTS: u32 = (1 << 30) | (1 << 25);
+///   DIRECT_MESSAGE          = 1 << 12 = 4096
+///   INTERACTION             = 1 << 26 = 67108864
+const INTENTS: u32 = (1 << 30) | (1 << 25) | (1 << 12) | (1 << 26);
 
 /// WebSocket opcodes.
 const OP_RESUME: u32 = 6;
@@ -60,6 +61,12 @@ const OP_HEARTBEAT_ACK: u32 = 11;
 const OP_DISPATCH: u32 = 0;
 const OP_RECONNECT: u32 = 7;
 const OP_INVALID_SESSION: u32 = 9;
+
+/// Build User-Agent string for QQ Bot HTTP requests.
+fn user_agent() -> String {
+    let os = std::env::consts::OS;
+    format!("MyClaw/{} (Rust; {})", env!("MYCLAW_VERSION"), os)
+}
 
 /// Reconnect delay schedule (seconds).
 const RECONNECT_DELAYS: &[u64] = &[1, 2, 5, 10, 30, 60];
@@ -214,10 +221,12 @@ impl TokenManager {
             "clientSecret": self.client_secret,
         });
 
+        let ua = user_agent();
         let resp = self
             .http_client
             .post(TOKEN_URL)
             .json(&body)
+            .header("User-Agent", &ua)
             .send()
             .await
             .map_err(|e| anyhow::anyhow!("token request failed: {}", e))?;
@@ -325,10 +334,12 @@ impl QQBotChannel {
     /// Fetch WebSocket gateway URL from the API.
     async fn fetch_gateway_url(&self) -> anyhow::Result<String> {
         let token = self.token_manager.get_token().await?;
+        let ua = user_agent();
         let resp = self
             .http_client
             .get(GATEWAY_URL)
             .header("Authorization", format!("QQBot {}", token))
+            .header("User-Agent", &ua)
             .send()
             .await
             .map_err(|e| anyhow::anyhow!("gateway request failed: {}", e))?;
@@ -351,10 +362,12 @@ impl QQBotChannel {
         if status.as_u16() == 401 || text.contains("11244") {
             warn!(status = %status, "gateway got token-expired error, refreshing and retrying");
             let new_token = self.token_manager.refresh().await?;
+            let ua = user_agent();
             let resp = self
                 .http_client
                 .get(GATEWAY_URL)
                 .header("Authorization", format!("QQBot {}", new_token))
+                .header("User-Agent", &ua)
                 .send()
                 .await
                 .map_err(|e| anyhow::anyhow!("gateway retry request failed: {}", e))?;
@@ -513,11 +526,13 @@ impl QQBotChannel {
             body["msg_seq"] = serde_json::Value::Number(msg_seq.into());
         }
 
+        let ua = user_agent();
         let resp = self
             .http_client
             .post(&url)
             .header("Authorization", format!("QQBot {}", token))
             .header("Content-Type", "application/json")
+            .header("User-Agent", &ua)
             .json(&body)
             .send()
             .await
@@ -531,11 +546,13 @@ impl QQBotChannel {
             if status.as_u16() == 401 || text.contains("11244") {
                 warn!(status = %status, "C2C send got token-expired error, refreshing and retrying");
                 let new_token = self.token_manager.refresh().await?;
+                let ua = user_agent();
                 let resp = self
                     .http_client
                     .post(&url)
                     .header("Authorization", format!("QQBot {}", new_token))
                     .header("Content-Type", "application/json")
+                    .header("User-Agent", &ua)
                     .json(&body)
                     .send()
                     .await
@@ -578,11 +595,13 @@ impl QQBotChannel {
             body["msg_seq"] = serde_json::Value::Number(msg_seq.into());
         }
 
+        let ua = user_agent();
         let resp = self
             .http_client
             .post(&url)
             .header("Authorization", format!("QQBot {}", token))
             .header("Content-Type", "application/json")
+            .header("User-Agent", &ua)
             .json(&body)
             .send()
             .await
@@ -596,11 +615,13 @@ impl QQBotChannel {
             if status.as_u16() == 401 || text.contains("11244") {
                 warn!(status = %status, "group send got token-expired error, refreshing and retrying");
                 let new_token = self.token_manager.refresh().await?;
+                let ua = user_agent();
                 let resp = self
                     .http_client
                     .post(&url)
                     .header("Authorization", format!("QQBot {}", new_token))
                     .header("Content-Type", "application/json")
+                    .header("User-Agent", &ua)
                     .json(&body)
                     .send()
                     .await
@@ -661,6 +682,7 @@ impl QQBotChannel {
                     let _ = http.post(&url)
                         .header("Authorization", format!("QQBot {}", token))
                         .header("Content-Type", "application/json")
+                        .header("User-Agent", user_agent())
                         .json(&body)
                         .send().await;
                 }
@@ -676,6 +698,38 @@ impl QQBotChannel {
         if let Some(handle) = tasks.remove(recipient) {
             handle.abort();
         }
+    }
+
+    /// Try to handle a bot- prefixed slash command.
+    /// Returns true if the command was handled (message consumed), false to continue dispatch.
+    async fn try_bot_command(
+        &self,
+        content: &str,
+        reply_target: &str,
+        msg_id: &str,
+    ) -> bool {
+        let trimmed = content.trim();
+
+        let reply = match trimmed {
+            "/bot-ping" => "pong 🏓".to_string(),
+            "/bot-version" => format!("MyClaw {}", env!("MYCLAW_VERSION")),
+            "/bot-help" => "🤖 QQ Bot Plugin\n/bot-ping — test connection\n/bot-version — show version\n/bot-help — show this help\n\nOther /commands are handled by the AI assistant.".to_string(),
+            _ => return false,
+        };
+
+        // Send reply directly via REST API (bypass orchestrator).
+        let result = if let Some(openid) = reply_target.strip_prefix("c2c:") {
+            self.send_c2c_message(openid, &reply, msg_id, 1).await
+        } else if let Some(group_openid) = reply_target.strip_prefix("group:") {
+            self.send_group_message(group_openid, &reply, msg_id, 1).await
+        } else {
+            return true; // Unknown target, just consume the message
+        };
+
+        if let Err(e) = result {
+            warn!(error = %e, "failed to send bot command reply");
+        }
+        true
     }
 }
 
@@ -988,6 +1042,13 @@ impl QQBotChannel {
                     }
                     // User messages
                     if let Some(channel_msg) = self.handle_dispatch(event_type, &payload.d) {
+                        // Bot- prefixed slash commands — intercept before orchestrator
+                        let msg_id = payload.d.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        if self.try_bot_command(&channel_msg.content, &channel_msg.reply_target, msg_id).await {
+                            debug!(msg_id = %channel_msg.id, "bot command handled, skipping orchestrator");
+                            return None;
+                        }
+
                         if tx.send(channel_msg.clone()).await.is_err() {
                             warn!("channel receiver dropped, stopping listen");
                             return Some(WsDisconnect::Clean);
