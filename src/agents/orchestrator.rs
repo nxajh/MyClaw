@@ -15,7 +15,6 @@ use crate::agents::sub_agent::SubAgentDelegator;
 use crate::channels::{Channel, ChannelMessage, SendMessage};
 use dashmap::DashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex as TokioMutex, oneshot};
 use tokio::task::JoinHandle;
@@ -428,7 +427,7 @@ impl Orchestrator {
 
                     let ch = channels.clone();
                     tokio::spawn(async move {
-                        // Resolve channel early so we can manage typing indicators.
+                        // Resolve channel early so we can send the response.
                         let channel: Option<Arc<dyn Channel>> = {
                             ch.get(&channel_name_clone).map(|r| r.clone())
                         };
@@ -437,42 +436,10 @@ impl Orchestrator {
                             None => return,
                         };
 
-                        // Start typing indicator while the agent processes the message.
-                        // Telegram's sendChatAction lasts ~5 seconds, so we spawn a
-                        // background task that refreshes it every 4 seconds until the
-                        // response is ready.
-                        if let Err(e) = channel.start_typing(&reply_target).await {
-                            tracing::debug!(session = %sk, err = %e, "start_typing failed (non-fatal)");
-                        }
-                        let typing_channel = channel.clone();
-                        let typing_target = reply_target.clone();
-                        let typing_done = Arc::new(AtomicBool::new(false));
-                        let typing_handle = {
-                            let done = typing_done.clone();
-                            let ch = typing_channel;
-                            let target = typing_target;
-                            tokio::spawn(async move {
-                                loop {
-                                    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-                                    if done.load(Ordering::Relaxed) {
-                                        break;
-                                    }
-                                    let _ = ch.start_typing(&target).await;
-                                }
-                            })
-                        };
-
                         let response = {
                             let mut guard = loop_.lock().await;
                             guard.run(&content, image_urls, image_base64).await
                         };
-
-                        // Signal typing task to stop, then stop typing indicator.
-                        typing_done.store(true, Ordering::Relaxed);
-                        typing_handle.abort();
-                        if let Err(e) = channel.stop_typing(&reply_target).await {
-                            tracing::debug!(session = %sk, err = %e, "stop_typing failed (non-fatal)");
-                        }
 
                         match response {
                             Ok(text) if !text.is_empty() => {

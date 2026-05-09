@@ -751,16 +751,6 @@ impl Channel for WechatChannel {
     async fn health_check(&self) -> bool {
         self.api.state.read().bot_token.is_some()
     }
-
-    async fn start_typing(&self, recipient: &str) -> anyhow::Result<()> {
-        self.api.send_typing(recipient, true).await?;
-        Ok(())
-    }
-
-    async fn stop_typing(&self, recipient: &str) -> anyhow::Result<()> {
-        self.api.send_typing(recipient, false).await?;
-        Ok(())
-    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

@@ -70,8 +70,6 @@ pub trait Channel: Send + Sync {
     async fn send(&self, msg: &SendMessage) -> anyhow::Result<()>;
     async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>>;
     async fn health_check(&self) -> bool;
-    async fn start_typing(&self, recipient: &str) -> anyhow::Result<()>;
-    async fn stop_typing(&self, recipient: &str) -> anyhow::Result<()>;
 }
 
 /// Dedup state for a channel adapter (in-memory).

@@ -259,6 +259,8 @@ pub struct QQBotChannel {
     /// Last sequence number for heartbeat.
     last_seq: Arc<Mutex<Option<u64>>>,
     http_client: reqwest::Client,
+    /// Active typing keep-alive tasks, keyed by recipient (e.g. "c2c:xxx").
+    typing_tasks: Arc<Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>>,
 }
 
 impl QQBotChannel {
@@ -274,6 +276,7 @@ impl QQBotChannel {
                 .timeout(Duration::from_secs(30))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
+            typing_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -598,6 +601,56 @@ impl QQBotChannel {
         debug!(group = group_openid, "group message sent");
         Ok(())
     }
+
+    /// Start a typing keep-alive task for a C2C recipient.
+    ///
+    /// QQ Bot typing indicator (msg_type=6) expires after 60 seconds.
+    /// This method spawns a background task that refreshes it every 50 seconds
+    /// until the task is aborted (typically when the response is sent).
+    fn start_internal_typing(&self, recipient: &str) {
+        let openid = match recipient.strip_prefix("c2c:") {
+            Some(id) => id.to_string(),
+            None => return, // 群聊 no-op
+        };
+
+        // Abort existing task for this recipient
+        let mut tasks = self.typing_tasks.lock();
+        if let Some(handle) = tasks.remove(recipient) {
+            handle.abort();
+        }
+
+        let http = self.http_client.clone();
+        let token_mgr = self.token_manager.clone();
+        let recipient_key = recipient.to_string();
+
+        let handle = tokio::spawn(async move {
+            loop {
+                // 发 typing indicator
+                if let Ok(token) = token_mgr.get_token().await {
+                    let url = format!("{}/v2/users/{}/messages", API_BASE, openid);
+                    let body = serde_json::json!({
+                        "msg_type": 6,
+                        "input_notify": { "input_type": 1, "input_second": 60 },
+                    });
+                    let _ = http.post(&url)
+                        .header("Authorization", format!("QQBot {}", token))
+                        .header("Content-Type", "application/json")
+                        .json(&body)
+                        .send().await;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(50)).await;
+            }
+        });
+        tasks.insert(recipient_key, handle);
+    }
+
+    /// Stop (abort) the typing keep-alive task for a recipient.
+    fn stop_internal_typing(&self, recipient: &str) {
+        let mut tasks = self.typing_tasks.lock();
+        if let Some(handle) = tasks.remove(recipient) {
+            handle.abort();
+        }
+    }
 }
 
 // ── Channel trait implementation ──────────────────────────────────────────────
@@ -638,6 +691,9 @@ impl Channel for QQBotChannel {
             }
         }
 
+        // Stop typing indicator for this recipient now that the response is sent.
+        self.stop_internal_typing(&msg.recipient);
+
         Ok(())
     }
 
@@ -658,78 +714,6 @@ impl Channel for QQBotChannel {
     async fn health_check(&self) -> bool {
         // Try to fetch a token to verify credentials.
         self.token_manager.get_token().await.is_ok()
-    }
-
-    /// Send typing indicator (C2C only).
-    ///
-    /// QQ Bot API: `POST /v2/users/{openid}/messages` with `msg_type: 6`
-    /// and `input_notify.input_second: 60`. Only works for C2C private chat.
-    /// The orchestrator refreshes this every ~4 seconds while waiting for a response.
-    async fn start_typing(&self, recipient: &str) -> anyhow::Result<()> {
-        // Only C2C supports typing indicator — group chat does not.
-        let openid = match recipient.strip_prefix("c2c:") {
-            Some(id) => id,
-            None => return Ok(()),
-        };
-
-        let token = self.token_manager.get_token().await?;
-        let url = format!("{}/v2/users/{}/messages", API_BASE, openid);
-
-        let body = serde_json::json!({
-            "msg_type": 6,
-            "input_notify": {
-                "input_type": 1,
-                "input_second": 60,
-            },
-        });
-
-        let resp = self
-            .http_client
-            .post(&url)
-            .header("Authorization", format!("QQBot {}", token))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("typing indicator request failed: {}", e))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-
-            // Token-expired? Force-refresh and retry once (non-fatal).
-            if status.as_u16() == 401 || text.contains("11244") {
-                debug!(status = %status, "typing indicator got token-expired error, refreshing and retrying");
-                if let Ok(new_token) = self.token_manager.refresh().await {
-                    let retry_resp = self
-                        .http_client
-                        .post(&url)
-                        .header("Authorization", format!("QQBot {}", new_token))
-                        .header("Content-Type", "application/json")
-                        .json(&body)
-                        .send()
-                        .await;
-
-                    if let Ok(resp) = retry_resp {
-                        if !resp.status().is_success() {
-                            let status = resp.status();
-                            let text = resp.text().await.unwrap_or_default();
-                            debug!(status = %status, body = %text, "typing indicator retry failed (non-fatal)");
-                        }
-                    }
-                }
-            } else {
-                // Non-fatal: typing indicator failure should not break message flow.
-                debug!(status = %status, body = %text, "typing indicator failed (non-fatal)");
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn stop_typing(&self, _recipient: &str) -> anyhow::Result<()> {
-        // QQ Bot API has no "stop typing" — the indicator expires after input_second (60s).
-        Ok(())
     }
 }
 
@@ -882,10 +866,12 @@ impl QQBotChannel {
             OP_DISPATCH => {
                 if let Some(ref event_type) = payload.t {
                     if let Some(channel_msg) = self.handle_dispatch(event_type, &payload.d) {
-                        if tx.send(channel_msg).await.is_err() {
+                        if tx.send(channel_msg.clone()).await.is_err() {
                             warn!("channel receiver dropped, stopping listen");
                             return true;
                         }
+                        // Start typing keep-alive for C2C messages.
+                        self.start_internal_typing(&channel_msg.reply_target);
                     }
                 }
             }

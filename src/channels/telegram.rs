@@ -648,6 +648,8 @@ pub struct TelegramChannel {
     bot_username: Arc<Mutex<Option<String>>>,
     /// Workspace directory for saving attachments.
     workspace_dir: Option<std::path::PathBuf>,
+    /// Active typing keep-alive tasks, keyed by recipient (chat_id).
+    typing_tasks: Arc<Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>>,
 }
 
 impl TelegramChannel {
@@ -664,6 +666,7 @@ impl TelegramChannel {
             dedup: DedupState::new(),
             bot_username: Arc::new(Mutex::new(None)),
             workspace_dir: config.workspace_dir.map(std::path::PathBuf::from),
+            typing_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -975,6 +978,51 @@ impl TelegramChannel {
         use base64::Engine;
         Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
     }
+
+    /// Start a typing keep-alive task for a recipient.
+    ///
+    /// Telegram's sendChatAction lasts ~5 seconds. This method spawns a
+    /// background task that refreshes it every 4 seconds until aborted.
+    fn start_internal_typing(&self, recipient: &str) {
+        let (chat_id, thread_id) = Self::parse_reply_target(recipient);
+
+        // Abort existing task for this recipient
+        let mut tasks = self.typing_tasks.lock();
+        if let Some(handle) = tasks.remove(recipient) {
+            handle.abort();
+        }
+
+        let bot_token = self.bot_token.clone();
+        let api_base = self.api_base.clone();
+        let recipient_key = recipient.to_string();
+
+        let handle = tokio::spawn(async move {
+            loop {
+                // Send typing action
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build()
+                    .unwrap_or_else(|_| reqwest::Client::new());
+                let url = format!("{}/bot{}/sendChatAction", api_base, bot_token);
+                let req = SendChatActionRequest {
+                    chat_id: chat_id.clone(),
+                    message_thread_id: thread_id.clone(),
+                    action: "typing".to_string(),
+                };
+                let _ = client.post(&url).json(&req).send().await;
+                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+            }
+        });
+        tasks.insert(recipient_key, handle);
+    }
+
+    /// Stop (abort) the typing keep-alive task for a recipient.
+    fn stop_internal_typing(&self, recipient: &str) {
+        let mut tasks = self.typing_tasks.lock();
+        if let Some(handle) = tasks.remove(recipient) {
+            handle.abort();
+        }
+    }
 }
 
 impl TelegramChannel {
@@ -1105,9 +1153,12 @@ impl TelegramChannel {
                     image_base64,
                 };
 
-                if let Err(e) = tx.send(channel_msg).await {
+                if let Err(e) = tx.send(channel_msg.clone()).await {
                     warn!("Telegram dispatch error: {e}");
                 }
+
+                // Start typing keep-alive for this chat.
+                self.start_internal_typing(&channel_msg.reply_target);
             }
         }
     }
@@ -1180,6 +1231,10 @@ impl Channel for TelegramChannel {
                 // Continue trying subsequent chunks
             }
         }
+
+        // Stop typing indicator for this recipient now that the response is sent.
+        self.stop_internal_typing(&message.recipient);
+
         if let Some(e) = last_error {
             return Err(e);
         }
@@ -1211,17 +1266,6 @@ impl Channel for TelegramChannel {
             .await
             .map(|r| r.status().is_success())
             .unwrap_or(false)
-    }
-
-    async fn start_typing(&self, recipient: &str) -> anyhow::Result<()> {
-        let (chat_id, thread_id) = Self::parse_reply_target(recipient);
-        self.send_chat_action(&chat_id, thread_id.as_deref(), "typing")
-            .await
-    }
-
-    async fn stop_typing(&self, _recipient: &str) -> anyhow::Result<()> {
-        // Telegram doesn't have a "stop typing" action.
-        Ok(())
     }
 }
 
