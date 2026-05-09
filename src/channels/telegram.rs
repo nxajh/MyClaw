@@ -361,6 +361,8 @@ struct Message {
     forward_sender_name: Option<String>,
     #[serde(default)]
     forward_date: Option<i64>,
+    #[serde(default)]
+    reply_to_message: Option<Box<Message>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -593,6 +595,19 @@ impl TelegramChannel {
     /// Check if text contains a @mention of the bot.
     fn contains_bot_mention(&self, text: &str) -> bool {
         !self.find_bot_mention_spans(text).is_empty()
+    }
+
+    /// Check if the message is a reply to a message sent by this bot.
+    fn is_reply_to_bot(&self, msg: &Message) -> bool {
+        if let Some(ref replied) = msg.reply_to_message {
+            if let Some(ref from) = replied.from {
+                if let Some(bot_un) = self.get_bot_username() {
+                    let from_un = from.username.as_deref().unwrap_or("");
+                    return from_un.eq_ignore_ascii_case(bot_un.trim_start_matches('@'));
+                }
+            }
+        }
+        false
     }
 
     fn is_group_message(chat: &Chat) -> bool {
@@ -944,7 +959,7 @@ impl TelegramChannel {
 
                 if Self::is_group_message(&chat) && self.mention_only {
                     let text = msg.text.as_deref().unwrap_or("");
-                    if !self.contains_bot_mention(text) {
+                    if !self.contains_bot_mention(text) && !self.is_reply_to_bot(&msg) {
                         continue;
                     }
                 }
@@ -1203,6 +1218,7 @@ mod tests {
             forward_from_chat: None,
             forward_sender_name: None,
             forward_date: Some(1_700_000_000),
+            reply_to_message: None,
         };
         assert_eq!(
             TelegramChannel::format_forward_attribution(&msg),
@@ -1234,6 +1250,7 @@ mod tests {
             }),
             forward_sender_name: None,
             forward_date: Some(1_700_000_000),
+            reply_to_message: None,
         };
         assert_eq!(
             TelegramChannel::format_forward_attribution(&msg),
@@ -1260,6 +1277,7 @@ mod tests {
             forward_from_chat: None,
             forward_sender_name: Some("Hidden User".into()),
             forward_date: Some(1_700_000_000),
+            reply_to_message: None,
         };
         assert_eq!(
             TelegramChannel::format_forward_attribution(&msg),
@@ -1290,6 +1308,7 @@ mod tests {
             forward_from_chat: None,
             forward_sender_name: None,
             forward_date: None,
+            reply_to_message: None,
         };
         assert_eq!(TelegramChannel::format_forward_attribution(&msg), None);
     }
