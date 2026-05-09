@@ -342,6 +342,8 @@ struct Message {
     #[serde(default)]
     message_id: i64,
     #[serde(default)]
+    message_thread_id: Option<i64>,
+    #[serde(default)]
     from: Option<User>,
     #[serde(default)]
     chat: Chat,
@@ -932,11 +934,15 @@ impl TelegramChannel {
                         .map(|u| u.to_string())
                         .or_else(|| sender_id.map(|id| id.to_string()))
                         .unwrap_or_default(),
-                    reply_target: chat.id.to_string(),
+                    reply_target: if let Some(tid) = msg.message_thread_id {
+                        format!("{}:{}", chat.id, tid)
+                    } else {
+                        chat.id.to_string()
+                    },
                     content,
                     channel: "telegram".to_string(),
                     timestamp: chrono::Utc::now().timestamp_millis() as u64,
-                    thread_ts: None,
+                    thread_ts: msg.message_thread_id.map(|id| id.to_string()),
                     interruption_scope_id: None,
                     attachments: vec![],
                     image_urls: None,
@@ -1106,9 +1112,24 @@ mod tests {
     }
 
     #[test]
+    fn test_message_thread_id_in_reply_target() {
+        // Simulates: chat.id = -100123456, message_thread_id = Some(42)
+        let reply_target = if let Some(tid) = Some(42_i64) {
+            format!("{}:{}", -100123456_i64, tid)
+        } else {
+            (-100123456_i64).to_string()
+        };
+        assert_eq!(reply_target, "-100123456:42");
+        let (chat_id, thread_id) = TelegramChannel::parse_reply_target(&reply_target);
+        assert_eq!(chat_id, "-100123456");
+        assert_eq!(thread_id, Some("42".to_string()));
+    }
+
+    #[test]
     fn test_forward_attribution_user() {
         let msg = Message {
             message_id: 1,
+            message_thread_id: None,
             from: None,
             chat: Chat {
                 id: 1,
@@ -1138,6 +1159,7 @@ mod tests {
     fn test_forward_attribution_channel() {
         let msg = Message {
             message_id: 1,
+            message_thread_id: None,
             from: None,
             chat: Chat {
                 id: 1,
@@ -1168,6 +1190,7 @@ mod tests {
     fn test_forward_attribution_hidden_sender() {
         let msg = Message {
             message_id: 1,
+            message_thread_id: None,
             from: None,
             chat: Chat {
                 id: 1,
@@ -1193,6 +1216,7 @@ mod tests {
     fn test_forward_attribution_none() {
         let msg = Message {
             message_id: 1,
+            message_thread_id: None,
             from: Some(User {
                 id: 1,
                 username: Some("alice".into()),
