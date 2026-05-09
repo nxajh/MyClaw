@@ -457,6 +457,22 @@ impl QQBotChannel {
 
         let cleaned_content = content.trim().to_string();
 
+        // Parse image URLs from attachments.
+        let image_urls = if let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) {
+            let urls: Vec<String> = attachments.iter()
+                .filter_map(|a| {
+                    if a.get("content_type").and_then(|v| v.as_str()) == Some("image") {
+                        a.get("url").and_then(|v| v.as_str()).map(String::from)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if urls.is_empty() { None } else { Some(urls) }
+        } else {
+            None
+        };
+
         Some(ChannelMessage {
             id: msg_id.to_string(),
             sender: user_openid.to_string(),
@@ -470,7 +486,7 @@ impl QQBotChannel {
             thread_ts: None,
             interruption_scope_id: None,
             attachments: vec![],
-            image_urls: None,
+            image_urls,
             image_base64: None,
         })
     }
@@ -485,6 +501,22 @@ impl QQBotChannel {
 
         let cleaned_content = content.trim().to_string();
 
+        // Parse image URLs from attachments.
+        let image_urls = if let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) {
+            let urls: Vec<String> = attachments.iter()
+                .filter_map(|a| {
+                    if a.get("content_type").and_then(|v| v.as_str()) == Some("image") {
+                        a.get("url").and_then(|v| v.as_str()).map(String::from)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if urls.is_empty() { None } else { Some(urls) }
+        } else {
+            None
+        };
+
         Some(ChannelMessage {
             id: msg_id.to_string(),
             sender: member_openid.to_string(),
@@ -498,7 +530,7 @@ impl QQBotChannel {
             thread_ts: None,
             interruption_scope_id: None,
             attachments: vec![],
-            image_urls: None,
+            image_urls,
             image_base64: None,
         })
     }
@@ -524,6 +556,13 @@ impl QQBotChannel {
         if !msg_id.is_empty() {
             body["msg_id"] = serde_json::Value::String(msg_id.to_string());
             body["msg_seq"] = serde_json::Value::Number(msg_seq.into());
+        } else {
+            // Proactive message — generate unique msg_seq from timestamp.
+            let seq = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u32;
+            body["msg_seq"] = serde_json::Value::Number(seq.into());
         }
 
         let ua = user_agent();
@@ -593,6 +632,13 @@ impl QQBotChannel {
         if !msg_id.is_empty() {
             body["msg_id"] = serde_json::Value::String(msg_id.to_string());
             body["msg_seq"] = serde_json::Value::Number(msg_seq.into());
+        } else {
+            // Proactive message — generate unique msg_seq from timestamp.
+            let seq = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u32;
+            body["msg_seq"] = serde_json::Value::Number(seq.into());
         }
 
         let ua = user_agent();
