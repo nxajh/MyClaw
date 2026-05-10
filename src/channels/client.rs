@@ -35,6 +35,7 @@ struct ClientConnection {
     /// WebSocket sender (clone of the split sink, wrapped as mpsc for simplicity).
     ws_sender: mpsc::Sender<String>,
     /// Current active session key for this connection.
+    #[allow(dead_code)]
     active_session: String,
     /// Set of session keys owned by this connection.
     sessions: std::collections::HashSet<String>,
@@ -150,7 +151,7 @@ impl ClientChannel {
                         let stream_contexts_clone = stream_contexts.clone();
                         let connections_clone = connections.clone();
                         let session_owners_clone = session_owners.clone();
-                        let auth_token_clone = auth_token.clone();
+                        let _auth_token_clone = auth_token.clone();
 
                         tracing::info!(
                             conn_id = %conn_id,
@@ -364,10 +365,7 @@ impl Channel for ClientChannel {
             drop(owners); // Release lock before await.
 
             let conns = self.connections.read();
-            match conns.get(&conn_id) {
-                Some(conn) => Some(conn.ws_sender.clone()),
-                None => None,
-            }
+            conns.get(&conn_id).map(|conn| conn.ws_sender.clone())
         }; // Lock released here.
 
         if let Some(sender) = ws_sender {
