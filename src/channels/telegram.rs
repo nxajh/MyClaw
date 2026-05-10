@@ -1360,20 +1360,14 @@ impl TelegramChannel {
                     image_base64,
                 };
 
-                // Send ack reaction if enabled (for every message).
-                if self.ack_reactions {
-                    let chat_id = chat.id;
-                    let msg_id = msg.message_id;
-                    self.ack_message(chat_id, msg_id).await;
-                }
-
                 if self.debounce_ms > 0 {
                     // Check if this is the first message in the debounce window.
                     let debounce_key = format!("{}|{}", channel_msg.sender, channel_msg.reply_target);
                     let is_new = !self.debounce_buffer.lock().contains_key(&debounce_key);
                     if is_new {
-                        // Track first message's ack for removal after response.
+                        // Only ack the first message in a debounce window.
                         if self.ack_reactions {
+                            self.ack_message(chat.id, msg.message_id).await;
                             self.pending_acks.lock().insert(
                                 channel_msg.reply_target.clone(),
                                 (chat.id, msg.message_id),
@@ -1381,10 +1375,12 @@ impl TelegramChannel {
                         }
                         self.start_internal_typing(&channel_msg.reply_target);
                     }
+                    // Subsequent messages are merged — no ack, no typing start.
                     self.debounce_send(channel_msg, tx.clone()).await;
                 } else {
-                    // No debounce — original behaviour.
+                    // No debounce — ack every message.
                     if self.ack_reactions {
+                        self.ack_message(chat.id, msg.message_id).await;
                         self.pending_acks.lock().insert(
                             channel_msg.reply_target.clone(),
                             (chat.id, msg.message_id),
