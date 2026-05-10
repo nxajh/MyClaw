@@ -855,6 +855,18 @@ impl TelegramChannel {
         }
     }
 
+    /// Acknowledge a callback query (stops the loading spinner on the button).
+    async fn answer_callback_query(&self, callback_query_id: &str) {
+        let client = self.http_client();
+        let url = self.api_url("answerCallbackQuery");
+        let body = serde_json::json!({
+            "callback_query_id": callback_query_id
+        });
+        if let Err(e) = client.post(&url).json(&body).send().await {
+            warn!("Failed to answer callback query {}: {e}", callback_query_id);
+        }
+    }
+
     /// Start a typing keep-alive task for a recipient.
     ///
     /// Telegram's sendChatAction lasts ~5 seconds. This method spawns a
@@ -971,6 +983,79 @@ impl TelegramChannel {
 
             for update in updates.into_iter() {
                 offset = update.update_id + 1;
+
+                // Handle callback query (inline keyboard button click).
+                if let Some(cq) = update.callback_query {
+                    // ACK the callback query to stop loading spinner.
+                    self.answer_callback_query(&cq.id).await;
+
+                    let data = match cq.data {
+                        Some(d) if !d.is_empty() => d,
+                        _ => continue,
+                    };
+                    let from_user = match cq.from {
+                        Some(u) => u,
+                        None => continue,
+                    };
+                    let chat = match cq.message {
+                        Some(ref m) => m.chat.clone(),
+                        None => continue,
+                    };
+
+                    // User filtering
+                    let sender_username = from_user.username.as_deref();
+                    let sender_id = Some(from_user.id);
+                    if !self.is_user_allowed(sender_username, sender_id) {
+                        continue;
+                    }
+
+                    // Dedup using callback query ID
+                    let update_id = format!("cq_{}", cq.id);
+                    if self.dedup.check_and_record(&update_id) {
+                        continue;
+                    }
+
+                    let reply_target = if let Some(tid) = cq.message.as_ref().and_then(|m| m.message_thread_id) {
+                        format!("{}:{}", chat.id, tid)
+                    } else {
+                        chat.id.to_string()
+                    };
+
+                    let channel_msg = ChannelMessage {
+                        id: update_id,
+                        sender: sender_username
+                            .map(|u| u.to_string())
+                            .or_else(|| sender_id.map(|id| id.to_string()))
+                            .unwrap_or_default(),
+                        reply_target,
+                        content: data,
+                        channel: "telegram".to_string(),
+                        timestamp: chrono::Utc::now().timestamp_millis() as u64,
+                        thread_ts: cq.message.as_ref().and_then(|m| m.message_thread_id).map(|id| id.to_string()),
+                        interruption_scope_id: None,
+                        attachments: vec![],
+                        image_urls: None,
+                        image_base64: None,
+                    };
+
+                    // Send ack reaction if enabled.
+                    if self.ack_reactions {
+                        let chat_id = chat.id;
+                        let msg_id = cq.message.as_ref().map(|m| m.message_id).unwrap_or(0);
+                        self.ack_message(chat_id, msg_id).await;
+                        self.pending_acks.lock().insert(
+                            channel_msg.reply_target.clone(),
+                            (chat_id, msg_id),
+                        );
+                    }
+
+                    if let Err(e) = tx.send(channel_msg.clone()).await {
+                        warn!("Telegram dispatch callback error: {e}");
+                    }
+                    self.start_internal_typing(&channel_msg.reply_target);
+
+                    continue;
+                }
 
                 let msg = match update.message {
                     Some(m) => m,
