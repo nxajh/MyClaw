@@ -206,7 +206,7 @@ impl ClientChannel {
                                             }
 
                                             // Create streaming context.
-                                            let (event_tx, event_rx) = mpsc::channel::<TurnEvent>(64);
+                                            let (event_tx, mut event_rx) = mpsc::channel::<TurnEvent>(64);
                                             let cancel = CancellationToken::new();
 
                                             // Store in stream_contexts.
