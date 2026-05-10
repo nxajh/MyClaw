@@ -1,4 +1,4 @@
-//! channels — Message channel adapters (Telegram, WeChat, QQ Bot).
+//! channels — Message channel adapters (Telegram, WeChat, QQ Bot, Client).
 
 pub mod message;
 pub mod telegram;
@@ -6,6 +6,8 @@ pub mod telegram;
 pub mod qqbot;
 #[cfg(feature = "wechat")]
 pub mod wechat;
+#[cfg(feature = "client")]
+pub mod client;
 
 pub use message::{Channel, ChannelMessage, SendMessage, DedupState, ProcessingStatus};
 pub use telegram::TelegramChannel;
@@ -13,3 +15,5 @@ pub use telegram::TelegramChannel;
 pub use qqbot::QQBotChannel;
 #[cfg(feature = "wechat")]
 pub use wechat::WechatChannel;
+#[cfg(feature = "client")]
+pub use client::ClientChannel;

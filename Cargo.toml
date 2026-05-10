@@ -77,10 +77,11 @@ md-5 = { version = "0.10", optional = true }
 urlencoding = { version = "2.1", optional = true }
 
 [features]
-default = ["wechat", "qqbot", "telegram"]
+default = ["wechat", "qqbot", "telegram", "client"]
 qqbot = ["tokio-tungstenite"]
 wechat = ["aes", "ecb", "md-5", "urlencoding"]
 telegram = []
+client = ["tokio-tungstenite"]
 
 [profile.release]
 opt-level = 3

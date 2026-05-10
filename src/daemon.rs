@@ -412,6 +412,17 @@ fn build_channels(config: &crate::config::AppConfig) -> Vec<(&'static str, Arc<d
         }
     }
 
+    #[cfg(feature = "client")]
+    if let Some(ref cfg) = config.channels.client {
+        if cfg.enabled {
+            let client_ch = crate::channels::ClientChannel::new(cfg.clone());
+            channels.push((
+                "client",
+                Arc::new(client_ch),
+            ));
+        }
+    }
+
     channels
 }
 

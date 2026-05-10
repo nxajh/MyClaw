@@ -5,6 +5,8 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::agents::TurnEvent;
+
 // ── Core message types ─────────────────────────────────────────────────────────
 
 /// A message received from a channel.
@@ -86,6 +88,29 @@ pub trait Channel: Send + Sync {
     /// Default implementation does nothing — channels can override to show
     /// status indicators (e.g. reactions).
     async fn on_status(&self, _recipient: &str, _status: ProcessingStatus) {}
+
+    /// Prepare streaming context for a session (ClientChannel only).
+    /// Called by the Orchestrator before `run_streamed()`.
+    /// Returns `(event_tx, cancel_token)` for the agent to use.
+    fn prepare_stream(
+        &self,
+        _session_key: &str,
+        _ws_sender: mpsc::Sender<String>,
+    ) -> Option<(mpsc::Sender<TurnEvent>, CancellationToken)> {
+        None
+    }
+
+    /// Take the prepared streaming context for a session.
+    /// Called by the Orchestrator to get the event_tx and cancel_token.
+    fn take_stream_context(
+        &self,
+        _session_key: &str,
+    ) -> Option<(mpsc::Sender<TurnEvent>, CancellationToken)> {
+        None
+    }
+
+    /// Cancel the current turn for a session (ClientChannel only).
+    fn cancel_turn(&self, _session_key: &str) {}
 }
 
 /// Dedup state for a channel adapter (in-memory).

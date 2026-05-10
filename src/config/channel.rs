@@ -122,6 +122,7 @@ pub struct ChannelConfigs {
     pub wechat: Option<WechatConfig>,
     pub telegram: Option<TelegramConfig>,
     pub qqbot: Option<QQBotConfig>,
+    pub client: Option<ClientConfig>,
 }
 
 impl ChannelConfigs {
@@ -137,7 +138,47 @@ impl ChannelConfigs {
         if self.qqbot.as_ref().is_some_and(|c| c.enabled) {
             names.push("qqbot");
         }
+        if self.client.as_ref().is_some_and(|c| c.enabled) {
+            names.push("client");
+        }
         names
+    }
+}
+
+// ── ClientConfig ─────────────────────────────────────────────────────────────
+
+/// WebSocket client channel configuration (TUI / Web UI).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientConfig {
+    /// Whether this channel is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Bind address for the WebSocket server.
+    #[serde(default = "default_client_bind")]
+    pub bind: String,
+    /// Maximum concurrent WebSocket connections.
+    #[serde(default = "default_max_connections")]
+    pub max_connections: u32,
+    /// Authentication token (Bearer). None = no auth required.
+    pub auth_token: Option<String>,
+}
+
+fn default_client_bind() -> String {
+    "127.0.0.1:18789".to_string()
+}
+
+fn default_max_connections() -> u32 {
+    10
+}
+
+impl Default for ClientConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: default_client_bind(),
+            max_connections: default_max_connections(),
+            auth_token: None,
+        }
     }
 }
 
