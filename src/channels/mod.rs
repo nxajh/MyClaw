@@ -7,7 +7,7 @@ pub mod qqbot;
 #[cfg(feature = "wechat")]
 pub mod wechat;
 
-pub use message::{Channel, ChannelMessage, SendMessage, DedupState};
+pub use message::{Channel, ChannelMessage, SendMessage, DedupState, ProcessingStatus};
 pub use telegram::TelegramChannel;
 #[cfg(feature = "qqbot")]
 pub use qqbot::QQBotChannel;

@@ -12,7 +12,7 @@
 use anyhow::Context;
 use crate::agents::delegation::{DelegationEvent, DelegationManager};
 use crate::agents::sub_agent::SubAgentDelegator;
-use crate::channels::{Channel, ChannelMessage, SendMessage};
+use crate::channels::{Channel, ChannelMessage, SendMessage, ProcessingStatus};
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -437,6 +437,8 @@ impl Orchestrator {
                         };
 
                         let response = {
+                            // Notify channel that processing has started.
+                            channel.on_status(&reply_target, ProcessingStatus::Thinking).await;
                             let mut guard = loop_.lock().await;
                             guard.run(&content, image_urls, image_base64).await
                         };
@@ -445,7 +447,7 @@ impl Orchestrator {
                             Ok(text) if !text.is_empty() => {
                                 tracing::info!(session = %sk, text_len = text.len(), "sending response");
                                 let send_msg = SendMessage {
-                                    recipient: reply_target,
+                                    recipient: reply_target.clone(),
                                     content: text,
                                     subject: None,
                                     thread_ts: reply_to_id.clone(),
@@ -456,9 +458,12 @@ impl Orchestrator {
                                 if let Err(e) = channel.send(&send_msg).await {
                                     error!(session = %sk, err = %e, "send failed");
                                 }
+                                channel.on_status(&reply_target, ProcessingStatus::Done).await;
                             }
                             Ok(_) => {}
                             Err(e) => {
+                                // Notify channel about the error.
+                                channel.on_status(&reply_target, ProcessingStatus::Error).await;
                                 // Send error message to user so they know what happened.
                                 let error_text = format!(
                                     "⚠️ 处理消息时发生错误：\n\n`{}`\n\n请稍后重试，或联系管理员。",

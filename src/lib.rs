@@ -21,7 +21,7 @@ pub use agents::{
     McpManager, AskUserHandler, DelegateHandler, SubAgentDelegator,
     DelegationEvent, DelegationManager,
 };
-pub use channels::{Channel, ChannelMessage, SendMessage, DedupState};
+pub use channels::{Channel, ChannelMessage, SendMessage, DedupState, ProcessingStatus};
 pub use config::{AppConfig, ConfigLoader};
 pub use registry::{Registry};
 pub use providers::ServiceRegistry;

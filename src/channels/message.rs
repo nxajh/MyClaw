@@ -63,6 +63,17 @@ pub struct MediaAttachment {
     pub mime_type: Option<String>,
 }
 
+/// Processing status notification from Orchestrator to Channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessingStatus {
+    /// LLM call started — the bot is "thinking".
+    Thinking,
+    /// Response sent successfully (status cleanup already handled in send()).
+    Done,
+    /// An error occurred during processing.
+    Error,
+}
+
 /// Marker trait for channel adapters.
 #[async_trait]
 pub trait Channel: Send + Sync {
@@ -70,6 +81,11 @@ pub trait Channel: Send + Sync {
     async fn send(&self, msg: &SendMessage) -> anyhow::Result<()>;
     async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>>;
     async fn health_check(&self) -> bool;
+
+    /// Notify the channel about processing status changes.
+    /// Default implementation does nothing — channels can override to show
+    /// status indicators (e.g. reactions).
+    async fn on_status(&self, _recipient: &str, _status: ProcessingStatus) {}
 }
 
 /// Dedup state for a channel adapter (in-memory).

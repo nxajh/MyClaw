@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::{Channel, ChannelMessage, DedupState, SendMessage};
+use crate::{Channel, ChannelMessage, DedupState, SendMessage, ProcessingStatus};
 use crate::config::channel::TelegramConfig;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -458,6 +458,8 @@ pub struct TelegramChannel {
     ack_reactions: bool,
     /// Track ack reactions: reply_target → (chat_id, message_id) for removal after reply.
     pending_acks: Arc<Mutex<std::collections::HashMap<String, (i64, i64)>>>,
+    /// Status reactions: reply_target → (chat_id, msg_id).
+    status_reactions: Arc<Mutex<std::collections::HashMap<String, (i64, i64)>>>,
     /// Debounce window in milliseconds (0 = disabled).
     debounce_ms: u64,
     /// Debounce buffer: "sender|reply_target" → pending entry.
@@ -485,6 +487,7 @@ impl TelegramChannel {
             typing_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
             ack_reactions: config.ack_reactions,
             pending_acks: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            status_reactions: Arc::new(Mutex::new(std::collections::HashMap::new())),
             debounce_ms: config.debounce_ms,
             debounce_buffer: Arc::new(Mutex::new(std::collections::HashMap::new())),
             stall_timeout_secs: config.stall_timeout_secs,
@@ -875,6 +878,47 @@ impl TelegramChannel {
         if let Err(e) = client.post(&url).json(&body).send().await {
             warn!("Failed to remove ack reaction from message {} in chat {}: {e}", message_id, chat_id);
         }
+    }
+
+    /// Set an emoji reaction on a message.
+    async fn set_reaction(&self, chat_id: i64, message_id: i64, emoji: &str) -> anyhow::Result<()> {
+        let client = self.http_client();
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reaction": [{ "type": "emoji", "emoji": emoji }]
+        });
+        let resp = client
+            .post(self.api_url("setMessageReaction"))
+            .json(&body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("setMessageReaction failed: {}", text);
+        }
+        Ok(())
+    }
+
+    /// Remove a specific emoji reaction from a message.
+    async fn remove_reaction(&self, chat_id: i64, message_id: i64, _emoji: &str) -> anyhow::Result<()> {
+        // Setting an empty reaction array removes all reactions.
+        let client = self.http_client();
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reaction": []
+        });
+        let resp = client
+            .post(self.api_url("setMessageReaction"))
+            .json(&body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("setMessageReaction(remove) failed: {}", text);
+        }
+        Ok(())
     }
 
     /// Acknowledge a callback query (stops the loading spinner on the button).
@@ -1437,6 +1481,12 @@ impl Channel for TelegramChannel {
             self.remove_ack(chat_id, msg_id).await;
         }
 
+        // Clean up status reaction if present (send() means success, remove 🤔).
+        let status_info = self.status_reactions.lock().remove(&message.recipient);
+        if let Some((chat_id, msg_id)) = status_info {
+            let _ = self.remove_reaction(chat_id, msg_id, "🤔").await;
+        }
+
         if let Some(e) = last_error {
             return Err(e);
         }
@@ -1474,6 +1524,36 @@ impl Channel for TelegramChannel {
             .await
             .map(|r| r.status().is_success())
             .unwrap_or(false)
+    }
+
+    async fn on_status(&self, recipient: &str, status: ProcessingStatus) {
+        match status {
+            ProcessingStatus::Thinking => {
+                // Remove 👀 ack and replace with 🤔.
+                // Scope the lock to avoid holding parking_lot::MutexGuard across await.
+                let ack_info = self.pending_acks.lock().get(recipient).cloned();
+                if let Some((chat_id, msg_id)) = ack_info {
+                    self.remove_ack(chat_id, msg_id).await;
+                    self.status_reactions.lock().insert(recipient.to_string(), (chat_id, msg_id));
+                    let _ = self.set_reaction(chat_id, msg_id, "🤔").await;
+                }
+            }
+            ProcessingStatus::Done => {
+                // Remove 🤔 reaction (send() already handles cleanup, but this is a safety net).
+                let status_info = self.status_reactions.lock().remove(recipient);
+                if let Some((chat_id, msg_id)) = status_info {
+                    let _ = self.remove_reaction(chat_id, msg_id, "🤔").await;
+                }
+            }
+            ProcessingStatus::Error => {
+                // Replace 🤔 with ❌.
+                let status_info = self.status_reactions.lock().remove(recipient);
+                if let Some((chat_id, msg_id)) = status_info {
+                    let _ = self.remove_reaction(chat_id, msg_id, "🤔").await;
+                    let _ = self.set_reaction(chat_id, msg_id, "❌").await;
+                }
+            }
+        }
     }
 }
 
