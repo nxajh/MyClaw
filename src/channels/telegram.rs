@@ -431,6 +431,16 @@ struct GetUpdatesResponse {
 
 // ── TelegramChannel ────────────────────────────────────────────────────────────
 
+/// Entry in the debounce buffer for merging rapid consecutive messages from the same sender.
+struct DebounceEntry {
+    sender: String,
+    reply_target: String,
+    contents: Vec<String>,
+    images: Option<Vec<String>>,
+    first_ts: u64,
+    timer: tokio::task::JoinHandle<()>,
+}
+
 #[derive(Clone)]
 pub struct TelegramChannel {
     bot_token: String,
@@ -448,6 +458,10 @@ pub struct TelegramChannel {
     ack_reactions: bool,
     /// Track ack reactions: reply_target → (chat_id, message_id) for removal after reply.
     pending_acks: Arc<Mutex<std::collections::HashMap<String, (i64, i64)>>>,
+    /// Debounce window in milliseconds (0 = disabled).
+    debounce_ms: u64,
+    /// Debounce buffer: "sender|reply_target" → pending entry.
+    debounce_buffer: Arc<Mutex<std::collections::HashMap<String, DebounceEntry>>>,
 }
 
 impl TelegramChannel {
@@ -467,6 +481,8 @@ impl TelegramChannel {
             typing_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
             ack_reactions: config.ack_reactions,
             pending_acks: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            debounce_ms: config.debounce_ms,
+            debounce_buffer: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -936,6 +952,87 @@ impl TelegramChannel {
 }
 
 impl TelegramChannel {
+    /// Buffer an inbound message for debounce merging.
+    ///
+    /// Messages from the same sender in the same conversation are merged
+    /// and dispatched as a single `ChannelMessage` after the debounce window
+    /// expires. If debounce is disabled (`debounce_ms == 0`), the message is
+    /// sent immediately via `tx`.
+    async fn debounce_send(&self, msg: ChannelMessage, tx: mpsc::Sender<ChannelMessage>) {
+        if self.debounce_ms == 0 {
+            if let Err(e) = tx.send(msg).await {
+                warn!("Telegram dispatch error: {e}");
+            }
+            return;
+        }
+
+        let key = format!("{}|{}", msg.sender, msg.reply_target);
+        let debounce_ms = self.debounce_ms;
+        let buffer = self.debounce_buffer.clone();
+        let sender_key = key.clone();
+
+        // Create timer task (starts sleeping immediately).
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(debounce_ms)).await;
+            let entry = buffer.lock().remove(&sender_key);
+            if let Some(entry) = entry {
+                let merged = entry.contents.join("\n");
+                let channel_msg = ChannelMessage {
+                    id: format!("debounced_{}", entry.first_ts),
+                    sender: entry.sender,
+                    reply_target: entry.reply_target,
+                    content: merged,
+                    channel: "telegram".to_string(),
+                    timestamp: entry.first_ts,
+                    thread_ts: None,
+                    interruption_scope_id: None,
+                    attachments: vec![],
+                    image_urls: None,
+                    image_base64: entry.images,
+                };
+                let _ = tx.send(channel_msg).await;
+            }
+        });
+
+        // Lock the buffer and update/create entry.
+        {
+            let mut buf = self.debounce_buffer.lock();
+            if let Some(entry) = buf.get_mut(&key) {
+                // Merge into existing entry.
+                if !msg.content.is_empty() {
+                    entry.contents.push(msg.content);
+                }
+                if let Some(imgs) = msg.image_base64 {
+                    if let Some(ref mut existing) = entry.images {
+                        existing.extend(imgs);
+                    } else {
+                        entry.images = Some(imgs);
+                    }
+                }
+                // Cancel old timer, set new one.
+                entry.timer.abort();
+                entry.timer = handle;
+            } else {
+                // New entry.
+                buf.insert(
+                    key,
+                    DebounceEntry {
+                        sender: msg.sender,
+                        reply_target: msg.reply_target,
+                        contents: if msg.content.is_empty() {
+                            vec![]
+                        } else {
+                            vec![msg.content]
+                        },
+                        images: msg.image_base64,
+                        first_ts: msg.timestamp,
+                        timer: handle,
+                    },
+                );
+            }
+        }
+    }
+
     /// The actual long-poll loop. Runs until channel is closed.
     async fn poll_loop(&self, tx: mpsc::Sender<ChannelMessage>) {
         let mut offset: i64 = 0;
@@ -1140,24 +1237,41 @@ impl TelegramChannel {
                     image_base64,
                 };
 
-                // Send ack reaction if enabled.
+                // Send ack reaction if enabled (for every message).
                 if self.ack_reactions {
                     let chat_id = chat.id;
                     let msg_id = msg.message_id;
                     self.ack_message(chat_id, msg_id).await;
-                    // Track for removal after reply.
-                    self.pending_acks.lock().insert(
-                        channel_msg.reply_target.clone(),
-                        (chat_id, msg_id),
-                    );
                 }
 
-                if let Err(e) = tx.send(channel_msg.clone()).await {
-                    warn!("Telegram dispatch error: {e}");
+                if self.debounce_ms > 0 {
+                    // Check if this is the first message in the debounce window.
+                    let debounce_key = format!("{}|{}", channel_msg.sender, channel_msg.reply_target);
+                    let is_new = !self.debounce_buffer.lock().contains_key(&debounce_key);
+                    if is_new {
+                        // Track first message's ack for removal after response.
+                        if self.ack_reactions {
+                            self.pending_acks.lock().insert(
+                                channel_msg.reply_target.clone(),
+                                (chat.id, msg.message_id),
+                            );
+                        }
+                        self.start_internal_typing(&channel_msg.reply_target);
+                    }
+                    self.debounce_send(channel_msg, tx.clone()).await;
+                } else {
+                    // No debounce — original behaviour.
+                    if self.ack_reactions {
+                        self.pending_acks.lock().insert(
+                            channel_msg.reply_target.clone(),
+                            (chat.id, msg.message_id),
+                        );
+                    }
+                    if let Err(e) = tx.send(channel_msg.clone()).await {
+                        warn!("Telegram dispatch error: {e}");
+                    }
+                    self.start_internal_typing(&channel_msg.reply_target);
                 }
-
-                // Start typing keep-alive for this chat.
-                self.start_internal_typing(&channel_msg.reply_target);
             }
         }
     }
@@ -1295,6 +1409,7 @@ mod tests {
             approval_timeout_secs: 120,
             ack_reactions: true,
             workspace_dir: None,
+            debounce_ms: 0, // disabled in tests
         }
     }
 

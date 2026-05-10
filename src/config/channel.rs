@@ -73,6 +73,13 @@ pub struct TelegramConfig {
     pub ack_reactions: bool,
     /// Workspace directory for saving downloaded attachments.
     pub workspace_dir: Option<String>,
+    /// Debounce window in milliseconds for merging rapid consecutive messages from the same sender.
+    #[serde(default = "default_debounce_ms")]
+    pub debounce_ms: u64,
+}
+
+fn default_debounce_ms() -> u64 {
+    2000
 }
 
 fn default_approval_timeout() -> u64 {
