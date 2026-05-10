@@ -462,6 +462,10 @@ pub struct TelegramChannel {
     debounce_ms: u64,
     /// Debounce buffer: "sender|reply_target" → pending entry.
     debounce_buffer: Arc<Mutex<std::collections::HashMap<String, DebounceEntry>>>,
+    /// Stall watchdog timeout in seconds (0 = disabled).
+    stall_timeout_secs: u64,
+    /// Track when typing started for each recipient: reply_target → Instant.
+    typing_started_at: Arc<Mutex<std::collections::HashMap<String, std::time::Instant>>>,
 }
 
 impl TelegramChannel {
@@ -483,6 +487,8 @@ impl TelegramChannel {
             pending_acks: Arc::new(Mutex::new(std::collections::HashMap::new())),
             debounce_ms: config.debounce_ms,
             debounce_buffer: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            stall_timeout_secs: config.stall_timeout_secs,
+            typing_started_at: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -896,6 +902,9 @@ impl TelegramChannel {
             handle.abort();
         }
 
+        // Record typing start time for stall watchdog.
+        self.typing_started_at.lock().insert(recipient.to_string(), std::time::Instant::now());
+
         let bot_token = self.bot_token.clone();
         let api_base = self.api_base.clone();
         let recipient_key = recipient.to_string();
@@ -948,6 +957,8 @@ impl TelegramChannel {
         if let Some(handle) = tasks.remove(recipient) {
             handle.abort();
         }
+        // Remove stall watchdog tracking.
+        self.typing_started_at.lock().remove(recipient);
     }
 }
 
@@ -1030,6 +1041,74 @@ impl TelegramChannel {
                     },
                 );
             }
+        }
+    }
+
+    /// Background task that monitors for stalled conversations.
+    ///
+    /// If typing has been active for longer than `stall_timeout_secs` for a
+    /// recipient, sends a "still thinking" notice so the user knows the bot
+    /// is alive. Only one notice is sent per stall event.
+    async fn stall_watchdog(&self) {
+        if self.stall_timeout_secs == 0 {
+            return; // disabled
+        }
+
+        let check_interval = std::time::Duration::from_secs(5);
+        let mut interval = tokio::time::interval(check_interval);
+        let stall_timeout = std::time::Duration::from_secs(self.stall_timeout_secs);
+        // Track which recipients we've already sent stall notice for (to avoid spamming).
+        let notified: Arc<Mutex<std::collections::HashSet<String>>> =
+            Arc::new(Mutex::new(std::collections::HashSet::new()));
+
+        loop {
+            interval.tick().await;
+            let now = std::time::Instant::now();
+
+            let stalled: Vec<(String, std::time::Duration)> = {
+                let typing = self.typing_started_at.lock();
+                typing
+                    .iter()
+                    .filter_map(|(target, started)| {
+                        let elapsed = now.duration_since(*started);
+                        if elapsed >= stall_timeout {
+                            Some((target.clone(), elapsed))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            };
+
+            for (target, elapsed) in stalled {
+                {
+                    let mut n = notified.lock();
+                    if n.contains(&target) {
+                        continue; // Already notified
+                    }
+                    n.insert(target.clone());
+                }
+
+                let secs = elapsed.as_secs();
+                warn!("Stall detected for {target}: typing for {secs}s without response");
+
+                let (chat_id, thread_id) = Self::parse_reply_target(&target);
+                if let Err(e) = self
+                    .send_raw(
+                        &chat_id,
+                        &format!("🤔 还在思考中... (已等待 {secs}s)"),
+                        thread_id.as_deref(),
+                    )
+                    .await
+                {
+                    warn!("Failed to send stall notice: {e}");
+                }
+            }
+
+            // Clean up notified set for recipients that are no longer typing.
+            let typing_keys: std::collections::HashSet<String> =
+                self.typing_started_at.lock().keys().cloned().collect();
+            notified.lock().retain(|k| typing_keys.contains(k));
         }
     }
 
@@ -1378,6 +1457,12 @@ impl Channel for TelegramChannel {
             ch.poll_loop(tx).await;
         });
 
+        // Spawn stall watchdog.
+        let watchdog_ch = self.clone();
+        tokio::spawn(async move {
+            watchdog_ch.stall_watchdog().await;
+        });
+
         Ok(rx)
     }
 
@@ -1410,6 +1495,7 @@ mod tests {
             ack_reactions: true,
             workspace_dir: None,
             debounce_ms: 0, // disabled in tests
+            stall_timeout_secs: 0, // disabled in tests
         }
     }
 

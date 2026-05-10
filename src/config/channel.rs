@@ -73,6 +73,10 @@ pub struct TelegramConfig {
     pub ack_reactions: bool,
     /// Workspace directory for saving downloaded attachments.
     pub workspace_dir: Option<String>,
+    /// Stall watchdog threshold in seconds. Send "still thinking" message if typing exceeds this.
+    /// Set to 0 to disable.
+    #[serde(default = "default_stall_timeout_secs")]
+    pub stall_timeout_secs: u64,
     /// Debounce window in milliseconds for merging rapid consecutive messages from the same sender.
     #[serde(default = "default_debounce_ms")]
     pub debounce_ms: u64,
@@ -80,6 +84,10 @@ pub struct TelegramConfig {
 
 fn default_debounce_ms() -> u64 {
     2000
+}
+
+fn default_stall_timeout_secs() -> u64 {
+    30
 }
 
 fn default_approval_timeout() -> u64 {
