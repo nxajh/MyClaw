@@ -28,7 +28,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{Channel, ChannelMessage, DedupState, SendMessage, ProcessingStatus};
 use crate::config::channel::TelegramConfig;
@@ -471,6 +471,8 @@ pub struct TelegramChannel {
     stall_timeout_secs: u64,
     /// Track when typing started for each recipient: reply_target → Instant.
     typing_started_at: Arc<Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    /// Stall watchdog messages to delete when real reply arrives: reply_target → [(chat_id, msg_id)].
+    stall_messages: ReactionTracker,
 }
 
 impl TelegramChannel {
@@ -495,6 +497,7 @@ impl TelegramChannel {
             debounce_buffer: Arc::new(Mutex::new(std::collections::HashMap::new())),
             stall_timeout_secs: config.stall_timeout_secs,
             typing_started_at: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            stall_messages: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -684,7 +687,7 @@ impl TelegramChannel {
         chat_id: &str,
         text: &str,
         thread_id: Option<&str>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<i64>> {
         let client = self.http_client();
         let html_text = markdown_to_telegram_html(text);
 
@@ -727,11 +730,19 @@ impl TelegramChannel {
                     body_text
                 ));
             }
-            return Ok(());
+            let resp_json: serde_json::Value = resp2.json().await?;
+            let msg_id = resp_json.get("result")
+                .and_then(|r| r.get("message_id"))
+                .and_then(|m| m.as_i64());
+            return Ok(msg_id);
         }
 
         if resp.status().is_success() {
-            return Ok(());
+            let resp_json: serde_json::Value = resp.json().await?;
+            let msg_id = resp_json.get("result")
+                .and_then(|r| r.get("message_id"))
+                .and_then(|m| m.as_i64());
+            return Ok(msg_id);
         }
 
         // HTML parse failed — fall back to plain text.
@@ -777,6 +788,29 @@ impl TelegramChannel {
             let status = fallback_resp.status();
             let body = fallback_resp.text().await.unwrap_or_default();
             anyhow::bail!("sendMessage failed: status={status}, body={body}");
+        }
+        let resp_json: serde_json::Value = fallback_resp.json().await?;
+        let msg_id = resp_json.get("result")
+            .and_then(|r| r.get("message_id"))
+            .and_then(|m| m.as_i64());
+        Ok(msg_id)
+    }
+
+    /// Delete a message by chat_id and message_id.
+    async fn delete_message(&self, chat_id: i64, message_id: i64) -> anyhow::Result<()> {
+        let client = self.http_client();
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+        });
+        let resp = client
+            .post(self.api_url("deleteMessage"))
+            .json(&body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("deleteMessage failed: {}", text);
         }
         Ok(())
     }
@@ -1140,7 +1174,8 @@ impl TelegramChannel {
                 warn!("Stall detected for {target}: typing for {secs}s without response");
 
                 let (chat_id, thread_id) = Self::parse_reply_target(&target);
-                if let Err(e) = self
+                let chat_id_i64: i64 = chat_id.parse().unwrap_or(0);
+                match self
                     .send_raw(
                         &chat_id,
                         &format!("🤔 还在思考中... (已等待 {secs}s)"),
@@ -1148,7 +1183,16 @@ impl TelegramChannel {
                     )
                     .await
                 {
-                    warn!("Failed to send stall notice: {e}");
+                    Ok(Some(stall_msg_id)) => {
+                        self.stall_messages.lock()
+                            .entry(target.clone())
+                            .or_default()
+                            .push((chat_id_i64, stall_msg_id));
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        warn!("Failed to send stall notice: {e}");
+                    }
                 }
             }
 
@@ -1447,6 +1491,16 @@ impl Channel for TelegramChannel {
 
     async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
         let (chat_id, thread_id) = Self::parse_reply_target(&message.recipient);
+
+        // Delete any stall watchdog messages before sending the real reply.
+        let stall_msgs = self.stall_messages.lock().remove(&message.recipient);
+        if let Some(msgs) = stall_msgs {
+            for (chat_id, msg_id) in msgs {
+                if let Err(e) = self.delete_message(chat_id, msg_id).await {
+                    debug!("Failed to delete stall message {}: {e}", msg_id);
+                }
+            }
+        }
 
         // Split into chunks that fit Telegram's 4096-char limit.
         // We use a conservative limit because markdown_to_telegram_html() can
