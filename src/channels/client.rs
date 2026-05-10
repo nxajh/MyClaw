@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures_util::SinkExt;
+use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
@@ -17,7 +17,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
 use crate::agents::TurnEvent;
-use crate::channels::message::{Channel, ChannelMessage, ProcessingStatus, SendMessage};
+use crate::channels::message::{Channel, ChannelMessage, SendMessage};
 use crate::config::channel::ClientConfig;
 
 // ── Stream Context ──────────────────────────────────────────────────────────
@@ -352,24 +352,31 @@ impl Channel for ClientChannel {
     async fn send(&self, msg: &SendMessage) -> anyhow::Result<()> {
         // msg.recipient is the session_key (e.g. "client:ws-1")
         // Find the connection that owns this session.
-        let owners = self.session_owners.read();
-        let conn_id = match owners.get(&msg.recipient) {
-            Some(id) => id.clone(),
-            None => {
-                tracing::warn!(recipient = %msg.recipient, "no connection found for session");
-                return Ok(());
-            }
-        };
-        drop(owners);
+        let ws_sender = {
+            let owners = self.session_owners.read();
+            let conn_id = match owners.get(&msg.recipient) {
+                Some(id) => id.clone(),
+                None => {
+                    tracing::warn!(recipient = %msg.recipient, "no connection found for session");
+                    return Ok(());
+                }
+            };
+            drop(owners); // Release lock before await.
 
-        let conns = self.connections.read();
-        if let Some(conn) = conns.get(&conn_id) {
+            let conns = self.connections.read();
+            match conns.get(&conn_id) {
+                Some(conn) => Some(conn.ws_sender.clone()),
+                None => None,
+            }
+        }; // Lock released here.
+
+        if let Some(sender) = ws_sender {
             let outgoing = serde_json::json!({
                 "type": "message",
                 "session": msg.recipient,
                 "content": msg.content,
             });
-            let _ = conn.ws_sender.send(outgoing.to_string()).await;
+            let _ = sender.send(outgoing.to_string()).await;
         }
         Ok(())
     }
