@@ -14,7 +14,8 @@ use std::time::Duration;
 use std::path::PathBuf;
 
 use parking_lot::RwLock;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
+use tokio_util::sync::CancellationToken;
 
 use crate::providers::Capability;
 use crate::providers::{
@@ -27,6 +28,7 @@ use crate::agents::session_manager::SessionOverride;
 
 use super::skills::SkillManager;
 use super::tool_registry::ToolRegistry;
+use super::TurnEvent;
 use futures_util::StreamExt;
 
 /// Callback for ask_user tool: (session_key, question) → user_answer.
@@ -57,6 +59,20 @@ use crate::config::sub_agent::SubAgentConfig;
 use crate::tools::TaskDelegator;
 use crate::storage::SummaryRecord;
 use crate::str_utils;
+
+// ── StreamMode ──────────────────────────────────────────────────────────────
+
+/// Determines how the LLM stream is consumed inside `chat_loop`.
+///
+/// - `Collect`: silently collect into a `CollectedResponse` (existing `run()` behavior).
+/// - `Streamed`: forward events via mpsc + support cancellation (for `run_streamed()`).
+enum StreamMode {
+    Collect,
+    Streamed {
+        event_tx: mpsc::Sender<TurnEvent>,
+        cancel: CancellationToken,
+    },
+}
 
 /// Estimate token count from text length (~4 bytes per token).
 pub(crate) fn estimate_tokens(text: &str) -> u64 {
@@ -545,7 +561,44 @@ impl AgentLoop {
     /// Process a user message and return the assistant's text response.
     ///
     /// This is the main entry point called by the orchestrator.
+    /// Process a user message and return the assistant's text response.
+    ///
+    /// This is the main entry point used by all existing channels (Telegram, QQ Bot, etc.).
+    /// Internally delegates to `run_turn_core` with `StreamMode::Collect`.
     pub async fn run(&mut self, user_message: &str, image_urls: Option<Vec<String>>, image_base64: Option<Vec<String>>) -> anyhow::Result<String> {
+        self.run_turn_core(user_message, image_urls, image_base64, StreamMode::Collect).await
+    }
+
+    /// Process a user message with streaming events sent to `event_tx`.
+    ///
+    /// Used by ClientChannel: the WebSocket handler forwards TurnEvent chunks
+    /// to the connected client in real-time. Supports cancellation via `CancellationToken`.
+    pub async fn run_streamed(
+        &mut self,
+        user_message: &str,
+        image_urls: Option<Vec<String>>,
+        image_base64: Option<Vec<String>>,
+        event_tx: mpsc::Sender<TurnEvent>,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<String> {
+        self.run_turn_core(
+            user_message,
+            image_urls,
+            image_base64,
+            StreamMode::Streamed { event_tx, cancel },
+        ).await
+    }
+
+    /// Shared implementation for `run()` and `run_streamed()`.
+    ///
+    /// Preamble (reset, diff, persist user message) → chat_loop → postamble (persist assistant).
+    async fn run_turn_core(
+        &mut self,
+        user_message: &str,
+        image_urls: Option<Vec<String>>,
+        image_base64: Option<Vec<String>>,
+        stream_mode: StreamMode,
+    ) -> anyhow::Result<String> {
         tracing::info!(user_input = %user_message, "user message received");
 
         // Reset loop breaker for new turn.
@@ -624,7 +677,7 @@ impl AgentLoop {
         let messages = self.build_messages().await?;
 
         // 3. Run the chat loop (handles tool calls iteratively).
-        let text = self.chat_loop(messages).await?;
+        let text = self.chat_loop(messages, stream_mode).await?;
 
         // 4. Persist assistant response.
         self.session.add_assistant_text(text.clone());
@@ -847,7 +900,7 @@ impl AgentLoop {
     }
 
     /// Core chat loop: call LLM, handle tool calls, repeat until text response.
-    async fn chat_loop(&mut self, initial_messages: Vec<ChatMessage>) -> anyhow::Result<String> {
+    async fn chat_loop(&mut self, initial_messages: Vec<ChatMessage>, stream_mode: StreamMode) -> anyhow::Result<String> {
         let mut tool_calls_count = 0usize;
         let mut boosted_max_tokens = false;
         let mut first_iteration = true;
@@ -867,6 +920,14 @@ impl AgentLoop {
         }
 
         loop {
+            // Cancellation checkpoint 3: before next LLM call (top of loop).
+            if let StreamMode::Streamed { cancel, .. } = &stream_mode {
+                if cancel.is_cancelled() {
+                    tracing::info!("turn cancelled before next LLM call");
+                    return Ok(String::new());
+                }
+            }
+
             // 1. Get a chat provider via registry.
             // If model_override is set, use that model directly.
             // If images are pending, prefer a vision-capable model from the fallback chain.
@@ -978,23 +1039,41 @@ impl AgentLoop {
             let stream = provider.chat(req)?;
             tracing::info!("chat stream started, collecting...");
 
-            let response = match self.collect_stream(stream).await {
-                Ok(r) => r,
-                Err(e) if e.to_string().contains("stream chunk timeout") => {
-                    // Server hung without sending data — count as failed attempt.
-                    tool_calls_count += 1;
-                    if tool_calls_count > 3 {
-                        tracing::error!("stream timeout after 3 retries, giving up");
-                        return Ok(String::new());
+            // Branch on StreamMode: Collect (existing) vs Streamed (forward events).
+            let response = {
+                let result = match &stream_mode {
+                    StreamMode::Collect => self.collect_stream(stream).await,
+                    StreamMode::Streamed { event_tx, cancel } => {
+                        self.collect_stream_with_events(stream, event_tx, cancel).await
                     }
-                    tracing::warn!(
-                        attempt = tool_calls_count,
-                        "stream chunk timeout, server may be hung, retrying..."
-                    );
-                    continue;
+                };
+                match result {
+                    Ok(r) => r,
+                    Err(e) if e.to_string().contains("stream chunk timeout") => {
+                        // Server hung without sending data — count as failed attempt.
+                        tool_calls_count += 1;
+                        if tool_calls_count > 3 {
+                            tracing::error!("stream timeout after 3 retries, giving up");
+                            return Ok(String::new());
+                        }
+                        tracing::warn!(
+                            attempt = tool_calls_count,
+                            "stream chunk timeout, server may be hung, retrying..."
+                        );
+                        continue;
+                    }
+                    Err(e) => return Err(e),
                 }
-                Err(e) => return Err(e),
             };
+
+            // Cancellation checkpoint 4: after stream collected, before tool loop.
+            if let StreamMode::Streamed { cancel, .. } = &stream_mode {
+                if cancel.is_cancelled() {
+                    tracing::info!("turn cancelled after stream collection");
+                    return Ok(response.text);
+                }
+            }
+
             tracing::info!(text_len = response.text.len(), tool_calls = response.tool_calls.len(), stop = ?response.stop_reason, "chat stream collected");
 
             // Record token usage from API response.
@@ -1051,6 +1130,10 @@ impl AgentLoop {
                     }
                     continue;
                 }
+                // Streamed mode: send Done event before returning.
+                if let StreamMode::Streamed { event_tx, .. } = &stream_mode {
+                    let _ = event_tx.send(TurnEvent::Done { text: response.text.clone() }).await;
+                }
                 return Ok(response.text);
             }
 
@@ -1098,6 +1181,22 @@ impl AgentLoop {
             for call in &response.tool_calls {
                 tool_calls_count += 1;
 
+                // Cancellation checkpoint 2: before each tool execution.
+                if let StreamMode::Streamed { cancel, event_tx } = &stream_mode {
+                    if cancel.is_cancelled() {
+                        tracing::info!(tool = %call.name, "turn cancelled before tool execution");
+                        let _ = event_tx.send(TurnEvent::Cancelled { partial: response.text.clone() }).await;
+                        return Ok(response.text.clone());
+                    }
+                    // Send ToolCall event to client.
+                    let args: serde_json::Value = serde_json::from_str(&call.arguments)
+                        .unwrap_or(serde_json::Value::Null);
+                    let _ = event_tx.send(TurnEvent::ToolCall {
+                        name: call.name.clone(),
+                        args,
+                    }).await;
+                }
+
                 // Hard limit check.
                 if self.config.max_tool_calls > 0
                     && tool_calls_count > self.config.max_tool_calls
@@ -1123,6 +1222,14 @@ impl AgentLoop {
                 };
 
                 tracing::info!(tool = %call.name, success = !is_error, "tool result:\n{}", result_content);
+
+                // Streamed mode: send ToolResult event to client.
+                if let StreamMode::Streamed { event_tx, .. } = &stream_mode {
+                    let _ = event_tx.send(TurnEvent::ToolResult {
+                        name: call.name.clone(),
+                        output: result_content.clone(),
+                    }).await;
+                }
 
                 // Loop breaker check.
                 match self.loop_breaker.record_and_check(&call.name, &call.arguments, &result_content) {
@@ -1264,6 +1371,149 @@ impl AgentLoop {
                     // Chunk timeout — treat as server-side failure so the
                     // caller (chat_loop) can distinguish this from a genuine
                     // MaxTokens condition and take appropriate action.
+                    anyhow::bail!(
+                        "stream chunk timeout after {}s, no data received",
+                        chunk_timeout.as_secs()
+                    );
+                }
+            }
+        }
+
+        Ok(CollectedResponse {
+            text,
+            reasoning_content,
+            tool_calls,
+            stop_reason,
+            usage,
+        })
+    }
+
+    /// Like `collect_stream`, but also forwards text/thinking chunks as
+    /// `TurnEvent`s via `event_tx` and respects `CancellationToken`.
+    ///
+    /// Cancellation behaviour:
+    /// - Returns `Ok(CollectedResponse)` with whatever was collected so far
+    ///   (the caller is responsible for sending `TurnEvent::Cancelled`).
+    /// - If `event_tx.send()` fails (client disconnected), returns
+    ///   `Err("Client disconnected")`.
+    async fn collect_stream_with_events(
+        &self,
+        mut stream: BoxStream<StreamEvent>,
+        event_tx: &mpsc::Sender<TurnEvent>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<CollectedResponse> {
+        let mut text = String::new();
+        let mut reasoning_content: Option<String> = None;
+        let mut tool_calls = Vec::new();
+        let mut stop_reason = StopReason::EndTurn;
+        let mut usage: Option<ChatUsage> = None;
+
+        let chunk_timeout = Duration::from_secs(self.config.stream_chunk_timeout_secs);
+        let max_output_bytes = self.config.max_output_bytes;
+
+        loop {
+            // Cancellation checkpoint 1: between stream chunks.
+            if cancel.is_cancelled() {
+                return Ok(CollectedResponse {
+                    text,
+                    reasoning_content,
+                    tool_calls,
+                    stop_reason,
+                    usage,
+                });
+            }
+
+            // Check output length limit
+            if text.len() > max_output_bytes {
+                tracing::warn!(
+                    output_bytes = text.len(),
+                    max_bytes = max_output_bytes,
+                    "stream output exceeded max size, forcing stop"
+                );
+                stop_reason = StopReason::MaxTokens;
+                break;
+            }
+
+            // Wait for next chunk with timeout
+            match tokio::time::timeout(chunk_timeout, stream.next()).await {
+                Ok(Some(event)) => {
+                    match event {
+                        StreamEvent::Delta { text: delta } => {
+                            text.push_str(&delta);
+                            // Forward chunk to client. If send fails, client is gone.
+                            if event_tx.send(TurnEvent::Chunk { delta }).await.is_err() {
+                                anyhow::bail!("Client disconnected during stream");
+                            }
+                        }
+                        StreamEvent::Thinking { text: delta } => {
+                            if !delta.is_empty() {
+                                if let Some(rc) = &mut reasoning_content {
+                                    rc.push_str(&delta);
+                                } else {
+                                    reasoning_content = Some(delta.clone());
+                                }
+                                if event_tx.send(TurnEvent::Thinking { delta }).await.is_err() {
+                                    anyhow::bail!("Client disconnected during stream");
+                                }
+                            }
+                        }
+                        StreamEvent::ToolCallStart { id, name, initial_arguments } => {
+                            tool_calls.push(ToolCall {
+                                id,
+                                name,
+                                arguments: initial_arguments,
+                            });
+                        }
+                        StreamEvent::ToolCallDelta { id, delta } => {
+                            if !id.is_empty() {
+                                if let Some(call) = tool_calls.iter_mut().find(|c| c.id == id) {
+                                    call.arguments.push_str(&delta);
+                                } else {
+                                    tool_calls.push(ToolCall {
+                                        id: id.clone(),
+                                        name: String::new(),
+                                        arguments: delta,
+                                    });
+                                    tracing::debug!(tool_call_id = %id, "auto-created tool call from delta");
+                                }
+                            } else if let Some(last) = tool_calls.last_mut() {
+                                last.arguments.push_str(&delta);
+                            }
+                        }
+                        StreamEvent::ToolCallEnd { id, name, arguments } => {
+                            if let Some(call) = tool_calls.iter_mut().find(|c| c.id == id) {
+                                call.name = name;
+                                call.arguments = arguments;
+                            }
+                        }
+                        StreamEvent::Usage(u) => {
+                            if let Some(ref mut existing) = usage {
+                                if u.input_tokens.is_some() { existing.input_tokens = u.input_tokens; }
+                                if u.output_tokens.is_some() { existing.output_tokens = u.output_tokens; }
+                                if u.cached_input_tokens.is_some() { existing.cached_input_tokens = u.cached_input_tokens; }
+                                if u.reasoning_tokens.is_some() { existing.reasoning_tokens = u.reasoning_tokens; }
+                                if u.cache_write_tokens.is_some() { existing.cache_write_tokens = u.cache_write_tokens; }
+                            } else {
+                                usage = Some(u);
+                            }
+                        }
+                        StreamEvent::Done { reason } => {
+                            stop_reason = reason;
+                            break;
+                        }
+                        StreamEvent::HttpError { message, .. } => {
+                            anyhow::bail!("Stream error: {}", message);
+                        }
+                        StreamEvent::Error(e) => {
+                            anyhow::bail!("Stream error: {}", e);
+                        }
+                    }
+                }
+                Ok(None) => {
+                    tracing::warn!("stream ended without Done event");
+                    break;
+                }
+                Err(_) => {
                     anyhow::bail!(
                         "stream chunk timeout after {}s, no data received",
                         chunk_timeout.as_secs()

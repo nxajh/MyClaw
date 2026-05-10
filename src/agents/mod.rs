@@ -19,8 +19,10 @@ pub mod cron_loader;
 pub mod webhook_loader;
 pub mod work_unit;
 pub mod slash_command;
+pub mod turn_event;
 
 pub use agent_impl::{Agent, AgentConfig, AgentLoop, AskUserHandler, DelegateHandler};
+pub use turn_event::TurnEvent;
 pub use attachment::AttachmentManager;
 pub use watcher::{WorkspaceWatcher, ChangeSet};
 pub use delegation::{DelegationEvent, DelegationManager};
