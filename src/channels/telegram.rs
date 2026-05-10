@@ -441,6 +441,9 @@ struct DebounceEntry {
     timer: tokio::task::JoinHandle<()>,
 }
 
+/// Reaction tracker: reply_target → Vec<(chat_id, message_id)>.
+type ReactionTracker = Arc<Mutex<std::collections::HashMap<String, Vec<(i64, i64)>>>>;
+
 #[derive(Clone)]
 pub struct TelegramChannel {
     bot_token: String,
@@ -457,9 +460,9 @@ pub struct TelegramChannel {
     /// Whether to send acknowledgement reactions on received messages.
     ack_reactions: bool,
     /// Track ack reactions: reply_target → (chat_id, message_id) for removal after reply.
-    pending_acks: Arc<Mutex<std::collections::HashMap<String, (i64, i64)>>>,
-    /// Status reactions: reply_target → (chat_id, msg_id).
-    status_reactions: Arc<Mutex<std::collections::HashMap<String, (i64, i64)>>>,
+    pending_acks: ReactionTracker,
+    /// Status reactions: reply_target → Vec<(chat_id, msg_id)>.
+    status_reactions: ReactionTracker,
     /// Debounce window in milliseconds (0 = disabled).
     debounce_ms: u64,
     /// Debounce buffer: "sender|reply_target" → pending entry.
@@ -1263,10 +1266,11 @@ impl TelegramChannel {
                         let chat_id = chat.id;
                         let msg_id = cq.message.as_ref().map(|m| m.message_id).unwrap_or(0);
                         self.ack_message(chat_id, msg_id).await;
-                        self.pending_acks.lock().insert(
-                            channel_msg.reply_target.clone(),
-                            (chat_id, msg_id),
-                        );
+                        self.pending_acks
+                            .lock()
+                            .entry(channel_msg.reply_target.clone())
+                            .or_default()
+                            .push((chat_id, msg_id));
                     }
 
                     if let Err(e) = tx.send(channel_msg.clone()).await {
@@ -1361,30 +1365,31 @@ impl TelegramChannel {
                 };
 
                 if self.debounce_ms > 0 {
-                    // Check if this is the first message in the debounce window.
+                    // Ack every message, accumulate all message IDs.
+                    if self.ack_reactions {
+                        self.ack_message(chat.id, msg.message_id).await;
+                        self.pending_acks
+                            .lock()
+                            .entry(channel_msg.reply_target.clone())
+                            .or_default()
+                            .push((chat.id, msg.message_id));
+                    }
+
                     let debounce_key = format!("{}|{}", channel_msg.sender, channel_msg.reply_target);
                     let is_new = !self.debounce_buffer.lock().contains_key(&debounce_key);
                     if is_new {
-                        // Only ack the first message in a debounce window.
-                        if self.ack_reactions {
-                            self.ack_message(chat.id, msg.message_id).await;
-                            self.pending_acks.lock().insert(
-                                channel_msg.reply_target.clone(),
-                                (chat.id, msg.message_id),
-                            );
-                        }
                         self.start_internal_typing(&channel_msg.reply_target);
                     }
-                    // Subsequent messages are merged — no ack, no typing start.
                     self.debounce_send(channel_msg, tx.clone()).await;
                 } else {
                     // No debounce — ack every message.
                     if self.ack_reactions {
                         self.ack_message(chat.id, msg.message_id).await;
-                        self.pending_acks.lock().insert(
-                            channel_msg.reply_target.clone(),
-                            (chat.id, msg.message_id),
-                        );
+                        self.pending_acks
+                            .lock()
+                            .entry(channel_msg.reply_target.clone())
+                            .or_default()
+                            .push((chat.id, msg.message_id));
                     }
                     if let Err(e) = tx.send(channel_msg.clone()).await {
                         warn!("Telegram dispatch error: {e}");
@@ -1471,16 +1476,20 @@ impl Channel for TelegramChannel {
         // Stop typing indicator for this recipient now that the response is sent.
         self.stop_internal_typing(&message.recipient);
 
-        // Remove ack reaction after successful reply.
+        // Remove ack reactions (👀) for all tracked messages.
         let ack_info = self.pending_acks.lock().remove(&message.recipient);
-        if let Some((chat_id, msg_id)) = ack_info {
-            self.remove_ack(chat_id, msg_id).await;
+        if let Some(msg_ids) = ack_info {
+            for (chat_id, msg_id) in msg_ids {
+                self.remove_ack(chat_id, msg_id).await;
+            }
         }
 
-        // Clean up status reaction if present (send() means success, remove 🤔).
+        // Clean up status reactions (🤔) for all tracked messages.
         let status_info = self.status_reactions.lock().remove(&message.recipient);
-        if let Some((chat_id, msg_id)) = status_info {
-            let _ = self.remove_reaction(chat_id, msg_id, "🤔").await;
+        if let Some(msg_ids) = status_info {
+            for (chat_id, msg_id) in msg_ids {
+                let _ = self.remove_reaction(chat_id, msg_id, "🤔").await;
+            }
         }
 
         if let Some(e) = last_error {
@@ -1525,28 +1534,38 @@ impl Channel for TelegramChannel {
     async fn on_status(&self, recipient: &str, status: ProcessingStatus) {
         match status {
             ProcessingStatus::Thinking => {
-                // Remove 👀 ack and replace with 🤔.
+                // Remove 👀 from all tracked messages, replace with 🤔.
                 // Scope the lock to avoid holding parking_lot::MutexGuard across await.
                 let ack_info = self.pending_acks.lock().get(recipient).cloned();
-                if let Some((chat_id, msg_id)) = ack_info {
-                    self.remove_ack(chat_id, msg_id).await;
-                    self.status_reactions.lock().insert(recipient.to_string(), (chat_id, msg_id));
-                    let _ = self.set_reaction(chat_id, msg_id, "🤔").await;
+                let msg_ids = match ack_info {
+                    Some(ids) if !ids.is_empty() => ids,
+                    _ => return,
+                };
+                let mut status_ids = Vec::with_capacity(msg_ids.len());
+                for (chat_id, msg_id) in &msg_ids {
+                    self.remove_ack(*chat_id, *msg_id).await;
+                    let _ = self.set_reaction(*chat_id, *msg_id, "🤔").await;
+                    status_ids.push((*chat_id, *msg_id));
                 }
+                self.status_reactions.lock().insert(recipient.to_string(), status_ids);
             }
             ProcessingStatus::Done => {
-                // Remove 🤔 reaction (send() already handles cleanup, but this is a safety net).
+                // Remove 🤔 reaction from all tracked messages (send() already handles cleanup, but this is a safety net).
                 let status_info = self.status_reactions.lock().remove(recipient);
-                if let Some((chat_id, msg_id)) = status_info {
-                    let _ = self.remove_reaction(chat_id, msg_id, "🤔").await;
+                if let Some(msg_ids) = status_info {
+                    for (chat_id, msg_id) in msg_ids {
+                        let _ = self.remove_reaction(chat_id, msg_id, "🤔").await;
+                    }
                 }
             }
             ProcessingStatus::Error => {
-                // Replace 🤔 with ❌.
+                // Replace 🤔 with ❌ on all tracked messages.
                 let status_info = self.status_reactions.lock().remove(recipient);
-                if let Some((chat_id, msg_id)) = status_info {
-                    let _ = self.remove_reaction(chat_id, msg_id, "🤔").await;
-                    let _ = self.set_reaction(chat_id, msg_id, "❌").await;
+                if let Some(msg_ids) = status_info {
+                    for (chat_id, msg_id) in msg_ids {
+                        let _ = self.remove_reaction(chat_id, msg_id, "🤔").await;
+                        let _ = self.set_reaction(chat_id, msg_id, "❌").await;
+                    }
                 }
             }
         }
