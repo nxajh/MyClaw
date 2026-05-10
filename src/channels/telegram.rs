@@ -2,23 +2,19 @@
 //!
 //! Implements the [`Channel`] trait for the Telegram Bot API.
 //!
-//! # Features (v1)
+//! # Features
 //!
 //! - Long-poll `getUpdates` for incoming messages
-//! - Send text messages via `sendMessage`
-//! - Message chunking (Telegram 4096 char limit)
-//! - Typing indicators (sendChatAction)
-//! - Allowed-user filtering
-//! - Message dedup
-//! - @mention detection in groups
-//!
-//! # Not in v1
-//!
-//! - Streaming draft edits
-//! - TTS voice messages
-//! - Voice transcription
-//! - Inline keyboard approvals
-//! - File attachments
+//! - Send text messages via `sendMessage` with HTML formatting
+//! - Message chunking (Telegram 4096 char limit) + 429 rate-limit retry
+//! - Typing indicators with circuit breaker (2-failure + 60s TTL)
+//! - Allowed-user filtering + @mention / reply_to_bot detection in groups
+//! - Message dedup + Thread/Topic support
+//! - Ack reactions (👀 on receive) + Status reactions (🤔 thinking, ❌ error)
+//! - CallbackQuery handling (button → text + answerCallbackQuery)
+//! - Inbound debounce (merge rapid consecutive messages)
+//! - Stall watchdog (notify when thinking for too long)
+//! - Photo/image download + forward attribution
 
 #![allow(dead_code)]
 
@@ -473,6 +469,10 @@ pub struct TelegramChannel {
     typing_started_at: Arc<Mutex<std::collections::HashMap<String, std::time::Instant>>>,
     /// Stall watchdog messages to delete when real reply arrives: reply_target → [(chat_id, msg_id)].
     stall_messages: ReactionTracker,
+    /// Shared HTTP client with connection pool.
+    http: reqwest::Client,
+    /// Whether we've logged the empty allowed_users warning.
+    empty_allowed_warned: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl TelegramChannel {
@@ -498,6 +498,11 @@ impl TelegramChannel {
             stall_timeout_secs: config.stall_timeout_secs,
             typing_started_at: Arc::new(Mutex::new(std::collections::HashMap::new())),
             stall_messages: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
+            empty_allowed_warned: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -505,11 +510,8 @@ impl TelegramChannel {
         format!("{}/bot{}/{}", self.api_base, self.bot_token, method)
     }
 
-    fn http_client(&self) -> reqwest::Client {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
+    fn http_client(&self) -> &reqwest::Client {
+        &self.http
     }
 
     fn normalize_identity(value: &str) -> String {
@@ -527,6 +529,9 @@ impl TelegramChannel {
     fn is_user_allowed(&self, username: Option<&str>, user_id: Option<i64>) -> bool {
         let users = self.allowed_users.read().unwrap();
         if users.is_empty() {
+            if !self.empty_allowed_warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                warn!("allowed_users is empty — all users will be rejected. Add users or '*' to allow all.");
+            }
             return false;
         }
         if users.iter().any(|u| u == "*") {
@@ -715,8 +720,7 @@ impl TelegramChannel {
             warn!("Telegram 429 rate limited, retrying after {}s", retry_after);
             tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
             // Retry once
-            let client2 = self.http_client();
-            let resp2 = client2
+            let resp2 = client
                 .post(self.api_url("sendMessage"))
                 .json(&req)
                 .send()
@@ -997,6 +1001,12 @@ impl TelegramChannel {
             let start = tokio::time::Instant::now();
             let mut consecutive_failures: u32 = 0;
 
+            // Create a typing-specific client with shorter timeout.
+            let typing_client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new());
+
             loop {
                 // TTL check
                 if start.elapsed() >= max_duration {
@@ -1005,17 +1015,13 @@ impl TelegramChannel {
                 }
 
                 // Send typing action
-                let client = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(10))
-                    .build()
-                    .unwrap_or_else(|_| reqwest::Client::new());
                 let url = format!("{}/bot{}/sendChatAction", api_base, bot_token);
                 let req = SendChatActionRequest {
                     chat_id: chat_id.clone(),
                     message_thread_id: thread_id.clone(),
                     action: "typing".to_string(),
                 };
-                match client.post(&url).json(&req).send().await {
+                match typing_client.post(&url).json(&req).send().await {
                     Ok(_) => consecutive_failures = 0,
                     Err(e) => {
                         consecutive_failures += 1;
@@ -1409,6 +1415,14 @@ impl TelegramChannel {
                 };
 
                 if self.debounce_ms > 0 {
+                    // Clean up stale error reactions from previous interactions
+                    let stale_status = self.status_reactions.lock().remove(&channel_msg.reply_target);
+                    if let Some(msg_ids) = stale_status {
+                        for (cid, mid) in msg_ids {
+                            let _ = self.remove_reaction(cid, mid, "❌").await;
+                        }
+                    }
+
                     // Ack every message, accumulate all message IDs.
                     if self.ack_reactions {
                         self.ack_message(chat.id, msg.message_id).await;
@@ -1426,6 +1440,14 @@ impl TelegramChannel {
                     }
                     self.debounce_send(channel_msg, tx.clone()).await;
                 } else {
+                    // Clean up stale error reactions from previous interactions
+                    let stale_status = self.status_reactions.lock().remove(&channel_msg.reply_target);
+                    if let Some(msg_ids) = stale_status {
+                        for (cid, mid) in msg_ids {
+                            let _ = self.remove_reaction(cid, mid, "❌").await;
+                        }
+                    }
+
                     // No debounce — ack every message.
                     if self.ack_reactions {
                         self.ack_message(chat.id, msg.message_id).await;
@@ -1614,11 +1636,12 @@ impl Channel for TelegramChannel {
             }
             ProcessingStatus::Error => {
                 // Replace 🤔 with ❌ on all tracked messages.
-                let status_info = self.status_reactions.lock().remove(recipient);
-                if let Some(msg_ids) = status_info {
-                    for (chat_id, msg_id) in msg_ids {
-                        let _ = self.remove_reaction(chat_id, msg_id, "🤔").await;
-                        let _ = self.set_reaction(chat_id, msg_id, "❌").await;
+                // Keep entries in status_reactions for cleanup on next message.
+                let info = self.status_reactions.lock().get(recipient).cloned();
+                if let Some(msg_ids) = info {
+                    for (chat_id, msg_id) in &msg_ids {
+                        let _ = self.remove_reaction(*chat_id, *msg_id, "🤔").await;
+                        let _ = self.set_reaction(*chat_id, *msg_id, "❌").await;
                     }
                 }
             }
