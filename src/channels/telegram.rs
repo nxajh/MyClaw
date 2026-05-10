@@ -444,6 +444,10 @@ pub struct TelegramChannel {
     workspace_dir: Option<std::path::PathBuf>,
     /// Active typing keep-alive tasks, keyed by recipient (chat_id).
     typing_tasks: Arc<Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>>,
+    /// Whether to send acknowledgement reactions on received messages.
+    ack_reactions: bool,
+    /// Track ack reactions: reply_target → (chat_id, message_id) for removal after reply.
+    pending_acks: Arc<Mutex<std::collections::HashMap<String, (i64, i64)>>>,
 }
 
 impl TelegramChannel {
@@ -461,6 +465,8 @@ impl TelegramChannel {
             bot_username: Arc::new(Mutex::new(None)),
             workspace_dir: config.workspace_dir.map(std::path::PathBuf::from),
             typing_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            ack_reactions: config.ack_reactions,
+            pending_acks: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -815,6 +821,40 @@ impl TelegramChannel {
         Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
     }
 
+    /// Send an acknowledgement reaction (👀) to a message.
+    async fn ack_message(&self, chat_id: i64, message_id: i64) {
+        if !self.ack_reactions {
+            return;
+        }
+        let client = self.http_client();
+        let url = self.api_url("setMessageReaction");
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reaction": [{"type": "emoji", "emoji": "👀"}]
+        });
+        if let Err(e) = client.post(&url).json(&body).send().await {
+            warn!("Failed to send ack reaction to message {} in chat {}: {e}", message_id, chat_id);
+        }
+    }
+
+    /// Remove acknowledgement reaction from a message after reply.
+    async fn remove_ack(&self, chat_id: i64, message_id: i64) {
+        if !self.ack_reactions {
+            return;
+        }
+        let client = self.http_client();
+        let url = self.api_url("setMessageReaction");
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reaction": []
+        });
+        if let Err(e) = client.post(&url).json(&body).send().await {
+            warn!("Failed to remove ack reaction from message {} in chat {}: {e}", message_id, chat_id);
+        }
+    }
+
     /// Start a typing keep-alive task for a recipient.
     ///
     /// Telegram's sendChatAction lasts ~5 seconds. This method spawns a
@@ -1015,6 +1055,18 @@ impl TelegramChannel {
                     image_base64,
                 };
 
+                // Send ack reaction if enabled.
+                if self.ack_reactions {
+                    let chat_id = chat.id;
+                    let msg_id = msg.message_id;
+                    self.ack_message(chat_id, msg_id).await;
+                    // Track for removal after reply.
+                    self.pending_acks.lock().insert(
+                        channel_msg.reply_target.clone(),
+                        (chat_id, msg_id),
+                    );
+                }
+
                 if let Err(e) = tx.send(channel_msg.clone()).await {
                     warn!("Telegram dispatch error: {e}");
                 }
@@ -1100,6 +1152,12 @@ impl Channel for TelegramChannel {
 
         // Stop typing indicator for this recipient now that the response is sent.
         self.stop_internal_typing(&message.recipient);
+
+        // Remove ack reaction after successful reply.
+        let ack_info = self.pending_acks.lock().remove(&message.recipient);
+        if let Some((chat_id, msg_id)) = ack_info {
+            self.remove_ack(chat_id, msg_id).await;
+        }
 
         if let Some(e) = last_error {
             return Err(e);
