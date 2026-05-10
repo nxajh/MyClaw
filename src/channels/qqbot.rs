@@ -2,17 +2,18 @@
 //!
 //! Implements the [`Channel`] trait for the QQ Bot API (WebSocket gateway + REST).
 //!
-//! # Features (v1)
+//! # Features
 //!
-//! - WebSocket connection with auto-reconnect
-//! - Heartbeat maintenance
-//! - C2C private chat message receive/send
-//! - Group @bot message receive/send
-//! - Text message chunking (QQ ~2000 char limit)
-//! - Markdown message format (no template needed, all bots can use)
+//! - WebSocket connection with auto-reconnect (Resume + incremental backoff)
+//! - Proactive background token refresh (single-writer, SystemTime-based expiry)
+//! - C2C private chat + Group @bot message receive/send
+//! - Markdown message format (msg_type=2)
+//! - Message chunking (~2000 char limit) + 429 rate-limit retry
+//! - Typing indicator (C2C only, msg_type=6, 60s validity, refreshed by typing task)
+//! - Interaction API: Keyboard buttons + CallbackQuery → text + ACK
+//! - Bot- prefixed slash commands (/bot-ping, /bot-version, /bot-help, etc.)
 //! - Message dedup via DedupState
-//! - Typing indicator (C2C only, msg_type=6, 60s validity, refreshed by orchestrator)
-//! - Button interactions (keyboard send + click-to-text conversion)
+//! - WebSocket session Resume (session_id + last_seq preservation)
 
 #![allow(dead_code)]
 
@@ -677,17 +678,8 @@ impl QQBotChannel {
         })
     }
 
-    /// Send a C2C message via REST API (markdown format).
-    async fn send_c2c_message(
-        &self,
-        openid: &str,
-        content: &str,
-        msg_id: &str,
-        msg_seq: u32,
-    ) -> anyhow::Result<()> {
-        let token = self.token_manager.get_token().await?;
-        let url = format!("{}/v2/users/{}/messages", API_BASE, openid);
-
+    /// Build a markdown message body for QQ Bot API.
+    fn build_markdown_body(&self, content: &str, msg_id: &str, msg_seq: u32) -> serde_json::Value {
         let mut body = serde_json::json!({
             "content": "",
             "msg_type": 2,
@@ -699,82 +691,104 @@ impl QQBotChannel {
             body["msg_id"] = serde_json::Value::String(msg_id.to_string());
             body["msg_seq"] = serde_json::Value::Number(msg_seq.into());
         } else {
-            // Proactive message — generate unique msg_seq from atomic counter.
             let seq = self.next_msg_seq();
             body["msg_seq"] = serde_json::Value::Number(seq.into());
         }
+        body
+    }
 
+    /// Send a REST message to QQ Bot with retry logic (token refresh + 429 backoff).
+    /// `url` is the fully constructed API endpoint URL.
+    /// `body` is the pre-built JSON body.
+    async fn send_rest_with_retry(&self, url: &str, body: &serde_json::Value) -> anyhow::Result<()> {
+        let token = self.token_manager.get_token().await?;
         let ua = user_agent();
         let resp = self
             .http_client
-            .post(&url)
+            .post(url)
             .header("Authorization", format!("QQBot {}", token))
             .header("Content-Type", "application/json")
             .header("User-Agent", &ua)
             .json(&body)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("C2C send failed: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("QQ Bot REST send failed: {}", e))?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let resp_headers = resp.headers().clone();
-            let text = resp.text().await.unwrap_or_default();
-
-            // Token-expired? Force-refresh and retry once.
-            if status.as_u16() == 401 || text.contains("11244") {
-                warn!(status = %status, "C2C send got token-expired error, refreshing and retrying");
-                let new_token = self.token_manager.refresh().await?;
-                let ua = user_agent();
-                let resp = self
-                    .http_client
-                    .post(&url)
-                    .header("Authorization", format!("QQBot {}", new_token))
-                    .header("Content-Type", "application/json")
-                    .header("User-Agent", &ua)
-                    .json(&body)
-                    .send()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("C2C retry send failed: {}", e))?;
-
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
-                    return Err(anyhow::anyhow!("C2C send returned {}: {}", status, text));
-                }
-            } else if status.as_u16() == 429 {
-                // Rate limited — wait and retry once.
-                let retry_after = resp_headers
-                    .get("Retry-After")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(5);
-                warn!(retry_after_secs = retry_after, "C2C rate limited, retrying after delay");
-                tokio::time::sleep(Duration::from_secs(retry_after)).await;
-                let token = self.token_manager.get_token().await?;
-                let ua = user_agent();
-                let resp = self
-                    .http_client
-                    .post(&url)
-                    .header("Authorization", format!("QQBot {}", token))
-                    .header("Content-Type", "application/json")
-                    .header("User-Agent", &ua)
-                    .json(&body)
-                    .send()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("C2C retry send failed: {}", e))?;
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
-                    return Err(anyhow::anyhow!("C2C send returned {}: {}", status, text));
-                }
-            } else {
-                return Err(anyhow::anyhow!("C2C send returned {}: {}", status, text));
-            }
+        if resp.status().is_success() {
+            return Ok(());
         }
 
-        debug!(openid = openid, "C2C message sent");
-        Ok(())
+        let status = resp.status();
+        let resp_headers = resp.headers().clone();
+        let text = resp.text().await.unwrap_or_default();
+
+        // Token-expired? Force-refresh and retry once.
+        if status.as_u16() == 401 || text.contains("11244") {
+            warn!(status = %status, "QQ Bot REST got token-expired error, refreshing and retrying");
+            let new_token = self.token_manager.refresh().await?;
+            let ua = user_agent();
+            let resp = self
+                .http_client
+                .post(url)
+                .header("Authorization", format!("QQBot {}", new_token))
+                .header("Content-Type", "application/json")
+                .header("User-Agent", &ua)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("QQ Bot REST retry failed: {}", e))?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(anyhow::anyhow!("QQ Bot REST returned {}: {}", status, text));
+            }
+            return Ok(());
+        }
+
+        // Rate limited? Wait and retry once.
+        if status.as_u16() == 429 {
+            let retry_after = resp_headers
+                .get("Retry-After")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(5);
+            warn!(retry_after_secs = retry_after, "QQ Bot REST rate limited, retrying after delay");
+            tokio::time::sleep(Duration::from_secs(retry_after)).await;
+            let token = self.token_manager.get_token().await?;
+            let ua = user_agent();
+            let resp = self
+                .http_client
+                .post(url)
+                .header("Authorization", format!("QQBot {}", token))
+                .header("Content-Type", "application/json")
+                .header("User-Agent", &ua)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("QQ Bot REST retry after 429 failed: {}", e))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(anyhow::anyhow!("QQ Bot REST returned {}: {}", status, text));
+            }
+            return Ok(());
+        }
+
+        Err(anyhow::anyhow!("QQ Bot REST returned {}: {}", status, text))
+    }
+
+    /// Send a C2C message via REST API (markdown format).
+    async fn send_c2c_message(
+        &self,
+        openid: &str,
+        content: &str,
+        msg_id: &str,
+        msg_seq: u32,
+    ) -> anyhow::Result<()> {
+        let url = format!("{}/v2/users/{}/messages", API_BASE, openid);
+        let body = self.build_markdown_body(content, msg_id, msg_seq);
+        self.send_rest_with_retry(&url, &body).await
     }
 
     /// Send a group message via REST API (markdown format).
@@ -785,104 +799,9 @@ impl QQBotChannel {
         msg_id: &str,
         msg_seq: u32,
     ) -> anyhow::Result<()> {
-        let token = self.token_manager.get_token().await?;
         let url = format!("{}/v2/groups/{}/messages", API_BASE, group_openid);
-
-        let mut body = serde_json::json!({
-            "content": "",
-            "msg_type": 2,
-            "markdown": {
-                "content": content,
-            },
-        });
-        if !msg_id.is_empty() {
-            body["msg_id"] = serde_json::Value::String(msg_id.to_string());
-            body["msg_seq"] = serde_json::Value::Number(msg_seq.into());
-        } else {
-            // Proactive message — generate unique msg_seq from atomic counter.
-            let seq = self.next_msg_seq();
-            body["msg_seq"] = serde_json::Value::Number(seq.into());
-        }
-
-        let ua = user_agent();
-        let resp = self
-            .http_client
-            .post(&url)
-            .header("Authorization", format!("QQBot {}", token))
-            .header("Content-Type", "application/json")
-            .header("User-Agent", &ua)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("group send failed: {}", e))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let resp_headers = resp.headers().clone();
-            let text = resp.text().await.unwrap_or_default();
-
-            // Token-expired? Force-refresh and retry once.
-            if status.as_u16() == 401 || text.contains("11244") {
-                warn!(status = %status, "group send got token-expired error, refreshing and retrying");
-                let new_token = self.token_manager.refresh().await?;
-                let ua = user_agent();
-                let resp = self
-                    .http_client
-                    .post(&url)
-                    .header("Authorization", format!("QQBot {}", new_token))
-                    .header("Content-Type", "application/json")
-                    .header("User-Agent", &ua)
-                    .json(&body)
-                    .send()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("group retry send failed: {}", e))?;
-
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
-                    return Err(anyhow::anyhow!(
-                        "group send returned {}: {}",
-                        status,
-                        text
-                    ));
-                }
-            } else if status.as_u16() == 429 {
-                // Rate limited — wait and retry once.
-                let retry_after = resp_headers
-                    .get("Retry-After")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(5);
-                warn!(retry_after_secs = retry_after, "group rate limited, retrying after delay");
-                tokio::time::sleep(Duration::from_secs(retry_after)).await;
-                let token = self.token_manager.get_token().await?;
-                let ua = user_agent();
-                let resp = self
-                    .http_client
-                    .post(&url)
-                    .header("Authorization", format!("QQBot {}", token))
-                    .header("Content-Type", "application/json")
-                    .header("User-Agent", &ua)
-                    .json(&body)
-                    .send()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("group retry send failed: {}", e))?;
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
-                    return Err(anyhow::anyhow!("group send returned {}: {}", status, text));
-                }
-            } else {
-                return Err(anyhow::anyhow!(
-                    "group send returned {}: {}",
-                    status,
-                    text
-                ));
-            }
-        }
-
-        debug!(group = group_openid, "group message sent");
-        Ok(())
+        let body = self.build_markdown_body(content, msg_id, msg_seq);
+        self.send_rest_with_retry(&url, &body).await
     }
 
     /// Start a typing keep-alive task for a C2C recipient.
@@ -1066,18 +985,32 @@ Type any command or just chat!"#;
             _ => return false,
         };
 
-        // Send reply directly via REST API (bypass orchestrator).
-        let result = if let Some(openid) = reply_target.strip_prefix("c2c:") {
-            self.send_c2c_message(openid, &reply, msg_id, 1).await
+        // Send reply directly via REST API (bypass orchestrator), with chunking.
+        let chunks = split_message_chunk(&reply, QQ_MAX_MESSAGE_LENGTH);
+        if let Some(openid) = reply_target.strip_prefix("c2c:") {
+            for (i, chunk) in chunks.iter().enumerate() {
+                let seq = self.next_msg_seq() + i as u32;
+                if let Err(e) = self.send_c2c_message(openid, chunk, msg_id, seq).await {
+                    warn!(chunk = i, error = %e, "failed to send bot command reply chunk");
+                    return true;
+                }
+                if i > 0 {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
         } else if let Some(group_openid) = reply_target.strip_prefix("group:") {
-            self.send_group_message(group_openid, &reply, msg_id, 1).await
-        } else {
-            return true; // Unknown target, just consume the message
-        };
-
-        if let Err(e) = result {
-            warn!(error = %e, "failed to send bot command reply");
+            for (i, chunk) in chunks.iter().enumerate() {
+                let seq = self.next_msg_seq() + i as u32;
+                if let Err(e) = self.send_group_message(group_openid, chunk, msg_id, seq).await {
+                    warn!(chunk = i, error = %e, "failed to send bot command reply chunk");
+                    return true;
+                }
+                if i > 0 {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
         }
+
         true
     }
 }
