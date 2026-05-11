@@ -598,6 +598,12 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         persist_backend: session_backend.clone(),
         mcp_manager: Some(Arc::clone(&mcp_manager_arc)),
         change_rx: Some(change_rx.clone()),
+        heartbeat_config: if scheduler_config.heartbeat.enabled {
+            Some(scheduler_config.heartbeat.clone())
+        } else {
+            None
+        },
+        timezone_offset: config.agent.prompt.timezone_offset,
     };
 
     // ── Launch ─────────────────────────────────────────────────────────────
@@ -618,14 +624,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         last_channel: shared.last_channel,
         change_rx: Some(change_rx.clone()),
     });
-
-    if scheduler_config.heartbeat.enabled {
-        let hb_ctx = scheduler_ctx.clone();
-        let hb_config = scheduler_config.heartbeat.clone();
-        tokio::spawn(async move {
-            crate::agents::run_heartbeat(hb_ctx, hb_config).await;
-        });
-    }
 
     if scheduler_config.cron.enabled {
         let cron_dir = config.workspace_dir.join("cron");

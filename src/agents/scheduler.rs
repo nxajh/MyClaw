@@ -123,7 +123,9 @@ pub async fn run_scheduled_task(
     guard.run(prompt, None, None).await
 }
 
-fn get_or_create_loop(
+/// Create or get an AgentLoop for a given session key.
+/// Public so Orchestrator can reuse it for heartbeat execution.
+pub fn get_or_create_loop(
     ctx: &SchedulerContext,
     session_key: &str,
 ) -> Arc<TokioMutex<AgentLoop>> {

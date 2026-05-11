@@ -13,6 +13,7 @@ use anyhow::Context;
 use crate::agents::delegation::{DelegationEvent, DelegationManager};
 use crate::agents::sub_agent::SubAgentDelegator;
 use crate::channels::{Channel, ChannelMessage, SendMessage, ProcessingStatus};
+use crate::config::scheduler::HeartbeatConfig;
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,6 +66,10 @@ pub struct Orchestrator {
     change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
     /// Last channel that received a user message (shared with schedulers).
     pub last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
+    /// Heartbeat config (set if enabled).
+    heartbeat_config: Option<HeartbeatConfig>,
+    /// Timezone offset for active hours calculation.
+    timezone_offset: i32,
 }
 
 /// Resources shared between Orchestrator and scheduler tasks.
@@ -104,6 +109,10 @@ pub struct OrchestratorParts {
     pub mcp_manager: Option<Arc<crate::agents::McpManager>>,
     /// File change receiver for hot-reload (shared across all AgentLoops).
     pub change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
+    /// Heartbeat config (conditional — only when heartbeat is enabled).
+    pub heartbeat_config: Option<HeartbeatConfig>,
+    /// Timezone offset for active hours calculation in heartbeat.
+    pub timezone_offset: i32,
 }
 
 impl Orchestrator {
@@ -145,6 +154,8 @@ impl Orchestrator {
             mcp_manager: parts.mcp_manager,
             change_rx: parts.change_rx,
             last_channel: Arc::new(tokio::sync::Mutex::new(None)),
+            heartbeat_config: parts.heartbeat_config,
+            timezone_offset: parts.timezone_offset,
         };
 
         info!(channels = orchestrator.channels.len(), "orchestrator initialized");
@@ -310,6 +321,15 @@ impl Orchestrator {
 
         let mut rx = rx;
 
+        // Initialize heartbeat ticker (if enabled).
+        let mut heartbeat_ticker = self.heartbeat_config.as_ref().and_then(|cfg| {
+            crate::agents::scheduler::parse_interval(&cfg.every).map(|interval| {
+                let mut t = tokio::time::interval(interval);
+                t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                t
+            })
+        });
+
         loop {
             if *shutdown_rx.borrow() {
                 tracing::info!("shutdown requested, exiting message loop");
@@ -317,7 +337,7 @@ impl Orchestrator {
             }
 
             let event = if delegation_rx.is_some() {
-                // select over user messages + delegation events + shutdown
+                // select over user messages + delegation events + heartbeat (if enabled) + shutdown
                 tokio::select! {
                     msg = rx.recv() => match msg {
                         Some(m) => ChannelEvent::UserMessage(m),
@@ -333,17 +353,25 @@ impl Orchestrator {
                             }
                         }
                     },
+                    _ = async { heartbeat_ticker.as_mut().map(|t| t.tick()).unwrap_or_else(tokio::time::Sleep::default).await }, if heartbeat_ticker.is_some() => {
+                        self.handle_heartbeat_tick().await;
+                        continue;
+                    },
                     _ = shutdown_rx.changed() => {
                         tracing::info!("shutdown signal received");
                         break;
                     }
                 }
             } else {
-                // No delegation events — only user messages + shutdown
+                // No delegation events — user messages + heartbeat (if enabled) + shutdown
                 tokio::select! {
                     msg = rx.recv() => match msg {
                         Some(m) => ChannelEvent::UserMessage(m),
                         None => break,
+                    },
+                    _ = async { heartbeat_ticker.as_mut().map(|t| t.tick()).unwrap_or_else(tokio::time::Sleep::default).await }, if heartbeat_ticker.is_some() => {
+                        self.handle_heartbeat_tick().await;
+                        continue;
                     },
                     _ = shutdown_rx.changed() => {
                         tracing::info!("shutdown signal received");
@@ -647,6 +675,70 @@ impl Orchestrator {
         }
     }
 
+    /// Handle a heartbeat tick — run the agent loop with heartbeat prompt.
+    async fn handle_heartbeat_tick(&self) {
+        use crate::agents::scheduler::{is_active_hours, send_to_target};
+
+        let config = match &self.heartbeat_config {
+            Some(c) => c,
+            None => return,
+        };
+
+        if !is_active_hours(&config.active_hours, self.timezone_offset) {
+            tracing::debug!("heartbeat skipped: outside active hours");
+            return;
+        }
+
+        if !std::path::Path::new("HEARTBEAT.md").exists() {
+            tracing::debug!("heartbeat skipped: no HEARTBEAT.md");
+            return;
+        }
+
+        tracing::info!("heartbeat triggered");
+
+        let prompt = config.prompt.as_deref().unwrap_or(
+            "read heartbeat.md if it exists. follow it strictly. \
+             if nothing needs attention, reply heartbeat_ok."
+        );
+
+        let result = self.run_heartbeat_loop("_heartbeat", prompt).await;
+
+        match result {
+            Ok(response) if is_silent_ok(&response, "heartbeat") => {
+                tracing::info!("heartbeat: nothing needs attention");
+            }
+            Ok(response) if !response.trim().is_empty() => {
+                tracing::info!(resp_len = response.len(), "heartbeat produced output");
+                send_to_target_internal(self.channels.clone(), self.last_channel.clone(), &config.target, &response).await;
+            }
+            Ok(_) => {
+                tracing::info!("heartbeat: empty response");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "heartbeat run failed");
+            }
+        }
+    }
+
+    /// Run an agent loop for a scheduler session (used by heartbeat).
+    async fn run_heartbeat_loop(&self, session_key: &str, prompt: &str) -> anyhow::Result<String> {
+        use crate::agents::scheduler::get_or_create_loop;
+
+        let ctx = crate::agents::SchedulerContext {
+            agent: self.agent.clone(),
+            channels: self.channels.clone(),
+            sessions: self.sessions.clone(),
+            session_backend: self.persist_backend.clone(),
+            timezone_offset: self.timezone_offset,
+            last_channel: self.last_channel.clone(),
+            change_rx: self.change_rx.clone(),
+        };
+
+        let loop_ = get_or_create_loop(&ctx, session_key);
+        let mut guard = loop_.lock().await;
+        guard.run(prompt, None, None).await
+    }
+
     /// Abort all listener handles (call after run() returns).
     pub async fn shutdown_listeners(&mut self) {
         let handles = std::mem::take(&mut self.listener_handles);
@@ -654,6 +746,54 @@ impl Orchestrator {
             h.abort();
         }
         tracing::info!("all listener tasks aborted");
+    }
+}
+
+/// Check if a response is a silent "nothing to do" signal (used by heartbeat).
+fn is_silent_ok(response: &str, prefix: &str) -> bool {
+    let trimmed = response.trim().to_lowercase();
+    let marker = format!("{}_ok", prefix);
+    trimmed == marker || trimmed.contains(&marker)
+}
+
+/// Send a response to the configured target channel (used by heartbeat).
+async fn send_to_target_internal(
+    channels: Arc<DashMap<String, Arc<dyn Channel>>>,
+    last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
+    target: &str,
+    content: &str,
+) {
+    let channel_name = match target {
+        "none" => return,
+        "last" => last_channel.lock().await.clone(),
+        name => Some(name.to_string()),
+    };
+
+    let Some(ch_name) = channel_name else {
+        tracing::warn!("no target channel for scheduled response");
+        return;
+    };
+
+    let channel = match channels.get(&ch_name) {
+        Some(ch) => ch.clone(),
+        None => {
+            tracing::warn!(channel = %ch_name, "target channel not found");
+            return;
+        }
+    };
+
+    let msg = SendMessage {
+        content: content.to_string(),
+        recipient: String::new(),
+        subject: None,
+        thread_ts: None,
+        cancellation_token: None,
+        attachments: vec![],
+        image_urls: None,
+    };
+
+    if let Err(e) = channel.send(&msg).await {
+        tracing::warn!(channel = %ch_name, error = %e, "failed to send scheduled response");
     }
 }
 
