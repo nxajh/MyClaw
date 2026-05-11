@@ -10,8 +10,6 @@
 //! not here. This struct receives fully-assembled components via its constructor.
 
 use anyhow::Context;
-use chrono::Timelike;
-use serde::Serialize;
 use crate::agents::delegation::{DelegationEvent, DelegationManager};
 use crate::agents::sub_agent::SubAgentDelegator;
 use crate::channels::{Channel, ChannelMessage, SendMessage, ProcessingStatus};
@@ -74,11 +72,6 @@ pub struct Orchestrator {
     timezone_offset: i32,
     /// Cron jobs (loaded from cron/*.md).
     cron_jobs: Vec<CronJob>,
-    /// Parsed cron schedules (cron::Schedule, CronJob).
-    #[serde(skip)]
-    cron_schedules: Vec<(cron::Schedule, CronJob)>,
-    /// Cron ticker (fires every 60 seconds).
-    cron_ticker: Option<tokio::time::Interval>,
 }
 
 /// Resources shared between Orchestrator and scheduler tasks.
@@ -150,37 +143,6 @@ impl Orchestrator {
             warn!("no channels enabled");
         }
 
-        let cron_schedules: Vec<(cron::Schedule, CronJob)> = parts.cron_jobs.iter()
-            .filter_map(|j| {
-                match j.schedule.parse::<cron::Schedule>() {
-                    Ok(s) => {
-                        tracing::info!(
-                            schedule = %j.schedule,
-                            target = %j.target,
-                            "cron job registered"
-                        );
-                        Some((s, j.clone()))
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            schedule = %j.schedule,
-                            error = %e,
-                            "invalid cron expression, skipping"
-                        );
-                        None
-                    }
-                }
-            })
-            .collect();
-
-        let cron_ticker = if cron_schedules.is_empty() {
-            None
-        } else {
-            let mut t = tokio::time::interval(Duration::from_secs(60));
-            t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            Some(t)
-        };
-
         let orchestrator = Orchestrator {
             channels: channels_map,
             sessions: Arc::new(DashMap::new()),
@@ -199,8 +161,6 @@ impl Orchestrator {
             heartbeat_config: parts.heartbeat_config,
             timezone_offset: parts.timezone_offset,
             cron_jobs: parts.cron_jobs,
-            cron_schedules,
-            cron_ticker,
         };
 
         info!(channels = orchestrator.channels.len(), "orchestrator initialized");
@@ -375,7 +335,37 @@ impl Orchestrator {
             })
         });
 
-        let mut cron_ticker = self.cron_ticker.clone();
+        // Parse cron schedules and create ticker (if any cron jobs exist).
+        let cron_schedules: Vec<(cron::Schedule, CronJob)> = self.cron_jobs.iter()
+            .filter_map(|j| {
+                match j.schedule.parse::<cron::Schedule>() {
+                    Ok(s) => {
+                        tracing::info!(
+                            schedule = %j.schedule,
+                            target = %j.target,
+                            "cron job registered"
+                        );
+                        Some((s, j.clone()))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            schedule = %j.schedule,
+                            error = %e,
+                            "invalid cron expression, skipping"
+                        );
+                        None
+                    }
+                }
+            })
+            .collect();
+
+        let mut cron_ticker = if cron_schedules.is_empty() {
+            None
+        } else {
+            let mut t = tokio::time::interval(Duration::from_secs(60));
+            t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            Some(t)
+        };
 
         loop {
             if *shutdown_rx.borrow() {
@@ -415,7 +405,7 @@ impl Orchestrator {
                             t.tick().await;
                         }
                     }, if cron_ticker.is_some() => {
-                        self.handle_cron_tick().await;
+                        self.handle_cron_tick(&cron_schedules).await;
                         continue;
                     },
                     _ = shutdown_rx.changed() => {
@@ -445,7 +435,7 @@ impl Orchestrator {
                             t.tick().await;
                         }
                     }, if cron_ticker.is_some() => {
-                        self.handle_cron_tick().await;
+                        self.handle_cron_tick(&cron_schedules).await;
                         continue;
                     },
                     _ = shutdown_rx.changed() => {
@@ -796,7 +786,7 @@ impl Orchestrator {
     }
 
     /// Handle a cron tick — check all cron schedules and run matching jobs.
-    async fn handle_cron_tick(&self) {
+    async fn handle_cron_tick(&self, cron_schedules: &[(cron::Schedule, CronJob)]) {
         use crate::agents::scheduler::cron_matches;
 
         let now = {
@@ -804,7 +794,7 @@ impl Orchestrator {
             utc + chrono::Duration::hours(self.timezone_offset as i64)
         };
 
-        for (schedule, job) in &self.cron_schedules {
+        for (schedule, job) in cron_schedules {
             if !cron_matches(schedule, &now) {
                 continue;
             }
