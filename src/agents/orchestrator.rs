@@ -354,7 +354,11 @@ impl Orchestrator {
                         }
                     },
                     // Heartbeat tick (if enabled).
-                    _ = async { heartbeat_ticker.as_mut().map(|t| t.tick().await); }, if heartbeat_ticker.is_some() => {
+                    _ = async {
+                        if let Some(t) = heartbeat_ticker.as_mut() {
+                            t.tick().await;
+                        }
+                    }, if heartbeat_ticker.is_some() => {
                         self.handle_heartbeat_tick().await;
                         continue;
                     },
@@ -371,7 +375,11 @@ impl Orchestrator {
                         None => break,
                     },
                     // Heartbeat tick (if enabled).
-                    _ = async { heartbeat_ticker.as_mut().map(|t| t.tick().await); }, if heartbeat_ticker.is_some() => {
+                    _ = async {
+                        if let Some(t) = heartbeat_ticker.as_mut() {
+                            t.tick().await;
+                        }
+                    }, if heartbeat_ticker.is_some() => {
                         self.handle_heartbeat_tick().await;
                         continue;
                     },
