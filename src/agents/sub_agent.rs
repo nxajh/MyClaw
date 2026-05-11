@@ -315,6 +315,8 @@ impl SubAgentDelegator {
         let agent_name_owned = agent_name.to_string();
 
         tokio::spawn(async move {
+            let start_time = std::time::Instant::now();
+
             let sub_delegator = SubAgentDelegator {
                 configs,
                 registry,
@@ -329,18 +331,21 @@ impl SubAgentDelegator {
                 .delegate_with_parent(&agent_name_owned, &task_owned, &parent_session_id_owned)
                 .await;
 
+            let duration_secs = start_time.elapsed().as_secs();
+
             match result {
                 Ok(summary) => {
-                    tracing::info!(task_id = %task_id_clone, "sub-agent completed successfully");
+                    tracing::info!(task_id = %task_id_clone, duration_secs, "sub-agent completed successfully");
                     let _ = event_tx.send(DelegationEvent::Completed {
                         task_id: task_id_clone.clone(),
                         session_key: parent_session_id_owned,
                         reply_target: reply_target_owned,
                         summary,
+                        duration_secs,
                     }).await;
                 }
                 Err(e) => {
-                    tracing::warn!(task_id = %task_id_clone, err = %e, "sub-agent failed");
+                    tracing::warn!(task_id = %task_id_clone, duration_secs, err = %e, "sub-agent failed");
                     let _ = event_tx.send(DelegationEvent::Failed {
                         task_id: task_id_clone.clone(),
                         session_key: parent_session_id_owned,

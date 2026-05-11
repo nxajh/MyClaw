@@ -19,6 +19,8 @@ pub enum DelegationEvent {
         session_key: String,
         reply_target: String,
         summary: String,
+        /// How long the sub-agent ran (in seconds).
+        duration_secs: u64,
     },
     /// Sub-agent failed.
     Failed {

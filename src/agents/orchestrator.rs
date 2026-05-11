@@ -539,8 +539,8 @@ impl Orchestrator {
     /// Handle a delegation event from a background sub-agent.
     async fn handle_delegation_event(&self, event: DelegationEvent) {
         match event {
-            DelegationEvent::Completed { task_id, session_key, reply_target, summary } => {
-                tracing::info!(task_id = %task_id, "delegation completed, waking main agent");
+            DelegationEvent::Completed { task_id, session_key, reply_target, summary, duration_secs } => {
+                tracing::info!(task_id = %task_id, duration_secs, "delegation completed, waking main agent");
 
                 let loop_ = match self.sessions.get(&session_key) {
                     Some(l) => l.clone(),
@@ -552,8 +552,8 @@ impl Orchestrator {
 
                 // Construct synthetic message to wake the main agent.
                 let synthetic_msg = format!(
-                    "[系统通知] 子代理已完成后台任务 (task_id: {})，结果如下：\n{}",
-                    task_id, summary
+                    "[系统通知] 子代理已完成后台任务 (task_id: {}, 耗时: {}s)，结果如下：\n{}",
+                    task_id, duration_secs, summary
                 );
 
                 // Run the main agent with the synthetic message.
