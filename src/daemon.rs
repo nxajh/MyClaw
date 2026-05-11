@@ -553,6 +553,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         config.channels.client.as_ref().filter(|c| c.enabled).map(|cfg| {
             let cc = crate::channels::ClientChannel::new(cfg.clone());
             cc.set_session_manager(session_manager.clone());
+            cc.set_tool_names(tools_arc.all_tools().iter().map(|t| t.spec().name.to_string()).collect());
+            cc.set_workspace_dir(config.workspace_dir.clone());
             Arc::new(cc)
         });
     #[cfg(feature = "client")]

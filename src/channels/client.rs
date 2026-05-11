@@ -57,6 +57,10 @@ pub struct ClientChannel {
     session_owners: Arc<RwLock<HashMap<String, String>>>,
     /// Session manager for management API (set after construction).
     session_manager: Arc<RwLock<Option<Arc<crate::agents::SessionManager>>>>,
+    /// Tool names for management API (set after construction).
+    tool_names: Arc<RwLock<Vec<String>>>,
+    /// Workspace directory for memory API (set after construction).
+    workspace_dir: Arc<RwLock<Option<std::path::PathBuf>>>,
 }
 
 impl ClientChannel {
@@ -70,12 +74,24 @@ impl ClientChannel {
             connections: Arc::new(RwLock::new(HashMap::new())),
             session_owners: Arc::new(RwLock::new(HashMap::new())),
             session_manager: Arc::new(RwLock::new(None)),
+            tool_names: Arc::new(RwLock::new(Vec::new())),
+            workspace_dir: Arc::new(RwLock::new(None)),
         }
     }
 
     /// Set the session manager (called from daemon.rs after construction).
     pub fn set_session_manager(&self, sm: Arc<crate::agents::SessionManager>) {
         *self.session_manager.write() = Some(sm);
+    }
+
+    /// Set the tool names list (called from daemon.rs after construction).
+    pub fn set_tool_names(&self, names: Vec<String>) {
+        *self.tool_names.write() = names;
+    }
+
+    /// Set the workspace directory (called from daemon.rs after construction).
+    pub fn set_workspace_dir(&self, dir: std::path::PathBuf) {
+        *self.workspace_dir.write() = Some(dir);
     }
 
     /// Start the WebSocket server (spawns a background task).
@@ -93,6 +109,8 @@ impl ClientChannel {
         let connections = self.connections.clone();
         let session_owners = self.session_owners.clone();
         let session_manager = self.session_manager.clone();
+        let tool_names = self.tool_names.clone();
+        let workspace_dir = self.workspace_dir.clone();
 
         tracing::info!("WebSocket server listening on ws://{}/myclaw", addr);
 
@@ -161,6 +179,8 @@ impl ClientChannel {
                         let connections_clone = connections.clone();
                         let session_owners_clone = session_owners.clone();
                         let session_manager_clone = session_manager.clone();
+                        let tool_names_clone = tool_names.clone();
+                        let workspace_dir_clone = workspace_dir.clone();
                         let _auth_token_clone = auth_token.clone();
 
                         tracing::info!(
@@ -293,6 +313,8 @@ impl ClientChannel {
                                                 &id, &method, &params,
                                                 &conn_id_clone,
                                                 &session_manager_clone,
+                                                &tool_names_clone,
+                                                &workspace_dir_clone,
                                             );
                                             let _ = ws_sender.send(resp).await;
                                         }
@@ -436,6 +458,8 @@ fn handle_api_request(
     params: &serde_json::Value,
     conn_id: &str,
     session_manager: &Arc<RwLock<Option<Arc<crate::agents::SessionManager>>>>,
+    tool_names: &Arc<RwLock<Vec<String>>>,
+    workspace_dir: &Arc<RwLock<Option<std::path::PathBuf>>>,
 ) -> String {
     let guard = session_manager.read();
     let sm = match guard.as_ref() {
@@ -542,6 +566,73 @@ fn handle_api_request(
                     "error": format!("failed to delete session: {}", e)
                 }).to_string(),
             }
+        }
+
+        "tools.list" => {
+            let names = tool_names.read();
+            let result: Vec<serde_json::Value> = names.iter().map(|n| {
+                serde_json::json!({ "name": n })
+            }).collect();
+            serde_json::json!({
+                "type": "api_response",
+                "id": id,
+                "result": result,
+            }).to_string()
+        }
+
+        "memory.list" => {
+            let dir_guard = workspace_dir.read();
+            let result = match dir_guard.as_ref() {
+                Some(dir) => {
+                    let memory_dir = dir.join("memory");
+                    match std::fs::read_dir(&memory_dir) {
+                        Ok(entries) => {
+                            let files: Vec<serde_json::Value> = entries
+                                .filter_map(|e| e.ok())
+                                .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
+                                .map(|e| {
+                                    let name = e.file_name().to_string_lossy().to_string();
+                                    let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+                                    serde_json::json!({
+                                        "name": name,
+                                        "size": size,
+                                    })
+                                }).collect();
+                            serde_json::json!({
+                                "type": "api_response",
+                                "id": id,
+                                "result": files,
+                            }).to_string()
+                        }
+                        Err(e) => serde_json::json!({
+                            "type": "api_error",
+                            "id": id,
+                            "error": format!("failed to read memory dir: {}", e)
+                        }).to_string(),
+                    }
+                }
+                None => serde_json::json!({
+                    "type": "api_error",
+                    "id": id,
+                    "error": "workspace directory not configured"
+                }).to_string(),
+            };
+            drop(dir_guard);
+            result
+        }
+
+        "config.get" => {
+            // Return basic runtime info.
+            let tools = tool_names.read();
+            let ws_dir = workspace_dir.read();
+            serde_json::json!({
+                "type": "api_response",
+                "id": id,
+                "result": {
+                    "tool_count": tools.len(),
+                    "workspace_dir": ws_dir.as_ref().map(|p| p.to_string_lossy().to_string()),
+                }
+            }).to_string()
         }
 
         _ => {
