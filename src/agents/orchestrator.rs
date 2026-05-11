@@ -43,7 +43,7 @@ pub struct Orchestrator {
     /// Per-session agent loops: "channel:sender" → Arc<Mutex<AgentLoop>>.
     sessions: Arc<DashMap<String, Arc<TokioMutex<AgentLoop>>>>,
     agent: Agent,
-    session_manager: SessionManager,
+    session_manager: Arc<SessionManager>,
     /// The message receiver, owned and consumed by run().
     #[allow(clippy::type_complexity)]
     msg_rx: Arc<TokioMutex<Option<mpsc::Receiver<(String, ChannelMessage)>>>>,
@@ -89,7 +89,7 @@ fn parse_session_key(sk: &str) -> Option<(&str, &str)> {
 /// decouples the Application layer from Infrastructure assembly logic.
 pub struct OrchestratorParts {
     pub agent: Agent,
-    pub session_manager: SessionManager,
+    pub session_manager: Arc<SessionManager>,
     /// Pre-built channels from Interface layer (Feature-gated at compile time).
     pub channels: Vec<(&'static str, Arc<dyn Channel>)>,
     /// Sub-agent delegator (conditional — only when sub-agents are configured).
@@ -385,7 +385,7 @@ impl Orchestrator {
                         let cmd_ctx = super::slash_command::CommandContext {
                             user_id: &sk,
                             registry: agent.registry(),
-                            session_manager: &self.session_manager,
+                            session_manager: self.session_manager.as_ref(),
                             agent: &agent,
                             agent_loop: session_loop.as_ref(),
                             mcp_manager: self.mcp_manager.as_ref(),
@@ -418,7 +418,7 @@ impl Orchestrator {
                     }
 
                     let loop_ = Self::get_or_create_loop(
-                        &sessions, &agent, &self.session_manager, &sk,
+                        &sessions, &agent, self.session_manager.as_ref(), &sk,
                         &channels, &self.pending_asks, &reply_target,
                         &sub_delegator, &delegation_manager,
                         &self.persist_backend,

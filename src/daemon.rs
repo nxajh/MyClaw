@@ -412,17 +412,6 @@ fn build_channels(config: &crate::config::AppConfig) -> Vec<(&'static str, Arc<d
         }
     }
 
-    #[cfg(feature = "client")]
-    if let Some(ref cfg) = config.channels.client {
-        if cfg.enabled {
-            let client_ch = crate::channels::ClientChannel::new(cfg.clone());
-            channels.push((
-                "client",
-                Arc::new(client_ch),
-            ));
-        }
-    }
-
     channels
 }
 
@@ -555,8 +544,21 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     };
 
     let session_backend = build_session_backend(&config);
-    let session_manager = SessionManager::new(Arc::clone(&session_backend));
-    let channels = build_channels(&config);
+    let session_manager = Arc::new(SessionManager::new(Arc::clone(&session_backend)));
+    let mut channels = build_channels(&config);
+
+    // Create ClientChannel separately (needs session_manager for management API).
+    #[cfg(feature = "client")]
+    let _client_channel: Option<Arc<crate::channels::ClientChannel>> =
+        config.channels.client.as_ref().filter(|c| c.enabled).map(|cfg| {
+            let cc = crate::channels::ClientChannel::new(cfg.clone());
+            cc.set_session_manager(session_manager.clone());
+            Arc::new(cc)
+        });
+    #[cfg(feature = "client")]
+    if let Some(ref cc) = _client_channel {
+        channels.push(("client", cc.clone() as Arc<dyn Channel>));
+    }
 
     let agent_config = AgentConfig {
         max_tool_calls: config.agent.max_tool_calls,

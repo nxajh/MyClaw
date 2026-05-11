@@ -55,6 +55,8 @@ pub struct ClientChannel {
     connections: Arc<RwLock<HashMap<String, ClientConnection>>>,
     /// Reverse map: session_key → connection_id.
     session_owners: Arc<RwLock<HashMap<String, String>>>,
+    /// Session manager for management API (set after construction).
+    session_manager: Arc<RwLock<Option<Arc<crate::agents::SessionManager>>>>,
 }
 
 impl ClientChannel {
@@ -67,7 +69,13 @@ impl ClientChannel {
             stream_contexts: Arc::new(RwLock::new(HashMap::new())),
             connections: Arc::new(RwLock::new(HashMap::new())),
             session_owners: Arc::new(RwLock::new(HashMap::new())),
+            session_manager: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Set the session manager (called from daemon.rs after construction).
+    pub fn set_session_manager(&self, sm: Arc<crate::agents::SessionManager>) {
+        *self.session_manager.write() = Some(sm);
     }
 
     /// Start the WebSocket server (spawns a background task).
@@ -84,6 +92,7 @@ impl ClientChannel {
         let stream_contexts = self.stream_contexts.clone();
         let connections = self.connections.clone();
         let session_owners = self.session_owners.clone();
+        let session_manager = self.session_manager.clone();
 
         tracing::info!("WebSocket server listening on ws://{}/myclaw", addr);
 
@@ -151,6 +160,7 @@ impl ClientChannel {
                         let stream_contexts_clone = stream_contexts.clone();
                         let connections_clone = connections.clone();
                         let session_owners_clone = session_owners.clone();
+                        let session_manager_clone = session_manager.clone();
                         let _auth_token_clone = auth_token.clone();
 
                         tracing::info!(
@@ -274,17 +284,17 @@ impl ClientChannel {
                                         }
 
                                         "api" => {
-                                            // Management API — Phase 1: basic framework.
+                                            // Management API.
                                             let id = parsed["id"].as_str().unwrap_or("").to_string();
                                             let method = parsed["method"].as_str().unwrap_or("").to_string();
+                                            let params = parsed.get("params").cloned().unwrap_or(serde_json::Value::Null);
 
-                                            // TODO: implement api_router with sessions.*
-                                            let resp = serde_json::json!({
-                                                "type": "api_error",
-                                                "id": id,
-                                                "error": format!("method not implemented: {}", method)
-                                            });
-                                            let _ = ws_sender.send(resp.to_string()).await;
+                                            let resp = handle_api_request(
+                                                &id, &method, &params,
+                                                &conn_id_clone,
+                                                &session_manager_clone,
+                                            );
+                                            let _ = ws_sender.send(resp).await;
                                         }
 
                                         "ping" => {
@@ -413,6 +423,133 @@ impl Channel for ClientChannel {
         let contexts = self.stream_contexts.read();
         if let Some(ctx) = contexts.get(session_key) {
             ctx.cancel.cancel();
+        }
+    }
+}
+
+// ── Management API Router ───────────────────────────────────────────────────
+
+/// Route a management API request and return a JSON response string.
+fn handle_api_request(
+    id: &str,
+    method: &str,
+    params: &serde_json::Value,
+    conn_id: &str,
+    session_manager: &Arc<RwLock<Option<Arc<crate::agents::SessionManager>>>>,
+) -> String {
+    let guard = session_manager.read();
+    let sm = match guard.as_ref() {
+        Some(sm) => sm,
+        None => {
+            return serde_json::json!({
+                "type": "api_error",
+                "id": id,
+                "error": "session manager not available"
+            }).to_string();
+        }
+    };
+
+    // Use conn_id as user_id for session scoping.
+    let user_id = conn_id;
+
+    match method {
+        "sessions.list" => {
+            let sessions = sm.list_sessions(user_id);
+            let active = sm.active_session_id(user_id);
+            let result: Vec<serde_json::Value> = sessions.iter().map(|s| {
+                serde_json::json!({
+                    "id": s.id,
+                    "name": s.name,
+                    "created_at": s.created_at,
+                    "is_active": s.id == active,
+                })
+            }).collect();
+            serde_json::json!({
+                "type": "api_response",
+                "id": id,
+                "result": result,
+            }).to_string()
+        }
+
+        "sessions.create" => {
+            let name = params["name"].as_str();
+            match sm.new_session(user_id, name) {
+                Ok(info) => serde_json::json!({
+                    "type": "api_response",
+                    "id": id,
+                    "result": {
+                        "id": info.id,
+                        "name": info.name,
+                        "created_at": info.created_at,
+                    }
+                }).to_string(),
+                Err(e) => serde_json::json!({
+                    "type": "api_error",
+                    "id": id,
+                    "error": format!("failed to create session: {}", e)
+                }).to_string(),
+            }
+        }
+
+        "sessions.switch" => {
+            let session_id = match params["session_id"].as_str() {
+                Some(s) => s,
+                None => {
+                    return serde_json::json!({
+                        "type": "api_error",
+                        "id": id,
+                        "error": "missing session_id parameter"
+                    }).to_string();
+                }
+            };
+            match sm.switch_session(user_id, session_id) {
+                Ok(info) => serde_json::json!({
+                    "type": "api_response",
+                    "id": id,
+                    "result": {
+                        "id": info.id,
+                        "name": info.name,
+                    }
+                }).to_string(),
+                Err(e) => serde_json::json!({
+                    "type": "api_error",
+                    "id": id,
+                    "error": format!("failed to switch session: {}", e)
+                }).to_string(),
+            }
+        }
+
+        "sessions.delete" => {
+            let session_id = match params["session_id"].as_str() {
+                Some(s) => s,
+                None => {
+                    return serde_json::json!({
+                        "type": "api_error",
+                        "id": id,
+                        "error": "missing session_id parameter"
+                    }).to_string();
+                }
+            };
+            match sm.delete_session(user_id, session_id) {
+                Ok(()) => serde_json::json!({
+                    "type": "api_response",
+                    "id": id,
+                    "result": null
+                }).to_string(),
+                Err(e) => serde_json::json!({
+                    "type": "api_error",
+                    "id": id,
+                    "error": format!("failed to delete session: {}", e)
+                }).to_string(),
+            }
+        }
+
+        _ => {
+            serde_json::json!({
+                "type": "api_error",
+                "id": id,
+                "error": format!("unknown method: {}", method)
+            }).to_string()
         }
     }
 }
