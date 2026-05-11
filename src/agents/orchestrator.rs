@@ -13,7 +13,6 @@ use anyhow::Context;
 use crate::agents::delegation::{DelegationEvent, DelegationManager};
 use crate::agents::sub_agent::SubAgentDelegator;
 use crate::channels::{Channel, ChannelMessage, SendMessage, ProcessingStatus};
-use crate::config::scheduler::{CronJob, HeartbeatConfig};
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,6 +32,21 @@ const ASK_USER_TIMEOUT: Duration = Duration::from_secs(300);
 enum ChannelEvent {
     UserMessage((String, ChannelMessage)),
     Delegation(DelegationEvent),
+}
+
+/// Events from the Scheduler (heartbeat ticks, cron triggers).
+#[derive(Debug)]
+pub enum SchedulerEvent {
+    /// Heartbeat tick — run agent with heartbeat prompt.
+    Heartbeat {
+        target: String,
+    },
+    /// Cron job matched — run agent with specific prompt.
+    Cron {
+        session_key: String,
+        prompt: String,
+        target: String,
+    },
 }
 
 /// Orchestrator — Application Service for message routing and session lifecycle.
@@ -67,12 +81,8 @@ pub struct Orchestrator {
     change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
     /// Last channel that received a user message (shared with schedulers).
     pub last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
-    /// Heartbeat config (set if enabled).
-    heartbeat_config: Option<HeartbeatConfig>,
-    /// Timezone offset for active hours calculation.
-    timezone_offset: i32,
-    /// Cron jobs (loaded from cron/*.md).
-    cron_jobs: Vec<CronJob>,
+    /// Scheduler event receiver (heartbeat ticks, cron triggers).
+    scheduler_rx: Arc<TokioMutex<Option<mpsc::Receiver<SchedulerEvent>>>>,
 }
 
 /// Resources shared between Orchestrator and scheduler tasks.
@@ -112,12 +122,8 @@ pub struct OrchestratorParts {
     pub mcp_manager: Option<Arc<crate::agents::McpManager>>,
     /// File change receiver for hot-reload (shared across all AgentLoops).
     pub change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
-    /// Heartbeat config (conditional — only when heartbeat is enabled).
-    pub heartbeat_config: Option<HeartbeatConfig>,
-    /// Cron jobs (loaded from cron/*.md files). Empty vec = no cron.
-    pub cron_jobs: Vec<CronJob>,
-    /// Timezone offset for active hours calculation in heartbeat.
-    pub timezone_offset: i32,
+    /// Scheduler event receiver (heartbeat ticks, cron triggers from Scheduler task).
+    pub scheduler_rx: Option<mpsc::Receiver<SchedulerEvent>>,
 }
 
 impl Orchestrator {
@@ -159,9 +165,7 @@ impl Orchestrator {
             mcp_manager: parts.mcp_manager,
             change_rx: parts.change_rx,
             last_channel: Arc::new(tokio::sync::Mutex::new(None)),
-            heartbeat_config: parts.heartbeat_config,
-            timezone_offset: parts.timezone_offset,
-            cron_jobs: parts.cron_jobs,
+            scheduler_rx: Arc::new(TokioMutex::new(parts.scheduler_rx)),
         };
 
         info!(channels = orchestrator.channels.len(), "orchestrator initialized");
@@ -319,6 +323,12 @@ impl Orchestrator {
             guard.take()
         };
 
+        // Take the scheduler event receiver if available.
+        let mut scheduler_rx = {
+            let mut guard = self.scheduler_rx.lock().await;
+            guard.take()
+        };
+
         let sessions = self.sessions.clone();
         let agent = self.agent.clone();
         let channels = self.channels.clone();
@@ -327,47 +337,6 @@ impl Orchestrator {
 
         let mut rx = rx;
 
-        // Cloning tickers into the loop scope to avoid &mut self borrow in select! branches.
-        let mut heartbeat_ticker = self.heartbeat_config.as_ref().and_then(|cfg| {
-            crate::agents::scheduler::parse_interval(&cfg.every).map(|interval| {
-                let mut t = tokio::time::interval(interval);
-                t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                t
-            })
-        });
-
-        // Parse cron schedules and create ticker (if any cron jobs exist).
-        let cron_schedules: Vec<(cron::Schedule, CronJob)> = self.cron_jobs.iter()
-            .filter_map(|j| {
-                match j.schedule.parse::<cron::Schedule>() {
-                    Ok(s) => {
-                        tracing::info!(
-                            schedule = %j.schedule,
-                            target = %j.target,
-                            "cron job registered"
-                        );
-                        Some((s, j.clone()))
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            schedule = %j.schedule,
-                            error = %e,
-                            "invalid cron expression, skipping"
-                        );
-                        None
-                    }
-                }
-            })
-            .collect();
-
-        let mut cron_ticker = if cron_schedules.is_empty() {
-            None
-        } else {
-            let mut t = tokio::time::interval(Duration::from_secs(60));
-            t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            Some(t)
-        };
-
         loop {
             if *shutdown_rx.borrow() {
                 tracing::info!("shutdown requested, exiting message loop");
@@ -375,7 +344,7 @@ impl Orchestrator {
             }
 
             let event = if delegation_rx.is_some() {
-                // select over user messages + delegation events + heartbeat/cron (if enabled) + shutdown
+                // select over user messages + delegation events + scheduler events + shutdown
                 tokio::select! {
                     msg = rx.recv() => match msg {
                         Some(m) => ChannelEvent::UserMessage(m),
@@ -391,22 +360,16 @@ impl Orchestrator {
                             }
                         }
                     },
-                    // Heartbeat tick (if enabled).
-                    _ = async {
-                        if let Some(t) = heartbeat_ticker.as_mut() {
-                            t.tick().await;
+                    // Scheduler events (heartbeat ticks, cron triggers) from Scheduler task.
+                    event = async {
+                        if let Some(rx) = scheduler_rx.as_mut() {
+                            rx.recv().await
+                        } else {
+                            std::future::pending().await
                         }
-                    }, if heartbeat_ticker.is_some() => {
-                        self.handle_heartbeat_tick().await;
-                        continue;
-                    },
-                    // Cron tick (every 60s if any cron jobs are configured).
-                    _ = async {
-                        if let Some(t) = cron_ticker.as_mut() {
-                            t.tick().await;
-                        }
-                    }, if cron_ticker.is_some() => {
-                        self.handle_cron_tick(&cron_schedules).await;
+                    }, if scheduler_rx.is_some() => {
+                        let event = event.unwrap();
+                        self.handle_scheduler_event(event).await;
                         continue;
                     },
                     _ = shutdown_rx.changed() => {
@@ -415,28 +378,22 @@ impl Orchestrator {
                     }
                 }
             } else {
-                // No delegation events — user messages + heartbeat + cron (if enabled) + shutdown
+                // No delegation events — user messages + scheduler events + shutdown
                 tokio::select! {
                     msg = rx.recv() => match msg {
                         Some(m) => ChannelEvent::UserMessage(m),
                         None => break,
                     },
-                    // Heartbeat tick (if enabled).
-                    _ = async {
-                        if let Some(t) = heartbeat_ticker.as_mut() {
-                            t.tick().await;
+                    // Scheduler events (heartbeat ticks, cron triggers) from Scheduler task.
+                    event = async {
+                        if let Some(rx) = scheduler_rx.as_mut() {
+                            rx.recv().await
+                        } else {
+                            std::future::pending().await
                         }
-                    }, if heartbeat_ticker.is_some() => {
-                        self.handle_heartbeat_tick().await;
-                        continue;
-                    },
-                    // Cron tick (every 60s if any cron jobs are configured).
-                    _ = async {
-                        if let Some(t) = cron_ticker.as_mut() {
-                            t.tick().await;
-                        }
-                    }, if cron_ticker.is_some() => {
-                        self.handle_cron_tick(&cron_schedules).await;
+                    }, if scheduler_rx.is_some() => {
+                        let event = event.unwrap();
+                        self.handle_scheduler_event(event).await;
                         continue;
                     },
                     _ = shutdown_rx.changed() => {
@@ -741,114 +698,65 @@ impl Orchestrator {
         }
     }
 
-    /// Handle a heartbeat tick — run the agent loop with heartbeat prompt.
-    async fn handle_heartbeat_tick(&self) {
-        use crate::agents::scheduler::is_active_hours;
-
-        let config = match &self.heartbeat_config {
-            Some(c) => c,
-            None => return,
-        };
-
-        if !is_active_hours(&config.active_hours, self.timezone_offset) {
-            tracing::debug!("heartbeat skipped: outside active hours");
-            return;
-        }
-
-        if !std::path::Path::new("HEARTBEAT.md").exists() {
-            tracing::debug!("heartbeat skipped: no HEARTBEAT.md");
-            return;
-        }
-
-        tracing::info!("heartbeat triggered");
-
-        let prompt = config.prompt.as_deref().unwrap_or(
-            "read heartbeat.md if it exists. follow it strictly. \
-             if nothing needs attention, reply heartbeat_ok."
-        );
-
-        let result = self.run_cron_loop("_heartbeat", prompt).await;
-
-        match result {
-            Ok(response) if is_silent_ok(&response, "heartbeat") => {
-                tracing::info!("heartbeat: nothing needs attention");
+    /// Handle a scheduler event (from the Scheduler task via mpsc).
+    async fn handle_scheduler_event(&self, event: SchedulerEvent) {
+        match event {
+            SchedulerEvent::Heartbeat { target } => {
+                tracing::info!("heartbeat triggered (from scheduler)");
+                // Check HEARTBEAT.md existence.
+                if !std::path::Path::new("HEARTBEAT.md").exists() {
+                    tracing::debug!("heartbeat skipped: no HEARTBEAT.md");
+                    return;
+                }
+                let prompt = "read heartbeat.md if it exists. follow it strictly. if nothing needs attention, reply heartbeat_ok.";
+                let result = self.run_scheduled_agent("_heartbeat", prompt).await;
+                match result {
+                    Ok(response) if is_silent_ok(&response, "heartbeat") => {
+                        tracing::info!("heartbeat: nothing needs attention");
+                    }
+                    Ok(response) if !response.trim().is_empty() => {
+                        send_to_target_internal(self.channels.clone(), self.last_channel.clone(), &target, &response).await;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "heartbeat run failed");
+                    }
+                }
             }
-            Ok(response) if !response.trim().is_empty() => {
-                tracing::info!(resp_len = response.len(), "heartbeat produced output");
-                send_to_target_internal(self.channels.clone(), self.last_channel.clone(), &config.target, &response).await;
-            }
-            Ok(_) => {
-                tracing::info!("heartbeat: empty response");
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "heartbeat run failed");
+            SchedulerEvent::Cron { session_key, prompt, target } => {
+                tracing::info!(session_key = %session_key, "cron job triggered (from scheduler)");
+                let result = self.run_scheduled_agent(&session_key, &prompt).await;
+                match result {
+                    Ok(response) if !response.trim().is_empty() => {
+                        send_to_target_internal(self.channels.clone(), self.last_channel.clone(), &target, &response).await;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(session_key = %session_key, error = %e, "cron job failed");
+                    }
+                }
             }
         }
     }
 
-    /// Handle a cron tick — check all cron schedules and run matching jobs.
-    async fn handle_cron_tick(&self, cron_schedules: &[(cron::Schedule, CronJob)]) {
-        use crate::agents::scheduler::cron_matches;
-
-        let now = {
-            let utc = chrono::Utc::now();
-            utc + chrono::Duration::hours(self.timezone_offset as i64)
-        };
-
-        for (schedule, job) in cron_schedules {
-            if !cron_matches(schedule, &now) {
-                continue;
-            }
-
-            // Check active_hours restriction.
-            if !crate::agents::is_active_hours(&job.active_hours, self.timezone_offset) {
-                tracing::debug!(schedule = %job.schedule, "cron: outside active hours");
-                continue;
-            }
-
-            tracing::info!(schedule = %job.schedule, "cron job triggered");
-
-            let session_key = format!(
-                "_cron_{}",
-                job.schedule.replace([' ', '*'], "_").replace('.', "_")
+    /// Create or get an AgentLoop for a scheduler session and run a prompt.
+    async fn run_scheduled_agent(&self, session_key: &str, prompt: &str) -> anyhow::Result<String> {
+        let loop_ = if let Some(existing) = self.sessions.get(session_key) {
+            existing.clone()
+        } else {
+            let sm = SessionManager::new(self.persist_backend.clone());
+            let session = sm.get_or_create(session_key);
+            let persist_hook: Arc<dyn PersistHook> = Arc::new(
+                BackendPersistHook::new(self.persist_backend.clone())
             );
-
-            let result = self.run_cron_loop(&session_key, &job.prompt).await;
-
-            match result {
-                Ok(response) if !response.trim().is_empty() => {
-                    send_to_target_internal(
-                        self.channels.clone(),
-                        self.last_channel.clone(),
-                        &job.target,
-                        &response,
-                    ).await;
-                }
-                Ok(_) => {
-                    tracing::info!(schedule = %job.schedule, "cron job: empty response");
-                }
-                Err(e) => {
-                    tracing::warn!(schedule = %job.schedule, error = %e, "cron job failed");
-                }
+            let mut loop_ = self.agent.loop_for_with_persist(session, Some(persist_hook));
+            if let Some(rx) = self.change_rx.clone() {
+                loop_ = loop_.with_change_rx(rx);
             }
-        }
-    }
-
-    /// Run an agent loop for a scheduler session (used by heartbeat and cron).
-    async fn run_cron_loop(&self, session_key: &str, prompt: &str) -> anyhow::Result<String> {
-        use crate::agents::scheduler::get_or_create_loop;
-
-        let ctx = crate::agents::SchedulerContext {
-            agent: self.agent.clone(),
-            channels: self.channels.clone(),
-            sessions: self.sessions.clone(),
-            session_backend: self.persist_backend.clone(),
-            timezone_offset: self.timezone_offset,
-            last_channel: self.last_channel.clone(),
-            change_rx: self.change_rx.clone(),
+            let entry: Arc<TokioMutex<AgentLoop>> = Arc::new(TokioMutex::new(loop_));
+            self.sessions.insert(session_key.to_string(), entry.clone());
+            entry
         };
-
-        let loop_ = get_or_create_loop(&ctx, session_key);
         let mut guard = loop_.lock().await;
         guard.run(prompt, None, None).await
     }

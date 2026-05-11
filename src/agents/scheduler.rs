@@ -1,9 +1,9 @@
-//! Scheduler — Heartbeat, Cron, Webhook.
+//! Scheduler — Heartbeat, Cron, Webhook, and pure Scheduler.
 //!
-//! Three scheduling modes share the same execution path:
-//!   construct prompt → AgentLoop::run() → handle response
-//!
-//! Each runs as an independent tokio task, sharing resources via Arc<SchedulerContext>.
+//! Scheduling modes:
+//!   - Scheduler (pure): sends timing events via mpsc, does NOT create agents.
+//!   - Heartbeat/Cron: legacy standalone loops (retained for backward compat).
+//!   - Webhook: HTTP server for external triggers.
 //!
 //! Job definitions come from files (`cron/*.md`, `webhooks/*.md`),
 //! not from TOML config. Config only holds global settings.
@@ -17,11 +17,110 @@ use tokio::sync::{Mutex as TokioMutex, Mutex};
 
 use crate::agents::Agent;
 use crate::agents::AgentLoop;
+use crate::agents::orchestrator::SchedulerEvent;
 use crate::agents::session_manager::SessionManager;
 use crate::agents::webhook_loader::{WebhookAuth, WebhookJobDef, render_template};
 use crate::channels::{Channel, SendMessage};
 use crate::config::scheduler::{CronJob, HeartbeatConfig, WebhookConfig};
 use crate::storage::SessionBackend;
+
+// ── Pure Scheduler ──────────────────────────────────────────────────────────
+
+/// Pure scheduler — sends timing events via mpsc, does NOT create agents.
+pub struct Scheduler {
+    heartbeat_config: Option<HeartbeatConfig>,
+    cron_schedules: Vec<(cron::Schedule, CronJob)>,
+    timezone_offset: i32,
+    event_tx: tokio::sync::mpsc::Sender<SchedulerEvent>,
+}
+
+impl Scheduler {
+    pub fn new(
+        heartbeat_config: Option<HeartbeatConfig>,
+        cron_jobs: Vec<CronJob>,
+        timezone_offset: i32,
+        event_tx: tokio::sync::mpsc::Sender<SchedulerEvent>,
+    ) -> Self {
+        let cron_schedules = cron_jobs.iter()
+            .filter_map(|j| {
+                match j.schedule.parse::<cron::Schedule>() {
+                    Ok(s) => {
+                        tracing::info!(schedule = %j.schedule, target = %j.target, "cron job registered");
+                        Some((s, j.clone()))
+                    }
+                    Err(e) => {
+                        tracing::warn!(schedule = %j.schedule, error = %e, "invalid cron expression, skipping");
+                        None
+                    }
+                }
+            })
+            .collect();
+        Self { heartbeat_config, cron_schedules, timezone_offset, event_tx }
+    }
+
+    /// Run the scheduler loop — sends events via mpsc.
+    pub async fn run(self) {
+        let mut heartbeat_ticker = self.heartbeat_config.as_ref().and_then(|cfg| {
+            parse_interval(&cfg.every).map(|interval| {
+                let mut t = tokio::time::interval(interval);
+                t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                t
+            })
+        });
+
+        let mut cron_ticker = if self.cron_schedules.is_empty() {
+            None
+        } else {
+            let mut t = tokio::time::interval(Duration::from_secs(60));
+            t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            Some(t)
+        };
+
+        tracing::info!(
+            heartbeat = heartbeat_ticker.is_some(),
+            cron_jobs = self.cron_schedules.len(),
+            "scheduler started"
+        );
+
+        loop {
+            tokio::select! {
+                _ = async {
+                    if let Some(t) = heartbeat_ticker.as_mut() { t.tick().await; }
+                    else { std::future::pending::<()>().await; }
+                }, if heartbeat_ticker.is_some() => {
+                    let config = self.heartbeat_config.as_ref().unwrap();
+                    if !is_active_hours(&config.active_hours, self.timezone_offset) {
+                        tracing::debug!("heartbeat skipped: outside active hours");
+                        continue;
+                    }
+                    let _ = self.event_tx.send(SchedulerEvent::Heartbeat {
+                        target: config.target.clone(),
+                    }).await;
+                }
+                _ = async {
+                    if let Some(t) = cron_ticker.as_mut() { t.tick().await; }
+                    else { std::future::pending::<()>().await; }
+                }, if cron_ticker.is_some() => {
+                    let now = {
+                        let utc = chrono::Utc::now();
+                        utc + chrono::Duration::hours(self.timezone_offset as i64)
+                    };
+                    for (schedule, job) in &self.cron_schedules {
+                        if !cron_matches(schedule, &now) { continue; }
+                        if !is_active_hours(&job.active_hours, self.timezone_offset) { continue; }
+                        let session_key = format!("_cron_{}",
+                            job.schedule.replace([' ', '*'], "_").replace('.', "_"));
+                        let _ = self.event_tx.send(SchedulerEvent::Cron {
+                            session_key,
+                            prompt: job.prompt.clone(),
+                            target: job.target.clone(),
+                        }).await;
+                    }
+                }
+            }
+        }
+    }
+}
 
 // ── Shared context ─────────────────────────────────────────────────────────
 

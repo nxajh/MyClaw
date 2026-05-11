@@ -591,6 +591,9 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             config.workspace_dir.join("agents"),
         );
 
+    // Create scheduler channel for Scheduler → Orchestrator communication.
+    let (scheduler_tx, scheduler_rx) = tokio::sync::mpsc::channel::<crate::agents::SchedulerEvent>(100);
+
     let parts = OrchestratorParts {
         agent: agent.clone(),
         session_manager,
@@ -601,18 +604,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         persist_backend: session_backend.clone(),
         mcp_manager: Some(Arc::clone(&mcp_manager_arc)),
         change_rx: Some(change_rx.clone()),
-        heartbeat_config: if config.agent.scheduler.heartbeat.enabled {
-            Some(config.agent.scheduler.heartbeat.clone())
-        } else {
-            None
-        },
-        cron_jobs: if config.agent.scheduler.cron.enabled {
-            let cron_dir = config.workspace_dir.join("cron");
-            crate::agents::load_cron_jobs(&cron_dir)
-        } else {
-            vec![]
-        },
-        timezone_offset: config.agent.prompt.timezone_offset,
+        scheduler_rx: Some(scheduler_rx),
     };
 
     // ── Launch ─────────────────────────────────────────────────────────────
@@ -638,6 +630,31 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         tokio::spawn(async move {
             crate::agents::run_webhook_server(wh_ctx, wh_config, wh_jobs).await;
         });
+    }
+
+    // ── Scheduler task (heartbeat + cron via mpsc) ──────────────────────────
+
+    {
+        let heartbeat_config = if scheduler_config.heartbeat.enabled {
+            Some(scheduler_config.heartbeat.clone())
+        } else {
+            None
+        };
+        let cron_jobs = if scheduler_config.cron.enabled {
+            let cron_dir = config.workspace_dir.join("cron");
+            crate::agents::load_cron_jobs(&cron_dir)
+        } else {
+            vec![]
+        };
+        if heartbeat_config.is_some() || !cron_jobs.is_empty() {
+            let scheduler = crate::agents::Scheduler::new(
+                heartbeat_config,
+                cron_jobs,
+                config.agent.prompt.timezone_offset,
+                scheduler_tx,
+            );
+            tokio::spawn(async move { scheduler.run().await; });
+        }
     }
 
     // Shutdown channel.
