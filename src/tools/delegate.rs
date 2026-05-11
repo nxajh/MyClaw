@@ -1,11 +1,11 @@
-//! Delegate task tool — allows the router agent to delegate tasks to sub-agents.
+//! Agent delegate tool — allows the main agent to delegate tasks to sub-agents.
 //!
 //! This tool is the core of the multi-agent orchestration pattern.
-//! The router agent calls `delegate_task(agent="coder", task="...")` and the tool:
+//! The main agent calls `agent_delegate(agent="coder", task="...", mode="sync")` and the tool:
 //! 1. Looks up the sub-agent by name
 //! 2. Creates a temporary AgentLoop with the sub-agent's system prompt and tools
-//! 3. Runs the sub-agent to completion
-//! 4. Returns the result to the router agent
+//! 3. Runs the sub-agent to completion (sync) or in background (async)
+//! 4. Returns the result (sync) or task_id (async) to the main agent
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -23,26 +23,28 @@ pub trait TaskDelegator: Send + Sync {
     fn available_agents(&self) -> Vec<(String, String)>;
 }
 
-/// The delegate_task tool — injectable delegator for runtime dispatch.
-pub struct DelegateTaskTool {
+/// The agent_delegate tool — injectable delegator for runtime dispatch.
+pub struct AgentDelegateTool {
     delegator: Arc<dyn TaskDelegator>,
 }
 
-impl DelegateTaskTool {
+impl AgentDelegateTool {
     pub fn new(delegator: Arc<dyn TaskDelegator>) -> Self {
         Self { delegator }
     }
 }
 
 #[async_trait]
-impl Tool for DelegateTaskTool {
+impl Tool for AgentDelegateTool {
     fn name(&self) -> &str {
-        "delegate_task"
+        "agent_delegate"
     }
 
     fn description(&self) -> &str {
         "Delegate a task to a specialized sub-agent. Each sub-agent has its own system prompt and tool set. \
-         Use this to break complex tasks into specialized sub-tasks that are handled by experts."
+         Use this to break complex tasks into specialized sub-tasks that are handled by experts. \
+         mode='sync' (default) blocks until the sub-agent finishes; mode='async' returns a task_id immediately \
+         and the sub-agent runs in the background — you will be notified when it completes."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -56,6 +58,11 @@ impl Tool for DelegateTaskTool {
                 "task": {
                     "type": "string",
                     "description": "A clear description of the task to delegate."
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["sync", "async"],
+                    "description": "Execution mode. 'sync' (default) blocks until completion. 'async' runs in the background and returns a task_id."
                 }
             },
             "required": ["agent", "task"]

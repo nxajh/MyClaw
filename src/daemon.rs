@@ -518,18 +518,18 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         );
         let delegator_arc = Arc::new(delegator);
 
-        // Build delegate_task tool.
-        let delegate_tool = crate::tools::DelegateTaskTool::new(
+        // Build agent_delegate tool.
+        let delegate_tool = crate::tools::AgentDelegateTool::new(
             Arc::clone(&delegator_arc) as Arc<dyn TaskDelegator>,
         );
 
-        // Build parent tool registry: same tools + delegate_task + tool_search.
+        // Build parent tool registry: same tools + agent_delegate + tool_search.
         let mut parent_tools = ToolRegistry::new();
         for tool in base_tools_arc.all_tools() {
             parent_tools.register(tool);
         }
         parent_tools.register(Arc::new(delegate_tool));
-        tracing::info!("delegate_task tool registered (multi-agent mode)");
+        tracing::info!("agent_delegate tool registered (multi-agent mode)");
 
         let tool_search = crate::tools::ToolSearchTool::new(Arc::clone(&base_tools_arc));
         parent_tools.register(Arc::new(tool_search));

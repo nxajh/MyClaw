@@ -51,7 +51,7 @@ fn list_tools(format: &str) -> Result<()> {
         ("http_request", "Make HTTP requests"),
         ("calculator", "Evaluate math expressions"),
         ("ask_user", "Ask user a question"),
-        ("delegate_task", "Delegate task to sub-agent"),
+        ("agent_delegate", "Delegate task to sub-agent"),
         ("task_manager", "Manage tasks and goals"),
         ("tool_search", "Search available tools"),
     ];

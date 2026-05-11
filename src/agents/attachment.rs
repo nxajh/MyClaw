@@ -422,7 +422,7 @@ impl AttachmentManager {
 
         if !delta.added.is_empty() {
             lines.push(
-                r#"Use `delegate_task(agent="name", task="...")` to delegate."#.to_string(),
+                r#"Use `agent_delegate(agent="name", task="...", mode="sync"/"async")` to delegate."#.to_string(),
             );
             for entry in &delta.added {
                 lines.push(format!("- **{}**", entry));

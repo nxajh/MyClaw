@@ -188,7 +188,7 @@ pub struct AgentConfig {
     /// Loop breaker exact-repeat threshold: N identical consecutive calls → break.
     pub loop_breaker_threshold: usize,
     /// Per-tool execution timeout in seconds (0 = no timeout).
-    /// Does not apply to ask_user or delegate_task (those have their own timeouts).
+    /// Does not apply to ask_user or agent_delegate (those have their own timeouts).
     pub tool_timeout_secs: u64,
 }
 
@@ -413,7 +413,7 @@ pub struct AgentLoop {
     system_prompt: String,
     /// Optional callback for ask_user tool.
     ask_user_handler: Option<AskUserHandler>,
-    /// Optional callback for async delegate_task.
+    /// Optional callback for async agent_delegate.
     delegate_handler: Option<DelegateHandler>,
     /// Loop breaker — detects repetitive tool-call patterns.
     loop_breaker: LoopBreaker,
@@ -1548,7 +1548,7 @@ impl AgentLoop {
     }
 
     /// Execute a single tool call.
-    /// Special-cases `ask_user` and `delegate_task` to use handlers when available.
+    /// Special-cases `ask_user` and `agent_delegate` to use handlers when available.
     /// Applies framework-level truncation based on the tool's `max_output_tokens()`.
     async fn execute_tool(&mut self, call: &ToolCall) -> anyhow::Result<ToolResult> {
         // Special handling for ask_user tool.
@@ -1581,9 +1581,10 @@ impl AgentLoop {
             }
         }
 
-        // Special handling for delegate_task: async handler takes priority,
-        // then sync delegation via sub_delegator (with parent session ID for persistence).
-        if call.name == "delegate_task" {
+        // Special handling for agent_delegate: route based on mode parameter.
+        // mode="async" + delegate_handler → background execution, returns task_id.
+        // mode="sync" (default) + sub_delegator → blocks until sub-agent completes.
+        if call.name == "agent_delegate" {
             let args: serde_json::Value = if call.arguments.is_empty() {
                 serde_json::Value::Object(serde_json::Map::new())
             } else {
@@ -1597,21 +1598,31 @@ impl AgentLoop {
             let task = args["task"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("'task' is required"))?;
+            let mode = args["mode"].as_str().unwrap_or("sync");
 
-            if let Some(ref handler) = self.delegate_handler {
-                let task_id = handler(agent_name.to_string(), task.to_string())?;
-                return Ok(ToolResult {
-                    success: true,
-                    output: format!(
-                        "Task delegated to sub-agent '{}' (task_id: {}). \
-                         The sub-agent is now running in the background. \
-                         You will be notified when it completes.",
-                        agent_name, task_id
-                    ),
-                    error: None,
-                });
+            if mode == "async" {
+                if let Some(ref handler) = self.delegate_handler {
+                    let task_id = handler(agent_name.to_string(), task.to_string())?;
+                    return Ok(ToolResult {
+                        success: true,
+                        output: format!(
+                            "Task delegated to sub-agent '{}' (task_id: {}). \
+                             The sub-agent is now running in the background. \
+                             You will be notified when it completes.",
+                            agent_name, task_id
+                        ),
+                        error: None,
+                    });
+                } else {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some("async mode not available: no delegate handler configured".to_string()),
+                    });
+                }
             }
 
+            // sync mode (default)
             if let Some(ref delegator) = self.sub_delegator {
                 let parent_id = self.session.id.clone();
                 let result = delegator.delegate_with_parent(agent_name, task, &parent_id).await;

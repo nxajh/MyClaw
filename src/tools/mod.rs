@@ -5,7 +5,7 @@
 //! **Core:** ShellTool, FileReadTool, FileWriteTool, FileEditTool, GlobSearchTool, ContentSearchTool
 //! **Web:** WebFetchTool, HttpRequestTool, WebSearchTool
 //! **Utility:** CalculatorTool, AskUserTool
-//! **Multi-Agent:** DelegateTaskTool
+//! **Multi-Agent:** AgentDelegateTool
 //! **Planning:** TaskManagerTool
 //! **Discovery:** ToolSearchTool, ListDirTool
 
@@ -27,7 +27,7 @@ mod web_search;
 // Re-export tools.
 pub use ask_user::AskUserTool;
 pub use calculator::CalculatorTool;
-pub use delegate::{DelegateTaskTool, TaskDelegator};
+pub use delegate::{AgentDelegateTool, TaskDelegator};
 pub use file_ops::{FileEditTool, FileReadTool, FileWriteTool};
 pub use http::HttpRequestTool;
 pub use list_dir::ListDirTool;

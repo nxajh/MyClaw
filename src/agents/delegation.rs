@@ -1,6 +1,6 @@
 //! Async delegation — event types and manager for background sub-agent execution.
 //!
-//! When `delegate_task` is called, the sub-agent is spawned in a background
+//! When `agent_delegate` is called with mode="async", the sub-agent is spawned in a background
 //! tokio task. When it completes (or fails), a `DelegationEvent` is sent via
 //! mpsc channel to the Orchestrator, which wakes the main agent by injecting
 //! a synthetic message.

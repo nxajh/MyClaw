@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 /// A sub-agent definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentConfig {
-    /// Unique name for this sub-agent (used in delegate_task tool call).
+    /// Unique name for this sub-agent (used in agent_delegate tool call).
     pub name: String,
 
     /// System prompt for this sub-agent.
@@ -39,7 +39,7 @@ pub struct SubAgentConfig {
     #[serde(default)]
     pub max_tool_calls: Option<usize>,
 
-    /// Optional description shown to the router agent in the delegate_task tool.
+    /// Optional description shown to the router agent in the agent_delegate tool.
     #[serde(default)]
     pub description: Option<String>,
 
