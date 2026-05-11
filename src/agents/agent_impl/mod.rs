@@ -265,6 +265,7 @@ impl Agent {
             skills_dir: self.skills_dir.clone(),
             agents_dir: self.agents_dir.clone(),
             change_rx: None,
+            pending_retry_message: None,
         }
     }
 }
@@ -311,6 +312,10 @@ pub struct AgentLoop {
     pub(crate) agents_dir: PathBuf,
     /// File change receiver (None for sub-agents).
     pub(crate) change_rx: Option<watch::Receiver<super::watcher::ChangeSet>>,
+    /// User message from a failed turn, awaiting user decision (retry or abort).
+    /// Set by `run_turn_core` when the LLM returns an empty response after all retries.
+    /// Consumed by the Orchestrator when the user clicks "retry" or "abort".
+    pub(crate) pending_retry_message: Option<String>,
 }
 
 impl AgentLoop {
@@ -370,5 +375,20 @@ impl AgentLoop {
     /// Access the attachment manager (for /reload command).
     pub fn attachments(&mut self) -> &mut AttachmentManager {
         &mut self.attachments
+    }
+
+    /// Store a user message for retry after an empty response.
+    pub fn set_pending_retry(&mut self, msg: String) {
+        self.pending_retry_message = Some(msg);
+    }
+
+    /// Take the pending retry message (consumes it).
+    pub fn take_pending_retry(&mut self) -> Option<String> {
+        self.pending_retry_message.take()
+    }
+
+    /// Check if there's a pending retry message.
+    pub fn has_pending_retry(&self) -> bool {
+        self.pending_retry_message.is_some()
     }
 }

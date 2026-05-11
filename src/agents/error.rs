@@ -34,4 +34,12 @@ pub enum AgentError {
     /// An LLM provider error (network, auth, rate-limit, etc.).
     #[error("provider error: {0}")]
     Provider(#[from] anyhow::Error),
+
+    /// The LLM returned an empty response after all retries.
+    /// The turn's user message has been rolled back from history.
+    #[error("empty response after retries")]
+    EmptyResponse {
+        /// The original user message that was rolled back.
+        user_message: String,
+    },
 }

@@ -66,6 +66,13 @@ pub trait SessionBackend: Send + Sync {
     /// Remove the last message from a session.
     fn remove_last_message(&self, session_id: &str) -> std::io::Result<bool>;
 
+    /// Truncate message history to keep only the first `keep_count` messages.
+    /// Used for rollback when a turn fails completely (e.g. empty LLM response).
+    /// Default: no-op (in-memory backend truncates in `Session::rollback_to`).
+    fn truncate_messages(&self, _session_id: &str, _keep_count: usize) -> std::io::Result<()> {
+        Ok(())
+    }
+
     // ── Summaries ──────────────────────────────────────────────────────────
 
     /// Save a compaction summary.

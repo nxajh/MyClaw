@@ -261,6 +261,13 @@ impl SessionBackend for InMemoryBackend {
         Ok(msgs.len() as i64)
     }
 
+    fn truncate_messages(&self, session_id: &str, keep_count: usize) -> std::io::Result<()> {
+        if let Some(msgs) = self.messages.write().get_mut(session_id) {
+            msgs.truncate(keep_count);
+        }
+        Ok(())
+    }
+
     fn remove_last_message(&self, session_id: &str) -> std::io::Result<bool> {
         if let Some(msgs) = self.messages.write().get_mut(session_id) {
             if !msgs.is_empty() {
@@ -315,6 +322,9 @@ pub trait PersistHook: Send + Sync {
     fn save_token_count(&self, session_id: &str, total: u64);
     /// Persist the session override so it survives restarts.
     fn save_session_override(&self, session_id: &str, override_json: &str);
+    /// Truncate message history to keep only the first `keep_count` messages.
+    /// Used for rollback when a turn fails completely.
+    fn truncate_messages(&self, session_id: &str, keep_count: usize);
 }
 
 /// PersistHook implementation backed by a SessionBackend.
@@ -360,6 +370,12 @@ impl PersistHook for BackendPersistHook {
     fn save_session_override(&self, session_id: &str, override_json: &str) {
         if let Err(e) = self.backend.save_session_override(session_id, override_json) {
             tracing::warn!(session = %session_id, err = %e, "save session override failed");
+        }
+    }
+
+    fn truncate_messages(&self, session_id: &str, keep_count: usize) {
+        if let Err(e) = self.backend.truncate_messages(session_id, keep_count) {
+            tracing::warn!(session = %session_id, err = %e, "truncate messages failed");
         }
     }
 }
@@ -460,6 +476,15 @@ impl Session {
                 self.message_ids.pop();
             }
         }
+    }
+
+    /// Roll back history to the given length.
+    /// Removes all messages added after position `len` (both in-memory history and message_ids).
+    /// Used when a turn fails completely (e.g. empty LLM response) to undo all
+    /// messages added during that turn (user + assistant/tool_calls/tool_results).
+    pub fn rollback_to(&mut self, len: usize) {
+        self.history.truncate(len);
+        self.message_ids.truncate(len);
     }
 }
 

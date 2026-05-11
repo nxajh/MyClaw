@@ -165,7 +165,10 @@ impl AgentLoop {
         // 4. Add combined user message to history and persist.
         let user_msg = ChatMessage::user_text(combined_user.clone());
         self.token_tracker.record_pending(estimate_message_tokens(&user_msg));
-        self.session.add_user_text(combined_user);
+        // ★ Record snapshot length BEFORE adding user message, so rollback can
+        //   undo everything added during this turn (user + assistant/tool_calls/tool_results).
+        let turn_snapshot_len = self.session.history.len();
+        self.session.add_user_text(combined_user.clone());
 
         if let Some(ref hook) = self.persist_hook {
             if let Some(msg) = self.session.history.last() {
@@ -183,10 +186,50 @@ impl AgentLoop {
         // 5. Build the full message list for this turn (pure: no side effects).
         let messages = self.build_messages().await?;
 
+        // Save a flag for whether we're in streaming mode, so we can send
+        // TurnEvent::EmptyResponse after chat_loop takes ownership of stream_mode.
+        let is_streamed = matches!(&stream_mode, StreamMode::Streamed { .. });
+
         // 3. Run the chat loop (handles tool calls iteratively).
         let text = self.chat_loop(messages, stream_mode).await?;
 
-        // 4. Persist assistant response.
+        // 4. Handle empty response: rollback turn and return error.
+        //    chat_loop retries internally (stream timeout × 3, empty response × 3).
+        //    If it still returns empty, the turn is irrecoverable.
+        if text.is_empty() {
+            tracing::warn!(
+                turn_snapshot_len,
+                current_len = self.session.history.len(),
+                "empty response after retries, rolling back turn"
+            );
+
+            // For streaming path: notify the client before rollback so the
+            // frontend can show retry UI. Note: stream_mode was moved into
+            // chat_loop, so we check the pre-saved flag. The TurnEvent is
+            // sent by chat_loop internally when it detects cancellation,
+            // but for empty response we handle it here via a different path:
+            // chat_loop sends TurnEvent::Done only on success, so the client
+            // will detect the stream ended without Done and can show retry UI.
+            // We also set the pending_retry_message so the orchestrator can
+            // offer the retry button.
+            if is_streamed {
+                tracing::info!("streaming turn had empty response, client will detect via missing Done event");
+            }
+
+            // Roll back in-memory history to pre-turn state.
+            self.session.rollback_to(turn_snapshot_len);
+
+            // Roll back persisted history.
+            if let Some(ref hook) = self.persist_hook {
+                hook.truncate_messages(&self.session.id, turn_snapshot_len);
+            }
+
+            return Err(crate::agents::error::AgentError::EmptyResponse {
+                user_message: combined_user,
+            }.into());
+        }
+
+        // 5. Persist assistant response.
         self.session.add_assistant_text(text.clone());
 
         // Persist assistant message via hook; capture the assigned DB id.

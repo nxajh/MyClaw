@@ -903,6 +903,54 @@ impl QQBotChannel {
         Ok(())
     }
 
+    /// Send a group message with an inline keyboard.
+    async fn send_group_keyboard(
+        &self,
+        group_openid: &str,
+        content: &str,
+        keyboard: &Keyboard,
+        msg_id: &str,
+    ) -> anyhow::Result<()> {
+        let token = self.token_manager.get_token().await?;
+        let url = format!("{}/v2/groups/{}/messages", API_BASE, group_openid);
+
+        let mut body = serde_json::json!({
+            "content": "",
+            "msg_type": 2,
+            "markdown": {
+                "content": content,
+            },
+            "keyboard": keyboard,
+        });
+
+        if !msg_id.is_empty() {
+            body["msg_id"] = serde_json::Value::String(msg_id.to_string());
+            body["msg_seq"] = serde_json::Value::Number(self.next_msg_seq().into());
+        } else {
+            body["msg_seq"] = serde_json::Value::Number(self.next_msg_seq().into());
+        }
+
+        let ua = user_agent();
+        let resp = self.http_client
+            .post(&url)
+            .header("Authorization", format!("QQBot {}", token))
+            .header("Content-Type", "application/json")
+            .header("User-Agent", &ua)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Group keyboard send failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("Group keyboard send returned {}: {}", status, text));
+        }
+
+        debug!(group_openid = group_openid, "group keyboard message sent");
+        Ok(())
+    }
+
     /// Acknowledge an interaction event (fire-and-forget).
     /// QQ Bot requires acknowledging within 3 seconds.
     fn ack_interaction(&self, event_id: &str) {
@@ -1028,18 +1076,58 @@ impl Channel for QQBotChannel {
         // thread_ts carries the original message event ID for passive replies.
         let msg_id = msg.thread_ts.as_deref().unwrap_or("");
 
+        // Build keyboard from inline_buttons (attached to last chunk only).
+        let keyboard: Option<Keyboard> = msg.inline_buttons.as_ref().map(|buttons| {
+            let pairs: Vec<(String, String)> = buttons.iter()
+                .map(|b| (b.label.clone(), b.callback_data.clone()))
+                .collect();
+            Keyboard::from_pairs(&pairs)
+        });
+
+        let count = chunks.len();
         for (i, chunk) in chunks.iter().enumerate() {
             // msg_seq must be unique per chunk for the same msg_id (1-based).
             let msg_seq = (i as u32) + 1;
-            let result = if let Some(openid) = msg.recipient.strip_prefix("c2c:") {
-                self.send_c2c_message(openid, chunk, msg_id, msg_seq).await
-            } else if let Some(group_openid) = msg.recipient.strip_prefix("group:") {
-                self.send_group_message(group_openid, chunk, msg_id, msg_seq).await
+            let is_last = i == count - 1;
+
+            let result = if is_last {
+                if let Some(kb) = &keyboard {
+                    // Last chunk with buttons — use keyboard endpoint.
+                    if let Some(openid) = msg.recipient.strip_prefix("c2c:") {
+                        self.send_c2c_keyboard(openid, chunk, kb, msg_id).await
+                    } else if let Some(group_openid) = msg.recipient.strip_prefix("group:") {
+                        self.send_group_keyboard(group_openid, chunk, kb, msg_id).await
+                    } else {
+                        Err(anyhow::anyhow!(
+                            "invalid QQ Bot recipient format: {} (expected c2c:<openid> or group:<openid>)",
+                            msg.recipient
+                        ))
+                    }
+                } else {
+                    // Last chunk without buttons — normal send.
+                    if let Some(openid) = msg.recipient.strip_prefix("c2c:") {
+                        self.send_c2c_message(openid, chunk, msg_id, msg_seq).await
+                    } else if let Some(group_openid) = msg.recipient.strip_prefix("group:") {
+                        self.send_group_message(group_openid, chunk, msg_id, msg_seq).await
+                    } else {
+                        Err(anyhow::anyhow!(
+                            "invalid QQ Bot recipient format: {} (expected c2c:<openid> or group:<openid>)",
+                            msg.recipient
+                        ))
+                    }
+                }
             } else {
-                Err(anyhow::anyhow!(
-                    "invalid QQ Bot recipient format: {} (expected c2c:<openid> or group:<openid>)",
-                    msg.recipient
-                ))
+                // Non-last chunk — always normal send.
+                if let Some(openid) = msg.recipient.strip_prefix("c2c:") {
+                    self.send_c2c_message(openid, chunk, msg_id, msg_seq).await
+                } else if let Some(group_openid) = msg.recipient.strip_prefix("group:") {
+                    self.send_group_message(group_openid, chunk, msg_id, msg_seq).await
+                } else {
+                    Err(anyhow::anyhow!(
+                        "invalid QQ Bot recipient format: {} (expected c2c:<openid> or group:<openid>)",
+                        msg.recipient
+                    ))
+                }
             };
 
             if let Err(e) = result {
@@ -1048,7 +1136,7 @@ impl Channel for QQBotChannel {
             }
 
             // Throttle between chunks to avoid rate limiting.
-            if i < chunks.len() - 1 {
+            if i < count - 1 {
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }

@@ -405,6 +405,8 @@ struct SendMessageRequest {
     text: String,
     #[serde(rename = "parse_mode", skip_serializing_if = "Option::is_none")]
     parse_mode: Option<String>,
+    #[serde(rename = "reply_markup", skip_serializing_if = "Option::is_none")]
+    reply_markup: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -692,6 +694,7 @@ impl TelegramChannel {
         chat_id: &str,
         text: &str,
         thread_id: Option<&str>,
+        reply_markup: Option<serde_json::Value>,
     ) -> anyhow::Result<Option<i64>> {
         let client = self.http_client();
         let html_text = markdown_to_telegram_html(text);
@@ -702,6 +705,7 @@ impl TelegramChannel {
             message_thread_id: thread_id.map(String::from),
             text: html_text.clone(),
             parse_mode: Some("HTML".to_string()),
+            reply_markup,
         };
         let resp = client
             .post(self.api_url("sendMessage"))
@@ -781,6 +785,7 @@ impl TelegramChannel {
             message_thread_id: thread_id.map(String::from),
             text: plain_text,
             parse_mode: None,
+            reply_markup: None,
         };
         let fallback_resp = client
             .post(self.api_url("sendMessage"))
@@ -1246,6 +1251,7 @@ impl TelegramChannel {
                         &chat_id,
                         &format!("🤔 还在思考中... (已等待 {secs}s)"),
                         None,
+                        None,
                     )
                     .await
                 {
@@ -1594,13 +1600,29 @@ impl Channel for TelegramChannel {
 
         let count = chunks.len();
         let mut last_error = None;
+
+        // Build reply_markup from inline_buttons (attached to last chunk only).
+        let reply_markup: Option<serde_json::Value> = message.inline_buttons.as_ref().map(|buttons| {
+            let keyboard: Vec<Vec<serde_json::Value>> = vec![
+                buttons.iter().map(|b| {
+                    serde_json::json!({
+                        "text": b.label,
+                        "callback_data": b.callback_data,
+                    })
+                }).collect()
+            ];
+            serde_json::json!({ "inline_keyboard": keyboard })
+        });
+
         for (i, chunk) in chunks.into_iter().enumerate() {
             let text = if count > 1 && i < count - 1 {
                 format!("{}\n\n(continues...)", chunk)
             } else {
                 chunk
             };
-            if let Err(e) = self.send_raw(&chat_id, &text, thread_id.as_deref()).await {
+            // Attach buttons only to the last chunk.
+            let markup = if i == count - 1 { reply_markup.clone() } else { None };
+            if let Err(e) = self.send_raw(&chat_id, &text, thread_id.as_deref(), markup).await {
                 warn!("Failed to send chunk {}/{}: {}", i + 1, count, e);
                 last_error = Some(e);
                 // Continue trying subsequent chunks

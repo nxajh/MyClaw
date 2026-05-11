@@ -28,6 +28,18 @@ pub struct ChannelMessage {
     pub image_base64: Option<Vec<String>>,
 }
 
+/// An inline button for interactive messages.
+/// Used by channels that support inline keyboards (e.g. Telegram).
+/// Channels that don't support buttons ignore the `inline_buttons` field.
+#[derive(Debug, Clone)]
+pub struct InlineButton {
+    /// Button label displayed to the user.
+    pub label: String,
+    /// Callback data sent back when the button is clicked.
+    /// For Telegram: max 64 bytes.
+    pub callback_data: String,
+}
+
 /// A message to send through a channel.
 #[derive(Debug, Clone)]
 pub struct SendMessage {
@@ -38,6 +50,9 @@ pub struct SendMessage {
     pub cancellation_token: Option<CancellationToken>,
     pub attachments: Vec<MediaAttachment>,
     pub image_urls: Option<Vec<String>>,
+    /// Optional inline buttons (Telegram inline_keyboard, etc.)
+    /// Channels that don't support buttons silently ignore this field.
+    pub inline_buttons: Option<Vec<InlineButton>>,
 }
 
 impl SendMessage {
@@ -50,6 +65,7 @@ impl SendMessage {
             cancellation_token: None,
             attachments: vec![],
             image_urls: None,
+            inline_buttons: None,
         }
     }
     pub fn is_verbose(&self, chunk_limit: usize) -> bool {

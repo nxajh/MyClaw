@@ -36,6 +36,10 @@ pub enum TurnEvent {
     #[serde(rename = "done")]
     Done { text: String },
 
+    /// Turn 失败 — 模型返回空回复（流式路径专用）
+    #[serde(rename = "empty_response")]
+    EmptyResponse { user_message: String },
+
     /// Turn 发生错误
     #[serde(rename = "error")]
     Error { message: String },

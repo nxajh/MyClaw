@@ -259,6 +259,7 @@ pub async fn send_to_target(ctx: &WebhookContext, target: &str, content: &str) {
         cancellation_token: None,
         attachments: vec![],
         image_urls: None,
+        inline_buttons: None,
     };
 
     if let Err(e) = channel.send(&msg).await {

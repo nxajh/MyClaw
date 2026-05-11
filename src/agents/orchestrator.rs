@@ -453,6 +453,115 @@ impl Orchestrator {
                         continue;
                     }
 
+                    // Check if this is a retry/abort callback from an EmptyResponse prompt.
+                    if msg.content.starts_with("__retry:") || msg.content.starts_with("__abort:") {
+                        let is_retry = msg.content.starts_with("__retry:");
+                        let reply_target = msg.reply_target.clone();
+                        let channel_name_c = channel_name.clone();
+
+                        let channel: Option<Arc<dyn Channel>> = {
+                            channels.get(&channel_name_c).map(|r| r.clone())
+                        };
+                        let channel = match channel {
+                            Some(c) => c,
+                            None => continue,
+                        };
+
+                        if is_retry {
+                            // Take the pending retry message from the agent loop.
+                            let pending = {
+                                let loop_ = Self::get_or_create_loop(
+                                    &sessions, &agent, self.session_manager.as_ref(), &sk,
+                                    &channels, &self.pending_asks, &reply_target,
+                                    &sub_delegator, &delegation_manager,
+                                    &self.persist_backend,
+                                    &self.change_rx,
+                                );
+                                let mut guard = loop_.lock().await;
+                                guard.take_pending_retry()
+                            };
+
+                            if let Some(user_msg) = pending {
+                                // Re-run the turn with the original user message.
+                                let loop_ = Self::get_or_create_loop(
+                                    &sessions, &agent, self.session_manager.as_ref(), &sk,
+                                    &channels, &self.pending_asks, &reply_target,
+                                    &sub_delegator, &delegation_manager,
+                                    &self.persist_backend,
+                                    &self.change_rx,
+                                );
+                                let reply_target_c = reply_target.clone();
+                                let reply_to_id = Some(msg.id.clone());
+                                let sk_c = sk.clone();
+
+                                tokio::spawn(async move {
+                                    channel.on_status(&reply_target_c, ProcessingStatus::Thinking).await;
+
+                                    let response = {
+                                        let mut guard = loop_.lock().await;
+                                        guard.run(&user_msg, None, None).await
+                                    };
+
+                                    match response {
+                                        Ok(text) if !text.is_empty() => {
+                                            let send_msg = SendMessage {
+                                                recipient: reply_target_c.clone(),
+                                                content: text,
+                                                subject: None,
+                                                thread_ts: reply_to_id.clone(),
+                                                cancellation_token: None,
+                                                attachments: vec![],
+                                                image_urls: None,
+                                                inline_buttons: None,
+                                            };
+                                            if let Err(e) = channel.send(&send_msg).await {
+                                                error!(session = %sk_c, err = %e, "retry send failed");
+                                            }
+                                            channel.on_status(&reply_target_c, ProcessingStatus::Done).await;
+                                        }
+                                        Ok(_) => {
+                                            // Empty again — just notify, don't loop.
+                                            let send_msg = SendMessage::new(
+                                                "⚠️ 重试后仍未获得有效回复。",
+                                                reply_target_c.clone(),
+                                            );
+                                            let _ = channel.send(&send_msg).await;
+                                            channel.on_status(&reply_target_c, ProcessingStatus::Done).await;
+                                        }
+                                        Err(e) => {
+                                            channel.on_status(&reply_target_c, ProcessingStatus::Error).await;
+                                            let error_text = format!("⚠️ 重试失败：`{}`", e);
+                                            let send_msg = SendMessage::new(error_text, reply_target_c.clone());
+                                            let _ = channel.send(&send_msg).await;
+                                        }
+                                    }
+                                });
+                            } else {
+                                let send_msg = SendMessage::new(
+                                    "没有待重试的消息，请重新发送。",
+                                    reply_target.clone(),
+                                );
+                                let _ = channel.send(&send_msg).await;
+                            }
+                        } else {
+                            // Abort — clear pending retry and acknowledge.
+                            let loop_ = Self::get_or_create_loop(
+                                &sessions, &agent, self.session_manager.as_ref(), &sk,
+                                &channels, &self.pending_asks, &reply_target,
+                                &sub_delegator, &delegation_manager,
+                                &self.persist_backend,
+                                &self.change_rx,
+                            );
+                            {
+                                let mut guard = loop_.lock().await;
+                                guard.take_pending_retry();
+                            }
+                            let send_msg = SendMessage::new("已取消", reply_target.clone());
+                            let _ = channel.send(&send_msg).await;
+                        }
+                        continue;
+                    }
+
                     let content = msg.content.clone();
                     let image_urls = msg.image_urls.clone();
                     let image_base64 = msg.image_base64.clone();
@@ -488,6 +597,7 @@ impl Orchestrator {
                                         cancellation_token: None,
                                         attachments: vec![],
                                         image_urls: None,
+                                        inline_buttons: None,
                                     };
                                     if let Err(e) = channel.send(&send_msg).await {
                                         error!(session = %sk, err = %e, "command response send failed");
@@ -574,6 +684,7 @@ impl Orchestrator {
                                         cancellation_token: None,
                                         attachments: vec![],
                                         image_urls: None,
+                                        inline_buttons: None,
                                     };
                                     if let Err(e) = channel.send(&send_msg).await {
                                         error!(session = %sk, err = %e, "send failed");
@@ -582,6 +693,51 @@ impl Orchestrator {
                                 }
                                 Ok(_) => {}
                                 Err(e) => {
+                                    // Check if this is an EmptyResponse — the LLM returned
+                                    // nothing after all retries. The user message has been
+                                    // rolled back. Offer retry/abort buttons.
+                                    if let Some(crate::agents::error::AgentError::EmptyResponse { user_message }) =
+                                        e.downcast_ref::<crate::agents::error::AgentError>()
+                                    {
+                                        tracing::info!(session = %sk, "empty response, sending retry prompt");
+                                        channel.on_status(&reply_target, ProcessingStatus::Done).await;
+
+                                        // Store user message for retry.
+                                        {
+                                            let mut guard = loop_.lock().await;
+                                            guard.set_pending_retry(user_message.clone());
+                                        }
+
+                                        // Build callback data (Telegram limits to 64 bytes).
+                                        let sk_prefix: String = sk.chars().take(32).collect();
+                                        let retry_data = format!("__retry:{}", sk_prefix);
+                                        let abort_data = format!("__abort:{}", sk_prefix);
+
+                                        let send_msg = SendMessage {
+                                            recipient: reply_target.clone(),
+                                            content: "⚠️ 处理失败，模型未返回有效回复。".to_string(),
+                                            subject: None,
+                                            thread_ts: reply_to_id.clone(),
+                                            cancellation_token: None,
+                                            attachments: vec![],
+                                            image_urls: None,
+                                            inline_buttons: Some(vec![
+                                                crate::channels::InlineButton {
+                                                    label: "🔄 重试".to_string(),
+                                                    callback_data: retry_data,
+                                                },
+                                                crate::channels::InlineButton {
+                                                    label: "✖ 放弃".to_string(),
+                                                    callback_data: abort_data,
+                                                },
+                                            ]),
+                                        };
+                                        if let Err(send_err) = channel.send(&send_msg).await {
+                                            error!(session = %sk, err = %send_err, "failed to send retry prompt");
+                                        }
+                                        return; // ★ Don't fall through to generic error handler.
+                                    }
+
                                     // Notify channel about the error.
                                     channel.on_status(&reply_target, ProcessingStatus::Error).await;
                                     // Send error message to user so they know what happened.
@@ -598,6 +754,7 @@ impl Orchestrator {
                                         cancellation_token: None,
                                         attachments: vec![],
                                         image_urls: None,
+                                        inline_buttons: None,
                                     };
                                     if let Err(send_err) = channel.send(&send_msg).await {
                                         error!(session = %sk, err = %send_err, "failed to send error notification to user");
@@ -662,6 +819,7 @@ impl Orchestrator {
                                 cancellation_token: None,
                                 attachments: vec![],
                                 image_urls: None,
+                                inline_buttons: None,
                             };
                             if let Err(e) = channel.send(&send_msg).await {
                                 tracing::error!(session = %session_key, err = %e, "send delegation result failed");
@@ -713,6 +871,7 @@ impl Orchestrator {
                                 cancellation_token: None,
                                 attachments: vec![],
                                 image_urls: None,
+                                inline_buttons: None,
                             };
                             if let Err(e) = channel.send(&send_msg).await {
                                 tracing::error!(session = %session_key, err = %e, "send delegation result failed");
@@ -841,6 +1000,7 @@ async fn send_to_target_internal(
         cancellation_token: None,
         attachments: vec![],
         image_urls: None,
+        inline_buttons: None,
     };
 
     if let Err(e) = channel.send(&msg).await {

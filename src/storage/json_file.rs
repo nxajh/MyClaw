@@ -367,6 +367,29 @@ impl SessionBackend for JsonFileBackend {
         Ok(true)
     }
 
+    fn truncate_messages(&self, session_id: &str, keep_count: usize) -> std::io::Result<()> {
+        let path = self.history_path(session_id);
+        let content = fs::read_to_string(&path)?;
+        let lines: Vec<&str> = content.lines().collect();
+        if keep_count >= lines.len() {
+            return Ok(()); // nothing to truncate
+        }
+        let new_content = if keep_count == 0 {
+            String::new()
+        } else {
+            let kept: Vec<&str> = lines.into_iter().take(keep_count).collect();
+            kept.join("\n") + "\n"
+        };
+        fs::write(&path, new_content)?;
+
+        if let Some(mut meta) = self.read_meta(session_id) {
+            meta.message_count = keep_count;
+            meta.last_activity = Utc::now();
+            let _ = self.write_meta(&meta);
+        }
+        Ok(())
+    }
+
     fn save_summary(&self, session_id: &str, summary: &SummaryRecord) -> std::io::Result<()> {
         if let Some(mut meta) = self.read_meta(session_id) {
             meta.compact_version = summary.version;
