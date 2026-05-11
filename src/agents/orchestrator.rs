@@ -693,6 +693,54 @@ impl Orchestrator {
                                 }
                                 Ok(_) => {}
                                 Err(e) => {
+                                    // Check if this is a LoopBreak — the loop breaker
+                                    // detected a repetitive tool pattern. The turn has
+                                    // been rolled back. Offer retry/abort buttons.
+                                    if let Some(crate::agents::error::AgentError::LoopBreak { reason }) =
+                                        e.downcast_ref::<crate::agents::error::AgentError>()
+                                    {
+                                        tracing::info!(session = %sk, reason = %reason, "loop breaker triggered, sending retry prompt");
+                                        channel.on_status(&reply_target, ProcessingStatus::Done).await;
+
+                                        // Store the last user message for retry.
+                                        {
+                                            let mut guard = loop_.lock().await;
+                                            guard.set_pending_retry(content.clone());
+                                        }
+
+                                        // Build callback data (Telegram limits to 64 bytes).
+                                        let sk_prefix: String = sk.chars().take(32).collect();
+                                        let retry_data = format!("__retry:{}", sk_prefix);
+                                        let abort_data = format!("__abort:{}", sk_prefix);
+
+                                        let send_msg = SendMessage {
+                                            recipient: reply_target.clone(),
+                                            content: format!(
+                                                "⚠️ 检测到工具调用循环，已自动中断。\n\n原因：`{}`",
+                                                reason
+                                            ),
+                                            subject: None,
+                                            thread_ts: reply_to_id.clone(),
+                                            cancellation_token: None,
+                                            attachments: vec![],
+                                            image_urls: None,
+                                            inline_buttons: Some(vec![
+                                                crate::channels::InlineButton {
+                                                    label: "🔄 重试".to_string(),
+                                                    callback_data: retry_data,
+                                                },
+                                                crate::channels::InlineButton {
+                                                    label: "✖ 放弃".to_string(),
+                                                    callback_data: abort_data,
+                                                },
+                                            ]),
+                                        };
+                                        if let Err(send_err) = channel.send(&send_msg).await {
+                                            error!(session = %sk, err = %send_err, "failed to send retry prompt");
+                                        }
+                                        return; // ★ Don't fall through to generic error handler.
+                                    }
+
                                     // Check if this is an EmptyResponse — the LLM returned
                                     // nothing after all retries. The user message has been
                                     // rolled back. Offer retry/abort buttons.

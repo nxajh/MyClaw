@@ -191,7 +191,37 @@ impl AgentLoop {
         let is_streamed = matches!(&stream_mode, StreamMode::Streamed { .. });
 
         // 3. Run the chat loop (handles tool calls iteratively).
-        let text = self.chat_loop(messages, stream_mode).await?;
+        let text = match self.chat_loop(messages, stream_mode).await {
+            Ok(text) => text,
+            Err(e) => {
+                // Check if this is a LoopBreak error — rollback turn and re-raise
+                // so the orchestrator can offer retry/abort buttons to the user.
+                if let Some(crate::agents::error::AgentError::LoopBreak { reason }) =
+                    e.downcast_ref::<crate::agents::error::AgentError>()
+                {
+                    tracing::warn!(
+                        turn_snapshot_len,
+                        current_len = self.session.history.len(),
+                        reason = %reason,
+                        "loop breaker triggered, rolling back turn"
+                    );
+
+                    // Roll back in-memory history to pre-turn state.
+                    self.session.rollback_to(turn_snapshot_len);
+
+                    // Roll back persisted history.
+                    if let Some(ref hook) = self.persist_hook {
+                        hook.truncate_messages(&self.session.id, turn_snapshot_len);
+                    }
+
+                    return Err(crate::agents::error::AgentError::LoopBreak {
+                        reason: reason.clone(),
+                    }.into());
+                }
+                // Not a LoopBreak — propagate as-is.
+                return Err(e);
+            }
+        };
 
         // 4. Handle empty response: rollback turn and return error.
         //    chat_loop retries internally (stream timeout × 3, empty response × 3).
@@ -689,7 +719,9 @@ impl AgentLoop {
                 match self.loop_breaker.record_and_check(&call.name, &call.arguments, &result_content) {
                     LoopBreak::Detected(reason) => {
                         tracing::warn!(reason = ?reason, "loop breaker triggered, aborting turn");
-                        anyhow::bail!("Loop breaker triggered: {:?}", reason);
+                        return Err(crate::agents::error::AgentError::LoopBreak {
+                            reason: format!("{:?}", reason),
+                        }.into());
                     }
                     LoopBreak::None => {}
                 }
