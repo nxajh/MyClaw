@@ -887,9 +887,8 @@ impl AgentLoop {
             }
 
             if changes.memory_changed {
-                let memory_dir = std::path::Path::new(&self.config.prompt_config.workspace_dir)
-                    .join("memory");
-                let files = crate::memory::scan_memory_files(&memory_dir);
+                let memory_dir = std::path::Path::new(&self.config.prompt_config.knowledge_dir);
+                let files = crate::memory::scan_memory_files(memory_dir);
                 let entries: Vec<crate::memory::IndexEntry> =
                     files.iter().map(crate::memory::IndexEntry::from).collect();
                 let history = self.session.history.clone();
@@ -2154,9 +2153,8 @@ impl AgentLoop {
 
         // Refresh memory index (summarizer may have written memory files via tools).
         {
-            let memory_dir = std::path::Path::new(&self.config.prompt_config.workspace_dir)
-                .join("memory");
-            let files = crate::memory::scan_memory_files(&memory_dir);
+            let memory_dir = std::path::Path::new(&self.config.prompt_config.knowledge_dir);
+            let files = crate::memory::scan_memory_files(memory_dir);
             let entries: Vec<crate::memory::IndexEntry> =
                 files.iter().map(crate::memory::IndexEntry::from).collect();
             let history = self.session.history.clone();

@@ -53,6 +53,8 @@ pub enum SkillsPromptInjectionMode {
 pub struct SystemPromptConfig {
     /// Workspace directory (contains SOUL.md, USER.md, etc.).
     pub workspace_dir: String,
+    /// Knowledge directory (contains memory/*.md files).
+    pub knowledge_dir: String,
     /// Current model name (e.g. "minimax-cn/MiniMax-M2.7").
     pub model_name: String,
     /// Autonomy level (safety section).
@@ -79,6 +81,7 @@ impl Default for SystemPromptConfig {
     fn default() -> Self {
         Self {
             workspace_dir: String::new(),
+            knowledge_dir: String::new(),
             model_name: String::new(),
             autonomy: AutonomyLevel::Default,
             skills_mode: SkillsPromptInjectionMode::Compact,
@@ -219,7 +222,7 @@ impl SystemPromptBuilder {
     }
 
     fn build_memory_section(&self) -> String {
-        crate::memory::build_memory_section(&self.config.workspace_dir)
+        crate::memory::build_memory_section(&self.config.knowledge_dir)
     }
 
     fn build_runtime(&self) -> String {

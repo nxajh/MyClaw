@@ -105,6 +105,10 @@ struct RawConfig {
     #[serde(default)]
     workspace_dir: Option<String>,
 
+    /// 知识库目录路径。默认为 {workspace_dir}/memory。
+    #[serde(default)]
+    knowledge_dir: Option<String>,
+
     /// Provider configurations.
     #[serde(default)]
     providers: HashMap<String, ProviderConfig>,
@@ -161,6 +165,8 @@ pub struct LoggingConfig {
 pub struct AppConfig {
     /// Workspace directory (absolute path).
     pub workspace_dir: PathBuf,
+    /// Knowledge directory (absolute path). Defaults to {workspace_dir}/memory.
+    pub knowledge_dir: PathBuf,
     /// Path to the config file.
     pub config_path: PathBuf,
     /// Provider configurations.
@@ -222,8 +228,14 @@ impl ConfigLoader {
                     .unwrap_or_else(|| PathBuf::from(".myclaw/workspace"))
             });
 
+        // Resolve knowledge_dir: explicit path or default to {workspace_dir}/memory.
+        let knowledge_dir = raw.knowledge_dir
+            .map(|d| Self::expand_path(&d))
+            .unwrap_or_else(|| workspace_dir.join("memory"));
+
         Ok(AppConfig {
             workspace_dir,
+            knowledge_dir,
             config_path,
             providers: raw.providers,
             routing: raw.routing,

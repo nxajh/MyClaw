@@ -173,6 +173,7 @@ impl SubAgentDelegator {
             max_history: 100,
             prompt_config: crate::agents::SystemPromptConfig {
                 workspace_dir: String::new(),
+                knowledge_dir: String::new(),
                 model_name: String::new(),
                 autonomy: crate::agents::AutonomyLevel::Full,
                 skills_mode: crate::agents::SkillsPromptInjectionMode::Compact,

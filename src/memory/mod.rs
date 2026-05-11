@@ -98,12 +98,12 @@ impl From<&MemoryFile> for IndexEntry {
 
 // ── Directory management ───────────────────────────────────────────────────
 
-/// Ensure the `memory/` directory exists under the workspace.
-/// Returns the memory directory path.
-pub fn ensure_memory_dir(workspace_dir: &str) -> std::io::Result<std::path::PathBuf> {
-    let memory_dir = Path::new(workspace_dir).join(MEMORY_DIR_NAME);
-    fs::create_dir_all(&memory_dir)?;
-    Ok(memory_dir)
+/// Ensure the knowledge directory exists.
+/// Returns the knowledge directory path.
+pub fn ensure_memory_dir(knowledge_dir: &str) -> std::io::Result<std::path::PathBuf> {
+    let memory_dir = Path::new(knowledge_dir);
+    fs::create_dir_all(memory_dir)?;
+    Ok(memory_dir.to_path_buf())
 }
 
 // ── Scanning ───────────────────────────────────────────────────────────────
@@ -246,13 +246,13 @@ pub fn truncate_index(content: &str, max_lines: usize, max_bytes: usize) -> Stri
 
 /// Build the complete Memory section for the system prompt.
 /// Includes static instructions + dynamic index from memory/*.md.
-pub fn build_memory_section(workspace_dir: &str) -> String {
-    if workspace_dir.is_empty() {
+pub fn build_memory_section(knowledge_dir: &str) -> String {
+    if knowledge_dir.is_empty() {
         return String::new();
     }
 
-    let memory_dir = Path::new(workspace_dir).join(MEMORY_DIR_NAME);
-    let files = scan_memory_files(&memory_dir);
+    let memory_dir = Path::new(knowledge_dir);
+    let files = scan_memory_files(memory_dir);
     let entries: Vec<IndexEntry> = files.iter().map(IndexEntry::from).collect();
     let index_text = format_memory_index(&entries);
 

@@ -419,9 +419,11 @@ fn build_channels(config: &crate::config::AppConfig) -> Vec<(&'static str, Arc<d
 fn build_prompt_config(
     cfg: &crate::config::agent::AgentConfig,
     workspace_dir: &std::path::Path,
+    knowledge_dir: &std::path::Path,
 ) -> SystemPromptConfig {
     SystemPromptConfig {
         workspace_dir: workspace_dir.to_string_lossy().to_string(),
+        knowledge_dir: knowledge_dir.to_string_lossy().to_string(),
         model_name: cfg.prompt.model_name.clone().unwrap_or_default(),
         autonomy: match cfg.autonomy_level {
             crate::config::agent::AutonomyLevel::Full => AutonomyLevel::Full,
@@ -447,11 +449,11 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         format!("failed to set cwd to workspace_dir '{}'", config.workspace_dir.display())
     })?;
 
-    // Ensure memory/ directory exists
+    // Ensure knowledge directory exists
     if let Err(e) = crate::memory::ensure_memory_dir(
-        config.workspace_dir.to_str().unwrap_or("."),
+        config.knowledge_dir.to_str().unwrap_or("."),
     ) {
-        tracing::warn!(error = %e, "failed to create memory/ directory (non-fatal)");
+        tracing::warn!(error = %e, "failed to create knowledge directory (non-fatal)");
     }
 
     // ── Composition Root: assemble all components ──────────────────────────
@@ -484,7 +486,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     tracing::debug!("web_search tool registered (connected to ServiceRegistry)");
 
     // WorkspaceWatcher for hot-reload.
-    let watcher = crate::agents::WorkspaceWatcher::new(&config.workspace_dir)?;
+    let watcher = crate::agents::WorkspaceWatcher::new(&config.workspace_dir, &config.knowledge_dir)?;
     let change_rx = watcher.rx.clone();
 
     // ── Sub-agent delegator (conditional) ──────────────────────────────────────
@@ -565,7 +567,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let agent_config = AgentConfig {
         max_tool_calls: config.agent.max_tool_calls,
         max_history: config.agent.max_history,
-        prompt_config: build_prompt_config(&config.agent, &config.workspace_dir),
+        prompt_config: build_prompt_config(&config.agent, &config.workspace_dir, &config.knowledge_dir),
         context: config.agent.context.clone(),
         stream_chunk_timeout_secs: config.agent.stream_chunk_timeout_secs,
         max_output_bytes: calculate_max_output_bytes(&config, &registry_arc),

@@ -29,12 +29,12 @@ pub struct WorkspaceWatcher {
 }
 
 impl WorkspaceWatcher {
-    pub fn new(workspace_dir: &Path) -> Result<Self> {
+    pub fn new(workspace_dir: &Path, knowledge_dir: &Path) -> Result<Self> {
         let (tx, rx) = watch::channel(ChangeSet::default());
 
         let skills_dir = workspace_dir.join("skills");
         let agents_dir = workspace_dir.join("agents");
-        let memory_dir = workspace_dir.join("memory");
+        let memory_dir = knowledge_dir.to_path_buf();
 
         let skills_dir_c = skills_dir.clone();
         let agents_dir_c = agents_dir.clone();
