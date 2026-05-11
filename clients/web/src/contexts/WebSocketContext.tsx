@@ -1,4 +1,4 @@
-import { createContext, useContext, type ReactNode } from 'react'
+import { createContext, useContext, type ReactNode, type Dispatch, type SetStateAction } from 'react'
 import { useWebSocket } from '../hooks/useWebSocket'
 import type { ChatMessage, ConnectionStatus } from '../hooks/useWebSocket'
 
@@ -9,7 +9,7 @@ interface WebSocketContextValue {
   sendMessage: (content: string) => void
   cancel: () => void
   sendRaw: (obj: Record<string, unknown>) => void
-  setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>
+  setMessages: Dispatch<SetStateAction<ChatMessage[]>>
   addMessageListener: (fn: (data: Record<string, unknown>) => void) => () => void
 }
 
