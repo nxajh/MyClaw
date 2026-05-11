@@ -21,6 +21,7 @@ enum AttachmentKind {
     McpInstructions,
     MemoryListing,
     DateInjection,
+    AutonomyNotice,
 }
 
 /// 单类增量。
@@ -328,15 +329,18 @@ impl AttachmentManager {
 
     // ── Render ──────────────────────────────────────────────────────────
 
-    /// 将 pending delta 合并为一条 ChatMessage。
+    /// 将 pending delta 合并为 `<system-reminder>` 文本字符串。
     ///
     /// 无 delta 时返回 `None`。
-    pub fn build_message(&self, skills: &SkillManager) -> Option<ChatMessage> {
+    /// 调用方负责将返回的文本前置到当前 user 消息中再写入 history。
+    pub fn build_text(&self, skills: &SkillManager) -> Option<String> {
         let mut sections = Vec::new();
 
-        // Date injection comes first (not a section, just a plain line).
         if let Some(delta) = self.pending.get(&AttachmentKind::DateInjection) {
             sections.push(Self::render_date(delta));
+        }
+        if let Some(delta) = self.pending.get(&AttachmentKind::AutonomyNotice) {
+            sections.push(Self::render_autonomy(delta));
         }
         if let Some(delta) = self.pending.get(&AttachmentKind::SkillListing) {
             sections.push(Self::render_skills(delta, skills));
@@ -355,10 +359,32 @@ impl AttachmentManager {
             return None;
         }
 
-        Some(ChatMessage::user_text(format!(
+        Some(format!(
             "<system-reminder>\n{}\n</system-reminder>",
             sections.join("\n\n")
-        )))
+        ))
+    }
+
+    /// 将 pending delta 合并为一条 ChatMessage（向后兼容旧调用点）。
+    pub fn build_message(&self, skills: &SkillManager) -> Option<ChatMessage> {
+        self.build_text(skills).map(ChatMessage::user_text)
+    }
+
+    /// Notify the model that the autonomy level has changed.
+    /// Called from `apply_session_override` when `autonomy` is updated.
+    pub fn diff_autonomy(&mut self, new_level: &crate::config::agent::AutonomyLevel) {
+        let label = match new_level {
+            crate::config::agent::AutonomyLevel::Full => "full",
+            crate::config::agent::AutonomyLevel::Default => "default",
+            crate::config::agent::AutonomyLevel::ReadOnly => "read_only",
+        };
+        self.pending.insert(
+            AttachmentKind::AutonomyNotice,
+            Delta {
+                added: vec![label.to_string()],
+                removed: vec![],
+            },
+        );
     }
 
     /// 清空 pending（每 turn 结算后调用）。
@@ -374,6 +400,7 @@ impl AttachmentManager {
             AttachmentKind::McpInstructions => "mcp",
             AttachmentKind::MemoryListing => "memory",
             AttachmentKind::DateInjection => "date",
+            AttachmentKind::AutonomyNotice => "autonomy",
         }).collect()
     }
 
@@ -458,6 +485,19 @@ impl AttachmentManager {
 
     fn render_date(delta: &Delta) -> String {
         delta.added.join("\n")
+    }
+
+    fn render_autonomy(delta: &Delta) -> String {
+        let level = delta.added.first().map(|s| s.as_str()).unwrap_or("default");
+        let desc = match level {
+            "full" => "All tools are permitted. No restrictions apply.",
+            "read_only" => "Autonomy is now READ-ONLY. \
+                You may only use read-only tools (file_read, list_dir, search, web_search, etc.). \
+                Shell execution, file writes, HTTP calls, and agent delegation are blocked.",
+            _ => "Autonomy is set to default. \
+                Safe tools are permitted; avoid destructive operations without user confirmation.",
+        };
+        format!("## Autonomy Level Changed\n\nCurrent autonomy: **{}**. {}", level, desc)
     }
 }
 

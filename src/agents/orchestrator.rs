@@ -744,8 +744,7 @@ impl Orchestrator {
         let loop_ = if let Some(existing) = self.sessions.get(session_key) {
             existing.clone()
         } else {
-            let sm = SessionManager::new(self.persist_backend.clone());
-            let session = sm.get_or_create(session_key);
+            let session = self.session_manager.get_or_create(session_key);
             let persist_hook: Arc<dyn PersistHook> = Arc::new(
                 BackendPersistHook::new(self.persist_backend.clone())
             );
@@ -823,6 +822,7 @@ async fn send_to_target_internal(
 mod tests {
     use super::*;
 
+    #[test]
     fn test_session_key() {
         assert_eq!(
             Orchestrator::session_key("wechat", "o9cq80zXpSX1Hz0ph_QNs591k4PA"),

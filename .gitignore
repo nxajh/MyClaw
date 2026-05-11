@@ -2,3 +2,13 @@
 **/*.rs.bak
 .DS_Store
 myclaw
+# Built binaries and backups
+/dist/
+*.old
+*.old2
+*.old3
+*.bak
+*.bak2
+*.prev
+# Debug / session logs
+*.jsonl

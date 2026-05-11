@@ -511,6 +511,12 @@ impl AgentLoop {
         if let Some(t) = ov.compact_threshold { self.config.context.compact_threshold = t; }
         if let Some(r) = ov.retain_work_units { self.config.context.retain_work_units = r; }
 
+        // Autonomy change: inject a system-reminder so the model learns the new policy
+        // on the next turn. The actual hard enforcement is in execute_tool regardless.
+        if let Some(ref autonomy) = ov.autonomy {
+            self.attachments.diff_autonomy(autonomy);
+        }
+
         // Store override in session for next loop_for_with_persist call.
         self.session.session_override = ov;
     }
@@ -622,10 +628,13 @@ impl AgentLoop {
             }
         }
 
-        // Compute initial diff (full listing of skills/agents/MCP) against history.
-        // If history is empty (first turn or post-compaction), this sends a full listing.
+        // 1. Hot-reload (may update skills/agents) — runs before any diff so that
+        //    subsequent diffs see the freshest state.
+        self.check_changes();
+
+        // 2. Compute all attachment deltas against current history (before adding
+        //    the new user message, so rebuild_from_history sees only prior turns).
         {
-            tracing::info!("run: computing diff against history");
             let history = self.session.history.clone();
             {
                 let skills = self.skills.read();
@@ -636,30 +645,43 @@ impl AgentLoop {
                 );
                 self.attachments.diff_skills(&skills, &history);
             }
-            // Agent listing: read from sub_delegator if available.
             if let Some(ref delegator) = self.sub_delegator {
                 let agents = delegator.available_agents();
                 tracing::info!(agent_count = agents.len(), "run: diff_agents");
                 self.attachments.diff_agents(&agents, &history);
-            } else {
-                tracing::info!("run: no sub_delegator, skipping agent diff");
             }
             if !self.mcp_instructions.is_empty() {
                 tracing::info!(mcp_count = self.mcp_instructions.len(), "run: diff_mcp");
                 self.attachments.diff_mcp(&self.mcp_instructions, &history);
             }
+            let tz = self.config.prompt_config.timezone_offset;
+            self.attachments.diff_date(tz, &history);
             tracing::info!(
                 pending_keys = ?self.attachments.pending_keys(),
                 "run: diff complete"
             );
         }
 
-        // 1. Account for the new user message before adding to history.
-        let user_msg = ChatMessage::user_text(user_message.to_string());
-        self.token_tracker.record_pending(estimate_message_tokens(&user_msg));
-        self.session.add_user_text(user_message.to_string());
+        // 3. Build attachment text and merge it into the user message.
+        //    The <system-reminder> is prepended so the model sees context before input.
+        //    Both are persisted as a single history entry — no consecutive user messages.
+        let combined_user = {
+            let skills = self.skills.read();
+            match self.attachments.build_text(&skills) {
+                Some(reminder) => {
+                    tracing::info!(reminder_len = reminder.len(), "merging attachment into user message");
+                    format!("{}\n\n{}", reminder, user_message)
+                }
+                None => user_message.to_string(),
+            }
+        };
+        self.attachments.clear_pending();
 
-        // Persist user message via hook; capture the assigned DB id.
+        // 4. Add combined user message to history and persist.
+        let user_msg = ChatMessage::user_text(combined_user.clone());
+        self.token_tracker.record_pending(estimate_message_tokens(&user_msg));
+        self.session.add_user_text(combined_user);
+
         if let Some(ref hook) = self.persist_hook {
             if let Some(msg) = self.session.history.last() {
                 if let Some(id) = hook.persist_message(&self.session.id, msg) {
@@ -673,7 +695,7 @@ impl AgentLoop {
         self.pending_image_urls = image_urls;
         self.pending_image_base64 = image_base64;
 
-        // 2. Build the full message list for this turn.
+        // 5. Build the full message list for this turn (pure: no side effects).
         let messages = self.build_messages().await?;
 
         // 3. Run the chat loop (handles tool calls iteratively).
@@ -770,63 +792,20 @@ impl AgentLoop {
         self.registry.get_chat_provider(Capability::Chat)
     }
 
-    /// Build the message list: system prompt + attachment (delta) + history.
+    /// Build the message list: system prompt + history.
+    ///
+    /// Pure function — no side effects on session state.
+    /// All attachment merging and hot-reload happens in `run_turn_core` before this is called.
     async fn build_messages(&mut self) -> anyhow::Result<Vec<ChatMessage>> {
-        let mut messages = Vec::with_capacity(self.session.history.len() + 8);
+        let mut messages = Vec::with_capacity(self.session.history.len() + 2);
 
-        // System prompt (static).
         if !self.system_prompt.is_empty() {
             messages.push(ChatMessage::system_text(&self.system_prompt));
         }
 
-        // Check for file changes (hot-reload).
-        self.check_changes();
-
-        // Date injection: check if date system-reminder is needed.
-        {
-            let tz = self.config.prompt_config.timezone_offset;
-            let history = self.session.history.clone();
-            self.attachments.diff_date(tz, &history);
-        }
-
-        // If there's a pending attachment delta, persist it into session history.
-        // All system-reminders are kept in history — compaction naturally removes old ones.
-        {
-            let skills = self.skills.read();
-            tracing::info!(
-                pending_keys = ?self.attachments.pending_keys(),
-                skill_count = skills.skill_count(),
-                "build_messages: checking attachment delta"
-            );
-            if let Some(msg) = self.attachments.build_message(&skills) {
-                tracing::info!(
-                    msg_len = msg.text_content().len(),
-                    "build_messages: persisting attachment to history"
-                );
-                // Append to history (previous system-reminders are kept)
-                self.session.add_user_text(msg.text_content().to_string());
-
-                // Persist the system-reminder so it survives session switches/restarts.
-                // Without this, the message lives only in memory and is lost when the
-                // session is evicted from the DashMap.
-                if let Some(ref hook) = self.persist_hook {
-                    if let Some(reminder_msg) = self.session.history.last() {
-                        if let Some(id) = hook.persist_message(&self.session.id, reminder_msg) {
-                            if let Some(last_id) = self.session.message_ids.last_mut() {
-                                *last_id = id;
-                            }
-                        }
-                    }
-                }
-
-                self.attachments.clear_pending();
-            }
-        }
-
-        // History (includes the attachment if just persisted).
         messages.extend(self.session.history.iter().cloned());
 
-        // Safety: remove orphan tool results before sending to provider.
+        // Remove orphan tool results before sending to provider.
         super::session_manager::sanitize_history(&mut messages);
 
         Ok(messages)
@@ -901,8 +880,11 @@ impl AgentLoop {
     /// Core chat loop: call LLM, handle tool calls, repeat until text response.
     async fn chat_loop(&mut self, initial_messages: Vec<ChatMessage>, stream_mode: StreamMode) -> anyhow::Result<String> {
         let mut tool_calls_count = 0usize;
+        let mut stream_timeout_retries = 0usize;
+        let mut empty_response_retries = 0usize;
         let mut boosted_max_tokens = false;
         let mut first_iteration = true;
+        let mut images_attached = false;
 
         // Check if we have pending images that need a vision-capable model.
         let has_images = self.pending_image_urls.as_ref().is_some_and(|v| !v.is_empty())
@@ -978,8 +960,13 @@ impl AgentLoop {
                 self.build_messages().await?
             };
 
-            // Attach pending images to the last user message if model supports it.
-            self.attach_images_if_supported(&mut messages, &model_id);
+            // Attach pending images to the last user message only on the first iteration.
+            // Subsequent iterations (after tool calls) rebuild from history which already
+            // has the text content; re-attaching would send images repeatedly.
+            if !images_attached {
+                self.attach_images_if_supported(&mut messages, &model_id);
+                images_attached = true;
+            }
 
             // 2. Build tool specs from skills manager.
             let tools = self.build_tool_specs();
@@ -1049,14 +1036,13 @@ impl AgentLoop {
                 match result {
                     Ok(r) => r,
                     Err(e) if e.to_string().contains("stream chunk timeout") => {
-                        // Server hung without sending data — count as failed attempt.
-                        tool_calls_count += 1;
-                        if tool_calls_count > 3 {
+                        stream_timeout_retries += 1;
+                        if stream_timeout_retries > 3 {
                             tracing::error!("stream timeout after 3 retries, giving up");
                             return Ok(String::new());
                         }
                         tracing::warn!(
-                            attempt = tool_calls_count,
+                            attempt = stream_timeout_retries,
                             "stream chunk timeout, server may be hung, retrying..."
                         );
                         continue;
@@ -1108,23 +1094,19 @@ impl AgentLoop {
             // 5. No tool calls → return text.
             if response.tool_calls.is_empty() {
                 if response.text.is_empty() {
-                    tool_calls_count += 1;
-                    if tool_calls_count > 3 {
+                    empty_response_retries += 1;
+                    if empty_response_retries > 3 {
                         tracing::error!("empty response after 3 retries, giving up");
                         return Ok(String::new());
                     }
 
                     match response.stop_reason {
                         StopReason::MaxTokens => {
-                            // Output budget exhausted by thinking.
-                            // Boost max_tokens on retry so thinking + text both fit.
-                            tracing::warn!(attempt = tool_calls_count, "output hit max_tokens with no text, boosting output budget for retry...");
+                            tracing::warn!(attempt = empty_response_retries, "output hit max_tokens with no text, boosting output budget for retry...");
                             boosted_max_tokens = true;
                         }
                         _ => {
-                            // Model returned end_turn/content_filter but no text (thinking-only).
-                            // Just retry — the model may produce text on the next attempt.
-                            tracing::warn!(attempt = tool_calls_count, stop = ?response.stop_reason, "chat response text is empty (thinking-only), retrying...");
+                            tracing::warn!(attempt = empty_response_retries, stop = ?response.stop_reason, "chat response text is empty (thinking-only), retrying...");
                         }
                     }
                     continue;
@@ -1270,7 +1252,29 @@ impl AgentLoop {
     /// Collect all events from a streaming chat response.
     async fn collect_stream(
         &self,
+        stream: BoxStream<StreamEvent>,
+    ) -> anyhow::Result<CollectedResponse> {
+        self.collect_stream_inner(stream, None, None).await
+    }
+
+    /// Like `collect_stream`, but also forwards text/thinking chunks as
+    /// `TurnEvent`s via `event_tx` and respects `CancellationToken`.
+    async fn collect_stream_with_events(
+        &self,
+        stream: BoxStream<StreamEvent>,
+        event_tx: &mpsc::Sender<TurnEvent>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<CollectedResponse> {
+        self.collect_stream_inner(stream, Some(event_tx), Some(cancel)).await
+    }
+
+    /// Unified stream collector. `event_tx` and `cancel` are both `Some` for the
+    /// streaming path, both `None` for the collect-only path.
+    async fn collect_stream_inner(
+        &self,
         mut stream: BoxStream<StreamEvent>,
+        event_tx: Option<&mpsc::Sender<TurnEvent>>,
+        cancel: Option<&CancellationToken>,
     ) -> anyhow::Result<CollectedResponse> {
         let mut text = String::new();
         let mut reasoning_content: Option<String> = None;
@@ -1282,6 +1286,13 @@ impl AgentLoop {
         let max_output_bytes = self.config.max_output_bytes;
 
         loop {
+            // Cancellation checkpoint (streaming path only).
+            if let Some(cancel) = cancel {
+                if cancel.is_cancelled() {
+                    return Ok(CollectedResponse { text, reasoning_content, tool_calls, stop_reason, usage });
+                }
+            }
+
             // Check output length limit
             if text.len() > max_output_bytes {
                 tracing::warn!(
@@ -1297,13 +1308,25 @@ impl AgentLoop {
             match tokio::time::timeout(chunk_timeout, stream.next()).await {
                 Ok(Some(event)) => {
                     match event {
-                        StreamEvent::Delta { text: delta } => text.push_str(&delta),
+                        StreamEvent::Delta { text: delta } => {
+                            text.push_str(&delta);
+                            if let Some(tx) = event_tx {
+                                if tx.send(TurnEvent::Chunk { delta }).await.is_err() {
+                                    anyhow::bail!("Client disconnected during stream");
+                                }
+                            }
+                        }
                         StreamEvent::Thinking { text: delta } => {
                             if !delta.is_empty() {
                                 if let Some(rc) = &mut reasoning_content {
                                     rc.push_str(&delta);
                                 } else {
-                                    reasoning_content = Some(delta);
+                                    reasoning_content = Some(delta.clone());
+                                }
+                                if let Some(tx) = event_tx {
+                                    if tx.send(TurnEvent::Thinking { delta }).await.is_err() {
+                                        anyhow::bail!("Client disconnected during stream");
+                                    }
                                 }
                             }
                         }
@@ -1387,149 +1410,6 @@ impl AgentLoop {
         })
     }
 
-    /// Like `collect_stream`, but also forwards text/thinking chunks as
-    /// `TurnEvent`s via `event_tx` and respects `CancellationToken`.
-    ///
-    /// Cancellation behaviour:
-    /// - Returns `Ok(CollectedResponse)` with whatever was collected so far
-    ///   (the caller is responsible for sending `TurnEvent::Cancelled`).
-    /// - If `event_tx.send()` fails (client disconnected), returns
-    ///   `Err("Client disconnected")`.
-    async fn collect_stream_with_events(
-        &self,
-        mut stream: BoxStream<StreamEvent>,
-        event_tx: &mpsc::Sender<TurnEvent>,
-        cancel: &CancellationToken,
-    ) -> anyhow::Result<CollectedResponse> {
-        let mut text = String::new();
-        let mut reasoning_content: Option<String> = None;
-        let mut tool_calls = Vec::new();
-        let mut stop_reason = StopReason::EndTurn;
-        let mut usage: Option<ChatUsage> = None;
-
-        let chunk_timeout = Duration::from_secs(self.config.stream_chunk_timeout_secs);
-        let max_output_bytes = self.config.max_output_bytes;
-
-        loop {
-            // Cancellation checkpoint 1: between stream chunks.
-            if cancel.is_cancelled() {
-                return Ok(CollectedResponse {
-                    text,
-                    reasoning_content,
-                    tool_calls,
-                    stop_reason,
-                    usage,
-                });
-            }
-
-            // Check output length limit
-            if text.len() > max_output_bytes {
-                tracing::warn!(
-                    output_bytes = text.len(),
-                    max_bytes = max_output_bytes,
-                    "stream output exceeded max size, forcing stop"
-                );
-                stop_reason = StopReason::MaxTokens;
-                break;
-            }
-
-            // Wait for next chunk with timeout
-            match tokio::time::timeout(chunk_timeout, stream.next()).await {
-                Ok(Some(event)) => {
-                    match event {
-                        StreamEvent::Delta { text: delta } => {
-                            text.push_str(&delta);
-                            // Forward chunk to client. If send fails, client is gone.
-                            if event_tx.send(TurnEvent::Chunk { delta }).await.is_err() {
-                                anyhow::bail!("Client disconnected during stream");
-                            }
-                        }
-                        StreamEvent::Thinking { text: delta } => {
-                            if !delta.is_empty() {
-                                if let Some(rc) = &mut reasoning_content {
-                                    rc.push_str(&delta);
-                                } else {
-                                    reasoning_content = Some(delta.clone());
-                                }
-                                if event_tx.send(TurnEvent::Thinking { delta }).await.is_err() {
-                                    anyhow::bail!("Client disconnected during stream");
-                                }
-                            }
-                        }
-                        StreamEvent::ToolCallStart { id, name, initial_arguments } => {
-                            tool_calls.push(ToolCall {
-                                id,
-                                name,
-                                arguments: initial_arguments,
-                            });
-                        }
-                        StreamEvent::ToolCallDelta { id, delta } => {
-                            if !id.is_empty() {
-                                if let Some(call) = tool_calls.iter_mut().find(|c| c.id == id) {
-                                    call.arguments.push_str(&delta);
-                                } else {
-                                    tool_calls.push(ToolCall {
-                                        id: id.clone(),
-                                        name: String::new(),
-                                        arguments: delta,
-                                    });
-                                    tracing::debug!(tool_call_id = %id, "auto-created tool call from delta");
-                                }
-                            } else if let Some(last) = tool_calls.last_mut() {
-                                last.arguments.push_str(&delta);
-                            }
-                        }
-                        StreamEvent::ToolCallEnd { id, name, arguments } => {
-                            if let Some(call) = tool_calls.iter_mut().find(|c| c.id == id) {
-                                call.name = name;
-                                call.arguments = arguments;
-                            }
-                        }
-                        StreamEvent::Usage(u) => {
-                            if let Some(ref mut existing) = usage {
-                                if u.input_tokens.is_some() { existing.input_tokens = u.input_tokens; }
-                                if u.output_tokens.is_some() { existing.output_tokens = u.output_tokens; }
-                                if u.cached_input_tokens.is_some() { existing.cached_input_tokens = u.cached_input_tokens; }
-                                if u.reasoning_tokens.is_some() { existing.reasoning_tokens = u.reasoning_tokens; }
-                                if u.cache_write_tokens.is_some() { existing.cache_write_tokens = u.cache_write_tokens; }
-                            } else {
-                                usage = Some(u);
-                            }
-                        }
-                        StreamEvent::Done { reason } => {
-                            stop_reason = reason;
-                            break;
-                        }
-                        StreamEvent::HttpError { message, .. } => {
-                            anyhow::bail!("Stream error: {}", message);
-                        }
-                        StreamEvent::Error(e) => {
-                            anyhow::bail!("Stream error: {}", e);
-                        }
-                    }
-                }
-                Ok(None) => {
-                    tracing::warn!("stream ended without Done event");
-                    break;
-                }
-                Err(_) => {
-                    anyhow::bail!(
-                        "stream chunk timeout after {}s, no data received",
-                        chunk_timeout.as_secs()
-                    );
-                }
-            }
-        }
-
-        Ok(CollectedResponse {
-            text,
-            reasoning_content,
-            tool_calls,
-            stop_reason,
-            usage,
-        })
-    }
-
     /// Build tool specs from the skills manager.
     fn build_tool_specs(&self) -> Vec<crate::providers::capability_chat::ToolSpec> {
         use crate::providers::capability_chat::ToolSpec;
@@ -1551,6 +1431,23 @@ impl AgentLoop {
     /// Special-cases `ask_user` and `agent_delegate` to use handlers when available.
     /// Applies framework-level truncation based on the tool's `max_output_tokens()`.
     async fn execute_tool(&mut self, call: &ToolCall) -> anyhow::Result<ToolResult> {
+        // Autonomy enforcement: block write-capable tools in ReadOnly mode.
+        if let Some(ref autonomy) = self.session.session_override.autonomy {
+            if matches!(autonomy, crate::config::agent::AutonomyLevel::ReadOnly) {
+                if is_write_tool(&call.name) {
+                    tracing::info!(tool = %call.name, "tool blocked by ReadOnly autonomy policy");
+                    return Ok(ToolResult {
+                        success: false,
+                        output: format!(
+                            "Tool '{}' is not allowed in read-only mode (autonomy: ReadOnly).",
+                            call.name
+                        ),
+                        error: Some("autonomy_policy: ReadOnly".to_string()),
+                    });
+                }
+            }
+        }
+
         // Special handling for ask_user tool.
         if call.name == "ask_user" {
             if let Some(ref handler) = self.ask_user_handler {
@@ -1743,10 +1640,10 @@ impl AgentLoop {
     ) -> (bool, Vec<String>) {
         let mut reasons = Vec::new();
 
-        // Check 1: length reasonable (no more than 2000 chars).
-        if summary.chars().count() > 2000 {
+        // Check 1: summary must have meaningful content (very short = likely truncated).
+        if summary.chars().count() < 100 {
             reasons.push(format!(
-                "summary too long: {} chars (limit 2000)",
+                "summary too short: {} chars (minimum 100)",
                 summary.chars().count()
             ));
         }
@@ -1772,12 +1669,13 @@ impl AgentLoop {
     fn extract_file_paths(messages: &[ChatMessage]) -> Vec<String> {
         static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
         let re = RE.get_or_init(|| regex::Regex::new(r"(?:/[\w/.-]+\.\w{1,5})|(?:src/[\w/.-]+)").unwrap());
+        let mut seen = std::collections::HashSet::new();
         let mut paths = Vec::new();
         for msg in messages {
             for cap in re.captures_iter(&msg.text_content()) {
                 if let Some(m) = cap.get(0) {
                     let p = m.as_str().to_string();
-                    if !paths.contains(&p) {
+                    if seen.insert(p.clone()) {
                         paths.push(p);
                     }
                 }
@@ -2491,4 +2389,19 @@ impl ChatMessageExt for ChatMessage {
             is_error: None,
         }
     }
+}
+
+/// Returns true for tools that can mutate system state and are therefore
+/// blocked in `AutonomyLevel::ReadOnly` mode.
+fn is_write_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "shell"
+            | "file_write"
+            | "file_edit"
+            | "file_delete"
+            | "agent_delegate"
+            | "agent_kill"
+            | "http"
+    )
 }
