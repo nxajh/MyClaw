@@ -58,9 +58,21 @@ export function useWebSocket() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [isGenerating, setIsGenerating] = useState(false)
 
+  // Registry of listeners for raw server messages (used by useApi)
+  const listenersRef = useRef<Set<(data: Record<string, unknown>) => void>>(new Set())
+
   // We keep a ref to the latest assistant message id so we can append chunks
   // without depending on state in the onmessage handler.
   const currentAssistantId = useRef<string | null>(null)
+
+  // -----------------------------------------------------------------------
+  // Listener management
+  // -----------------------------------------------------------------------
+
+  const addMessageListener = useCallback((fn: (data: Record<string, unknown>) => void) => {
+    listenersRef.current.add(fn)
+    return () => { listenersRef.current.delete(fn) }
+  }, [])
 
   // -----------------------------------------------------------------------
   // Connect
@@ -92,7 +104,13 @@ export function useWebSocket() {
 
       ws.onmessage = (event) => {
         try {
-          const data = JSON.parse(event.data as string)
+          const data = JSON.parse(event.data as string) as Record<string, unknown>
+
+          // Notify external listeners first (e.g. useApi)
+          listenersRef.current.forEach((fn) => {
+            try { fn(data) } catch { /* swallow listener errors */ }
+          })
+
           handleServerMessage(data)
         } catch {
           // ignore malformed JSON
@@ -208,7 +226,7 @@ export function useWebSocket() {
         break
       }
 
-      // api_response / api_error are handled by the API helpers via callbacks
+      // api_response / api_error are handled by external listeners (useApi)
       default:
         break
     }
@@ -285,5 +303,6 @@ export function useWebSocket() {
     cancel,
     sendRaw,
     setMessages,
+    addMessageListener,
   }
 }
