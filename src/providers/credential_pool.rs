@@ -102,7 +102,7 @@ impl CredentialPool {
 
     /// Get the next available credential key.
     /// Returns None if all credentials are exhausted or disabled.
-    pub fn next(&mut self) -> Option<&str> {
+    pub fn next_credential(&mut self) -> Option<&str> {
         self.refresh();
 
         let active_indices: Vec<usize> = self.entries.iter()
@@ -207,9 +207,9 @@ impl SharedCredentialPool {
         }
     }
 
-    pub fn next(&self) -> Option<String> {
+    pub fn next_credential(&self) -> Option<String> {
         let mut pool = self.inner.lock().unwrap();
-        pool.next().map(|s| s.to_string())
+        pool.next_credential().map(|s| s.to_string())
     }
 
     pub fn mark_exhausted(&self, key: &str, reason: &FailoverReason) {
@@ -226,6 +226,11 @@ impl SharedCredentialPool {
         let pool = self.inner.lock().unwrap();
         pool.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        let pool = self.inner.lock().unwrap();
+        pool.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -239,8 +244,8 @@ mod tests {
             vec!["key1".to_string(), "key2".to_string()],
             RotationStrategy::FillFirst,
         );
-        assert_eq!(pool.next(), Some("key1"));
-        assert_eq!(pool.next(), Some("key1"));
+        assert_eq!(pool.next_credential(), Some("key1"));
+        assert_eq!(pool.next_credential(), Some("key1"));
     }
 
     #[test]
@@ -250,9 +255,9 @@ mod tests {
             vec!["key1".to_string(), "key2".to_string()],
             RotationStrategy::RoundRobin,
         );
-        assert_eq!(pool.next(), Some("key1"));
-        assert_eq!(pool.next(), Some("key2"));
-        assert_eq!(pool.next(), Some("key1"));
+        assert_eq!(pool.next_credential(), Some("key1"));
+        assert_eq!(pool.next_credential(), Some("key2"));
+        assert_eq!(pool.next_credential(), Some("key1"));
     }
 
     #[test]
@@ -263,7 +268,7 @@ mod tests {
             RotationStrategy::FillFirst,
         );
         pool.mark_exhausted("key1", &FailoverReason::RateLimit);
-        assert_eq!(pool.next(), Some("key2"));
+        assert_eq!(pool.next_credential(), Some("key2"));
     }
 
     #[test]
@@ -274,11 +279,11 @@ mod tests {
             RotationStrategy::FillFirst,
         );
         pool.mark_exhausted("key1", &FailoverReason::Auth);
-        assert_eq!(pool.next(), None);
+        assert_eq!(pool.next_credential(), None);
 
         // Simulate cooldown expiration by manipulating the timestamp
         pool.entries[0].exhausted_until = Some(Instant::now() - Duration::from_secs(1));
-        assert_eq!(pool.next(), Some("key1"));
+        assert_eq!(pool.next_credential(), Some("key1"));
     }
 
     #[test]

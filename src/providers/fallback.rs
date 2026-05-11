@@ -109,7 +109,7 @@ impl ChatProvider for FallbackChatProvider {
                             );
                             if classified.should_rotate_credential {
                                 if let Some(ref pool) = entry.credential_pool {
-                                    if let Some(next_key) = pool.next() {
+                                    if let Some(next_key) = pool.next_credential() {
                                         tracing::info!(
                                             model = %entry.model_id,
                                             key_prefix = %next_key.chars().take(4).collect::<String>(),
@@ -131,7 +131,7 @@ impl ChatProvider for FallbackChatProvider {
                                 .with_provider("fallback", &entry.model_id);
                             if classified.should_rotate_credential {
                                 if let Some(ref pool) = entry.credential_pool {
-                                    if let Some(next_key) = pool.next() {
+                                    if let Some(next_key) = pool.next_credential() {
                                         tracing::info!(
                                             model = %entry.model_id,
                                             key_prefix = %next_key.chars().take(4).collect::<String>(),
