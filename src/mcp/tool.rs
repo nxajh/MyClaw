@@ -27,7 +27,9 @@ pub struct McpToolWrapper {
 
 impl McpToolWrapper {
     pub fn new(prefixed_name: String, def: McpToolDef, registry: Arc<McpRegistry>) -> Self {
-        let description = def.description.unwrap_or_else(|| "MCP tool".to_string());
+        let description = def.description
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "MCP tool".to_string());
         Self {
             prefixed_name,
             description,

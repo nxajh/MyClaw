@@ -314,12 +314,34 @@ impl McpRegistry {
     }
 
     /// Get (name, instructions) for all connected servers.
+    ///
+    /// If a server has no instructions from the initialize response,
+    /// falls back to a tool listing so the model knows what MCP tools exist.
     pub async fn server_instructions(&self) -> Vec<(String, String)> {
         let mut result = Vec::new();
         for server in &self.servers {
             let name = server.name().await;
             let instructions = server.instructions().await;
-            result.push((name, instructions));
+            let text = if instructions.is_empty() {
+                // Fallback: list tools with descriptions
+                let tools = server.tools().await;
+                if tools.is_empty() {
+                    String::new()
+                } else {
+                    let lines: Vec<String> = tools.iter().map(|t| {
+                        let desc = t.description.as_deref()
+                            .filter(|s| !s.trim().is_empty())
+                            .unwrap_or("no description");
+                        format!("- {}: {}", t.name, desc)
+                    }).collect();
+                    format!("Available tools:\n{}", lines.join("\n"))
+                }
+            } else {
+                instructions
+            };
+            if !text.is_empty() {
+                result.push((name, text));
+            }
         }
         result
     }
