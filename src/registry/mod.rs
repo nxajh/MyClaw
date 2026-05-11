@@ -112,6 +112,11 @@ impl Registry {
                 anyhow::bail!("All fallback models failed for {:?}", capability)
             }
             RoutingStrategy::Cheapest | RoutingStrategy::Fastest => {
+                // Not yet implemented: treated as Fixed (first model in list).
+                tracing::warn!(
+                    strategy = ?entry.strategy,
+                    "routing strategy not implemented, falling back to Fixed"
+                );
                 let entry = RouteEntry {
                     strategy: RoutingStrategy::Fixed,
                     models: entry.models.clone(),

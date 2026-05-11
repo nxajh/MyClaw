@@ -73,11 +73,4 @@ impl DelegationManager {
         self.running.iter().map(|e| e.key().clone()).collect()
     }
 
-    /// Get agent names for running tasks (parallel vector, same length as running_snapshot).
-    /// Returns empty vec if no task info stored.
-    pub fn running_agent_names(&self) -> Vec<String> {
-        // Tasks registered with delegate_async don't store agent name in the current design.
-        // Return empty vec — caller can match with running_snapshot by index.
-        Vec::new()
-    }
 }

@@ -314,7 +314,7 @@ impl SubAgentDelegator {
         let task_id_clone = task_id.clone();
         let agent_name_owned = agent_name.to_string();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let start_time = std::time::Instant::now();
 
             let sub_delegator = SubAgentDelegator {
@@ -356,7 +356,7 @@ impl SubAgentDelegator {
             }
         });
 
-        delegation_manager.register(task_id.clone(), tokio::spawn(async {}));
+        delegation_manager.register(task_id.clone(), handle);
         Ok(task_id)
     }
 }

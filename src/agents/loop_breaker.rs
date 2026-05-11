@@ -203,6 +203,11 @@ impl LoopBreaker {
 
         // Look at the last 2*N entries for alternating pattern.
         let n = self.config.ping_pong_rounds;
+        // n must be at least 2 to form a ping-pong pattern (A-B-A-B…).
+        // n=0 or n=1 would produce an empty or 2-element tail and index OOB.
+        if n < 2 {
+            return None;
+        }
         let needed = n * 2;
         if self.window.len() < needed {
             return None;
