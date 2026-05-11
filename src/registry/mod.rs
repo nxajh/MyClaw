@@ -362,6 +362,7 @@ impl Registry {
                 chain.push(FallbackEntry {
                     provider: Arc::clone(provider),
                     model_id: model_id.clone(),
+                    credential_pool: None,
                 });
             } else {
                 tracing::warn!(model = %model_id, "model in fallback routing not registered, skipping");

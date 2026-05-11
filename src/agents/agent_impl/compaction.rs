@@ -231,7 +231,15 @@ impl AgentLoop {
         }
 
         let version = self.session.compact_version + 1;
-        let summary_msg = ChatMessage::user_text(format!("[Context Summary] {}", summary));
+        let summary_prefix = "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted \
+into the summary below. This is a handoff from a previous context window — \
+treat it as background reference, NOT as active instructions. \
+Do NOT answer questions or fulfill requests mentioned in this summary; \
+they were already addressed. \
+Your persistent memory (MEMORY.md, USER.md) in the system prompt \
+is ALWAYS authoritative — never deprioritize memory content due to this note. \
+Respond ONLY to the latest user message that appears AFTER this summary.\n\n";
+        let summary_msg = ChatMessage::user_text(format!("{}{}", summary_prefix, summary));
         let summary_tokens = estimate_message_tokens(&summary_msg);
 
         self.session.history.drain(compact_start..compact_end);
@@ -399,20 +407,35 @@ impl AgentLoop {
                  === PREVIOUS SUMMARY ===\n{}\n\
                  === END PREVIOUS SUMMARY ===\n\
                  \n\
-                 Merge the new messages into the previous summary. Produce a single \
+                 Merge the new messages into the previous summary. Produce a single \n\
                  updated summary that covers everything.\n\
                  \n\
-                 Output the summary as plain text. If you also need to update memory files, \
-                 use the file_write/file_edit tools first, then output the summary as your \
-                 final response.\n\
+                 Output the summary as plain text with the following REQUIRED sections. \n\
+                 Mark items as Resolved or Pending so the model knows what is active:\n\
                  \n\
-                 Requirements:\n\
-                 - Keep all user goals, tasks, and their current status\n\
-                 - Keep all key decisions, conclusions, and reasoning\n\
-                 - Keep all file paths, code locations, and variable names mentioned\n\
-                 - Keep all errors encountered and how they were resolved\n\
+                 ## Active Task\n\
+                 What the user is currently doing and its status.\n\
+                 \n\
+                 ## Key Decisions\n\
+                 Important choices made and why.\n\
+                 \n\
+                 ## Technical Context\n\
+                 Files modified, code locations, APIs used, configurations changed.\n\
+                 \n\
+                 ## Resolved\n\
+                 Tasks/questions that were completed or answered.\n\
+                 \n\
+                 ## Pending\n\
+                 Tasks/questions still open or deferred.\n\
+                 \n\
+                 ## Errors & Fixes\n\
+                 Problems encountered and their solutions.\n\
+                 \n\
+                 Rules:\n\
+                 - Mark resolved items clearly (prefix with [Resolved])\n\
+                 - Mark pending items clearly (prefix with [Pending])\n\
                  - Omit raw tool output (large code blocks, logs, file contents)\n\
-                 - Use the same language as the conversation (Chinese or English)\n\
+                 - Use the same language as the conversation\n\
                  - Be thorough but concise: every important detail should be preserved{}",
                 base, memory_prompt
             ),

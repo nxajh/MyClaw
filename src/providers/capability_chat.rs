@@ -93,7 +93,7 @@ pub enum StreamEvent {
 }
 
 impl StreamEvent {
-    /// Whether this error is retryable (429 rate-limit, 503 service unavailable, etc.).
+    /// Whether this error is retryable (legacy heuristic; prefer `ClassifiedError`).
     pub fn is_retryable_error(&self) -> bool {
         match self {
             StreamEvent::HttpError { status, .. } => *status == 429 || *status >= 500,
@@ -101,6 +101,19 @@ impl StreamEvent {
                 msg.contains("429") || msg.contains("503") || msg.contains("rate_limit")
             }
             _ => false,
+        }
+    }
+
+    /// Classify this event into a structured error (if it's an error variant).
+    pub fn classify(&self) -> Option<crate::providers::ClassifiedError> {
+        match self {
+            StreamEvent::HttpError { status, message } => {
+                Some(crate::providers::ClassifiedError::from_http(*status, Some(message)))
+            }
+            StreamEvent::Error(msg) => {
+                Some(crate::providers::ClassifiedError::from_message(msg))
+            }
+            _ => None,
         }
     }
 }

@@ -13,6 +13,7 @@ pub use crate::providers::capability::{
     ChatModelConfig, EmbeddingModelConfig, BasicModelConfig,
     ChatPricing, EmbeddingPricing, BasicPricing,
 };
+pub use crate::providers::RotationStrategy;
 
 // ── AuthStyle ─────────────────────────────────────────────────────────────────
 
@@ -65,11 +66,21 @@ pub struct CapabilitySection {
 ///
 /// Each capability has its own section with base_url and models.
 /// Provider-level api_key and auth_style serve as fallback defaults.
+///
+/// Multiple API keys can be configured for rotation (rate-limit / billing failover).
+/// `api_keys` takes precedence over `api_key`; if neither is set, the provider
+/// falls back to environment-variable resolution at runtime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     /// Provider-level API key (supports `${ENV_VAR}` expansion).
     /// Capability-level api_key takes precedence when set.
     pub api_key: Option<String>,
+    /// Multiple API keys for rotation (comma-separated or array).
+    #[serde(default)]
+    pub api_keys: Vec<String>,
+    /// Credential rotation strategy when multiple keys are available.
+    #[serde(default)]
+    pub rotation_strategy: RotationStrategy,
     /// Default authentication style.
     #[serde(default)]
     pub auth_style: AuthStyle,
@@ -105,6 +116,31 @@ impl ProviderConfig {
             .filter(|k| !k.is_empty())
             .map(String::from)
             .or_else(|| self.api_key.clone())
+    }
+
+    /// Get all effective API keys for a capability section.
+    /// Returns `api_keys` if populated, otherwise falls back to `api_key` as a single-element vec.
+    pub fn effective_api_keys(&self, capability_api_key: Option<&str>) -> Vec<String> {
+        // Capability-level api_keys (not yet supported per-capability, use provider-level)
+        let provider_keys: Vec<String> = self.api_keys.iter()
+            .filter(|k| !k.is_empty())
+            .cloned()
+            .collect();
+
+        if !provider_keys.is_empty() {
+            return provider_keys;
+        }
+
+        // Fallback: capability-level single key, then provider-level single key
+        if let Some(key) = capability_api_key.filter(|k| !k.is_empty()) {
+            return vec![key.to_string()];
+        }
+        if let Some(ref key) = self.api_key {
+            if !key.is_empty() {
+                return vec![key.clone()];
+            }
+        }
+        Vec::new()
     }
 
     /// Get the effective auth_style for a capability section.

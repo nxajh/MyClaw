@@ -1,6 +1,7 @@
 //! agents — Agent loop, session management, and prompt construction.
 
 mod agent_impl;
+pub mod context_engine;
 pub mod error;
 pub mod agent_loader;
 pub mod attachment;
@@ -42,3 +43,4 @@ pub use mcp_manager::McpManager;
 pub use sub_agent::SubAgentDelegator;
 pub use scheduler::{Scheduler, WebhookContext, run_webhook_server, send_to_target, is_active_hours, cron_matches};
 pub use error::AgentError;
+pub use context_engine::{ContextEngine, TokenStats, CompactionResult, TokenTracker};

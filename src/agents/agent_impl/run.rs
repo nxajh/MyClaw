@@ -488,19 +488,34 @@ impl AgentLoop {
                 };
                 match result {
                     Ok(r) => r,
-                    Err(e) if e.to_string().contains("stream chunk timeout") => {
-                        stream_timeout_retries += 1;
-                        if stream_timeout_retries > 3 {
-                            tracing::error!("stream timeout after 3 retries, giving up");
-                            return Ok(String::new());
+                    Err(e) => {
+                        let classified = crate::providers::ClassifiedError::from_message(&e.to_string());
+                        if classified.retryable {
+                            match classified.reason {
+                                crate::providers::FailoverReason::Timeout => {
+                                    stream_timeout_retries += 1;
+                                    if stream_timeout_retries > 3 {
+                                        tracing::error!("stream timeout after 3 retries, giving up");
+                                        return Ok(String::new());
+                                    }
+                                    tracing::warn!(
+                                        attempt = stream_timeout_retries,
+                                        "stream chunk timeout, retrying..."
+                                    );
+                                    continue;
+                                }
+                                _ => {
+                                    // Other retryable errors (e.g. server error) — retry once.
+                                    tracing::warn!(
+                                        reason = ?classified.reason,
+                                        "retryable error, retrying..."
+                                    );
+                                    continue;
+                                }
+                            }
                         }
-                        tracing::warn!(
-                            attempt = stream_timeout_retries,
-                            "stream chunk timeout, server may be hung, retrying..."
-                        );
-                        continue;
+                        return Err(e);
                     }
-                    Err(e) => return Err(e),
                 }
             };
 
@@ -555,11 +570,16 @@ impl AgentLoop {
 
                     match response.stop_reason {
                         StopReason::MaxTokens => {
+                            // Output budget exhausted — boost and retry (context-related, not provider failure).
                             tracing::warn!(attempt = empty_response_retries, "output hit max_tokens with no text, boosting output budget for retry...");
                             boosted_max_tokens = true;
                         }
+                        StopReason::StopSequence | StopReason::EndTurn => {
+                            // Model stopped naturally but produced no text — may be a transient issue.
+                            tracing::warn!(attempt = empty_response_retries, stop = ?response.stop_reason, "empty response with natural stop, retrying...");
+                        }
                         _ => {
-                            tracing::warn!(attempt = empty_response_retries, stop = ?response.stop_reason, "chat response text is empty (thinking-only), retrying...");
+                            tracing::warn!(attempt = empty_response_retries, stop = ?response.stop_reason, "chat response text is empty, retrying...");
                         }
                     }
                     continue;

@@ -6,6 +6,7 @@ pub mod capability;           // Capability, Modality, model configs
 pub mod capability_chat;     // ChatProvider, ChatMessage, StreamEvent, etc.
 pub mod capability_embedding; // EmbeddingProvider, EmbedRequest, etc.
 pub mod capability_tool;      // Tool, ToolResult
+pub mod error_class;          // FailoverReason, ClassifiedError
 pub mod image;               // ImageGenerationProvider
 pub mod search;              // SearchProvider
 pub mod tts;                 // TtsProvider
@@ -23,6 +24,7 @@ pub use capability_chat::{
     BoxStream, ChatProvider, ChatRequest, ChatResponse, ChatMessage, ContentPart,
     StopReason, StreamEvent, ToolCall, ToolSpec as ChatToolSpec, ThinkingConfig, ImageDetail, ChatUsage,
 };
+pub use error_class::{ClassifiedError, FailoverReason};
 pub use capability_embedding::{
     EmbeddingProvider, EmbedRequest, EmbedResponse, EmbeddingUsage, EmbedInput,
 };
@@ -37,6 +39,7 @@ pub use service_registry::ServiceRegistry;
 // ── Implementations ────────────────────────────────────────────────────────────
 
 pub mod anthropic;
+pub mod credential_pool;
 pub mod fallback;
 pub mod glm;
 pub mod http;
@@ -47,6 +50,7 @@ pub mod shared;
 pub mod xiaomi;
 
 pub use fallback::FallbackChatProvider;
+pub use credential_pool::{CredentialPool, CredentialEntry, CredentialStatus, RotationStrategy, SharedCredentialPool};
 pub use anthropic::AnthropicProvider;
 pub use glm::GlmProvider;
 pub use kimi::KimiProvider;

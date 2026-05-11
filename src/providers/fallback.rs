@@ -1,5 +1,5 @@
 //! FallbackChatProvider — decorator that wraps multiple ChatProviders
-//! and retries on retryable errors (HTTP 429 rate-limit, 5xx server errors).
+//! and retries on retryable errors with structured error classification.
 //!
 //! This keeps fallback logic entirely within the Infrastructure layer.
 //! The Application layer (Agent) only sees a single `ChatProvider`.
@@ -7,19 +7,22 @@
 use async_trait::async_trait;
 use crate::providers::{
     BoxStream, ChatProvider, ChatRequest, ChatMessage, StreamEvent, ChatToolSpec,
-    ThinkingConfig,
+    ThinkingConfig, ClassifiedError,
 };
+use crate::providers::credential_pool::SharedCredentialPool;
 use futures_util::StreamExt;
 use std::sync::Arc;
 
-/// An entry in the fallback chain: a provider + its model ID.
+/// An entry in the fallback chain: a provider + its model ID + optional credential pool.
 #[derive(Clone)]
 pub struct FallbackEntry {
     pub provider: Arc<dyn ChatProvider>,
     pub model_id: String,
+    /// Optional credential pool for same-provider key rotation.
+    pub credential_pool: Option<SharedCredentialPool>,
 }
 
-/// Decorator that tries providers in order, falling back on retryable errors.
+/// Decorator that tries providers in order, falling back based on error classification.
 #[derive(Clone)]
 pub struct FallbackChatProvider {
     chain: Vec<FallbackEntry>,
@@ -30,11 +33,6 @@ impl FallbackChatProvider {
         assert!(!chain.is_empty(), "fallback chain must not be empty");
         Self { chain }
     }
-}
-
-/// Whether a stream error is retryable (429 rate-limit, 5xx server error).
-fn is_retryable(status: u16) -> bool {
-    status == 429 || status >= 500
 }
 
 #[async_trait]
@@ -74,26 +72,86 @@ impl ChatProvider for FallbackChatProvider {
                 let stream = match entry.provider.chat(req) {
                     Ok(s) => s,
                     Err(e) => {
-                        tracing::warn!(model = %entry.model_id, err = %e, "chat() failed, trying next");
-                        continue;
+                        let classified = ClassifiedError::from_message(&e.to_string())
+                            .with_provider("fallback", &entry.model_id);
+                        tracing::warn!(
+                            model = %entry.model_id,
+                            reason = ?classified.reason,
+                            retryable = classified.retryable,
+                            "chat() failed: {}", classified.message
+                        );
+                        // Only continue to next provider if classified as fallback-worthy.
+                        if classified.should_fallback || classified.retryable {
+                            continue;
+                        }
+                        // Non-retryable setup error — propagate immediately.
+                        let _ = tx.send(StreamEvent::Error(e.to_string())).await;
+                        return;
                     }
                 };
 
-                // Drain the stream. If we hit a retryable HttpError, break out
-                // and the outer loop will try the next provider.
-                let mut retryable = false;
+                // Drain the stream. Classify errors to decide whether to failover.
+                let mut should_failover = false;
                 let mut inner_stream = stream;
 
                 while let Some(event) = inner_stream.next().await {
                     match &event {
-                        StreamEvent::HttpError { status, message: _ } if is_retryable(*status) => {
+                        StreamEvent::HttpError { status, message } => {
+                            let classified = ClassifiedError::from_http(*status, Some(message))
+                                .with_provider("fallback", &entry.model_id);
                             tracing::warn!(
                                 model = %entry.model_id,
-                                status,
-                                "retryable error, falling back to next provider"
+                                status = *status,
+                                reason = ?classified.reason,
+                                should_fallback = classified.should_fallback,
+                                should_rotate = classified.should_rotate_credential,
+                                "classified HTTP error"
                             );
-                            retryable = true;
-                            break;
+                            if classified.should_rotate_credential {
+                                if let Some(ref pool) = entry.credential_pool {
+                                    if let Some(next_key) = pool.next() {
+                                        tracing::info!(
+                                            model = %entry.model_id,
+                                            key_prefix = %next_key.chars().take(4).collect::<String>(),
+                                            "rotating to next credential"
+                                        );
+                                    }
+                                }
+                            }
+                            if classified.should_fallback || classified.retryable {
+                                should_failover = true;
+                                break;
+                            }
+                            // Non-retryable HTTP error — propagate and stop.
+                            let _ = tx.send(event).await;
+                            return;
+                        }
+                        StreamEvent::Error(msg) => {
+                            let classified = ClassifiedError::from_message(msg)
+                                .with_provider("fallback", &entry.model_id);
+                            if classified.should_rotate_credential {
+                                if let Some(ref pool) = entry.credential_pool {
+                                    if let Some(next_key) = pool.next() {
+                                        tracing::info!(
+                                            model = %entry.model_id,
+                                            key_prefix = %next_key.chars().take(4).collect::<String>(),
+                                            "rotating to next credential"
+                                        );
+                                    }
+                                }
+                            }
+                            if classified.should_fallback || classified.retryable {
+                                tracing::warn!(
+                                    model = %entry.model_id,
+                                    reason = ?classified.reason,
+                                    "classified stream error, failing over"
+                                );
+                                should_failover = true;
+                                break;
+                            }
+                            // Non-retryable stream error — propagate.
+                            let _ = tx.send(event).await;
+                            return;
                         }
                         _ => {
                             let _ = tx.send(event).await;
@@ -101,8 +159,8 @@ impl ChatProvider for FallbackChatProvider {
                     }
                 }
 
-                if !retryable {
-                    // Stream ended normally (Done/Error/other) — we're done.
+                if !should_failover {
+                    // Stream ended normally — we're done.
                     return;
                 }
                 // else: continue to next provider in chain
