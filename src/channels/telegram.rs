@@ -819,6 +819,46 @@ impl TelegramChannel {
         Ok(())
     }
 
+    /// Edit an existing message by chat_id and message_id.
+    async fn edit_message(&self, chat_id: i64, message_id: i64, text: &str) -> anyhow::Result<bool> {
+        let client = self.http_client();
+        let html_text = markdown_to_telegram_html(text);
+
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": html_text,
+            "parse_mode": "HTML",
+        });
+
+        let resp = client
+            .post(self.api_url("editMessageText"))
+            .json(&body)
+            .send()
+            .await?;
+
+        if resp.status().is_success() {
+            return Ok(true);
+        }
+
+        // HTML parse failed — fallback to plain text.
+        if resp.status().as_u16() == 400 {
+            let body_plain = serde_json::json!({
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": text,
+            });
+            let resp2 = client
+                .post(self.api_url("editMessageText"))
+                .json(&body_plain)
+                .send()
+                .await?;
+            return Ok(resp2.status().is_success());
+        }
+
+        Ok(false)
+    }
+
     async fn send_chat_action(
         &self,
         chat_id: &str,
@@ -994,6 +1034,8 @@ impl TelegramChannel {
         let api_base = self.api_base.clone();
         let recipient_key = recipient.to_string();
         let recipient_key_clone = recipient_key.clone();
+        let typing_tasks = self.typing_tasks.clone();
+        let typing_started_at = self.typing_started_at.clone();
 
         let handle = tokio::spawn(async move {
             let max_consecutive_failures: u32 = 2;
@@ -1034,8 +1076,17 @@ impl TelegramChannel {
 
                 tokio::time::sleep(std::time::Duration::from_secs(4)).await;
             }
+
+            // Task exiting: clean up only if no new task has taken over.
+            let mut tasks = typing_tasks.lock();
+            if let Some(h) = tasks.get(&recipient_key_clone) {
+                if h.is_finished() {
+                    tasks.remove(&recipient_key_clone);
+                    typing_started_at.lock().remove(&recipient_key_clone);
+                }
+            }
         });
-        tasks.insert(recipient_key_clone, handle);
+        tasks.insert(recipient.to_string(), handle);
     }
 
     /// Stop (abort) the typing keep-alive task for a recipient.
@@ -1141,12 +1192,11 @@ impl TelegramChannel {
             return; // disabled
         }
 
-        let check_interval = std::time::Duration::from_secs(5);
+        let check_interval = std::time::Duration::from_secs(10);
         let mut interval = tokio::time::interval(check_interval);
         let stall_timeout = std::time::Duration::from_secs(self.stall_timeout_secs);
-        // Track which recipients we've already sent stall notice for (to avoid spamming).
-        let notified: Arc<Mutex<std::collections::HashSet<String>>> =
-            Arc::new(Mutex::new(std::collections::HashSet::new()));
+        // Track sent stall notices: reply_target → [(chat_id, msg_id)].
+        let notified: ReactionTracker = Arc::new(Mutex::new(std::collections::HashMap::new()));
 
         loop {
             interval.tick().await;
@@ -1168,24 +1218,34 @@ impl TelegramChannel {
             };
 
             for (target, elapsed) in stalled {
-                {
-                    let mut n = notified.lock();
-                    if n.contains(&target) {
-                        continue; // Already notified
+                let secs = elapsed.as_secs();
+                let (chat_id, _thread_id) = Self::parse_reply_target(&target);
+                let chat_id_i64: i64 = chat_id.parse().unwrap_or(0);
+
+                // Check if we already have a stall message for this target.
+                let existing_msg_ids = {
+                    let n = notified.lock();
+                    n.get(&target).cloned()
+                };
+
+                // Already have a stall message — edit it in place.
+                if let Some(msg_ids) = existing_msg_ids {
+                    let text = format!("🤔 还在思考中... (已等待 {secs}s)");
+                    for (cid, mid) in msg_ids {
+                        if let Err(e) = self.edit_message(cid, mid, &text).await {
+                            warn!("Failed to edit stall message {mid}: {e}");
+                        }
                     }
-                    n.insert(target.clone());
+                    continue;
                 }
 
-                let secs = elapsed.as_secs();
+                // First time over threshold — send a new stall message.
                 warn!("Stall detected for {target}: typing for {secs}s without response");
-
-                let (chat_id, thread_id) = Self::parse_reply_target(&target);
-                let chat_id_i64: i64 = chat_id.parse().unwrap_or(0);
                 match self
                     .send_raw(
                         &chat_id,
                         &format!("🤔 还在思考中... (已等待 {secs}s)"),
-                        thread_id.as_deref(),
+                        None,
                     )
                     .await
                 {
@@ -1194,6 +1254,8 @@ impl TelegramChannel {
                             .entry(target.clone())
                             .or_default()
                             .push((chat_id_i64, stall_msg_id));
+                        let mut n = notified.lock();
+                        n.insert(target.clone(), vec![(chat_id_i64, stall_msg_id)]);
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -1202,10 +1264,10 @@ impl TelegramChannel {
                 }
             }
 
-            // Clean up notified set for recipients that are no longer typing.
+            // Clean up notified entries for recipients that are no longer typing.
             let typing_keys: std::collections::HashSet<String> =
                 self.typing_started_at.lock().keys().cloned().collect();
-            notified.lock().retain(|k| typing_keys.contains(k));
+            notified.lock().retain(|k, _| typing_keys.contains(k));
         }
     }
 
