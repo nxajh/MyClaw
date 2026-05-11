@@ -23,7 +23,7 @@ use std::path::Path;
 use anyhow::Result;
 use tracing::{info, warn};
 
-use crate::config::sub_agent::SubAgentConfig;
+use crate::config::sub_agent::{AgentIsolation, SubAgentConfig};
 use crate::str_utils::{extract_yaml_list, extract_yaml_string, parse_front_matter};
 
 /// 解析 AGENT.md 文件为 SubAgentConfig。
@@ -65,6 +65,7 @@ pub fn parse_agent_file(path: &Path) -> Result<SubAgentConfig> {
             Some(description)
         },
         model,
+        isolation: AgentIsolation::default(),
     })
 }
 

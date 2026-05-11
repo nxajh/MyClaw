@@ -11,6 +11,7 @@
 //! system_prompt = "You are an expert programmer. Write clean, idiomatic code."
 //! tools = ["shell", "file_read", "file_write", "file_edit", "glob_search", "content_search"]
 //! max_tool_calls = 30
+//! isolation = "worktree"  # optional: "shared" (default) or "worktree"
 //!
 //! [[agents]]
 //! name = "researcher"
@@ -20,6 +21,22 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
+
+/// File system isolation level for a sub-agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentIsolation {
+    /// Share workspace_dir with the main agent — no extra isolation.
+    Shared,
+    /// Use a git worktree for the sub-agent — isolated working directory.
+    Worktree,
+}
+
+impl Default for AgentIsolation {
+    fn default() -> Self {
+        Self::Shared
+    }
+}
 
 /// A sub-agent definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +64,10 @@ pub struct SubAgentConfig {
     /// Useful for routing summarization to cheaper models.
     #[serde(default)]
     pub model: Option<String>,
+
+    /// File system isolation level. Defaults to "shared".
+    #[serde(default)]
+    pub isolation: AgentIsolation,
 }
 
 impl SubAgentConfig {
@@ -80,5 +101,30 @@ mod tests {
         assert_eq!(config.name, "coder");
         assert_eq!(config.tools, vec!["shell", "file_read"]);
         assert_eq!(config.max_tool_calls, Some(30));
+    }
+
+    #[test]
+    fn deserialize_with_isolation() {
+        let toml_str = r#"
+        name = "coder"
+        system_prompt = "You are a programmer."
+        isolation = "worktree"
+        "#;
+        let config: SubAgentConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.isolation, AgentIsolation::Worktree);
+    }
+
+    #[test]
+    fn default_isolation_is_shared() {
+        let config = SubAgentConfig {
+            name: "test".to_string(),
+            system_prompt: String::new(),
+            tools: vec![],
+            max_tool_calls: None,
+            description: None,
+            model: None,
+            isolation: AgentIsolation::default(),
+        };
+        assert_eq!(config.isolation, AgentIsolation::Shared);
     }
 }

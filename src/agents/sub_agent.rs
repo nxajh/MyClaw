@@ -32,7 +32,7 @@ use crate::agents::prompt::{SECTION_ANTI_NARRATION, SECTION_SAFETY_FULL, SECTION
 use crate::agents::session_manager::{BackendPersistHook, PersistHook, Session};
 use crate::agents::skills::SkillManager;
 use crate::agents::tool_registry::ToolRegistry;
-use crate::config::sub_agent::SubAgentConfig;
+use crate::config::sub_agent::{AgentIsolation, SubAgentConfig};
 use crate::providers::ServiceRegistry;
 use crate::storage::SessionBackend as _;
 use crate::tools::TaskDelegator;
@@ -52,6 +52,8 @@ pub struct SubAgentDelegator {
     default_max_tool_calls: usize,
     /// Root of the sessions directory — used to open per-invocation sub-backends.
     sessions_root: PathBuf,
+    /// Root directory for git worktrees (when isolation = worktree).
+    worktrees_root: PathBuf,
 }
 
 impl SubAgentDelegator {
@@ -62,6 +64,7 @@ impl SubAgentDelegator {
         skills: Arc<RwLock<SkillManager>>,
         default_max_tool_calls: usize,
         sessions_root: PathBuf,
+        worktrees_root: PathBuf,
     ) -> Self {
         Self {
             configs,
@@ -70,6 +73,7 @@ impl SubAgentDelegator {
             skills,
             default_max_tool_calls,
             sessions_root,
+            worktrees_root,
         }
     }
 
@@ -181,15 +185,33 @@ impl SubAgentDelegator {
             )
         };
 
+        // Prepare isolation environment (worktree or shared).
+        let (worktree_path, cleanup_worktree) = match config.isolation {
+            AgentIsolation::Worktree => {
+                let task_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+                let worktree_path = self.worktrees_root.join(format!("{}_{}", config.name, task_id));
+                std::fs::create_dir_all(&worktree_path).ok();
+                tracing::info!(path = %worktree_path.display(), "preparing worktree for sub-agent");
+                (worktree_path, Some(task_id))
+            }
+            AgentIsolation::Shared => (PathBuf::new(), None),
+        };
+
         let (session_id, persist_hook) = self.open_sub_session(parent_session_id, &config.name);
 
         let session = Session::new(session_id);
+
+        let workspace_dir = if worktree_path.as_os_str().is_empty() {
+            String::new()
+        } else {
+            worktree_path.to_string_lossy().to_string()
+        };
 
         let agent_config = crate::agents::AgentConfig {
             max_tool_calls: config.max_tool_calls.unwrap_or(self.default_max_tool_calls),
             max_history: 100,
             prompt_config: crate::agents::SystemPromptConfig {
-                workspace_dir: String::new(),
+                workspace_dir,
                 knowledge_dir: String::new(),
                 model_name: String::new(),
                 autonomy: crate::agents::AutonomyLevel::Full,
@@ -228,6 +250,21 @@ impl SubAgentDelegator {
             Ok(text) => tracing::info!(agent = %config.name, text_len = text.len(), "sub-agent completed"),
             Err(e) => tracing::warn!(agent = %config.name, err = %e, "sub-agent failed"),
         }
+
+        // Cleanup worktree if we created one.
+        if let Some(_task_id) = cleanup_worktree {
+            if let Some(parent) = worktree_path.parent() {
+                let _ = std::fs::remove_dir_all(&worktree_path);
+                tracing::info!(path = %worktree_path.display(), "cleaned up worktree");
+                // Remove parent if empty (worktrees_root dir).
+                if let Ok(entries) = std::fs::read_dir(parent) {
+                    if entries.count() == 0 {
+                        let _ = std::fs::remove_dir(parent);
+                    }
+                }
+            }
+        }
+
         result
         }) // end Box::pin
     }
@@ -269,6 +306,7 @@ impl SubAgentDelegator {
         let skills = self.skills.clone();
         let default_max_tool_calls = self.default_max_tool_calls;
         let sessions_root = self.sessions_root.clone();
+        let worktrees_root = self.worktrees_root.clone();
         let task_owned = task.to_string();
         let parent_session_id_owned = parent_session_id.to_string();
         let reply_target_owned = reply_target.to_string();
@@ -284,6 +322,7 @@ impl SubAgentDelegator {
                 skills,
                 default_max_tool_calls,
                 sessions_root,
+                worktrees_root,
             };
 
             let result = sub_delegator

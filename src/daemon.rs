@@ -515,6 +515,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             Arc::clone(&skills_arc),
             config.agent.max_tool_calls,
             config.workspace_dir.join("sessions"),
+            config.workspace_dir.join("worktrees"),
         );
         let delegator_arc = Arc::new(delegator);
 
