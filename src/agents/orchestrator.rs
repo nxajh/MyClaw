@@ -913,6 +913,8 @@ async fn send_to_target_internal(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     fn test_session_key() {
         assert_eq!(
             Orchestrator::session_key("wechat", "o9cq80zXpSX1Hz0ph_QNs591k4PA"),
