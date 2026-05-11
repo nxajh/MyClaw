@@ -598,8 +598,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         persist_backend: session_backend.clone(),
         mcp_manager: Some(Arc::clone(&mcp_manager_arc)),
         change_rx: Some(change_rx.clone()),
-        heartbeat_config: if scheduler_config.heartbeat.enabled {
-            Some(scheduler_config.heartbeat.clone())
+        heartbeat_config: if config.agent.scheduler.heartbeat.enabled {
+            Some(config.agent.scheduler.heartbeat.clone())
         } else {
             None
         },

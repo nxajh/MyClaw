@@ -353,7 +353,8 @@ impl Orchestrator {
                             }
                         }
                     },
-                    _ = async { heartbeat_ticker.as_mut().map(|t| t.tick()).unwrap_or_else(tokio::time::Sleep::default).await }, if heartbeat_ticker.is_some() => {
+                    // Heartbeat tick (if enabled).
+                    _ = async { heartbeat_ticker.as_mut().map(|t| t.tick().await); }, if heartbeat_ticker.is_some() => {
                         self.handle_heartbeat_tick().await;
                         continue;
                     },
@@ -369,7 +370,8 @@ impl Orchestrator {
                         Some(m) => ChannelEvent::UserMessage(m),
                         None => break,
                     },
-                    _ = async { heartbeat_ticker.as_mut().map(|t| t.tick()).unwrap_or_else(tokio::time::Sleep::default).await }, if heartbeat_ticker.is_some() => {
+                    // Heartbeat tick (if enabled).
+                    _ = async { heartbeat_ticker.as_mut().map(|t| t.tick().await); }, if heartbeat_ticker.is_some() => {
                         self.handle_heartbeat_tick().await;
                         continue;
                     },
@@ -677,7 +679,7 @@ impl Orchestrator {
 
     /// Handle a heartbeat tick — run the agent loop with heartbeat prompt.
     async fn handle_heartbeat_tick(&self) {
-        use crate::agents::scheduler::{is_active_hours, send_to_target};
+        use crate::agents::scheduler::is_active_hours;
 
         let config = match &self.heartbeat_config {
             Some(c) => c,
