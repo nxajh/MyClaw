@@ -25,6 +25,7 @@ use crate::agents::agent_impl::{Agent, AgentLoop, AskUserHandler, DelegateHandle
 use crate::agents::session_manager::{SessionManager, PersistHook, BackendPersistHook};
 
 const CHANNEL_QUEUE_SIZE: usize = 100;
+
 /// Timeout for ask_user waiting for user reply (5 minutes).
 const ASK_USER_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -912,9 +913,6 @@ async fn send_to_target_internal(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
     fn test_session_key() {
         assert_eq!(
             Orchestrator::session_key("wechat", "o9cq80zXpSX1Hz0ph_QNs591k4PA"),

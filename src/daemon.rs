@@ -580,6 +580,9 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // Get MCP server instructions for attachment injection.
     let mcp_instructions = mcp_manager_arc.server_instructions().await;
 
+    // Scheduler config (used for both parts and webhook launch).
+    let scheduler_config = config.agent.scheduler.clone();
+
     let agent = Agent::new(registry_arc, tools_arc, skills_arc, agent_config)
         .with_mcp_instructions(mcp_instructions)
         .with_sub_agent_configs(sub_agent_configs_arc)
@@ -618,7 +621,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     print_banner(&config, mcp_manager_arc.server_count().await, mcp_manager_arc.tool_count().await, sub_agent_count, &sub_agent_names);
 
     // ── Scheduler tasks ────────────────────────────────────────────────────
-    let scheduler_config = config.agent.scheduler.clone();
 
     if scheduler_config.webhook.enabled {
         let wh_dir = config.workspace_dir.join("webhooks");

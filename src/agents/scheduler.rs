@@ -337,8 +337,6 @@ use hyper_util::rt::TokioIo;
 use http_body_util::Full;
 
 /// Run the webhook HTTP server.
-/// Custom routes are loaded from `webhooks/*.md` files.
-/// Built-in endpoints: `/hooks/agent`, `/hooks/wake`.
 pub async fn run_webhook_server(
     ctx: Arc<SchedulerContext>,
     config: WebhookConfig,
