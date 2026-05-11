@@ -59,6 +59,12 @@ async fn main() -> Result<()> {
             println!("  OS: {}", std::env::consts::OS);
         }
 
+        // `myclaw tui` — launch TUI client
+        #[cfg(feature = "tui")]
+        Some(cli::Commands::Tui { ref url }) => {
+            cli::cmd_tui::run(Some(url)).await?;
+        }
+
         // No subcommand → show help (arg_required_else_help handles this normally)
         None => {
             let cfg = resolve_config_or_die(cli_args.config.as_deref());

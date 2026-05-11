@@ -12,6 +12,9 @@ pub mod storage;
 pub mod str_utils;
 pub mod tools;
 
+#[cfg(feature = "tui")]
+pub mod tui;
+
 // Re-exports
 pub use agents::{
     Agent, AgentConfig, AgentLoop, InMemoryBackend, Session, SessionManager,

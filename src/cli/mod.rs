@@ -7,6 +7,8 @@ pub mod cmd_doctor;
 pub mod cmd_exec;
 pub mod cmd_status;
 pub mod cmd_tools;
+#[cfg(feature = "tui")]
+pub mod cmd_tui;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -114,6 +116,14 @@ pub enum Commands {
 
     /// Show version and build information.
     Version,
+
+    /// Launch the TUI client connected to a running MyClaw WebSocket server.
+    #[cfg(feature = "tui")]
+    Tui {
+        /// WebSocket URL of the MyClaw server.
+        #[arg(long, default_value = "ws://127.0.0.1:18789/myclaw")]
+        url: String,
+    },
 }
 
 // ── Shared helpers for subcommand handlers ────────────────────────────────────
