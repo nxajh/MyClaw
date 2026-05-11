@@ -25,17 +25,8 @@ use crate::str_utils;
 // ── Config types ─────────────────────────────────────────────────────────────
 
 /// Autonomy level controls safety section.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AutonomyLevel {
-    /// Full autonomy — execute directly.
-    Full,
-    /// Default — ask for confirmation.
-    #[default]
-    Default,
-    /// Read-only — no external actions.
-    ReadOnly,
-}
+/// Re-exported from `config::agent` — single canonical definition.
+pub use crate::config::agent::AutonomyLevel;
 
 /// Skill injection mode.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]

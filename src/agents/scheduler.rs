@@ -18,7 +18,6 @@ use tokio::sync::{Mutex as TokioMutex, Mutex};
 use crate::agents::Agent;
 use crate::agents::AgentLoop;
 use crate::agents::orchestrator::SchedulerEvent;
-use crate::agents::session_manager::SessionManager;
 use crate::agents::webhook_loader::{WebhookAuth, WebhookJobDef, render_template};
 use crate::channels::{Channel, SendMessage};
 use crate::config::scheduler::{CronJob, HeartbeatConfig, WebhookConfig};
@@ -122,13 +121,17 @@ impl Scheduler {
     }
 }
 
-// ── Shared context ─────────────────────────────────────────────────────────
+// ── Webhook context ────────────────────────────────────────────────────────
 
-/// Resources shared by all scheduler tasks.
-pub struct SchedulerContext {
+/// Resources needed by the webhook server to run agent tasks.
+/// Heartbeat and cron use the Orchestrator event path instead.
+pub struct WebhookContext {
     pub agent: Agent,
     pub channels: Arc<DashMap<String, Arc<dyn Channel>>>,
     pub sessions: Arc<DashMap<String, Arc<TokioMutex<AgentLoop>>>>,
+    /// Shared session manager — avoids creating throwaway instances per request.
+    pub session_manager: Arc<crate::agents::session_manager::SessionManager>,
+    /// Backend kept separately for persist hooks (BackendPersistHook needs it).
     pub session_backend: Arc<dyn SessionBackend>,
     pub timezone_offset: i32,
     /// Last channel that received a user message.
@@ -194,26 +197,11 @@ fn parse_hhmm(s: &str) -> Option<u32> {
     Some(hours * 60 + mins)
 }
 
-// ── Silent response detection ──────────────────────────────────────────────
+// ── Webhook execution helpers ──────────────────────────────────────────────
 
-/// Check if a response is a silent "nothing to do" signal.
-fn is_silent_ok(response: &str, prefix: &str) -> bool {
-    let trimmed = response.trim().to_lowercase();
-    let marker = format!("{}_ok", prefix);
-    trimmed == marker || trimmed.contains(&marker)
-}
-
-// ── Default prompts ────────────────────────────────────────────────────────
-
-const HEARTBEAT_PROMPT: &str =
-    "read heartbeat.md if it exists. follow it strictly. \
-     if nothing needs attention, reply heartbeat_ok.";
-
-// ── Shared execution ───────────────────────────────────────────────────────
-
-/// Create or get an AgentLoop for a scheduler session and run a prompt.
+/// Create or get an AgentLoop for a webhook session and run a prompt.
 pub async fn run_scheduled_task(
-    ctx: &SchedulerContext,
+    ctx: &WebhookContext,
     session_key: &str,
     prompt: &str,
 ) -> anyhow::Result<String> {
@@ -222,28 +210,17 @@ pub async fn run_scheduled_task(
     guard.run(prompt, None, None).await
 }
 
-/// Create or get an AgentLoop for a given session key.
-/// Public so Orchestrator can reuse it for heartbeat execution.
-pub fn get_or_create_loop(
-    ctx: &SchedulerContext,
-    session_key: &str,
-) -> Arc<TokioMutex<AgentLoop>> {
+fn get_or_create_loop(ctx: &WebhookContext, session_key: &str) -> Arc<TokioMutex<AgentLoop>> {
     if let Some(existing) = ctx.sessions.get(session_key) {
         return existing.clone();
     }
 
-    // Scheduler creates its own SessionManager sharing the same backend.
-    let sm = SessionManager::new(ctx.session_backend.clone());
-    let session = sm.get_or_create(session_key);
-
+    let session = ctx.session_manager.get_or_create(session_key);
     let persist_hook: Arc<dyn crate::agents::PersistHook> = Arc::new(
         crate::agents::BackendPersistHook::new(ctx.session_backend.clone())
     );
-    let loop_ = ctx.agent.loop_for_with_persist(session, Some(persist_hook));
+    let mut loop_ = ctx.agent.loop_for_with_persist(session, Some(persist_hook));
 
-    let mut loop_ = loop_;
-
-    // Wire up file change receiver for hot-reload.
     if let Some(rx) = ctx.change_rx.clone() {
         loop_ = loop_.with_change_rx(rx);
     }
@@ -254,7 +231,7 @@ pub fn get_or_create_loop(
 }
 
 /// Send a response to the configured target channel.
-pub async fn send_to_target(ctx: &SchedulerContext, target: &str, content: &str) {
+pub async fn send_to_target(ctx: &WebhookContext, target: &str, content: &str) {
     let channel_name = match target {
         "none" => return,
         "last" => ctx.last_channel.lock().await.clone(),
@@ -289,133 +266,6 @@ pub async fn send_to_target(ctx: &SchedulerContext, target: &str, content: &str)
     }
 }
 
-// ── Heartbeat ──────────────────────────────────────────────────────────────
-
-/// Run the heartbeat scheduler loop.
-pub async fn run_heartbeat(ctx: Arc<SchedulerContext>, config: HeartbeatConfig) {
-    let interval = match parse_interval(&config.every) {
-        Some(d) => d,
-        None => {
-            tracing::warn!(every = %config.every, "invalid heartbeat interval, disabling");
-            return;
-        }
-    };
-
-    let mut ticker = tokio::time::interval(interval);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-    tracing::info!(
-        every = ?interval,
-        target = %config.target,
-        "heartbeat scheduler started"
-    );
-
-    loop {
-        ticker.tick().await;
-
-        if !is_active_hours(&config.active_hours, ctx.timezone_offset) {
-            tracing::debug!("heartbeat skipped: outside active hours");
-            continue;
-        }
-
-        // Check HEARTBEAT.md existence.
-        if !std::path::Path::new("HEARTBEAT.md").exists() {
-            tracing::debug!("heartbeat skipped: no HEARTBEAT.md");
-            continue;
-        }
-
-        tracing::info!("heartbeat triggered");
-
-        let prompt = config.prompt.as_deref().unwrap_or(HEARTBEAT_PROMPT);
-        let result = run_scheduled_task(&ctx, "_heartbeat", prompt).await;
-
-        match result {
-            Ok(response) if is_silent_ok(&response, "heartbeat") => {
-                tracing::info!("heartbeat: nothing needs attention");
-            }
-            Ok(response) if !response.trim().is_empty() => {
-                tracing::info!(resp_len = response.len(), "heartbeat produced output");
-                send_to_target(&ctx, &config.target, &response).await;
-            }
-            Ok(_) => {
-                tracing::info!("heartbeat: empty response");
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "heartbeat run failed");
-            }
-        }
-    }
-}
-
-// ── Cron ────────────────────────────────────────────────────────────────────
-
-/// Run the cron scheduler loop.
-/// Jobs are loaded from `cron/*.md` files, not from config.
-pub async fn run_cron_scheduler(ctx: Arc<SchedulerContext>, jobs: Vec<CronJob>) {
-    let mut parsed: Vec<(cron::Schedule, CronJob)> = Vec::new();
-    for job in &jobs {
-        match job.schedule.parse::<cron::Schedule>() {
-            Ok(schedule) => {
-                tracing::info!(
-                    schedule = %job.schedule,
-                    target = %job.target,
-                    prompt_preview = %job.prompt.chars().take(50).collect::<String>(),
-                    "cron job registered"
-                );
-                parsed.push((schedule, job.clone()));
-            }
-            Err(e) => {
-                tracing::warn!(schedule = %job.schedule, error = %e, "invalid cron expression, skipping");
-            }
-        }
-    }
-
-    if parsed.is_empty() {
-        tracing::info!("no valid cron jobs, cron scheduler idle");
-        return;
-    }
-
-    // Check every minute (cron minimum granularity).
-    let mut ticker = tokio::time::interval(Duration::from_secs(60));
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-    tracing::info!(job_count = parsed.len(), "cron scheduler started");
-
-    loop {
-        ticker.tick().await;
-
-        let now = {
-            let utc = chrono::Utc::now();
-            utc + chrono::Duration::hours(ctx.timezone_offset as i64)
-        };
-
-        for (schedule, job) in &parsed {
-            if cron_matches(schedule, &now) {
-                let session_key = format!(
-                    "_cron_{}",
-                    job.schedule.replace([' ', '*'], "").replace('.', "_")
-                );
-
-                tracing::info!(schedule = %job.schedule, "cron job triggered");
-
-                let result = run_scheduled_task(&ctx, &session_key, &job.prompt).await;
-
-                match result {
-                    Ok(response) if !response.trim().is_empty() => {
-                        send_to_target(&ctx, &job.target, &response).await;
-                    }
-                    Ok(_) => {
-                        tracing::info!(schedule = %job.schedule, "cron job: empty response");
-                    }
-                    Err(e) => {
-                        tracing::warn!(schedule = %job.schedule, error = %e, "cron job failed");
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// Check if a cron schedule matches the current time.
 /// `now` should be a local time as DateTime<Utc> with the timezone offset applied.
 pub fn cron_matches(schedule: &cron::Schedule, now: &chrono::DateTime<chrono::Utc>) -> bool {
@@ -437,7 +287,7 @@ use http_body_util::Full;
 
 /// Run the webhook HTTP server.
 pub async fn run_webhook_server(
-    ctx: Arc<SchedulerContext>,
+    ctx: Arc<WebhookContext>,
     config: WebhookConfig,
     jobs: Vec<WebhookJobDef>,
 ) {
@@ -490,7 +340,7 @@ pub async fn run_webhook_server(
 /// Main request dispatcher — routes to built-in endpoints or custom webhook jobs.
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
-    ctx: Arc<SchedulerContext>,
+    ctx: Arc<WebhookContext>,
     jobs: &[WebhookJobDef],
     global_secret: &Option<String>,
 ) -> anyhow::Result<Response<Full<Bytes>>> {
@@ -593,7 +443,7 @@ async fn handle_request(
 /// Body: `{"message": "...", "target": "last"}`
 async fn handle_hooks_agent(
     req: Request<hyper::body::Incoming>,
-    ctx: Arc<SchedulerContext>,
+    ctx: Arc<WebhookContext>,
     global_secret: &Option<String>,
 ) -> anyhow::Result<Response<Full<Bytes>>> {
     // Verify global Bearer token.

@@ -50,6 +50,22 @@ impl SessionOverride {
             && self.compact_threshold.is_none()
             && self.retain_work_units.is_none()
     }
+
+    /// Resolve the optional thinking/effort fields into a `ThinkingConfig`.
+    /// `None` = use the model's own reasoning config (no override).
+    pub fn to_thinking_config(&self) -> Option<crate::providers::ThinkingConfig> {
+        match self.thinking {
+            Some(true) => Some(crate::providers::ThinkingConfig {
+                enabled: true,
+                effort: self.effort.clone(),
+            }),
+            Some(false) => Some(crate::providers::ThinkingConfig {
+                enabled: false,
+                effort: None,
+            }),
+            None => None,
+        }
+    }
 }
 
 /// Remove orphan tool results (tool messages whose tool_call_id has no matching
