@@ -11,6 +11,7 @@
 
 use anyhow::Context;
 use chrono::Timelike;
+use serde::Serialize;
 use crate::agents::delegation::{DelegationEvent, DelegationManager};
 use crate::agents::sub_agent::SubAgentDelegator;
 use crate::channels::{Channel, ChannelMessage, SendMessage, ProcessingStatus};
@@ -365,7 +366,7 @@ impl Orchestrator {
 
         let mut rx = rx;
 
-        // Initialize heartbeat ticker (if enabled).
+        // Cloning tickers into the loop scope to avoid &mut self borrow in select! branches.
         let mut heartbeat_ticker = self.heartbeat_config.as_ref().and_then(|cfg| {
             crate::agents::scheduler::parse_interval(&cfg.every).map(|interval| {
                 let mut t = tokio::time::interval(interval);
@@ -373,6 +374,8 @@ impl Orchestrator {
                 t
             })
         });
+
+        let mut cron_ticker = self.cron_ticker.clone();
 
         loop {
             if *shutdown_rx.borrow() {
@@ -408,10 +411,10 @@ impl Orchestrator {
                     },
                     // Cron tick (every 60s if any cron jobs are configured).
                     _ = async {
-                        if let Some(t) = self.cron_ticker.as_mut() {
+                        if let Some(t) = cron_ticker.as_mut() {
                             t.tick().await;
                         }
-                    }, if self.cron_ticker.is_some() => {
+                    }, if cron_ticker.is_some() => {
                         self.handle_cron_tick().await;
                         continue;
                     },
@@ -438,10 +441,10 @@ impl Orchestrator {
                     },
                     // Cron tick (every 60s if any cron jobs are configured).
                     _ = async {
-                        if let Some(t) = self.cron_ticker.as_mut() {
+                        if let Some(t) = cron_ticker.as_mut() {
                             t.tick().await;
                         }
-                    }, if self.cron_ticker.is_some() => {
+                    }, if cron_ticker.is_some() => {
                         self.handle_cron_tick().await;
                         continue;
                     },
