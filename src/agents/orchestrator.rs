@@ -187,20 +187,40 @@ impl Orchestrator {
         msg_tx: Arc<mpsc::Sender<(String, ChannelMessage)>>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
-            let rx = match channel.listen().await {
-                Ok(r) => r,
-                Err(e) => {
-                    error!(channel = %channel_name, err = %e, "listen failed");
-                    return;
+            let mut backoff = Duration::from_secs(1);
+            loop {
+                let mut rx = match channel.listen().await {
+                    Ok(r) => {
+                        backoff = Duration::from_secs(1);
+                        r
+                    }
+                    Err(e) => {
+                        error!(
+                            channel = %channel_name,
+                            err = %e,
+                            delay_secs = backoff.as_secs(),
+                            "listen failed, retrying"
+                        );
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(Duration::from_secs(60));
+                        continue;
+                    }
+                };
+                while let Some(msg) = rx.recv().await {
+                    if msg_tx.send((channel_name.to_string(), msg)).await.is_err() {
+                        // Orchestrator is gone; no point reconnecting.
+                        return;
+                    }
                 }
-            };
-            let mut rx = rx;
-            while let Some(msg) = rx.recv().await {
-                if msg_tx.send((channel_name.to_string(), msg)).await.is_err() {
-                    break;
-                }
+                // Stream ended cleanly (channel disconnected) — reconnect.
+                warn!(
+                    channel = %channel_name,
+                    delay_secs = backoff.as_secs(),
+                    "listener stream ended, reconnecting"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(60));
             }
-            info!(channel = %channel_name, "listener ended");
         })
     }
 
@@ -368,8 +388,13 @@ impl Orchestrator {
                             std::future::pending().await
                         }
                     }, if scheduler_rx.is_some() => {
-                        let event = event.unwrap();
-                        self.handle_scheduler_event(event).await;
+                        match event {
+                            Some(e) => self.handle_scheduler_event(e).await,
+                            None => {
+                                tracing::warn!("scheduler channel closed, disabling scheduler");
+                                scheduler_rx = None;
+                            }
+                        }
                         continue;
                     },
                     _ = shutdown_rx.changed() => {
@@ -392,8 +417,13 @@ impl Orchestrator {
                             std::future::pending().await
                         }
                     }, if scheduler_rx.is_some() => {
-                        let event = event.unwrap();
-                        self.handle_scheduler_event(event).await;
+                        match event {
+                            Some(e) => self.handle_scheduler_event(e).await,
+                            None => {
+                                tracing::warn!("scheduler channel closed, disabling scheduler");
+                                scheduler_rx = None;
+                            }
+                        }
                         continue;
                     },
                     _ = shutdown_rx.changed() => {

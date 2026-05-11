@@ -84,6 +84,40 @@ pub fn sanitize_history(history: &mut Vec<ChatMessage>) {
     }
 }
 
+/// Same as `sanitize_history` but keeps IDs paired with their messages throughout,
+/// so the returned IDs correctly correspond to the surviving messages.
+///
+/// `sanitize_history` uses `retain()` which may remove messages from arbitrary
+/// positions (not just the tail), so slicing the IDs array after the fact gives
+/// wrong IDs. This variant avoids that by filtering both vecs together.
+fn sanitize_paired(pairs: Vec<(i64, ChatMessage)>) -> Vec<(i64, ChatMessage)> {
+    let known_tool_ids: std::collections::HashSet<String> = pairs
+        .iter()
+        .filter(|(_, m)| m.role == "assistant")
+        .flat_map(|(_, m)| m.tool_calls.iter().flatten().map(|tc| tc.id.clone()))
+        .collect();
+
+    let before = pairs.len();
+    let result: Vec<_> = pairs
+        .into_iter()
+        .filter(|(_, msg)| {
+            if msg.role == "tool" {
+                return msg
+                    .tool_call_id
+                    .as_ref()
+                    .map_or(false, |id| known_tool_ids.contains(id));
+            }
+            true
+        })
+        .collect();
+
+    let removed = before - result.len();
+    if removed > 0 {
+        tracing::warn!(removed, "sanitized orphan tool results from history");
+    }
+    result
+}
+
 struct InMemorySessionMeta {
     owner: String,
     display_name: Option<String>,
@@ -460,14 +494,14 @@ impl SessionManager {
                 // rotation), so we simply load everything in the current file.
                 let rows = self.backend.load_incremental(&session_id, 0);
                 let count = rows.len();
-                let (ids, mut msgs): (Vec<i64>, Vec<_>) = rows.into_iter().unzip();
-                sanitize_history(&mut msgs);
-                let ids = ids[..msgs.len()].to_vec();
+                let pairs = sanitize_paired(rows);
+                let sanitized = pairs.len();
+                let (ids, msgs): (Vec<i64>, Vec<_>) = pairs.into_iter().unzip();
 
                 tracing::info!(
                     session = %session_id,
                     message_count = count,
-                    sanitized = msgs.len(),
+                    sanitized,
                     last_total_tokens,
                     "session restored from compacted history"
                 );
@@ -491,11 +525,11 @@ impl SessionManager {
                 // Load all messages with their backend IDs (id > 0 covers all rows).
                 let rows = self.backend.load_incremental(&session_id, 0);
                 let count = rows.len();
-                let (ids, mut msgs): (Vec<i64>, Vec<_>) = rows.into_iter().unzip();
-                sanitize_history(&mut msgs);
-                let ids = ids[..msgs.len()].to_vec();
+                let pairs = sanitize_paired(rows);
+                let sanitized = pairs.len();
+                let (ids, msgs): (Vec<i64>, Vec<_>) = pairs.into_iter().unzip();
                 if count > 0 {
-                    tracing::info!(session = %session_id, message_count = count, sanitized = msgs.len(), "session restored from full history");
+                    tracing::info!(session = %session_id, message_count = count, sanitized, "session restored from full history");
                 }
                 Session {
                     id: session_id.clone(),
@@ -533,12 +567,28 @@ impl SessionManager {
         }
 
         // 3. Auto-create.
-        let info = self.backend.create_session(user_id, None)
-            .expect("failed to auto-create session");
-        let _ = self.backend.set_active_session(user_id, &info.id);
-        self.active.write().insert(user_id.to_string(), info.id.clone());
-        tracing::info!(user = %user_id, session = %info.id, "auto-created first session");
-        info.id
+        match self.backend.create_session(user_id, None) {
+            Ok(info) => {
+                let _ = self.backend.set_active_session(user_id, &info.id);
+                self.active.write().insert(user_id.to_string(), info.id.clone());
+                tracing::info!(user = %user_id, session = %info.id, "auto-created first session");
+                info.id
+            }
+            Err(e) => {
+                // Backend failed (disk full, permissions, …). Generate an ephemeral
+                // session ID so the agent can still operate this turn, rather than
+                // crashing the whole process.
+                let ephemeral = format!("ephemeral:{}", uuid::Uuid::new_v4());
+                tracing::error!(
+                    error = %e,
+                    user = %user_id,
+                    session = %ephemeral,
+                    "backend failed to create session; using ephemeral (non-persisted) session"
+                );
+                self.active.write().insert(user_id.to_string(), ephemeral.clone());
+                ephemeral
+            }
+        }
     }
 
     /// Create a new session and make it active for the user.

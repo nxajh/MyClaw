@@ -956,7 +956,6 @@ impl AgentLoop {
                 }
                 initial_messages.clone()
             } else {
-                first_iteration = false;
                 self.build_messages().await?
             };
 
