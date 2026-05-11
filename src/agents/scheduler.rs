@@ -319,7 +319,7 @@ pub async fn run_cron_scheduler(ctx: Arc<SchedulerContext>, jobs: Vec<CronJob>) 
 
 /// Check if a cron schedule matches the current time.
 /// `now` should be a local time as DateTime<Utc> with the timezone offset applied.
-fn cron_matches(schedule: &cron::Schedule, now: &chrono::DateTime<chrono::Utc>) -> bool {
+pub fn cron_matches(schedule: &cron::Schedule, now: &chrono::DateTime<chrono::Utc>) -> bool {
     let from = *now - chrono::Duration::seconds(61);
     schedule.after(&from).next().is_some_and(|next| {
         let diff = (next - *now).num_seconds().abs();

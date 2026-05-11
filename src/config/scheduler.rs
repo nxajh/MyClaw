@@ -52,6 +52,9 @@ pub struct CronJob {
     /// Where to send output: "last" | "none" | channel name.
     #[serde(default = "default_target")]
     pub target: String,
+    /// Active hours restriction, e.g. "08:00-24:00". None = always active.
+    #[serde(default)]
+    pub active_hours: Option<String>,
 }
 
 /// Cron scheduler configuration (global settings only).

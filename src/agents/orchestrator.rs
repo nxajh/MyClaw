@@ -10,10 +10,11 @@
 //! not here. This struct receives fully-assembled components via its constructor.
 
 use anyhow::Context;
+use chrono::Timelike;
 use crate::agents::delegation::{DelegationEvent, DelegationManager};
 use crate::agents::sub_agent::SubAgentDelegator;
 use crate::channels::{Channel, ChannelMessage, SendMessage, ProcessingStatus};
-use crate::config::scheduler::HeartbeatConfig;
+use crate::config::scheduler::{CronJob, HeartbeatConfig};
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -70,6 +71,13 @@ pub struct Orchestrator {
     heartbeat_config: Option<HeartbeatConfig>,
     /// Timezone offset for active hours calculation.
     timezone_offset: i32,
+    /// Cron jobs (loaded from cron/*.md).
+    cron_jobs: Vec<CronJob>,
+    /// Parsed cron schedules (cron::Schedule, CronJob).
+    #[serde(skip)]
+    cron_schedules: Vec<(cron::Schedule, CronJob)>,
+    /// Cron ticker (fires every 60 seconds).
+    cron_ticker: Option<tokio::time::Interval>,
 }
 
 /// Resources shared between Orchestrator and scheduler tasks.
@@ -111,6 +119,8 @@ pub struct OrchestratorParts {
     pub change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
     /// Heartbeat config (conditional — only when heartbeat is enabled).
     pub heartbeat_config: Option<HeartbeatConfig>,
+    /// Cron jobs (loaded from cron/*.md files). Empty vec = no cron.
+    pub cron_jobs: Vec<CronJob>,
     /// Timezone offset for active hours calculation in heartbeat.
     pub timezone_offset: i32,
 }
@@ -139,6 +149,37 @@ impl Orchestrator {
             warn!("no channels enabled");
         }
 
+        let cron_schedules: Vec<(cron::Schedule, CronJob)> = parts.cron_jobs.iter()
+            .filter_map(|j| {
+                match j.schedule.parse::<cron::Schedule>() {
+                    Ok(s) => {
+                        tracing::info!(
+                            schedule = %j.schedule,
+                            target = %j.target,
+                            "cron job registered"
+                        );
+                        Some((s, j.clone()))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            schedule = %j.schedule,
+                            error = %e,
+                            "invalid cron expression, skipping"
+                        );
+                        None
+                    }
+                }
+            })
+            .collect();
+
+        let cron_ticker = if cron_schedules.is_empty() {
+            None
+        } else {
+            let mut t = tokio::time::interval(Duration::from_secs(60));
+            t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            Some(t)
+        };
+
         let orchestrator = Orchestrator {
             channels: channels_map,
             sessions: Arc::new(DashMap::new()),
@@ -156,6 +197,9 @@ impl Orchestrator {
             last_channel: Arc::new(tokio::sync::Mutex::new(None)),
             heartbeat_config: parts.heartbeat_config,
             timezone_offset: parts.timezone_offset,
+            cron_jobs: parts.cron_jobs,
+            cron_schedules,
+            cron_ticker,
         };
 
         info!(channels = orchestrator.channels.len(), "orchestrator initialized");
@@ -337,7 +381,7 @@ impl Orchestrator {
             }
 
             let event = if delegation_rx.is_some() {
-                // select over user messages + delegation events + heartbeat (if enabled) + shutdown
+                // select over user messages + delegation events + heartbeat/cron (if enabled) + shutdown
                 tokio::select! {
                     msg = rx.recv() => match msg {
                         Some(m) => ChannelEvent::UserMessage(m),
@@ -362,13 +406,22 @@ impl Orchestrator {
                         self.handle_heartbeat_tick().await;
                         continue;
                     },
+                    // Cron tick (every 60s if any cron jobs are configured).
+                    _ = async {
+                        if let Some(t) = self.cron_ticker.as_mut() {
+                            t.tick().await;
+                        }
+                    }, if self.cron_ticker.is_some() => {
+                        self.handle_cron_tick().await;
+                        continue;
+                    },
                     _ = shutdown_rx.changed() => {
                         tracing::info!("shutdown signal received");
                         break;
                     }
                 }
             } else {
-                // No delegation events — user messages + heartbeat (if enabled) + shutdown
+                // No delegation events — user messages + heartbeat + cron (if enabled) + shutdown
                 tokio::select! {
                     msg = rx.recv() => match msg {
                         Some(m) => ChannelEvent::UserMessage(m),
@@ -381,6 +434,15 @@ impl Orchestrator {
                         }
                     }, if heartbeat_ticker.is_some() => {
                         self.handle_heartbeat_tick().await;
+                        continue;
+                    },
+                    // Cron tick (every 60s if any cron jobs are configured).
+                    _ = async {
+                        if let Some(t) = self.cron_ticker.as_mut() {
+                            t.tick().await;
+                        }
+                    }, if self.cron_ticker.is_some() => {
+                        self.handle_cron_tick().await;
                         continue;
                     },
                     _ = shutdown_rx.changed() => {
@@ -711,7 +773,7 @@ impl Orchestrator {
              if nothing needs attention, reply heartbeat_ok."
         );
 
-        let result = self.run_heartbeat_loop("_heartbeat", prompt).await;
+        let result = self.run_cron_loop("_heartbeat", prompt).await;
 
         match result {
             Ok(response) if is_silent_ok(&response, "heartbeat") => {
@@ -730,8 +792,56 @@ impl Orchestrator {
         }
     }
 
-    /// Run an agent loop for a scheduler session (used by heartbeat).
-    async fn run_heartbeat_loop(&self, session_key: &str, prompt: &str) -> anyhow::Result<String> {
+    /// Handle a cron tick — check all cron schedules and run matching jobs.
+    async fn handle_cron_tick(&self) {
+        use crate::agents::scheduler::cron_matches;
+
+        let now = {
+            let utc = chrono::Utc::now();
+            utc + chrono::Duration::hours(self.timezone_offset as i64)
+        };
+
+        for (schedule, job) in &self.cron_schedules {
+            if !cron_matches(schedule, &now) {
+                continue;
+            }
+
+            // Check active_hours restriction.
+            if !crate::agents::is_active_hours(&job.active_hours, self.timezone_offset) {
+                tracing::debug!(schedule = %job.schedule, "cron: outside active hours");
+                continue;
+            }
+
+            tracing::info!(schedule = %job.schedule, "cron job triggered");
+
+            let session_key = format!(
+                "_cron_{}",
+                job.schedule.replace([' ', '*'], "_").replace('.', "_")
+            );
+
+            let result = self.run_cron_loop(&session_key, &job.prompt).await;
+
+            match result {
+                Ok(response) if !response.trim().is_empty() => {
+                    send_to_target_internal(
+                        self.channels.clone(),
+                        self.last_channel.clone(),
+                        &job.target,
+                        &response,
+                    ).await;
+                }
+                Ok(_) => {
+                    tracing::info!(schedule = %job.schedule, "cron job: empty response");
+                }
+                Err(e) => {
+                    tracing::warn!(schedule = %job.schedule, error = %e, "cron job failed");
+                }
+            }
+        }
+    }
+
+    /// Run an agent loop for a scheduler session (used by heartbeat and cron).
+    async fn run_cron_loop(&self, session_key: &str, prompt: &str) -> anyhow::Result<String> {
         use crate::agents::scheduler::get_or_create_loop;
 
         let ctx = crate::agents::SchedulerContext {

@@ -603,6 +603,12 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         } else {
             None
         },
+        cron_jobs: if config.agent.scheduler.cron.enabled {
+            let cron_dir = config.workspace_dir.join("cron");
+            crate::agents::load_cron_jobs(&cron_dir)
+        } else {
+            vec![]
+        },
         timezone_offset: config.agent.prompt.timezone_offset,
     };
 
@@ -613,35 +619,19 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
     // ── Scheduler tasks ────────────────────────────────────────────────────
     let scheduler_config = config.agent.scheduler.clone();
-    let shared = orchestrator.shared();
-
-    let scheduler_ctx = Arc::new(crate::agents::SchedulerContext {
-        agent: agent.clone(),
-        channels: shared.channels,
-        sessions: shared.sessions,
-        session_backend: session_backend.clone(),
-        timezone_offset: config.agent.prompt.timezone_offset,
-        last_channel: shared.last_channel,
-        change_rx: Some(change_rx.clone()),
-    });
-
-    if scheduler_config.cron.enabled {
-        let cron_dir = config.workspace_dir.join("cron");
-        let cron_jobs = crate::agents::load_cron_jobs(&cron_dir);
-        if !cron_jobs.is_empty() {
-            let cron_ctx = scheduler_ctx.clone();
-            tokio::spawn(async move {
-                crate::agents::run_cron_scheduler(cron_ctx, cron_jobs).await;
-            });
-        } else {
-            tracing::info!("cron enabled but no jobs found in {}", cron_dir.display());
-        }
-    }
 
     if scheduler_config.webhook.enabled {
         let wh_dir = config.workspace_dir.join("webhooks");
         let wh_jobs = crate::agents::load_webhook_jobs(&wh_dir);
-        let wh_ctx = scheduler_ctx.clone();
+        let wh_ctx = Arc::new(crate::agents::SchedulerContext {
+            agent: agent.clone(),
+            channels: orchestrator.shared().channels,
+            sessions: orchestrator.shared().sessions,
+            session_backend: session_backend.clone(),
+            timezone_offset: config.agent.prompt.timezone_offset,
+            last_channel: orchestrator.shared().last_channel,
+            change_rx: Some(change_rx.clone()),
+        });
         let wh_config = scheduler_config.webhook.clone();
         tokio::spawn(async move {
             crate::agents::run_webhook_server(wh_ctx, wh_config, wh_jobs).await;
