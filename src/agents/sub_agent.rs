@@ -207,14 +207,16 @@ impl SubAgentDelegator {
             worktree_path.to_string_lossy().to_string()
         };
 
-        let agent_config = {
-            let mut cfg = crate::agents::AgentConfig::default();
-            cfg.max_tool_calls = config.max_tool_calls.unwrap_or(self.default_max_tool_calls);
-            cfg.max_history = 100;
-            cfg.prompt_config.workspace_dir = workspace_dir;
-            cfg.prompt_config.autonomy = crate::agents::AutonomyLevel::Full;
-            cfg.prompt_config.compact = true;
-            cfg
+        let agent_config = crate::agents::AgentConfig {
+            max_tool_calls: config.max_tool_calls.unwrap_or(self.default_max_tool_calls),
+            max_history: 100,
+            prompt_config: crate::agents::SystemPromptConfig {
+                workspace_dir,
+                autonomy: crate::agents::AutonomyLevel::Full,
+                compact: true,
+                ..Default::default()
+            },
+            ..Default::default()
         };
 
         let agent = crate::agents::Agent::new(
