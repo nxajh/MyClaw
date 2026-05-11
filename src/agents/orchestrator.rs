@@ -801,7 +801,7 @@ impl Orchestrator {
 }
 
 /// Check if a response is a silent "nothing to do" signal (used by heartbeat).
-fn is_silent_ok(response: &str, prefix: &str) -> bool {
+pub(crate) fn is_silent_ok(response: &str, prefix: &str) -> bool {
     let trimmed = response.trim().to_lowercase();
     let marker = format!("{}_ok", prefix);
     trimmed == marker || trimmed.contains(&marker)

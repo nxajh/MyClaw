@@ -586,6 +586,7 @@ fn ok_response(status: StatusCode, body: &str) -> anyhow::Result<Response<Full<B
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::orchestrator::is_silent_ok;
 
     #[test]
     fn parse_interval_minutes() {
