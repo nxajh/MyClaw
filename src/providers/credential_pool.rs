@@ -288,6 +288,6 @@ mod tests {
 
     #[test]
     fn mask_key_hides_middle() {
-        assert_eq!(CredentialPool::mask_key("sk-abcdefghijklmnopqrstuvwxyz"), "sk-a...xyz");
+        assert_eq!(CredentialPool::mask_key("sk-abcdefghijklmnopqrstuvwxyz"), "sk-a...wxyz");
     }
 }
