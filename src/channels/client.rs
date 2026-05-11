@@ -459,9 +459,9 @@ fn handle_api_request(
             let result: Vec<serde_json::Value> = sessions.iter().map(|s| {
                 serde_json::json!({
                     "id": s.id,
-                    "name": s.name,
-                    "created_at": s.created_at,
-                    "is_active": s.id == active,
+                    "name": s.display_name,
+                    "created_at": s.created_at.to_rfc3339(),
+                    "is_active": active.as_ref() == Some(&s.id),
                 })
             }).collect();
             serde_json::json!({
@@ -479,8 +479,8 @@ fn handle_api_request(
                     "id": id,
                     "result": {
                         "id": info.id,
-                        "name": info.name,
-                        "created_at": info.created_at,
+                        "name": info.display_name,
+                        "created_at": info.created_at.to_rfc3339(),
                     }
                 }).to_string(),
                 Err(e) => serde_json::json!({
@@ -508,7 +508,7 @@ fn handle_api_request(
                     "id": id,
                     "result": {
                         "id": info.id,
-                        "name": info.name,
+                        "name": info.display_name,
                     }
                 }).to_string(),
                 Err(e) => serde_json::json!({
