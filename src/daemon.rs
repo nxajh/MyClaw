@@ -594,6 +594,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // Create scheduler channel for Scheduler → Orchestrator communication.
     let (scheduler_tx, scheduler_rx) = tokio::sync::mpsc::channel::<crate::agents::SchedulerEvent>(100);
 
+    let session_manager_for_webhook = Arc::clone(&session_manager);
+
     let parts = OrchestratorParts {
         agent: agent.clone(),
         session_manager,
@@ -617,10 +619,11 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     if scheduler_config.webhook.enabled {
         let wh_dir = config.workspace_dir.join("webhooks");
         let wh_jobs = crate::agents::load_webhook_jobs(&wh_dir);
-        let wh_ctx = Arc::new(crate::agents::SchedulerContext {
+        let wh_ctx = Arc::new(crate::agents::WebhookContext {
             agent: agent.clone(),
             channels: orchestrator.shared().channels,
             sessions: orchestrator.shared().sessions,
+            session_manager: session_manager_for_webhook,
             session_backend: session_backend.clone(),
             timezone_offset: config.agent.prompt.timezone_offset,
             last_channel: orchestrator.shared().last_channel,
