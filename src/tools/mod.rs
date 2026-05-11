@@ -5,10 +5,12 @@
 //! **Core:** ShellTool, FileReadTool, FileWriteTool, FileEditTool, GlobSearchTool, ContentSearchTool
 //! **Web:** WebFetchTool, HttpRequestTool, WebSearchTool
 //! **Utility:** CalculatorTool, AskUserTool
-//! **Multi-Agent:** AgentDelegateTool
+//! **Multi-Agent:** AgentDelegateTool, AgentListTool, AgentKillTool
 //! **Planning:** TaskManagerTool
 //! **Discovery:** ToolSearchTool, ListDirTool
 
+mod agent_kill;
+mod agent_list;
 mod ask_user;
 mod calculator;
 mod delegate;
@@ -25,6 +27,8 @@ mod web;
 mod web_search;
 
 // Re-export tools.
+pub use agent_kill::AgentKillTool;
+pub use agent_list::AgentListTool;
 pub use ask_user::AskUserTool;
 pub use calculator::CalculatorTool;
 pub use delegate::{AgentDelegateTool, TaskDelegator};
