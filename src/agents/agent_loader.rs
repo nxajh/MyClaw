@@ -292,6 +292,7 @@ You are an expert programmer. Write clean, idiomatic code.
                 max_tool_calls: None,
                 description: None,
                 model: None,
+                isolation: AgentIsolation::default(),
             },
             SubAgentConfig {
                 name: "coder".into(),
@@ -300,6 +301,7 @@ You are an expert programmer. Write clean, idiomatic code.
                 max_tool_calls: None,
                 description: None,
                 model: None,
+                isolation: AgentIsolation::default(),
             },
         ];
         let warnings = validate_agents(&agents, &[]);
@@ -315,6 +317,7 @@ You are an expert programmer. Write clean, idiomatic code.
             max_tool_calls: None,
             description: None,
             model: None,
+            isolation: AgentIsolation::default(),
         }];
         let warnings = validate_agents(&agents, &["shell"]);
         assert!(warnings
