@@ -240,39 +240,33 @@ impl AttachmentManager {
     }
 
     /// 与 memory 索引做 diff，变更时生成 system-reminder。
+    /// 与 diff_skills 一致：始终检查 history，首次/compaction 后自动全量注入。
     pub fn diff_memory(
         &mut self,
         entries: &[crate::memory::IndexEntry],
         history: &[ChatMessage],
     ) {
         let new_text = crate::memory::format_memory_index(entries);
-        let old_text = self.memory_index.take().unwrap_or_default();
 
-        if new_text == old_text {
-            self.memory_index = Some(old_text);
-            return;
-        }
-
-        // Check if history already contains this exact index (avoid duplicates)
-        let marker = format!("## Memory Index Updated\n\n{}", &new_text);
+        // 检查 history 中是否已有相同的 memory 索引
+        let marker = format!("## Memory\n\n{}", &new_text);
         let already_injected = history.iter().any(|msg| {
             msg.text_content().contains(&marker)
         });
 
-        if !already_injected {
-            let msg = format!(
-                "## Memory Index Updated\n\n{}",
-                new_text
-            );
-            self.pending.insert(
-                AttachmentKind::MemoryListing,
-                Delta {
-                    added: vec![msg],
-                    removed: vec![],
-                },
-            );
+        if already_injected {
+            self.memory_index = Some(new_text);
+            return;
         }
 
+        // 首次 / 变更 / compaction 后 → 注入
+        self.pending.insert(
+            AttachmentKind::MemoryListing,
+            Delta {
+                added: vec![new_text.clone()],
+                removed: vec![],
+            },
+        );
         self.memory_index = Some(new_text);
     }
 
@@ -460,9 +454,11 @@ impl AttachmentManager {
     }
 
     fn render_memory(delta: &Delta) -> String {
-        delta.added.join("
-
-")
+        let mut lines = vec!["## Memory".to_string()];
+        for entry in &delta.added {
+            lines.push(entry.clone());
+        }
+        lines.join("\n\n")
     }
 
     fn render_mcp(delta: &Delta) -> String {

@@ -795,7 +795,18 @@ async fn cmd_history(ctx: CommandContext<'_>) -> String {
             _ => "❓",
         };
         let text = msg.text_content();
-        let first_line = text.lines().find(|l| !l.is_empty()).unwrap_or("");
+
+        // 跳过 <system-reminder> 前缀，找到用户实际输入
+        let display_text = if msg.role == "user" {
+            text.strip_prefix("<system-reminder>")
+                .and_then(|s| s.find("</system-reminder>"))
+                .map(|end| text[end + "</system-reminder>".len()..].trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&text)
+        } else {
+            &text
+        };
+        let first_line = display_text.lines().find(|l| !l.is_empty()).unwrap_or("");
 
         // Build display: use text if present, otherwise show tool calls.
         let display = if !first_line.is_empty() {

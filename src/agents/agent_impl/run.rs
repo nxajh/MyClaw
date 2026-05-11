@@ -139,6 +139,18 @@ impl AgentLoop {
                 tracing::info!(mcp_count = self.mcp_instructions.len(), "run: diff_mcp");
                 self.attachments.diff_mcp(&self.mcp_instructions, &history);
             }
+            // Memory index — 每 turn 都检查，首次或 compaction 后自动全量注入
+            {
+                let memory_dir = std::path::Path::new(&self.config.prompt_config.knowledge_dir);
+                let files = crate::memory::scan_memory_files(memory_dir);
+                let entries: Vec<crate::memory::IndexEntry> =
+                    files.iter().map(crate::memory::IndexEntry::from).collect();
+                tracing::info!(
+                    memory_count = entries.len(),
+                    "run: diff_memory"
+                );
+                self.attachments.diff_memory(&entries, &history);
+            }
             let tz = self.config.prompt_config.timezone_offset;
             self.attachments.diff_date(tz, &history);
             tracing::info!(

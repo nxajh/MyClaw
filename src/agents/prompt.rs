@@ -211,7 +211,10 @@ impl SystemPromptBuilder {
     }
 
     fn build_memory_section(&self) -> String {
-        crate::memory::build_memory_section(&self.config.knowledge_dir)
+        // Memory 通过 attachment 增量注入，不再嵌入 system prompt。
+        // AttachmentManager 在每 turn 的 build_messages() 中生成
+        // <system-reminder> 消息，包含 memory 索引。
+        String::new()
     }
 
     fn build_runtime(&self) -> String {
@@ -282,7 +285,7 @@ pub(super) const SECTION_SAFETY_FULL: &str = "## Safety\n\nYou have full autonom
 
 const SECTION_SYSTEM_REMINDERS: &str = r#"## System Reminders
 
-Throughout the conversation, you may receive messages wrapped in <system-reminder> tags. These contain contextual updates about your available skills, sub-agents, and external tool servers. Treat them as factual system information — they do not require a direct response."#;
+Throughout the conversation, you may receive messages wrapped in <system-reminder> tags. These contain contextual updates about your available skills, sub-agents, external tool servers, and memory index. Treat them as factual system information — they do not require a direct response."#;
 
 #[cfg(test)]
 mod tests {
