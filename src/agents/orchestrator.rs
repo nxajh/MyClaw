@@ -436,51 +436,91 @@ impl Orchestrator {
                             None => return,
                         };
 
-                        let response = {
-                            // Notify channel that processing has started.
-                            channel.on_status(&reply_target, ProcessingStatus::Thinking).await;
-                            let mut guard = loop_.lock().await;
-                            guard.run(&content, image_urls, image_base64).await
-                        };
+                        // Notify channel that processing has started.
+                        channel.on_status(&reply_target, ProcessingStatus::Thinking).await;
 
-                        match response {
-                            Ok(text) if !text.is_empty() => {
-                                tracing::info!(session = %sk, text_len = text.len(), "sending response");
-                                let send_msg = SendMessage {
-                                    recipient: reply_target.clone(),
-                                    content: text,
-                                    subject: None,
-                                    thread_ts: reply_to_id.clone(),
-                                    cancellation_token: None,
-                                    attachments: vec![],
-                                    image_urls: None,
-                                };
-                                if let Err(e) = channel.send(&send_msg).await {
-                                    error!(session = %sk, err = %e, "send failed");
+                        // ClientChannel uses streaming path: run_streamed() + TurnEvent forwarding.
+                        // Other channels use the existing run() + channel.send() path.
+                        let is_client = channel_name_clone == "client";
+
+                        if is_client {
+                            // Streaming path for ClientChannel.
+                            let stream_ctx = channel.take_stream_context(&reply_target);
+                            let (event_tx, cancel) = match stream_ctx {
+                                Some(ctx) => ctx,
+                                None => {
+                                    tracing::warn!(session = %sk, "no stream context for client session, falling back to run()");
+                                    let mut guard = loop_.lock().await;
+                                    let _ = guard.run(&content, image_urls, image_base64).await;
+                                    return;
                                 }
-                                channel.on_status(&reply_target, ProcessingStatus::Done).await;
+                            };
+
+                            let response = {
+                                let mut guard = loop_.lock().await;
+                                guard.run_streamed(&content, image_urls, image_base64, event_tx, cancel).await
+                            };
+
+                            match response {
+                                Ok(_text) => {
+                                    // Text already sent via TurnEvent::Done.
+                                    // Send TurnEvent::Error if needed (handled by run_streamed internally).
+                                    channel.on_status(&reply_target, ProcessingStatus::Done).await;
+                                }
+                                Err(e) => {
+                                    channel.on_status(&reply_target, ProcessingStatus::Error).await;
+                                    error!(session = %sk, err = %e, "streamed turn failed");
+                                    // Error already sent via channel.send() is not needed
+                                    // because the WS handler's forwarding task will have ended
+                                    // and the client can detect the stream ended without Done.
+                                }
                             }
-                            Ok(_) => {}
-                            Err(e) => {
-                                // Notify channel about the error.
-                                channel.on_status(&reply_target, ProcessingStatus::Error).await;
-                                // Send error message to user so they know what happened.
-                                let error_text = format!(
-                                    "⚠️ 处理消息时发生错误：\n\n`{}`\n\n请稍后重试，或联系管理员。",
-                                    e
-                                );
-                                error!(session = %sk, err = %e, "loop failed, notifying user");
-                                let send_msg = SendMessage {
-                                    recipient: reply_target,
-                                    content: error_text,
-                                    subject: None,
-                                    thread_ts: reply_to_id.clone(),
-                                    cancellation_token: None,
-                                    attachments: vec![],
-                                    image_urls: None,
-                                };
-                                if let Err(send_err) = channel.send(&send_msg).await {
-                                    error!(session = %sk, err = %send_err, "failed to send error notification to user");
+                        } else {
+                            // Existing non-streaming path.
+                            let response = {
+                                let mut guard = loop_.lock().await;
+                                guard.run(&content, image_urls, image_base64).await
+                            };
+
+                            match response {
+                                Ok(text) if !text.is_empty() => {
+                                    tracing::info!(session = %sk, text_len = text.len(), "sending response");
+                                    let send_msg = SendMessage {
+                                        recipient: reply_target.clone(),
+                                        content: text,
+                                        subject: None,
+                                        thread_ts: reply_to_id.clone(),
+                                        cancellation_token: None,
+                                        attachments: vec![],
+                                        image_urls: None,
+                                    };
+                                    if let Err(e) = channel.send(&send_msg).await {
+                                        error!(session = %sk, err = %e, "send failed");
+                                    }
+                                    channel.on_status(&reply_target, ProcessingStatus::Done).await;
+                                }
+                                Ok(_) => {}
+                                Err(e) => {
+                                    // Notify channel about the error.
+                                    channel.on_status(&reply_target, ProcessingStatus::Error).await;
+                                    // Send error message to user so they know what happened.
+                                    let error_text = format!(
+                                        "⚠️ 处理消息时发生错误：\n\n`{}`\n\n请稍后重试，或联系管理员。",
+                                        e
+                                    );
+                                    error!(session = %sk, err = %e, "loop failed, notifying user");
+                                    let send_msg = SendMessage {
+                                        recipient: reply_target,
+                                        content: error_text,
+                                        subject: None,
+                                        thread_ts: reply_to_id.clone(),
+                                        cancellation_token: None,
+                                        attachments: vec![],
+                                        image_urls: None,
+                                    };
+                                    if let Err(send_err) = channel.send(&send_msg).await {
+                                        error!(session = %sk, err = %send_err, "failed to send error notification to user");
+                                    }
                                 }
                             }
                         }
