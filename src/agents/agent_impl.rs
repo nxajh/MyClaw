@@ -1432,18 +1432,16 @@ impl AgentLoop {
     async fn execute_tool(&mut self, call: &ToolCall) -> anyhow::Result<ToolResult> {
         // Autonomy enforcement: block write-capable tools in ReadOnly mode.
         if let Some(ref autonomy) = self.session.session_override.autonomy {
-            if matches!(autonomy, crate::config::agent::AutonomyLevel::ReadOnly) {
-                if is_write_tool(&call.name) {
-                    tracing::info!(tool = %call.name, "tool blocked by ReadOnly autonomy policy");
-                    return Ok(ToolResult {
-                        success: false,
-                        output: format!(
-                            "Tool '{}' is not allowed in read-only mode (autonomy: ReadOnly).",
-                            call.name
-                        ),
-                        error: Some("autonomy_policy: ReadOnly".to_string()),
-                    });
-                }
+            if matches!(autonomy, crate::config::agent::AutonomyLevel::ReadOnly) && is_write_tool(&call.name) {
+                tracing::info!(tool = %call.name, "tool blocked by ReadOnly autonomy policy");
+                return Ok(ToolResult {
+                    success: false,
+                    output: format!(
+                        "Tool '{}' is not allowed in read-only mode (autonomy: ReadOnly).",
+                        call.name
+                    ),
+                    error: Some("autonomy_policy: ReadOnly".to_string()),
+                });
             }
         }
 

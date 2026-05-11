@@ -105,7 +105,7 @@ fn sanitize_paired(pairs: Vec<(i64, ChatMessage)>) -> Vec<(i64, ChatMessage)> {
                 return msg
                     .tool_call_id
                     .as_ref()
-                    .map_or(false, |id| known_tool_ids.contains(id));
+                    .is_some_and(|id| known_tool_ids.contains(id));
             }
             true
         })
