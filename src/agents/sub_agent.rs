@@ -28,6 +28,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::agents::delegation::{DelegationEvent, DelegationManager};
+use crate::agents::prompt::{SECTION_ANTI_NARRATION, SECTION_SAFETY_FULL, SECTION_TOOL_HONESTY};
 use crate::agents::session_manager::{BackendPersistHook, PersistHook, Session};
 use crate::agents::skills::SkillManager;
 use crate::agents::tool_registry::ToolRegistry;
@@ -157,11 +158,27 @@ impl SubAgentDelegator {
 
         let tools = self.build_filtered_tools(&config.tools);
         let tool_names = tools.tool_names_sorted();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let system_prompt = if config.system_prompt.is_empty() {
-            format!("You are a specialized agent named '{}'.\nAvailable tools: {}",
-                config.name, tool_names.join(", "))
+            format!(
+                "You are a specialized agent named '{}'.\n\n{}\n{}\n{}\n\nCurrent date: {}\n\nAvailable tools: {}",
+                config.name,
+                SECTION_ANTI_NARRATION,
+                SECTION_TOOL_HONESTY,
+                SECTION_SAFETY_FULL,
+                today,
+                tool_names.join(", "),
+            )
         } else {
-            format!("{}\n\nAvailable tools: {}", config.system_prompt, tool_names.join(", "))
+            format!(
+                "{}\n\n{}\n{}\n{}\n\nCurrent date: {}\n\nAvailable tools: {}",
+                config.system_prompt,
+                SECTION_ANTI_NARRATION,
+                SECTION_TOOL_HONESTY,
+                SECTION_SAFETY_FULL,
+                today,
+                tool_names.join(", "),
+            )
         };
 
         let (session_id, persist_hook) = self.open_sub_session(parent_session_id, &config.name);

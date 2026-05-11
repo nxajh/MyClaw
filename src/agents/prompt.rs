@@ -157,9 +157,7 @@ impl SystemPromptBuilder {
 
     fn build_safety(&self) -> String {
         match self.config.autonomy {
-            AutonomyLevel::Full => {
-                "## Safety\n\nYou have full autonomy. Execute actions directly without asking for confirmation unless the action is potentially destructive or irreversible.".to_string()
-            }
+            AutonomyLevel::Full => SECTION_SAFETY_FULL.to_string(),
             AutonomyLevel::Default => {
                 "## Safety\n\nAsk for confirmation before performing potentially destructive, irreversible, or public actions (e.g., deleting files, sending public messages). For internal actions (reading, searching, organizing), proceed directly.".to_string()
             }
@@ -275,16 +273,21 @@ impl SystemPromptBuilder {
 }
 
 // ── Static section strings ─────────────────────────────────────────────────────
+//
+// Shared with sub_agent.rs for sub-agent system prompt construction.
 
-const SECTION_ANTI_NARRATION: &str = r#"## CRITICAL: No Tool Narration
+pub(super) const SECTION_ANTI_NARRATION: &str = r#"## CRITICAL: No Tool Narration
 
 Do NOT narrate tool usage. Never say "Let me check...", "I'll fetch that...", "Searching now...", or describe which tool you're using. The user sees only the final answer. Tool calls are invisible infrastructure — skip straight to the answer."#;
 
-const SECTION_TOOL_HONESTY: &str = r#"## CRITICAL: Tool Honesty
+pub(super) const SECTION_TOOL_HONESTY: &str = r#"## CRITICAL: Tool Honesty
 
 - NEVER fabricate, invent, or guess tool results. If a tool returns empty results, say "No results found."
 - If a tool call fails, report the error — never make up data to fill the gap.
 - When unsure whether a tool call succeeded, ask the user rather than guessing."#;
+
+/// Safety section for Full autonomy — used by both main agent and sub-agents.
+pub(super) const SECTION_SAFETY_FULL: &str = "## Safety\n\nYou have full autonomy. Execute actions directly without asking for confirmation unless the action is potentially destructive or irreversible.";
 
 const SECTION_SYSTEM_REMINDERS: &str = r#"## System Reminders
 
