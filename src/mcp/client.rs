@@ -333,7 +333,7 @@ impl McpRegistry {
                         let desc = t.description.as_deref()
                             .filter(|s| !s.trim().is_empty())
                             .unwrap_or("no description");
-                        format!("- {}: {}", t.name, desc)
+                        format!("- {}: {}", t.name, desc.trim())
                     }).collect();
                     format!("Available tools:\n{}", lines.join("\n"))
                 }

@@ -296,7 +296,7 @@ fn cmd_tools(ctx: CommandContext<'_>) -> String {
     for name in &names {
         if let Some(tool) = tools.get(name) {
             let desc = tool.description();
-            let short = desc.lines().next().unwrap_or(desc);
+            let short = desc.trim().lines().next().unwrap_or(desc);
             let truncated = if short.chars().count() > 60 {
                 format!("{}...", short.chars().take(57).collect::<String>())
             } else {
