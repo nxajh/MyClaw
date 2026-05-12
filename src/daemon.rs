@@ -449,6 +449,14 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         format!("failed to set cwd to workspace_dir '{}'", config.workspace_dir.display())
     })?;
 
+    // Write PID file for hot-switch coordination (used by `myclaw update`).
+    let pid_file = std::env::temp_dir().join("myclaw.pid");
+    if let Err(e) = std::fs::write(&pid_file, std::process::id().to_string()) {
+        tracing::warn!(error = %e, "failed to write PID file (non-fatal)");
+    } else {
+        tracing::debug!(pid = %std::process::id(), path = %pid_file.display(), "PID file written");
+    }
+
     // Ensure knowledge directory exists
     if let Err(e) = crate::memory::ensure_memory_dir(
         config.knowledge_dir.to_str().unwrap_or("."),
@@ -553,6 +561,25 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let session_backend = build_session_backend(&config);
     let session_manager = Arc::new(SessionManager::new(Arc::clone(&session_backend)));
     let mut channels = build_channels(&config);
+
+    // ── Sub-agent recovery: detect interrupted sub-agents from a previous run ──
+    let sessions_root = config.workspace_dir.join("sessions");
+    let unfinished_subagents = scan_unfinished_subagents(&sessions_root);
+    if !unfinished_subagents.is_empty() {
+        tracing::info!(
+            count = unfinished_subagents.len(),
+            "detected unfinished sub-agents from previous run"
+        );
+        for sa in &unfinished_subagents {
+            tracing::info!(
+                agent = %sa.agent_name,
+                task_id = %sa.task_id,
+                "  unfinished sub-agent"
+            );
+        }
+    }
+    // Clean up stale marker files — they belong to the old process.
+    cleanup_stale_subagent_markers(&sessions_root);
 
     // Create ClientChannel separately (needs session_manager for management API).
     #[cfg(feature = "client")]
@@ -708,13 +735,22 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     orchestrator.shutdown_listeners().await;
 
     tracing::info!("myclaw daemon stopped");
+
+    // Clean up PID file
+    let pid_file = std::env::temp_dir().join("myclaw.pid");
+    if pid_file.exists() {
+        let _ = std::fs::remove_file(&pid_file);
+        tracing::debug!("PID file removed");
+    }
+
     Ok(())
 }
 
-/// Wait for SIGINT or SIGTERM.
+/// Wait for SIGINT, SIGTERM, or SIGUSR1.
 async fn wait_for_signal() -> Result<()> {
     let mut sigint = signal(SignalKind::interrupt())?;
     let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigusr1 = signal(SignalKind::user_defined1())?;
 
     tokio::select! {
         _ = sigint.recv() => {
@@ -723,6 +759,62 @@ async fn wait_for_signal() -> Result<()> {
         _ = sigterm.recv() => {
             tracing::debug!("received SIGTERM");
         }
+        _ = sigusr1.recv() => {
+            tracing::info!("received SIGUSR1 — hot switch triggered by `myclaw update`");
+        }
     }
     Ok(())
+}
+
+// ── Sub-agent recovery (hot-switch detection) ─────────────────────────────────
+
+/// Info about a sub-agent that was running when the daemon was killed.
+#[derive(Debug, Clone)]
+pub struct UnfinishedSubAgent {
+    pub agent_name: String,
+    pub task_id: String,
+    pub task_preview: String,
+}
+
+/// Scan the sessions directory for `subagent_running_*.json` marker files left
+/// behind by a previous daemon process that was killed while sub-agents were
+/// still executing.
+fn scan_unfinished_subagents(sessions_root: &std::path::Path) -> Vec<UnfinishedSubAgent> {
+    let mut unfinished = Vec::new();
+    let entries = match std::fs::read_dir(sessions_root) {
+        Ok(e) => e,
+        Err(_) => return unfinished,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("subagent_running_") && name.ends_with(".json") {
+            if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                if let Ok(state) = serde_json::from_str::<serde_json::Value>(&content) {
+                    unfinished.push(UnfinishedSubAgent {
+                        agent_name: state["agent_name"].as_str().unwrap_or("unknown").to_string(),
+                        task_id: state["task_id"].as_str().unwrap_or("unknown").to_string(),
+                        task_preview: state["task_preview"].as_str().unwrap_or("").to_string(),
+                    });
+                }
+            }
+        }
+    }
+    unfinished
+}
+
+/// Remove all stale `subagent_running_*.json` marker files.  Called once after
+/// the orchestrator has been informed about unfinished sub-agents so the markers
+/// don't linger across future restarts.
+fn cleanup_stale_subagent_markers(sessions_root: &std::path::Path) {
+    let entries = match std::fs::read_dir(sessions_root) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("subagent_running_") && name.ends_with(".json") {
+            let _ = std::fs::remove_file(entry.path());
+            tracing::info!(file = %name, "cleaned up stale sub-agent marker");
+        }
+    }
 }

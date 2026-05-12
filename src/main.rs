@@ -52,6 +52,11 @@ async fn main() -> Result<()> {
             cli::cmd_completion::run(shell)?;
         }
 
+        // `myclaw update` — download latest artifact and hot-switch
+        Some(cli::Commands::Update) => {
+            cli::cmd_update::run_update()?;
+        }
+
         // `myclaw version` — detailed version info
         Some(cli::Commands::Version) => {
             println!("MyClaw {}", env!("MYCLAW_VERSION"));

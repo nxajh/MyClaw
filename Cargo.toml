@@ -59,6 +59,9 @@ toml = "0.8"
 async-trait = "0.1"
 notify = { version = "7", features = ["macos_kqueue"] }
 
+# libc (for kill syscall in myclaw update)
+libc = "0.2"
+
 # Cron expression parsing
 cron = "0.15"
 

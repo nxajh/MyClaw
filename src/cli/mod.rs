@@ -7,6 +7,7 @@ pub mod cmd_doctor;
 pub mod cmd_exec;
 pub mod cmd_status;
 pub mod cmd_tools;
+pub mod cmd_update;
 #[cfg(feature = "tui")]
 pub mod cmd_tui;
 
@@ -113,6 +114,9 @@ pub enum Commands {
         /// Shell to generate completions for.
         shell: clap_complete::Shell,
     },
+
+    /// Download the latest release from GitHub and hot-switch.
+    Update,
 
     /// Show version and build information.
     Version,
