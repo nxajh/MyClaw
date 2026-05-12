@@ -1076,6 +1076,14 @@ impl Channel for QQBotChannel {
         // thread_ts carries the original message event ID for passive replies.
         let msg_id = msg.thread_ts.as_deref().unwrap_or("");
 
+        // Normalize recipient: bare openids (from startup recovery fallback)
+        // are treated as c2c: prefixed.
+        let recipient = if msg.recipient.starts_with("c2c:") || msg.recipient.starts_with("group:") {
+            msg.recipient.clone()
+        } else {
+            format!("c2c:{}", msg.recipient)
+        };
+
         // Build keyboard from inline_buttons (attached to last chunk only).
         let keyboard: Option<Keyboard> = msg.inline_buttons.as_ref().map(|buttons| {
             let pairs: Vec<(String, String)> = buttons.iter()
@@ -1093,39 +1101,39 @@ impl Channel for QQBotChannel {
             let result = if is_last {
                 if let Some(kb) = &keyboard {
                     // Last chunk with buttons — use keyboard endpoint.
-                    if let Some(openid) = msg.recipient.strip_prefix("c2c:") {
+                    if let Some(openid) = recipient.strip_prefix("c2c:") {
                         self.send_c2c_keyboard(openid, chunk, kb, msg_id).await
-                    } else if let Some(group_openid) = msg.recipient.strip_prefix("group:") {
+                    } else if let Some(group_openid) = recipient.strip_prefix("group:") {
                         self.send_group_keyboard(group_openid, chunk, kb, msg_id).await
                     } else {
                         Err(anyhow::anyhow!(
                             "invalid QQ Bot recipient format: {} (expected c2c:<openid> or group:<openid>)",
-                            msg.recipient
+                            recipient
                         ))
                     }
                 } else {
                     // Last chunk without buttons — normal send.
-                    if let Some(openid) = msg.recipient.strip_prefix("c2c:") {
+                    if let Some(openid) = recipient.strip_prefix("c2c:") {
                         self.send_c2c_message(openid, chunk, msg_id, msg_seq).await
-                    } else if let Some(group_openid) = msg.recipient.strip_prefix("group:") {
+                    } else if let Some(group_openid) = recipient.strip_prefix("group:") {
                         self.send_group_message(group_openid, chunk, msg_id, msg_seq).await
                     } else {
                         Err(anyhow::anyhow!(
                             "invalid QQ Bot recipient format: {} (expected c2c:<openid> or group:<openid>)",
-                            msg.recipient
+                            recipient
                         ))
                     }
                 }
             } else {
                 // Non-last chunk — always normal send.
-                if let Some(openid) = msg.recipient.strip_prefix("c2c:") {
+                if let Some(openid) = recipient.strip_prefix("c2c:") {
                     self.send_c2c_message(openid, chunk, msg_id, msg_seq).await
-                } else if let Some(group_openid) = msg.recipient.strip_prefix("group:") {
+                } else if let Some(group_openid) = recipient.strip_prefix("group:") {
                     self.send_group_message(group_openid, chunk, msg_id, msg_seq).await
                 } else {
                     Err(anyhow::anyhow!(
                         "invalid QQ Bot recipient format: {} (expected c2c:<openid> or group:<openid>)",
-                        msg.recipient
+                        recipient
                     ))
                 }
             };
@@ -1142,7 +1150,7 @@ impl Channel for QQBotChannel {
         }
 
         // Stop typing indicator for this recipient now that the response is sent.
-        self.stop_internal_typing(&msg.recipient);
+        self.stop_internal_typing(&recipient);
 
         Ok(())
     }
