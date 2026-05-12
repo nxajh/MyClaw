@@ -155,6 +155,25 @@ impl SearchProvider for GoogleProvider {
 
         let resp: GeminiResponse = serde_json::from_str(&resp_text)?;
 
+        // Debug: log grounding metadata state.
+        if let Some(ref candidate) = resp.candidates.as_ref().and_then(|c| c.first()) {
+            let has_meta = candidate.grounding_metadata.is_some();
+            let chunk_count = candidate.grounding_metadata.as_ref()
+                .and_then(|m| m.grounding_chunks.as_ref())
+                .map(|c| c.len())
+                .unwrap_or(0);
+            let support_count = candidate.grounding_metadata.as_ref()
+                .and_then(|m| m.grounding_supports.as_ref())
+                .map(|s| s.len())
+                .unwrap_or(0);
+            tracing::info!(
+                has_meta,
+                chunk_count,
+                support_count,
+                "Google Gemini grounding metadata"
+            );
+        }
+
         if let Some(err) = resp.error {
             let msg = err.message.unwrap_or_else(|| err.status.unwrap_or_default());
             anyhow::bail!("Google Gemini error {}: {}", err.code.unwrap_or(0), msg);
@@ -240,6 +259,12 @@ impl SearchProvider for GoogleProvider {
         }
 
         let total = Some(results.len() as u64);
+        let with_snippets = results.iter().filter(|r| !r.snippet.is_empty()).count();
+        tracing::info!(
+            total = results.len(),
+            with_snippets,
+            "Google search results extracted"
+        );
         Ok(SearchResults {
             results,
             total,
