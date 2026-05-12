@@ -59,6 +59,10 @@ struct SessionMeta {
     /// Per-session runtime overrides (JSON-encoded SessionOverride).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     session_override: Option<String>,
+    /// Last reply_target for this session (e.g. "c2c:<openid>", "group:<group_openid>").
+    /// Used by startup recovery to send responses to the correct target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_reply_target: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -238,6 +242,7 @@ impl SessionBackend for JsonFileBackend {
             compact_token_estimate: None,
             last_total_tokens: None,
             session_override: None,
+            last_reply_target: None,
         };
         self.write_meta(&meta)?;
 
@@ -499,5 +504,17 @@ impl SessionBackend for JsonFileBackend {
 
     fn load_session_override(&self, session_id: &str) -> Option<String> {
         self.read_meta(session_id)?.session_override
+    }
+
+    fn save_reply_target(&self, session_id: &str, target: &str) -> std::io::Result<()> {
+        if let Some(mut meta) = self.read_meta(session_id) {
+            meta.last_reply_target = if target.is_empty() { None } else { Some(target.to_string()) };
+            self.write_meta(&meta)?;
+        }
+        Ok(())
+    }
+
+    fn load_reply_target(&self, session_id: &str) -> Option<String> {
+        self.read_meta(session_id)?.last_reply_target
     }
 }

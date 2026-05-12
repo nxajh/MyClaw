@@ -396,6 +396,19 @@ impl AgentLoop {
             }
 
             let text = self.chat_loop(messages, stream_mode.clone()).await?;
+            // Persist the recovered assistant response so the turn is no longer incomplete.
+            if !text.is_empty() {
+                self.session.add_assistant_text(text.clone());
+                if let Some(ref hook) = self.persist_hook {
+                    if let Some(msg) = self.session.history.last() {
+                        if let Some(id) = hook.persist_message(&self.session.id, msg) {
+                            if let Some(last_id) = self.session.message_ids.last_mut() {
+                                *last_id = id;
+                            }
+                        }
+                    }
+                }
+            }
             tracing::info!("interrupted turn resumed (case A: re-executed tools + LLM)");
             return Ok(Some(text));
         }
@@ -405,6 +418,19 @@ impl AgentLoop {
             tracing::info!("detected incomplete turn (missing LLM continuation), resuming");
             let messages = self.build_messages().await?;
             let text = self.chat_loop(messages, stream_mode.clone()).await?;
+            // Persist the recovered assistant response so the turn is no longer incomplete.
+            if !text.is_empty() {
+                self.session.add_assistant_text(text.clone());
+                if let Some(ref hook) = self.persist_hook {
+                    if let Some(msg) = self.session.history.last() {
+                        if let Some(id) = hook.persist_message(&self.session.id, msg) {
+                            if let Some(last_id) = self.session.message_ids.last_mut() {
+                                *last_id = id;
+                            }
+                        }
+                    }
+                }
+            }
             tracing::info!("interrupted turn resumed (case B: LLM continuation)");
             return Ok(Some(text));
         }

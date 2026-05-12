@@ -122,6 +122,16 @@ pub trait SessionBackend: Send + Sync {
         None
     }
 
+    /// Persist the last reply_target for a session (e.g. "c2c:<openid>").
+    fn save_reply_target(&self, _session_id: &str, _target: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Load persisted last reply_target for a session.
+    fn load_reply_target(&self, _session_id: &str) -> Option<String> {
+        None
+    }
+
     // ── Maintenance ────────────────────────────────────────────────────────
 
     /// Clean up sessions older than ttl_hours.

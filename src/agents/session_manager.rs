@@ -455,6 +455,8 @@ pub trait PersistHook: Send + Sync {
     fn save_token_count(&self, session_id: &str, total: u64);
     /// Persist the session override so it survives restarts.
     fn save_session_override(&self, session_id: &str, override_json: &str);
+    /// Persist the last reply_target for this session.
+    fn save_reply_target(&self, session_id: &str, target: &str);
     /// Truncate message history to keep only the first `keep_count` messages.
     /// Used for rollback when a turn fails completely.
     fn truncate_messages(&self, session_id: &str, keep_count: usize);
@@ -506,6 +508,12 @@ impl PersistHook for BackendPersistHook {
         }
     }
 
+    fn save_reply_target(&self, session_id: &str, target: &str) {
+        if let Err(e) = self.backend.save_reply_target(session_id, target) {
+            tracing::warn!(session = %session_id, err = %e, "save reply target failed");
+        }
+    }
+
     fn truncate_messages(&self, session_id: &str, keep_count: usize) {
         if let Err(e) = self.backend.truncate_messages(session_id, keep_count) {
             tracing::warn!(session = %session_id, err = %e, "truncate messages failed");
@@ -551,6 +559,10 @@ pub struct Session {
     /// Detected on session load; used by the orchestrator to inject a
     /// recovery prompt so the model can re-execute the missing tools.
     pub breakpoint_items: Vec<BreakpointItem>,
+    /// Last reply_target used for this session (e.g. "c2c:<openid>", "group:<group_openid>").
+    /// Used by startup recovery to send the response to the correct target.
+    /// Not persisted — set from incoming ChannelMessage.
+    pub last_reply_target: Option<String>,
 }
 
 impl Session {
@@ -566,6 +578,7 @@ impl Session {
             session_override: SessionOverride::default(),
             incomplete_turn: false,
             breakpoint_items: Vec::new(),
+            last_reply_target: None,
         }
     }
 
@@ -757,6 +770,8 @@ impl SessionManager {
             (i, m, Vec::new())
         };
 
+        let last_reply_target = self.backend.load_reply_target(&session_id);
+
         let mut session = Session {
             id: session_id.clone(),
             owner: user_id.to_string(),
@@ -768,6 +783,7 @@ impl SessionManager {
             session_override,
             incomplete_turn: false,
             breakpoint_items: breakpoints,
+            last_reply_target,
         };
 
         // Breakpoint items are kept for diagnostics, but recovery is now handled

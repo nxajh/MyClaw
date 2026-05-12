@@ -451,9 +451,16 @@ impl Orchestrator {
                         recovered += 1;
                         tracing::info!(session = %sk, "startup recovery: turn completed");
                         // Send recovery response via the channel.
-                        if let Some((ch_name, sender)) = parse_session_key(sk) {
+                        // Use persisted reply_target if available (handles QQ Bot c2c:/group: prefix).
+                        let recipient = self.persist_backend.load_reply_target(sk)
+                            .unwrap_or_else(|| {
+                                parse_session_key(sk)
+                                    .map(|(_, sender)| sender.to_string())
+                                    .unwrap_or_default()
+                            });
+                        if let Some((ch_name, _)) = parse_session_key(sk) {
                             if let Some(channel) = channels.get(ch_name).map(|r| r.clone()) {
-                                let send_msg = SendMessage::new(&text, sender);
+                                let send_msg = SendMessage::new(&text, &recipient);
                                 if let Err(e) = channel.send(&send_msg).await {
                                     tracing::warn!(session = %sk, err = %e, "startup recovery: failed to send response");
                                 }
@@ -902,6 +909,16 @@ impl Orchestrator {
                             });
                             continue;
                         }
+                    }
+
+                    // Store reply_target on session for startup recovery.
+                    {
+                        let mut session = self.session_manager.get_or_create(&sk);
+                        session.last_reply_target = Some(reply_target.clone());
+                    }
+                    // Persist reply_target so it survives restarts.
+                    if let Err(e) = self.persist_backend.save_reply_target(&sk, &reply_target) {
+                        tracing::warn!(session = %sk, err = %e, "failed to persist reply_target");
                     }
 
                     let loop_ = Self::get_or_create_loop(
