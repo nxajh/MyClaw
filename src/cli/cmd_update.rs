@@ -43,7 +43,7 @@ pub fn run_update() -> Result<()> {
             // Fallback: copy if cross-filesystem rename fails
             std::fs::copy(&new_binary, &current_exe)?;
             std::fs::remove_file(&new_binary).ok();
-            Ok(())
+            Ok::<(), std::io::Error>(())
         })
         .context("failed to replace binary")?;
 
