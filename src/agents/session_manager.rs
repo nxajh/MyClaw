@@ -961,6 +961,7 @@ fn get_session_queue_path(sessions_dir: &std::path::Path, session_id: &str) -> s
 /// Used during hot-switch to buffer incoming messages while the old process
 /// is shutting down and the new one hasn't started yet.  Each message is
 /// written as one JSON line (JSONL format).
+#[allow(dead_code)]
 pub fn enqueue_message(
     sessions_dir: &std::path::Path,
     session_id: &str,
