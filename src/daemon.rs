@@ -864,47 +864,9 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     tracing::info!("dispatch loop ended, shutting down listeners...");
     orchestrator.shutdown_listeners().await;
 
-    // ── Hot switch: if SIGUSR1 set the flag, fork+execv the new binary ──
+    // ── If SIGUSR1 set the flag, exit cleanly — systemd will restart with new binary ──
     if crate::is_shutting_down() {
-        let socket_fd = LISTEN_SOCKET_FD.load(Ordering::SeqCst);
-        if socket_fd >= 0 {
-            tracing::info!(socket_fd, "triggering hot switch");
-            // spawn_blocking because do_hot_switch calls waitpid (blocking).
-            match tokio::task::spawn_blocking(move || {
-                crate::hot_switch::do_hot_switch(socket_fd)
-            })
-            .await
-            {
-                Ok(Ok(())) => {
-                    // do_hot_switch only returns Ok when the child exited
-                    // normally (rare — usually the parent exits via SIGUSR2).
-                    tracing::info!("hot switch completed (child exited normally)");
-                }
-                Ok(Err(e)) => {
-                    tracing::error!(error = %e, "hot switch failed, rollback applied");
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "hot switch task panicked");
-                }
-            }
-        } else {
-            tracing::info!("no listen socket available, hot switching without socket inheritance");
-            match tokio::task::spawn_blocking(|| {
-                crate::hot_switch::do_hot_switch(-1)
-            })
-            .await
-            {
-                Ok(Ok(())) => {
-                    tracing::info!("hot switch completed (child exited normally)");
-                }
-                Ok(Err(e)) => {
-                    tracing::error!(error = %e, "hot switch failed, rollback applied");
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "hot switch task panicked");
-                }
-            }
-        }
+        tracing::info!("shutdown flag set, exiting for restart (systemd will start new binary)");
     }
 
     tracing::info!("myclaw daemon stopped");
