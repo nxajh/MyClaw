@@ -10,6 +10,7 @@ use super::super::TurnEvent;
 ///
 /// - `Collect`: silently collect into a `CollectedResponse` (existing `run()` behavior).
 /// - `Streamed`: forward events via mpsc + support cancellation (for `run_streamed()`).
+#[derive(Clone)]
 pub(crate) enum StreamMode {
     Collect,
     Streamed {

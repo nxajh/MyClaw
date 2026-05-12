@@ -307,98 +307,107 @@ impl AgentLoop {
 
     /// Detect and recover an interrupted turn from session history.
     ///
-    /// If the session ends with assistant tool_calls that have no matching tool
-    /// results (process was killed mid-turn), re-execute the missing tools and
-    /// call `chat_loop` so the model continues from where it left off.
+    /// Two cases are handled:
+    ///
+    /// **Case A — missing tool results:** The session ends with an assistant
+    /// tool_calls message whose tool results were never persisted (process was
+    /// killed during tool execution).  We re-execute the missing tools and call
+    /// `chat_loop` so the model continues.
+    ///
+    /// **Case B — missing LLM continuation:** The session ends with complete
+    /// tool results but no final assistant response (process was killed after
+    /// tool execution finished but before the next LLM call).  We call
+    /// `chat_loop` directly so the model generates the final response.
     async fn recover_incomplete_turn(&mut self, stream_mode: &StreamMode) -> anyhow::Result<()> {
-        // Scan session history from the end to find missing tool results.
         let history = &self.session.history;
         if history.is_empty() {
             return Ok(());
         }
 
-        // Walk backwards: collect all tool_call_ids that have results,
+        // Walk backwards: collect tool_call_ids that have results,
         // then find tool_calls without results.
         let mut completed_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut pending_calls: Vec<crate::providers::ToolCall> = Vec::new();
-        let mut found_incomplete = false;
+        let mut has_trailing_tool_results = false;
 
-        // Scan from end backwards until we hit a non-assistant message.
         for msg in history.iter().rev() {
-            match msg.role {
-                crate::providers::Role::Tool => {
-                    if let Some(ref id) = msg.tool_call_id {
-                        completed_ids.insert(id.clone());
+            if msg.role == "tool" {
+                if let Some(ref id) = msg.tool_call_id {
+                    completed_ids.insert(id.clone());
+                }
+                has_trailing_tool_results = true;
+            } else if msg.role == "assistant" {
+                if let Some(ref calls) = msg.tool_calls {
+                    for call in calls {
+                        if !completed_ids.contains(&call.id) {
+                            pending_calls.push(call.clone());
+                        }
                     }
                 }
-                crate::providers::Role::Assistant => {
-                    if let Some(ref calls) = msg.tool_calls {
-                        for call in calls {
-                            if !completed_ids.contains(&call.id) {
-                                pending_calls.push(call.clone());
-                                found_incomplete = true;
+                // Stop scanning — we only care about the trailing segment.
+                break;
+            } else {
+                break; // User/system message — no incomplete turn.
+            }
+        }
+
+        // Case A: assistant tool_calls with missing results → re-execute.
+        if !pending_calls.is_empty() {
+            tracing::info!(
+                missing_count = pending_calls.len(),
+                "detected incomplete turn (missing tool results), resuming"
+            );
+
+            let mut messages = self.build_messages().await?;
+
+            for call in &pending_calls {
+                tracing::info!(tool = %call.name, id = %call.id, "re-executing interrupted tool call");
+                let result = self.execute_tool(call).await;
+                let (result_content, is_error) = match &result {
+                    Ok(r) => {
+                        let mut out = r.output.clone();
+                        if let Some(ref err) = r.error {
+                            if out.is_empty() {
+                                out = format!("error: {}", err);
+                            }
+                        }
+                        (out, !r.success)
+                    }
+                    Err(e) => (format!("error: {}", e), true),
+                };
+
+                tracing::info!(tool = %call.name, success = !is_error, "re-executed tool result");
+
+                let mut tool_msg = ChatMessage::text("tool", &result_content);
+                tool_msg.tool_call_id = Some(call.id.clone());
+                tool_msg.is_error = Some(is_error);
+                messages.push(tool_msg);
+
+                self.session.add_tool_result(call.id.clone(), result_content, is_error);
+                if let Some(ref hook) = self.persist_hook {
+                    if let Some(msg) = self.session.history.last() {
+                        if let Some(id) = hook.persist_message(&self.session.id, msg) {
+                            if let Some(last_id) = self.session.message_ids.last_mut() {
+                                *last_id = id;
                             }
                         }
                     }
-                    // Stop scanning — we only care about the trailing assistant tool_calls.
-                    break;
                 }
-                _ => break, // User/system message — no incomplete turn.
             }
-        }
 
-        if !found_incomplete || pending_calls.is_empty() {
+            let _text = self.chat_loop(messages, stream_mode.clone()).await?;
+            tracing::info!("interrupted turn resumed (case A: re-executed tools + LLM)");
             return Ok(());
         }
 
-        tracing::info!(
-            missing_count = pending_calls.len(),
-            "detected incomplete turn from previous run, resuming tool execution"
-        );
-
-        // Re-execute missing tool results and append to session history.
-        let mut messages = self.build_messages().await?;
-
-        for call in &pending_calls {
-            tracing::info!(tool = %call.name, id = %call.id, "re-executing interrupted tool call");
-            let result = self.execute_tool(call).await;
-            let (result_content, is_error) = match &result {
-                Ok(r) => {
-                    let mut out = r.output.clone();
-                    if let Some(ref err) = r.error {
-                        if out.is_empty() {
-                            out = format!("error: {}", err);
-                        }
-                    }
-                    (out, !r.success)
-                }
-                Err(e) => (format!("error: {}", e), true),
-            };
-
-            tracing::info!(tool = %call.name, success = !is_error, "re-executed tool result");
-
-            // Append to messages for chat_loop.
-            let mut tool_msg = ChatMessage::text("tool", &result_content);
-            tool_msg.tool_call_id = Some(call.id.clone());
-            tool_msg.is_error = Some(is_error);
-            messages.push(tool_msg);
-
-            // Persist to session history.
-            self.session.add_tool_result(call.id.clone(), result_content, is_error);
-            if let Some(ref hook) = self.persist_hook {
-                if let Some(msg) = self.session.history.last() {
-                    if let Some(id) = hook.persist_message(&self.session.id, msg) {
-                        if let Some(last_id) = self.session.message_ids.last_mut() {
-                            *last_id = id;
-                        }
-                    }
-                }
-            }
+        // Case B: all tool results present but no final assistant response → call LLM.
+        if has_trailing_tool_results && pending_calls.is_empty() {
+            tracing::info!("detected incomplete turn (missing LLM continuation), resuming");
+            let messages = self.build_messages().await?;
+            let _text = self.chat_loop(messages, stream_mode.clone()).await?;
+            tracing::info!("interrupted turn resumed (case B: LLM continuation)");
+            return Ok(());
         }
-
-        // Call chat_loop so the model sees the completed tool results and continues.
-        let _text = self.chat_loop(messages, stream_mode.clone()).await?;
-        tracing::info!("interrupted turn resumed and completed");
 
         Ok(())
     }
