@@ -2,20 +2,24 @@
 //!
 //! Routes search queries through the Registry's SearchProvider capability.
 //! If no SearchProvider is configured, returns a helpful error message.
+//! Supports per-provider cooldown: providers that recently failed with
+//! retryable errors are skipped until their cooldown expires.
 
 use async_trait::async_trait;
 use std::sync::Arc;
 use crate::providers::{ServiceRegistry, Tool, ToolResult};
 use crate::providers::search::SearchRequest;
+use crate::tools::search_cooldown::SearchProviderCooldown;
 use serde_json::json;
 
 pub struct WebSearchTool {
     registry: Arc<dyn ServiceRegistry>,
+    cooldown: Arc<SearchProviderCooldown>,
 }
 
 impl WebSearchTool {
-    pub fn new(registry: Arc<dyn ServiceRegistry>) -> Self {
-        Self { registry }
+    pub fn new(registry: Arc<dyn ServiceRegistry>, cooldown: Arc<SearchProviderCooldown>) -> Self {
+        Self { registry, cooldown }
     }
 }
 
@@ -77,11 +81,23 @@ impl Tool for WebSearchTool {
 
         // Try each provider in the fallback chain.
         let mut last_error = None;
-        for (provider, model_id) in &chain {
+        let mut skipped = 0;
+        for (provider, model_id, provider_name) in &chain {
+            // Skip providers that are still in cooldown.
+            if self.cooldown.is_cooled_down(provider_name) {
+                tracing::debug!(
+                    provider = %provider_name,
+                    "search provider in cooldown, skipping"
+                );
+                skipped += 1;
+                continue;
+            }
+
             tracing::debug!(
                 query = %query,
                 limit = limit,
                 provider_model = %model_id,
+                provider = %provider_name,
                 "executing web search"
             );
 
@@ -122,9 +138,11 @@ impl Tool for WebSearchTool {
                     });
                 }
                 Err(e) => {
+                    let reason = self.cooldown.classify_and_record(provider_name, &e.to_string());
                     tracing::warn!(
                         error = %e,
-                        provider = %model_id,
+                        provider = %provider_name,
+                        reason = ?reason,
                         "search provider failed, trying next"
                     );
                     last_error = Some(e);
@@ -133,7 +151,17 @@ impl Tool for WebSearchTool {
             }
         }
 
-        // All providers failed.
+        // All providers failed or were in cooldown.
+        if skipped > 0 && skipped == chain.len() {
+            let msg = "All search providers are in cooldown. Please try again later.";
+            tracing::warn!(providers = skipped, msg);
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(msg.to_string()),
+            });
+        }
+
         let msg = last_error.map(|e| e.to_string()).unwrap_or_else(|| "unknown error".into());
         tracing::warn!("all search providers failed: {}", msg);
         Ok(ToolResult {

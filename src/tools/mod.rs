@@ -25,6 +25,7 @@ pub mod tool_search;
 pub mod truncation;
 mod web;
 mod web_search;
+pub mod search_cooldown;
 
 // Re-export tools.
 pub use agent_kill::AgentKillTool;

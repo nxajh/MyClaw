@@ -482,7 +482,11 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let registry_arc: Arc<dyn crate::providers::ServiceRegistry> = Arc::new(registry);
 
     // Register WebSearchTool — requires ServiceRegistry for search routing.
-    tools.register(Arc::new(crate::tools::WebSearchTool::new(registry_arc.clone())));
+    let search_cooldown = Arc::new(crate::tools::search_cooldown::SearchProviderCooldown::new());
+    tools.register(Arc::new(crate::tools::WebSearchTool::new(
+        registry_arc.clone(),
+        search_cooldown,
+    )));
     tracing::debug!("web_search tool registered (connected to ServiceRegistry)");
 
     // WorkspaceWatcher for hot-reload.
