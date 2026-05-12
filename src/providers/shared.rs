@@ -414,6 +414,7 @@ impl ProviderHandle {
         match self {
             ProviderHandle::Glm(p) => Some(Box::new(p)),
             ProviderHandle::Google(p) => Some(Box::new(p)),
+            ProviderHandle::MiniMax(p) => Some(Box::new(p)),
             _ => None,
         }
     }
