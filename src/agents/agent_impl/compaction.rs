@@ -690,43 +690,29 @@ Respond ONLY to the latest user message that appears AFTER this summary.\n\n";
         }
     }
 
-    /// Drop everything before the first user message in the retention zone.
-    ///
-    /// After compaction the retention zone may start with orphan messages
-    /// (assistant with tool_calls whose results were compacted away, orphan
-    /// tool results, etc.) that precede the first user message.  Dropping
-    /// them keeps the remaining history aligned on a clean user→assistant
-    /// boundary, avoiding 400 errors from unmatched tool_call_ids.
+    /// Drop the oldest work unit in the retention zone (last resort).
     fn drop_oldest_retained_work_unit(&mut self, boundary: usize) {
-        // Find the first user message in the retention zone.
-        let first_user = self.session.history[boundary..]
-            .iter()
-            .position(|m| m.role == "user");
+        let retained = &self.session.history[boundary..];
+        let units = super::super::work_unit::extract_work_units(retained);
 
-        let drop_end = match first_user {
-            Some(pos) => boundary + pos,
-            None => return, // no user message — don't drop anything
-        };
+        if units.len() <= 1 { return; }
 
-        if drop_end <= boundary {
-            // Already starts with a user message; nothing to drop.
-            return;
-        }
+        let unit = &units[0];
+        let start = boundary + unit.user_start;
+        let end = boundary + unit.end + 1;
 
-        let removed_tokens: u64 = self.session.history[boundary..drop_end]
-            .iter()
-            .map(estimate_message_tokens)
-            .sum();
+        let to_remove = &self.session.history[start..end];
+        let removed_tokens: u64 = to_remove.iter().map(estimate_message_tokens).sum();
 
-        self.session.history.drain(boundary..drop_end);
-        self.session.message_ids.drain(boundary..drop_end);
+        self.session.history.drain(start..end);
+        self.session.message_ids.drain(start..end);
         self.token_tracker.adjust_for_compaction(removed_tokens, 0);
 
         tracing::warn!(
-            dropped_start = boundary,
-            dropped_end = drop_end,
+            dropped_start = start,
+            dropped_end = end,
             removed_tokens,
-            "dropped orphan messages before first user message in retention zone"
+            "dropped oldest retained work unit after truncation insufficient"
         );
     }
 }
