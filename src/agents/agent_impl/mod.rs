@@ -398,8 +398,7 @@ impl AgentLoop {
     /// ends with an incomplete turn (missing tool results or missing LLM continuation),
     /// re-executes the necessary steps silently — the response is persisted to session
     /// history but NOT sent to any channel.
-    pub async fn recover_interrupted_turn(&mut self) -> anyhow::Result<bool> {
-        self.recover_incomplete_turn(&crate::agents::agent_impl::types::StreamMode::Collect).await?;
-        Ok(true)
+    pub async fn recover_interrupted_turn(&mut self) -> anyhow::Result<Option<String>> {
+        self.recover_incomplete_turn(&crate::agents::agent_impl::types::StreamMode::Collect).await
     }
 }

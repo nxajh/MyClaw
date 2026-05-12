@@ -447,9 +447,21 @@ impl Orchestrator {
                 );
                 let mut guard = loop_.lock().await;
                 match guard.recover_interrupted_turn().await {
-                    Ok(_) => {
+                    Ok(Some(text)) if !text.is_empty() => {
                         recovered += 1;
                         tracing::info!(session = %sk, "startup recovery: turn completed");
+                        // Send recovery response via the channel.
+                        if let Some((ch_name, sender)) = parse_session_key(sk) {
+                            if let Some(channel) = channels.get(ch_name).map(|r| r.clone()) {
+                                let send_msg = SendMessage::new(&text, sender);
+                                if let Err(e) = channel.send(&send_msg).await {
+                                    tracing::warn!(session = %sk, err = %e, "startup recovery: failed to send response");
+                                }
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        // No recovery needed or empty response — skip silently.
                     }
                     Err(e) => {
                         tracing::warn!(session = %sk, err = %e, "startup recovery failed");

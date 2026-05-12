@@ -96,7 +96,7 @@ impl AgentLoop {
         // If the session ends with assistant tool_calls that have no matching
         // tool results (process was killed mid-turn), re-execute the missing
         // tools and let chat_loop continue from there.
-        self.recover_incomplete_turn(&stream_mode).await?;
+        let _recovery_text = self.recover_incomplete_turn(&stream_mode).await?;
 
         // Reset loop breaker for new turn.
         self.loop_breaker.reset();
@@ -318,10 +318,10 @@ impl AgentLoop {
     /// tool results but no final assistant response (process was killed after
     /// tool execution finished but before the next LLM call).  We call
     /// `chat_loop` directly so the model generates the final response.
-    pub(crate) async fn recover_incomplete_turn(&mut self, stream_mode: &StreamMode) -> anyhow::Result<()> {
+    pub(crate) async fn recover_incomplete_turn(&mut self, stream_mode: &StreamMode) -> anyhow::Result<Option<String>> {
         let history = &self.session.history;
         if history.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
 
         // Walk backwards: collect tool_call_ids that have results,
@@ -395,21 +395,21 @@ impl AgentLoop {
                 }
             }
 
-            let _text = self.chat_loop(messages, stream_mode.clone()).await?;
+            let text = self.chat_loop(messages, stream_mode.clone()).await?;
             tracing::info!("interrupted turn resumed (case A: re-executed tools + LLM)");
-            return Ok(());
+            return Ok(Some(text));
         }
 
         // Case B: all tool results present but no final assistant response → call LLM.
         if has_trailing_tool_results && pending_calls.is_empty() {
             tracing::info!("detected incomplete turn (missing LLM continuation), resuming");
             let messages = self.build_messages().await?;
-            let _text = self.chat_loop(messages, stream_mode.clone()).await?;
+            let text = self.chat_loop(messages, stream_mode.clone()).await?;
             tracing::info!("interrupted turn resumed (case B: LLM continuation)");
-            return Ok(());
+            return Ok(Some(text));
         }
 
-        Ok(())
+        Ok(None)
     }
 
     /// Build the message list: system prompt + history.
