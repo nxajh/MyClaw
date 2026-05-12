@@ -396,6 +396,13 @@ impl Orchestrator {
                 break;
             }
 
+            // Hot switch checkpoint: SIGUSR1 set the flag — exit loop so
+            // daemon.rs can trigger fork+execv.
+            if crate::is_shutting_down() {
+                tracing::info!("shutdown flag detected in orchestrator, exiting for hot switch");
+                break;
+            }
+
             let event = if delegation_rx.is_some() {
                 // select over user messages + delegation events + scheduler events + shutdown
                 tokio::select! {

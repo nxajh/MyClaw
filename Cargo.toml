@@ -73,6 +73,9 @@ http-body-util = "0.1"
 # HMAC for webhook signature verification
 hmac = "0.12"
 
+# SO_REUSEPORT support (hot switch)
+socket2 = { version = "0.5", features = ["all"] }
+
 # WeChat crypto (feature-gated)
 aes = { version = "0.8", optional = true }
 ecb = { version = "0.1", optional = true }

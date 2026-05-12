@@ -287,16 +287,31 @@ use hyper_util::rt::TokioIo;
 use http_body_util::Full;
 
 /// Run the webhook HTTP server.
+///
+/// If `pre_bound` is `Some`, use the pre-bound `SO_REUSEPORT` listener instead
+/// of binding a fresh socket.  This is used during hot switch so the new process
+/// can accept connections on the same port before the old process releases it.
 pub async fn run_webhook_server(
     ctx: Arc<WebhookContext>,
     config: WebhookConfig,
     jobs: Vec<WebhookJobDef>,
+    pre_bound: Option<std::net::TcpListener>,
 ) {
-    let listener = match tokio::net::TcpListener::bind(("0.0.0.0", config.port)).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!(port = config.port, error = %e, "webhook: failed to bind");
-            return;
+    let listener = if let Some(std_listener) = pre_bound {
+        match tokio::net::TcpListener::from_std(std_listener) {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!(port = config.port, error = %e, "webhook: failed to convert pre-bound listener");
+                return;
+            }
+        }
+    } else {
+        match tokio::net::TcpListener::bind(("0.0.0.0", config.port)).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!(port = config.port, error = %e, "webhook: failed to bind");
+                return;
+            }
         }
     };
 

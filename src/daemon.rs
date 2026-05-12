@@ -19,10 +19,15 @@ use crate::tools::TaskDelegator;
 use crate::config::sub_agent::SubAgentConfig;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
 
 use crate::channels::Channel;
+
+/// File descriptor of the SO_REUSEPORT listen socket, stored so the hot-switch
+/// child can inherit it.  `-1` means no socket has been bound yet.
+pub static LISTEN_SOCKET_FD: AtomicI32 = AtomicI32::new(-1);
 
 /// Default config file locations.
 const DEFAULT_CONFIG_PATHS: &[&str] = &[
@@ -57,6 +62,31 @@ pub fn load_config_from(path: &str) -> Result<crate::config::AppConfig> {
     }
     tracing::info!(path = %p.display(), "loading config");
     crate::config::ConfigLoader::from_file(&p).context("failed to load config")
+}
+
+/// Bind a TCP listener with `SO_REUSEPORT` + `SO_REUSE_ADDRESS`.
+///
+/// This allows a new process to bind the same port **before** the old process
+/// has released it — essential for zero-downtime hot switch.
+fn bind_reusable(port: u16) -> anyhow::Result<std::net::TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+
+    let addr: std::net::SocketAddr = format!("0.0.0.0:{port}")
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid bind address: {e}"))?;
+
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
+        .context("failed to create socket")?;
+    socket.set_reuse_port(true).context("SO_REUSEPORT failed")?;
+    socket.set_reuse_address(true).context("SO_REUSEADDR failed")?;
+    socket
+        .bind(&addr.into())
+        .with_context(|| format!("failed to bind {addr}"))?;
+    socket.listen(128).context("listen failed")?;
+
+    let listener: std::net::TcpListener = socket.into();
+    tracing::info!(port, "SO_REUSEPORT listener bound");
+    Ok(listener)
 }
 
 /// Initialize tracing subscriber based on config.
@@ -449,6 +479,15 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         format!("failed to set cwd to workspace_dir '{}'", config.workspace_dir.display())
     })?;
 
+    // ── Hot switch: if started via fork+execv, notify the old process ──
+    #[cfg(unix)]
+    if crate::hot_switch::is_hot_switch() {
+        if let Some(old) = crate::hot_switch::old_pid() {
+            tracing::info!(old_pid = old, "hot switch startup detected, sending SIGUSR2 to old process");
+            unsafe { libc::kill(old, libc::SIGUSR2); }
+        }
+    }
+
     // Write PID file for hot-switch coordination (used by `myclaw update`).
     let pid_file = std::env::temp_dir().join("myclaw.pid");
     if let Err(e) = std::fs::write(&pid_file, std::process::id().to_string()) {
@@ -663,8 +702,28 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             change_rx: Some(change_rx.clone()),
         });
         let wh_config = scheduler_config.webhook.clone();
+
+        // Bind the webhook port with SO_REUSEPORT so a hot-switch child can
+        // bind the same port before the old process releases it.
+        let wh_listener = match bind_reusable(wh_config.port) {
+            Ok(l) => {
+                // Store fd for hot switch child.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::io::AsRawFd;
+                    LISTEN_SOCKET_FD.store(l.as_raw_fd(), Ordering::SeqCst);
+                }
+                Some(l)
+            }
+            Err(e) => {
+                tracing::warn!(port = wh_config.port, error = %e,
+                    "SO_REUSEPORT bind failed, webhook server will use normal bind");
+                None
+            }
+        };
+
         tokio::spawn(async move {
-            crate::agents::run_webhook_server(wh_ctx, wh_config, wh_jobs).await;
+            crate::agents::run_webhook_server(wh_ctx, wh_config, wh_jobs, wh_listener).await;
         });
     }
 
@@ -699,7 +758,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // ── SIGUSR1: set shutdown flag for checkpoint exit (hot switch) ────────
     #[cfg(unix)]
     {
-        use std::sync::atomic::Ordering;
         let mut sigusr1 = signal(SignalKind::user_defined1())
             .expect("failed to register SIGUSR1 handler");
         tokio::spawn(async move {
@@ -734,6 +792,34 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // Graceful shutdown.
     tracing::info!("dispatch loop ended, shutting down listeners...");
     orchestrator.shutdown_listeners().await;
+
+    // ── Hot switch: if SIGUSR1 set the flag, fork+execv the new binary ──
+    if crate::is_shutting_down() {
+        let socket_fd = LISTEN_SOCKET_FD.load(Ordering::SeqCst);
+        if socket_fd >= 0 {
+            tracing::info!(socket_fd, "triggering hot switch");
+            // spawn_blocking because do_hot_switch calls waitpid (blocking).
+            match tokio::task::spawn_blocking(move || {
+                crate::hot_switch::do_hot_switch(socket_fd)
+            })
+            .await
+            {
+                Ok(Ok(())) => {
+                    // do_hot_switch only returns Ok when the child exited
+                    // normally (rare — usually the parent exits via SIGUSR2).
+                    tracing::info!("hot switch completed (child exited normally)");
+                }
+                Ok(Err(e)) => {
+                    tracing::error!(error = %e, "hot switch failed, rollback applied");
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "hot switch task panicked");
+                }
+            }
+        } else {
+            tracing::warn!("shutdown flag set but no listen socket available, skipping hot switch");
+        }
+    }
 
     tracing::info!("myclaw daemon stopped");
 

@@ -15,6 +15,7 @@ pub mod agents;
 pub mod channels;
 pub mod config;
 pub mod daemon;
+pub mod hot_switch;
 pub mod mcp;
 pub mod memory;
 pub mod providers;
