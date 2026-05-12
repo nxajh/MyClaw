@@ -891,7 +891,22 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
                 }
             }
         } else {
-            tracing::warn!("shutdown flag set but no listen socket available, skipping hot switch");
+            tracing::info!("no listen socket available, hot switching without socket inheritance");
+            match tokio::task::spawn_blocking(|| {
+                crate::hot_switch::do_hot_switch(-1)
+            })
+            .await
+            {
+                Ok(Ok(())) => {
+                    tracing::info!("hot switch completed (child exited normally)");
+                }
+                Ok(Err(e)) => {
+                    tracing::error!(error = %e, "hot switch failed, rollback applied");
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "hot switch task panicked");
+                }
+            }
         }
     }
 
