@@ -69,9 +69,11 @@ impl SessionOverride {
 }
 
 /// Remove orphan tool results (tool messages whose tool_call_id has no matching
-/// assistant tool_call in the history). Also removes any trailing assistant
-/// message with tool_calls that has no subsequent tool results (incomplete round).
+/// assistant tool_call in the history). Also removes trailing assistant messages
+/// with tool_calls that have no corresponding tool results (incomplete round,
+/// e.g. process crashed during tool execution).
 pub fn sanitize_history(history: &mut Vec<ChatMessage>) {
+    // Step 1: Collect all tool_call_ids declared by assistant messages.
     let mut known_tool_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for msg in history.iter() {
         if msg.role == "assistant" {
@@ -83,6 +85,7 @@ pub fn sanitize_history(history: &mut Vec<ChatMessage>) {
         }
     }
 
+    // Step 2: Remove orphan tool results (no matching assistant tool_call).
     let before = history.len();
     history.retain(|msg| {
         if msg.role == "tool" {
@@ -98,6 +101,32 @@ pub fn sanitize_history(history: &mut Vec<ChatMessage>) {
     if removed > 0 {
         tracing::warn!(removed, "sanitized orphan tool results from history");
     }
+
+    // Step 3: Collect tool_call_ids that actually have a tool result.
+    let fulfilled_ids: std::collections::HashSet<String> = history
+        .iter()
+        .filter(|m| m.role == "tool")
+        .filter_map(|m| m.tool_call_id.clone())
+        .collect();
+
+    // Step 4: Trim trailing assistant messages whose tool_calls are all unfulfilled.
+    // These are left behind when the process crashes during tool execution.
+    let mut trimmed = 0;
+    while let Some(last) = history.last() {
+        if last.role == "assistant" {
+            if let Some(ref tcs) = last.tool_calls {
+                if !tcs.is_empty() && tcs.iter().all(|tc| !fulfilled_ids.contains(&tc.id)) {
+                    history.pop();
+                    trimmed += 1;
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+    if trimmed > 0 {
+        tracing::warn!(trimmed, "sanitized trailing assistant messages with unfulfilled tool_calls");
+    }
 }
 
 /// Same as `sanitize_history` but keeps IDs paired with their messages throughout,
@@ -107,6 +136,7 @@ pub fn sanitize_history(history: &mut Vec<ChatMessage>) {
 /// positions (not just the tail), so slicing the IDs array after the fact gives
 /// wrong IDs. This variant avoids that by filtering both vecs together.
 fn sanitize_paired(pairs: Vec<(i64, ChatMessage)>) -> Vec<(i64, ChatMessage)> {
+    // Step 1: Remove orphan tool results.
     let known_tool_ids: std::collections::HashSet<String> = pairs
         .iter()
         .filter(|(_, m)| m.role == "assistant")
@@ -114,7 +144,7 @@ fn sanitize_paired(pairs: Vec<(i64, ChatMessage)>) -> Vec<(i64, ChatMessage)> {
         .collect();
 
     let before = pairs.len();
-    let result: Vec<_> = pairs
+    let mut result: Vec<_> = pairs
         .into_iter()
         .filter(|(_, msg)| {
             if msg.role == "tool" {
@@ -126,6 +156,31 @@ fn sanitize_paired(pairs: Vec<(i64, ChatMessage)>) -> Vec<(i64, ChatMessage)> {
             true
         })
         .collect();
+
+    // Step 2: Collect fulfilled tool_call_ids (those with actual tool results).
+    let fulfilled_ids: std::collections::HashSet<String> = result
+        .iter()
+        .filter(|(_, m)| m.role == "tool")
+        .filter_map(|(_, m)| m.tool_call_id.clone())
+        .collect();
+
+    // Step 3: Trim trailing assistant messages with all-unfulfilled tool_calls.
+    let mut trimmed = 0;
+    while let Some((_, last)) = result.last() {
+        if last.role == "assistant" {
+            if let Some(ref tcs) = last.tool_calls {
+                if !tcs.is_empty() && tcs.iter().all(|tc| !fulfilled_ids.contains(&tc.id)) {
+                    result.pop();
+                    trimmed += 1;
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+    if trimmed > 0 {
+        tracing::warn!(trimmed, "sanitize_paired: trimmed trailing assistant messages with unfulfilled tool_calls");
+    }
 
     let removed = before - result.len();
     if removed > 0 {
