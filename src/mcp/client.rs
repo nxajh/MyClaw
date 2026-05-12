@@ -137,6 +137,7 @@ impl McpServer {
         let result = list_resp
             .result
             .ok_or_else(|| anyhow!("tools/list returned no result from `{}`", config.name))?;
+        tracing::debug!(server = %config.name, raw_tools = %serde_json::to_string_pretty(&result).unwrap_or_default(), "MCP tools/list raw response");
         let tool_list: McpToolsListResult = serde_json::from_value(result)
             .with_context(|| format!("failed to parse tools/list from `{}`", config.name))?;
 

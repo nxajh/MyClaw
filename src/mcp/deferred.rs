@@ -34,6 +34,7 @@ impl DeferredMcpToolStub {
         let description = def
             .description
             .clone()
+            .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "MCP tool".to_string());
         Self {
             prefixed_name,
