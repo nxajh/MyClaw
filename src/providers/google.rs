@@ -188,15 +188,49 @@ impl SearchProvider for GoogleProvider {
         // Extract citations from grounding metadata.
         let mut results: Vec<SearchResult> = Vec::new();
         if let Some(meta) = candidate.grounding_metadata {
+            // Collect per-chunk snippet text from groundingSupports.
+            // Each support maps a text segment to one or more chunk indices.
+            let mut chunk_snippets: std::collections::HashMap<usize, String> =
+                std::collections::HashMap::new();
+            if let Some(supports) = meta.grounding_supports.as_ref() {
+                for support in supports {
+                    let seg = support
+                        .segment
+                        .as_ref()
+                        .and_then(|s| s.text.as_deref())
+                        .unwrap_or("")
+                        .trim();
+                    if seg.is_empty() {
+                        continue;
+                    }
+                    if let Some(indices) = &support.grounding_chunk_indices {
+                        for &idx in indices {
+                            chunk_snippets
+                                .entry(idx as usize)
+                                .and_modify(|e| {
+                                    if !e.contains(seg) {
+                                        e.push_str("; ");
+                                        e.push_str(seg);
+                                    }
+                                })
+                                .or_insert_with(|| seg.to_string());
+                        }
+                    }
+                }
+            }
+
             if let Some(chunks) = meta.grounding_chunks {
-                for chunk in chunks {
+                for (i, chunk) in chunks.into_iter().enumerate() {
                     if let Some(web) = chunk.web {
                         let url = web.uri.unwrap_or_default();
                         if !url.is_empty() {
+                            let snippet = chunk_snippets
+                                .remove(&i)
+                                .unwrap_or_default();
                             results.push(SearchResult {
                                 title: web.title.unwrap_or_default(),
                                 url,
-                                snippet: String::new(),
+                                snippet,
                                 published_at: None,
                             });
                         }
