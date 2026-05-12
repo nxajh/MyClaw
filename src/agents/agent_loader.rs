@@ -54,6 +54,13 @@ pub fn parse_agent_file(path: &Path) -> Result<SubAgentConfig> {
         Some(model_raw)
     };
 
+    let isolation = extract_yaml_string(&front_matter, "isolation")
+        .map(|s| match s.to_lowercase().as_str() {
+            "worktree" => AgentIsolation::Worktree,
+            _ => AgentIsolation::Shared,
+        })
+        .unwrap_or_default();
+
     Ok(SubAgentConfig {
         name,
         system_prompt: body.trim().to_string(),
@@ -65,7 +72,7 @@ pub fn parse_agent_file(path: &Path) -> Result<SubAgentConfig> {
             Some(description)
         },
         model,
-        isolation: AgentIsolation::default(),
+        isolation,
     })
 }
 

@@ -163,49 +163,82 @@ impl SubAgentDelegator {
         let tools = self.build_filtered_tools(&config.tools);
         let tool_names = tools.tool_names_sorted();
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let system_prompt = if config.system_prompt.is_empty() {
-            format!(
-                "You are a specialized agent named '{}'.\n\n{}\n{}\n{}\n\nCurrent date: {}\n\nAvailable tools: {}",
-                config.name,
-                SECTION_ANTI_NARRATION,
-                SECTION_TOOL_HONESTY,
-                SECTION_SAFETY_FULL,
-                today,
-                tool_names.join(", "),
-            )
-        } else {
-            format!(
-                "{}\n\n{}\n{}\n{}\n\nCurrent date: {}\n\nAvailable tools: {}",
-                config.system_prompt,
-                SECTION_ANTI_NARRATION,
-                SECTION_TOOL_HONESTY,
-                SECTION_SAFETY_FULL,
-                today,
-                tool_names.join(", "),
-            )
-        };
 
-        // Prepare isolation environment (worktree or shared).
-        let (worktree_path, cleanup_worktree) = match config.isolation {
+        // --- worktree creation (moved BEFORE prompt so we can inject the path) ---
+        let (worktree_path, cleanup_worktree, branch_name) = match config.isolation {
             AgentIsolation::Worktree => {
                 let task_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+                let branch_name = format!("subagent/{}_{}", config.name, task_id);
                 let worktree_path = self.worktrees_root.join(format!("{}_{}", config.name, task_id));
-                std::fs::create_dir_all(&worktree_path).ok();
-                tracing::info!(path = %worktree_path.display(), "preparing worktree for sub-agent");
-                (worktree_path, Some(task_id))
+
+                if let Some(parent) = worktree_path.parent() {
+                    std::fs::create_dir_all(parent).ok();
+                }
+                if worktree_path.exists() {
+                    let _ = std::fs::remove_dir_all(&worktree_path);
+                }
+
+                let output = std::process::Command::new("git")
+                    .args(["worktree", "add", "-b", &branch_name, &worktree_path.to_string_lossy(), "HEAD"])
+                    .output()
+                    .map_err(|e| anyhow::anyhow!("failed to run git worktree add: {}", e))?;
+
+                if !output.status.success() {
+                    anyhow::bail!(
+                        "failed to create git worktree: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+
+                tracing::info!(
+                    path = %worktree_path.display(),
+                    branch = %branch_name,
+                    "created git worktree for sub-agent"
+                );
+                (worktree_path, Some(task_id), Some(branch_name))
             }
-            AgentIsolation::Shared => (PathBuf::new(), None),
+            AgentIsolation::Shared => (PathBuf::new(), None, None),
         };
-
-        let (session_id, persist_hook) = self.open_sub_session(parent_session_id, &config.name);
-
-        let session = Session::new(session_id);
 
         let workspace_dir = if worktree_path.as_os_str().is_empty() {
             String::new()
         } else {
             worktree_path.to_string_lossy().to_string()
         };
+
+        let workspace_section = if workspace_dir.is_empty() {
+            String::new()
+        } else {
+            format!("\n\nWorking directory: {}", workspace_dir)
+        };
+
+        let system_prompt = if config.system_prompt.is_empty() {
+            format!(
+                "You are a specialized agent named '{}'.{}\n\n{}\n{}\n{}\n\nCurrent date: {}\n\nAvailable tools: {}",
+                config.name,
+                workspace_section,
+                SECTION_ANTI_NARRATION,
+                SECTION_TOOL_HONESTY,
+                SECTION_SAFETY_FULL,
+                today,
+                tool_names.join(", "),
+            )
+        } else {
+            format!(
+                "{}{}\n\n{}\n{}\n{}\n\nCurrent date: {}\n\nAvailable tools: {}",
+                config.system_prompt,
+                workspace_section,
+                SECTION_ANTI_NARRATION,
+                SECTION_TOOL_HONESTY,
+                SECTION_SAFETY_FULL,
+                today,
+                tool_names.join(", "),
+            )
+        };
+
+        let (session_id, persist_hook) = self.open_sub_session(parent_session_id, &config.name);
+
+        let session = Session::new(session_id);
 
         let agent_config = crate::agents::AgentConfig {
             max_tool_calls: config.max_tool_calls.unwrap_or(self.default_max_tool_calls),
@@ -239,18 +272,77 @@ impl SubAgentDelegator {
             Err(e) => tracing::warn!(agent = %config.name, err = %e, "sub-agent failed"),
         }
 
-        // Cleanup worktree if we created one.
-        if let Some(_task_id) = cleanup_worktree {
-            if let Some(parent) = worktree_path.parent() {
-                let _ = std::fs::remove_dir_all(&worktree_path);
-                tracing::info!(path = %worktree_path.display(), "cleaned up worktree");
-                // Remove parent if empty (worktrees_root dir).
-                if let Ok(entries) = std::fs::read_dir(parent) {
-                    if entries.count() == 0 {
-                        let _ = std::fs::remove_dir(parent);
+        // Merge sub-agent branch back into the main branch (if it committed anything).
+        if let Some(ref branch_name) = branch_name {
+            let diff = std::process::Command::new("git")
+                .args(["log", "--oneline", "HEAD..", branch_name])
+                .output();
+
+            let has_commits = match diff {
+                Ok(d) => !d.stdout.is_empty(),
+                Err(_) => false,
+            };
+
+            if has_commits {
+                // Switch back to the previous branch.
+                let checkout = std::process::Command::new("git")
+                    .args(["checkout", "@{-1}"])
+                    .output();
+
+                if let Ok(co) = checkout {
+                    if co.status.success() {
+                        let merge = std::process::Command::new("git")
+                            .args(["merge", "--no-ff", "-m",
+                                   &format!("merge sub-agent: {}", config.name),
+                                   branch_name])
+                            .output();
+
+                        match merge {
+                            Ok(m) if !m.status.success() => {
+                                tracing::warn!(
+                                    branch = %branch_name,
+                                    stderr = %String::from_utf8_lossy(&m.stderr),
+                                    "merge conflict — aborting merge, worktree preserved"
+                                );
+                                let _ = std::process::Command::new("git")
+                                    .args(["merge", "--abort"])
+                                    .output();
+                                return Err(anyhow::anyhow!(
+                                    "sub-agent '{}' completed but merge failed (conflict). Worktree preserved at {}",
+                                    config.name, worktree_path.display()
+                                ));
+                            }
+                            Err(e) => {
+                                tracing::warn!(branch = %branch_name, err = %e, "failed to run git merge");
+                            }
+                            _ => {
+                                tracing::info!(branch = %branch_name, "merged sub-agent branch");
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            branch = %branch_name,
+                            stderr = %String::from_utf8_lossy(&co.stderr),
+                            "failed to checkout previous branch"
+                        );
                     }
                 }
+            } else {
+                tracing::info!(branch = %branch_name, "no new commits, skipping merge");
             }
+        }
+
+        // Cleanup worktree + branch (only on success).
+        if cleanup_worktree.is_some() && result.is_ok() {
+            let _ = std::process::Command::new("git")
+                .args(["worktree", "remove", "--force", &worktree_path.to_string_lossy()])
+                .output();
+            if let Some(ref bn) = branch_name {
+                let _ = std::process::Command::new("git")
+                    .args(["branch", "-D", bn])
+                    .output();
+            }
+            tracing::info!(path = %worktree_path.display(), "cleaned up worktree and branch");
         }
 
         result
