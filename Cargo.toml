@@ -90,4 +90,4 @@ tui = ["dep:ratatui", "dep:crossterm", "tokio-tungstenite"]
 
 [profile.release]
 opt-level = 3
-lto = false
+lto = true
