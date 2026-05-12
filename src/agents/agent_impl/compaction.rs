@@ -390,7 +390,14 @@ Respond ONLY to the latest user message that appears AFTER this summary.\n\n";
                  \n\
                  Then the memory content in markdown.\n\
                  \n\
-                 Rules:\n\
+                 description quality rules:\n\
+                 - DO NOT repeat the filename — description must add information beyond what the name already says\n\
+                 - MUST include key terms that help decide when to read this file (tool names, feature names, bug symptoms, decision outcomes)\n\
+                 - BAD: \"MyClaw memory system design decisions\" (name already says this)\n\
+                 - GOOD: \"记忆索引从system prompt迁到system-reminder注入；diff_memory始终检查history不依赖内存旧文本\"\n\
+                 - If updating an existing file, update its description to reflect the latest content\n\
+                 \n\
+                 Other rules:\n\
                  - ONLY save things NOT derivable from code/git (user preferences, decisions, corrections)\n\
                  - Check the existing memory index to avoid duplicates — update existing files instead of creating duplicates\n\
                  - If existing memories are outdated or contradicted, update or delete them\n\
