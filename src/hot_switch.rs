@@ -77,8 +77,19 @@ pub fn do_hot_switch(socket_fd: i32) -> anyhow::Result<()> {
             std::env::set_var(ENV_OLD_PID, current_pid.to_string());
         }
 
-        let c_path = std::ffi::CString::new(current_exe.to_string_lossy().as_bytes())?;
-        let args = [c_path.as_ptr(), std::ptr::null()];
+        // current_exe() resolves to /proc/self/exe which is the old inode (now renamed to .old).
+        // Strip .old suffix to get the new binary path.
+        let new_binary = {
+            let s = current_exe.to_string_lossy().to_string();
+            if s.ends_with(".old") {
+                std::path::PathBuf::from(&s[..s.len() - 4])
+            } else {
+                current_exe.clone()
+            }
+        };
+        let c_path = std::ffi::CString::new(new_binary.to_string_lossy().as_bytes())?;
+        let c_run = std::ffi::CString::new("run")?;
+        let args = [c_path.as_ptr(), c_run.as_ptr(), std::ptr::null()];
 
         // execv replaces the current process — only returns on failure.
         unsafe { libc::execv(c_path.as_ptr(), args.as_ptr()) };
