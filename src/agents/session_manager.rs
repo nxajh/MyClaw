@@ -408,6 +408,11 @@ pub struct Session {
     pub last_total_tokens: Option<u64>,
     /// Per-session runtime overrides set by slash commands.
     pub session_override: SessionOverride,
+    /// Set when the last persisted turn ended with a user message but no
+    /// corresponding assistant response (e.g. daemon crash/SIGKILL). The
+    /// orchestrator will prompt the user to retry or abort on the next
+    /// interaction. Not persisted — rebuilt on every session load.
+    pub incomplete_turn: bool,
 }
 
 impl Session {
@@ -421,6 +426,7 @@ impl Session {
             summary_metadata: None,
             last_total_tokens: None,
             session_override: SessionOverride::default(),
+            incomplete_turn: false,
         }
     }
 
@@ -431,18 +437,26 @@ impl Session {
     }
 
     /// Append an assistant text message to history.
+    /// Skips empty messages to avoid API format errors on reload.
     pub fn add_assistant_text(&mut self, text: String) {
+        if text.trim().is_empty() {
+            return;
+        }
         self.history.push(ChatMessage::assistant_text(text));
         self.message_ids.push(0);
     }
 
     /// Append an assistant message with tool_calls to history.
+    /// Skips only when text is empty AND there are no tool_calls.
     pub fn add_assistant_with_tools(
         &mut self,
         text: String,
         tool_calls: Vec<crate::providers::ToolCall>,
         thinking: Option<String>,
     ) {
+        if text.trim().is_empty() && tool_calls.is_empty() {
+            return;
+        }
         let mut msg = ChatMessage::assistant_text(&text);
         msg.tool_calls = Some(tool_calls);
         if let Some(thinking) = thinking {
@@ -529,7 +543,7 @@ impl SessionManager {
         let session_override = self.backend.load_session_override(&session_id)
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or_default();
-        let session = match self.backend.load_latest_summary(&session_id) {
+        let mut session = match self.backend.load_latest_summary(&session_id) {
             Some(summary) => {
                 // The summary message is already in history.jsonl (written during
                 // rotation), so we simply load everything in the current file.
@@ -560,6 +574,7 @@ impl SessionManager {
                     }),
                     last_total_tokens,
                     session_override,
+                    incomplete_turn: false,
                 }
             }
             None => {
@@ -581,11 +596,20 @@ impl SessionManager {
                     summary_metadata: None,
                     last_total_tokens,
                     session_override,
+                    incomplete_turn: false,
                 }
             }
         };
 
-        // 4. Cache.
+        // 4. Detect incomplete turn (last message is user without assistant reply).
+        //    Only check the most recent turn — earlier orphan user messages are
+        //    ignored because compaction or manual cleanup may have removed them.
+        if session.history.last().is_some_and(|m| m.role == "user") {
+            session.incomplete_turn = true;
+            tracing::warn!(session = %session_id, "detected incomplete turn on load");
+        }
+
+        // 5. Cache.
         {
             let mut cache = self.cache.write();
             cache.insert(session_id, session.clone());

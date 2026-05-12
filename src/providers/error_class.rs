@@ -210,7 +210,7 @@ impl ClassifiedError {
             FailoverReason::PayloadTooLarge => (true, true, false, false, None),
             FailoverReason::ModelNotFound => (false, false, false, true, None),
             FailoverReason::FormatError => (false, false, false, false, None),
-            FailoverReason::Unknown => (true, false, false, true, Some(Duration::from_secs(5))),
+            FailoverReason::Unknown => (false, false, false, true, Some(Duration::from_secs(5))),
         }
     }
 

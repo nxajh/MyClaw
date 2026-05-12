@@ -206,31 +206,33 @@ impl AgentLoop {
         let text = match self.chat_loop(messages, stream_mode).await {
             Ok(text) => text,
             Err(e) => {
-                // Check if this is a LoopBreak error — rollback turn and re-raise
-                // so the orchestrator can offer retry/abort buttons to the user.
+                // Roll back turn for ALL errors so the user can retry cleanly.
+                tracing::warn!(
+                    turn_snapshot_len,
+                    current_len = self.session.history.len(),
+                    err = %e,
+                    "chat_loop failed, rolling back turn"
+                );
+
+                // Roll back in-memory history to pre-turn state.
+                self.session.rollback_to(turn_snapshot_len);
+
+                // Roll back persisted history.
+                if let Some(ref hook) = self.persist_hook {
+                    hook.truncate_messages(&self.session.id, turn_snapshot_len);
+                }
+
+                // Check if this is a LoopBreak error — re-raise with specific type
+                // so the orchestrator can show a tailored retry prompt.
                 if let Some(crate::agents::error::AgentError::LoopBreak { reason }) =
                     e.downcast_ref::<crate::agents::error::AgentError>()
                 {
-                    tracing::warn!(
-                        turn_snapshot_len,
-                        current_len = self.session.history.len(),
-                        reason = %reason,
-                        "loop breaker triggered, rolling back turn"
-                    );
-
-                    // Roll back in-memory history to pre-turn state.
-                    self.session.rollback_to(turn_snapshot_len);
-
-                    // Roll back persisted history.
-                    if let Some(ref hook) = self.persist_hook {
-                        hook.truncate_messages(&self.session.id, turn_snapshot_len);
-                    }
-
                     return Err(crate::agents::error::AgentError::LoopBreak {
                         reason: reason.clone(),
                     }.into());
                 }
-                // Not a LoopBreak — propagate as-is.
+
+                // Propagate as-is (already rolled back).
                 return Err(e);
             }
         };
@@ -377,6 +379,7 @@ impl AgentLoop {
     async fn chat_loop(&mut self, initial_messages: Vec<ChatMessage>, stream_mode: StreamMode) -> anyhow::Result<String> {
         let mut tool_calls_count = 0usize;
         let mut stream_timeout_retries = 0usize;
+        let mut retry_count = 0usize;
         let mut empty_response_retries = 0usize;
         let mut boosted_max_tokens = false;
         let mut first_iteration = true;
@@ -547,8 +550,16 @@ impl AgentLoop {
                                     continue;
                                 }
                                 _ => {
-                                    // Other retryable errors (e.g. server error) — retry once.
+                                    retry_count += 1;
+                                    if retry_count > 3 {
+                                        tracing::error!(reason = ?classified.reason, "retryable error after 3 attempts, giving up");
+                                        return Err(super::super::error::AgentError::RetryExhausted {
+                                            attempts: retry_count,
+                                            source: e,
+                                        }.into());
+                                    }
                                     tracing::warn!(
+                                        attempt = retry_count,
                                         reason = ?classified.reason,
                                         "retryable error, retrying..."
                                     );

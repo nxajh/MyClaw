@@ -35,6 +35,14 @@ pub enum AgentError {
     #[error("provider error: {0}")]
     Provider(#[from] anyhow::Error),
 
+    /// All internal retries for a retryable provider error were exhausted.
+    /// The orchestrator should offer retry/abort buttons to the user.
+    #[error("retries exhausted after {attempts} attempts: {source}")]
+    RetryExhausted {
+        attempts: usize,
+        source: anyhow::Error,
+    },
+
     /// The LLM returned an empty response after all retries.
     /// The turn's user message has been rolled back from history.
     #[error("empty response after retries")]

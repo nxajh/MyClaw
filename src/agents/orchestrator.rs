@@ -530,8 +530,40 @@ impl Orchestrator {
                                         }
                                         Err(e) => {
                                             channel.on_status(&reply_target_c, ProcessingStatus::Error).await;
-                                            let error_text = format!("⚠️ 重试失败：`{}`", e);
-                                            let send_msg = SendMessage::new(error_text, reply_target_c.clone());
+                                            error!(session = %sk_c, err = %e, "retry failed, offering retry/abort again");
+
+                                            // Re-store the user message so the user can retry again.
+                                            {
+                                                let mut guard = loop_.lock().await;
+                                                guard.set_pending_retry(user_msg.clone());
+                                            }
+
+                                            let sk_prefix: String = sk_c.chars().take(32).collect();
+                                            let retry_data = format!("__retry:{}", sk_prefix);
+                                            let abort_data = format!("__abort:{}", sk_prefix);
+
+                                            let send_msg = SendMessage {
+                                                recipient: reply_target_c.clone(),
+                                                content: format!(
+                                                    "⚠️ 重试失败：`{}`\n\n你可以选择再次重试或放弃。",
+                                                    e
+                                                ),
+                                                subject: None,
+                                                thread_ts: reply_to_id.clone(),
+                                                cancellation_token: None,
+                                                attachments: vec![],
+                                                image_urls: None,
+                                                inline_buttons: Some(vec![
+                                                    crate::channels::InlineButton {
+                                                        label: "🔄 重试".to_string(),
+                                                        callback_data: retry_data,
+                                                    },
+                                                    crate::channels::InlineButton {
+                                                        label: "✖ 放弃".to_string(),
+                                                        callback_data: abort_data,
+                                                    },
+                                                ]),
+                                            };
                                             let _ = channel.send(&send_msg).await;
                                         }
                                     }
@@ -560,6 +592,62 @@ impl Orchestrator {
                             let _ = channel.send(&send_msg).await;
                         }
                         continue;
+                    }
+
+                    // Check for an incomplete turn loaded from a previous crash/SIGKILL.
+                    // If the session's last message is a user message without a reply,
+                    // prompt the user to retry or abort before processing new input.
+                    {
+                        let loop_ = Self::get_or_create_loop(
+                            &sessions, &agent, self.session_manager.as_ref(), &sk,
+                            &channels, &self.pending_asks, &msg.reply_target,
+                            &sub_delegator, &delegation_manager,
+                            &self.persist_backend,
+                            &self.change_rx,
+                        );
+                        let mut guard = loop_.lock().await;
+                        if guard.session.incomplete_turn {
+                            guard.session.incomplete_turn = false;
+
+                            // Extract the orphaned user message for retry.
+                            let last_user_msg = guard.session.history.last()
+                                .filter(|m| m.role == "user")
+                                .map(|m| m.text_content().to_string())
+                                .unwrap_or_default();
+                            guard.set_pending_retry(last_user_msg.clone());
+
+                            let channel = match channels.get(&channel_name).map(|r| r.clone()) {
+                                Some(c) => c,
+                                None => continue,
+                            };
+                            let sk_prefix: String = sk.chars().take(32).collect();
+                            let retry_data = format!("__retry:{}", sk_prefix);
+                            let abort_data = format!("__abort:{}", sk_prefix);
+
+                            let send_msg = SendMessage {
+                                recipient: msg.reply_target.clone(),
+                                content: "⚠️ 检测到上次请求未处理完成（可能是服务重启）。\n\n请选择重试或放弃。".to_string(),
+                                subject: None,
+                                thread_ts: Some(msg.id.clone()),
+                                cancellation_token: None,
+                                attachments: vec![],
+                                image_urls: None,
+                                inline_buttons: Some(vec![
+                                    crate::channels::InlineButton {
+                                        label: "🔄 重试".to_string(),
+                                        callback_data: retry_data,
+                                    },
+                                    crate::channels::InlineButton {
+                                        label: "✖ 放弃".to_string(),
+                                        callback_data: abort_data,
+                                    },
+                                ]),
+                            };
+                            if let Err(e) = channel.send(&send_msg).await {
+                                error!(session = %sk, err = %e, "failed to send incomplete-turn prompt");
+                            }
+                            continue;
+                        }
                     }
 
                     let content = msg.content.clone();
@@ -786,26 +874,85 @@ impl Orchestrator {
                                         return; // ★ Don't fall through to generic error handler.
                                     }
 
-                                    // Notify channel about the error.
+                                    // Check if retries were exhausted — offer retry/abort buttons.
+                                    if let Some(crate::agents::error::AgentError::RetryExhausted { attempts, source }) =
+                                        e.downcast_ref::<crate::agents::error::AgentError>()
+                                    {
+                                        channel.on_status(&reply_target, ProcessingStatus::Error).await;
+                                        error!(session = %sk, attempts, err = %source, "retryable retries exhausted, offering retry/abort");
+
+                                        {
+                                            let mut guard = loop_.lock().await;
+                                            guard.set_pending_retry(content.clone());
+                                        }
+
+                                        let sk_prefix: String = sk.chars().take(32).collect();
+                                        let retry_data = format!("__retry:{}", sk_prefix);
+                                        let abort_data = format!("__abort:{}", sk_prefix);
+
+                                        let send_msg = SendMessage {
+                                            recipient: reply_target.clone(),
+                                            content: format!(
+                                                "⚠️ 处理失败（重试 {} 次后放弃）：\n\n`{}`",
+                                                attempts, source
+                                            ),
+                                            subject: None,
+                                            thread_ts: reply_to_id.clone(),
+                                            cancellation_token: None,
+                                            attachments: vec![],
+                                            image_urls: None,
+                                            inline_buttons: Some(vec![
+                                                crate::channels::InlineButton {
+                                                    label: "🔄 重试".to_string(),
+                                                    callback_data: retry_data,
+                                                },
+                                                crate::channels::InlineButton {
+                                                    label: "✖ 放弃".to_string(),
+                                                    callback_data: abort_data,
+                                                },
+                                            ]),
+                                        };
+                                        if let Err(send_err) = channel.send(&send_msg).await {
+                                            error!(session = %sk, err = %send_err, "failed to send retry prompt");
+                                        }
+                                        return;
+                                    }
+
+                                    // Non-retryable error — still offer retry/abort so the user
+                                    // can manually retry (e.g. after a transient issue resolves).
                                     channel.on_status(&reply_target, ProcessingStatus::Error).await;
-                                    // Send error message to user so they know what happened.
-                                    let error_text = format!(
-                                        "⚠️ 处理消息时发生错误：\n\n`{}`\n\n请稍后重试，或联系管理员。",
-                                        e
-                                    );
-                                    error!(session = %sk, err = %e, "loop failed, notifying user");
+                                    error!(session = %sk, err = %e, "non-retryable loop error, offering retry/abort");
+
+                                    {
+                                        let mut guard = loop_.lock().await;
+                                        guard.set_pending_retry(content.clone());
+                                    }
+
+                                    let sk_prefix: String = sk.chars().take(32).collect();
+                                    let retry_data = format!("__retry:{}", sk_prefix);
+                                    let abort_data = format!("__abort:{}", sk_prefix);
+
                                     let send_msg = SendMessage {
-                                        recipient: reply_target,
-                                        content: error_text,
+                                        recipient: reply_target.clone(),
+                                        content: format!("⚠️ 处理消息时发生错误：\n\n`{}`", e),
                                         subject: None,
                                         thread_ts: reply_to_id.clone(),
                                         cancellation_token: None,
                                         attachments: vec![],
                                         image_urls: None,
-                                        inline_buttons: None,
+                                        inline_buttons: Some(vec![
+                                            crate::channels::InlineButton {
+                                                label: "🔄 重试".to_string(),
+                                                callback_data: retry_data,
+                                            },
+                                            crate::channels::InlineButton {
+                                                label: "✖ 放弃".to_string(),
+                                                callback_data: abort_data,
+                                            },
+                                        ]),
                                     };
                                     if let Err(send_err) = channel.send(&send_msg).await {
-                                        error!(session = %sk, err = %send_err, "failed to send error notification to user");
+                                        error!(session = %sk, err = %send_err, "failed to send retry prompt");
                                     }
                                 }
                             }
