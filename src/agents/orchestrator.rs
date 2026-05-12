@@ -390,6 +390,77 @@ impl Orchestrator {
             guard.clone()
         };
 
+        // ── Startup recovery: detect and resume interrupted turns ──────────
+        // Scan all sessions for incomplete turns left by a previous run
+        // (e.g. SIGUSR1 hot-switch killed the process mid-turn).
+        {
+            let all_sessions = self.session_manager.list_all_sessions();
+            let mut recovered = 0;
+            for session_info in &all_sessions {
+                let sk = &session_info.owner;
+                // Load session and check for incomplete turns.
+                let session = self.session_manager.get_or_create(sk);
+                let history = &session.history;
+                if history.is_empty() {
+                    continue;
+                }
+                // Quick check: does the session end with tool results or
+                // assistant tool_calls without results?
+                let has_incomplete = {
+                    let mut completed_ids = std::collections::HashSet::new();
+                    let mut has_trailing_tools = false;
+                    let mut found_pending = false;
+                    for msg in history.iter().rev() {
+                        if msg.role == "tool" {
+                            if let Some(ref id) = msg.tool_call_id {
+                                completed_ids.insert(id.clone());
+                            }
+                            has_trailing_tools = true;
+                        } else if msg.role == "assistant" {
+                            if let Some(ref calls) = msg.tool_calls {
+                                for call in calls {
+                                    if !completed_ids.contains(&call.id) {
+                                        found_pending = true;
+                                    }
+                                }
+                            }
+                            break;
+                        } else {
+                            break;
+                        }
+                    }
+                    found_pending || has_trailing_tools
+                };
+                if !has_incomplete {
+                    continue;
+                }
+                tracing::info!(session = %sk, "startup recovery: found incomplete turn");
+                // Create a loop for this session and trigger recovery.
+                let reply_target = format!("startup:recovery:{}", sk);
+                let loop_ = Self::get_or_create_loop(
+                    &sessions, &agent, self.session_manager.as_ref(), sk,
+                    &channels, &self.pending_asks, &reply_target,
+                    &sub_delegator, &delegation_manager,
+                    &self.persist_backend,
+                    &self.change_rx,
+                    &unfinished_subagents,
+                );
+                let mut guard = loop_.lock().await;
+                match guard.recover_interrupted_turn().await {
+                    Ok(_) => {
+                        recovered += 1;
+                        tracing::info!(session = %sk, "startup recovery: turn completed");
+                    }
+                    Err(e) => {
+                        tracing::warn!(session = %sk, err = %e, "startup recovery failed");
+                    }
+                }
+            }
+            if recovered > 0 {
+                tracing::info!(count = recovered, "startup recovery complete");
+            }
+        }
+
         loop {
             if *shutdown_rx.borrow() {
                 tracing::info!("shutdown requested, exiting message loop");

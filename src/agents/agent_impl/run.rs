@@ -318,7 +318,7 @@ impl AgentLoop {
     /// tool results but no final assistant response (process was killed after
     /// tool execution finished but before the next LLM call).  We call
     /// `chat_loop` directly so the model generates the final response.
-    async fn recover_incomplete_turn(&mut self, stream_mode: &StreamMode) -> anyhow::Result<()> {
+    pub(crate) async fn recover_incomplete_turn(&mut self, stream_mode: &StreamMode) -> anyhow::Result<()> {
         let history = &self.session.history;
         if history.is_empty() {
             return Ok(());

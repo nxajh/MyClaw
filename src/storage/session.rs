@@ -47,6 +47,9 @@ pub trait SessionBackend: Send + Sync {
     /// List all sessions for a given owner, ordered by last_activity DESC.
     fn list_sessions(&self, owner: &str) -> Vec<SessionInfo>;
 
+    /// List ALL sessions across all owners (for startup recovery).
+    fn list_all_sessions(&self) -> Vec<SessionInfo>;
+
     // ── Active session ────────────────────────────────────────────────────
 
     /// Get the active session ID for a user.

@@ -303,6 +303,21 @@ impl SessionBackend for JsonFileBackend {
         sessions
     }
 
+    fn list_all_sessions(&self) -> Vec<SessionInfo> {
+        let Ok(entries) = fs::read_dir(&self.root) else { return vec![]; };
+        let mut sessions: Vec<SessionInfo> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .filter_map(|e| {
+                let id = e.file_name().to_string_lossy().to_string();
+                self.read_meta(&id)
+            })
+            .map(|m| Self::meta_to_info(&m))
+            .collect();
+        sessions.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+        sessions
+    }
+
     fn get_active_session(&self, user_id: &str) -> Option<String> {
         self.read_active().map.get(user_id).cloned()
     }

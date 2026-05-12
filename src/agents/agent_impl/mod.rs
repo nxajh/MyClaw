@@ -391,4 +391,15 @@ impl AgentLoop {
     pub fn has_pending_retry(&self) -> bool {
         self.pending_retry_message.is_some()
     }
+
+    /// Attempt to recover an interrupted turn from a previous run (startup recovery).
+    ///
+    /// Called by the orchestrator before entering the message loop. If the session
+    /// ends with an incomplete turn (missing tool results or missing LLM continuation),
+    /// re-executes the necessary steps silently — the response is persisted to session
+    /// history but NOT sent to any channel.
+    pub async fn recover_interrupted_turn(&mut self) -> anyhow::Result<bool> {
+        self.recover_incomplete_turn(&crate::agents::agent_impl::types::StreamMode::Collect).await?;
+        Ok(true)
+    }
 }

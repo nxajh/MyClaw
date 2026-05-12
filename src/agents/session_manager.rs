@@ -355,6 +355,22 @@ impl SessionBackend for InMemoryBackend {
             .collect()
     }
 
+    fn list_all_sessions(&self) -> Vec<SessionInfo> {
+        self.sessions.read().iter()
+            .map(|(id, meta)| {
+                let msgs = self.messages.read().get(id).map(|v| v.len()).unwrap_or(0);
+                SessionInfo {
+                    id: id.clone(),
+                    owner: meta.owner.clone(),
+                    display_name: meta.display_name.clone(),
+                    created_at: meta.created_at,
+                    last_activity: meta.last_activity,
+                    message_count: msgs,
+                }
+            })
+            .collect()
+    }
+
     fn get_active_session(&self, user_id: &str) -> Option<String> {
         self.active.read().get(user_id).cloned()
     }
@@ -874,6 +890,11 @@ impl SessionManager {
     /// List all sessions for a user.
     pub fn list_sessions(&self, user_id: &str) -> Vec<SessionInfo> {
         self.backend.list_sessions(user_id)
+    }
+
+    /// List ALL sessions across all owners (for startup recovery).
+    pub fn list_all_sessions(&self) -> Vec<SessionInfo> {
+        self.backend.list_all_sessions()
     }
 
     /// Get the active session_id for a user (None if not resolved yet).
