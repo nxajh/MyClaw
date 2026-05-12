@@ -463,6 +463,24 @@ impl ServiceRegistry for Registry {
         self.route_capability(Capability::Search, &self.search_providers)
     }
 
+    fn get_search_fallback_chain(&self) -> anyhow::Result<Vec<(Arc<dyn SearchProvider>, String)>> {
+        let entry = self.routing.get(Capability::Search)
+            .with_context(|| "No routing configured for Search")?;
+
+        let mut chain = Vec::new();
+        for model_id in &entry.models {
+            if let Some(provider) = self.search_providers.get(model_id.as_str()) {
+                chain.push((Arc::clone(provider), model_id.clone()));
+            }
+        }
+
+        if chain.is_empty() {
+            anyhow::bail!("No available search providers in fallback chain");
+        }
+
+        Ok(chain)
+    }
+
     fn get_stt_provider(&self) -> anyhow::Result<(Arc<dyn SttProvider>, String)> {
         self.route_capability(Capability::SpeechToText, &self.stt_providers)
     }

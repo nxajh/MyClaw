@@ -57,9 +57,9 @@ impl Tool for WebSearchTool {
 
         let limit = args["limit"].as_u64().unwrap_or(5) as usize;
 
-        // Obtain a search provider from the registry.
-        let (provider, model_id) = match self.registry.get_search_provider() {
-            Ok(tuple) => tuple,
+        // Obtain the fallback chain from the registry.
+        let chain = match self.registry.get_search_fallback_chain() {
+            Ok(chain) => chain,
             Err(e) => {
                 tracing::debug!(error = %e, "no search provider available");
                 return Ok(ToolResult {
@@ -75,57 +75,71 @@ impl Tool for WebSearchTool {
             }
         };
 
-        tracing::debug!(
-            query = %query,
-            limit = limit,
-            provider_model = %model_id,
-            "executing web search"
-        );
+        // Try each provider in the fallback chain.
+        let mut last_error = None;
+        for (provider, model_id) in &chain {
+            tracing::debug!(
+                query = %query,
+                limit = limit,
+                provider_model = %model_id,
+                "executing web search"
+            );
 
-        let request = SearchRequest {
-            query: query.to_string(),
-            limit: Some(limit),
-            search_type: Some(model_id.clone()),
-        };
+            let request = SearchRequest {
+                query: query.to_string(),
+                limit: Some(limit),
+                search_type: Some(model_id.clone()),
+            };
 
-        let results = match provider.search(request) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = %e, "search provider failed");
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("Search failed: {}", e)),
-                });
+            match provider.search(request) {
+                Ok(results) => {
+                    if results.results.is_empty() {
+                        return Ok(ToolResult {
+                            success: true,
+                            output: format!("No results found for \"{}\".", query),
+                            error: None,
+                        });
+                    }
+
+                    // Format results into a readable text response.
+                    let mut output = format!("Search results for \"{}\" ({} found):\n\n", query, results.results.len());
+                    for (i, result) in results.results.iter().enumerate() {
+                        output.push_str(&format!("{}. {}\n", i + 1, result.title));
+                        output.push_str(&format!("   URL: {}\n", result.url));
+                        if !result.snippet.is_empty() {
+                            output.push_str(&format!("   {}\n", result.snippet));
+                        }
+                        if let Some(ref published) = result.published_at {
+                            output.push_str(&format!("   Published: {}\n", published));
+                        }
+                        output.push('\n');
+                    }
+
+                    return Ok(ToolResult {
+                        success: true,
+                        output,
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        provider = %model_id,
+                        "search provider failed, trying next"
+                    );
+                    last_error = Some(e);
+                    // Continue to next provider in chain.
+                }
             }
-        };
-
-        if results.results.is_empty() {
-            return Ok(ToolResult {
-                success: true,
-                output: format!("No results found for \"{}\".", query),
-                error: None,
-            });
         }
 
-        // Format results into a readable text response.
-        let mut output = format!("Search results for \"{}\" ({} found):\n\n", query, results.results.len());
-        for (i, result) in results.results.iter().enumerate() {
-            output.push_str(&format!("{}. {}\n", i + 1, result.title));
-            output.push_str(&format!("   URL: {}\n", result.url));
-            if !result.snippet.is_empty() {
-                output.push_str(&format!("   {}\n", result.snippet));
-            }
-            if let Some(ref published) = result.published_at {
-                output.push_str(&format!("   Published: {}\n", published));
-            }
-            output.push('\n');
-        }
-
+        // All providers failed.
+        let msg = last_error.map(|e| e.to_string()).unwrap_or_else(|| "unknown error".into());
+        tracing::warn!("all search providers failed: {}", msg);
         Ok(ToolResult {
-            success: true,
-            output,
-            error: None,
+            success: false,
+            output: String::new(),
+            error: Some(format!("All search providers failed. Last error: {}", msg)),
         })
     }
 }
