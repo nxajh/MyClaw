@@ -779,7 +779,46 @@ impl Orchestrator {
                                     }
                                     channel.on_status(&reply_target, ProcessingStatus::Done).await;
                                 }
-                                Ok(_) => {}
+                                Ok(_) => {
+                                    // Empty response (e.g. stream timeout retries exhausted).
+                                    // run() returns Ok("") instead of Err, so it bypasses the
+                                    // error handlers below. Treat like EmptyResponse: notify
+                                    // the user and offer retry/abort buttons.
+                                    tracing::warn!(session = %sk, "empty response from run(), offering retry/abort");
+                                    channel.on_status(&reply_target, ProcessingStatus::Done).await;
+
+                                    {
+                                        let mut guard = loop_.lock().await;
+                                        guard.set_pending_retry(content.clone());
+                                    }
+
+                                    let sk_prefix: String = sk.chars().take(32).collect();
+                                    let retry_data = format!("__retry:{}", sk_prefix);
+                                    let abort_data = format!("__abort:{}", sk_prefix);
+
+                                    let send_msg = SendMessage {
+                                        recipient: reply_target.clone(),
+                                        content: "⚠️ 处理超时，未收到模型回复。".to_string(),
+                                        subject: None,
+                                        thread_ts: reply_to_id.clone(),
+                                        cancellation_token: None,
+                                        attachments: vec![],
+                                        image_urls: None,
+                                        inline_buttons: Some(vec![
+                                            crate::channels::InlineButton {
+                                                label: "🔄 重试".to_string(),
+                                                callback_data: retry_data,
+                                            },
+                                            crate::channels::InlineButton {
+                                                label: "✖ 放弃".to_string(),
+                                                callback_data: abort_data,
+                                            },
+                                        ]),
+                                    };
+                                    if let Err(send_err) = channel.send(&send_msg).await {
+                                        error!(session = %sk, err = %send_err, "failed to send empty-response retry prompt");
+                                    }
+                                }
                                 Err(e) => {
                                     // Check if this is a LoopBreak — the loop breaker
                                     // detected a repetitive tool pattern. The turn has
