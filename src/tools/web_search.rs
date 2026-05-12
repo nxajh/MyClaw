@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use crate::providers::{ServiceRegistry, Tool, ToolResult};
 use crate::providers::search::SearchRequest;
-use crate::tools::search_cooldown::SearchProviderCooldown;
+use crate::tools::search_cooldown::{SearchProviderCooldown, parse_search_cooldown};
 use serde_json::json;
 
 pub struct WebSearchTool {
@@ -138,7 +138,21 @@ impl Tool for WebSearchTool {
                     });
                 }
                 Err(e) => {
-                    let reason = self.cooldown.classify_and_record(provider_name, &e.to_string());
+                    let error_str = e.to_string();
+                    // classify_and_record internally uses parse_search_cooldown
+                    // to extract specific cooldown durations from the response body
+                    // (e.g., retry_after JSON field, "try again in X seconds" text).
+                    // Falls back to the default cooldown for the classified error type.
+                    let reason = self.cooldown.classify_and_record(provider_name, &error_str);
+
+                    // Additional pass: if classify_and_record didn't find a cooldown
+                    // (e.g., non-HTTP errors), try parsing the raw error string directly.
+                    if !self.cooldown.is_cooled_down(provider_name) {
+                        if let Some(parsed) = parse_search_cooldown(&error_str) {
+                            self.cooldown.record_failure_with_cooldown(provider_name, parsed);
+                        }
+                    }
+
                     tracing::warn!(
                         error = %e,
                         provider = %provider_name,
