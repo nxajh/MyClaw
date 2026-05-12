@@ -1,6 +1,6 @@
 //! Session manager — manages multi-session lifecycle and persistence.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -187,6 +187,68 @@ fn sanitize_paired(pairs: Vec<(i64, ChatMessage)>) -> Vec<(i64, ChatMessage)> {
         tracing::warn!(removed, "sanitized orphan tool results from history");
     }
     result
+}
+
+// ── Breakpoint detection (session recovery) ───────────────────────────────────
+
+/// Describes a tool call that was initiated but never received a result
+/// (e.g. the process was killed during tool execution).
+#[derive(Debug, Clone)]
+pub struct BreakpointItem {
+    pub tool_call_id: String,
+    pub tool_name: String,
+    /// JSON-encoded arguments string.
+    pub arguments: String,
+}
+
+/// Analyze session history and return tool calls that lack corresponding results.
+///
+/// Walks the entire message list, tracking which `tool_call_id`s were issued by
+/// assistant messages and which received a `tool` result.  Any pending (unfulfilled)
+/// tool calls represent "breakpoints" — places where execution was interrupted.
+pub fn identify_breakpoint(messages: &[ChatMessage]) -> Vec<BreakpointItem> {
+    let mut pending_tools: HashMap<String, (&str, &str)> = HashMap::new();
+
+    for msg in messages {
+        match msg.role.as_str() {
+            "assistant" => {
+                if let Some(calls) = &msg.tool_calls {
+                    for call in calls {
+                        pending_tools.insert(call.id.clone(), (&call.name, &call.arguments));
+                    }
+                }
+            }
+            "tool" => {
+                if let Some(id) = &msg.tool_call_id {
+                    pending_tools.remove(id.as_str());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pending_tools
+        .into_iter()
+        .map(|(id, (name, arguments))| BreakpointItem {
+            tool_call_id: id,
+            tool_name: name.to_string(),
+            arguments: arguments.to_string(),
+        })
+        .collect()
+}
+
+/// Check whether the message history ends with an incomplete assistant turn
+/// (assistant emitted tool_calls but some/all are missing tool results).
+///
+/// This is a lighter check than [`identify_breakpoint`] — it only examines the
+/// tail of the conversation rather than scanning the full history.
+pub fn detect_incomplete_turn(messages: &[ChatMessage]) -> bool {
+    messages
+        .last()
+        .map(|m| {
+            m.role == "assistant" && m.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty())
+        })
+        .unwrap_or(false)
 }
 
 struct InMemorySessionMeta {
@@ -468,6 +530,11 @@ pub struct Session {
     /// orchestrator will prompt the user to retry or abort on the next
     /// interaction. Not persisted — rebuilt on every session load.
     pub incomplete_turn: bool,
+    /// Tool calls that were pending when the session was interrupted
+    /// (assistant emitted tool_calls but no tool results were persisted).
+    /// Detected on session load; used by the orchestrator to inject a
+    /// recovery prompt so the model can re-execute the missing tools.
+    pub breakpoint_items: Vec<BreakpointItem>,
 }
 
 impl Session {
@@ -482,6 +549,7 @@ impl Session {
             last_total_tokens: None,
             session_override: SessionOverride::default(),
             incomplete_turn: false,
+            breakpoint_items: Vec::new(),
         }
     }
 
@@ -598,63 +666,108 @@ impl SessionManager {
         let session_override = self.backend.load_session_override(&session_id)
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or_default();
-        let mut session = match self.backend.load_latest_summary(&session_id) {
+        let (summary_meta, compact_ver) = match self.backend.load_latest_summary(&session_id) {
             Some(summary) => {
-                // The summary message is already in history.jsonl (written during
-                // rotation), so we simply load everything in the current file.
-                let rows = self.backend.load_incremental(&session_id, 0);
-                let count = rows.len();
-                let pairs = sanitize_paired(rows);
-                let sanitized = pairs.len();
-                let (ids, msgs): (Vec<i64>, Vec<_>) = pairs.into_iter().unzip();
-
-                tracing::info!(
-                    session = %session_id,
-                    message_count = count,
-                    sanitized,
-                    last_total_tokens,
-                    "session restored from compacted history"
-                );
-
-                Session {
-                    id: session_id.clone(),
-                    owner: user_id.to_string(),
-                    history: msgs,
-                    message_ids: ids,
-                    compact_version: summary.version,
-                    summary_metadata: Some(SummaryMetadata {
-                        version: summary.version,
-                        token_estimate: summary.token_estimate.unwrap_or(0),
-                        up_to_message: summary.up_to_message,
-                    }),
-                    last_total_tokens,
-                    session_override,
-                    incomplete_turn: false,
-                }
+                let meta = SummaryMetadata {
+                    version: summary.version,
+                    token_estimate: summary.token_estimate.unwrap_or(0),
+                    up_to_message: summary.up_to_message,
+                };
+                (Some(meta), summary.version)
             }
-            None => {
-                // Load all messages with their backend IDs (id > 0 covers all rows).
-                let rows = self.backend.load_incremental(&session_id, 0);
-                let count = rows.len();
-                let pairs = sanitize_paired(rows);
-                let sanitized = pairs.len();
-                let (ids, msgs): (Vec<i64>, Vec<_>) = pairs.into_iter().unzip();
-                if count > 0 {
-                    tracing::info!(session = %session_id, message_count = count, sanitized, "session restored from full history");
-                }
-                Session {
-                    id: session_id.clone(),
-                    owner: user_id.to_string(),
-                    message_ids: ids,
-                    history: msgs,
-                    compact_version: 0,
-                    summary_metadata: None,
-                    last_total_tokens,
-                    session_override,
-                    incomplete_turn: false,
-                }
-            }
+            None => (None, 0),
         };
+        let from_compacted = summary_meta.is_some();
+
+        let rows = self.backend.load_incremental(&session_id, 0);
+        let count = rows.len();
+
+        // Detect breakpoints on raw (pre-sanitization) messages so we can
+        // decide whether to preserve the trailing assistant tool_calls for
+        // recovery rather than trimming them away.
+        let raw_msgs: Vec<ChatMessage> = rows.iter().map(|(_, m)| m.clone()).collect();
+        let breakpoints = identify_breakpoint(&raw_msgs);
+
+        let (ids, msgs, breakpoints) = if !breakpoints.is_empty() {
+            // Breakpoint mode: only remove orphan tool results, but keep the
+            // trailing assistant message with tool_calls so the model can
+            // re-execute the interrupted tools.
+            let known_tool_ids: HashSet<String> = rows
+                .iter()
+                .filter(|(_, m)| m.role == "assistant")
+                .flat_map(|(_, m)| m.tool_calls.iter().flatten().map(|tc| tc.id.clone()))
+                .collect();
+            let filtered: Vec<_> = rows
+                .into_iter()
+                .filter(|(_, msg)| {
+                    if msg.role == "tool" {
+                        return msg
+                            .tool_call_id
+                            .as_ref()
+                            .is_some_and(|id| known_tool_ids.contains(id));
+                    }
+                    true
+                })
+                .collect();
+            let (i, m): (Vec<i64>, Vec<_>) = filtered.into_iter().unzip();
+            tracing::warn!(
+                session = %session_id,
+                breakpoint_count = breakpoints.len(),
+                "detected breakpoint: tool calls without results, preserving for recovery"
+            );
+            (i, m, breakpoints)
+        } else {
+            let pairs = sanitize_paired(rows);
+            let sanitized = pairs.len();
+            let (i, m): (Vec<i64>, Vec<_>) = pairs.into_iter().unzip();
+            if count > 0 {
+                if from_compacted {
+                    tracing::info!(
+                        session = %session_id,
+                        message_count = count,
+                        sanitized,
+                        last_total_tokens,
+                        "session restored from compacted history"
+                    );
+                } else {
+                    tracing::info!(
+                        session = %session_id,
+                        message_count = count,
+                        sanitized,
+                        "session restored from full history"
+                    );
+                }
+            }
+            (i, m, Vec::new())
+        };
+
+        let mut session = Session {
+            id: session_id.clone(),
+            owner: user_id.to_string(),
+            history: msgs,
+            message_ids: ids,
+            compact_version: compact_ver,
+            summary_metadata: summary_meta,
+            last_total_tokens,
+            session_override,
+            incomplete_turn: false,
+            breakpoint_items: breakpoints,
+        };
+
+        // Inject recovery system prompt when breakpoints are detected so the
+        // model knows to re-execute the interrupted tool calls.
+        if !session.breakpoint_items.is_empty() {
+            let names: Vec<&str> = session
+                .breakpoint_items
+                .iter()
+                .map(|b| b.tool_name.as_str())
+                .collect();
+            session.history.push(ChatMessage::system_text(format!(
+                "⚠️ 上次请求在 tool 执行过程中被中断。中断的 tool calls: [{}]。Session 已恢复，请继续执行未完成的 tool calls。",
+                names.join(", ")
+            )));
+            session.message_ids.push(0);
+        }
 
         // 4. Detect incomplete turn (last message is user without assistant reply).
         //    Only check the most recent turn — earlier orphan user messages are
@@ -831,4 +944,100 @@ impl Default for SessionManager {
     fn default() -> Self {
         Self::in_memory()
     }
+}
+
+// ── Queue processing (hot-switch recovery) ────────────────────────────────────
+
+/// Get the queue file path for a session.
+///
+/// Queue files live inside the session directory alongside `history.jsonl`:
+/// `sessions/{session_id}/queue.jsonl`.
+fn get_session_queue_path(sessions_dir: &std::path::Path, session_id: &str) -> std::path::PathBuf {
+    sessions_dir.join(session_id).join("queue.jsonl")
+}
+
+/// Append a message to a session's queue file.
+///
+/// Used during hot-switch to buffer incoming messages while the old process
+/// is shutting down and the new one hasn't started yet.  Each message is
+/// written as one JSON line (JSONL format).
+pub fn enqueue_message(
+    sessions_dir: &std::path::Path,
+    session_id: &str,
+    msg: &ChatMessage,
+) -> std::io::Result<()> {
+    let queue_file = get_session_queue_path(sessions_dir, session_id);
+    if let Some(parent) = queue_file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let line = serde_json::to_string(msg).map_err(std::io::Error::other)? + "\n";
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&queue_file)?
+        .write_all(line.as_bytes())
+}
+
+/// Read and drain all queued messages for a single session.
+///
+/// Returns the messages and removes the queue file.  Returns an empty vec
+/// if no queue file exists.
+pub fn process_queue(
+    sessions_dir: &std::path::Path,
+    session_id: &str,
+) -> std::io::Result<Vec<ChatMessage>> {
+    let queue_file = get_session_queue_path(sessions_dir, session_id);
+    if !queue_file.exists() {
+        return Ok(Vec::new());
+    }
+
+    let content = std::fs::read_to_string(&queue_file)?;
+    let messages: Vec<ChatMessage> = content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+
+    // Remove the queue file after successful read.
+    std::fs::remove_file(&queue_file)?;
+
+    if !messages.is_empty() {
+        tracing::info!(
+            session = %session_id,
+            count = messages.len(),
+            "processed queued messages from hot switch"
+        );
+    }
+
+    Ok(messages)
+}
+
+/// Process queue files for all sessions under the given directory.
+///
+/// Scans each subdirectory of `sessions_dir` for a `queue.jsonl` file,
+/// reads the queued messages, and removes the file.  Returns a map of
+/// `session_id → queued messages` (only sessions with non-empty queues
+/// are included).
+pub fn process_all_queues(
+    sessions_dir: &std::path::Path,
+) -> std::io::Result<HashMap<String, Vec<ChatMessage>>> {
+    let mut result = HashMap::new();
+    let entries = match std::fs::read_dir(sessions_dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(result),
+    };
+
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let session_id = entry.file_name().to_string_lossy().to_string();
+        let messages = process_queue(sessions_dir, &session_id)?;
+        if !messages.is_empty() {
+            result.insert(session_id, messages);
+        }
+    }
+
+    Ok(result)
 }

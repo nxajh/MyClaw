@@ -479,12 +479,46 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         format!("failed to set cwd to workspace_dir '{}'", config.workspace_dir.display())
     })?;
 
-    // ── Hot switch: if started via fork+execv, notify the old process ──
+    // ── Hot switch: enhanced startup for fork+execv child ─────────────────
+    // When the new binary is started via execv (hot switch), it inherits the
+    // listen socket fd and needs to: (1) take over the socket, (2) clear the
+    // Telegram update offset so the new process fetches fresh updates, (3) drain
+    // any queued messages that arrived during the switch, and (4) notify the
+    // old process that it can exit.
     #[cfg(unix)]
     if crate::hot_switch::is_hot_switch() {
-        if let Some(old) = crate::hot_switch::old_pid() {
-            tracing::info!(old_pid = old, "hot switch startup detected, sending SIGUSR2 to old process");
-            unsafe { libc::kill(old, libc::SIGUSR2); }
+        tracing::info!("hot switch mode detected — initializing new process takeover");
+
+        // ── Socket takeover ────────────────────────────────────────────────
+        // The old process stored its listen socket fd in MYCLAW_SOCKET_FD before
+        // calling execv.  Store it in LISTEN_SOCKET_FD so the webhook bind code
+        // below can reuse it instead of calling bind_reusable().
+        if let Some(fd) = crate::hot_switch::inherited_socket_fd() {
+            tracing::info!(fd, "inherited listen socket from old process");
+            LISTEN_SOCKET_FD.store(fd, Ordering::SeqCst);
+        } else {
+            tracing::warn!("hot switch detected but MYCLAW_SOCKET_FD not set");
+        }
+
+        // ── Telegram offset reset ─────────────────────────────────────────
+        // The old process may have persisted an update offset that covers
+        // messages it never finished processing.  Clear the offset file so
+        // getUpdates returns recent messages.  The Telegram channel's dedup
+        // layer will filter out any duplicates.
+        reset_telegram_offset();
+
+        // ── Queue processing ──────────────────────────────────────────────
+        // Queue drain is handled later (after session backend initialization)
+        // in the dedicated queue processing section.  We skip it here because
+        // process_all_queues deletes the queue files, and the later call needs
+        // to read them using the proper session backend.
+
+        // ── Notify old process ────────────────────────────────────────────
+        // SIGUSR2 tells the old process that the new one is ready; the old
+        // process will exit(0).
+        if let Some(old_pid) = crate::hot_switch::old_pid() {
+            tracing::info!(old_pid, "sending SIGUSR2 to old process — I am ready");
+            unsafe { libc::kill(old_pid, libc::SIGUSR2); }
         }
     }
 
@@ -620,6 +654,33 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // Clean up stale marker files — they belong to the old process.
     cleanup_stale_subagent_markers(&sessions_root);
 
+    // ── Queue processing: drain queued messages from hot-switch ────────────────
+    // During hot-switch, incoming messages may have been queued to queue.jsonl
+    // files while the old process was shutting down.  Now that the session
+    // backend is ready, read them back and persist them.
+    if crate::hot_switch::is_hot_switch() {
+        match crate::agents::process_all_queues(&sessions_root) {
+            Ok(queues) => {
+                for (sid, msgs) in &queues {
+                    for msg in msgs {
+                        session_manager.append_message(sid, msg.clone());
+                    }
+                }
+                if !queues.is_empty() {
+                    let total: usize = queues.values().map(|v| v.len()).sum();
+                    tracing::info!(
+                        sessions = queues.len(),
+                        total_messages = total,
+                        "persisted queued messages from hot switch"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to process session queues (non-fatal)");
+            }
+        }
+    }
+
     // Create ClientChannel separately (needs session_manager for management API).
     #[cfg(feature = "client")]
     let _client_channel: Option<Arc<crate::channels::ClientChannel>> =
@@ -705,20 +766,33 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
         // Bind the webhook port with SO_REUSEPORT so a hot-switch child can
         // bind the same port before the old process releases it.
-        let wh_listener = match bind_reusable(wh_config.port) {
-            Ok(l) => {
-                // Store fd for hot switch child.
-                #[cfg(unix)]
-                {
-                    use std::os::unix::io::AsRawFd;
-                    LISTEN_SOCKET_FD.store(l.as_raw_fd(), Ordering::SeqCst);
+        let wh_listener = {
+            // If hot-switch stored a valid fd earlier, reuse it directly.
+            let inherited_fd = LISTEN_SOCKET_FD.load(Ordering::SeqCst);
+            if inherited_fd >= 0 {
+                tracing::info!(fd = inherited_fd, "reusing inherited webhook socket from hot switch");
+                // SAFETY: the fd was inherited from the parent via execv and is
+                // a valid, already-bound, already-listening socket.
+                use std::os::unix::io::FromRawFd;
+                let std_listener = unsafe { std::net::TcpListener::from_raw_fd(inherited_fd) };
+                Some(std_listener)
+            } else {
+                match bind_reusable(wh_config.port) {
+                    Ok(l) => {
+                        // Store fd for hot switch child.
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::io::AsRawFd;
+                            LISTEN_SOCKET_FD.store(l.as_raw_fd(), Ordering::SeqCst);
+                        }
+                        Some(l)
+                    }
+                    Err(e) => {
+                        tracing::warn!(port = wh_config.port, error = %e,
+                            "SO_REUSEPORT bind failed, webhook server will use normal bind");
+                        None
+                    }
                 }
-                Some(l)
-            }
-            Err(e) => {
-                tracing::warn!(port = wh_config.port, error = %e,
-                    "SO_REUSEPORT bind failed, webhook server will use normal bind");
-                None
             }
         };
 
@@ -851,6 +925,27 @@ async fn wait_for_signal() -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ── Hot-switch helpers ──────────────────────────────────────────────────────
+
+/// Reset the persisted Telegram update offset so that `getUpdates` returns
+/// recent messages instead of skipping everything the old process already
+/// fetched.  The dedup layer in TelegramChannel will filter any duplicates.
+fn reset_telegram_offset() {
+    let data_dir = directories::ProjectDirs::from("", "", "myclaw")
+        .map(|d| d.data_dir().to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from(".myclaw"));
+    let offset_path = data_dir.join("telegram_offset");
+    if offset_path.exists() {
+        if let Err(e) = std::fs::remove_file(&offset_path) {
+            tracing::warn!(error = %e, path = %offset_path.display(),
+                "failed to remove telegram offset file (non-fatal)");
+        } else {
+            tracing::info!(path = %offset_path.display(),
+                "telegram offset cleared — new process will fetch fresh updates");
+        }
+    }
 }
 
 // ── Sub-agent recovery (hot-switch detection) ─────────────────────────────────
