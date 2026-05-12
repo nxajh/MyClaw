@@ -152,8 +152,23 @@ impl SubAgentDelegator {
                 )
             })?;
 
+        // Generate a unique task_id and create a running-state marker file so the
+        // daemon can detect interrupted sub-agents after a hot-switch restart.
+        let task_id = format!("del_{}", uuid::Uuid::new_v4());
+        let marker_path = self.sessions_root.join(format!("subagent_running_{}.json", task_id));
+        let marker_state = serde_json::json!({
+            "agent_name": config.name,
+            "task_id": task_id,
+            "task_preview": task.chars().take(200).collect::<String>(),
+            "started_at": chrono::Utc::now().to_rfc3339(),
+        });
+        if let Err(e) = std::fs::write(&marker_path, serde_json::to_string_pretty(&marker_state).unwrap_or_default()) {
+            tracing::warn!(path = %marker_path.display(), err = %e, "failed to write sub-agent marker file");
+        }
+
         tracing::info!(
             agent = %config.name,
+            task_id = %task_id,
             parent = %parent_session_id,
             tools = ?config.tools,
             task_len = task.len(),
@@ -344,6 +359,9 @@ impl SubAgentDelegator {
             }
             tracing::info!(path = %worktree_path.display(), "cleaned up worktree and branch");
         }
+
+        // Cleanup the running-state marker file — sub-agent is done (success or failure).
+        let _ = std::fs::remove_file(&marker_path);
 
         result
         }) // end Box::pin

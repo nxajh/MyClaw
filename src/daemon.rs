@@ -639,6 +639,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         change_rx: Some(change_rx.clone()),
         scheduler_rx: Some(scheduler_rx),
         search_cooldown: Some(search_cooldown),
+        unfinished_subagents,
     };
 
     // ── Launch ─────────────────────────────────────────────────────────────

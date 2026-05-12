@@ -85,6 +85,9 @@ pub struct Orchestrator {
     scheduler_rx: Arc<TokioMutex<Option<mpsc::Receiver<SchedulerEvent>>>>,
     /// Search provider cooldown tracker (shared with WebSearchTool).
     search_cooldown: Option<Arc<crate::tools::search_cooldown::SearchProviderCooldown>>,
+    /// Sub-agents that were interrupted by a hot-switch restart.
+    /// Injected as a system reminder on the first session interaction, then cleared.
+    unfinished_subagents: parking_lot::Mutex<Vec<crate::daemon::UnfinishedSubAgent>>,
 }
 
 /// Resources shared between Orchestrator and scheduler tasks.
@@ -128,6 +131,9 @@ pub struct OrchestratorParts {
     pub scheduler_rx: Option<mpsc::Receiver<SchedulerEvent>>,
     /// Search provider cooldown tracker (shared with WebSearchTool).
     pub search_cooldown: Option<Arc<crate::tools::search_cooldown::SearchProviderCooldown>>,
+    /// Sub-agents that were still running when the previous daemon was killed.
+    /// Injected as a recovery hint into the first session interaction.
+    pub unfinished_subagents: Vec<crate::daemon::UnfinishedSubAgent>,
 }
 
 impl Orchestrator {
@@ -171,6 +177,7 @@ impl Orchestrator {
             last_channel: Arc::new(tokio::sync::Mutex::new(None)),
             scheduler_rx: Arc::new(TokioMutex::new(parts.scheduler_rx)),
             search_cooldown: parts.search_cooldown,
+            unfinished_subagents: parking_lot::Mutex::new(parts.unfinished_subagents),
         };
 
         info!(channels = orchestrator.channels.len(), "orchestrator initialized");
@@ -246,11 +253,26 @@ impl Orchestrator {
         delegation_manager: &Option<Arc<DelegationManager>>,
         persist_backend: &Arc<dyn crate::storage::SessionBackend>,
         change_rx: &Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
+        unfinished_subagents: &[crate::daemon::UnfinishedSubAgent],
     ) -> Arc<TokioMutex<AgentLoop>> {
         if let Some(existing) = sessions.get(sk) {
             return existing.clone();
         }
-        let session = session_manager.get_or_create(sk);
+        let mut session = session_manager.get_or_create(sk);
+
+        // Inject recovery hint if sub-agents were interrupted by a hot-switch.
+        if !unfinished_subagents.is_empty() {
+            let mut recovery_msg = String::from(
+                "⚠️ 以下子代理在上次热切换中断，其 session 已持久化。如果需要，可以重新 delegate 它们继续工作：\n\n"
+            );
+            for agent_info in unfinished_subagents {
+                recovery_msg.push_str(&format!(
+                    "- {} (task: {}): {}\n",
+                    agent_info.agent_name, agent_info.task_id, agent_info.task_preview
+                ));
+            }
+            session.add_system_text(recovery_msg);
+        }
 
         // Create persist hook from the shared backend.
         let persist_hook: Arc<dyn PersistHook> = Arc::new(
@@ -361,6 +383,12 @@ impl Orchestrator {
         let delegation_manager = self.delegation_manager.clone();
 
         let mut rx = rx;
+
+        // Build recovery hint for sub-agents interrupted by previous hot-switch.
+        let unfinished_subagents = {
+            let guard = self.unfinished_subagents.lock();
+            guard.clone()
+        };
 
         loop {
             if *shutdown_rx.borrow() {
@@ -481,6 +509,7 @@ impl Orchestrator {
                                     &sub_delegator, &delegation_manager,
                                     &self.persist_backend,
                                     &self.change_rx,
+                                    &unfinished_subagents,
                                 );
                                 let mut guard = loop_.lock().await;
                                 guard.take_pending_retry()
@@ -494,6 +523,7 @@ impl Orchestrator {
                                     &sub_delegator, &delegation_manager,
                                     &self.persist_backend,
                                     &self.change_rx,
+                                    &unfinished_subagents,
                                 );
                                 let reply_target_c = reply_target.clone();
                                 let reply_to_id = Some(msg.id.clone());
@@ -588,6 +618,7 @@ impl Orchestrator {
                                 &sub_delegator, &delegation_manager,
                                 &self.persist_backend,
                                 &self.change_rx,
+                                &unfinished_subagents,
                             );
                             {
                                 let mut guard = loop_.lock().await;
@@ -609,6 +640,7 @@ impl Orchestrator {
                             &sub_delegator, &delegation_manager,
                             &self.persist_backend,
                             &self.change_rx,
+                            &unfinished_subagents,
                         );
                         let mut guard = loop_.lock().await;
                         if guard.session.incomplete_turn {
@@ -708,6 +740,7 @@ impl Orchestrator {
                         &sub_delegator, &delegation_manager,
                         &self.persist_backend,
                         &self.change_rx,
+                        &unfinished_subagents,
                     );
 
                     let ch = channels.clone();
