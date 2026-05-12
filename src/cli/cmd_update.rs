@@ -29,16 +29,22 @@ pub fn run_update() -> Result<()> {
         anyhow::bail!("downloaded artifact does not contain 'myclaw' binary");
     }
 
-    // 5. Backup old binary
+    // 5. Rename old binary out of the way (rename works on running binaries — inode kept by process)
     let old_binary = current_exe.with_extension("old");
     if old_binary.exists() {
         std::fs::remove_file(&old_binary)?;
     }
-    std::fs::copy(&current_exe, &old_binary)
-        .context("failed to backup current binary")?;
+    std::fs::rename(&current_exe, &old_binary)
+        .context("failed to rename current binary")?;
 
-    // 6. Replace binary (copy instead of rename to handle cross-filesystem)
-    std::fs::copy(&new_binary, &current_exe)
+    // 6. Move new binary into place (rename avoids "Text file busy" on running binaries)
+    std::fs::rename(&new_binary, &current_exe)
+        .or_else(|_| {
+            // Fallback: copy if cross-filesystem rename fails
+            std::fs::copy(&new_binary, &current_exe)?;
+            std::fs::remove_file(&new_binary).ok();
+            Ok(())
+        })
         .context("failed to replace binary")?;
 
     // Set executable permissions
