@@ -654,30 +654,27 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // Clean up stale marker files — they belong to the old process.
     cleanup_stale_subagent_markers(&sessions_root);
 
-    // ── Queue processing: drain queued messages from hot-switch ────────────────
-    // During hot-switch, incoming messages may have been queued to queue.jsonl
-    // files while the old process was shutting down.  Now that the session
-    // backend is ready, read them back and persist them.
-    if crate::hot_switch::is_hot_switch() {
-        match crate::agents::process_all_queues(&sessions_root) {
-            Ok(queues) => {
-                for (sid, msgs) in &queues {
-                    for msg in msgs {
-                        session_manager.append_message(sid, msg.clone());
-                    }
-                }
-                if !queues.is_empty() {
-                    let total: usize = queues.values().map(|v| v.len()).sum();
-                    tracing::info!(
-                        sessions = queues.len(),
-                        total_messages = total,
-                        "persisted queued messages from hot switch"
-                    );
+    // ── Queue processing: drain any queued messages ────────────────────────
+    // Messages may have been queued to queue.jsonl files during a hot switch
+    // or if the process was killed mid-turn. Always scan on startup.
+    match crate::agents::process_all_queues(&sessions_root) {
+        Ok(queues) => {
+            for (sid, msgs) in &queues {
+                for msg in msgs {
+                    session_manager.append_message(sid, msg.clone());
                 }
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to process session queues (non-fatal)");
+            if !queues.is_empty() {
+                let total: usize = queues.values().map(|v| v.len()).sum();
+                tracing::info!(
+                    sessions = queues.len(),
+                    total_messages = total,
+                    "persisted queued messages from previous run"
+                );
             }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to process session queues (non-fatal)");
         }
     }
 
