@@ -754,20 +754,8 @@ impl SessionManager {
             breakpoint_items: breakpoints,
         };
 
-        // Inject recovery system prompt when breakpoints are detected so the
-        // model knows to re-execute the interrupted tool calls.
-        if !session.breakpoint_items.is_empty() {
-            let names: Vec<&str> = session
-                .breakpoint_items
-                .iter()
-                .map(|b| b.tool_name.as_str())
-                .collect();
-            session.history.push(ChatMessage::system_text(format!(
-                "⚠️ 上次请求在 tool 执行过程中被中断。中断的 tool calls: [{}]。Session 已恢复，请继续执行未完成的 tool calls。",
-                names.join(", ")
-            )));
-            session.message_ids.push(0);
-        }
+        // Breakpoint items are kept for diagnostics, but recovery is now handled
+        // automatically by `recover_incomplete_turn` in run.rs — no prompt injection needed.
 
         // 4. Detect incomplete turn (last message is user without assistant reply).
         //    Only check the most recent turn — earlier orphan user messages are
