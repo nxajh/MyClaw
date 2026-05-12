@@ -314,6 +314,7 @@ pub fn create_full_openai_provider_with_user_agent(
 pub enum ProviderHandle {
     OpenAi(crate::providers::openai::OpenAiProvider),
     Glm(crate::providers::glm::GlmProvider),
+    Google(crate::providers::google::GoogleProvider),
     Kimi(crate::providers::kimi::KimiProvider),
     MiniMax(crate::providers::minimax::MiniMaxProvider),
     Anthropic(crate::providers::anthropic::AnthropicProvider),
@@ -338,6 +339,9 @@ impl ProviderHandle {
             let mut p = crate::providers::glm::GlmProvider::with_base_url(api_key, base_url.to_string());
             if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
             Some(ProviderHandle::Glm(p))
+        } else if host.contains("googleapis.com") || host.contains("google.com") {
+            let p = crate::providers::google::GoogleProvider::with_base_url(api_key, base_url.to_string());
+            Some(ProviderHandle::Google(p))
         } else if host.contains("xiaomimimo") {
             let mut p = crate::providers::xiaomi::XiaomiProvider::with_base_url(api_key, base_url.to_string());
             if let Some(ua) = user_agent { p = p.with_user_agent(ua.to_string()); }
@@ -366,6 +370,7 @@ impl ProviderHandle {
         match self {
             ProviderHandle::OpenAi(p) => Box::new(p),
             ProviderHandle::Glm(p) => Box::new(p),
+            ProviderHandle::Google(_) => panic!("Google provider does not implement ChatProvider"),
             ProviderHandle::Kimi(p) => Box::new(p),
             ProviderHandle::MiniMax(p) => Box::new(p),
             ProviderHandle::Anthropic(p) => Box::new(p),
@@ -408,6 +413,7 @@ impl ProviderHandle {
     pub fn into_search_provider(self) -> Option<Box<dyn crate::providers::SearchProvider>> {
         match self {
             ProviderHandle::Glm(p) => Some(Box::new(p)),
+            ProviderHandle::Google(p) => Some(Box::new(p)),
             _ => None,
         }
     }
