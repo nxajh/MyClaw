@@ -85,7 +85,7 @@ impl Tool for WebSearchTool {
         let request = SearchRequest {
             query: query.to_string(),
             limit: Some(limit),
-            search_type: None,
+            search_type: Some(model_id.clone()),
         };
 
         let results = match provider.search(request) {
