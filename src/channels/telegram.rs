@@ -471,6 +471,8 @@ pub struct TelegramChannel {
     typing_started_at: Arc<Mutex<std::collections::HashMap<String, std::time::Instant>>>,
     /// Stall watchdog messages to delete when real reply arrives: reply_target → [(chat_id, msg_id)].
     stall_messages: ReactionTracker,
+    /// Directory for persisting state (e.g. Telegram update offset).
+    data_dir: std::path::PathBuf,
     /// Shared HTTP client with connection pool.
     http: reqwest::Client,
     /// Whether we've logged the empty allowed_users warning.
@@ -500,6 +502,9 @@ impl TelegramChannel {
             stall_timeout_secs: config.stall_timeout_secs,
             typing_started_at: Arc::new(Mutex::new(std::collections::HashMap::new())),
             stall_messages: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            data_dir: directories::ProjectDirs::from("", "", "myclaw")
+                .map(|d| d.data_dir().to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from(".myclaw")),
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(60))
                 .build()
@@ -514,6 +519,35 @@ impl TelegramChannel {
 
     fn http_client(&self) -> &reqwest::Client {
         &self.http
+    }
+
+    /// Path to the file that persists the Telegram update offset.
+    fn offset_path(&self) -> std::path::PathBuf {
+        self.data_dir.join("telegram_offset")
+    }
+
+    /// Load the persisted update offset from disk.
+    /// Returns 0 when the file does not exist or is unreadable.
+    fn load_offset(&self) -> i64 {
+        let path = self.offset_path();
+        match std::fs::read_to_string(&path) {
+            Ok(content) => content.trim().parse().unwrap_or(0),
+            Err(_) => 0,
+        }
+    }
+
+    /// Persist the given offset to disk *before* processing the batch.
+    /// This ensures that even if the process is killed mid-processing,
+    /// a subsequent restart will not re-fetch already-seen updates.
+    fn persist_offset(&self, offset: i64) {
+        let path = self.offset_path();
+        // Best-effort: create parent directory if it doesn't exist yet.
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(&path, offset.to_string()) {
+            warn!("Failed to persist Telegram offset to {}: {e}", path.display());
+        }
     }
 
     fn normalize_identity(value: &str) -> String {
@@ -1279,7 +1313,10 @@ impl TelegramChannel {
 
     /// The actual long-poll loop. Runs until channel is closed.
     async fn poll_loop(&self, tx: mpsc::Sender<ChannelMessage>) {
-        let mut offset: i64 = 0;
+        let mut offset: i64 = self.load_offset();
+        if offset > 0 {
+            info!("Resuming Telegram polling from persisted offset {offset}");
+        }
 
         loop {
             let http = self.http_client();
@@ -1322,8 +1359,16 @@ impl TelegramChannel {
                 }
             };
 
+            // Persist the offset *before* processing any updates.
+            // This ensures that if the process is killed mid-processing,
+            // a restart will not re-fetch these updates.
+            if let Some(last) = updates.last() {
+                offset = last.update_id + 1;
+                self.persist_offset(offset);
+                debug!("Persisted Telegram offset {offset}");
+            }
+
             for update in updates.into_iter() {
-                offset = update.update_id + 1;
 
                 // Handle callback query (inline keyboard button click).
                 if let Some(cq) = update.callback_query {
