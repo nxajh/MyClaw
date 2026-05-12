@@ -473,6 +473,86 @@ impl Orchestrator {
             }
         }
 
+        // ── Sub-agent startup recovery ─────────────────────────────────────
+        // For unfinished sub-agents detected via marker files, recover their
+        // interrupted turns and emit delegation events so the parent agent
+        // receives the results.
+        for sa in &unfinished_subagents {
+            if sa.sub_session_id.is_empty() || sa.session_key.is_empty() {
+                tracing::info!(task_id = %sa.task_id, "sub-agent recovery: skipping (no session_id or session_key)");
+                continue;
+            }
+            // Construct the sub-agent session key for loading.
+            let sub_sk = format!("{}:{}", sa.agent_name, sa.sub_session_id);
+            let session = self.session_manager.get_or_create(&sub_sk);
+            let history = &session.history;
+            if history.is_empty() {
+                continue;
+            }
+            // Check for incomplete turn.
+            let has_incomplete = {
+                let mut completed_ids = std::collections::HashSet::new();
+                let mut has_trailing_tools = false;
+                let mut found_pending = false;
+                for msg in history.iter().rev() {
+                    if msg.role == "tool" {
+                        if let Some(ref id) = msg.tool_call_id {
+                            completed_ids.insert(id.clone());
+                        }
+                        has_trailing_tools = true;
+                    } else if msg.role == "assistant" {
+                        if let Some(ref calls) = msg.tool_calls {
+                            for call in calls {
+                                if !completed_ids.contains(&call.id) {
+                                    found_pending = true;
+                                }
+                            }
+                        }
+                        break;
+                    } else {
+                        break;
+                    }
+                }
+                found_pending || has_trailing_tools
+            };
+            if !has_incomplete {
+                continue;
+            }
+            tracing::info!(task_id = %sa.task_id, agent = %sa.agent_name, "sub-agent startup recovery: found incomplete turn");
+            // Create a loop for the sub-agent session and recover.
+            let reply_target = format!("startup:recovery:sub:{}", sa.task_id);
+            let loop_ = Self::get_or_create_loop(
+                &sessions, &agent, self.session_manager.as_ref(), &sub_sk,
+                &channels, &self.pending_asks, &reply_target,
+                &sub_delegator, &delegation_manager,
+                &self.persist_backend,
+                &self.change_rx,
+                &unfinished_subagents,
+            );
+            let mut guard = loop_.lock().await;
+            match guard.recover_interrupted_turn().await {
+                Ok(Some(text)) if !text.is_empty() => {
+                    tracing::info!(task_id = %sa.task_id, "sub-agent startup recovery: turn completed");
+                    // Emit delegation event so the parent agent gets the result.
+                    if let Some(ref dm) = delegation_manager {
+                        let _ = dm.event_sender().send(DelegationEvent::Completed {
+                            task_id: sa.task_id.clone(),
+                            session_key: sa.session_key.clone(),
+                            reply_target: sa.reply_target.clone(),
+                            summary: text,
+                            duration_secs: 0,
+                        }).await;
+                    }
+                }
+                Ok(_) => {
+                    tracing::info!(task_id = %sa.task_id, "sub-agent startup recovery: no recovery needed");
+                }
+                Err(e) => {
+                    tracing::warn!(task_id = %sa.task_id, err = %e, "sub-agent startup recovery failed");
+                }
+            }
+        }
+
         loop {
             if *shutdown_rx.borrow() {
                 tracing::info!("shutdown requested, exiting message loop");

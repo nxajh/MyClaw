@@ -105,7 +105,7 @@ impl AgentLoop {
             // sync mode (default)
             if let Some(ref delegator) = self.sub_delegator {
                 let parent_id = self.session.id.clone();
-                let result = delegator.delegate_with_parent(agent_name, task, &parent_id).await;
+                let result = delegator.delegate_with_parent(agent_name, task, &parent_id, None, None, None).await;
                 return Ok(match result {
                     Ok(output) => ToolResult { success: true, output, error: None },
                     Err(e) => ToolResult {

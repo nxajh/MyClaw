@@ -140,6 +140,9 @@ impl SubAgentDelegator {
         agent_name: &'a str,
         task: &'a str,
         parent_session_id: &'a str,
+        task_id_override: Option<&'a str>,
+        session_key: Option<&'a str>,
+        reply_target: Option<&'a str>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'a>> {
         Box::pin(async move {
         let config = self.find_config(agent_name)
@@ -154,17 +157,11 @@ impl SubAgentDelegator {
 
         // Generate a unique task_id and create a running-state marker file so the
         // daemon can detect interrupted sub-agents after a hot-switch restart.
-        let task_id = format!("del_{}", uuid::Uuid::new_v4());
+        let task_id = task_id_override.map(|s| s.to_string())
+            .unwrap_or_else(|| format!("del_{}", uuid::Uuid::new_v4()));
+        // We'll write the marker after we know the sub_session_id.
+        // For now, save the path.
         let marker_path = self.sessions_root.join(format!("subagent_running_{}.json", task_id));
-        let marker_state = serde_json::json!({
-            "agent_name": config.name,
-            "task_id": task_id,
-            "task_preview": task.chars().take(200).collect::<String>(),
-            "started_at": chrono::Utc::now().to_rfc3339(),
-        });
-        if let Err(e) = std::fs::write(&marker_path, serde_json::to_string_pretty(&marker_state).unwrap_or_default()) {
-            tracing::warn!(path = %marker_path.display(), err = %e, "failed to write sub-agent marker file");
-        }
 
         tracing::info!(
             agent = %config.name,
@@ -252,6 +249,21 @@ impl SubAgentDelegator {
         };
 
         let (session_id, persist_hook) = self.open_sub_session(parent_session_id, &config.name);
+
+        // Write the marker file now that we know the sub_session_id.
+        let marker_state = serde_json::json!({
+            "agent_name": config.name,
+            "task_id": task_id,
+            "task_preview": task.chars().take(200).collect::<String>(),
+            "started_at": chrono::Utc::now().to_rfc3339(),
+            "parent_session_id": parent_session_id,
+            "sub_session_id": session_id,
+            "session_key": session_key.unwrap_or(""),
+            "reply_target": reply_target.unwrap_or(""),
+        });
+        if let Err(e) = std::fs::write(&marker_path, serde_json::to_string_pretty(&marker_state).unwrap_or_default()) {
+            tracing::warn!(path = %marker_path.display(), err = %e, "failed to write sub-agent marker file");
+        }
 
         let session = Session::new(session_id);
 
@@ -407,6 +419,7 @@ impl SubAgentDelegator {
         let worktrees_root = self.worktrees_root.clone();
         let task_owned = task.to_string();
         let parent_session_id_owned = parent_session_id.to_string();
+        let session_key_owned = parent_session_id.to_string();
         let reply_target_owned = reply_target.to_string();
         let event_tx = delegation_manager.event_sender();
         let task_id_clone = task_id.clone();
@@ -426,7 +439,10 @@ impl SubAgentDelegator {
             };
 
             let result = sub_delegator
-                .delegate_with_parent(&agent_name_owned, &task_owned, &parent_session_id_owned)
+                .delegate_with_parent(
+                    &agent_name_owned, &task_owned, &parent_session_id_owned,
+                    Some(&task_id_clone), Some(&session_key_owned), Some(&reply_target_owned),
+                )
                 .await;
 
             let duration_secs = start_time.elapsed().as_secs();
@@ -462,7 +478,7 @@ impl SubAgentDelegator {
 #[async_trait::async_trait]
 impl TaskDelegator for SubAgentDelegator {
     async fn delegate(&self, agent_name: &str, task: &str) -> anyhow::Result<String> {
-        self.delegate_with_parent(agent_name, task, "").await
+        self.delegate_with_parent(agent_name, task, "", None, None, None).await
     }
 
     fn available_agents(&self) -> Vec<(String, String)> {

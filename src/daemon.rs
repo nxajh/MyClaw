@@ -930,6 +930,10 @@ pub struct UnfinishedSubAgent {
     pub agent_name: String,
     pub task_id: String,
     pub task_preview: String,
+    pub parent_session_id: String,
+    pub sub_session_id: String,
+    pub session_key: String,
+    pub reply_target: String,
 }
 
 /// Scan the sessions directory for `subagent_running_*.json` marker files left
@@ -950,6 +954,10 @@ fn scan_unfinished_subagents(sessions_root: &std::path::Path) -> Vec<UnfinishedS
                         agent_name: state["agent_name"].as_str().unwrap_or("unknown").to_string(),
                         task_id: state["task_id"].as_str().unwrap_or("unknown").to_string(),
                         task_preview: state["task_preview"].as_str().unwrap_or("").to_string(),
+                        parent_session_id: state["parent_session_id"].as_str().unwrap_or("").to_string(),
+                        sub_session_id: state["sub_session_id"].as_str().unwrap_or("").to_string(),
+                        session_key: state["session_key"].as_str().unwrap_or("").to_string(),
+                        reply_target: state["reply_target"].as_str().unwrap_or("").to_string(),
                     });
                 }
             }
