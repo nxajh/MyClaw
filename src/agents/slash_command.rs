@@ -24,6 +24,8 @@ pub struct CommandContext<'a> {
     pub mcp_manager: Option<&'a Arc<McpManager>>,
     /// Sessions cache — needed by /new to evict stale agent loops.
     pub sessions: &'a DashMap<String, Arc<TokioMutex<AgentLoop>>>,
+    /// Search provider cooldown tracker (for /status command).
+    pub search_cooldown: Option<&'a Arc<crate::tools::search_cooldown::SearchProviderCooldown>>,
 }
 
 /// Parse a slash command from message content.
@@ -121,7 +123,7 @@ fn cmd_help() -> String {
     "📦 **MyClaw Slash Commands**\n\n\
      **基础**\n\
      /help — 显示此帮助信息\n\
-     /status — 当前会话状态（模型、token 用量）\n\
+     /status — 显示 provider 实时状态\n\
      /new [名称] — 创建新会话\n\
      /sessions — 列出所有会话\n\
      /switch <序号> — 切换到指定会话\n\
@@ -150,34 +152,52 @@ fn cmd_help() -> String {
 }
 
 async fn cmd_status(ctx: CommandContext<'_>) -> String {
-    let model_info = match ctx.registry.get_chat_provider(crate::providers::Capability::Chat) {
-        Ok((_, model_id)) => {
-            match ctx.registry.get_chat_model_config(&model_id) {
-                Ok(cfg) => {
-                    let cw = cfg.context_window
-                        .map(|v| format!("{}K", v / 1024))
-                        .unwrap_or_else(|| "未知".to_string());
-                    format!("模型: `{}` (上下文: {})", model_id, cw)
-                }
-                Err(_) => format!("模型: `{}`", model_id),
+    let summaries = ctx.registry.get_all_provider_summaries();
+    if summaries.is_empty() {
+        return "⚠️ 没有已注册的 provider。".to_string();
+    }
+
+    let mut lines = vec!["📊 **Provider 实时状态**\n".to_string()];
+
+    // Header
+    lines.push(format!(
+        "{:<16} {:>10} {:>10}   {}",
+        "Provider", "Chat 模型", "搜索模型", "状态"
+    ));
+    lines.push("─".repeat(56));
+
+    for s in &summaries {
+        let total_models = s.chat_models.len() + s.search_models.len();
+
+        // Determine status.
+        let status = if total_models == 0 {
+            "❌ 无模型".to_string()
+        } else if let Some(cooldown) = &ctx.search_cooldown {
+            // Check if any search model's provider is in cooldown.
+            // SearchProviderCooldown tracks by provider name.
+            if cooldown.is_cooled_down(&s.name) {
+                "⏱️ 冷却中".to_string()
+            } else {
+                "✅ 正常".to_string()
             }
-        }
-        Err(_) => "模型: 未配置".to_string(),
-    };
+        } else {
+            "✅ 正常".to_string()
+        };
 
-    let session_info = if let Some(loop_arc) = ctx.agent_loop {
-        let guard = loop_arc.lock().await;
-        let history_len = guard.session().history.len();
-        let total_tokens = guard.token_total();
-        format!(
-            "会话: `{}`\n历史: {} 条消息\nToken: {}",
-            ctx.user_id, history_len, total_tokens
-        )
-    } else {
-        format!("会话: `{}`\n状态: 新会话", ctx.user_id)
-    };
+        lines.push(format!(
+            "{:<16} {:>10} {:>10}   {}",
+            s.name,
+            s.chat_models.len(),
+            s.search_models.len(),
+            status,
+        ));
+    }
 
-    format!("📊 **状态**\n\n{}\n{}", model_info, session_info)
+    // Also show credential pool status for chat providers (if available).
+    lines.push(String::new());
+    lines.push("_模型详情请使用 /models_".to_string());
+
+    lines.join("\n")
 }
 
 async fn cmd_new(args: &str, ctx: CommandContext<'_>) -> String {

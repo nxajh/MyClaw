@@ -34,7 +34,7 @@ pub use search::{SearchProvider, SearchRequest, SearchResult, SearchResults};
 pub use tts::{TtsProvider, TtsRequest, TtsFormat, TtsVoice};
 pub use stt::{SttProvider, SttRequest, TranscriptionResponse, SttSegment};
 pub use video::{VideoGenerationProvider, VideoRequest, VideoResponse};
-pub use service_registry::ServiceRegistry;
+pub use service_registry::{ServiceRegistry, ProviderSummary};
 
 // ── Implementations ────────────────────────────────────────────────────────────
 

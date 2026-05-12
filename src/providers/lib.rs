@@ -22,6 +22,7 @@ pub use crate::providers::{
     SttProvider, SttRequest, TranscriptionResponse, SttSegment,
     TtsProvider, TtsFormat, TtsVoice,
     VideoGenerationProvider, VideoRequest, VideoResponse,
+    ServiceRegistry, ProviderSummary,
 
     // Implementations
     AnthropicProvider, GlmProvider, KimiProvider, MiniMaxProvider, OpenAiProvider,

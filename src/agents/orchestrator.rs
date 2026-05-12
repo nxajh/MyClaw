@@ -83,6 +83,8 @@ pub struct Orchestrator {
     pub last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
     /// Scheduler event receiver (heartbeat ticks, cron triggers).
     scheduler_rx: Arc<TokioMutex<Option<mpsc::Receiver<SchedulerEvent>>>>,
+    /// Search provider cooldown tracker (shared with WebSearchTool).
+    search_cooldown: Option<Arc<crate::tools::search_cooldown::SearchProviderCooldown>>,
 }
 
 /// Resources shared between Orchestrator and scheduler tasks.
@@ -124,6 +126,8 @@ pub struct OrchestratorParts {
     pub change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
     /// Scheduler event receiver (heartbeat ticks, cron triggers from Scheduler task).
     pub scheduler_rx: Option<mpsc::Receiver<SchedulerEvent>>,
+    /// Search provider cooldown tracker (shared with WebSearchTool).
+    pub search_cooldown: Option<Arc<crate::tools::search_cooldown::SearchProviderCooldown>>,
 }
 
 impl Orchestrator {
@@ -166,6 +170,7 @@ impl Orchestrator {
             change_rx: parts.change_rx,
             last_channel: Arc::new(tokio::sync::Mutex::new(None)),
             scheduler_rx: Arc::new(TokioMutex::new(parts.scheduler_rx)),
+            search_cooldown: parts.search_cooldown,
         };
 
         info!(channels = orchestrator.channels.len(), "orchestrator initialized");
@@ -668,6 +673,7 @@ impl Orchestrator {
                             agent_loop: session_loop.as_ref(),
                             mcp_manager: self.mcp_manager.as_ref(),
                             sessions: &self.sessions,
+                            search_cooldown: self.search_cooldown.as_ref(),
                         };
                         if let Some(response) = super::slash_command::dispatch(cmd, cmd_args, cmd_ctx).await {
                             // Send command response directly, skip agent loop.

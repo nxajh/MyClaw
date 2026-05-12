@@ -485,7 +485,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let search_cooldown = Arc::new(crate::tools::search_cooldown::SearchProviderCooldown::new());
     tools.register(Arc::new(crate::tools::WebSearchTool::new(
         registry_arc.clone(),
-        search_cooldown,
+        Arc::clone(&search_cooldown),
     )));
     tracing::debug!("web_search tool registered (connected to ServiceRegistry)");
 
@@ -611,6 +611,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         mcp_manager: Some(Arc::clone(&mcp_manager_arc)),
         change_rx: Some(change_rx.clone()),
         scheduler_rx: Some(scheduler_rx),
+        search_cooldown: Some(search_cooldown),
     };
 
     // ── Launch ─────────────────────────────────────────────────────────────

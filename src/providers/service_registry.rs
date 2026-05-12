@@ -10,6 +10,17 @@ use super::stt::SttProvider;
 use super::tts::TtsProvider;
 use super::video::VideoGenerationProvider;
 
+/// Summary of a provider's registered models and capabilities.
+#[derive(Debug, Clone)]
+pub struct ProviderSummary {
+    /// Provider key (e.g. "openai", "google", "minimax").
+    pub name: String,
+    /// Model IDs registered for Chat capability.
+    pub chat_models: Vec<String>,
+    /// Model IDs registered for Search capability.
+    pub search_models: Vec<String>,
+}
+
 /// ServiceRegistry — read-only view consumed by Application / Domain layers.
 pub trait ServiceRegistry: Send + Sync {
     fn get_chat_provider(&self, capability: Capability) -> anyhow::Result<(Arc<dyn ChatProvider>, String)>;
@@ -32,4 +43,7 @@ pub trait ServiceRegistry: Send + Sync {
 
     /// Get the list of model IDs in the chat routing config (in fallback order).
     fn get_chat_routing_models(&self) -> Vec<String>;
+
+    /// Get summaries for all registered providers (name, chat models, search models).
+    fn get_all_provider_summaries(&self) -> Vec<ProviderSummary>;
 }

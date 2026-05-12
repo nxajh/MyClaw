@@ -504,6 +504,29 @@ impl ServiceRegistry for Registry {
             .map(|e| e.models.clone())
             .unwrap_or_default()
     }
+
+    fn get_all_provider_summaries(&self) -> Vec<crate::providers::ProviderSummary> {
+        let mut summaries = Vec::new();
+        for (name, config) in &self.providers {
+            let mut chat_models = Vec::new();
+            let mut search_models = Vec::new();
+            for model in &config.models {
+                if model.supports(Capability::Chat) {
+                    chat_models.push(model.model_id.clone());
+                }
+                if model.supports(Capability::Search) {
+                    search_models.push(model.model_id.clone());
+                }
+            }
+            summaries.push(crate::providers::ProviderSummary {
+                name: name.clone(),
+                chat_models,
+                search_models,
+            });
+        }
+        summaries.sort_by(|a, b| a.name.cmp(&b.name));
+        summaries
+    }
 }
 
 impl Registry {
