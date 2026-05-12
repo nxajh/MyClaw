@@ -156,7 +156,7 @@ impl SearchProvider for GoogleProvider {
         let resp: GeminiResponse = serde_json::from_str(&resp_text)?;
 
         // Debug: log grounding metadata state.
-        if let Some(ref candidate) = resp.candidates.as_ref().and_then(|c| c.first()) {
+        if let Some(candidate) = resp.candidates.as_ref().and_then(|c| c.first()) {
             let has_meta = candidate.grounding_metadata.is_some();
             let chunk_count = candidate.grounding_metadata.as_ref()
                 .and_then(|m| m.grounding_chunks.as_ref())
