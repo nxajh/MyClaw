@@ -31,6 +31,7 @@ pub trait ServiceRegistry: Send + Sync {
     fn get_tts_provider(&self) -> anyhow::Result<(Arc<dyn TtsProvider>, String)>;
     fn get_video_provider(&self) -> anyhow::Result<(Arc<dyn VideoGenerationProvider>, String)>;
     fn get_search_provider(&self) -> anyhow::Result<(Arc<dyn SearchProvider>, String)>;
+    #[allow(clippy::type_complexity)]
     fn get_search_fallback_chain(&self) -> anyhow::Result<Vec<(Arc<dyn SearchProvider>, String, String)>>;
     fn get_stt_provider(&self) -> anyhow::Result<(Arc<dyn SttProvider>, String)>;
     

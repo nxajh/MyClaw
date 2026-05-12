@@ -19,6 +19,12 @@ pub struct SearchProviderCooldown {
     inner: Mutex<HashMap<String, Instant>>,
 }
 
+impl Default for SearchProviderCooldown {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SearchProviderCooldown {
     pub fn new() -> Self {
         Self {
