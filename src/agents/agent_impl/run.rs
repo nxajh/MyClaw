@@ -237,9 +237,18 @@ impl AgentLoop {
             }
         };
 
-        // 4. Handle empty response: rollback turn and return error.
+        // 5. Handle empty response: rollback turn and return error.
         //    chat_loop retries internally (stream timeout × 3, empty response × 3).
         //    If it still returns empty, the turn is irrecoverable.
+        //
+        //    BUT: if the empty response is due to a checkpoint exit (SIGUSR1),
+        //    skip persistence and return cleanly — let the session stay at the
+        //    last tool_result so a new process can resume from the breakpoint.
+        if text.is_empty() && crate::is_shutting_down() {
+            tracing::info!("checkpoint exit with empty response, skipping persistence");
+            return Ok(text);
+        }
+
         if text.is_empty() {
             tracing::warn!(
                 turn_snapshot_len,
@@ -406,6 +415,12 @@ impl AgentLoop {
                     tracing::info!("turn cancelled before next LLM call");
                     return Ok(String::new());
                 }
+            }
+
+            // Hot switch checkpoint: before next LLM call.
+            if crate::is_shutting_down() {
+                tracing::info!("shutdown flag set, exiting at LLM checkpoint");
+                return Ok(String::new());
             }
 
             // 1. Get a chat provider via registry.
@@ -702,6 +717,12 @@ impl AgentLoop {
                         name: call.name.clone(),
                         args,
                     }).await;
+                }
+
+                // Hot switch checkpoint: before tool execution.
+                if crate::is_shutting_down() {
+                    tracing::info!(tool = %call.name, "shutdown flag set, exiting before tool execution");
+                    return Ok(String::new());
                 }
 
                 // Hard limit check.

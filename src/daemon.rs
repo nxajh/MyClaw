@@ -668,12 +668,37 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // Shutdown channel.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
+    // ── SIGUSR1: set shutdown flag for checkpoint exit (hot switch) ────────
+    #[cfg(unix)]
+    {
+        use std::sync::atomic::Ordering;
+        let mut sigusr1 = signal(SignalKind::user_defined1())
+            .expect("failed to register SIGUSR1 handler");
+        tokio::spawn(async move {
+            sigusr1.recv().await;
+            tracing::info!("SIGUSR1 received, setting shutdown flag");
+            crate::SHUTDOWN_FLAG.store(true, Ordering::SeqCst);
+        });
+    }
+
     // Wait for SIGINT or SIGTERM.
     tokio::spawn(async move {
         let _ = wait_for_signal().await;
         let _ = shutdown_tx.send(true);
         tracing::info!("shutdown signal received, initiating graceful shutdown...");
     });
+
+    // ── SIGUSR2: new process ready, exit immediately ──────────────────────
+    #[cfg(unix)]
+    {
+        let mut sigusr2 = signal(SignalKind::user_defined2())
+            .expect("failed to register SIGUSR2 handler");
+        tokio::spawn(async move {
+            sigusr2.recv().await;
+            tracing::info!("SIGUSR2 received, new process ready, exiting");
+            std::process::exit(0);
+        });
+    }
 
     // Run the message dispatch loop (blocks until shutdown).
     orchestrator.run(shutdown_rx).await.context("orchestrator run error")?;

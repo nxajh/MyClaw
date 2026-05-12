@@ -1,5 +1,16 @@
 //! MyClaw — AI Agent system.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Global shutdown flag, set by SIGUSR1. Agent loop exits at the nearest
+/// checkpoint (before next LLM call or before tool execution).
+pub static SHUTDOWN_FLAG: AtomicBool = AtomicBool::new(false);
+
+/// Convenience helper: check whether the shutdown flag is set.
+pub fn is_shutting_down() -> bool {
+    SHUTDOWN_FLAG.load(Ordering::SeqCst)
+}
+
 pub mod agents;
 pub mod channels;
 pub mod config;
