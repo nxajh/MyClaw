@@ -126,7 +126,7 @@ fn build_anthropic_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
         .collect::<Vec<_>>()
         .join("\n");
 
-    let messages: Vec<serde_json::Value> = req.messages
+    let raw_messages: Vec<serde_json::Value> = req.messages
         .iter()
         .filter(|m| m.role != "system")
         .filter_map(|msg| {
@@ -197,6 +197,50 @@ fn build_anthropic_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
             Some(serde_json::json!({"role": role, "content": content}))
         })
         .collect();
+
+    let raw_count = raw_messages.len();
+    // Merge consecutive same-role messages.  Some providers (notably MiniMax's
+    // Anthropic-compatible endpoint) internally convert to OpenAI format and
+    // break when messages don't strictly alternate between user and assistant.
+    // The Anthropic API itself merges consecutive same-role messages silently,
+    // so this is safe for all consumers.
+    let mut messages: Vec<serde_json::Value> = Vec::with_capacity(raw_count);
+    for msg in raw_messages {
+        let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        let content = msg.get("content");
+
+        if let Some(last) = messages.last_mut() {
+            if last.get("role").and_then(|v| v.as_str()) == Some(role) {
+                tracing::debug!(role, "merging consecutive same-role messages");
+                // Merge content arrays.
+                let last_content = last.get_mut("content").unwrap();
+                let new_items = match content {
+                    Some(serde_json::Value::Array(arr)) => arr.clone(),
+                    Some(other) => vec![other.clone()],
+                    None => vec![],
+                };
+                match last_content {
+                    serde_json::Value::Array(arr) => arr.extend(new_items),
+                    serde_json::Value::Null => *last_content = serde_json::Value::Array(new_items),
+                    other => {
+                        let prev = other.clone();
+                        *other = serde_json::Value::Array(vec![prev]);
+                        if let serde_json::Value::Array(arr) = other {
+                            arr.extend(new_items);
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+        messages.push(msg);
+    }
+
+    tracing::debug!(
+        raw_count,
+        merged_count = messages.len(),
+        "build_anthropic_body: message merge complete"
+    );
 
     let mut body = json!({
         "model": req.model,
