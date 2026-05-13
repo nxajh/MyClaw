@@ -751,14 +751,17 @@ impl Orchestrator {
                 );
 
                 // Spawn: LLM execution runs independently of the main loop.
+                let ctx = SchedulerContext {
+                    sessions: self.sessions.clone(),
+                    session_manager: self.session_manager.clone(),
+                    persist_backend: self.persist_backend.clone(),
+                    agent: self.agent.clone(),
+                    change_rx: self.change_rx.clone(),
+                    channels: self.channels.clone(),
+                    last_channel: self.last_channel.clone(),
+                };
                 tokio::spawn(run_heartbeat_task(
-                    self.sessions.clone(),
-                    self.session_manager.clone(),
-                    self.persist_backend.clone(),
-                    self.agent.clone(),
-                    self.change_rx.clone(),
-                    self.channels.clone(),
-                    self.last_channel.clone(),
+                    ctx,
                     target,
                     prompt,
                     due.into_iter().cloned().collect(),
@@ -768,14 +771,17 @@ impl Orchestrator {
             }
             SchedulerEvent::Cron { session_key, prompt, target } => {
                 tracing::info!(session_key = %session_key, "cron job triggered (from scheduler)");
+                let ctx = SchedulerContext {
+                    sessions: self.sessions.clone(),
+                    session_manager: self.session_manager.clone(),
+                    persist_backend: self.persist_backend.clone(),
+                    agent: self.agent.clone(),
+                    change_rx: self.change_rx.clone(),
+                    channels: self.channels.clone(),
+                    last_channel: self.last_channel.clone(),
+                };
                 tokio::spawn(run_cron_task(
-                    self.sessions.clone(),
-                    self.session_manager.clone(),
-                    self.persist_backend.clone(),
-                    self.agent.clone(),
-                    self.change_rx.clone(),
-                    self.channels.clone(),
-                    self.last_channel.clone(),
+                    ctx,
                     session_key,
                     prompt,
                     target,
@@ -1267,8 +1273,8 @@ pub(crate) fn is_silent_ok(response: &str, prefix: &str) -> bool {
     trimmed == marker || trimmed.contains(&marker)
 }
 
-/// Execute a heartbeat turn as an independent spawned task.
-async fn run_heartbeat_task(
+/// Shared resources for spawned scheduler tasks (heartbeat/cron).
+struct SchedulerContext {
     sessions: Arc<DashMap<String, Arc<TokioMutex<AgentLoop>>>>,
     session_manager: Arc<SessionManager>,
     persist_backend: Arc<dyn crate::storage::SessionBackend>,
@@ -1276,6 +1282,11 @@ async fn run_heartbeat_task(
     change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
     channels: Arc<DashMap<String, Arc<dyn Channel>>>,
     last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
+}
+
+/// Execute a heartbeat turn as an independent spawned task.
+async fn run_heartbeat_task(
+    ctx: SchedulerContext,
     target: String,
     prompt: String,
     due: Vec<super::heartbeat_tasks::HeartbeatTask>,
@@ -1284,10 +1295,7 @@ async fn run_heartbeat_task(
 ) {
     let session_key = format!("_heartbeat_{}", uuid::Uuid::new_v4());
     let result = {
-        let loop_ = get_or_create_scheduled_loop(
-            &sessions, &session_manager, &persist_backend,
-            &agent, change_rx.as_ref(), &session_key,
-        );
+        let loop_ = get_or_create_scheduled_loop(&ctx, &session_key);
         let mut guard = loop_.lock().await;
         guard.run(&prompt, None, None).await
     };
@@ -1309,7 +1317,7 @@ async fn run_heartbeat_task(
             tracing::info!("heartbeat: nothing needs attention");
         }
         Ok(response) if !response.trim().is_empty() => {
-            send_to_target_internal(channels, last_channel, &target, &response).await;
+            send_to_target_internal(ctx.channels, ctx.last_channel, &target, &response).await;
         }
         Ok(_) => {}
         Err(e) => {
@@ -1320,29 +1328,20 @@ async fn run_heartbeat_task(
 
 /// Execute a cron job turn as an independent spawned task.
 async fn run_cron_task(
-    sessions: Arc<DashMap<String, Arc<TokioMutex<AgentLoop>>>>,
-    session_manager: Arc<SessionManager>,
-    persist_backend: Arc<dyn crate::storage::SessionBackend>,
-    agent: Agent,
-    change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
-    channels: Arc<DashMap<String, Arc<dyn Channel>>>,
-    last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
+    ctx: SchedulerContext,
     session_key: String,
     prompt: String,
     target: String,
 ) {
     let result = {
-        let loop_ = get_or_create_scheduled_loop(
-            &sessions, &session_manager, &persist_backend,
-            &agent, change_rx.as_ref(), &session_key,
-        );
+        let loop_ = get_or_create_scheduled_loop(&ctx, &session_key);
         let mut guard = loop_.lock().await;
         guard.run(&prompt, None, None).await
     };
 
     match result {
         Ok(response) if !response.trim().is_empty() => {
-            send_to_target_internal(channels, last_channel, &target, &response).await;
+            send_to_target_internal(ctx.channels, ctx.last_channel, &target, &response).await;
         }
         Ok(_) => {}
         Err(e) => {
@@ -1353,26 +1352,22 @@ async fn run_cron_task(
 
 /// Get or create an AgentLoop for a scheduler session (heartbeat/cron).
 fn get_or_create_scheduled_loop(
-    sessions: &Arc<DashMap<String, Arc<TokioMutex<AgentLoop>>>>,
-    session_manager: &Arc<SessionManager>,
-    persist_backend: &Arc<dyn crate::storage::SessionBackend>,
-    agent: &Agent,
-    change_rx: Option<&tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
+    ctx: &SchedulerContext,
     session_key: &str,
 ) -> Arc<TokioMutex<AgentLoop>> {
-    if let Some(existing) = sessions.get(session_key) {
+    if let Some(existing) = ctx.sessions.get(session_key) {
         return existing.clone();
     }
-    let session = session_manager.get_or_create(session_key);
+    let session = ctx.session_manager.get_or_create(session_key);
     let persist_hook: Arc<dyn PersistHook> = Arc::new(
-        BackendPersistHook::new(persist_backend.clone())
+        BackendPersistHook::new(ctx.persist_backend.clone())
     );
-    let mut loop_ = agent.loop_for_with_persist(session, Some(persist_hook));
-    if let Some(rx) = change_rx {
+    let mut loop_ = ctx.agent.loop_for_with_persist(session, Some(persist_hook));
+    if let Some(rx) = ctx.change_rx.as_ref() {
         loop_ = loop_.with_change_rx(rx.clone());
     }
     let entry: Arc<TokioMutex<AgentLoop>> = Arc::new(TokioMutex::new(loop_));
-    sessions.insert(session_key.to_string(), entry.clone());
+    ctx.sessions.insert(session_key.to_string(), entry.clone());
     entry
 }
 
