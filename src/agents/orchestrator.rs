@@ -459,66 +459,12 @@ impl Orchestrator {
                             };
 
                             if let Some(user_msg) = pending {
-                                // Re-run the turn with the original user message.
                                 let loop_ = registry.get_or_create(&sk, &reply_target);
-                                let reply_target_c = reply_target.clone();
                                 let reply_to_id = Some(msg.id.clone());
-                                let sk_c = sk.clone();
-
-                                tokio::spawn(async move {
-                                    channel.on_status(&reply_target_c, ProcessingStatus::Thinking).await;
-
-                                    let response = {
-                                        let mut guard = loop_.lock().await;
-                                        guard.run(&user_msg, None, None).await
-                                    };
-
-                                    match response {
-                                        Ok(text) if !text.is_empty() => {
-                                            let send_msg = SendMessage {
-                                                recipient: reply_target_c.clone(),
-                                                content: text,
-                                                subject: None,
-                                                thread_ts: reply_to_id.clone(),
-                                                cancellation_token: None,
-                                                attachments: vec![],
-                                                image_urls: None,
-                                                inline_buttons: None,
-                                            };
-                                            if let Err(e) = channel.send(&send_msg).await {
-                                                error!(session = %sk_c, err = %e, "retry send failed");
-                                            }
-                                            channel.on_status(&reply_target_c, ProcessingStatus::Done).await;
-                                        }
-                                        Ok(_) => {
-                                            // Empty again — just notify, don't loop.
-                                            let send_msg = SendMessage::new(
-                                                MSG_RETRY_EMPTY,
-                                                reply_target_c.clone(),
-                                            );
-                                            let _ = channel.send(&send_msg).await;
-                                            channel.on_status(&reply_target_c, ProcessingStatus::Done).await;
-                                        }
-                                        Err(e) => {
-                                            channel.on_status(&reply_target_c, ProcessingStatus::Error).await;
-                                            error!(session = %sk_c, err = %e, "retry failed, offering retry/abort again");
-
-                                            // Re-store the user message so the user can retry again.
-                                            {
-                                                let mut guard = loop_.lock().await;
-                                                guard.set_pending_retry(user_msg.clone());
-                                            }
-
-                                            let send_msg = retry_abort_prompt(
-                                                format!("⚠️ 重试失败：`{}`\n\n你可以选择再次重试或放弃。", e),
-                                                &sk_c,
-                                                reply_target_c.clone(),
-                                                reply_to_id.clone(),
-                                            );
-                                            let _ = channel.send(&send_msg).await;
-                                        }
-                                    }
-                                });
+                                tokio::spawn(run_retry_task(
+                                    sk.clone(), channel, loop_,
+                                    user_msg, reply_target.clone(), reply_to_id,
+                                ));
                             } else {
                                 let send_msg = SendMessage::new(
                                     MSG_NO_PENDING_RETRY,
@@ -577,7 +523,6 @@ impl Orchestrator {
                     let image_base64 = msg.image_base64.clone();
                     let reply_target = msg.reply_target.clone();
                     let reply_to_id = Some(msg.id.clone());
-                    let channel_name_clone = channel_name.clone();
 
                     // Intercept slash commands before reaching agent loop.
                     if let Some((cmd, cmd_args)) = super::slash_command::parse_command(&content) {
@@ -593,18 +538,13 @@ impl Orchestrator {
                             search_cooldown: self.search_cooldown.as_ref(),
                         };
                         if let Some(response) = super::slash_command::dispatch(cmd, cmd_args, cmd_ctx).await {
-                            // Send command response directly, skip agent loop.
-                            let ch = channels.clone();
-                            tokio::spawn(async move {
-                                let channel: Option<Arc<dyn Channel>> = {
-                                    ch.get(&channel_name_clone).map(|r| r.clone())
-                                };
-                                if let Some(channel) = channel {
+                            if let Some(channel) = channels.get(&channel_name).map(|r| r.clone()) {
+                                tokio::spawn(async move {
                                     let send_msg = SendMessage {
                                         recipient: reply_target,
                                         content: response,
                                         subject: None,
-                                        thread_ts: reply_to_id.clone(),
+                                        thread_ts: reply_to_id,
                                         cancellation_token: None,
                                         attachments: vec![],
                                         image_urls: None,
@@ -613,8 +553,8 @@ impl Orchestrator {
                                     if let Err(e) = channel.send(&send_msg).await {
                                         error!(session = %sk, err = %e, "command response send failed");
                                     }
-                                }
-                            });
+                                });
+                            }
                             continue;
                         }
                     }
@@ -629,208 +569,16 @@ impl Orchestrator {
                         tracing::warn!(session = %sk, err = %e, "failed to persist reply_target");
                     }
 
+                    let channel = match channels.get(&channel_name).map(|r| r.clone()) {
+                        Some(c) => c,
+                        None => continue,
+                    };
                     let loop_ = registry.get_or_create(&sk, &reply_target);
-
-                    let ch = channels.clone();
-                    tokio::spawn(async move {
-                        // Resolve channel early so we can send the response.
-                        let channel: Option<Arc<dyn Channel>> = {
-                            ch.get(&channel_name_clone).map(|r| r.clone())
-                        };
-                        let channel = match channel {
-                            Some(c) => c,
-                            None => return,
-                        };
-
-                        // Notify channel that processing has started.
-                        channel.on_status(&reply_target, ProcessingStatus::Thinking).await;
-
-                        // Channels that support streaming use run_streamed() + TurnEvent forwarding.
-                        // All other channels use the run() + channel.send() path.
-                        let supports_streaming = channel.supports_streaming();
-
-                        if supports_streaming {
-                            // Streaming path for ClientChannel.
-                            let stream_ctx = channel.take_stream_context(&reply_target);
-                            let (event_tx, cancel) = match stream_ctx {
-                                Some(ctx) => ctx,
-                                None => {
-                                    tracing::warn!(session = %sk, "no stream context for client session, falling back to run()");
-                                    let mut guard = loop_.lock().await;
-                                    let _ = guard.run(&content, image_urls, image_base64).await;
-                                    return;
-                                }
-                            };
-
-                            let response = {
-                                let mut guard = loop_.lock().await;
-                                guard.run_streamed(&content, image_urls, image_base64, event_tx, cancel).await
-                            };
-
-                            match response {
-                                Ok(_text) => {
-                                    // Text already sent via TurnEvent::Done.
-                                    // Send TurnEvent::Error if needed (handled by run_streamed internally).
-                                    channel.on_status(&reply_target, ProcessingStatus::Done).await;
-                                }
-                                Err(e) => {
-                                    channel.on_status(&reply_target, ProcessingStatus::Error).await;
-                                    error!(session = %sk, err = %e, "streamed turn failed");
-                                    // Error already sent via channel.send() is not needed
-                                    // because the WS handler's forwarding task will have ended
-                                    // and the client can detect the stream ended without Done.
-                                }
-                            }
-                        } else {
-                            // Existing non-streaming path.
-                            let response = {
-                                let mut guard = loop_.lock().await;
-                                guard.run(&content, image_urls, image_base64).await
-                            };
-
-                            match response {
-                                Ok(text) if !text.is_empty() => {
-                                    tracing::info!(session = %sk, text_len = text.len(), "sending response");
-                                    let send_msg = SendMessage {
-                                        recipient: reply_target.clone(),
-                                        content: text,
-                                        subject: None,
-                                        thread_ts: reply_to_id.clone(),
-                                        cancellation_token: None,
-                                        attachments: vec![],
-                                        image_urls: None,
-                                        inline_buttons: None,
-                                    };
-                                    if let Err(e) = channel.send(&send_msg).await {
-                                        error!(session = %sk, err = %e, "send failed");
-                                    }
-                                    channel.on_status(&reply_target, ProcessingStatus::Done).await;
-                                }
-                                Ok(_) => {
-                                    // Empty response (e.g. stream timeout retries exhausted).
-                                    // run() returns Ok("") instead of Err, so it bypasses the
-                                    // error handlers below. Treat like EmptyResponse: notify
-                                    // the user and offer retry/abort buttons.
-                                    tracing::warn!(session = %sk, "empty response from run(), offering retry/abort");
-                                    channel.on_status(&reply_target, ProcessingStatus::Done).await;
-
-                                    {
-                                        let mut guard = loop_.lock().await;
-                                        guard.set_pending_retry(content.clone());
-                                    }
-
-                                    let send_msg = retry_abort_prompt(
-                                        MSG_TIMEOUT,
-                                        &sk,
-                                        reply_target.clone(),
-                                        reply_to_id.clone(),
-                                    );
-                                    if let Err(send_err) = channel.send(&send_msg).await {
-                                        error!(session = %sk, err = %send_err, "failed to send empty-response retry prompt");
-                                    }
-                                }
-                                Err(e) => {
-                                    // Check if this is a LoopBreak — the loop breaker
-                                    // detected a repetitive tool pattern. The turn has
-                                    // been rolled back. Offer retry/abort buttons.
-                                    if let Some(crate::agents::error::AgentError::LoopBreak { reason }) =
-                                        e.downcast_ref::<crate::agents::error::AgentError>()
-                                    {
-                                        tracing::info!(session = %sk, reason = %reason, "loop breaker triggered, sending retry prompt");
-                                        channel.on_status(&reply_target, ProcessingStatus::Done).await;
-
-                                        // Store the last user message for retry.
-                                        {
-                                            let mut guard = loop_.lock().await;
-                                            guard.set_pending_retry(content.clone());
-                                        }
-
-                                        let send_msg = retry_abort_prompt(
-                                            format!("⚠️ 检测到工具调用循环，已自动中断。\n\n原因：`{}`", reason),
-                                            &sk,
-                                            reply_target.clone(),
-                                            reply_to_id.clone(),
-                                        );
-                                        if let Err(send_err) = channel.send(&send_msg).await {
-                                            error!(session = %sk, err = %send_err, "failed to send retry prompt");
-                                        }
-                                        return; // ★ Don't fall through to generic error handler.
-                                    }
-
-                                    // Check if this is an EmptyResponse — the LLM returned
-                                    // nothing after all retries. The user message has been
-                                    // rolled back. Offer retry/abort buttons.
-                                    if let Some(crate::agents::error::AgentError::EmptyResponse { user_message }) =
-                                        e.downcast_ref::<crate::agents::error::AgentError>()
-                                    {
-                                        tracing::info!(session = %sk, "empty response, sending retry prompt");
-                                        channel.on_status(&reply_target, ProcessingStatus::Done).await;
-
-                                        // Store user message for retry.
-                                        {
-                                            let mut guard = loop_.lock().await;
-                                            guard.set_pending_retry(user_message.clone());
-                                        }
-
-                                        let send_msg = retry_abort_prompt(
-                                            MSG_EMPTY_RESPONSE,
-                                            &sk,
-                                            reply_target.clone(),
-                                            reply_to_id.clone(),
-                                        );
-                                        if let Err(send_err) = channel.send(&send_msg).await {
-                                            error!(session = %sk, err = %send_err, "failed to send retry prompt");
-                                        }
-                                        return; // ★ Don't fall through to generic error handler.
-                                    }
-
-                                    // Check if retries were exhausted — offer retry/abort buttons.
-                                    if let Some(crate::agents::error::AgentError::RetryExhausted { attempts, source }) =
-                                        e.downcast_ref::<crate::agents::error::AgentError>()
-                                    {
-                                        channel.on_status(&reply_target, ProcessingStatus::Error).await;
-                                        error!(session = %sk, attempts, err = %source, "retryable retries exhausted, offering retry/abort");
-
-                                        {
-                                            let mut guard = loop_.lock().await;
-                                            guard.set_pending_retry(content.clone());
-                                        }
-
-                                        let send_msg = retry_abort_prompt(
-                                            format!("⚠️ 处理失败（重试 {} 次后放弃）：\n\n`{}`", attempts, source),
-                                            &sk,
-                                            reply_target.clone(),
-                                            reply_to_id.clone(),
-                                        );
-                                        if let Err(send_err) = channel.send(&send_msg).await {
-                                            error!(session = %sk, err = %send_err, "failed to send retry prompt");
-                                        }
-                                        return;
-                                    }
-
-                                    // Non-retryable error — still offer retry/abort so the user
-                                    // can manually retry (e.g. after a transient issue resolves).
-                                    channel.on_status(&reply_target, ProcessingStatus::Error).await;
-                                    error!(session = %sk, err = %e, "non-retryable loop error, offering retry/abort");
-
-                                    {
-                                        let mut guard = loop_.lock().await;
-                                        guard.set_pending_retry(content.clone());
-                                    }
-
-                                    let send_msg = retry_abort_prompt(
-                                        format!("⚠️ 处理消息时发生错误：\n\n`{}`", e),
-                                        &sk,
-                                        reply_target.clone(),
-                                        reply_to_id.clone(),
-                                    );
-                                    if let Err(send_err) = channel.send(&send_msg).await {
-                                        error!(session = %sk, err = %send_err, "failed to send retry prompt");
-                                    }
-                                }
-                            }
-                        }
-                    });
+                    tokio::spawn(run_message_task(
+                        sk, channel, loop_,
+                        content, image_urls, image_base64,
+                        reply_target, reply_to_id,
+                    ));
                 }
                 ChannelEvent::Delegation(event) => {
                     self.handle_delegation_event(event).await;
@@ -1328,6 +1076,215 @@ fn retry_abort_prompt(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Execute a retry turn (spawned by the __retry callback handler).
+///
+/// Re-runs the pending user message through the agent loop and sends the
+/// result (or another retry/abort prompt on failure) back via `channel`.
+async fn run_retry_task(
+    sk: String,
+    channel: Arc<dyn Channel>,
+    loop_: Arc<TokioMutex<AgentLoop>>,
+    user_msg: String,
+    reply_target: String,
+    reply_to_id: Option<String>,
+) {
+    channel.on_status(&reply_target, ProcessingStatus::Thinking).await;
+
+    let response = {
+        let mut guard = loop_.lock().await;
+        guard.run(&user_msg, None, None).await
+    };
+
+    match response {
+        Ok(text) if !text.is_empty() => {
+            let send_msg = SendMessage {
+                recipient: reply_target.clone(),
+                content: text,
+                subject: None,
+                thread_ts: reply_to_id,
+                cancellation_token: None,
+                attachments: vec![],
+                image_urls: None,
+                inline_buttons: None,
+            };
+            if let Err(e) = channel.send(&send_msg).await {
+                error!(session = %sk, err = %e, "retry send failed");
+            }
+            channel.on_status(&reply_target, ProcessingStatus::Done).await;
+        }
+        Ok(_) => {
+            let send_msg = SendMessage::new(MSG_RETRY_EMPTY, reply_target.clone());
+            let _ = channel.send(&send_msg).await;
+            channel.on_status(&reply_target, ProcessingStatus::Done).await;
+        }
+        Err(e) => {
+            channel.on_status(&reply_target, ProcessingStatus::Error).await;
+            error!(session = %sk, err = %e, "retry failed, offering retry/abort again");
+            {
+                let mut guard = loop_.lock().await;
+                guard.set_pending_retry(user_msg.clone());
+            }
+            let send_msg = retry_abort_prompt(
+                format!("⚠️ 重试失败：`{}`\n\n你可以选择再次重试或放弃。", e),
+                &sk,
+                reply_target,
+                reply_to_id,
+            );
+            let _ = channel.send(&send_msg).await;
+        }
+    }
+}
+
+/// Execute a normal user-message turn (spawned per message).
+///
+/// Runs the agent loop for `content` via the streaming or non-streaming path
+/// and sends the result (or a retry/abort prompt on error) back via `channel`.
+async fn run_message_task(
+    sk: String,
+    channel: Arc<dyn Channel>,
+    loop_: Arc<TokioMutex<AgentLoop>>,
+    content: String,
+    image_urls: Option<Vec<String>>,
+    image_base64: Option<Vec<String>>,
+    reply_target: String,
+    reply_to_id: Option<String>,
+) {
+    channel.on_status(&reply_target, ProcessingStatus::Thinking).await;
+
+    if channel.supports_streaming() {
+        let stream_ctx = channel.take_stream_context(&reply_target);
+        let (event_tx, cancel) = match stream_ctx {
+            Some(ctx) => ctx,
+            None => {
+                tracing::warn!(session = %sk, "no stream context, falling back to run()");
+                let mut guard = loop_.lock().await;
+                let _ = guard.run(&content, image_urls, image_base64).await;
+                return;
+            }
+        };
+        let response = {
+            let mut guard = loop_.lock().await;
+            guard.run_streamed(&content, image_urls, image_base64, event_tx, cancel).await
+        };
+        match response {
+            Ok(_) => channel.on_status(&reply_target, ProcessingStatus::Done).await,
+            Err(e) => {
+                channel.on_status(&reply_target, ProcessingStatus::Error).await;
+                error!(session = %sk, err = %e, "streamed turn failed");
+            }
+        }
+        return;
+    }
+
+    // Non-streaming path.
+    let response = {
+        let mut guard = loop_.lock().await;
+        guard.run(&content, image_urls, image_base64).await
+    };
+
+    match response {
+        Ok(text) if !text.is_empty() => {
+            tracing::info!(session = %sk, text_len = text.len(), "sending response");
+            let send_msg = SendMessage {
+                recipient: reply_target.clone(),
+                content: text,
+                subject: None,
+                thread_ts: reply_to_id.clone(),
+                cancellation_token: None,
+                attachments: vec![],
+                image_urls: None,
+                inline_buttons: None,
+            };
+            if let Err(e) = channel.send(&send_msg).await {
+                error!(session = %sk, err = %e, "send failed");
+            }
+            channel.on_status(&reply_target, ProcessingStatus::Done).await;
+        }
+        Ok(_) => {
+            tracing::warn!(session = %sk, "empty response from run(), offering retry/abort");
+            channel.on_status(&reply_target, ProcessingStatus::Done).await;
+            {
+                let mut guard = loop_.lock().await;
+                guard.set_pending_retry(content.clone());
+            }
+            let send_msg = retry_abort_prompt(MSG_TIMEOUT, &sk, reply_target.clone(), reply_to_id.clone());
+            if let Err(e) = channel.send(&send_msg).await {
+                error!(session = %sk, err = %e, "failed to send empty-response retry prompt");
+            }
+        }
+        Err(e) => {
+            if let Some(crate::agents::error::AgentError::LoopBreak { reason }) =
+                e.downcast_ref::<crate::agents::error::AgentError>()
+            {
+                tracing::info!(session = %sk, reason = %reason, "loop breaker triggered, sending retry prompt");
+                channel.on_status(&reply_target, ProcessingStatus::Done).await;
+                {
+                    let mut guard = loop_.lock().await;
+                    guard.set_pending_retry(content.clone());
+                }
+                let send_msg = retry_abort_prompt(
+                    format!("⚠️ 检测到工具调用循环，已自动中断。\n\n原因：`{}`", reason),
+                    &sk, reply_target, reply_to_id,
+                );
+                if let Err(se) = channel.send(&send_msg).await {
+                    error!(session = %sk, err = %se, "failed to send retry prompt");
+                }
+                return;
+            }
+
+            if let Some(crate::agents::error::AgentError::EmptyResponse { user_message }) =
+                e.downcast_ref::<crate::agents::error::AgentError>()
+            {
+                tracing::info!(session = %sk, "empty response, sending retry prompt");
+                channel.on_status(&reply_target, ProcessingStatus::Done).await;
+                {
+                    let mut guard = loop_.lock().await;
+                    guard.set_pending_retry(user_message.clone());
+                }
+                let send_msg = retry_abort_prompt(MSG_EMPTY_RESPONSE, &sk, reply_target, reply_to_id);
+                if let Err(se) = channel.send(&send_msg).await {
+                    error!(session = %sk, err = %se, "failed to send retry prompt");
+                }
+                return;
+            }
+
+            if let Some(crate::agents::error::AgentError::RetryExhausted { attempts, source }) =
+                e.downcast_ref::<crate::agents::error::AgentError>()
+            {
+                channel.on_status(&reply_target, ProcessingStatus::Error).await;
+                error!(session = %sk, attempts, err = %source, "retries exhausted, offering retry/abort");
+                {
+                    let mut guard = loop_.lock().await;
+                    guard.set_pending_retry(content.clone());
+                }
+                let send_msg = retry_abort_prompt(
+                    format!("⚠️ 处理失败（重试 {} 次后放弃）：\n\n`{}`", attempts, source),
+                    &sk, reply_target, reply_to_id,
+                );
+                if let Err(se) = channel.send(&send_msg).await {
+                    error!(session = %sk, err = %se, "failed to send retry prompt");
+                }
+                return;
+            }
+
+            // Non-retryable error — still offer retry/abort for manual recovery.
+            channel.on_status(&reply_target, ProcessingStatus::Error).await;
+            error!(session = %sk, err = %e, "non-retryable loop error, offering retry/abort");
+            {
+                let mut guard = loop_.lock().await;
+                guard.set_pending_retry(content.clone());
+            }
+            let send_msg = retry_abort_prompt(
+                format!("⚠️ 处理消息时发生错误：\n\n`{}`", e),
+                &sk, reply_target, reply_to_id,
+            );
+            if let Err(se) = channel.send(&send_msg).await {
+                error!(session = %sk, err = %se, "failed to send retry prompt");
+            }
+        }
+    }
+}
 
 /// Check if a response is a silent "nothing to do" signal (used by heartbeat).
 pub(crate) fn is_silent_ok(response: &str, prefix: &str) -> bool {
