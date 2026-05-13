@@ -17,6 +17,7 @@
 
 #![allow(dead_code)]
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use std::time::Duration;
@@ -391,12 +392,22 @@ pub struct QQBotChannel {
     msg_seq_counter: Arc<AtomicU32>,
     /// Last seen C2C recipient (cached for outbound messages with no recipient, e.g. cron).
     last_recipient: Arc<Mutex<Option<String>>>,
+    /// Path to persist last_recipient across restarts.
+    state_file: PathBuf,
 }
 
 impl QQBotChannel {
-    pub fn new(config: QQBotConfig) -> Self {
+    pub fn new(config: QQBotConfig, workspace_dir: &std::path::Path) -> Self {
         let app_id = config.app_id.clone();
         let client_secret = config.client_secret.clone();
+        let state_file = workspace_dir.join(".qqbot_last_recipient");
+
+        // Load persisted last_recipient from disk.
+        let last_recipient = std::fs::read_to_string(&state_file)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
         Self {
             config,
             token_manager: Arc::new(TokenManager::new(app_id, client_secret)),
@@ -409,7 +420,8 @@ impl QQBotChannel {
             typing_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session: Arc::new(Mutex::new(None)),
             msg_seq_counter: Arc::new(AtomicU32::new(1)),
-            last_recipient: Arc::new(Mutex::new(None)),
+            last_recipient: Arc::new(Mutex::new(last_recipient)),
+            state_file,
         }
     }
 
@@ -639,7 +651,11 @@ impl QQBotChannel {
 
         // Cache the recipient for outbound messages with no recipient (e.g. cron).
         if let Some(mut last) = self.last_recipient.try_lock() {
-            *last = Some(format!("c2c:{}", user_openid));
+            let recipient = format!("c2c:{}", user_openid);
+            if last.as_deref() != Some(&recipient) {
+                *last = Some(recipient);
+                let _ = std::fs::write(&self.state_file, last.as_deref().unwrap_or(""));
+            }
         }
 
         // Parse image URLs from attachments.
@@ -685,6 +701,15 @@ impl QQBotChannel {
         let msg_id = data.get("id")?.as_str()?;
 
         let cleaned_content = content.trim().to_string();
+
+        // Cache the group recipient for outbound messages with no recipient (e.g. cron).
+        if let Some(mut last) = self.last_recipient.try_lock() {
+            let recipient = format!("group:{}", group_openid);
+            if last.as_deref() != Some(&recipient) {
+                *last = Some(recipient);
+                let _ = std::fs::write(&self.state_file, last.as_deref().unwrap_or(""));
+            }
+        }
 
         // Parse image URLs from attachments.
         let image_urls = if let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) {
