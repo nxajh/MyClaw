@@ -355,6 +355,8 @@ pub struct QQBotChannel {
     session: Arc<Mutex<Option<SessionState>>>,
     /// Monotonic counter for proactive message msg_seq to avoid collisions.
     msg_seq_counter: Arc<AtomicU32>,
+    /// Last seen C2C recipient (cached for outbound messages with no recipient, e.g. cron).
+    last_recipient: Arc<Mutex<Option<String>>>,
 }
 
 impl QQBotChannel {
@@ -373,6 +375,7 @@ impl QQBotChannel {
             typing_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session: Arc::new(Mutex::new(None)),
             msg_seq_counter: Arc::new(AtomicU32::new(1)),
+            last_recipient: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -599,6 +602,11 @@ impl QQBotChannel {
         let msg_id = data.get("id")?.as_str()?;
 
         let cleaned_content = content.trim().to_string();
+
+        // Cache the recipient for outbound messages with no recipient (e.g. cron).
+        if let Some(mut last) = self.last_recipient.try_lock() {
+            *last = Some(format!("c2c:{}", user_openid));
+        }
 
         // Parse image URLs from attachments.
         let image_urls = if let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) {
@@ -1077,11 +1085,19 @@ impl Channel for QQBotChannel {
         let msg_id = msg.thread_ts.as_deref().unwrap_or("");
 
         // Normalize recipient: bare openids (from startup recovery fallback)
-        // are treated as c2c: prefixed.
-        let recipient = if msg.recipient.starts_with("c2c:") || msg.recipient.starts_with("group:") {
-            msg.recipient.clone()
+        // are treated as c2c: prefixed. Fall back to last seen C2C recipient.
+        let raw_recipient = if msg.recipient.is_empty() {
+            self.last_recipient.lock().clone().unwrap_or_default()
         } else {
-            format!("c2c:{}", msg.recipient)
+            msg.recipient.clone()
+        };
+        if raw_recipient.is_empty() {
+            anyhow::bail!("QQBot send failed: no recipient and no cached sender");
+        }
+        let recipient = if raw_recipient.starts_with("c2c:") || raw_recipient.starts_with("group:") {
+            raw_recipient
+        } else {
+            format!("c2c:{}", raw_recipient)
         };
 
         // Build keyboard from inline_buttons (attached to last chunk only).
