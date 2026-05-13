@@ -904,6 +904,30 @@ impl QQBotChannel {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+
+            // Token expired? Force-refresh and retry once.
+            if status.as_u16() == 401 || text.contains("11244") {
+                warn!(status = %status, "C2C keyboard got token-expired error, refreshing and retrying");
+                let new_token = self.token_manager.refresh().await?;
+                let resp = self.http_client
+                    .post(&url)
+                    .header("Authorization", format!("QQBot {}", new_token))
+                    .header("Content-Type", "application/json")
+                    .header("User-Agent", &ua)
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("C2C keyboard retry failed: {}", e))?;
+
+                if resp.status().is_success() {
+                    debug!(openid = openid, "C2C keyboard message sent (after token refresh)");
+                    return Ok(());
+                }
+                let retry_status = resp.status();
+                let retry_text = resp.text().await.unwrap_or_default();
+                return Err(anyhow::anyhow!("C2C keyboard retry returned {}: {}", retry_status, retry_text));
+            }
+
             return Err(anyhow::anyhow!("C2C keyboard send returned {}: {}", status, text));
         }
 
@@ -952,6 +976,30 @@ impl QQBotChannel {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+
+            // Token expired? Force-refresh and retry once.
+            if status.as_u16() == 401 || text.contains("11244") {
+                warn!(status = %status, "Group keyboard got token-expired error, refreshing and retrying");
+                let new_token = self.token_manager.refresh().await?;
+                let resp = self.http_client
+                    .post(&url)
+                    .header("Authorization", format!("QQBot {}", new_token))
+                    .header("Content-Type", "application/json")
+                    .header("User-Agent", &ua)
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Group keyboard retry failed: {}", e))?;
+
+                if resp.status().is_success() {
+                    debug!(group_openid = group_openid, "group keyboard message sent (after token refresh)");
+                    return Ok(());
+                }
+                let retry_status = resp.status();
+                let retry_text = resp.text().await.unwrap_or_default();
+                return Err(anyhow::anyhow!("Group keyboard retry returned {}: {}", retry_status, retry_text));
+            }
+
             return Err(anyhow::anyhow!("Group keyboard send returned {}: {}", status, text));
         }
 
