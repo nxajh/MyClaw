@@ -435,6 +435,27 @@ impl AgentLoop {
             return Ok(Some(text));
         }
 
+        // Case C: last message is user — daemon was killed before model responded.
+        if history.last().map_or(false, |m| m.role == "user") {
+            tracing::info!("detected incomplete turn (user message with no assistant response), resuming");
+            let messages = self.build_messages().await?;
+            let text = self.chat_loop(messages, stream_mode.clone()).await?;
+            if !text.is_empty() {
+                self.session.add_assistant_text(text.clone());
+                if let Some(ref hook) = self.persist_hook {
+                    if let Some(msg) = self.session.history.last() {
+                        if let Some(id) = hook.persist_message(&self.session.id, msg) {
+                            if let Some(last_id) = self.session.message_ids.last_mut() {
+                                *last_id = id;
+                            }
+                        }
+                    }
+                }
+            }
+            tracing::info!("interrupted turn resumed (case C: user→assistant recovery)");
+            return Ok(Some(text));
+        }
+
         Ok(None)
     }
 
