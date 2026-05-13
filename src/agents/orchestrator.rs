@@ -12,7 +12,7 @@
 use anyhow::Context;
 use crate::agents::delegation::{DelegationEvent, DelegationManager};
 use crate::agents::sub_agent::SubAgentDelegator;
-use crate::channels::{Channel, ChannelMessage, SendMessage, ProcessingStatus};
+use crate::channels::{Channel, ChannelMessage, SendMessage, ProcessingStatus, InlineButton};
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,6 +27,16 @@ const CHANNEL_QUEUE_SIZE: usize = 100;
 
 /// Timeout for ask_user waiting for user reply (5 minutes).
 const ASK_USER_TIMEOUT: Duration = Duration::from_secs(300);
+
+// ── User-facing message strings ────────────────────────────────────────────────
+const MSG_RETRY_EMPTY: &str = "⚠️ 重试后仍未获得有效回复。";
+const MSG_NO_PENDING_RETRY: &str = "没有待重试的消息，请重新发送。";
+const MSG_ABORT_ACK: &str = "已取消";
+const MSG_INCOMPLETE_TURN: &str = "⚠️ 检测到上次请求未处理完成（可能是服务重启）。\n\n请选择重试或放弃。";
+const MSG_TIMEOUT: &str = "⚠️ 处理超时，未收到模型回复。";
+const MSG_EMPTY_RESPONSE: &str = "⚠️ 处理失败，模型未返回有效回复。";
+const BTN_RETRY: &str = "🔄 重试";
+const BTN_ABORT: &str = "✖ 放弃";
 
 /// Internal enum for the run loop's select.
 enum ChannelEvent {
@@ -87,7 +97,7 @@ pub struct Orchestrator {
     search_cooldown: Option<Arc<crate::tools::search_cooldown::SearchProviderCooldown>>,
     /// Sub-agents that were interrupted by a hot-switch restart.
     /// Injected as a system reminder on the first session interaction, then cleared.
-    unfinished_subagents: parking_lot::Mutex<Vec<crate::daemon::UnfinishedSubAgent>>,
+    unfinished_subagents: parking_lot::Mutex<Vec<crate::agents::UnfinishedSubAgent>>,
 }
 
 /// Resources shared between Orchestrator and scheduler tasks.
@@ -104,6 +114,35 @@ fn parse_session_key(sk: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((ch, sender))
+}
+
+/// Return `true` if the session history ends with an incomplete tool execution:
+/// either trailing tool-result messages, or assistant tool_calls whose IDs have
+/// no matching tool-result — indicating the turn was interrupted mid-execution.
+fn history_has_incomplete_turn(history: &[crate::providers::capability_chat::ChatMessage]) -> bool {
+    let mut completed_ids = std::collections::HashSet::new();
+    let mut has_trailing_tools = false;
+    let mut found_pending = false;
+    for msg in history.iter().rev() {
+        if msg.role == "tool" {
+            if let Some(ref id) = msg.tool_call_id {
+                completed_ids.insert(id.clone());
+            }
+            has_trailing_tools = true;
+        } else if msg.role == "assistant" {
+            if let Some(ref calls) = msg.tool_calls {
+                for call in calls {
+                    if !completed_ids.contains(&call.id) {
+                        found_pending = true;
+                    }
+                }
+            }
+            break;
+        } else {
+            break;
+        }
+    }
+    found_pending || has_trailing_tools
 }
 
 /// Fully-assembled components ready for the Orchestrator to use.
@@ -133,7 +172,7 @@ pub struct OrchestratorParts {
     pub search_cooldown: Option<Arc<crate::tools::search_cooldown::SearchProviderCooldown>>,
     /// Sub-agents that were still running when the previous daemon was killed.
     /// Injected as a recovery hint into the first session interaction.
-    pub unfinished_subagents: Vec<crate::daemon::UnfinishedSubAgent>,
+    pub unfinished_subagents: Vec<crate::agents::UnfinishedSubAgent>,
 }
 
 impl Orchestrator {
@@ -240,122 +279,6 @@ impl Orchestrator {
         format!("{channel}:{sender}")
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn get_or_create_loop(
-        sessions: &DashMap<String, Arc<TokioMutex<AgentLoop>>>,
-        agent: &Agent,
-        session_manager: &SessionManager,
-        sk: &str,
-        channels: &DashMap<String, Arc<dyn Channel>>,
-        pending_asks: &Arc<DashMap<String, (oneshot::Sender<String>, String)>>,
-        reply_target: &str,
-        sub_delegator: &Option<Arc<SubAgentDelegator>>,
-        delegation_manager: &Option<Arc<DelegationManager>>,
-        persist_backend: &Arc<dyn crate::storage::SessionBackend>,
-        change_rx: &Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
-        unfinished_subagents: &[crate::daemon::UnfinishedSubAgent],
-    ) -> Arc<TokioMutex<AgentLoop>> {
-        if let Some(existing) = sessions.get(sk) {
-            return existing.clone();
-        }
-        let mut session = session_manager.get_or_create(sk);
-
-        // Inject recovery hint if sub-agents were interrupted by a hot-switch.
-        if !unfinished_subagents.is_empty() {
-            let mut recovery_msg = String::from(
-                "⚠️ 以下子代理在上次热切换中断，其 session 已持久化。如果需要，可以重新 delegate 它们继续工作：\n\n"
-            );
-            for agent_info in unfinished_subagents {
-                recovery_msg.push_str(&format!(
-                    "- {} (task: {}): {}\n",
-                    agent_info.agent_name, agent_info.task_id, agent_info.task_preview
-                ));
-            }
-            session.add_system_text(recovery_msg);
-        }
-
-        // Create persist hook from the shared backend.
-        let persist_hook: Arc<dyn PersistHook> = Arc::new(
-            BackendPersistHook::new(Arc::clone(persist_backend))
-        );
-        let loop_ = agent.loop_for_with_persist(session, Some(persist_hook));
-
-        // Wire up the ask_user handler.
-        let channels = channels.clone();
-        let pending_asks = pending_asks.clone();
-        let reply_target_owned = reply_target.to_string();
-        let user_facing_key = sk.to_string();
-        let handler: AskUserHandler = Arc::new(move |session_key: String, question: String| {
-            let channels = channels.clone();
-            let pending_asks = pending_asks.clone();
-            let reply_target = reply_target_owned.clone();
-            let user_facing_key = user_facing_key.clone();
-            Box::pin(async move {
-                // 1. Send the question through the channel.
-                let (ch_name, _) = parse_session_key(&session_key)
-                    .ok_or_else(|| anyhow::anyhow!("invalid session key: {}", session_key))?;
-
-                let channel: Arc<dyn Channel> = channels
-                    .get(ch_name)
-                    .map(|r| r.clone())
-                    .ok_or_else(|| anyhow::anyhow!("channel '{}' not found", ch_name))?;
-
-                let send_msg = SendMessage::new(&question, &reply_target);
-                channel.send(&send_msg).await?;
-
-                // 2. Create a oneshot channel and register as pending.
-                //    Use the user-facing key so the run loop can find it.
-                let (tx, rx) = oneshot::channel();
-                pending_asks.insert(user_facing_key, (tx, reply_target.clone()));
-
-                // 3. Wait for the user's reply (delivered by the run loop) with timeout.
-                let answer = tokio::time::timeout(ASK_USER_TIMEOUT, rx)
-                    .await
-                    .map_err(|_| anyhow::anyhow!("ask_user timed out waiting for user reply"))?
-                    .map_err(|_| anyhow::anyhow!("ask_user cancelled (dropped)"))?;
-
-                Ok(answer)
-            })
-        });
-
-        let mut loop_ = loop_.with_ask_user_handler(handler);
-
-        // Wire up the delegate handler (async delegation).
-        if let (Some(delegator), Some(manager)) = (sub_delegator.clone(), delegation_manager.clone()) {
-            // Use the session *key* (e.g. "telegram:12345") not session.id — the
-            // sessions DashMap is keyed by session_key, and handle_delegation_event
-            // looks up the entry with exactly this value.
-            let session_key_for_delegate = sk.to_string();
-            let reply_target_for_delegate = reply_target.to_string();
-            let delegate_handler: DelegateHandler = Arc::new(
-                move |agent_name: String, task: String| {
-                    delegator.delegate_async(
-                        &agent_name,
-                        &task,
-                        &session_key_for_delegate,
-                        &reply_target_for_delegate,
-                        &manager,
-                    )
-                }
-            );
-            loop_ = loop_.with_delegate_handler(delegate_handler);
-        }
-
-        // Wire up the sub-agent delegator for compaction summarization.
-        if let Some(delegator) = sub_delegator.clone() {
-            loop_ = loop_.with_sub_delegator(delegator);
-        }
-
-        // Wire up the file change receiver for hot-reload.
-        if let Some(rx) = change_rx.clone() {
-            loop_ = loop_.with_change_rx(rx);
-        }
-
-        let entry: Arc<TokioMutex<AgentLoop>> = Arc::new(TokioMutex::new(loop_));
-        sessions.insert(sk.into(), entry.clone());
-        entry
-    }
-
     /// Main message loop. Consumes self.msg_rx.
     /// Call from the Composition Root; blocks until shutdown.
     pub async fn run(&self, mut shutdown_rx: tokio::sync::watch::Receiver<bool>) -> anyhow::Result<()> {
@@ -390,175 +313,25 @@ impl Orchestrator {
             guard.clone()
         };
 
-        // ── Startup recovery: detect and resume interrupted turns ──────────
-        // Scan all sessions for incomplete turns left by a previous run
-        // (e.g. SIGUSR1 hot-switch killed the process mid-turn).
-        {
-            let all_sessions = self.session_manager.list_all_sessions();
-            let mut recovered = 0;
-            for session_info in &all_sessions {
-                let sk = &session_info.owner;
-                // Load session and check for incomplete turns.
-                let session = self.session_manager.get_or_create(sk);
-                let history = &session.history;
-                if history.is_empty() {
-                    continue;
-                }
-                // Quick check: does the session end with tool results or
-                // assistant tool_calls without results?
-                let has_incomplete = {
-                    let mut completed_ids = std::collections::HashSet::new();
-                    let mut has_trailing_tools = false;
-                    let mut found_pending = false;
-                    for msg in history.iter().rev() {
-                        if msg.role == "tool" {
-                            if let Some(ref id) = msg.tool_call_id {
-                                completed_ids.insert(id.clone());
-                            }
-                            has_trailing_tools = true;
-                        } else if msg.role == "assistant" {
-                            if let Some(ref calls) = msg.tool_calls {
-                                for call in calls {
-                                    if !completed_ids.contains(&call.id) {
-                                        found_pending = true;
-                                    }
-                                }
-                            }
-                            break;
-                        } else {
-                            break;
-                        }
-                    }
-                    found_pending || has_trailing_tools
-                };
-                if !has_incomplete {
-                    continue;
-                }
-                tracing::info!(session = %sk, "startup recovery: found incomplete turn");
-                // Create a loop for this session and trigger recovery.
-                let reply_target = format!("startup:recovery:{}", sk);
-                let loop_ = Self::get_or_create_loop(
-                    &sessions, &agent, self.session_manager.as_ref(), sk,
-                    &channels, &self.pending_asks, &reply_target,
-                    &sub_delegator, &delegation_manager,
-                    &self.persist_backend,
-                    &self.change_rx,
-                    &unfinished_subagents,
-                );
-                let mut guard = loop_.lock().await;
-                match guard.recover_interrupted_turn().await {
-                    Ok(Some(text)) if !text.is_empty() => {
-                        recovered += 1;
-                        tracing::info!(session = %sk, "startup recovery: turn completed");
-                        // Send recovery response via the channel.
-                        // Use persisted reply_target if available (handles QQ Bot c2c:/group: prefix).
-                        let recipient = self.persist_backend.load_reply_target(sk)
-                            .unwrap_or_else(|| {
-                                parse_session_key(sk)
-                                    .map(|(_, sender)| sender.to_string())
-                                    .unwrap_or_default()
-                            });
-                        if let Some((ch_name, _)) = parse_session_key(sk) {
-                            if let Some(channel) = channels.get(ch_name).map(|r| r.clone()) {
-                                let send_msg = SendMessage::new(&text, &recipient);
-                                if let Err(e) = channel.send(&send_msg).await {
-                                    tracing::warn!(session = %sk, err = %e, "startup recovery: failed to send response");
-                                }
-                            }
-                        }
-                    }
-                    Ok(_) => {
-                        // No recovery needed or empty response — skip silently.
-                    }
-                    Err(e) => {
-                        tracing::warn!(session = %sk, err = %e, "startup recovery failed");
-                    }
-                }
-            }
-            if recovered > 0 {
-                tracing::info!(count = recovered, "startup recovery complete");
-            }
-        }
+        // Assemble the shared session-creation context used throughout run().
+        // LoopRegistry replaces the former 12-argument get_or_create_loop
+        // free function, grouping all Arc-owned shared state into one place.
+        let registry = LoopRegistry {
+            sessions: sessions.clone(),
+            agent: agent.clone(),
+            session_manager: self.session_manager.clone(),
+            channels: channels.clone(),
+            pending_asks: self.pending_asks.clone(),
+            sub_delegator: sub_delegator.clone(),
+            delegation_manager: delegation_manager.clone(),
+            persist_backend: self.persist_backend.clone(),
+            change_rx: self.change_rx.clone(),
+            unfinished_subagents: unfinished_subagents.clone(),
+        };
 
-        // ── Sub-agent startup recovery ─────────────────────────────────────
-        // For unfinished sub-agents detected via marker files, recover their
-        // interrupted turns and emit delegation events so the parent agent
-        // receives the results.
-        for sa in &unfinished_subagents {
-            if sa.sub_session_id.is_empty() || sa.session_key.is_empty() {
-                tracing::info!(task_id = %sa.task_id, "sub-agent recovery: skipping (no session_id or session_key)");
-                continue;
-            }
-            // Construct the sub-agent session key for loading.
-            let sub_sk = format!("{}:{}", sa.agent_name, sa.sub_session_id);
-            let session = self.session_manager.get_or_create(&sub_sk);
-            let history = &session.history;
-            if history.is_empty() {
-                continue;
-            }
-            // Check for incomplete turn.
-            let has_incomplete = {
-                let mut completed_ids = std::collections::HashSet::new();
-                let mut has_trailing_tools = false;
-                let mut found_pending = false;
-                for msg in history.iter().rev() {
-                    if msg.role == "tool" {
-                        if let Some(ref id) = msg.tool_call_id {
-                            completed_ids.insert(id.clone());
-                        }
-                        has_trailing_tools = true;
-                    } else if msg.role == "assistant" {
-                        if let Some(ref calls) = msg.tool_calls {
-                            for call in calls {
-                                if !completed_ids.contains(&call.id) {
-                                    found_pending = true;
-                                }
-                            }
-                        }
-                        break;
-                    } else {
-                        break;
-                    }
-                }
-                found_pending || has_trailing_tools
-            };
-            if !has_incomplete {
-                continue;
-            }
-            tracing::info!(task_id = %sa.task_id, agent = %sa.agent_name, "sub-agent startup recovery: found incomplete turn");
-            // Create a loop for the sub-agent session and recover.
-            let reply_target = format!("startup:recovery:sub:{}", sa.task_id);
-            let loop_ = Self::get_or_create_loop(
-                &sessions, &agent, self.session_manager.as_ref(), &sub_sk,
-                &channels, &self.pending_asks, &reply_target,
-                &sub_delegator, &delegation_manager,
-                &self.persist_backend,
-                &self.change_rx,
-                &unfinished_subagents,
-            );
-            let mut guard = loop_.lock().await;
-            match guard.recover_interrupted_turn().await {
-                Ok(Some(text)) if !text.is_empty() => {
-                    tracing::info!(task_id = %sa.task_id, "sub-agent startup recovery: turn completed");
-                    // Emit delegation event so the parent agent gets the result.
-                    if let Some(ref dm) = delegation_manager {
-                        let _ = dm.event_sender().send(DelegationEvent::Completed {
-                            task_id: sa.task_id.clone(),
-                            session_key: sa.session_key.clone(),
-                            reply_target: sa.reply_target.clone(),
-                            summary: text,
-                            duration_secs: 0,
-                        }).await;
-                    }
-                }
-                Ok(_) => {
-                    tracing::info!(task_id = %sa.task_id, "sub-agent startup recovery: no recovery needed");
-                }
-                Err(e) => {
-                    tracing::warn!(task_id = %sa.task_id, err = %e, "sub-agent startup recovery failed");
-                }
-            }
-        }
+        // ── Startup recovery ──────────────────────────────────────────────
+        self.startup_recover_sessions(&registry).await;
+        self.startup_recover_subagents(&registry, &unfinished_subagents, &delegation_manager).await;
 
         loop {
             if *shutdown_rx.borrow() {
@@ -680,128 +453,33 @@ impl Orchestrator {
                         if is_retry {
                             // Take the pending retry message from the agent loop.
                             let pending = {
-                                let loop_ = Self::get_or_create_loop(
-                                    &sessions, &agent, self.session_manager.as_ref(), &sk,
-                                    &channels, &self.pending_asks, &reply_target,
-                                    &sub_delegator, &delegation_manager,
-                                    &self.persist_backend,
-                                    &self.change_rx,
-                                    &unfinished_subagents,
-                                );
+                                let loop_ = registry.get_or_create(&sk, &reply_target);
                                 let mut guard = loop_.lock().await;
                                 guard.take_pending_retry()
                             };
 
                             if let Some(user_msg) = pending {
-                                // Re-run the turn with the original user message.
-                                let loop_ = Self::get_or_create_loop(
-                                    &sessions, &agent, self.session_manager.as_ref(), &sk,
-                                    &channels, &self.pending_asks, &reply_target,
-                                    &sub_delegator, &delegation_manager,
-                                    &self.persist_backend,
-                                    &self.change_rx,
-                                    &unfinished_subagents,
-                                );
-                                let reply_target_c = reply_target.clone();
+                                let loop_ = registry.get_or_create(&sk, &reply_target);
                                 let reply_to_id = Some(msg.id.clone());
-                                let sk_c = sk.clone();
-
-                                tokio::spawn(async move {
-                                    channel.on_status(&reply_target_c, ProcessingStatus::Thinking).await;
-
-                                    let response = {
-                                        let mut guard = loop_.lock().await;
-                                        guard.run(&user_msg, None, None).await
-                                    };
-
-                                    match response {
-                                        Ok(text) if !text.is_empty() => {
-                                            let send_msg = SendMessage {
-                                                recipient: reply_target_c.clone(),
-                                                content: text,
-                                                subject: None,
-                                                thread_ts: reply_to_id.clone(),
-                                                cancellation_token: None,
-                                                attachments: vec![],
-                                                image_urls: None,
-                                                inline_buttons: None,
-                                            };
-                                            if let Err(e) = channel.send(&send_msg).await {
-                                                error!(session = %sk_c, err = %e, "retry send failed");
-                                            }
-                                            channel.on_status(&reply_target_c, ProcessingStatus::Done).await;
-                                        }
-                                        Ok(_) => {
-                                            // Empty again — just notify, don't loop.
-                                            let send_msg = SendMessage::new(
-                                                "⚠️ 重试后仍未获得有效回复。",
-                                                reply_target_c.clone(),
-                                            );
-                                            let _ = channel.send(&send_msg).await;
-                                            channel.on_status(&reply_target_c, ProcessingStatus::Done).await;
-                                        }
-                                        Err(e) => {
-                                            channel.on_status(&reply_target_c, ProcessingStatus::Error).await;
-                                            error!(session = %sk_c, err = %e, "retry failed, offering retry/abort again");
-
-                                            // Re-store the user message so the user can retry again.
-                                            {
-                                                let mut guard = loop_.lock().await;
-                                                guard.set_pending_retry(user_msg.clone());
-                                            }
-
-                                            let sk_prefix: String = sk_c.chars().take(32).collect();
-                                            let retry_data = format!("__retry:{}", sk_prefix);
-                                            let abort_data = format!("__abort:{}", sk_prefix);
-
-                                            let send_msg = SendMessage {
-                                                recipient: reply_target_c.clone(),
-                                                content: format!(
-                                                    "⚠️ 重试失败：`{}`\n\n你可以选择再次重试或放弃。",
-                                                    e
-                                                ),
-                                                subject: None,
-                                                thread_ts: reply_to_id.clone(),
-                                                cancellation_token: None,
-                                                attachments: vec![],
-                                                image_urls: None,
-                                                inline_buttons: Some(vec![
-                                                    crate::channels::InlineButton {
-                                                        label: "🔄 重试".to_string(),
-                                                        callback_data: retry_data,
-                                                    },
-                                                    crate::channels::InlineButton {
-                                                        label: "✖ 放弃".to_string(),
-                                                        callback_data: abort_data,
-                                                    },
-                                                ]),
-                                            };
-                                            let _ = channel.send(&send_msg).await;
-                                        }
-                                    }
-                                });
+                                tokio::spawn(run_retry_task(
+                                    sk.clone(), channel, loop_,
+                                    user_msg, reply_target.clone(), reply_to_id,
+                                ));
                             } else {
                                 let send_msg = SendMessage::new(
-                                    "没有待重试的消息，请重新发送。",
+                                    MSG_NO_PENDING_RETRY,
                                     reply_target.clone(),
                                 );
                                 let _ = channel.send(&send_msg).await;
                             }
                         } else {
                             // Abort — clear pending retry and acknowledge.
-                            let loop_ = Self::get_or_create_loop(
-                                &sessions, &agent, self.session_manager.as_ref(), &sk,
-                                &channels, &self.pending_asks, &reply_target,
-                                &sub_delegator, &delegation_manager,
-                                &self.persist_backend,
-                                &self.change_rx,
-                                &unfinished_subagents,
-                            );
+                            let loop_ = registry.get_or_create(&sk, &reply_target);
                             {
                                 let mut guard = loop_.lock().await;
                                 guard.take_pending_retry();
                             }
-                            let send_msg = SendMessage::new("已取消", reply_target.clone());
+                            let send_msg = SendMessage::new(MSG_ABORT_ACK, reply_target.clone());
                             let _ = channel.send(&send_msg).await;
                         }
                         continue;
@@ -811,14 +489,7 @@ impl Orchestrator {
                     // If the session's last message is a user message without a reply,
                     // prompt the user to retry or abort before processing new input.
                     {
-                        let loop_ = Self::get_or_create_loop(
-                            &sessions, &agent, self.session_manager.as_ref(), &sk,
-                            &channels, &self.pending_asks, &msg.reply_target,
-                            &sub_delegator, &delegation_manager,
-                            &self.persist_backend,
-                            &self.change_rx,
-                            &unfinished_subagents,
-                        );
+                        let loop_ = registry.get_or_create(&sk, &msg.reply_target);
                         let mut guard = loop_.lock().await;
                         if guard.session.incomplete_turn {
                             guard.session.incomplete_turn = false;
@@ -834,29 +505,12 @@ impl Orchestrator {
                                 Some(c) => c,
                                 None => continue,
                             };
-                            let sk_prefix: String = sk.chars().take(32).collect();
-                            let retry_data = format!("__retry:{}", sk_prefix);
-                            let abort_data = format!("__abort:{}", sk_prefix);
-
-                            let send_msg = SendMessage {
-                                recipient: msg.reply_target.clone(),
-                                content: "⚠️ 检测到上次请求未处理完成（可能是服务重启）。\n\n请选择重试或放弃。".to_string(),
-                                subject: None,
-                                thread_ts: Some(msg.id.clone()),
-                                cancellation_token: None,
-                                attachments: vec![],
-                                image_urls: None,
-                                inline_buttons: Some(vec![
-                                    crate::channels::InlineButton {
-                                        label: "🔄 重试".to_string(),
-                                        callback_data: retry_data,
-                                    },
-                                    crate::channels::InlineButton {
-                                        label: "✖ 放弃".to_string(),
-                                        callback_data: abort_data,
-                                    },
-                                ]),
-                            };
+                            let send_msg = retry_abort_prompt(
+                                MSG_INCOMPLETE_TURN,
+                                &sk,
+                                msg.reply_target.clone(),
+                                Some(msg.id.clone()),
+                            );
                             if let Err(e) = channel.send(&send_msg).await {
                                 error!(session = %sk, err = %e, "failed to send incomplete-turn prompt");
                             }
@@ -869,7 +523,6 @@ impl Orchestrator {
                     let image_base64 = msg.image_base64.clone();
                     let reply_target = msg.reply_target.clone();
                     let reply_to_id = Some(msg.id.clone());
-                    let channel_name_clone = channel_name.clone();
 
                     // Intercept slash commands before reaching agent loop.
                     if let Some((cmd, cmd_args)) = super::slash_command::parse_command(&content) {
@@ -885,18 +538,13 @@ impl Orchestrator {
                             search_cooldown: self.search_cooldown.as_ref(),
                         };
                         if let Some(response) = super::slash_command::dispatch(cmd, cmd_args, cmd_ctx).await {
-                            // Send command response directly, skip agent loop.
-                            let ch = channels.clone();
-                            tokio::spawn(async move {
-                                let channel: Option<Arc<dyn Channel>> = {
-                                    ch.get(&channel_name_clone).map(|r| r.clone())
-                                };
-                                if let Some(channel) = channel {
+                            if let Some(channel) = channels.get(&channel_name).map(|r| r.clone()) {
+                                tokio::spawn(async move {
                                     let send_msg = SendMessage {
                                         recipient: reply_target,
                                         content: response,
                                         subject: None,
-                                        thread_ts: reply_to_id.clone(),
+                                        thread_ts: reply_to_id,
                                         cancellation_token: None,
                                         attachments: vec![],
                                         image_urls: None,
@@ -905,8 +553,8 @@ impl Orchestrator {
                                     if let Err(e) = channel.send(&send_msg).await {
                                         error!(session = %sk, err = %e, "command response send failed");
                                     }
-                                }
-                            });
+                                });
+                            }
                             continue;
                         }
                     }
@@ -921,308 +569,16 @@ impl Orchestrator {
                         tracing::warn!(session = %sk, err = %e, "failed to persist reply_target");
                     }
 
-                    let loop_ = Self::get_or_create_loop(
-                        &sessions, &agent, self.session_manager.as_ref(), &sk,
-                        &channels, &self.pending_asks, &reply_target,
-                        &sub_delegator, &delegation_manager,
-                        &self.persist_backend,
-                        &self.change_rx,
-                        &unfinished_subagents,
-                    );
-
-                    let ch = channels.clone();
-                    tokio::spawn(async move {
-                        // Resolve channel early so we can send the response.
-                        let channel: Option<Arc<dyn Channel>> = {
-                            ch.get(&channel_name_clone).map(|r| r.clone())
-                        };
-                        let channel = match channel {
-                            Some(c) => c,
-                            None => return,
-                        };
-
-                        // Notify channel that processing has started.
-                        channel.on_status(&reply_target, ProcessingStatus::Thinking).await;
-
-                        // ClientChannel uses streaming path: run_streamed() + TurnEvent forwarding.
-                        // Other channels use the existing run() + channel.send() path.
-                        let is_client = channel_name_clone == "client";
-
-                        if is_client {
-                            // Streaming path for ClientChannel.
-                            let stream_ctx = channel.take_stream_context(&reply_target);
-                            let (event_tx, cancel) = match stream_ctx {
-                                Some(ctx) => ctx,
-                                None => {
-                                    tracing::warn!(session = %sk, "no stream context for client session, falling back to run()");
-                                    let mut guard = loop_.lock().await;
-                                    let _ = guard.run(&content, image_urls, image_base64).await;
-                                    return;
-                                }
-                            };
-
-                            let response = {
-                                let mut guard = loop_.lock().await;
-                                guard.run_streamed(&content, image_urls, image_base64, event_tx, cancel).await
-                            };
-
-                            match response {
-                                Ok(_text) => {
-                                    // Text already sent via TurnEvent::Done.
-                                    // Send TurnEvent::Error if needed (handled by run_streamed internally).
-                                    channel.on_status(&reply_target, ProcessingStatus::Done).await;
-                                }
-                                Err(e) => {
-                                    channel.on_status(&reply_target, ProcessingStatus::Error).await;
-                                    error!(session = %sk, err = %e, "streamed turn failed");
-                                    // Error already sent via channel.send() is not needed
-                                    // because the WS handler's forwarding task will have ended
-                                    // and the client can detect the stream ended without Done.
-                                }
-                            }
-                        } else {
-                            // Existing non-streaming path.
-                            let response = {
-                                let mut guard = loop_.lock().await;
-                                guard.run(&content, image_urls, image_base64).await
-                            };
-
-                            match response {
-                                Ok(text) if !text.is_empty() => {
-                                    tracing::info!(session = %sk, text_len = text.len(), "sending response");
-                                    let send_msg = SendMessage {
-                                        recipient: reply_target.clone(),
-                                        content: text,
-                                        subject: None,
-                                        thread_ts: reply_to_id.clone(),
-                                        cancellation_token: None,
-                                        attachments: vec![],
-                                        image_urls: None,
-                                        inline_buttons: None,
-                                    };
-                                    if let Err(e) = channel.send(&send_msg).await {
-                                        error!(session = %sk, err = %e, "send failed");
-                                    }
-                                    channel.on_status(&reply_target, ProcessingStatus::Done).await;
-                                }
-                                Ok(_) => {
-                                    // Empty response (e.g. stream timeout retries exhausted).
-                                    // run() returns Ok("") instead of Err, so it bypasses the
-                                    // error handlers below. Treat like EmptyResponse: notify
-                                    // the user and offer retry/abort buttons.
-                                    tracing::warn!(session = %sk, "empty response from run(), offering retry/abort");
-                                    channel.on_status(&reply_target, ProcessingStatus::Done).await;
-
-                                    {
-                                        let mut guard = loop_.lock().await;
-                                        guard.set_pending_retry(content.clone());
-                                    }
-
-                                    let sk_prefix: String = sk.chars().take(32).collect();
-                                    let retry_data = format!("__retry:{}", sk_prefix);
-                                    let abort_data = format!("__abort:{}", sk_prefix);
-
-                                    let send_msg = SendMessage {
-                                        recipient: reply_target.clone(),
-                                        content: "⚠️ 处理超时，未收到模型回复。".to_string(),
-                                        subject: None,
-                                        thread_ts: reply_to_id.clone(),
-                                        cancellation_token: None,
-                                        attachments: vec![],
-                                        image_urls: None,
-                                        inline_buttons: Some(vec![
-                                            crate::channels::InlineButton {
-                                                label: "🔄 重试".to_string(),
-                                                callback_data: retry_data,
-                                            },
-                                            crate::channels::InlineButton {
-                                                label: "✖ 放弃".to_string(),
-                                                callback_data: abort_data,
-                                            },
-                                        ]),
-                                    };
-                                    if let Err(send_err) = channel.send(&send_msg).await {
-                                        error!(session = %sk, err = %send_err, "failed to send empty-response retry prompt");
-                                    }
-                                }
-                                Err(e) => {
-                                    // Check if this is a LoopBreak — the loop breaker
-                                    // detected a repetitive tool pattern. The turn has
-                                    // been rolled back. Offer retry/abort buttons.
-                                    if let Some(crate::agents::error::AgentError::LoopBreak { reason }) =
-                                        e.downcast_ref::<crate::agents::error::AgentError>()
-                                    {
-                                        tracing::info!(session = %sk, reason = %reason, "loop breaker triggered, sending retry prompt");
-                                        channel.on_status(&reply_target, ProcessingStatus::Done).await;
-
-                                        // Store the last user message for retry.
-                                        {
-                                            let mut guard = loop_.lock().await;
-                                            guard.set_pending_retry(content.clone());
-                                        }
-
-                                        // Build callback data (Telegram limits to 64 bytes).
-                                        let sk_prefix: String = sk.chars().take(32).collect();
-                                        let retry_data = format!("__retry:{}", sk_prefix);
-                                        let abort_data = format!("__abort:{}", sk_prefix);
-
-                                        let send_msg = SendMessage {
-                                            recipient: reply_target.clone(),
-                                            content: format!(
-                                                "⚠️ 检测到工具调用循环，已自动中断。\n\n原因：`{}`",
-                                                reason
-                                            ),
-                                            subject: None,
-                                            thread_ts: reply_to_id.clone(),
-                                            cancellation_token: None,
-                                            attachments: vec![],
-                                            image_urls: None,
-                                            inline_buttons: Some(vec![
-                                                crate::channels::InlineButton {
-                                                    label: "🔄 重试".to_string(),
-                                                    callback_data: retry_data,
-                                                },
-                                                crate::channels::InlineButton {
-                                                    label: "✖ 放弃".to_string(),
-                                                    callback_data: abort_data,
-                                                },
-                                            ]),
-                                        };
-                                        if let Err(send_err) = channel.send(&send_msg).await {
-                                            error!(session = %sk, err = %send_err, "failed to send retry prompt");
-                                        }
-                                        return; // ★ Don't fall through to generic error handler.
-                                    }
-
-                                    // Check if this is an EmptyResponse — the LLM returned
-                                    // nothing after all retries. The user message has been
-                                    // rolled back. Offer retry/abort buttons.
-                                    if let Some(crate::agents::error::AgentError::EmptyResponse { user_message }) =
-                                        e.downcast_ref::<crate::agents::error::AgentError>()
-                                    {
-                                        tracing::info!(session = %sk, "empty response, sending retry prompt");
-                                        channel.on_status(&reply_target, ProcessingStatus::Done).await;
-
-                                        // Store user message for retry.
-                                        {
-                                            let mut guard = loop_.lock().await;
-                                            guard.set_pending_retry(user_message.clone());
-                                        }
-
-                                        // Build callback data (Telegram limits to 64 bytes).
-                                        let sk_prefix: String = sk.chars().take(32).collect();
-                                        let retry_data = format!("__retry:{}", sk_prefix);
-                                        let abort_data = format!("__abort:{}", sk_prefix);
-
-                                        let send_msg = SendMessage {
-                                            recipient: reply_target.clone(),
-                                            content: "⚠️ 处理失败，模型未返回有效回复。".to_string(),
-                                            subject: None,
-                                            thread_ts: reply_to_id.clone(),
-                                            cancellation_token: None,
-                                            attachments: vec![],
-                                            image_urls: None,
-                                            inline_buttons: Some(vec![
-                                                crate::channels::InlineButton {
-                                                    label: "🔄 重试".to_string(),
-                                                    callback_data: retry_data,
-                                                },
-                                                crate::channels::InlineButton {
-                                                    label: "✖ 放弃".to_string(),
-                                                    callback_data: abort_data,
-                                                },
-                                            ]),
-                                        };
-                                        if let Err(send_err) = channel.send(&send_msg).await {
-                                            error!(session = %sk, err = %send_err, "failed to send retry prompt");
-                                        }
-                                        return; // ★ Don't fall through to generic error handler.
-                                    }
-
-                                    // Check if retries were exhausted — offer retry/abort buttons.
-                                    if let Some(crate::agents::error::AgentError::RetryExhausted { attempts, source }) =
-                                        e.downcast_ref::<crate::agents::error::AgentError>()
-                                    {
-                                        channel.on_status(&reply_target, ProcessingStatus::Error).await;
-                                        error!(session = %sk, attempts, err = %source, "retryable retries exhausted, offering retry/abort");
-
-                                        {
-                                            let mut guard = loop_.lock().await;
-                                            guard.set_pending_retry(content.clone());
-                                        }
-
-                                        let sk_prefix: String = sk.chars().take(32).collect();
-                                        let retry_data = format!("__retry:{}", sk_prefix);
-                                        let abort_data = format!("__abort:{}", sk_prefix);
-
-                                        let send_msg = SendMessage {
-                                            recipient: reply_target.clone(),
-                                            content: format!(
-                                                "⚠️ 处理失败（重试 {} 次后放弃）：\n\n`{}`",
-                                                attempts, source
-                                            ),
-                                            subject: None,
-                                            thread_ts: reply_to_id.clone(),
-                                            cancellation_token: None,
-                                            attachments: vec![],
-                                            image_urls: None,
-                                            inline_buttons: Some(vec![
-                                                crate::channels::InlineButton {
-                                                    label: "🔄 重试".to_string(),
-                                                    callback_data: retry_data,
-                                                },
-                                                crate::channels::InlineButton {
-                                                    label: "✖ 放弃".to_string(),
-                                                    callback_data: abort_data,
-                                                },
-                                            ]),
-                                        };
-                                        if let Err(send_err) = channel.send(&send_msg).await {
-                                            error!(session = %sk, err = %send_err, "failed to send retry prompt");
-                                        }
-                                        return;
-                                    }
-
-                                    // Non-retryable error — still offer retry/abort so the user
-                                    // can manually retry (e.g. after a transient issue resolves).
-                                    channel.on_status(&reply_target, ProcessingStatus::Error).await;
-                                    error!(session = %sk, err = %e, "non-retryable loop error, offering retry/abort");
-
-                                    {
-                                        let mut guard = loop_.lock().await;
-                                        guard.set_pending_retry(content.clone());
-                                    }
-
-                                    let sk_prefix: String = sk.chars().take(32).collect();
-                                    let retry_data = format!("__retry:{}", sk_prefix);
-                                    let abort_data = format!("__abort:{}", sk_prefix);
-
-                                    let send_msg = SendMessage {
-                                        recipient: reply_target.clone(),
-                                        content: format!("⚠️ 处理消息时发生错误：\n\n`{}`", e),
-                                        subject: None,
-                                        thread_ts: reply_to_id.clone(),
-                                        cancellation_token: None,
-                                        attachments: vec![],
-                                        image_urls: None,
-                                        inline_buttons: Some(vec![
-                                            crate::channels::InlineButton {
-                                                label: "🔄 重试".to_string(),
-                                                callback_data: retry_data,
-                                            },
-                                            crate::channels::InlineButton {
-                                                label: "✖ 放弃".to_string(),
-                                                callback_data: abort_data,
-                                            },
-                                        ]),
-                                    };
-                                    if let Err(send_err) = channel.send(&send_msg).await {
-                                        error!(session = %sk, err = %send_err, "failed to send retry prompt");
-                                    }
-                                }
-                            }
-                        }
-                    });
+                    let channel = match channels.get(&channel_name).map(|r| r.clone()) {
+                        Some(c) => c,
+                        None => continue,
+                    };
+                    let loop_ = registry.get_or_create(&sk, &reply_target);
+                    tokio::spawn(run_message_task(
+                        sk, channel, loop_,
+                        TurnInput { content, image_urls, image_base64 },
+                        reply_target, reply_to_id,
+                    ));
                 }
                 ChannelEvent::Delegation(event) => {
                     self.handle_delegation_event(event).await;
@@ -1461,6 +817,100 @@ impl Orchestrator {
         guard.run(prompt, None, None).await
     }
 
+    /// Scan all persisted sessions for incomplete turns and resume them.
+    /// Called once at startup, before the main event loop.
+    async fn startup_recover_sessions(&self, registry: &LoopRegistry) {
+        let all_sessions = self.session_manager.list_all_sessions();
+        let mut recovered = 0;
+        for session_info in &all_sessions {
+            let sk = &session_info.owner;
+            let session = self.session_manager.get_or_create(sk);
+            let history = &session.history;
+            if history.is_empty() || !history_has_incomplete_turn(history) {
+                continue;
+            }
+            tracing::info!(session = %sk, "startup recovery: found incomplete turn");
+            let reply_target = format!("startup:recovery:{}", sk);
+            let loop_ = registry.get_or_create(sk, &reply_target);
+            let mut guard = loop_.lock().await;
+            match guard.recover_interrupted_turn().await {
+                Ok(Some(text)) if !text.is_empty() => {
+                    recovered += 1;
+                    tracing::info!(session = %sk, "startup recovery: turn completed");
+                    // Use persisted reply_target if available (handles QQ Bot c2c:/group: prefix).
+                    let recipient = self.persist_backend.load_reply_target(sk)
+                        .unwrap_or_else(|| {
+                            parse_session_key(sk)
+                                .map(|(_, sender)| sender.to_string())
+                                .unwrap_or_default()
+                        });
+                    if let Some((ch_name, _)) = parse_session_key(sk) {
+                        if let Some(channel) = self.channels.get(ch_name).map(|r| r.clone()) {
+                            let send_msg = SendMessage::new(&text, &recipient);
+                            if let Err(e) = channel.send(&send_msg).await {
+                                tracing::warn!(session = %sk, err = %e, "startup recovery: failed to send response");
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(session = %sk, err = %e, "startup recovery failed");
+                }
+            }
+        }
+        if recovered > 0 {
+            tracing::info!(count = recovered, "startup recovery complete");
+        }
+    }
+
+    /// Recover sub-agents that were interrupted by a previous daemon shutdown.
+    /// Resumes each incomplete sub-agent turn and emits a delegation event so
+    /// the parent agent receives the result.
+    async fn startup_recover_subagents(
+        &self,
+        registry: &LoopRegistry,
+        unfinished: &[crate::agents::UnfinishedSubAgent],
+        delegation_manager: &Option<Arc<DelegationManager>>,
+    ) {
+        for sa in unfinished {
+            if sa.sub_session_id.is_empty() || sa.session_key.is_empty() {
+                tracing::info!(task_id = %sa.task_id, "sub-agent recovery: skipping (no session_id or session_key)");
+                continue;
+            }
+            let sub_sk = format!("{}:{}", sa.agent_name, sa.sub_session_id);
+            let session = self.session_manager.get_or_create(&sub_sk);
+            let history = &session.history;
+            if history.is_empty() || !history_has_incomplete_turn(history) {
+                continue;
+            }
+            tracing::info!(task_id = %sa.task_id, agent = %sa.agent_name, "sub-agent startup recovery: found incomplete turn");
+            let reply_target = format!("startup:recovery:sub:{}", sa.task_id);
+            let loop_ = registry.get_or_create(&sub_sk, &reply_target);
+            let mut guard = loop_.lock().await;
+            match guard.recover_interrupted_turn().await {
+                Ok(Some(text)) if !text.is_empty() => {
+                    tracing::info!(task_id = %sa.task_id, "sub-agent startup recovery: turn completed");
+                    if let Some(dm) = delegation_manager {
+                        let _ = dm.event_sender().send(DelegationEvent::Completed {
+                            task_id: sa.task_id.clone(),
+                            session_key: sa.session_key.clone(),
+                            reply_target: sa.reply_target.clone(),
+                            summary: text,
+                            duration_secs: 0,
+                        }).await;
+                    }
+                }
+                Ok(_) => {
+                    tracing::info!(task_id = %sa.task_id, "sub-agent startup recovery: no recovery needed");
+                }
+                Err(e) => {
+                    tracing::warn!(task_id = %sa.task_id, err = %e, "sub-agent startup recovery failed");
+                }
+            }
+        }
+    }
+
     /// Abort all listener handles (call after run() returns).
     pub async fn shutdown_listeners(&mut self) {
         let handles = std::mem::take(&mut self.listener_handles);
@@ -1468,6 +918,378 @@ impl Orchestrator {
             h.abort();
         }
         tracing::info!("all listener tasks aborted");
+    }
+}
+
+// ── LoopRegistry ──────────────────────────────────────────────────────────────
+
+/// Groups the shared, Arc-owned resources required to create or look up an
+/// `AgentLoop` for a session.
+///
+/// Replaces the 12-argument `get_or_create_loop` free function.  All fields are
+/// cheap to clone (Arc or small value types) so the registry can be constructed
+/// once at the start of `Orchestrator::run()` and referenced throughout without
+/// re-borrowing `self`.
+struct LoopRegistry {
+    sessions: Arc<DashMap<String, Arc<TokioMutex<AgentLoop>>>>,
+    agent: Agent,
+    session_manager: Arc<SessionManager>,
+    channels: Arc<DashMap<String, Arc<dyn Channel>>>,
+    pending_asks: Arc<DashMap<String, (oneshot::Sender<String>, String)>>,
+    sub_delegator: Option<Arc<SubAgentDelegator>>,
+    delegation_manager: Option<Arc<DelegationManager>>,
+    persist_backend: Arc<dyn crate::storage::SessionBackend>,
+    change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
+    unfinished_subagents: Vec<crate::agents::UnfinishedSubAgent>,
+}
+
+impl LoopRegistry {
+    /// Return the existing `AgentLoop` for `sk`, or create and wire a new one.
+    fn get_or_create(&self, sk: &str, reply_target: &str) -> Arc<TokioMutex<AgentLoop>> {
+        if let Some(existing) = self.sessions.get(sk) {
+            return existing.clone();
+        }
+
+        let mut session = self.session_manager.get_or_create(sk);
+
+        // Inject recovery hint if sub-agents were interrupted by a hot-switch.
+        if !self.unfinished_subagents.is_empty() {
+            let mut recovery_msg = String::from(
+                "⚠️ 以下子代理在上次热切换中断，其 session 已持久化。如果需要，可以重新 delegate 它们继续工作：\n\n"
+            );
+            for agent_info in &self.unfinished_subagents {
+                recovery_msg.push_str(&format!(
+                    "- {} (task: {}): {}\n",
+                    agent_info.agent_name, agent_info.task_id, agent_info.task_preview
+                ));
+            }
+            session.add_system_text(recovery_msg);
+        }
+
+        let persist_hook: Arc<dyn PersistHook> = Arc::new(
+            BackendPersistHook::new(Arc::clone(&self.persist_backend))
+        );
+        let loop_ = self.agent.loop_for_with_persist(session, Some(persist_hook));
+
+        // Wire ask_user handler — captures an Arc clone of channels (O(1)).
+        let channels_arc = Arc::clone(&self.channels);
+        let pending_asks = Arc::clone(&self.pending_asks);
+        let reply_target_owned = reply_target.to_string();
+        let user_facing_key = sk.to_string();
+        let ask_handler: AskUserHandler = Arc::new(move |session_key: String, question: String| {
+            let channels = Arc::clone(&channels_arc);
+            let pending_asks = pending_asks.clone();
+            let reply_target = reply_target_owned.clone();
+            let user_facing_key = user_facing_key.clone();
+            Box::pin(async move {
+                let (ch_name, _) = parse_session_key(&session_key)
+                    .ok_or_else(|| anyhow::anyhow!("invalid session key: {}", session_key))?;
+                let channel: Arc<dyn Channel> = channels
+                    .get(ch_name)
+                    .map(|r| r.clone())
+                    .ok_or_else(|| anyhow::anyhow!("channel '{}' not found", ch_name))?;
+                let send_msg = SendMessage::new(&question, &reply_target);
+                channel.send(&send_msg).await?;
+
+                let (tx, rx) = oneshot::channel();
+                pending_asks.insert(user_facing_key, (tx, reply_target.clone()));
+
+                let answer = tokio::time::timeout(ASK_USER_TIMEOUT, rx)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("ask_user timed out waiting for user reply"))?
+                    .map_err(|_| anyhow::anyhow!("ask_user cancelled (dropped)"))?;
+                Ok(answer)
+            })
+        });
+
+        let mut loop_ = loop_.with_ask_user_handler(ask_handler);
+
+        // Wire delegate handler.
+        if let (Some(delegator), Some(manager)) = (self.sub_delegator.clone(), self.delegation_manager.clone()) {
+            let session_key_for_delegate = sk.to_string();
+            let reply_target_for_delegate = reply_target.to_string();
+            let delegate_handler: DelegateHandler = Arc::new(
+                move |agent_name: String, task: String| {
+                    delegator.delegate_async(
+                        &agent_name,
+                        &task,
+                        &session_key_for_delegate,
+                        &reply_target_for_delegate,
+                        &manager,
+                    )
+                }
+            );
+            loop_ = loop_.with_delegate_handler(delegate_handler);
+        }
+
+        // Wire sub-agent delegator for compaction summarisation.
+        if let Some(delegator) = self.sub_delegator.clone() {
+            loop_ = loop_.with_sub_delegator(delegator);
+        }
+
+        // Wire file-change receiver for hot-reload.
+        if let Some(rx) = self.change_rx.clone() {
+            loop_ = loop_.with_change_rx(rx);
+        }
+
+        let entry: Arc<TokioMutex<AgentLoop>> = Arc::new(TokioMutex::new(loop_));
+        self.sessions.insert(sk.into(), entry.clone());
+        entry
+    }
+}
+
+// ── retry_abort_prompt ────────────────────────────────────────────────────────
+
+/// Build a `SendMessage` that presents the user with **Retry / Abort** inline
+/// buttons.
+///
+/// Centralises the construction that previously appeared 6–7 times verbatim in
+/// `Orchestrator::run()`.  The callback data is prefixed with `__retry:` /
+/// `__abort:` and a 32-char prefix of the session key so it fits within
+/// Telegram's 64-byte limit.
+fn retry_abort_prompt(
+    content: impl Into<String>,
+    sk: &str,
+    reply_target: impl Into<String>,
+    thread_ts: Option<String>,
+) -> SendMessage {
+    let sk_prefix: String = sk.chars().take(32).collect();
+    SendMessage {
+        content: content.into(),
+        recipient: reply_target.into(),
+        subject: None,
+        thread_ts,
+        cancellation_token: None,
+        attachments: vec![],
+        image_urls: None,
+        inline_buttons: Some(vec![
+            InlineButton {
+                label: BTN_RETRY.to_string(),
+                callback_data: format!("__retry:{}", sk_prefix),
+            },
+            InlineButton {
+                label: BTN_ABORT.to_string(),
+                callback_data: format!("__abort:{}", sk_prefix),
+            },
+        ]),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Bundles the user message content and optional image payloads that are
+/// forwarded together to `AgentLoop::run` / `AgentLoop::run_streamed`.
+struct TurnInput {
+    content: String,
+    image_urls: Option<Vec<String>>,
+    image_base64: Option<Vec<String>>,
+}
+
+/// Execute a retry turn (spawned by the __retry callback handler).
+///
+/// Re-runs the pending user message through the agent loop and sends the
+/// result (or another retry/abort prompt on failure) back via `channel`.
+async fn run_retry_task(
+    sk: String,
+    channel: Arc<dyn Channel>,
+    loop_: Arc<TokioMutex<AgentLoop>>,
+    user_msg: String,
+    reply_target: String,
+    reply_to_id: Option<String>,
+) {
+    channel.on_status(&reply_target, ProcessingStatus::Thinking).await;
+
+    let response = {
+        let mut guard = loop_.lock().await;
+        guard.run(&user_msg, None, None).await
+    };
+
+    match response {
+        Ok(text) if !text.is_empty() => {
+            let send_msg = SendMessage {
+                recipient: reply_target.clone(),
+                content: text,
+                subject: None,
+                thread_ts: reply_to_id,
+                cancellation_token: None,
+                attachments: vec![],
+                image_urls: None,
+                inline_buttons: None,
+            };
+            if let Err(e) = channel.send(&send_msg).await {
+                error!(session = %sk, err = %e, "retry send failed");
+            }
+            channel.on_status(&reply_target, ProcessingStatus::Done).await;
+        }
+        Ok(_) => {
+            let send_msg = SendMessage::new(MSG_RETRY_EMPTY, reply_target.clone());
+            let _ = channel.send(&send_msg).await;
+            channel.on_status(&reply_target, ProcessingStatus::Done).await;
+        }
+        Err(e) => {
+            channel.on_status(&reply_target, ProcessingStatus::Error).await;
+            error!(session = %sk, err = %e, "retry failed, offering retry/abort again");
+            {
+                let mut guard = loop_.lock().await;
+                guard.set_pending_retry(user_msg.clone());
+            }
+            let send_msg = retry_abort_prompt(
+                format!("⚠️ 重试失败：`{}`\n\n你可以选择再次重试或放弃。", e),
+                &sk,
+                reply_target,
+                reply_to_id,
+            );
+            let _ = channel.send(&send_msg).await;
+        }
+    }
+}
+
+/// Execute a normal user-message turn (spawned per message).
+///
+/// Runs the agent loop for `input` via the streaming or non-streaming path
+/// and sends the result (or a retry/abort prompt on error) back via `channel`.
+async fn run_message_task(
+    sk: String,
+    channel: Arc<dyn Channel>,
+    loop_: Arc<TokioMutex<AgentLoop>>,
+    input: TurnInput,
+    reply_target: String,
+    reply_to_id: Option<String>,
+) {
+    let TurnInput { content, image_urls, image_base64 } = input;
+    channel.on_status(&reply_target, ProcessingStatus::Thinking).await;
+
+    if channel.supports_streaming() {
+        let stream_ctx = channel.take_stream_context(&reply_target);
+        let (event_tx, cancel) = match stream_ctx {
+            Some(ctx) => ctx,
+            None => {
+                tracing::warn!(session = %sk, "no stream context, falling back to run()");
+                let mut guard = loop_.lock().await;
+                let _ = guard.run(&content, image_urls, image_base64).await;
+                return;
+            }
+        };
+        let response = {
+            let mut guard = loop_.lock().await;
+            guard.run_streamed(&content, image_urls, image_base64, event_tx, cancel).await
+        };
+        match response {
+            Ok(_) => channel.on_status(&reply_target, ProcessingStatus::Done).await,
+            Err(e) => {
+                channel.on_status(&reply_target, ProcessingStatus::Error).await;
+                error!(session = %sk, err = %e, "streamed turn failed");
+            }
+        }
+        return;
+    }
+
+    // Non-streaming path.
+    let response = {
+        let mut guard = loop_.lock().await;
+        guard.run(&content, image_urls, image_base64).await
+    };
+
+    match response {
+        Ok(text) if !text.is_empty() => {
+            tracing::info!(session = %sk, text_len = text.len(), "sending response");
+            let send_msg = SendMessage {
+                recipient: reply_target.clone(),
+                content: text,
+                subject: None,
+                thread_ts: reply_to_id.clone(),
+                cancellation_token: None,
+                attachments: vec![],
+                image_urls: None,
+                inline_buttons: None,
+            };
+            if let Err(e) = channel.send(&send_msg).await {
+                error!(session = %sk, err = %e, "send failed");
+            }
+            channel.on_status(&reply_target, ProcessingStatus::Done).await;
+        }
+        Ok(_) => {
+            tracing::warn!(session = %sk, "empty response from run(), offering retry/abort");
+            channel.on_status(&reply_target, ProcessingStatus::Done).await;
+            {
+                let mut guard = loop_.lock().await;
+                guard.set_pending_retry(content.clone());
+            }
+            let send_msg = retry_abort_prompt(MSG_TIMEOUT, &sk, reply_target.clone(), reply_to_id.clone());
+            if let Err(e) = channel.send(&send_msg).await {
+                error!(session = %sk, err = %e, "failed to send empty-response retry prompt");
+            }
+        }
+        Err(e) => {
+            if let Some(crate::agents::error::AgentError::LoopBreak { reason }) =
+                e.downcast_ref::<crate::agents::error::AgentError>()
+            {
+                tracing::info!(session = %sk, reason = %reason, "loop breaker triggered, sending retry prompt");
+                channel.on_status(&reply_target, ProcessingStatus::Done).await;
+                {
+                    let mut guard = loop_.lock().await;
+                    guard.set_pending_retry(content.clone());
+                }
+                let send_msg = retry_abort_prompt(
+                    format!("⚠️ 检测到工具调用循环，已自动中断。\n\n原因：`{}`", reason),
+                    &sk, reply_target, reply_to_id,
+                );
+                if let Err(se) = channel.send(&send_msg).await {
+                    error!(session = %sk, err = %se, "failed to send retry prompt");
+                }
+                return;
+            }
+
+            if let Some(crate::agents::error::AgentError::EmptyResponse { user_message }) =
+                e.downcast_ref::<crate::agents::error::AgentError>()
+            {
+                tracing::info!(session = %sk, "empty response, sending retry prompt");
+                channel.on_status(&reply_target, ProcessingStatus::Done).await;
+                {
+                    let mut guard = loop_.lock().await;
+                    guard.set_pending_retry(user_message.clone());
+                }
+                let send_msg = retry_abort_prompt(MSG_EMPTY_RESPONSE, &sk, reply_target, reply_to_id);
+                if let Err(se) = channel.send(&send_msg).await {
+                    error!(session = %sk, err = %se, "failed to send retry prompt");
+                }
+                return;
+            }
+
+            if let Some(crate::agents::error::AgentError::RetryExhausted { attempts, source }) =
+                e.downcast_ref::<crate::agents::error::AgentError>()
+            {
+                channel.on_status(&reply_target, ProcessingStatus::Error).await;
+                error!(session = %sk, attempts, err = %source, "retries exhausted, offering retry/abort");
+                {
+                    let mut guard = loop_.lock().await;
+                    guard.set_pending_retry(content.clone());
+                }
+                let send_msg = retry_abort_prompt(
+                    format!("⚠️ 处理失败（重试 {} 次后放弃）：\n\n`{}`", attempts, source),
+                    &sk, reply_target, reply_to_id,
+                );
+                if let Err(se) = channel.send(&send_msg).await {
+                    error!(session = %sk, err = %se, "failed to send retry prompt");
+                }
+                return;
+            }
+
+            // Non-retryable error — still offer retry/abort for manual recovery.
+            channel.on_status(&reply_target, ProcessingStatus::Error).await;
+            error!(session = %sk, err = %e, "non-retryable loop error, offering retry/abort");
+            {
+                let mut guard = loop_.lock().await;
+                guard.set_pending_retry(content.clone());
+            }
+            let send_msg = retry_abort_prompt(
+                format!("⚠️ 处理消息时发生错误：\n\n`{}`", e),
+                &sk, reply_target, reply_to_id,
+            );
+            if let Err(se) = channel.send(&send_msg).await {
+                error!(session = %sk, err = %se, "failed to send retry prompt");
+            }
+        }
     }
 }
 

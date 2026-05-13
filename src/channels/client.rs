@@ -424,6 +424,10 @@ impl Channel for ClientChannel {
         true // Local WebSocket server is always healthy.
     }
 
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
     fn prepare_stream(
         &self,
         _session_key: &str,
