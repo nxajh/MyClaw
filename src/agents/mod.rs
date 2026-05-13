@@ -5,6 +5,7 @@ pub mod context_engine;
 pub mod error;
 pub mod agent_loader;
 pub mod attachment;
+pub mod recovery;
 pub mod watcher;
 mod delegation;
 mod loop_breaker;
@@ -25,6 +26,7 @@ pub mod slash_command;
 pub mod turn_event;
 
 pub use agent_impl::{Agent, AgentConfig, AgentLoop, AskUserHandler, DelegateHandler};
+pub use recovery::UnfinishedSubAgent;
 pub use turn_event::TurnEvent;
 pub use attachment::AttachmentManager;
 pub use watcher::{WorkspaceWatcher, ChangeSet};
