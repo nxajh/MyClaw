@@ -98,22 +98,41 @@ enum WsDisconnect {
 
 // ── Interaction / Keyboard types ──────────────────────────────────────────────
 
-/// A single button in a keyboard row.
+/// Permission metadata for a keyboard button. type=2 means all users can click.
 #[derive(Clone, serde::Serialize)]
-struct Button {
-    /// Button display text.
-    label: String,
-    /// Click callback value — sent back as message content when user clicks.
-    data: String,
-    /// Button style: 0 = gray (secondary), 1 = blue (primary).
-    #[serde(skip_serializing_if = "is_zero")]
-    style: u32,
-    /// 0 = click, 1 = link.
-    #[serde(skip_serializing_if = "is_zero")]
+struct ButtonPermission {
     r#type: u32,
 }
 
-fn is_zero(v: &u32) -> bool { *v == 0 }
+/// What happens when a button is clicked.
+#[derive(Clone, serde::Serialize)]
+struct ButtonAction {
+    /// 1 = Callback (INTERACTION_CREATE), 2 = Link (opens URL).
+    r#type: u32,
+    /// Payload delivered in data.resolved.button_data when type=1.
+    data: String,
+    permission: ButtonPermission,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    click_limit: Option<u32>,
+}
+
+/// Visual rendering of a button.
+#[derive(Clone, serde::Serialize)]
+struct ButtonRenderData {
+    label: String,
+    visited_label: String,
+    style: u32,
+}
+
+/// A single button in a keyboard row.
+#[derive(Clone, serde::Serialize)]
+struct Button {
+    id: String,
+    render_data: ButtonRenderData,
+    action: ButtonAction,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group_id: Option<String>,
+}
 
 /// A row of buttons.
 #[derive(Clone, serde::Serialize)]
@@ -121,10 +140,16 @@ struct ButtonRow {
     buttons: Vec<Button>,
 }
 
-/// A keyboard (grid of button rows).
+/// Keyboard content wrapper.
+#[derive(Clone, serde::Serialize)]
+struct KeyboardContent {
+    rows: Vec<ButtonRow>,
+}
+
+/// A keyboard (grid of button rows). Top-level payload for message body.
 #[derive(Clone, serde::Serialize)]
 struct Keyboard {
-    rows: Vec<ButtonRow>,
+    content: KeyboardContent,
 }
 
 impl Keyboard {
@@ -133,12 +158,21 @@ impl Keyboard {
     fn from_pairs(pairs: &[(impl AsRef<str>, impl AsRef<str>)]) -> Self {
         let mut rows = Vec::new();
         let mut current_row = Vec::new();
-        for (label, value) in pairs {
+        for (i, (label, value)) in pairs.iter().enumerate() {
             current_row.push(Button {
-                label: label.as_ref().to_string(),
-                data: value.as_ref().to_string(),
-                style: 0,
-                r#type: 0,
+                id: format!("btn_{}", i),
+                render_data: ButtonRenderData {
+                    label: label.as_ref().to_string(),
+                    visited_label: format!("✓ {}", label.as_ref()),
+                    style: 1,
+                },
+                action: ButtonAction {
+                    r#type: 1, // Callback
+                    data: value.as_ref().to_string(),
+                    permission: ButtonPermission { r#type: 2 }, // All users
+                    click_limit: None,
+                },
+                group_id: None,
             });
             if current_row.len() >= 5 {
                 rows.push(ButtonRow { buttons: std::mem::take(&mut current_row) });
@@ -147,7 +181,7 @@ impl Keyboard {
         if !current_row.is_empty() {
             rows.push(ButtonRow { buttons: current_row });
         }
-        Self { rows }
+        Self { content: KeyboardContent { rows } }
     }
 }
 
