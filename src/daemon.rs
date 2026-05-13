@@ -352,9 +352,6 @@ async fn build_tools(mcp_manager: &McpManager, skills: &Arc<parking_lot::RwLock<
     // SkillTool — loads skill body on demand.
     tools.register(Arc::new(crate::tools::SkillTool::new(Arc::clone(skills))));
 
-    // SelfTool — agent self-management (reload, restart, update, status, etc.)
-    tools.register(Arc::new(crate::tools::SelfTool::new()));
-
     // Inject MCP tools (if any servers are configured and connected).
     if mcp_manager.is_connected().await {
         let mcp_tools = mcp_manager.tools().await;
