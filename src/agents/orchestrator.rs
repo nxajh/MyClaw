@@ -707,17 +707,19 @@ impl Orchestrator {
     }
 
     /// Handle a scheduler event (from the Scheduler task via mpsc).
+    /// Dispatch scheduler events by spawning independent tasks.
+    /// Pre-flight checks (file read, parse, due filter) run inline to avoid
+    /// unnecessary task creation; the actual LLM execution is spawned.
     async fn handle_scheduler_event(&self, event: SchedulerEvent) {
         match event {
             SchedulerEvent::Heartbeat { target } => {
                 tracing::info!("heartbeat triggered (from scheduler)");
-                // Check HEARTBEAT.md existence — skip LLM entirely if missing.
+                // Pre-flight: cheap checks before spawning.
                 let heartbeat_path = std::path::Path::new("HEARTBEAT.md");
                 if !heartbeat_path.exists() {
                     tracing::debug!("heartbeat skipped: no HEARTBEAT.md");
                     return;
                 }
-                // Read file content in orchestrator; skip LLM if empty or no tasks.
                 let content = match std::fs::read_to_string(heartbeat_path) {
                     Ok(c) => c,
                     Err(e) => {
@@ -725,15 +727,11 @@ impl Orchestrator {
                         return;
                     }
                 };
-
-                // Parse structured tasks from HEARTBEAT.md
                 let (context, tasks) = super::heartbeat_tasks::parse_heartbeat(&content);
                 if tasks.is_empty() {
                     tracing::debug!("heartbeat skipped: no tasks in HEARTBEAT.md");
                     return;
                 }
-
-                // Load task state and filter to due tasks only
                 let state_path = std::path::Path::new("HEARTBEAT_STATE.json");
                 let state = super::heartbeat_tasks::HeartbeatState::load(state_path);
                 let due = super::heartbeat_tasks::due_tasks(&tasks, &state);
@@ -745,7 +743,6 @@ impl Orchestrator {
                     return;
                 }
 
-                // Build prompt with only due tasks
                 let prompt = super::heartbeat_tasks::build_heartbeat_prompt(&context, &due);
                 tracing::info!(
                     due_tasks = due.len(),
@@ -753,71 +750,38 @@ impl Orchestrator {
                     "heartbeat: running due tasks"
                 );
 
-                // Use ephemeral session key (no history accumulation)
-                let session_key = format!("_heartbeat_{}", uuid::Uuid::new_v4());
-                let result = self.run_scheduled_agent(&session_key, &prompt).await;
-
-                // Update task state on success
-                if result.is_ok() {
-                    let mut new_state = state;
-                    let now_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64;
-                    for task in &due {
-                        new_state.last_run.insert(task.name.clone(), now_ms);
-                    }
-                    new_state.save(state_path);
-                }
-
-                match result {
-                    Ok(response) if is_silent_ok(&response, "heartbeat") => {
-                        tracing::info!("heartbeat: nothing needs attention");
-                    }
-                    Ok(response) if !response.trim().is_empty() => {
-                        send_to_target_internal(self.channels.clone(), self.last_channel.clone(), &target, &response).await;
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!(error = %e, "heartbeat run failed");
-                    }
-                }
+                // Spawn: LLM execution runs independently of the main loop.
+                tokio::spawn(run_heartbeat_task(
+                    self.sessions.clone(),
+                    self.session_manager.clone(),
+                    self.persist_backend.clone(),
+                    self.agent.clone(),
+                    self.change_rx.clone(),
+                    self.channels.clone(),
+                    self.last_channel.clone(),
+                    target,
+                    prompt,
+                    due.into_iter().cloned().collect(),
+                    state,
+                    state_path.to_path_buf(),
+                ));
             }
             SchedulerEvent::Cron { session_key, prompt, target } => {
                 tracing::info!(session_key = %session_key, "cron job triggered (from scheduler)");
-                let result = self.run_scheduled_agent(&session_key, &prompt).await;
-                match result {
-                    Ok(response) if !response.trim().is_empty() => {
-                        send_to_target_internal(self.channels.clone(), self.last_channel.clone(), &target, &response).await;
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!(session_key = %session_key, error = %e, "cron job failed");
-                    }
-                }
+                tokio::spawn(run_cron_task(
+                    self.sessions.clone(),
+                    self.session_manager.clone(),
+                    self.persist_backend.clone(),
+                    self.agent.clone(),
+                    self.change_rx.clone(),
+                    self.channels.clone(),
+                    self.last_channel.clone(),
+                    session_key,
+                    prompt,
+                    target,
+                ));
             }
         }
-    }
-
-    /// Create or get an AgentLoop for a scheduler session and run a prompt.
-    async fn run_scheduled_agent(&self, session_key: &str, prompt: &str) -> anyhow::Result<String> {
-        let loop_ = if let Some(existing) = self.sessions.get(session_key) {
-            existing.clone()
-        } else {
-            let session = self.session_manager.get_or_create(session_key);
-            let persist_hook: Arc<dyn PersistHook> = Arc::new(
-                BackendPersistHook::new(self.persist_backend.clone())
-            );
-            let mut loop_ = self.agent.loop_for_with_persist(session, Some(persist_hook));
-            if let Some(rx) = self.change_rx.clone() {
-                loop_ = loop_.with_change_rx(rx);
-            }
-            let entry: Arc<TokioMutex<AgentLoop>> = Arc::new(TokioMutex::new(loop_));
-            self.sessions.insert(session_key.to_string(), entry.clone());
-            entry
-        };
-        let mut guard = loop_.lock().await;
-        guard.run(prompt, None, None).await
     }
 
     /// Scan all persisted sessions for incomplete turns and resume them.
@@ -1301,6 +1265,115 @@ pub(crate) fn is_silent_ok(response: &str, prefix: &str) -> bool {
     let trimmed = response.trim().to_lowercase();
     let marker = format!("{}_ok", prefix);
     trimmed == marker || trimmed.contains(&marker)
+}
+
+/// Execute a heartbeat turn as an independent spawned task.
+async fn run_heartbeat_task(
+    sessions: Arc<DashMap<String, Arc<TokioMutex<AgentLoop>>>>,
+    session_manager: Arc<SessionManager>,
+    persist_backend: Arc<dyn crate::storage::SessionBackend>,
+    agent: Agent,
+    change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
+    channels: Arc<DashMap<String, Arc<dyn Channel>>>,
+    last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
+    target: String,
+    prompt: String,
+    due: Vec<super::heartbeat_tasks::HeartbeatTask>,
+    mut state: super::heartbeat_tasks::HeartbeatState,
+    state_path: std::path::PathBuf,
+) {
+    let session_key = format!("_heartbeat_{}", uuid::Uuid::new_v4());
+    let result = {
+        let loop_ = get_or_create_scheduled_loop(
+            &sessions, &session_manager, &persist_backend,
+            &agent, change_rx.as_ref(), &session_key,
+        );
+        let mut guard = loop_.lock().await;
+        guard.run(&prompt, None, None).await
+    };
+
+    // Update task state on success.
+    if result.is_ok() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        for task in &due {
+            state.last_run.insert(task.name.clone(), now_ms);
+        }
+        state.save(&state_path);
+    }
+
+    match result {
+        Ok(response) if is_silent_ok(&response, "heartbeat") => {
+            tracing::info!("heartbeat: nothing needs attention");
+        }
+        Ok(response) if !response.trim().is_empty() => {
+            send_to_target_internal(channels, last_channel, &target, &response).await;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "heartbeat run failed");
+        }
+    }
+}
+
+/// Execute a cron job turn as an independent spawned task.
+async fn run_cron_task(
+    sessions: Arc<DashMap<String, Arc<TokioMutex<AgentLoop>>>>,
+    session_manager: Arc<SessionManager>,
+    persist_backend: Arc<dyn crate::storage::SessionBackend>,
+    agent: Agent,
+    change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
+    channels: Arc<DashMap<String, Arc<dyn Channel>>>,
+    last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
+    session_key: String,
+    prompt: String,
+    target: String,
+) {
+    let result = {
+        let loop_ = get_or_create_scheduled_loop(
+            &sessions, &session_manager, &persist_backend,
+            &agent, change_rx.as_ref(), &session_key,
+        );
+        let mut guard = loop_.lock().await;
+        guard.run(&prompt, None, None).await
+    };
+
+    match result {
+        Ok(response) if !response.trim().is_empty() => {
+            send_to_target_internal(channels, last_channel, &target, &response).await;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(session_key = %session_key, error = %e, "cron job failed");
+        }
+    }
+}
+
+/// Get or create an AgentLoop for a scheduler session (heartbeat/cron).
+fn get_or_create_scheduled_loop(
+    sessions: &Arc<DashMap<String, Arc<TokioMutex<AgentLoop>>>>,
+    session_manager: &Arc<SessionManager>,
+    persist_backend: &Arc<dyn crate::storage::SessionBackend>,
+    agent: &Agent,
+    change_rx: Option<&tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
+    session_key: &str,
+) -> Arc<TokioMutex<AgentLoop>> {
+    if let Some(existing) = sessions.get(session_key) {
+        return existing.clone();
+    }
+    let session = session_manager.get_or_create(session_key);
+    let persist_hook: Arc<dyn PersistHook> = Arc::new(
+        BackendPersistHook::new(persist_backend.clone())
+    );
+    let mut loop_ = agent.loop_for_with_persist(session, Some(persist_hook));
+    if let Some(rx) = change_rx {
+        loop_ = loop_.with_change_rx(rx.clone());
+    }
+    let entry: Arc<TokioMutex<AgentLoop>> = Arc::new(TokioMutex::new(loop_));
+    sessions.insert(session_key.to_string(), entry.clone());
+    entry
 }
 
 /// Send a response to the configured target channel (used by heartbeat).
