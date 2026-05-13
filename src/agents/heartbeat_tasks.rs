@@ -89,10 +89,14 @@ fn text_to_name(text: &str) -> String {
 ///
 /// The general context is everything before the first `## Tasks` section.
 /// Tasks are parsed from `- [name:interval] description` lines.
+///
+/// Backward compat: if no `## Tasks` section exists but there are `- ` lines,
+/// they are treated as tasks (plain text format, default 30m interval).
 pub fn parse_heartbeat(content: &str) -> (String, Vec<HeartbeatTask>) {
     let mut context_lines: Vec<&str> = Vec::new();
     let mut tasks: Vec<HeartbeatTask> = Vec::new();
     let mut in_tasks_section = false;
+    let mut has_tasks_section = false;
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -102,6 +106,7 @@ pub fn parse_heartbeat(content: &str) -> (String, Vec<HeartbeatTask>) {
             || trimmed.eq_ignore_ascii_case("## tasks:")
         {
             in_tasks_section = true;
+            has_tasks_section = true;
             continue;
         }
 
@@ -127,11 +132,26 @@ pub fn parse_heartbeat(content: &str) -> (String, Vec<HeartbeatTask>) {
         }
     }
 
-    // Strip leading/trailing empty lines and markdown headers from context
+    // Backward compat: no "## Tasks" section → collect `- ` lines from context as tasks
+    if !has_tasks_section {
+        let mut remaining_context: Vec<&str> = Vec::new();
+        for line in context_lines {
+            let trimmed = line.trim();
+            if trimmed.starts_with("- ") && trimmed.len() > 2 {
+                if let Some(task) = parse_task_line(&trimmed[2..]) {
+                    tasks.push(task);
+                    continue;
+                }
+            }
+            remaining_context.push(line);
+        }
+        context_lines = remaining_context;
+    }
+
+    // Strip markdown headers (# ...) and leading/trailing whitespace from context
     let context = context_lines
-        .join("\n")
-        .lines()
-        .map(str::trim)
+        .into_iter()
+        .filter(|line| !line.trim().starts_with('#'))
         .collect::<Vec<_>>()
         .join("\n")
         .trim()
@@ -314,9 +334,9 @@ mod tests {
         ];
         let now = now_millis();
         let mut state = HeartbeatState::default();
-        // task a ran 20 min ago → due (interval 30m)
-        state.last_run.insert("a".into(), now - 20 * 60 * 1000);
-        // task b ran 20 min ago → not due (interval 1h)
+        // task a ran 35 min ago → due (interval 30m, 35 > 30)
+        state.last_run.insert("a".into(), now - 35 * 60 * 1000);
+        // task b ran 20 min ago → not due (interval 1h, 20 < 60)
         state.last_run.insert("b".into(), now - 20 * 60 * 1000);
 
         let due = due_tasks(&tasks, &state);
