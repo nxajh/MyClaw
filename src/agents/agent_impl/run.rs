@@ -436,7 +436,7 @@ impl AgentLoop {
         }
 
         // Case C: last message is user — daemon was killed before model responded.
-        if history.last().map_or(false, |m| m.role == "user") {
+        if history.last().is_some_and(|m| m.role == "user") {
             tracing::info!("detected incomplete turn (user message with no assistant response), resuming");
             let messages = self.build_messages().await?;
             let text = self.chat_loop(messages, stream_mode.clone()).await?;

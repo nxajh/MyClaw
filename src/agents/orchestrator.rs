@@ -144,7 +144,7 @@ fn history_has_incomplete_turn(history: &[crate::providers::capability_chat::Cha
         }
     }
     // Check if the very last message is a user message (no assistant response yet).
-    let last_is_user = history.last().map_or(false, |m| m.role == "user");
+    let last_is_user = history.last().is_some_and(|m| m.role == "user");
     found_pending || has_trailing_tools || last_is_user
 }
 
