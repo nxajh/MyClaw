@@ -576,7 +576,7 @@ impl Orchestrator {
                     let loop_ = registry.get_or_create(&sk, &reply_target);
                     tokio::spawn(run_message_task(
                         sk, channel, loop_,
-                        content, image_urls, image_base64,
+                        TurnInput { content, image_urls, image_base64 },
                         reply_target, reply_to_id,
                     ));
                 }
@@ -1077,6 +1077,14 @@ fn retry_abort_prompt(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Bundles the user message content and optional image payloads that are
+/// forwarded together to `AgentLoop::run` / `AgentLoop::run_streamed`.
+struct TurnInput {
+    content: String,
+    image_urls: Option<Vec<String>>,
+    image_base64: Option<Vec<String>>,
+}
+
 /// Execute a retry turn (spawned by the __retry callback handler).
 ///
 /// Re-runs the pending user message through the agent loop and sends the
@@ -1138,18 +1146,17 @@ async fn run_retry_task(
 
 /// Execute a normal user-message turn (spawned per message).
 ///
-/// Runs the agent loop for `content` via the streaming or non-streaming path
+/// Runs the agent loop for `input` via the streaming or non-streaming path
 /// and sends the result (or a retry/abort prompt on error) back via `channel`.
 async fn run_message_task(
     sk: String,
     channel: Arc<dyn Channel>,
     loop_: Arc<TokioMutex<AgentLoop>>,
-    content: String,
-    image_urls: Option<Vec<String>>,
-    image_base64: Option<Vec<String>>,
+    input: TurnInput,
     reply_target: String,
     reply_to_id: Option<String>,
 ) {
+    let TurnInput { content, image_urls, image_base64 } = input;
     channel.on_status(&reply_target, ProcessingStatus::Thinking).await;
 
     if channel.supports_streaming() {
