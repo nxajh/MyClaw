@@ -1352,13 +1352,35 @@ impl Orchestrator {
         match event {
             SchedulerEvent::Heartbeat { target } => {
                 tracing::info!("heartbeat triggered (from scheduler)");
-                // Check HEARTBEAT.md existence.
-                if !std::path::Path::new("HEARTBEAT.md").exists() {
+                // Check HEARTBEAT.md existence — skip LLM entirely if missing.
+                let heartbeat_path = std::path::Path::new("HEARTBEAT.md");
+                if !heartbeat_path.exists() {
                     tracing::debug!("heartbeat skipped: no HEARTBEAT.md");
                     return;
                 }
-                let prompt = "read heartbeat.md if it exists. follow it strictly. if nothing needs attention, reply heartbeat_ok.";
-                let result = self.run_scheduled_agent("_heartbeat", prompt).await;
+                // Read file content in orchestrator; skip LLM if empty or no tasks.
+                let content = match std::fs::read_to_string(heartbeat_path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "heartbeat skipped: cannot read HEARTBEAT.md");
+                        return;
+                    }
+                };
+                let has_tasks = content.lines().any(|line| {
+                    let t = line.trim();
+                    t.starts_with("- ") && t.len() > 2
+                });
+                if !has_tasks {
+                    tracing::debug!("heartbeat skipped: HEARTBEAT.md has no tasks");
+                    return;
+                }
+                let prompt = format!(
+                    "You are performing a heartbeat check. The HEARTBEAT.md content is below.\n\n\
+                     {}\n\n\
+                     Follow the instructions in the file. If nothing needs attention, reply with exactly: heartbeat_ok",
+                    content
+                );
+                let result = self.run_scheduled_agent("_heartbeat", &prompt).await;
                 match result {
                     Ok(response) if is_silent_ok(&response, "heartbeat") => {
                         tracing::info!("heartbeat: nothing needs attention");
