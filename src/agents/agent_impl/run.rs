@@ -353,6 +353,79 @@ impl AgentLoop {
 
         // Case A: assistant tool_calls with missing results → re-execute.
         if !pending_calls.is_empty() {
+            // Check if the last completed tool was a restart/stop command.
+            // If so, skip remaining tool calls — the daemon exited after that
+            // tool and the pending calls were never executed. Re-executing them
+            // (e.g. kill/pkill) would be harmful.
+            let last_completed_is_restart = {
+                let mut found = None;
+                for msg in history.iter().rev() {
+                    if msg.role == "tool" {
+                        // Find the assistant message before this tool result
+                        // to get the tool call name.
+                        continue;
+                    }
+                    if msg.role == "assistant" {
+                        if let Some(ref calls) = msg.tool_calls {
+                            // Find the last tool call that has a result.
+                            for call in calls.iter().rev() {
+                                if completed_ids.contains(&call.id) {
+                                    found = Some(call.name.clone());
+                                    break;
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+                matches!(
+                    found.as_deref(),
+                    Some("myclaw_restart") | Some("myclaw_stop") | Some("myclaw_update")
+                )
+            };
+
+            if last_completed_is_restart {
+                tracing::info!(
+                    missing_count = pending_calls.len(),
+                    "last completed tool was restart/stop, skipping remaining tool calls"
+                );
+                // Inject synthetic "skipped" results for pending calls.
+                let mut messages = self.build_messages().await?;
+                for call in &pending_calls {
+                    let result_content = "skipped: daemon was restarting".to_string();
+                    let mut tool_msg = ChatMessage::text("tool", &result_content);
+                    tool_msg.tool_call_id = Some(call.id.clone());
+                    tool_msg.is_error = Some(false);
+                    messages.push(tool_msg);
+                    self.session.add_tool_result(call.id.clone(), result_content, false);
+                    if let Some(ref hook) = self.persist_hook {
+                        if let Some(msg) = self.session.history.last() {
+                            if let Some(id) = hook.persist_message(&self.session.id, msg) {
+                                if let Some(last_id) = self.session.message_ids.last_mut() {
+                                    *last_id = id;
+                                }
+                            }
+                        }
+                    }
+                }
+                // Continue to LLM so it can respond to the user.
+                let text = self.chat_loop(messages, stream_mode.clone()).await?;
+                if !text.is_empty() {
+                    self.session.add_assistant_text(text.clone());
+                    if let Some(ref hook) = self.persist_hook {
+                        if let Some(msg) = self.session.history.last() {
+                            if let Some(id) = hook.persist_message(&self.session.id, msg) {
+                                if let Some(last_id) = self.session.message_ids.last_mut() {
+                                    *last_id = id;
+                                }
+                            }
+                        }
+                    }
+                }
+                tracing::info!("interrupted turn resumed (restart: skipped pending tools)");
+                return Ok(Some(text));
+            }
+
             tracing::info!(
                 missing_count = pending_calls.len(),
                 "detected incomplete turn (missing tool results), resuming"
@@ -932,6 +1005,18 @@ impl AgentLoop {
                             }
                         }
                     }
+                }
+
+                // Hot switch checkpoint: after tool execution.
+                // SIGUSR1 may arrive during or immediately after `myclaw restart`
+                // executes. Check here so we exit before the next tool call in
+                // the same batch (e.g. kill/pkill) can run.
+                if crate::is_shutting_down() {
+                    tracing::info!(
+                        tool = %call.name,
+                        "shutdown flag set after tool execution, exiting before next tool"
+                    );
+                    return Ok(String::new());
                 }
             }
         }
