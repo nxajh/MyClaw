@@ -12,7 +12,7 @@
 use anyhow::{Context, Result};
 use crate::agents::{
     Agent, AgentConfig, InMemoryBackend, Orchestrator, OrchestratorParts, SessionManager,
-    ToolRegistry, SkillManager, Skill, SystemPromptConfig, AutonomyLevel, SkillsPromptInjectionMode,
+    ToolRegistry, SkillManager, Skill, SystemPromptConfig, SkillsPromptInjectionMode,
     McpManager, SubAgentDelegator, DelegationManager,
 };
 use crate::tools::TaskDelegator;
@@ -455,11 +455,9 @@ fn build_prompt_config(
         workspace_dir: workspace_dir.to_string_lossy().to_string(),
         knowledge_dir: knowledge_dir.to_string_lossy().to_string(),
         model_name: cfg.prompt.model_name.clone().unwrap_or_default(),
-        autonomy: match cfg.autonomy_level {
-            crate::config::agent::AutonomyLevel::Full => AutonomyLevel::Full,
-            crate::config::agent::AutonomyLevel::Default => AutonomyLevel::Default,
-            crate::config::agent::AutonomyLevel::ReadOnly => AutonomyLevel::ReadOnly,
-        },
+        // agents::AutonomyLevel is a re-export of config::agent::AutonomyLevel —
+        // same type, assign directly.
+        autonomy: cfg.autonomy_level,
         skills_mode: SkillsPromptInjectionMode::Compact,
         compact: cfg.prompt.compact,
         max_chars: cfg.prompt.max_chars,

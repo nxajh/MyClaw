@@ -125,6 +125,15 @@ pub trait Channel: Send + Sync {
         None
     }
 
+    /// Whether this channel supports streaming turn events via `run_streamed()`.
+    ///
+    /// Returns `false` by default.  `ClientChannel` overrides this to `true`.
+    /// Replaces the previous `channel_name == "client"` string comparison in
+    /// the Orchestrator, eliminating an OCP violation.
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+
     /// Cancel the current turn for a session (ClientChannel only).
     fn cancel_turn(&self, _session_key: &str) {}
 }

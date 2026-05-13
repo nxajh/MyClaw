@@ -3,33 +3,38 @@
 mod agent_impl;
 pub mod context_engine;
 pub mod error;
-pub mod agent_loader;
 pub mod attachment;
 pub mod recovery;
-pub mod watcher;
 mod delegation;
 mod loop_breaker;
 mod orchestrator;
 mod prompt;
 mod session_manager;
-pub mod skill_loader;
-mod skills;
 mod tool_registry;
 mod mcp_manager;
-mod scheduler;
 mod sub_agent;
-pub mod cron_loader;
-pub mod heartbeat_tasks;
-pub mod webhook_loader;
-pub mod work_unit;
 pub mod slash_command;
 pub mod turn_event;
+
+/// Scheduling: cron jobs, webhooks, heartbeat scheduler.
+pub mod scheduling;
+pub use scheduling::cron_loader;
+pub use scheduling::heartbeat_tasks;
+pub use scheduling::webhook_loader;
+pub use scheduling::work_unit;
+
+/// Workspace: agent/skill loading, skill execution, file watching.
+pub mod workspace;
+pub use workspace::agent_loader;
+pub use workspace::skill_loader;
+pub use workspace::watcher;
+pub use workspace::skills;
 
 pub use agent_impl::{Agent, AgentConfig, AgentLoop, AskUserHandler, DelegateHandler};
 pub use recovery::UnfinishedSubAgent;
 pub use turn_event::TurnEvent;
 pub use attachment::AttachmentManager;
-pub use watcher::{WorkspaceWatcher, ChangeSet};
+pub use workspace::watcher::{WorkspaceWatcher, ChangeSet};
 pub use delegation::{DelegationEvent, DelegationManager};
 pub use loop_breaker::{LoopBreak, LoopBreakReason, LoopBreaker, LoopBreakerConfig};
 pub use session_manager::{InMemoryBackend, PersistHook, BackendPersistHook, Session, BreakpointItem};
@@ -38,13 +43,13 @@ pub use orchestrator::{Orchestrator, OrchestratorParts, SharedSessions, Schedule
 pub use prompt::{AutonomyLevel, SkillsPromptInjectionMode, SystemPromptBuilder, SystemPromptConfig};
 pub use session_manager::SessionManager;
 pub use crate::storage::SessionBackend;
-pub use skill_loader::SkillDefinition;
-pub use cron_loader::load_cron_jobs;
-pub use webhook_loader::{WebhookJobDef, load_webhook_jobs};
-pub use skills::{Skill, SkillManager};
+pub use workspace::skill_loader::SkillDefinition;
+pub use scheduling::cron_loader::load_cron_jobs;
+pub use scheduling::webhook_loader::{WebhookJobDef, load_webhook_jobs};
+pub use workspace::skills::{Skill, SkillManager};
 pub use tool_registry::ToolRegistry;
 pub use mcp_manager::McpManager;
 pub use sub_agent::SubAgentDelegator;
-pub use scheduler::{Scheduler, WebhookContext, run_webhook_server, send_to_target, is_active_hours, cron_matches};
+pub use scheduling::scheduler::{Scheduler, WebhookContext, run_webhook_server, send_to_target, is_active_hours, cron_matches};
 pub use error::AgentError;
 pub use context_engine::{ContextEngine, TokenStats, CompactionResult, TokenTracker};

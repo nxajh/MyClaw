@@ -28,6 +28,16 @@ const CHANNEL_QUEUE_SIZE: usize = 100;
 /// Timeout for ask_user waiting for user reply (5 minutes).
 const ASK_USER_TIMEOUT: Duration = Duration::from_secs(300);
 
+// ── User-facing message strings ────────────────────────────────────────────────
+const MSG_RETRY_EMPTY: &str = "⚠️ 重试后仍未获得有效回复。";
+const MSG_NO_PENDING_RETRY: &str = "没有待重试的消息，请重新发送。";
+const MSG_ABORT_ACK: &str = "已取消";
+const MSG_INCOMPLETE_TURN: &str = "⚠️ 检测到上次请求未处理完成（可能是服务重启）。\n\n请选择重试或放弃。";
+const MSG_TIMEOUT: &str = "⚠️ 处理超时，未收到模型回复。";
+const MSG_EMPTY_RESPONSE: &str = "⚠️ 处理失败，模型未返回有效回复。";
+const BTN_RETRY: &str = "🔄 重试";
+const BTN_ABORT: &str = "✖ 放弃";
+
 /// Internal enum for the run loop's select.
 enum ChannelEvent {
     UserMessage((String, ChannelMessage)),
@@ -104,6 +114,35 @@ fn parse_session_key(sk: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((ch, sender))
+}
+
+/// Return `true` if the session history ends with an incomplete tool execution:
+/// either trailing tool-result messages, or assistant tool_calls whose IDs have
+/// no matching tool-result — indicating the turn was interrupted mid-execution.
+fn history_has_incomplete_turn(history: &[crate::providers::capability_chat::ChatMessage]) -> bool {
+    let mut completed_ids = std::collections::HashSet::new();
+    let mut has_trailing_tools = false;
+    let mut found_pending = false;
+    for msg in history.iter().rev() {
+        if msg.role == "tool" {
+            if let Some(ref id) = msg.tool_call_id {
+                completed_ids.insert(id.clone());
+            }
+            has_trailing_tools = true;
+        } else if msg.role == "assistant" {
+            if let Some(ref calls) = msg.tool_calls {
+                for call in calls {
+                    if !completed_ids.contains(&call.id) {
+                        found_pending = true;
+                    }
+                }
+            }
+            break;
+        } else {
+            break;
+        }
+    }
+    found_pending || has_trailing_tools
 }
 
 /// Fully-assembled components ready for the Orchestrator to use.
@@ -290,161 +329,9 @@ impl Orchestrator {
             unfinished_subagents: unfinished_subagents.clone(),
         };
 
-        // ── Startup recovery: detect and resume interrupted turns ──────────
-        // Scan all sessions for incomplete turns left by a previous run
-        // (e.g. SIGUSR1 hot-switch killed the process mid-turn).
-        {
-            let all_sessions = self.session_manager.list_all_sessions();
-            let mut recovered = 0;
-            for session_info in &all_sessions {
-                let sk = &session_info.owner;
-                // Load session and check for incomplete turns.
-                let session = self.session_manager.get_or_create(sk);
-                let history = &session.history;
-                if history.is_empty() {
-                    continue;
-                }
-                // Quick check: does the session end with tool results or
-                // assistant tool_calls without results?
-                let has_incomplete = {
-                    let mut completed_ids = std::collections::HashSet::new();
-                    let mut has_trailing_tools = false;
-                    let mut found_pending = false;
-                    for msg in history.iter().rev() {
-                        if msg.role == "tool" {
-                            if let Some(ref id) = msg.tool_call_id {
-                                completed_ids.insert(id.clone());
-                            }
-                            has_trailing_tools = true;
-                        } else if msg.role == "assistant" {
-                            if let Some(ref calls) = msg.tool_calls {
-                                for call in calls {
-                                    if !completed_ids.contains(&call.id) {
-                                        found_pending = true;
-                                    }
-                                }
-                            }
-                            break;
-                        } else {
-                            break;
-                        }
-                    }
-                    found_pending || has_trailing_tools
-                };
-                if !has_incomplete {
-                    continue;
-                }
-                tracing::info!(session = %sk, "startup recovery: found incomplete turn");
-                // Create a loop for this session and trigger recovery.
-                let reply_target = format!("startup:recovery:{}", sk);
-                let loop_ = registry.get_or_create(sk, &reply_target);
-                let mut guard = loop_.lock().await;
-                match guard.recover_interrupted_turn().await {
-                    Ok(Some(text)) if !text.is_empty() => {
-                        recovered += 1;
-                        tracing::info!(session = %sk, "startup recovery: turn completed");
-                        // Send recovery response via the channel.
-                        // Use persisted reply_target if available (handles QQ Bot c2c:/group: prefix).
-                        let recipient = self.persist_backend.load_reply_target(sk)
-                            .unwrap_or_else(|| {
-                                parse_session_key(sk)
-                                    .map(|(_, sender)| sender.to_string())
-                                    .unwrap_or_default()
-                            });
-                        if let Some((ch_name, _)) = parse_session_key(sk) {
-                            if let Some(channel) = channels.get(ch_name).map(|r| r.clone()) {
-                                let send_msg = SendMessage::new(&text, &recipient);
-                                if let Err(e) = channel.send(&send_msg).await {
-                                    tracing::warn!(session = %sk, err = %e, "startup recovery: failed to send response");
-                                }
-                            }
-                        }
-                    }
-                    Ok(_) => {
-                        // No recovery needed or empty response — skip silently.
-                    }
-                    Err(e) => {
-                        tracing::warn!(session = %sk, err = %e, "startup recovery failed");
-                    }
-                }
-            }
-            if recovered > 0 {
-                tracing::info!(count = recovered, "startup recovery complete");
-            }
-        }
-
-        // ── Sub-agent startup recovery ─────────────────────────────────────
-        // For unfinished sub-agents detected via marker files, recover their
-        // interrupted turns and emit delegation events so the parent agent
-        // receives the results.
-        for sa in &unfinished_subagents {
-            if sa.sub_session_id.is_empty() || sa.session_key.is_empty() {
-                tracing::info!(task_id = %sa.task_id, "sub-agent recovery: skipping (no session_id or session_key)");
-                continue;
-            }
-            // Construct the sub-agent session key for loading.
-            let sub_sk = format!("{}:{}", sa.agent_name, sa.sub_session_id);
-            let session = self.session_manager.get_or_create(&sub_sk);
-            let history = &session.history;
-            if history.is_empty() {
-                continue;
-            }
-            // Check for incomplete turn.
-            let has_incomplete = {
-                let mut completed_ids = std::collections::HashSet::new();
-                let mut has_trailing_tools = false;
-                let mut found_pending = false;
-                for msg in history.iter().rev() {
-                    if msg.role == "tool" {
-                        if let Some(ref id) = msg.tool_call_id {
-                            completed_ids.insert(id.clone());
-                        }
-                        has_trailing_tools = true;
-                    } else if msg.role == "assistant" {
-                        if let Some(ref calls) = msg.tool_calls {
-                            for call in calls {
-                                if !completed_ids.contains(&call.id) {
-                                    found_pending = true;
-                                }
-                            }
-                        }
-                        break;
-                    } else {
-                        break;
-                    }
-                }
-                found_pending || has_trailing_tools
-            };
-            if !has_incomplete {
-                continue;
-            }
-            tracing::info!(task_id = %sa.task_id, agent = %sa.agent_name, "sub-agent startup recovery: found incomplete turn");
-            // Create a loop for the sub-agent session and recover.
-            let reply_target = format!("startup:recovery:sub:{}", sa.task_id);
-            let loop_ = registry.get_or_create(&sub_sk, &reply_target);
-            let mut guard = loop_.lock().await;
-            match guard.recover_interrupted_turn().await {
-                Ok(Some(text)) if !text.is_empty() => {
-                    tracing::info!(task_id = %sa.task_id, "sub-agent startup recovery: turn completed");
-                    // Emit delegation event so the parent agent gets the result.
-                    if let Some(ref dm) = delegation_manager {
-                        let _ = dm.event_sender().send(DelegationEvent::Completed {
-                            task_id: sa.task_id.clone(),
-                            session_key: sa.session_key.clone(),
-                            reply_target: sa.reply_target.clone(),
-                            summary: text,
-                            duration_secs: 0,
-                        }).await;
-                    }
-                }
-                Ok(_) => {
-                    tracing::info!(task_id = %sa.task_id, "sub-agent startup recovery: no recovery needed");
-                }
-                Err(e) => {
-                    tracing::warn!(task_id = %sa.task_id, err = %e, "sub-agent startup recovery failed");
-                }
-            }
-        }
+        // ── Startup recovery ──────────────────────────────────────────────
+        self.startup_recover_sessions(&registry).await;
+        self.startup_recover_subagents(&registry, &unfinished_subagents, &delegation_manager).await;
 
         loop {
             if *shutdown_rx.borrow() {
@@ -606,7 +493,7 @@ impl Orchestrator {
                                         Ok(_) => {
                                             // Empty again — just notify, don't loop.
                                             let send_msg = SendMessage::new(
-                                                "⚠️ 重试后仍未获得有效回复。",
+                                                MSG_RETRY_EMPTY,
                                                 reply_target_c.clone(),
                                             );
                                             let _ = channel.send(&send_msg).await;
@@ -634,7 +521,7 @@ impl Orchestrator {
                                 });
                             } else {
                                 let send_msg = SendMessage::new(
-                                    "没有待重试的消息，请重新发送。",
+                                    MSG_NO_PENDING_RETRY,
                                     reply_target.clone(),
                                 );
                                 let _ = channel.send(&send_msg).await;
@@ -646,7 +533,7 @@ impl Orchestrator {
                                 let mut guard = loop_.lock().await;
                                 guard.take_pending_retry();
                             }
-                            let send_msg = SendMessage::new("已取消", reply_target.clone());
+                            let send_msg = SendMessage::new(MSG_ABORT_ACK, reply_target.clone());
                             let _ = channel.send(&send_msg).await;
                         }
                         continue;
@@ -673,7 +560,7 @@ impl Orchestrator {
                                 None => continue,
                             };
                             let send_msg = retry_abort_prompt(
-                                "⚠️ 检测到上次请求未处理完成（可能是服务重启）。\n\n请选择重试或放弃。",
+                                MSG_INCOMPLETE_TURN,
                                 &sk,
                                 msg.reply_target.clone(),
                                 Some(msg.id.clone()),
@@ -758,11 +645,11 @@ impl Orchestrator {
                         // Notify channel that processing has started.
                         channel.on_status(&reply_target, ProcessingStatus::Thinking).await;
 
-                        // ClientChannel uses streaming path: run_streamed() + TurnEvent forwarding.
-                        // Other channels use the existing run() + channel.send() path.
-                        let is_client = channel_name_clone == "client";
+                        // Channels that support streaming use run_streamed() + TurnEvent forwarding.
+                        // All other channels use the run() + channel.send() path.
+                        let supports_streaming = channel.supports_streaming();
 
-                        if is_client {
+                        if supports_streaming {
                             // Streaming path for ClientChannel.
                             let stream_ctx = channel.take_stream_context(&reply_target);
                             let (event_tx, cancel) = match stream_ctx {
@@ -833,7 +720,7 @@ impl Orchestrator {
                                     }
 
                                     let send_msg = retry_abort_prompt(
-                                        "⚠️ 处理超时，未收到模型回复。",
+                                        MSG_TIMEOUT,
                                         &sk,
                                         reply_target.clone(),
                                         reply_to_id.clone(),
@@ -886,7 +773,7 @@ impl Orchestrator {
                                         }
 
                                         let send_msg = retry_abort_prompt(
-                                            "⚠️ 处理失败，模型未返回有效回复。",
+                                            MSG_EMPTY_RESPONSE,
                                             &sk,
                                             reply_target.clone(),
                                             reply_to_id.clone(),
@@ -1182,6 +1069,100 @@ impl Orchestrator {
         guard.run(prompt, None, None).await
     }
 
+    /// Scan all persisted sessions for incomplete turns and resume them.
+    /// Called once at startup, before the main event loop.
+    async fn startup_recover_sessions(&self, registry: &LoopRegistry) {
+        let all_sessions = self.session_manager.list_all_sessions();
+        let mut recovered = 0;
+        for session_info in &all_sessions {
+            let sk = &session_info.owner;
+            let session = self.session_manager.get_or_create(sk);
+            let history = &session.history;
+            if history.is_empty() || !history_has_incomplete_turn(history) {
+                continue;
+            }
+            tracing::info!(session = %sk, "startup recovery: found incomplete turn");
+            let reply_target = format!("startup:recovery:{}", sk);
+            let loop_ = registry.get_or_create(sk, &reply_target);
+            let mut guard = loop_.lock().await;
+            match guard.recover_interrupted_turn().await {
+                Ok(Some(text)) if !text.is_empty() => {
+                    recovered += 1;
+                    tracing::info!(session = %sk, "startup recovery: turn completed");
+                    // Use persisted reply_target if available (handles QQ Bot c2c:/group: prefix).
+                    let recipient = self.persist_backend.load_reply_target(sk)
+                        .unwrap_or_else(|| {
+                            parse_session_key(sk)
+                                .map(|(_, sender)| sender.to_string())
+                                .unwrap_or_default()
+                        });
+                    if let Some((ch_name, _)) = parse_session_key(sk) {
+                        if let Some(channel) = self.channels.get(ch_name).map(|r| r.clone()) {
+                            let send_msg = SendMessage::new(&text, &recipient);
+                            if let Err(e) = channel.send(&send_msg).await {
+                                tracing::warn!(session = %sk, err = %e, "startup recovery: failed to send response");
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(session = %sk, err = %e, "startup recovery failed");
+                }
+            }
+        }
+        if recovered > 0 {
+            tracing::info!(count = recovered, "startup recovery complete");
+        }
+    }
+
+    /// Recover sub-agents that were interrupted by a previous daemon shutdown.
+    /// Resumes each incomplete sub-agent turn and emits a delegation event so
+    /// the parent agent receives the result.
+    async fn startup_recover_subagents(
+        &self,
+        registry: &LoopRegistry,
+        unfinished: &[crate::agents::UnfinishedSubAgent],
+        delegation_manager: &Option<Arc<DelegationManager>>,
+    ) {
+        for sa in unfinished {
+            if sa.sub_session_id.is_empty() || sa.session_key.is_empty() {
+                tracing::info!(task_id = %sa.task_id, "sub-agent recovery: skipping (no session_id or session_key)");
+                continue;
+            }
+            let sub_sk = format!("{}:{}", sa.agent_name, sa.sub_session_id);
+            let session = self.session_manager.get_or_create(&sub_sk);
+            let history = &session.history;
+            if history.is_empty() || !history_has_incomplete_turn(history) {
+                continue;
+            }
+            tracing::info!(task_id = %sa.task_id, agent = %sa.agent_name, "sub-agent startup recovery: found incomplete turn");
+            let reply_target = format!("startup:recovery:sub:{}", sa.task_id);
+            let loop_ = registry.get_or_create(&sub_sk, &reply_target);
+            let mut guard = loop_.lock().await;
+            match guard.recover_interrupted_turn().await {
+                Ok(Some(text)) if !text.is_empty() => {
+                    tracing::info!(task_id = %sa.task_id, "sub-agent startup recovery: turn completed");
+                    if let Some(dm) = delegation_manager {
+                        let _ = dm.event_sender().send(DelegationEvent::Completed {
+                            task_id: sa.task_id.clone(),
+                            session_key: sa.session_key.clone(),
+                            reply_target: sa.reply_target.clone(),
+                            summary: text,
+                            duration_secs: 0,
+                        }).await;
+                    }
+                }
+                Ok(_) => {
+                    tracing::info!(task_id = %sa.task_id, "sub-agent startup recovery: no recovery needed");
+                }
+                Err(e) => {
+                    tracing::warn!(task_id = %sa.task_id, err = %e, "sub-agent startup recovery failed");
+                }
+            }
+        }
+    }
+
     /// Abort all listener handles (call after run() returns).
     pub async fn shutdown_listeners(&mut self) {
         let handles = std::mem::take(&mut self.listener_handles);
@@ -1335,11 +1316,11 @@ fn retry_abort_prompt(
         image_urls: None,
         inline_buttons: Some(vec![
             InlineButton {
-                label: "🔄 重试".to_string(),
+                label: BTN_RETRY.to_string(),
                 callback_data: format!("__retry:{}", sk_prefix),
             },
             InlineButton {
-                label: "✖ 放弃".to_string(),
+                label: BTN_ABORT.to_string(),
                 callback_data: format!("__abort:{}", sk_prefix),
             },
         ]),
