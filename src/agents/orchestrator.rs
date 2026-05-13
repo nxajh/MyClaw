@@ -91,6 +91,8 @@ pub struct Orchestrator {
     change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
     /// Last channel that received a user message (shared with schedulers).
     pub last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
+    /// Path to persist last_channel across restarts.
+    last_channel_file: std::path::PathBuf,
     /// Scheduler event receiver (heartbeat ticks, cron triggers).
     scheduler_rx: Arc<TokioMutex<Option<mpsc::Receiver<SchedulerEvent>>>>,
     /// Search provider cooldown tracker (shared with WebSearchTool).
@@ -176,6 +178,8 @@ pub struct OrchestratorParts {
     /// Sub-agents that were still running when the previous daemon was killed.
     /// Injected as a recovery hint into the first session interaction.
     pub unfinished_subagents: Vec<crate::agents::UnfinishedSubAgent>,
+    /// Workspace directory for persisting runtime state.
+    pub workspace_dir: std::path::PathBuf,
 }
 
 impl Orchestrator {
@@ -202,6 +206,14 @@ impl Orchestrator {
             warn!("no channels enabled");
         }
 
+        let last_channel_file = parts.workspace_dir.join(".last_channel");
+
+        // Load persisted last_channel from disk.
+        let last_channel_value = std::fs::read_to_string(&last_channel_file)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
         let orchestrator = Orchestrator {
             channels: channels_map,
             sessions: Arc::new(DashMap::new()),
@@ -216,7 +228,8 @@ impl Orchestrator {
             persist_backend: parts.persist_backend,
             mcp_manager: parts.mcp_manager,
             change_rx: parts.change_rx,
-            last_channel: Arc::new(tokio::sync::Mutex::new(None)),
+            last_channel: Arc::new(tokio::sync::Mutex::new(last_channel_value)),
+            last_channel_file,
             scheduler_rx: Arc::new(TokioMutex::new(parts.scheduler_rx)),
             search_cooldown: parts.search_cooldown,
             unfinished_subagents: parking_lot::Mutex::new(parts.unfinished_subagents),
@@ -424,7 +437,10 @@ impl Orchestrator {
                     // Track last channel for scheduler target resolution.
                     {
                         let mut lc = self.last_channel.lock().await;
-                        *lc = Some(channel_name.clone());
+                        if lc.as_deref() != Some(&channel_name) {
+                            *lc = Some(channel_name.clone());
+                            let _ = std::fs::write(&self.last_channel_file, &channel_name);
+                        }
                     }
 
                     let sk = Self::session_key(&channel_name, &msg.sender);
