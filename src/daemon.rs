@@ -805,16 +805,19 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         } else {
             None
         };
-        let cron_jobs = if scheduler_config.cron.enabled {
-            let cron_dir = config.workspace_dir.join("cron");
-            crate::agents::load_cron_jobs(&cron_dir)
+        let cron_dir = if scheduler_config.cron.enabled {
+            Some(config.workspace_dir.join("cron"))
         } else {
-            vec![]
+            None
         };
-        if heartbeat_config.is_some() || !cron_jobs.is_empty() {
+        let cron_jobs = cron_dir.as_ref()
+            .map(|d| crate::agents::load_cron_jobs(d))
+            .unwrap_or_default();
+        if heartbeat_config.is_some() || cron_dir.is_some() {
             let scheduler = crate::agents::Scheduler::new(
                 heartbeat_config,
                 cron_jobs,
+                cron_dir,
                 config.agent.prompt.timezone_offset,
                 scheduler_tx,
             );

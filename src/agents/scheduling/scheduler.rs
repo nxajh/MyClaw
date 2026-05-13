@@ -8,6 +8,7 @@
 //! Job definitions come from files (`cron/*.md`, `webhooks/*.md`),
 //! not from TOML config. Config only holds global settings.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,10 +26,39 @@ use crate::storage::SessionBackend;
 
 // ── Pure Scheduler ──────────────────────────────────────────────────────────
 
+/// Fingerprint of a cron directory — (file_name, mtime) for each `.md` file.
+type CronFingerprints = std::collections::HashMap<std::path::PathBuf, std::time::SystemTime>;
+
+/// Snapshot the current state of `.md` files in the cron directory.
+fn snapshot_cron_dir(cron_dir: &std::path::Path) -> CronFingerprints {
+    let mut map = CronFingerprints::new();
+    if !cron_dir.exists() {
+        return map;
+    }
+    let entries = match std::fs::read_dir(cron_dir) {
+        Ok(e) => e,
+        Err(_) => return map,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().is_none_or(|ext| ext != "md") {
+            continue;
+        }
+        if let Ok(meta) = path.metadata() {
+            if let Ok(mtime) = meta.modified() {
+                map.insert(path, mtime);
+            }
+        }
+    }
+    map
+}
+
 /// Pure scheduler — sends timing events via mpsc, does NOT create agents.
 pub struct Scheduler {
     heartbeat_config: Option<HeartbeatConfig>,
     cron_schedules: Vec<(cron::Schedule, CronJob)>,
+    cron_dir: Option<PathBuf>,
+    cron_fingerprints: CronFingerprints,
     timezone_offset: i32,
     event_tx: tokio::sync::mpsc::Sender<SchedulerEvent>,
 }
@@ -37,10 +67,20 @@ impl Scheduler {
     pub fn new(
         heartbeat_config: Option<HeartbeatConfig>,
         cron_jobs: Vec<CronJob>,
+        cron_dir: Option<PathBuf>,
         timezone_offset: i32,
         event_tx: tokio::sync::mpsc::Sender<SchedulerEvent>,
     ) -> Self {
-        let cron_schedules = cron_jobs.iter()
+        let cron_fingerprints = cron_dir.as_ref()
+            .map(|d| snapshot_cron_dir(d))
+            .unwrap_or_default();
+
+        let cron_schedules = Self::parse_cron_jobs(&cron_jobs);
+        Self { heartbeat_config, cron_schedules, cron_dir, cron_fingerprints, timezone_offset, event_tx }
+    }
+
+    fn parse_cron_jobs(cron_jobs: &[CronJob]) -> Vec<(cron::Schedule, CronJob)> {
+        cron_jobs.iter()
             .filter_map(|j| {
                 match j.schedule.parse::<cron::Schedule>() {
                     Ok(s) => {
@@ -53,12 +93,32 @@ impl Scheduler {
                     }
                 }
             })
-            .collect();
-        Self { heartbeat_config, cron_schedules, timezone_offset, event_tx }
+            .collect()
+    }
+
+    /// Reload cron jobs from disk if files changed. Returns true if reloaded.
+    fn maybe_reload_cron(&mut self) -> bool {
+        let Some(ref cron_dir) = self.cron_dir else {
+            return false;
+        };
+
+        let new_fingerprints = snapshot_cron_dir(cron_dir);
+        if new_fingerprints == self.cron_fingerprints {
+            return false;
+        }
+
+        tracing::info!("cron directory changed, reloading...");
+        self.cron_fingerprints = new_fingerprints;
+
+        let jobs = crate::agents::load_cron_jobs(cron_dir);
+        let new_count = jobs.len();
+        self.cron_schedules = Self::parse_cron_jobs(&jobs);
+        tracing::info!(count = new_count, "cron jobs reloaded");
+        true
     }
 
     /// Run the scheduler loop — sends events via mpsc.
-    pub async fn run(self) {
+    pub async fn run(mut self) {
         let mut heartbeat_ticker = self.heartbeat_config.as_ref().and_then(|cfg| {
             parse_interval(&cfg.every).map(|interval| {
                 let mut t = tokio::time::interval(interval);
@@ -67,17 +127,21 @@ impl Scheduler {
             })
         });
 
-        let mut cron_ticker = if self.cron_schedules.is_empty() {
-            None
-        } else {
+        // Always create cron ticker if we have a cron directory (supports hot-reload
+        // of new cron files even when no cron jobs existed at startup).
+        let cron_enabled = self.cron_dir.is_some() || !self.cron_schedules.is_empty();
+        let mut cron_ticker = if cron_enabled {
             let mut t = tokio::time::interval(Duration::from_secs(60));
             t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             Some(t)
+        } else {
+            None
         };
 
         tracing::info!(
             heartbeat = heartbeat_ticker.is_some(),
             cron_jobs = self.cron_schedules.len(),
+            hot_reload = self.cron_dir.is_some(),
             "scheduler started"
         );
 
@@ -100,6 +164,13 @@ impl Scheduler {
                     if let Some(t) = cron_ticker.as_mut() { t.tick().await; }
                     else { std::future::pending::<()>().await; }
                 }, if cron_ticker.is_some() => {
+                    // Check for cron file changes before evaluating schedules.
+                    self.maybe_reload_cron();
+
+                    if self.cron_schedules.is_empty() {
+                        continue;
+                    }
+
                     let now = {
                         let utc = chrono::Utc::now();
                         utc + chrono::Duration::hours(self.timezone_offset as i64)
