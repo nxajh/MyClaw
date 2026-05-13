@@ -19,6 +19,20 @@ fn print_text_status(cfg: &Option<myclaw::config::AppConfig>) {
 
     println!("  Version: {}", env!("MYCLAW_VERSION"));
 
+    // Daemon runtime info
+    match myclaw::signal::find_daemon_pid() {
+        Ok(pid) => {
+            println!("  PID: {}", pid);
+            println!("  Status: ✅ running");
+            if let Some((hours, mins)) = read_uptime(pid) {
+                println!("  Uptime: {}h {}m", hours, mins);
+            }
+        }
+        Err(_) => {
+            println!("  Status: ⚠️  not running (or PID not found)");
+        }
+    }
+
     match cfg {
         Some(cfg) => {
             println!("  Config: ✅ loaded ({})", cfg.config_path.display());
@@ -31,6 +45,7 @@ fn print_text_status(cfg: &Option<myclaw::config::AppConfig>) {
             let channels: Vec<&str> = [
                 cfg.channels.telegram.is_some().then_some("telegram"),
                 cfg.channels.wechat.is_some().then_some("wechat"),
+                cfg.channels.qqbot.is_some().then_some("qqbot"),
             ].into_iter().flatten().collect();
             println!("  Channels: {}", if channels.is_empty() { "none".to_string() } else { channels.join(", ") });
 
@@ -49,6 +64,20 @@ fn print_json_status(cfg: &Option<myclaw::config::AppConfig>) -> Result<()> {
         "version": env!("MYCLAW_VERSION"),
         "config_loaded": cfg.is_some(),
     });
+
+    match myclaw::signal::find_daemon_pid() {
+        Ok(pid) => {
+            status["pid"] = serde_json::json!(pid);
+            status["running"] = serde_json::json!(true);
+            if let Some((hours, mins)) = read_uptime(pid) {
+                status["uptime"] = serde_json::json!(format!("{}h {}m", hours, mins));
+            }
+        }
+        Err(_) => {
+            status["running"] = serde_json::json!(false);
+        }
+    }
+
     if let Some(c) = cfg {
         status["config_path"] = serde_json::json!(c.config_path.to_string_lossy().as_ref());
         status["default_model"] = serde_json::json!(c.defaults.model);
@@ -60,4 +89,21 @@ fn print_json_status(cfg: &Option<myclaw::config::AppConfig>) -> Result<()> {
     }
     println!("{}", serde_json::to_string_pretty(&status)?);
     Ok(())
+}
+
+/// Read process uptime from /proc.
+fn read_uptime(pid: i32) -> Option<(u64, u64)> {
+    let stat = std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
+    let fields: Vec<&str> = stat.split_whitespace().collect();
+    if fields.len() <= 21 {
+        return None;
+    }
+    let start_ticks: u64 = fields[21].parse().ok()?;
+    let uptime_str = std::fs::read_to_string("/proc/uptime").ok()?;
+    let sys_uptime: f64 = uptime_str.split_whitespace().next()?.parse().ok()?;
+
+    let ticks_per_sec = 100u64; // common default
+    let start_secs = start_ticks / ticks_per_sec;
+    let running_secs = sys_uptime as u64 - start_secs;
+    Some((running_secs / 3600, (running_secs % 3600) / 60))
 }

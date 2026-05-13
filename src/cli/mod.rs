@@ -5,9 +5,12 @@ pub mod cmd_completion;
 pub mod cmd_config;
 pub mod cmd_doctor;
 pub mod cmd_exec;
+pub mod cmd_reload;
+pub mod cmd_restart;
 pub mod cmd_status;
 pub mod cmd_tools;
 pub mod cmd_update;
+pub mod signal;
 #[cfg(feature = "tui")]
 pub mod cmd_tui;
 
@@ -117,6 +120,12 @@ pub enum Commands {
 
     /// Download the latest release from GitHub and hot-switch.
     Update,
+
+    /// Reload daemon configuration without restart (sends SIGHUP).
+    Reload,
+
+    /// Restart the daemon gracefully (sends SIGUSR1, systemd restarts).
+    Restart,
 
     /// Show version and build information.
     Version,

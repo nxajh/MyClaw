@@ -57,6 +57,16 @@ async fn main() -> Result<()> {
             cli::cmd_update::run_update()?;
         }
 
+        // `myclaw reload` — hot-reload daemon config
+        Some(cli::Commands::Reload) => {
+            cli::cmd_reload::run(&cli_args).await?;
+        }
+
+        // `myclaw restart` — graceful daemon restart
+        Some(cli::Commands::Restart) => {
+            cli::cmd_restart::run(&cli_args).await?;
+        }
+
         // `myclaw version` — detailed version info
         Some(cli::Commands::Version) => {
             println!("MyClaw {}", env!("MYCLAW_VERSION"));

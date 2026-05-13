@@ -20,6 +20,7 @@ pub mod mcp;
 pub mod memory;
 pub mod providers;
 pub mod registry;
+pub mod signal;
 pub mod storage;
 pub mod str_utils;
 pub mod tools;

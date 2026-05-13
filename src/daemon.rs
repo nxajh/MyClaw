@@ -352,6 +352,9 @@ async fn build_tools(mcp_manager: &McpManager, skills: &Arc<parking_lot::RwLock<
     // SkillTool — loads skill body on demand.
     tools.register(Arc::new(crate::tools::SkillTool::new(Arc::clone(skills))));
 
+    // SelfTool — agent self-management (reload, restart, update, status, etc.)
+    tools.register(Arc::new(crate::tools::SelfTool::new()));
+
     // Inject MCP tools (if any servers are configured and connected).
     if mcp_manager.is_connected().await {
         let mcp_tools = mcp_manager.tools().await;
@@ -835,6 +838,33 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             sigusr1.recv().await;
             tracing::info!("SIGUSR1 received, setting shutdown flag");
             crate::SHUTDOWN_FLAG.store(true, Ordering::SeqCst);
+        });
+    }
+
+    // ── SIGHUP: hot-reload configuration ──────────────────────────────────
+    #[cfg(unix)]
+    {
+        let config_path = config.config_path.clone();
+        let mut sighup = signal(SignalKind::hangup())
+            .expect("failed to register SIGHUP handler");
+        tokio::spawn(async move {
+            loop {
+                sighup.recv().await;
+                tracing::info!("SIGHUP received, reloading config from {}", config_path.display());
+                match crate::config::ConfigLoader::from_file(&config_path) {
+                    Ok(new_cfg) => {
+                        tracing::info!(
+                            model = %new_cfg.defaults.model,
+                            "config reloaded successfully"
+                        );
+                        // TODO: propagate config changes to running components
+                        // (scheduler, channel routing, model selection, etc.)
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "config reload failed, keeping current config");
+                    }
+                }
+            }
         });
     }
 

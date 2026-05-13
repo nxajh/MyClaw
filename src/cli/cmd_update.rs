@@ -139,50 +139,5 @@ fn find_project_dir() -> Result<PathBuf> {
 
 /// Send SIGUSR1 to the running myclaw daemon to trigger hot switch.
 fn send_sigusr1() -> Result<()> {
-    // Try PID file first
-    let pid_file = PathBuf::from("/tmp/myclaw.pid");
-    if pid_file.exists() {
-        let pid_str = std::fs::read_to_string(&pid_file)?;
-        let pid: i32 = pid_str
-            .trim()
-            .parse()
-            .context("invalid PID in pid file")?;
-        // SAFETY: libc::kill is a simple syscall wrapper.
-        let ret = unsafe { libc::kill(pid, libc::SIGUSR1) };
-        if ret == 0 {
-            return Ok(());
-        }
-        let err = std::io::Error::last_os_error();
-        tracing::warn!(
-            pid,
-            error = %err,
-            "failed to send SIGUSR1 via PID file, falling back to pgrep"
-        );
-    }
-
-    // Fallback: use pgrep to find the daemon
-    let output = std::process::Command::new("pgrep")
-        .args(["-x", "myclaw"])
-        .output()
-        .context("failed to execute pgrep")?;
-
-    if !output.status.success() {
-        anyhow::bail!("no running myclaw daemon found");
-    }
-
-    let pids = String::from_utf8(output.stdout)?;
-    let pid: i32 = pids
-        .lines()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("no PID found"))?
-        .trim()
-        .parse()?;
-
-    let ret = unsafe { libc::kill(pid, libc::SIGUSR1) };
-    if ret != 0 {
-        let err = std::io::Error::last_os_error();
-        anyhow::bail!("failed to send SIGUSR1 to PID {}: {}", pid, err);
-    }
-
-    Ok(())
+    super::signal::send_sigusr1()
 }
