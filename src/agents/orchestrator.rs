@@ -35,6 +35,8 @@ const MSG_ABORT_ACK: &str = "已取消";
 const MSG_INCOMPLETE_TURN: &str = "⚠️ 检测到上次请求未处理完成（可能是服务重启）。\n\n请选择重试或放弃。";
 const MSG_TIMEOUT: &str = "⚠️ 处理超时，未收到模型回复。";
 const MSG_EMPTY_RESPONSE: &str = "⚠️ 处理失败，模型未返回有效回复。";
+const MSG_SUBAGENT_RECOVERY_HINT: &str =
+    "⚠️ 以下子代理在上次热切换中断，其 session 已持久化。如果需要，可以重新 delegate 它们继续工作：\n\n";
 const BTN_RETRY: &str = "🔄 重试";
 const BTN_ABORT: &str = "✖ 放弃";
 
@@ -943,9 +945,7 @@ impl LoopRegistry {
 
         // Inject recovery hint if sub-agents were interrupted by a hot-switch.
         if !self.unfinished_subagents.is_empty() {
-            let mut recovery_msg = String::from(
-                "⚠️ 以下子代理在上次热切换中断，其 session 已持久化。如果需要，可以重新 delegate 它们继续工作：\n\n"
-            );
+            let mut recovery_msg = String::from(MSG_SUBAGENT_RECOVERY_HINT);
             for agent_info in &self.unfinished_subagents {
                 recovery_msg.push_str(&format!(
                     "- {} (task: {}): {}\n",
