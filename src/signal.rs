@@ -54,6 +54,11 @@ pub fn send_sighup() -> Result<()> {
     send_signal(libc::SIGHUP)
 }
 
+/// Send SIGTERM to the daemon (graceful stop).
+pub fn send_sigterm() -> Result<()> {
+    send_signal(libc::SIGTERM)
+}
+
 /// Send SIGUSR1 to the daemon (hot switch / restart).
 pub fn send_sigusr1() -> Result<()> {
     send_signal(libc::SIGUSR1)

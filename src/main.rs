@@ -67,6 +67,11 @@ async fn main() -> Result<()> {
             cli::cmd_restart::run(&cli_args).await?;
         }
 
+        // `myclaw stop` — graceful shutdown via SIGTERM
+        Some(cli::Commands::Stop) => {
+            cli::cmd_stop::run(&cli_args).await?;
+        }
+
         // `myclaw version` — detailed version info
         Some(cli::Commands::Version) => {
             println!("MyClaw {}", env!("MYCLAW_VERSION"));

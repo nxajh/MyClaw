@@ -8,6 +8,7 @@ pub mod cmd_exec;
 pub mod cmd_reload;
 pub mod cmd_restart;
 pub mod cmd_status;
+pub mod cmd_stop;
 pub mod cmd_tools;
 pub mod cmd_update;
 pub mod signal;
@@ -126,6 +127,9 @@ pub enum Commands {
 
     /// Restart the daemon gracefully (sends SIGUSR1, systemd restarts).
     Restart,
+
+    /// Stop the daemon gracefully (sends SIGTERM).
+    Stop,
 
     /// Show version and build information.
     Version,
