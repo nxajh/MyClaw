@@ -831,10 +831,12 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     {
         let mut sigusr1 = signal(SignalKind::user_defined1())
             .expect("failed to register SIGUSR1 handler");
+        let shutdown_tx_usr1 = shutdown_tx.clone();
         tokio::spawn(async move {
             sigusr1.recv().await;
             tracing::info!("SIGUSR1 received, setting shutdown flag");
             crate::SHUTDOWN_FLAG.store(true, Ordering::SeqCst);
+            let _ = shutdown_tx_usr1.send(true);
         });
     }
 

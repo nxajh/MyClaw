@@ -1366,21 +1366,51 @@ impl Orchestrator {
                         return;
                     }
                 };
-                let has_tasks = content.lines().any(|line| {
-                    let t = line.trim();
-                    t.starts_with("- ") && t.len() > 2
-                });
-                if !has_tasks {
-                    tracing::debug!("heartbeat skipped: HEARTBEAT.md has no tasks");
+
+                // Parse structured tasks from HEARTBEAT.md
+                let (context, tasks) = super::heartbeat_tasks::parse_heartbeat(&content);
+                if tasks.is_empty() {
+                    tracing::debug!("heartbeat skipped: no tasks in HEARTBEAT.md");
                     return;
                 }
-                let prompt = format!(
-                    "You are performing a heartbeat check. The HEARTBEAT.md content is below.\n\n\
-                     {}\n\n\
-                     Follow the instructions in the file. If nothing needs attention, reply with exactly: heartbeat_ok",
-                    content
+
+                // Load task state and filter to due tasks only
+                let state_path = std::path::Path::new("HEARTBEAT_STATE.json");
+                let state = super::heartbeat_tasks::HeartbeatState::load(state_path);
+                let due = super::heartbeat_tasks::due_tasks(&tasks, &state);
+                if due.is_empty() {
+                    tracing::debug!(
+                        total_tasks = tasks.len(),
+                        "heartbeat skipped: no tasks due"
+                    );
+                    return;
+                }
+
+                // Build prompt with only due tasks
+                let prompt = super::heartbeat_tasks::build_heartbeat_prompt(&context, &due);
+                tracing::info!(
+                    due_tasks = due.len(),
+                    total_tasks = tasks.len(),
+                    "heartbeat: running due tasks"
                 );
-                let result = self.run_scheduled_agent("_heartbeat", &prompt).await;
+
+                // Use ephemeral session key (no history accumulation)
+                let session_key = format!("_heartbeat_{}", uuid::Uuid::new_v4());
+                let result = self.run_scheduled_agent(&session_key, &prompt).await;
+
+                // Update task state on success
+                if result.is_ok() {
+                    let mut new_state = state;
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    for task in &due {
+                        new_state.last_run.insert(task.name.clone(), now_ms);
+                    }
+                    new_state.save(state_path);
+                }
+
                 match result {
                     Ok(response) if is_silent_ok(&response, "heartbeat") => {
                         tracing::info!("heartbeat: nothing needs attention");

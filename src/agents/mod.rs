@@ -18,6 +18,7 @@ mod mcp_manager;
 mod scheduler;
 mod sub_agent;
 pub mod cron_loader;
+pub mod heartbeat_tasks;
 pub mod webhook_loader;
 pub mod work_unit;
 pub mod slash_command;
