@@ -947,7 +947,7 @@ struct LoopRegistry {
     sessions: Arc<DashMap<String, Arc<TokioMutex<AgentLoop>>>>,
     agent: Agent,
     session_manager: Arc<SessionManager>,
-    channels: Arc<DashMap<String, Arc<dyn Channel>>>,
+    channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
     pending_asks: Arc<DashMap<String, (oneshot::Sender<String>, String)>>,
     sub_delegator: Option<Arc<SubAgentDelegator>>,
     delegation_manager: Option<Arc<DelegationManager>>,
@@ -995,12 +995,12 @@ impl LoopRegistry {
             let reply_target = reply_target_owned.clone();
             let user_facing_key = user_facing_key.clone();
             Box::pin(async move {
-                let (ch_name, _) = parse_session_key(&session_key)
+                let (ch_type, acc_id, _) = parse_session_key(&session_key)
                     .ok_or_else(|| anyhow::anyhow!("invalid session key: {}", session_key))?;
                 let channel: Arc<dyn Channel> = channels
-                    .get(ch_name)
+                    .get(&(ch_type.to_string(), acc_id.to_string()))
                     .map(|r| r.clone())
-                    .ok_or_else(|| anyhow::anyhow!("channel '{}' not found", ch_name))?;
+                    .ok_or_else(|| anyhow::anyhow!("channel '{}:{}' not found", ch_type, acc_id))?;
                 let send_msg = SendMessage::new(&question, &reply_target);
                 channel.send(&send_msg).await?;
 
