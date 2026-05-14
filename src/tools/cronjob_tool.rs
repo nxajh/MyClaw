@@ -64,6 +64,10 @@ impl Tool for CronJobTool {
                 "active_hours": {
                     "type": "string",
                     "description": "Active hours restriction, e.g. '08:00-24:00'. Omit for always active."
+                },
+                "tz": {
+                    "type": "string",
+                    "description": "Per-job IANA timezone (e.g. 'Asia/Shanghai'). Overrides global timezone."
                 }
             },
             "required": ["action"]
@@ -116,12 +120,15 @@ impl CronJobTool {
             )));
         }
 
+        let tz = args.get("tz").and_then(|v| v.as_str()).map(|s| s.to_string());
+
         let entry = JobEntry {
             id: String::new(), // auto-generated
             schedule: schedule.clone(),
             prompt,
             target,
             name: name.clone(),
+            tz,
             active_hours,
             enabled: true,
             last_run_at: None,
@@ -186,7 +193,7 @@ impl CronJobTool {
         let mut store = self.store.write().unwrap();
         match store.update_job(&id, JobUpdate {
             name: None, schedule: None, prompt: None, target: None,
-            active_hours: None, enabled: Some(enabled),
+            tz: None, active_hours: None, enabled: Some(enabled),
         }) {
             Ok(true) => Ok(ToolResult {
                 success: true,

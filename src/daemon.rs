@@ -555,14 +555,21 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let skills = build_skill_manager(&config.workspace_dir);
     let skills_arc: Arc<parking_lot::RwLock<SkillManager>> = Arc::new(parking_lot::RwLock::new(skills));
 
+    // Resolve timezone: config.timezone (IANA) takes precedence over timezone_offset.
+    let tz_name = config.agent.prompt.timezone.clone().unwrap_or_else(|| {
+        // Convert legacy offset to Etc/GMT name (signs are inverted in Etc/GMT).
+        let offset = config.agent.prompt.timezone_offset;
+        if offset == 0 { "UTC".to_string() }
+        else { format!("Etc/GMT{}", if offset > 0 { format!("-{}", offset) } else { format!("{}", -offset) }) }
+    });
+
     // Build shared cron store (used by both scheduler and CronJobTool).
     let cron_dir = config.workspace_dir.join("cron");
     let jobs_json_path = cron_dir.join("jobs.json");
 
     // Migrate from old markdown files if jobs.json doesn't exist yet.
-    let tz_offset = config.agent.prompt.timezone_offset;
     if !jobs_json_path.exists() {
-        let mut migrator = crate::agents::CronStore::new(jobs_json_path.clone(), tz_offset);
+        let mut migrator = crate::agents::CronStore::new(jobs_json_path.clone(), tz_name.clone());
         let count = migrator.migrate_from_markdown(&cron_dir);
         if count > 0 {
             tracing::info!(count = count, "migrated cron jobs from markdown to JSON");
@@ -570,7 +577,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     }
 
     let cron_store = crate::tools::SharedCronStore::new(
-        std::sync::RwLock::new(crate::agents::CronStore::new(jobs_json_path, tz_offset))
+        std::sync::RwLock::new(crate::agents::CronStore::new(jobs_json_path, tz_name.clone()))
     );
 
     // Build tool registry (all built-in + MCP + SkillTool).
@@ -779,7 +786,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             sessions: orchestrator.shared().sessions,
             session_manager: session_manager_for_webhook,
             session_backend: session_backend.clone(),
-            timezone_offset: config.agent.prompt.timezone_offset,
+            timezone: tz_name.clone(),
             last_channel: orchestrator.shared().last_channel,
             change_rx: Some(change_rx.clone()),
         });
@@ -834,14 +841,14 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         // Create a separate CronStore instance for the scheduler (reads same file).
         let scheduler_store = crate::agents::CronStore::new(
             cron_store.read().unwrap().path().to_path_buf(),
-            config.agent.prompt.timezone_offset,
+            tz_name.clone(),
         );
 
         if heartbeat_config.is_some() || !scheduler_store.jobs().is_empty() {
             let mut scheduler = crate::agents::Scheduler::new(
                 heartbeat_config,
                 scheduler_store,
-                config.agent.prompt.timezone_offset,
+                tz_name.clone(),
                 scheduler_tx,
             );
             tokio::spawn(async move { scheduler.run().await; });

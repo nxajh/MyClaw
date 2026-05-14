@@ -32,7 +32,7 @@ use crate::storage::SessionBackend;
 pub struct Scheduler {
     heartbeat_config: Option<HeartbeatConfig>,
     store: CronStore,
-    timezone_offset: i32,
+    timezone: String,
     event_tx: tokio::sync::mpsc::Sender<SchedulerEvent>,
 }
 
@@ -40,12 +40,12 @@ impl Scheduler {
     pub fn new(
         heartbeat_config: Option<HeartbeatConfig>,
         store: CronStore,
-        timezone_offset: i32,
+        timezone: String,
         event_tx: tokio::sync::mpsc::Sender<SchedulerEvent>,
     ) -> Self {
         let job_count = store.jobs().len();
         tracing::info!(count = job_count, "scheduler loaded cron jobs from JSON store");
-        Self { heartbeat_config, store, timezone_offset, event_tx }
+        Self { heartbeat_config, store, timezone, event_tx }
     }
 
     /// Run the scheduler loop — sends events via mpsc.
@@ -77,7 +77,7 @@ impl Scheduler {
                     else { std::future::pending::<()>().await; }
                 }, if heartbeat_ticker.is_some() => {
                     let config = self.heartbeat_config.as_ref().unwrap();
-                    if !is_active_hours(&config.active_hours, self.timezone_offset) {
+                    if !is_active_hours(&config.active_hours, &self.timezone) {
                         tracing::debug!("heartbeat skipped: outside active hours");
                         continue;
                     }
@@ -92,7 +92,7 @@ impl Scheduler {
                     // Find due jobs (collect IDs to release the borrow).
                     let due_jobs: Vec<JobEntry> = self.store.get_due_jobs()
                         .into_iter()
-                        .filter(|j| is_active_hours(&j.active_hours, self.timezone_offset))
+                        .filter(|j| is_active_hours(&j.active_hours, j.tz.as_deref().unwrap_or(&self.timezone)))
                         .collect();
 
                     let mut due_job_ids = Vec::new();
@@ -134,7 +134,7 @@ pub struct WebhookContext {
     pub session_manager: Arc<crate::agents::session_manager::SessionManager>,
     /// Backend kept separately for persist hooks (BackendPersistHook needs it).
     pub session_backend: Arc<dyn SessionBackend>,
-    pub timezone_offset: i32,
+    pub timezone: String,
     /// Last channel that received a user message.
     pub last_channel: Arc<Mutex<Option<String>>>,
     pub change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
@@ -166,9 +166,10 @@ pub fn parse_interval(s: &str) -> Option<Duration> {
 
 // ── Active hours ───────────────────────────────────────────────────────────
 
-/// Check if current time (in configured timezone) is within active hours.
+/// Check if current time is within active hours.
 /// Format: "HH:MM-HH:MM" e.g. "08:00-24:00".
-pub fn is_active_hours(active_hours: &Option<String>, timezone_offset: i32) -> bool {
+/// `tz_name` is the IANA timezone (e.g. "Asia/Shanghai").
+pub fn is_active_hours(active_hours: &Option<String>, tz_name: &str) -> bool {
     let Some(hours) = active_hours else {
         return true; // No restriction = always active
     };
@@ -178,9 +179,9 @@ pub fn is_active_hours(active_hours: &Option<String>, timezone_offset: i32) -> b
         None => return true, // Invalid format = always active
     };
 
-    let now_utc = chrono::Utc::now();
-    let local = now_utc + chrono::Duration::hours(timezone_offset as i64);
-    let now_mins = local.hour() * 60 + local.minute();
+    let tz = crate::agents::scheduling::cron_store::resolve_tz(tz_name);
+    let now_local = chrono::Utc::now().with_timezone(&tz);
+    let now_mins = now_local.hour() * 60 + now_local.minute();
 
     now_mins >= start_mins && now_mins < end_mins
 }
@@ -631,12 +632,12 @@ mod tests {
 
     #[test]
     fn is_active_hours_no_restriction() {
-        assert!(is_active_hours(&None, 8));
+        assert!(is_active_hours(&None, "Asia/Shanghai"));
     }
 
     #[test]
     fn is_active_hours_invalid_format_always_active() {
-        assert!(is_active_hours(&Some("bad".to_string()), 8));
+        assert!(is_active_hours(&Some("bad".to_string()), "Asia/Shanghai"));
     }
 
     #[test]

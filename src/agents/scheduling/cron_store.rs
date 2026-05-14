@@ -29,6 +29,10 @@ pub struct JobEntry {
     /// Optional friendly name.
     #[serde(default)]
     pub name: Option<String>,
+    /// Per-job IANA timezone override (e.g. "Asia/Shanghai").
+    /// If None, falls back to the global timezone.
+    #[serde(default)]
+    pub tz: Option<String>,
     /// Active hours restriction, e.g. "08:00-24:00". None = always active.
     #[serde(default)]
     pub active_hours: Option<String>,
@@ -61,19 +65,19 @@ pub struct CronStore {
     data: JobsFile,
     /// Last known mtime of the file (for hot-reload detection).
     last_mtime: Option<SystemTime>,
-    /// Timezone offset in hours from UTC (e.g. 8 for UTC+8).
-    timezone_offset: i32,
+    /// Global IANA timezone (e.g. "Asia/Shanghai"). Used when a job has no per-job `tz`.
+    timezone: String,
 }
 
 impl CronStore {
     /// Create a new store backed by the given path.
     /// Loads existing data if the file exists.
-    pub fn new(path: PathBuf, timezone_offset: i32) -> Self {
+    pub fn new(path: PathBuf, timezone: String) -> Self {
         let mut store = Self {
             path,
             data: JobsFile::default(),
             last_mtime: None,
-            timezone_offset,
+            timezone,
         };
         store.load_from_disk();
         store
@@ -152,7 +156,7 @@ impl CronStore {
             entry.created_at = Some(chrono::Utc::now().to_rfc3339());
         }
         // Compute initial next_run_at.
-        entry.next_run_at = compute_next_run(&entry.schedule, None, self.timezone_offset);
+        entry.next_run_at = compute_next_run(&entry.schedule, None, entry.tz.as_deref().unwrap_or(&self.timezone));
         let id = entry.id.clone();
         self.data.jobs.push(entry);
         self.save_to_disk()?;
@@ -170,13 +174,17 @@ impl CronStore {
         }
         if let Some(schedule) = update.schedule {
             job.schedule = schedule;
-            job.next_run_at = compute_next_run(&job.schedule, job.last_run_at.as_deref(), self.timezone_offset);
+            job.next_run_at = compute_next_run(&job.schedule, job.last_run_at.as_deref(), job.tz.as_deref().unwrap_or(&self.timezone));
         }
         if let Some(prompt) = update.prompt {
             job.prompt = prompt;
         }
         if let Some(target) = update.target {
             job.target = target;
+        }
+        if let Some(tz) = update.tz {
+            job.tz = Some(tz);
+            job.next_run_at = compute_next_run(&job.schedule, job.last_run_at.as_deref(), job.tz.as_deref().unwrap_or(&self.timezone));
         }
         if let Some(active_hours) = update.active_hours {
             job.active_hours = Some(active_hours);
@@ -185,7 +193,7 @@ impl CronStore {
             job.enabled = enabled;
             if enabled {
                 // Re-compute next_run_at when re-enabling.
-                job.next_run_at = compute_next_run(&job.schedule, job.last_run_at.as_deref(), self.timezone_offset);
+                job.next_run_at = compute_next_run(&job.schedule, job.last_run_at.as_deref(), job.tz.as_deref().unwrap_or(&self.timezone));
             } else {
                 job.next_run_at = None;
             }
@@ -211,7 +219,7 @@ impl CronStore {
         if let Some(job) = self.data.jobs.iter_mut().find(|j| j.id == id) {
             let now = chrono::Utc::now().to_rfc3339();
             job.last_run_at = Some(now);
-            job.next_run_at = compute_next_run(&job.schedule, job.last_run_at.as_deref(), self.timezone_offset);
+            job.next_run_at = compute_next_run(&job.schedule, job.last_run_at.as_deref(), job.tz.as_deref().unwrap_or(&self.timezone));
             // Best-effort save — don't propagate errors from here.
             if let Err(e) = self.save_to_disk() {
                 tracing::warn!(error = %e, "failed to save jobs.json after marking run");
@@ -296,6 +304,7 @@ impl CronStore {
                 target,
                 name: path.file_stem()
                     .map(|s| s.to_string_lossy().to_string()),
+                tz: None,
                 active_hours,
                 enabled: true,
                 last_run_at: None,
@@ -320,14 +329,24 @@ pub struct JobUpdate {
     pub schedule: Option<String>,
     pub prompt: Option<String>,
     pub target: Option<String>,
+    pub tz: Option<String>,
     pub active_hours: Option<String>,
     pub enabled: Option<bool>,
 }
 
+/// Resolve an IANA timezone name to a `chrono_tz::Tz`.
+/// Falls back to UTC if the name is invalid.
+pub fn resolve_tz(name: &str) -> chrono_tz::Tz {
+    name.parse::<chrono_tz::Tz>().unwrap_or_else(|_| {
+        tracing::warn!(tz = %name, "invalid IANA timezone, falling back to UTC");
+        chrono_tz::UTC
+    })
+}
+
 /// Compute the next run time for a cron schedule.
 /// `last_run` is the ISO 8601 timestamp of the last run, or None for first run.
-/// `timezone_offset` is hours from UTC (e.g. 8 for UTC+8).
-pub fn compute_next_run(schedule: &str, last_run: Option<&str>, timezone_offset: i32) -> Option<String> {
+/// `tz_name` is the IANA timezone name (e.g. "Asia/Shanghai").
+pub fn compute_next_run(schedule: &str, last_run: Option<&str>, tz_name: &str) -> Option<String> {
     let cron_schedule: cron::Schedule = match schedule.parse() {
         Ok(s) => s,
         Err(e) => {
@@ -336,7 +355,7 @@ pub fn compute_next_run(schedule: &str, last_run: Option<&str>, timezone_offset:
         }
     };
 
-    let offset = chrono::Duration::hours(timezone_offset as i64);
+    let tz = resolve_tz(tz_name);
     let base_utc = match last_run {
         Some(ts) => {
             chrono::DateTime::parse_from_rfc3339(ts)
@@ -346,10 +365,10 @@ pub fn compute_next_run(schedule: &str, last_run: Option<&str>, timezone_offset:
         None => chrono::Utc::now(),
     };
 
-    // Find next fire time in local timezone, then convert back to UTC for storage.
-    let base_local = base_utc + offset;
+    // Convert to local time, find next fire, convert back to UTC.
+    let base_local = base_utc.with_timezone(&tz);
     cron_schedule.after(&base_local).next()
-        .map(|dt| (dt - offset).to_rfc3339())
+        .map(|dt| dt.with_timezone(&chrono::Utc).to_rfc3339())
 }
 
 /// Generate a random 12-char hex ID.
@@ -371,7 +390,7 @@ mod tests {
     fn test_add_and_list_jobs() {
         let dir = tempdir().unwrap();
         let store_path = dir.path().join("jobs.json");
-        let mut store = CronStore::new(store_path, 8);
+        let mut store = CronStore::new(store_path, "Asia/Shanghai".to_string());
 
         let id = store.add_job(JobEntry {
             id: String::new(),
@@ -395,7 +414,7 @@ mod tests {
     fn test_update_and_remove() {
         let dir = tempdir().unwrap();
         let store_path = dir.path().join("jobs.json");
-        let mut store = CronStore::new(store_path, 8);
+        let mut store = CronStore::new(store_path, "Asia/Shanghai".to_string());
 
         let id = store.add_job(JobEntry {
             id: String::new(),
@@ -413,6 +432,7 @@ mod tests {
         // Update
         let ok = store.update_job(&id, JobUpdate {
             name: Some("updated".to_string()),
+            tz: None,
             schedule: None,
             prompt: None,
             target: None,
@@ -425,7 +445,7 @@ mod tests {
         // Disable
         store.update_job(&id, JobUpdate {
             name: None, schedule: None, prompt: None, target: None,
-            active_hours: None, enabled: Some(false),
+            tz: None, active_hours: None, enabled: Some(false),
         }).unwrap();
         assert!(!store.jobs()[0].enabled);
         assert!(store.jobs()[0].next_run_at.is_none());
@@ -442,7 +462,7 @@ mod tests {
 
         // Write
         {
-            let mut store = CronStore::new(store_path.clone(), 8);
+            let mut store = CronStore::new(store_path.clone(), "Asia/Shanghai".to_string());
             store.add_job(JobEntry {
                 id: String::new(),
                 schedule: "0 0 9 * * *".to_string(),
@@ -458,7 +478,7 @@ mod tests {
         }
 
         // Read back
-        let store = CronStore::new(store_path, 8);
+        let store = CronStore::new(store_path, "Asia/Shanghai".to_string());
         assert_eq!(store.jobs().len(), 1);
         assert_eq!(store.jobs()[0].prompt, "persisted");
         assert_eq!(store.jobs()[0].target, "telegram");
@@ -466,7 +486,7 @@ mod tests {
 
     #[test]
     fn test_compute_next_run() {
-        let next = compute_next_run("0 0 9 * * *", None, 8);
+        let next = compute_next_run("0 0 9 * * *", None, "Asia/Shanghai");
         assert!(next.is_some());
     }
 }

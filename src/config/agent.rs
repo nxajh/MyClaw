@@ -134,8 +134,13 @@ pub struct PromptConfig {
     /// Default channel name shown in channel caps section.
     pub channel_name: Option<String>,
 
+    /// IANA timezone name (e.g. "Asia/Shanghai").
+    /// Takes precedence over `timezone_offset` when set.
+    #[serde(default)]
+    pub timezone: Option<String>,
+
     /// Timezone offset in hours (e.g. 8 for UTC+8).
-    /// Used for date injection via system-reminder.
+    /// Legacy fallback — prefer `timezone` for DST-aware scheduling.
     #[serde(default = "default_timezone_offset")]
     pub timezone_offset: i32,
 }
@@ -154,6 +159,7 @@ impl Default for PromptConfig {
             native_tools: true,
             model_name: None,
             channel_name: None,
+            timezone: None,
             timezone_offset: default_timezone_offset(),
         }
     }
