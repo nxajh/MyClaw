@@ -1048,19 +1048,35 @@ impl QQBotChannel {
                 }
             };
 
-            let url = format!("{}/v2/interactions/{}/ack", API_BASE, event_id);
+            let url = format!("{}/interactions/{}", API_BASE, event_id);
             let ua = user_agent();
             let body = serde_json::json!({ "code": 0 });
 
-            let _ = http.put(&url)
+            match http.put(&url)
                 .header("Authorization", format!("QQBot {}", token))
                 .header("Content-Type", "application/json")
                 .header("User-Agent", &ua)
                 .json(&body)
                 .send()
-                .await;
-
-            debug!(event_id = %event_id, "interaction acknowledged");
+                .await
+            {
+                Ok(resp) if resp.status().as_u16() >= 400 => {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    warn!(
+                        event_id = %event_id,
+                        status = %status,
+                        body = %text,
+                        "interaction ACK failed"
+                    );
+                }
+                Ok(_) => {
+                    debug!(event_id = %event_id, "interaction acknowledged");
+                }
+                Err(e) => {
+                    warn!(event_id = %event_id, error = %e, "interaction ACK request failed");
+                }
+            }
         });
     }
 
