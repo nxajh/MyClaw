@@ -44,12 +44,12 @@ pub use prompt::{AutonomyLevel, SkillsPromptInjectionMode, SystemPromptBuilder, 
 pub use session_manager::SessionManager;
 pub use crate::storage::SessionBackend;
 pub use workspace::skill_loader::SkillDefinition;
-pub use scheduling::cron_loader::load_cron_jobs;
+pub use scheduling::cron_store::{CronStore, JobEntry, JobUpdate};
 pub use scheduling::webhook_loader::{WebhookJobDef, load_webhook_jobs};
 pub use workspace::skills::{Skill, SkillManager};
 pub use tool_registry::ToolRegistry;
 pub use mcp_manager::McpManager;
 pub use sub_agent::SubAgentDelegator;
-pub use scheduling::scheduler::{Scheduler, WebhookContext, run_webhook_server, send_to_target, is_active_hours, cron_matches};
+pub use scheduling::scheduler::{Scheduler, WebhookContext, run_webhook_server, send_to_target, is_active_hours};
 pub use error::AgentError;
 pub use context_engine::{ContextEngine, TokenStats, CompactionResult, TokenTracker};

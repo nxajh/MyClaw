@@ -336,7 +336,11 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
 }
 
 /// Build ToolRegistry with all built-in + MCP + SkillTool registered.
-async fn build_tools(mcp_manager: &McpManager, skills: &Arc<parking_lot::RwLock<SkillManager>>) -> ToolRegistry {
+async fn build_tools(
+    mcp_manager: &McpManager,
+    skills: &Arc<parking_lot::RwLock<SkillManager>>,
+    cron_store: &crate::tools::SharedCronStore,
+) -> ToolRegistry {
     let mut tools = ToolRegistry::new();
     let builtin = crate::tools::builtin_tools();
     for tool in builtin {
@@ -351,6 +355,9 @@ async fn build_tools(mcp_manager: &McpManager, skills: &Arc<parking_lot::RwLock<
 
     // SkillTool — loads skill body on demand.
     tools.register(Arc::new(crate::tools::SkillTool::new(Arc::clone(skills))));
+
+    // CronJobTool — manage scheduled cron jobs.
+    tools.register(Arc::new(crate::tools::CronJobTool::new(Arc::clone(cron_store))));
 
     // Inject MCP tools (if any servers are configured and connected).
     if mcp_manager.is_connected().await {
@@ -548,8 +555,25 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let skills = build_skill_manager(&config.workspace_dir);
     let skills_arc: Arc<parking_lot::RwLock<SkillManager>> = Arc::new(parking_lot::RwLock::new(skills));
 
+    // Build shared cron store (used by both scheduler and CronJobTool).
+    let cron_dir = config.workspace_dir.join("cron");
+    let jobs_json_path = cron_dir.join("jobs.json");
+
+    // Migrate from old markdown files if jobs.json doesn't exist yet.
+    if !jobs_json_path.exists() {
+        let mut migrator = crate::agents::CronStore::new(jobs_json_path.clone());
+        let count = migrator.migrate_from_markdown(&cron_dir);
+        if count > 0 {
+            tracing::info!(count = count, "migrated cron jobs from markdown to JSON");
+        }
+    }
+
+    let cron_store = crate::tools::SharedCronStore::new(
+        std::sync::RwLock::new(crate::agents::CronStore::new(jobs_json_path))
+    );
+
     // Build tool registry (all built-in + MCP + SkillTool).
-    let mut tools = build_tools(&mcp_manager, &skills_arc).await;
+    let mut tools = build_tools(&mcp_manager, &skills_arc, &cron_store).await;
 
     // Build sub-agent configs (AGENT.md files from workspace/agents/).
     let sub_agent_configs = build_sub_agents(&config.workspace_dir);
@@ -805,19 +829,16 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         } else {
             None
         };
-        let cron_dir = if scheduler_config.cron.enabled {
-            Some(config.workspace_dir.join("cron"))
-        } else {
-            None
-        };
-        let cron_jobs = cron_dir.as_ref()
-            .map(|d| crate::agents::load_cron_jobs(d))
-            .unwrap_or_default();
-        if heartbeat_config.is_some() || cron_dir.is_some() {
-            let scheduler = crate::agents::Scheduler::new(
+
+        // Create a separate CronStore instance for the scheduler (reads same file).
+        let scheduler_store = crate::agents::CronStore::new(
+            cron_store.read().unwrap().path().to_path_buf()
+        );
+
+        if heartbeat_config.is_some() || !scheduler_store.jobs().is_empty() {
+            let mut scheduler = crate::agents::Scheduler::new(
                 heartbeat_config,
-                cron_jobs,
-                cron_dir,
+                scheduler_store,
                 config.agent.prompt.timezone_offset,
                 scheduler_tx,
             );
