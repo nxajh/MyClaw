@@ -46,6 +46,7 @@ enum ChannelEvent {
 
 /// Events from the Scheduler (heartbeat ticks, cron triggers).
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum SchedulerEvent {
     /// Heartbeat tick — run agent with heartbeat prompt.
     Heartbeat {
@@ -64,6 +65,9 @@ pub enum SchedulerEvent {
         disabled_tools: Option<Vec<String>>,
     },
 }
+
+/// Type alias for the channel message sender.
+pub type ChannelMsgSender = mpsc::Sender<((String, String), ChannelMessage)>;
 
 /// Orchestrator — Application Service for message routing and session lifecycle.
 ///
@@ -197,7 +201,7 @@ impl Orchestrator {
     ///
     /// The Composition Root is responsible for building `OrchestratorParts`
     /// (creating Registry, registering Providers/Tools, opening Storage, etc.).
-    pub fn new(parts: OrchestratorParts) -> (Self, mpsc::Sender<((String, String), ChannelMessage)>) {
+    pub fn new(parts: OrchestratorParts) -> (Self, ChannelMsgSender) {
         let (msg_tx, msg_rx) = mpsc::channel(CHANNEL_QUEUE_SIZE);
         let msg_tx = Arc::new(msg_tx);
 
@@ -266,7 +270,7 @@ impl Orchestrator {
         channel_type: String,
         account_id: String,
         channel: Arc<dyn Channel>,
-        msg_tx: Arc<mpsc::Sender<((String, String), ChannelMessage)>>,
+        msg_tx: Arc<ChannelMsgSender>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut backoff = Duration::from_secs(1);
