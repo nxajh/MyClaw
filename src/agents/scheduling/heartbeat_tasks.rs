@@ -9,22 +9,23 @@
 //!
 //! ## Tasks
 //!
-//! - [check-email:30m] 检查邮件，有重要邮件时摘要通知我
-//! - [check-calendar:1h] 检查日历，提醒未来 2 小时事项
-//! - [review-pr:2h] 检查 GitHub PR 状态
-//! - [paused-task:paused] 这个任务不会执行
+//! - [check-email] Check email for important messages
+//! - [check-calendar] Check calendar for upcoming events
+//! - [review-pr] Check GitHub PR status
+//! - [paused-task:paused] This task will not execute
 //! ```
 //!
-//! Format: `- [name:interval] description`
+//! Format: `- [name] description` or `- [name:paused] description`
 //! - `name`: task identifier (alphanumeric, hyphens)
-//! - `interval`: duration like `30m`, `1h`, `2h`, `1d`, or `paused`
-//! - Backward compatible: `- plain text` defaults to 30m interval
+//! - `paused`: optional keyword to skip this task
+//! - Frequency is controlled by the heartbeat `every` config, not per-task
+//! - Backward compatible: `- plain text` generates a hash-based name
 //!
 //! Task state is persisted to `HEARTBEAT_STATE.json` in workspace dir.
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -88,10 +89,11 @@ fn text_to_name(text: &str) -> String {
 /// Parse HEARTBEAT.md content into (general_context, tasks).
 ///
 /// The general context is everything before the first `## Tasks` section.
-/// Tasks are parsed from `- [name:interval] description` lines.
+/// Tasks are parsed from `- [name] description` lines.
+/// The optional `:paused` suffix marks a task as paused: `- [name:paused] description`
 ///
 /// Backward compat: if no `## Tasks` section exists but there are `- ` lines,
-/// they are treated as tasks (plain text format, default 30m interval).
+/// they are treated as tasks (plain text format with auto-generated name).
 pub fn parse_heartbeat(content: &str) -> (String, Vec<HeartbeatTask>) {
     let mut context_lines: Vec<&str> = Vec::new();
     let mut tasks: Vec<HeartbeatTask> = Vec::new();
@@ -160,7 +162,7 @@ pub fn parse_heartbeat(content: &str) -> (String, Vec<HeartbeatTask>) {
     (context, tasks)
 }
 
-/// Parse a single task line: `[name:interval] description` or plain text.
+/// Parse a single task line: `[name] description` or `[name:paused] description` or plain text.
 fn parse_task_line(text: &str) -> Option<HeartbeatTask> {
     let text = text.trim();
     if text.is_empty() {
@@ -217,34 +219,18 @@ fn parse_task_line(text: &str) -> Option<HeartbeatTask> {
     })
 }
 
-/// Current time in milliseconds since Unix epoch.
-fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
-/// Filter tasks to only those that are due (interval elapsed since last run).
+/// Filter tasks to only those that are not paused.
+///
+/// With config-controlled heartbeat interval (the `every` field), all non-paused
+/// tasks run on every heartbeat tick. Per-task intervals are no longer used —
+/// frequency is controlled at the config level, matching OpenClaw's approach.
 pub fn due_tasks<'a>(
     tasks: &'a [HeartbeatTask],
-    state: &HeartbeatState,
+    _state: &HeartbeatState,
 ) -> Vec<&'a HeartbeatTask> {
-    let now = now_millis();
     tasks
         .iter()
-        .filter(|task| {
-            if task.is_paused {
-                return false;
-            }
-            match state.last_run.get(&task.name) {
-                Some(&last) => {
-                    let elapsed_ms = now.saturating_sub(last);
-                    elapsed_ms >= task.interval.as_millis() as u64
-                }
-                None => true, // never run → always due
-            }
-        })
+        .filter(|task| !task.is_paused)
         .collect()
 }
 
@@ -264,7 +250,8 @@ pub fn build_heartbeat_prompt(context: &str, due: &[&HeartbeatTask]) -> String {
     }
 
     prompt.push_str(
-        "\nAfter completing all tasks, reply HEARTBEAT_OK. \
+        "\nIf all tasks have nothing to report, reply ONLY with: HEARTBEAT_OK\n\
+         If any task produced results, report them normally. Do NOT include HEARTBEAT_OK in that case.\n\
          Do not infer or repeat old tasks from prior chats.",
     );
 
@@ -277,15 +264,13 @@ mod tests {
 
     #[test]
     fn parse_structured_tasks() {
-        let content = "# HEARTBEAT\n\nGeneral instructions here.\n\n## Tasks\n\n- [check-email:30m] 检查邮件\n- [check-cal:1h] 检查日历\n- [paused:paused] 不执行\n";
+        let content = "# HEARTBEAT\n\nGeneral instructions here.\n\n## Tasks\n\n- [check-email] 检查邮件\n- [check-cal] 检查日历\n- [paused:paused] 不执行\n";
         let (ctx, tasks) = parse_heartbeat(content);
         assert_eq!(ctx, "General instructions here.");
         assert_eq!(tasks.len(), 3);
         assert_eq!(tasks[0].name, "check-email");
-        assert_eq!(tasks[0].interval, Duration::from_secs(1800));
         assert!(!tasks[0].is_paused);
         assert_eq!(tasks[1].name, "check-cal");
-        assert_eq!(tasks[1].interval, Duration::from_secs(3600));
         assert!(tasks[2].is_paused);
     }
 
@@ -317,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn due_tasks_respects_interval() {
+    fn due_tasks_skips_paused_only() {
         let tasks = vec![
             HeartbeatTask {
                 name: "a".into(),
@@ -329,16 +314,10 @@ mod tests {
                 name: "b".into(),
                 interval: Duration::from_secs(3600),
                 description: "task b".into(),
-                is_paused: false,
+                is_paused: true,
             },
         ];
-        let now = now_millis();
-        let mut state = HeartbeatState::default();
-        // task a ran 35 min ago → due (interval 30m, 35 > 30)
-        state.last_run.insert("a".into(), now - 35 * 60 * 1000);
-        // task b ran 20 min ago → not due (interval 1h, 20 < 60)
-        state.last_run.insert("b".into(), now - 20 * 60 * 1000);
-
+        let state = HeartbeatState::default();
         let due = due_tasks(&tasks, &state);
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].name, "a");

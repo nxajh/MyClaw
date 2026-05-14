@@ -1294,7 +1294,10 @@ async fn run_message_task(
 pub(crate) fn is_silent_ok(response: &str, prefix: &str) -> bool {
     let trimmed = response.trim().to_lowercase();
     let marker = format!("{}_ok", prefix);
-    trimmed == marker || trimmed.contains(&marker)
+    // Only match if the response IS the marker (possibly with surrounding whitespace).
+    // Don't use contains() — a response with real content should never be silenced
+    // just because it happens to mention the marker.
+    trimmed == marker
 }
 
 /// Shared resources for spawned scheduler tasks (heartbeat/cron).
