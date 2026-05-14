@@ -195,14 +195,18 @@ impl Scheduler {
                     if let Some(t) = heartbeat_ticker.as_mut() { t.tick().await; }
                     else { std::future::pending::<()>().await; }
                 }, if heartbeat_ticker.is_some() => {
+                    tracing::debug!("heartbeat tick fired");
                     let config = self.heartbeat_config.as_ref().unwrap();
                     if !is_active_hours(&config.active_hours, &self.timezone) {
                         tracing::debug!("heartbeat skipped: outside active hours");
                         continue;
                     }
-                    let _ = self.event_tx.send(SchedulerEvent::Heartbeat {
+                    match self.event_tx.send(SchedulerEvent::Heartbeat {
                         target: config.target.clone(),
-                    }).await;
+                    }).await {
+                        Ok(()) => tracing::debug!("heartbeat event sent to orchestrator"),
+                        Err(e) => tracing::warn!(error = %e, "failed to send heartbeat event"),
+                    }
                 }
                 _ = cron_ticker.tick() => {
                     self.maybe_reload();
