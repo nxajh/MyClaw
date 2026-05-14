@@ -145,6 +145,7 @@ impl CronJobTool {
             let channel = v.get("channel")?.as_str()?;
             Some(DeliveryConfig {
                 channel: channel.to_string(),
+                account_id: v.get("account_id").and_then(|a| a.as_str()).map(|s| s.to_string()),
                 to: v.get("to").and_then(|t| t.as_str()).map(|s| s.to_string()),
                 thread_id: v.get("thread_id").and_then(|t| t.as_str()).map(|s| s.to_string()),
             })

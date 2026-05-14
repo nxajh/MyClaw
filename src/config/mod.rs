@@ -293,17 +293,21 @@ impl ConfigLoader {
             }
         }
 
-        // Expand channel tokens.
+        // Expand channel tokens (iterate over accounts).
         if let Some(ref mut wechat) = config.channels.wechat {
-            if let Some(ref token) = wechat.bot_token {
-                wechat.bot_token = Some(Self::expand_string(token));
-            }
-            if let Some(ref key) = wechat.aes_key {
-                wechat.aes_key = Some(Self::expand_string(key));
+            for (_, account) in wechat.accounts.iter_mut() {
+                if let Some(ref token) = account.bot_token {
+                    account.bot_token = Some(Self::expand_string(token));
+                }
+                if let Some(ref key) = account.aes_key {
+                    account.aes_key = Some(Self::expand_string(key));
+                }
             }
         }
         if let Some(ref mut tg) = config.channels.telegram {
-            tg.bot_token = Self::expand_string(&tg.bot_token);
+            for (_, account) in tg.accounts.iter_mut() {
+                account.bot_token = Self::expand_string(&account.bot_token);
+            }
         }
     }
 
