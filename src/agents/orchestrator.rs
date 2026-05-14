@@ -1351,6 +1351,7 @@ async fn run_heartbeat_task(
 }
 
 /// Execute a cron job turn as an independent spawned task.
+#[allow(clippy::too_many_arguments)]
 async fn run_cron_task(
     ctx: SchedulerContext,
     session_key: String,
