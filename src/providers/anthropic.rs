@@ -242,6 +242,35 @@ fn build_anthropic_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
         "build_anthropic_body: message merge complete"
     );
 
+    // Final pass: filter out empty text blocks from content arrays.
+    // Anthropic returns 400 "text content blocks must be non-empty".
+    for msg in &mut messages {
+        if let Some(content) = msg.get_mut("content") {
+            if let serde_json::Value::Array(arr) = content {
+                arr.retain(|p| {
+                    if p.get("type").and_then(|v| v.as_str()) == Some("text") {
+                        !p.get("text").and_then(|v| v.as_str()).unwrap_or("").is_empty()
+                    } else {
+                        true
+                    }
+                });
+            }
+        }
+    }
+
+    // After filtering empty blocks, some messages might have empty content arrays.
+    // Assistant messages must NOT have empty content in Anthropic API.
+    messages.retain(|msg| {
+        let _role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        let content = msg.get("content");
+        match content {
+            Some(serde_json::Value::Array(arr)) => !arr.is_empty(),
+            Some(serde_json::Value::String(s)) => !s.is_empty(),
+            Some(serde_json::Value::Null) => false,
+            _ => true,
+        }
+    });
+
     let mut body = json!({
         "model": req.model,
         "messages": messages,
