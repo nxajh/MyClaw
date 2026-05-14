@@ -392,11 +392,17 @@ strategy = "fallback"
 models = ["gpt-4o"]
 
 [channels.wechat]
+enabled = true
+
+[channels.wechat.accounts.default]
 api_base = "https://ilink.bot.weixin.qq.com"
 bot_token = "test-wechat-token"
 allowed_users = ["wxid_abc123"]
 
 [channels.telegram]
+enabled = true
+
+[channels.telegram.accounts.default]
 bot_token = "test-telegram-token"
 allowed_users = ["*"]
 
