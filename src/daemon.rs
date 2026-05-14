@@ -560,8 +560,9 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let jobs_json_path = cron_dir.join("jobs.json");
 
     // Migrate from old markdown files if jobs.json doesn't exist yet.
+    let tz_offset = config.agent.prompt.timezone_offset;
     if !jobs_json_path.exists() {
-        let mut migrator = crate::agents::CronStore::new(jobs_json_path.clone());
+        let mut migrator = crate::agents::CronStore::new(jobs_json_path.clone(), tz_offset);
         let count = migrator.migrate_from_markdown(&cron_dir);
         if count > 0 {
             tracing::info!(count = count, "migrated cron jobs from markdown to JSON");
@@ -569,7 +570,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     }
 
     let cron_store = crate::tools::SharedCronStore::new(
-        std::sync::RwLock::new(crate::agents::CronStore::new(jobs_json_path))
+        std::sync::RwLock::new(crate::agents::CronStore::new(jobs_json_path, tz_offset))
     );
 
     // Build tool registry (all built-in + MCP + SkillTool).
@@ -832,7 +833,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
         // Create a separate CronStore instance for the scheduler (reads same file).
         let scheduler_store = crate::agents::CronStore::new(
-            cron_store.read().unwrap().path().to_path_buf()
+            cron_store.read().unwrap().path().to_path_buf(),
+            config.agent.prompt.timezone_offset,
         );
 
         if heartbeat_config.is_some() || !scheduler_store.jobs().is_empty() {
