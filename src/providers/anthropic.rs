@@ -247,11 +247,15 @@ fn build_anthropic_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
     for msg in &mut messages {
         if let Some(serde_json::Value::Array(arr)) = msg.get_mut("content") {
             arr.retain(|p| {
-                if p.get("type").and_then(|v| v.as_str()) == Some("text") {
-                    !p.get("text").and_then(|v| v.as_str()).unwrap_or("").is_empty()
-                } else {
-                    true
+                let is_text = p.get("type").and_then(|v| v.as_str()) == Some("text");
+                if is_text {
+                    let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    if text.trim().is_empty() {
+                        tracing::warn!("Dropping empty text block from message");
+                        return false;
+                    }
                 }
+                true
             });
         }
     }
@@ -260,12 +264,16 @@ fn build_anthropic_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
     // Assistant messages must NOT have empty content in Anthropic API.
     messages.retain(|msg| {
         let content = msg.get("content");
-        match content {
+        let has_content = match content {
             Some(serde_json::Value::Array(arr)) => !arr.is_empty(),
-            Some(serde_json::Value::String(s)) => !s.is_empty(),
+            Some(serde_json::Value::String(s)) => !s.trim().is_empty(),
             Some(serde_json::Value::Null) => false,
             _ => true,
+        };
+        if !has_content {
+            tracing::warn!(role = ?msg.get("role"), "Dropping message with empty content");
         }
+        has_content
     });
 
     let mut body = json!({
