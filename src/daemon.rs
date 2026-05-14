@@ -582,8 +582,15 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         }
     }
 
+    // Read heartbeat config early for the scheduler.
+    let heartbeat_config = if config.agent.scheduler.heartbeat.enabled {
+        Some(config.agent.scheduler.heartbeat.clone())
+    } else {
+        None
+    };
+
     let shared_scheduler = crate::agents::scheduling::scheduler::Scheduler::new(
-        jobs_json_path.clone(), tz_name.clone(), None, scheduler_tx.clone(),
+        jobs_json_path.clone(), tz_name.clone(), heartbeat_config, scheduler_tx.clone(),
     );
 
     // Build tool registry (all built-in + MCP + SkillTool).
@@ -836,13 +843,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // ── Scheduler task (heartbeat + cron via mpsc) ──────────────────────────
 
     {
-        let _heartbeat_config = if scheduler_config.heartbeat.enabled {
-            Some(scheduler_config.heartbeat.clone())
-        } else {
-            None
-        };
-
-        // Run the scheduler (it was created earlier with the real scheduler_tx).
+        // Run the scheduler (it was created earlier with heartbeat config).
         if shared_scheduler.should_run() {
             let scheduler = Arc::clone(&shared_scheduler);
             tokio::spawn(async move { scheduler.run().await; });
