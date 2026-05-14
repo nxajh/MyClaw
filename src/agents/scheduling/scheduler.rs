@@ -1,55 +1,174 @@
-//! Scheduler — Heartbeat, Cron, Webhook, and pure Scheduler.
+//! Scheduler — Cron job scheduling, storage, and execution events.
 //!
-//! Scheduling modes:
-//!   - Scheduler (pure): sends timing events via mpsc, does NOT create agents.
-//!   - Heartbeat/Cron: legacy standalone loops (retained for backward compat).
-//!   - Webhook: HTTP server for external triggers.
+//! The Scheduler is the single owner of all cron job data. It:
+//!   - Loads and persists jobs from `jobs.json`
+//!   - Hot-reloads when the file changes on disk
+//!   - Sends timing events (heartbeat, cron) via mpsc channel
+//!   - Provides CRUD methods for cronjob_tool
+//!   - Records run results
 //!
-//! Job definitions come from files (`cron/*.md`, `webhooks/*.md`),
-//! not from TOML config. Config only holds global settings.
+//! External code interacts through `SharedScheduler` (Arc<Scheduler>).
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use chrono::Timelike;
 use dashmap::DashMap;
-use tokio::sync::{Mutex as TokioMutex, Mutex};
+use parking_lot::{Mutex as ParkMutex, RwLock};
+use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::Mutex;
 
 use crate::agents::Agent;
 use crate::agents::AgentLoop;
 use crate::agents::orchestrator::SchedulerEvent;
-use crate::agents::scheduling::cron_store::{CronStore, JobEntry};
+use crate::agents::scheduling::cron_types::{DeliveryConfig, RunRecord, ScheduleKind};
 use crate::agents::webhook_loader::{WebhookAuth, WebhookJobDef, render_template};
 use crate::channels::{Channel, SendMessage};
 use crate::config::scheduler::{HeartbeatConfig, WebhookConfig};
 use crate::storage::SessionBackend;
 
-// ── Pure Scheduler ──────────────────────────────────────────────────────────
+/// Shared handle to the Scheduler for concurrent access.
+pub type SharedScheduler = Arc<Scheduler>;
 
-/// Pure scheduler — sends timing events via mpsc, does NOT create agents.
-/// Reads jobs from a JSON store (`cron/jobs.json`) and hot-reloads when the
-/// file changes on disk.
+// ── JobEntry ────────────────────────────────────────────────────────────────
+
+/// A single cron job stored in `jobs.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobEntry {
+    /// Unique ID (12-char hex).
+    pub id: String,
+    /// Cron expression (6-field: sec min hour day month weekday).
+    /// e.g. "0 0 9 * * *" = every day at 09:00.
+    pub schedule: String,
+    /// Prompt to send to the agent when triggered.
+    pub prompt: String,
+    /// Where to send output: "last" | "none" | channel name.
+    #[serde(default = "default_target")]
+    pub target: String,
+    /// Optional friendly name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Per-job IANA timezone override (e.g. "Asia/Shanghai").
+    #[serde(default)]
+    pub tz: Option<String>,
+    /// Active hours restriction, e.g. "08:00-24:00". None = always active.
+    #[serde(default)]
+    pub active_hours: Option<String>,
+    /// Whether this job is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// ISO 8601 timestamp of last successful run. None = never run.
+    #[serde(default)]
+    pub last_run_at: Option<String>,
+    /// ISO 8601 timestamp of next scheduled run.
+    #[serde(default)]
+    pub next_run_at: Option<String>,
+    /// ISO 8601 timestamp of job creation.
+    #[serde(default)]
+    pub created_at: Option<String>,
+    /// Per-job delivery configuration (overrides target when set).
+    #[serde(default)]
+    pub delivery: Option<DeliveryConfig>,
+    /// Run history (most recent entries).
+    #[serde(default)]
+    pub last_runs: Vec<RunRecord>,
+    /// Tool whitelist. If set, only these tools are available for this job.
+    #[serde(default)]
+    pub enabled_tools: Option<Vec<String>>,
+    /// Tool blacklist. These tools are disabled for this job.
+    #[serde(default)]
+    pub disabled_tools: Option<Vec<String>>,
+    /// Schedule kind override (every/at). If None, use schedule string as cron.
+    #[serde(default)]
+    pub schedule_kind: Option<ScheduleKind>,
+}
+
+fn default_target() -> String { "last".to_string() }
+fn default_true() -> bool { true }
+
+/// Update fields for a cron job (all optional, only set fields are updated).
+#[derive(Debug, Clone, Default)]
+pub struct JobUpdate {
+    pub name: Option<String>,
+    pub schedule: Option<String>,
+    pub prompt: Option<String>,
+    pub target: Option<String>,
+    pub tz: Option<String>,
+    pub active_hours: Option<String>,
+    pub enabled: Option<bool>,
+    pub delivery: Option<DeliveryConfig>,
+    pub enabled_tools: Option<Vec<String>>,
+    pub disabled_tools: Option<Vec<String>>,
+}
+
+/// The top-level JSON structure of `jobs.json`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct JobsFile {
+    pub jobs: Vec<JobEntry>,
+}
+
+// ── Scheduler ───────────────────────────────────────────────────────────────
+
+/// Manages cron job scheduling, storage, and event dispatch.
+/// All data access is through interior mutability (RwLock).
 pub struct Scheduler {
-    heartbeat_config: Option<HeartbeatConfig>,
-    store: CronStore,
+    /// Jobs data protected by RwLock for concurrent access.
+    jobs: RwLock<JobsFile>,
+    /// Path to jobs.json on disk.
+    path: PathBuf,
+    /// Last known mtime (for hot-reload detection).
+    last_mtime: ParkMutex<Option<SystemTime>>,
+    /// Global IANA timezone.
     timezone: String,
+    /// Heartbeat config.
+    heartbeat_config: Option<HeartbeatConfig>,
+    /// Event channel to orchestrator.
     event_tx: tokio::sync::mpsc::Sender<SchedulerEvent>,
 }
 
 impl Scheduler {
+    /// Create a new Scheduler. Returns a SharedScheduler (Arc<Self>).
+    /// Loads existing jobs from disk if the file exists.
     pub fn new(
-        heartbeat_config: Option<HeartbeatConfig>,
-        store: CronStore,
+        path: PathBuf,
         timezone: String,
+        heartbeat_config: Option<HeartbeatConfig>,
         event_tx: tokio::sync::mpsc::Sender<SchedulerEvent>,
-    ) -> Self {
-        let job_count = store.jobs().len();
+    ) -> SharedScheduler {
+        let mut data = JobsFile::default();
+        let mut last_mtime = None;
+
+        if path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(parsed) = serde_json::from_str::<JobsFile>(&content) {
+                    data = parsed;
+                    last_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+                }
+            }
+        }
+
+        let job_count = data.jobs.len();
         tracing::info!(count = job_count, "scheduler loaded cron jobs from JSON store");
-        Self { heartbeat_config, store, timezone, event_tx }
+
+        Arc::new(Self {
+            jobs: RwLock::new(data),
+            path,
+            last_mtime: ParkMutex::new(last_mtime),
+            timezone,
+            heartbeat_config,
+            event_tx,
+        })
+    }
+
+    /// Whether the scheduler should run (has heartbeat or cron jobs).
+    pub fn should_run(&self) -> bool {
+        self.heartbeat_config.is_some() || !self.jobs.read().jobs.is_empty()
     }
 
     /// Run the scheduler loop — sends events via mpsc.
-    pub async fn run(&mut self) {
+    pub async fn run(&self) {
         let mut heartbeat_ticker = self.heartbeat_config.as_ref().and_then(|cfg| {
             parse_interval(&cfg.every).map(|interval| {
                 let mut t = tokio::time::interval(interval);
@@ -66,7 +185,7 @@ impl Scheduler {
 
         tracing::info!(
             heartbeat = heartbeat_ticker.is_some(),
-            cron_jobs = self.store.jobs().len(),
+            cron_jobs = self.jobs.read().jobs.len(),
             "scheduler started (JSON store mode)"
         );
 
@@ -86,18 +205,27 @@ impl Scheduler {
                     }).await;
                 }
                 _ = cron_ticker.tick() => {
-                    // Hot-reload: check if jobs.json changed on disk.
-                    self.store.maybe_reload();
+                    self.maybe_reload();
 
-                    // Find due jobs (collect IDs to release the borrow).
-                    let due_jobs: Vec<JobEntry> = self.store.get_due_jobs()
-                        .into_iter()
-                        .filter(|j| is_active_hours(&j.active_hours, j.tz.as_deref().unwrap_or(&self.timezone)))
-                        .collect();
+                    // Find due jobs (clone to release read lock before sending).
+                    let due_jobs: Vec<JobEntry> = {
+                        let data = self.jobs.read();
+                        let now = chrono::Utc::now();
+                        data.jobs.iter()
+                            .filter(|j| j.enabled)
+                            .filter(|j| {
+                                j.next_run_at.as_ref()
+                                    .and_then(|n| chrono::DateTime::parse_from_rfc3339(n).ok())
+                                    .map(|dt| dt.with_timezone(&chrono::Utc) <= now)
+                                    .unwrap_or(false)
+                            })
+                            .filter(|j| is_active_hours(&j.active_hours, j.tz.as_deref().unwrap_or(&self.timezone)))
+                            .cloned()
+                            .collect()
+                    };
 
                     let mut due_job_ids = Vec::new();
                     for j in &due_jobs {
-                        let session_key = format!("_cron_{}", j.id);
                         tracing::info!(
                             job_id = %j.id,
                             schedule = %j.schedule,
@@ -105,21 +233,379 @@ impl Scheduler {
                             "cron job triggered"
                         );
                         let _ = self.event_tx.send(SchedulerEvent::Cron {
-                            session_key,
+                            session_key: format!("_cron_{}", j.id),
                             prompt: j.prompt.clone(),
                             target: j.target.clone(),
+                            job_id: j.id.clone(),
+                            delivery: j.delivery.clone(),
+                            enabled_tools: j.enabled_tools.clone(),
+                            disabled_tools: j.disabled_tools.clone(),
                         }).await;
                         due_job_ids.push(j.id.clone());
                     }
 
                     // Mark jobs as run (updates last_run_at + next_run_at).
-                    for id in &due_job_ids {
-                        self.store.mark_run(id);
+                    if !due_job_ids.is_empty() {
+                        let mut data = self.jobs.write();
+                        for id in &due_job_ids {
+                            if let Some(job) = data.jobs.iter_mut().find(|j| j.id == *id) {
+                                let now = chrono::Utc::now().to_rfc3339();
+                                job.last_run_at = Some(now);
+                                job.next_run_at = compute_next_run(
+                                    &job.schedule,
+                                    job.last_run_at.as_deref(),
+                                    job.tz.as_deref().unwrap_or(&self.timezone),
+                                );
+                            }
+                        }
+                        let _ = self.save_to_disk_inner(&data);
                     }
                 }
             }
         }
     }
+}
+
+// ── CRUD operations ─────────────────────────────────────────────────────────
+
+impl Scheduler {
+    /// Get all jobs (cloned).
+    pub fn jobs(&self) -> Vec<JobEntry> {
+        self.jobs.read().jobs.clone()
+    }
+
+    /// Number of jobs.
+    pub fn job_count(&self) -> usize {
+        self.jobs.read().jobs.len()
+    }
+
+    /// Add a new job. Returns the generated ID.
+    pub fn add_job(&self, mut entry: JobEntry) -> anyhow::Result<String> {
+        if entry.id.is_empty() {
+            entry.id = generate_id();
+        }
+        if entry.created_at.is_none() {
+            entry.created_at = Some(chrono::Utc::now().to_rfc3339());
+        }
+        entry.next_run_at = compute_next_run(
+            &entry.schedule,
+            None,
+            entry.tz.as_deref().unwrap_or(&self.timezone),
+        );
+        let id = entry.id.clone();
+        {
+            let mut data = self.jobs.write();
+            data.jobs.push(entry);
+            self.save_to_disk_inner(&data)?;
+        }
+        Ok(id)
+    }
+
+    /// Update a job's fields. Returns true if found and updated.
+    pub fn update_job(&self, id: &str, update: JobUpdate) -> anyhow::Result<bool> {
+        let mut data = self.jobs.write();
+        if let Some(job) = data.jobs.iter_mut().find(|j| j.id == id) {
+            if let Some(name) = update.name { job.name = Some(name); }
+            if let Some(schedule) = update.schedule { job.schedule = schedule; }
+            if let Some(prompt) = update.prompt { job.prompt = prompt; }
+            if let Some(target) = update.target { job.target = target; }
+            if let Some(tz) = update.tz {
+                job.tz = Some(tz);
+                job.next_run_at = compute_next_run(&job.schedule, job.last_run_at.as_deref(), job.tz.as_deref().unwrap_or(&self.timezone));
+            }
+            if let Some(active_hours) = update.active_hours { job.active_hours = Some(active_hours); }
+            if let Some(enabled) = update.enabled {
+                job.enabled = enabled;
+                if !enabled { job.next_run_at = None; }
+                else { job.next_run_at = compute_next_run(&job.schedule, job.last_run_at.as_deref(), job.tz.as_deref().unwrap_or(&self.timezone)); }
+            }
+            if let Some(delivery) = update.delivery { job.delivery = Some(delivery); }
+            if let Some(enabled_tools) = update.enabled_tools { job.enabled_tools = Some(enabled_tools); }
+            if let Some(disabled_tools) = update.disabled_tools { job.disabled_tools = Some(disabled_tools); }
+            self.save_to_disk_inner(&data)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Remove a job. Returns true if found and removed.
+    pub fn remove_job(&self, id: &str) -> anyhow::Result<bool> {
+        let mut data = self.jobs.write();
+        let len_before = data.jobs.len();
+        data.jobs.retain(|j| j.id != id);
+        if data.jobs.len() < len_before {
+            self.save_to_disk_inner(&data)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Set enabled/disabled state.
+    pub fn set_enabled(&self, id: &str, enabled: bool) -> anyhow::Result<bool> {
+        self.update_job(id, JobUpdate { enabled: Some(enabled), ..Default::default() })
+    }
+
+    /// Record a run result for a job.
+    pub fn mark_run_result(&self, id: &str, record: RunRecord) {
+        let mut data = self.jobs.write();
+        if let Some(job) = data.jobs.iter_mut().find(|j| j.id == id) {
+            job.last_run_at = Some(record.run_at.clone());
+            job.next_run_at = compute_next_run(
+                &job.schedule,
+                job.last_run_at.as_deref(),
+                job.tz.as_deref().unwrap_or(&self.timezone),
+            );
+            job.last_runs.push(record);
+            // Keep only the most recent 10 entries.
+            if job.last_runs.len() > 10 {
+                let drain_count = job.last_runs.len() - 10;
+                job.last_runs.drain(0..drain_count);
+            }
+            // One-shot "at" jobs auto-disable after execution.
+            if matches!(job.schedule_kind, Some(ScheduleKind::At { .. })) {
+                job.enabled = false;
+            }
+            let _ = self.save_to_disk_inner(&data);
+        }
+    }
+}
+
+// ── Persistence ─────────────────────────────────────────────────────────────
+
+impl Scheduler {
+    /// Atomic save: write to .tmp then rename.
+    fn save_to_disk_inner(&self, data: &JobsFile) -> anyhow::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(data)?;
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, &json)?;
+        std::fs::rename(&tmp, &self.path)?;
+        Ok(())
+    }
+
+    /// Hot-reload: check if jobs.json changed on disk and reload if so.
+    pub fn maybe_reload(&self) {
+        let meta = std::fs::metadata(&self.path).ok();
+        let mtime = meta.and_then(|m| m.modified().ok());
+        let mut last = self.last_mtime.lock();
+        if mtime == *last { return; }
+        if let Ok(content) = std::fs::read_to_string(&self.path) {
+            if let Ok(parsed) = serde_json::from_str::<JobsFile>(&content) {
+                let mut data = self.jobs.write();
+                *data = parsed;
+                *last = mtime;
+                tracing::info!(count = data.jobs.len(), "hot-reloaded cron jobs from disk");
+            }
+        }
+    }
+
+    /// Migrate jobs from old markdown files in the cron directory.
+    pub fn migrate_from_markdown(&self, cron_dir: &Path) -> usize {
+        if !cron_dir.exists() { return 0; }
+
+        let entries = match std::fs::read_dir(cron_dir) {
+            Ok(e) => e,
+            Err(_) => return 0,
+        };
+
+        let mut migrated = 0;
+        let mut data = self.jobs.write();
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || path.extension().is_none_or(|ext| ext != "md") {
+                continue;
+            }
+
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            let (front_matter, body) = crate::str_utils::parse_front_matter(&content);
+            let schedule = match crate::str_utils::extract_yaml_string(&front_matter, "schedule") {
+                Some(s) => s,
+                None => continue,
+            };
+
+            let target = crate::str_utils::extract_yaml_string(&front_matter, "target")
+                .unwrap_or_else(|| "last".to_string());
+
+            let prompt = body.trim().to_string();
+            if prompt.is_empty() { continue; }
+
+            let active_hours = crate::str_utils::extract_yaml_string(&front_matter, "active_hours");
+
+            let already_exists = data.jobs.iter().any(|j| j.schedule == schedule && j.prompt == prompt);
+            if already_exists { continue; }
+
+            let entry = JobEntry {
+                id: generate_id(),
+                schedule,
+                prompt,
+                target,
+                name: path.file_stem().map(|s| s.to_string_lossy().to_string()),
+                tz: None,
+                active_hours,
+                enabled: true,
+                last_run_at: None,
+                next_run_at: None,
+                created_at: None,
+                delivery: None,
+                last_runs: Vec::new(),
+                enabled_tools: None,
+                disabled_tools: None,
+                schedule_kind: None,
+            };
+
+            data.jobs.push(entry);
+            migrated += 1;
+        }
+
+        if migrated > 0 {
+            let _ = self.save_to_disk_inner(&data);
+        }
+        migrated
+    }
+}
+
+// ── Prompt injection scanner ────────────────────────────────────────────────
+
+/// Scan a prompt for common injection patterns.
+/// Returns Ok(()) if safe, Err(reason) if injection detected.
+pub fn scan_prompt_injection(prompt: &str) -> Result<(), String> {
+    let lower = prompt.to_lowercase();
+
+    let role_hijack = [
+        "ignore previous", "ignore all instructions", "you are now",
+        "system prompt", "忽略之前", "忽略所有", "你现在是", "你的新角色",
+        "disregard your", "override your instructions",
+        "forget your instructions", "new instructions",
+    ];
+    for pattern in &role_hijack {
+        if lower.contains(pattern) {
+            return Err(format!("prompt injection detected (role hijack): '{}'", pattern));
+        }
+    }
+
+    let exfiltration = [
+        "send to http", "post to http", "curl -x post", "wget --post",
+        "发送到http", "上传到http",
+    ];
+    for pattern in &exfiltration {
+        if lower.contains(pattern) {
+            return Err(format!("prompt injection detected (exfiltration): '{}'", pattern));
+        }
+    }
+
+    Ok(())
+}
+
+// ── Schedule computation ────────────────────────────────────────────────────
+
+/// Resolve an IANA timezone name to a `chrono_tz::Tz`.
+/// Falls back to UTC if the name is invalid.
+pub fn resolve_tz(name: &str) -> chrono_tz::Tz {
+    name.parse::<chrono_tz::Tz>().unwrap_or_else(|_| {
+        tracing::warn!(tz = %name, "invalid IANA timezone, falling back to UTC");
+        chrono_tz::UTC
+    })
+}
+
+/// Compute the next run time for a job.
+/// Supports both legacy cron expressions and new ScheduleKind.
+pub fn compute_next_run(schedule: &str, last_run: Option<&str>, tz_name: &str) -> Option<String> {
+    compute_next_run_inner(None, schedule, last_run, tz_name)
+}
+
+/// Full compute with ScheduleKind support.
+pub fn compute_next_run_full(
+    kind: Option<&ScheduleKind>,
+    schedule: &str,
+    last_run: Option<&str>,
+    tz_name: &str,
+) -> Option<String> {
+    compute_next_run_inner(kind, schedule, last_run, tz_name)
+}
+
+fn compute_next_run_inner(
+    kind: Option<&ScheduleKind>,
+    schedule: &str,
+    last_run: Option<&str>,
+    tz_name: &str,
+) -> Option<String> {
+    match kind {
+        Some(ScheduleKind::Every { interval_ms }) => {
+            let base_ms = last_run
+                .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+                .map(|dt| dt.timestamp_millis() as u64)
+                .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() as u64);
+            let next_ms = base_ms + interval_ms;
+            chrono::DateTime::from_timestamp_millis(next_ms as i64)
+                .map(|dt| dt.with_timezone(&chrono::Utc).to_rfc3339())
+        }
+        Some(ScheduleKind::At { at }) => {
+            if last_run.is_some() {
+                return None; // Already executed
+            }
+            chrono::DateTime::parse_from_rfc3339(at)
+                .ok()
+                .map(|dt| dt.with_timezone(&chrono::Utc).to_rfc3339())
+        }
+        Some(ScheduleKind::Cron { expr }) => {
+            let cron_schedule: cron::Schedule = match expr.parse() {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(schedule = %expr, error = %e, "invalid cron expression");
+                    return None;
+                }
+            };
+            let tz = resolve_tz(tz_name);
+            let base_utc = match last_run {
+                Some(ts) => chrono::DateTime::parse_from_rfc3339(ts)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+                None => chrono::Utc::now(),
+            };
+            let base_local = base_utc.with_timezone(&tz);
+            cron_schedule.after(&base_local).next()
+                .map(|dt| dt.with_timezone(&chrono::Utc).to_rfc3339())
+        }
+        None => {
+            // Legacy cron expression from schedule string.
+            let cron_schedule: cron::Schedule = match schedule.parse() {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(schedule = %schedule, error = %e, "invalid cron expression");
+                    return None;
+                }
+            };
+            let tz = resolve_tz(tz_name);
+            let base_utc = match last_run {
+                Some(ts) => chrono::DateTime::parse_from_rfc3339(ts)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+                None => chrono::Utc::now(),
+            };
+            let base_local = base_utc.with_timezone(&tz);
+            cron_schedule.after(&base_local).next()
+                .map(|dt| dt.with_timezone(&chrono::Utc).to_rfc3339())
+        }
+    }
+}
+
+/// Generate a random 12-char hex ID.
+fn generate_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{:012x}", nanos & 0xfffffffffff)
 }
 
 // ── Webhook context ────────────────────────────────────────────────────────
@@ -179,7 +665,7 @@ pub fn is_active_hours(active_hours: &Option<String>, tz_name: &str) -> bool {
         None => return true, // Invalid format = always active
     };
 
-    let tz = crate::agents::scheduling::cron_store::resolve_tz(tz_name);
+    let tz = resolve_tz(tz_name);
     let now_local = chrono::Utc::now().with_timezone(&tz);
     let now_mins = now_local.hour() * 60 + now_local.minute();
 

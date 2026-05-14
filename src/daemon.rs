@@ -339,7 +339,7 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
 async fn build_tools(
     mcp_manager: &McpManager,
     skills: &Arc<parking_lot::RwLock<SkillManager>>,
-    cron_store: &crate::tools::SharedCronStore,
+    shared_scheduler: &crate::agents::SharedScheduler,
 ) -> ToolRegistry {
     let mut tools = ToolRegistry::new();
     let builtin = crate::tools::builtin_tools();
@@ -357,7 +357,7 @@ async fn build_tools(
     tools.register(Arc::new(crate::tools::SkillTool::new(Arc::clone(skills))));
 
     // CronJobTool — manage scheduled cron jobs.
-    tools.register(Arc::new(crate::tools::CronJobTool::new(Arc::clone(cron_store))));
+    tools.register(Arc::new(crate::tools::CronJobTool::new(Arc::clone(shared_scheduler))));
 
     // Inject MCP tools (if any servers are configured and connected).
     if mcp_manager.is_connected().await {
@@ -563,25 +563,31 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         else { format!("Etc/GMT{}", if offset > 0 { format!("-{}", offset) } else { format!("{}", -offset) }) }
     });
 
-    // Build shared cron store (used by both scheduler and CronJobTool).
+    // Create scheduler channel early (needed for SharedScheduler creation).
+    let (scheduler_tx, scheduler_rx) = tokio::sync::mpsc::channel::<crate::agents::SchedulerEvent>(100);
+
+    // Build shared scheduler (owns all cron job data).
     let cron_dir = config.workspace_dir.join("cron");
     let jobs_json_path = cron_dir.join("jobs.json");
 
     // Migrate from old markdown files if jobs.json doesn't exist yet.
     if !jobs_json_path.exists() {
-        let mut migrator = crate::agents::CronStore::new(jobs_json_path.clone(), tz_name.clone());
+        let (dummy_tx, _) = tokio::sync::mpsc::channel(1);
+        let migrator = crate::agents::scheduling::scheduler::Scheduler::new(
+            jobs_json_path.clone(), tz_name.clone(), None, dummy_tx,
+        );
         let count = migrator.migrate_from_markdown(&cron_dir);
         if count > 0 {
             tracing::info!(count = count, "migrated cron jobs from markdown to JSON");
         }
     }
 
-    let cron_store = crate::tools::SharedCronStore::new(
-        std::sync::RwLock::new(crate::agents::CronStore::new(jobs_json_path, tz_name.clone()))
+    let shared_scheduler = crate::agents::scheduling::scheduler::Scheduler::new(
+        jobs_json_path.clone(), tz_name.clone(), None, scheduler_tx.clone(),
     );
 
     // Build tool registry (all built-in + MCP + SkillTool).
-    let mut tools = build_tools(&mcp_manager, &skills_arc, &cron_store).await;
+    let mut tools = build_tools(&mcp_manager, &skills_arc, &shared_scheduler).await;
 
     // Build sub-agent configs (AGENT.md files from workspace/agents/).
     let sub_agent_configs = build_sub_agents(&config.workspace_dir);
@@ -749,9 +755,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             config.workspace_dir.join("agents"),
         );
 
-    // Create scheduler channel for Scheduler → Orchestrator communication.
-    let (scheduler_tx, scheduler_rx) = tokio::sync::mpsc::channel::<crate::agents::SchedulerEvent>(100);
-
+    // scheduler_tx already created above; scheduler_rx goes to OrchestratorParts.
     let session_manager_for_webhook = Arc::clone(&session_manager);
 
     let parts = OrchestratorParts {
@@ -832,25 +836,15 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // ── Scheduler task (heartbeat + cron via mpsc) ──────────────────────────
 
     {
-        let heartbeat_config = if scheduler_config.heartbeat.enabled {
+        let _heartbeat_config = if scheduler_config.heartbeat.enabled {
             Some(scheduler_config.heartbeat.clone())
         } else {
             None
         };
 
-        // Create a separate CronStore instance for the scheduler (reads same file).
-        let scheduler_store = crate::agents::CronStore::new(
-            cron_store.read().unwrap().path().to_path_buf(),
-            tz_name.clone(),
-        );
-
-        if heartbeat_config.is_some() || !scheduler_store.jobs().is_empty() {
-            let mut scheduler = crate::agents::Scheduler::new(
-                heartbeat_config,
-                scheduler_store,
-                tz_name.clone(),
-                scheduler_tx,
-            );
+        // Run the scheduler (it was created earlier with the real scheduler_tx).
+        if shared_scheduler.should_run() {
+            let scheduler = Arc::clone(&shared_scheduler);
             tokio::spawn(async move { scheduler.run().await; });
         }
     }

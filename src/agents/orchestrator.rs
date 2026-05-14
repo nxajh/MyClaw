@@ -56,6 +56,10 @@ pub enum SchedulerEvent {
         session_key: String,
         prompt: String,
         target: String,
+        job_id: String,
+        delivery: Option<crate::agents::scheduling::cron_types::DeliveryConfig>,
+        enabled_tools: Option<Vec<String>>,
+        disabled_tools: Option<Vec<String>>,
     },
 }
 
@@ -785,7 +789,7 @@ impl Orchestrator {
                     state_path.to_path_buf(),
                 ));
             }
-            SchedulerEvent::Cron { session_key, prompt, target } => {
+            SchedulerEvent::Cron { session_key, prompt, target, job_id, delivery, enabled_tools, disabled_tools } => {
                 tracing::info!(session_key = %session_key, "cron job triggered (from scheduler)");
                 let ctx = SchedulerContext {
                     sessions: self.sessions.clone(),
@@ -801,6 +805,10 @@ impl Orchestrator {
                     session_key,
                     prompt,
                     target,
+                    job_id,
+                    delivery,
+                    enabled_tools,
+                    disabled_tools,
                 ));
             }
         }
@@ -1348,6 +1356,10 @@ async fn run_cron_task(
     session_key: String,
     prompt: String,
     target: String,
+    _job_id: String,
+    _delivery: Option<crate::agents::scheduling::cron_types::DeliveryConfig>,
+    _enabled_tools: Option<Vec<String>>,
+    _disabled_tools: Option<Vec<String>>,
 ) {
     let result = {
         let loop_ = get_or_create_scheduled_loop(&ctx, &session_key);
