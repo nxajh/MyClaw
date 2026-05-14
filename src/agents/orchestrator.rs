@@ -104,6 +104,10 @@ pub struct Orchestrator {
     pub last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
     /// Path to persist last_channel across restarts.
     last_channel_file: std::path::PathBuf,
+    /// Last recipient (reply_target) that received a user message (shared with schedulers).
+    pub last_recipient: Arc<tokio::sync::Mutex<Option<String>>>,
+    /// Path to persist last_recipient across restarts.
+    last_recipient_file: std::path::PathBuf,
     /// Scheduler event receiver (heartbeat ticks, cron triggers).
     scheduler_rx: Arc<TokioMutex<Option<mpsc::Receiver<SchedulerEvent>>>>,
     /// Search provider cooldown tracker (shared with WebSearchTool).
@@ -118,6 +122,7 @@ pub struct SharedSessions {
     pub sessions: Arc<DashMap<String, Arc<TokioMutex<AgentLoop>>>>,
     pub channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
     pub last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
+    pub last_recipient: Arc<tokio::sync::Mutex<Option<String>>>,
 }
 
 /// Parse a session key like "telegram:ops:12345" into (channel_type, account_id, sender).
@@ -232,6 +237,14 @@ impl Orchestrator {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
+        let last_recipient_file = parts.workspace_dir.join(".last_recipient");
+
+        // Load persisted last_recipient from disk.
+        let last_recipient_value = std::fs::read_to_string(&last_recipient_file)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
         let orchestrator = Orchestrator {
             channels: channels_map,
             sessions: Arc::new(DashMap::new()),
@@ -248,6 +261,8 @@ impl Orchestrator {
             change_rx: parts.change_rx,
             last_channel: Arc::new(tokio::sync::Mutex::new(last_channel_value)),
             last_channel_file,
+            last_recipient: Arc::new(tokio::sync::Mutex::new(last_recipient_value)),
+            last_recipient_file,
             scheduler_rx: Arc::new(TokioMutex::new(parts.scheduler_rx)),
             search_cooldown: parts.search_cooldown,
             unfinished_subagents: parking_lot::Mutex::new(parts.unfinished_subagents),
@@ -263,6 +278,7 @@ impl Orchestrator {
             sessions: self.sessions.clone(),
             channels: self.channels.clone(),
             last_channel: self.last_channel.clone(),
+            last_recipient: self.last_recipient.clone(),
         }
     }
 
@@ -462,6 +478,15 @@ impl Orchestrator {
                         if lc.as_deref() != Some(&lc_val) {
                             *lc = Some(lc_val.clone());
                             let _ = std::fs::write(&self.last_channel_file, &lc_val);
+                        }
+                    }
+                    // Track last recipient for heartbeat/cron target resolution.
+                    let recipient = msg.reply_target.clone();
+                    {
+                        let mut lr = self.last_recipient.lock().await;
+                        if lr.as_deref() != Some(&recipient) {
+                            *lr = Some(recipient.clone());
+                            let _ = std::fs::write(&self.last_recipient_file, &recipient);
                         }
                     }
 
@@ -797,6 +822,7 @@ impl Orchestrator {
                     change_rx: self.change_rx.clone(),
                     channels: self.channels.clone(),
                     last_channel: self.last_channel.clone(),
+                    last_recipient: self.last_recipient.clone(),
                 };
                 tokio::spawn(run_heartbeat_task(
                     ctx,
@@ -818,6 +844,7 @@ impl Orchestrator {
                     change_rx: self.change_rx.clone(),
                     channels: self.channels.clone(),
                     last_channel: self.last_channel.clone(),
+                    last_recipient: self.last_recipient.clone(),
                 };
                 tokio::spawn(run_cron_task(
                     ctx,
@@ -1329,6 +1356,7 @@ struct SchedulerContext {
     change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
     channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
     last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
+    last_recipient: Arc<tokio::sync::Mutex<Option<String>>>,
 }
 
 /// Execute a heartbeat turn as an independent spawned task.
@@ -1365,7 +1393,7 @@ async fn run_heartbeat_task(
             tracing::info!("heartbeat: nothing needs attention");
         }
         Ok(response) if !response.trim().is_empty() => {
-            send_to_target_internal(ctx.channels, ctx.last_channel, target_channel, target_account, &response).await;
+            send_to_target_internal(ctx.channels, ctx.last_channel, ctx.last_recipient.clone(), target_channel, target_account, &response).await;
         }
         Ok(_) => {}
         Err(e) => {
@@ -1395,7 +1423,7 @@ async fn run_cron_task(
 
     match result {
         Ok(response) if !response.trim().is_empty() => {
-            send_to_target_internal(ctx.channels, ctx.last_channel, target_channel, target_account, &response).await;
+            send_to_target_internal(ctx.channels, ctx.last_channel, ctx.last_recipient.clone(), target_channel, target_account, &response).await;
         }
         Ok(_) => {}
         Err(e) => {
@@ -1429,6 +1457,7 @@ fn get_or_create_scheduled_loop(
 async fn send_to_target_internal(
     channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
     last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
+    last_recipient: Arc<tokio::sync::Mutex<Option<String>>>,
     target_channel: Option<String>,
     target_account: Option<String>,
     content: &str,
@@ -1463,9 +1492,12 @@ async fn send_to_target_internal(
         }
     };
 
+    // Resolve recipient from last_recipient.
+    let recipient = last_recipient.lock().await.clone().unwrap_or_default();
+
     let msg = SendMessage {
         content: content.to_string(),
-        recipient: String::new(),
+        recipient,
         subject: None,
         thread_ts: None,
         cancellation_token: None,
