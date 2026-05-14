@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::{Channel, ChannelMessage, DedupState, SendMessage, ProcessingStatus};
-use crate::config::channel::TelegramConfig;
+use crate::config::channel::TelegramAccountConfig;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -480,7 +480,7 @@ pub struct TelegramChannel {
 }
 
 impl TelegramChannel {
-    pub fn new(config: TelegramConfig) -> Self {
+    pub fn new(config: TelegramAccountConfig) -> Self {
         let allowed = Self::normalize_allowed_users(config.allowed_users.clone());
 
         Self {
@@ -1170,7 +1170,6 @@ impl TelegramChannel {
                     sender: entry.sender,
                     reply_target: entry.reply_target,
                     content: merged,
-                    channel: "telegram".to_string(),
                     timestamp: entry.first_ts,
                     thread_ts: None,
                     interruption_scope_id: None,
@@ -1415,7 +1414,6 @@ impl TelegramChannel {
                             .unwrap_or_default(),
                         reply_target,
                         content: data,
-                        channel: "telegram".to_string(),
                         timestamp: chrono::Utc::now().timestamp_millis() as u64,
                         thread_ts: cq.message.as_ref().and_then(|m| m.message_thread_id).map(|id| id.to_string()),
                         interruption_scope_id: None,
@@ -1518,7 +1516,6 @@ impl TelegramChannel {
                         chat.id.to_string()
                     },
                     content,
-                    channel: "telegram".to_string(),
                     timestamp: chrono::Utc::now().timestamp_millis() as u64,
                     thread_ts: msg.message_thread_id.map(|id| id.to_string()),
                     interruption_scope_id: None,
@@ -1784,8 +1781,8 @@ impl Channel for TelegramChannel {
 mod tests {
     use super::*;
 
-    fn make_config() -> TelegramConfig {
-        TelegramConfig {
+    fn make_config() -> TelegramAccountConfig {
+        TelegramAccountConfig {
             bot_token: "test_token_123".into(),
             allowed_users: vec!["alice".into(), "123456".into()],
             mention_only: false,

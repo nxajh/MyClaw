@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 pub struct DeliveryConfig {
     /// Target channel name (e.g. "telegram", "discord").
     pub channel: String,
+    /// Target account ID (for multi-instance channels).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Target user/group ID (channel-specific format).
     #[serde(default)]
     pub to: Option<String>,

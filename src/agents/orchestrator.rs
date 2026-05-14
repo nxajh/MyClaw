@@ -40,7 +40,7 @@ const BTN_ABORT: &str = "✖ 放弃";
 
 /// Internal enum for the run loop's select.
 enum ChannelEvent {
-    UserMessage((String, ChannelMessage)),
+    UserMessage(((String, String), ChannelMessage)),
     Delegation(DelegationEvent),
 }
 
@@ -49,13 +49,15 @@ enum ChannelEvent {
 pub enum SchedulerEvent {
     /// Heartbeat tick — run agent with heartbeat prompt.
     Heartbeat {
-        target: String,
+        target_channel: Option<String>,
+        target_account: Option<String>,
     },
     /// Cron job matched — run agent with specific prompt.
     Cron {
         session_key: String,
         prompt: String,
-        target: String,
+        target_channel: Option<String>,
+        target_account: Option<String>,
         job_id: String,
         delivery: Option<crate::agents::scheduling::cron_types::DeliveryConfig>,
         enabled_tools: Option<Vec<String>>,
@@ -68,15 +70,15 @@ pub enum SchedulerEvent {
 /// Coordinates the flow: Channel → Session → AgentLoop → Channel.
 /// Does NOT depend on any Infrastructure concrete types.
 pub struct Orchestrator {
-    /// Channels, keyed by name (e.g. "telegram", "wechat").
-    channels: Arc<DashMap<String, Arc<dyn Channel>>>,
-    /// Per-session agent loops: "channel:sender" → Arc<Mutex<AgentLoop>>.
+    /// Channels, keyed by (channel_type, account_id).
+    channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
+    /// Per-session agent loops: "channel:account:sender" → Arc<Mutex<AgentLoop>>.
     sessions: Arc<DashMap<String, Arc<TokioMutex<AgentLoop>>>>,
     agent: Agent,
     session_manager: Arc<SessionManager>,
     /// The message receiver, owned and consumed by run().
     #[allow(clippy::type_complexity)]
-    msg_rx: Arc<TokioMutex<Option<mpsc::Receiver<(String, ChannelMessage)>>>>,
+    msg_rx: Arc<TokioMutex<Option<mpsc::Receiver<((String, String), ChannelMessage)>>>>,
     /// Listener task handles — taken and awaited on shutdown.
     listener_handles: Vec<JoinHandle<()>>,
     /// Pending ask_user replies: session_key → (oneshot sender, reply_target).
@@ -94,6 +96,7 @@ pub struct Orchestrator {
     /// File change receiver for hot-reload.
     change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
     /// Last channel that received a user message (shared with schedulers).
+    /// Format: "channel_type:account_id"
     pub last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
     /// Path to persist last_channel across restarts.
     last_channel_file: std::path::PathBuf,
@@ -109,17 +112,20 @@ pub struct Orchestrator {
 /// Resources shared between Orchestrator and scheduler tasks.
 pub struct SharedSessions {
     pub sessions: Arc<DashMap<String, Arc<TokioMutex<AgentLoop>>>>,
-    pub channels: Arc<DashMap<String, Arc<dyn Channel>>>,
+    pub channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
     pub last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
 }
 
-/// Parse a session key like "telegram:12345" into (channel_name, sender).
-fn parse_session_key(sk: &str) -> Option<(&str, &str)> {
-    let (ch, sender) = sk.split_once(':')?;
-    if ch.is_empty() || sender.is_empty() {
+/// Parse a session key like "telegram:ops:12345" into (channel_type, account_id, sender).
+fn parse_session_key(sk: &str) -> Option<(&str, &str, &str)> {
+    let mut parts = sk.splitn(3, ':');
+    let channel_type = parts.next()?;
+    let account_id = parts.next()?;
+    let sender = parts.next()?;
+    if channel_type.is_empty() || account_id.is_empty() || sender.is_empty() {
         return None;
     }
-    Some((ch, sender))
+    Some((channel_type, account_id, sender))
 }
 
 /// Return `true` if the session history ends with an incomplete tool execution:
@@ -161,8 +167,8 @@ fn history_has_incomplete_turn(history: &[crate::providers::capability_chat::Cha
 pub struct OrchestratorParts {
     pub agent: Agent,
     pub session_manager: Arc<SessionManager>,
-    /// Pre-built channels from Interface layer (Feature-gated at compile time).
-    pub channels: Vec<(&'static str, Arc<dyn Channel>)>,
+    /// Pre-built channels: (channel_type, account_id, channel_instance).
+    pub channels: Vec<(String, String, Arc<dyn Channel>)>,
     /// Sub-agent delegator (conditional — only when sub-agents are configured).
     pub sub_delegator: Option<Arc<SubAgentDelegator>>,
     /// Delegation manager (conditional — only when sub-agents are configured).
@@ -191,19 +197,23 @@ impl Orchestrator {
     ///
     /// The Composition Root is responsible for building `OrchestratorParts`
     /// (creating Registry, registering Providers/Tools, opening Storage, etc.).
-    pub fn new(parts: OrchestratorParts) -> (Self, mpsc::Sender<(String, ChannelMessage)>) {
+    pub fn new(parts: OrchestratorParts) -> (Self, mpsc::Sender<((String, String), ChannelMessage)>) {
         let (msg_tx, msg_rx) = mpsc::channel(CHANNEL_QUEUE_SIZE);
         let msg_tx = Arc::new(msg_tx);
 
-        let channels_map: Arc<DashMap<String, Arc<dyn Channel>>> = Arc::new(DashMap::new());
+        let channels_map: Arc<DashMap<(String, String), Arc<dyn Channel>>> = Arc::new(DashMap::new());
         let mut listener_handles = Vec::new();
 
-        for (name, channel) in &parts.channels {
-            let name_static: &'static str = name;
-            let handle = Self::spawn_listener(name_static, Arc::clone(channel), Arc::clone(&msg_tx));
-            channels_map.insert((*name).to_string(), Arc::clone(channel));
+        for (channel_type, account_id, channel) in &parts.channels {
+            let handle = Self::spawn_listener(
+                channel_type.clone(),
+                account_id.clone(),
+                Arc::clone(channel),
+                Arc::clone(&msg_tx),
+            );
+            channels_map.insert((channel_type.clone(), account_id.clone()), Arc::clone(channel));
             listener_handles.push(handle);
-            info!(channel = %name, "listener started");
+            info!(channel = %channel_type, account = %account_id, "listener started");
         }
 
         if channels_map.is_empty() {
@@ -253,9 +263,10 @@ impl Orchestrator {
     }
 
     fn spawn_listener(
-        channel_name: &'static str,
+        channel_type: String,
+        account_id: String,
         channel: Arc<dyn Channel>,
-        msg_tx: Arc<mpsc::Sender<(String, ChannelMessage)>>,
+        msg_tx: Arc<mpsc::Sender<((String, String), ChannelMessage)>>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut backoff = Duration::from_secs(1);
@@ -267,7 +278,8 @@ impl Orchestrator {
                     }
                     Err(e) => {
                         error!(
-                            channel = %channel_name,
+                            channel = %channel_type,
+                            account = %account_id,
                             err = %e,
                             delay_secs = backoff.as_secs(),
                             "listen failed, retrying"
@@ -278,14 +290,15 @@ impl Orchestrator {
                     }
                 };
                 while let Some(msg) = rx.recv().await {
-                    if msg_tx.send((channel_name.to_string(), msg)).await.is_err() {
+                    if msg_tx.send(((channel_type.clone(), account_id.clone()), msg)).await.is_err() {
                         // Orchestrator is gone; no point reconnecting.
                         return;
                     }
                 }
                 // Stream ended cleanly (channel disconnected) — reconnect.
                 warn!(
-                    channel = %channel_name,
+                    channel = %channel_type,
+                    account = %account_id,
                     delay_secs = backoff.as_secs(),
                     "listener stream ended, reconnecting"
                 );
@@ -295,8 +308,8 @@ impl Orchestrator {
         })
     }
 
-    fn session_key(channel: &str, sender: &str) -> String {
-        format!("{channel}:{sender}")
+    fn session_key(channel_type: &str, account_id: &str, sender: &str) -> String {
+        format!("{}:{}:{}", channel_type, account_id, sender)
     }
 
     /// Main message loop. Consumes self.msg_rx.
@@ -437,17 +450,19 @@ impl Orchestrator {
             };
 
             match event {
-                ChannelEvent::UserMessage((channel_name, msg)) => {
+                ChannelEvent::UserMessage(((channel_type, account_id), msg)) => {
                     // Track last channel for scheduler target resolution.
+                    let lc_val = format!("{}:{}", channel_type, account_id);
                     {
                         let mut lc = self.last_channel.lock().await;
-                        if lc.as_deref() != Some(&channel_name) {
-                            *lc = Some(channel_name.clone());
-                            let _ = std::fs::write(&self.last_channel_file, &channel_name);
+                        if lc.as_deref() != Some(&lc_val) {
+                            *lc = Some(lc_val.clone());
+                            let _ = std::fs::write(&self.last_channel_file, &lc_val);
                         }
                     }
 
-                    let sk = Self::session_key(&channel_name, &msg.sender);
+                    let sk = Self::session_key(&channel_type, &account_id, &msg.sender);
+                    let channel_key = (channel_type.clone(), account_id.clone());
 
                     // Check if this is a reply to a pending ask_user.
                     if let Some((_, (tx, _))) = self.pending_asks.remove(&sk) {
@@ -463,10 +478,9 @@ impl Orchestrator {
                     if msg.content.starts_with("__retry:") || msg.content.starts_with("__abort:") {
                         let is_retry = msg.content.starts_with("__retry:");
                         let reply_target = msg.reply_target.clone();
-                        let channel_name_c = channel_name.clone();
 
                         let channel: Option<Arc<dyn Channel>> = {
-                            channels.get(&channel_name_c).map(|r| r.clone())
+                            channels.get(&channel_key).map(|r| r.clone())
                         };
                         let channel = match channel {
                             Some(c) => c,
@@ -524,7 +538,7 @@ impl Orchestrator {
                                 .unwrap_or_default();
                             guard.set_pending_retry(last_user_msg.clone());
 
-                            let channel = match channels.get(&channel_name).map(|r| r.clone()) {
+                            let channel = match channels.get(&channel_key).map(|r| r.clone()) {
                                 Some(c) => c,
                                 None => continue,
                             };
@@ -561,7 +575,7 @@ impl Orchestrator {
                             search_cooldown: self.search_cooldown.as_ref(),
                         };
                         if let Some(response) = super::slash_command::dispatch(cmd, cmd_args, cmd_ctx).await {
-                            if let Some(channel) = channels.get(&channel_name).map(|r| r.clone()) {
+                            if let Some(channel) = channels.get(&channel_key).map(|r| r.clone()) {
                                 tokio::spawn(async move {
                                     let send_msg = SendMessage {
                                         recipient: reply_target,
@@ -592,7 +606,7 @@ impl Orchestrator {
                         tracing::warn!(session = %sk, err = %e, "failed to persist reply_target");
                     }
 
-                    let channel = match channels.get(&channel_name).map(|r| r.clone()) {
+                    let channel = match channels.get(&channel_key).map(|r| r.clone()) {
                         Some(c) => c,
                         None => continue,
                     };
@@ -642,14 +656,14 @@ impl Orchestrator {
                 // Send the main agent's response to the user.
                 match response {
                     Ok(text) if !text.is_empty() => {
-                        let (ch_name, _) = match parse_session_key(&session_key) {
-                            Some(pair) => pair,
+                        let (ch_type, acc_id, _) = match parse_session_key(&session_key) {
+                            Some(triple) => triple,
                             None => {
                                 tracing::warn!(session = %session_key, "invalid session key in delegation event");
                                 return;
                             }
                         };
-                        if let Some(channel) = self.channels.get(ch_name) {
+                        if let Some(channel) = self.channels.get(&(ch_type.to_string(), acc_id.to_string())) {
                             let send_msg = SendMessage {
                                 recipient: reply_target,
                                 content: text,
@@ -694,14 +708,14 @@ impl Orchestrator {
 
                 match response {
                     Ok(text) if !text.is_empty() => {
-                        let (ch_name, _) = match parse_session_key(&session_key) {
-                            Some(pair) => pair,
+                        let (ch_type, acc_id, _) = match parse_session_key(&session_key) {
+                            Some(triple) => triple,
                             None => {
                                 tracing::warn!(session = %session_key, "invalid session key in delegation event");
                                 return;
                             }
                         };
-                        if let Some(channel) = self.channels.get(ch_name) {
+                        if let Some(channel) = self.channels.get(&(ch_type.to_string(), acc_id.to_string())) {
                             let send_msg = SendMessage {
                                 recipient: reply_target,
                                 content: text,
@@ -732,7 +746,7 @@ impl Orchestrator {
     /// unnecessary task creation; the actual LLM execution is spawned.
     async fn handle_scheduler_event(&self, event: SchedulerEvent) {
         match event {
-            SchedulerEvent::Heartbeat { target } => {
+            SchedulerEvent::Heartbeat { target_channel, target_account } => {
                 tracing::info!("heartbeat triggered (from scheduler)");
                 // Pre-flight: cheap checks before spawning.
                 let heartbeat_path = std::path::Path::new("HEARTBEAT.md");
@@ -782,14 +796,15 @@ impl Orchestrator {
                 };
                 tokio::spawn(run_heartbeat_task(
                     ctx,
-                    target,
+                    target_channel,
+                    target_account,
                     prompt,
                     due.into_iter().cloned().collect(),
                     state,
                     state_path.to_path_buf(),
                 ));
             }
-            SchedulerEvent::Cron { session_key, prompt, target, job_id, delivery, enabled_tools, disabled_tools } => {
+            SchedulerEvent::Cron { session_key, prompt, target_channel, target_account, job_id, delivery, enabled_tools, disabled_tools } => {
                 tracing::info!(session_key = %session_key, "cron job triggered (from scheduler)");
                 let ctx = SchedulerContext {
                     sessions: self.sessions.clone(),
@@ -804,7 +819,8 @@ impl Orchestrator {
                     ctx,
                     session_key,
                     prompt,
-                    target,
+                    target_channel,
+                    target_account,
                     job_id,
                     delivery,
                     enabled_tools,
@@ -838,11 +854,11 @@ impl Orchestrator {
                     let recipient = self.persist_backend.load_reply_target(sk)
                         .unwrap_or_else(|| {
                             parse_session_key(sk)
-                                .map(|(_, sender)| sender.to_string())
+                                .map(|(_, _, sender)| sender.to_string())
                                 .unwrap_or_default()
                         });
-                    if let Some((ch_name, _)) = parse_session_key(sk) {
-                        if let Some(channel) = self.channels.get(ch_name).map(|r| r.clone()) {
+                    if let Some((ch_type, acc_id, _)) = parse_session_key(sk) {
+                        if let Some(channel) = self.channels.get(&(ch_type.to_string(), acc_id.to_string())).map(|r| r.clone()) {
                             let send_msg = SendMessage::new(&text, &recipient);
                             if let Err(e) = channel.send(&send_msg).await {
                                 tracing::warn!(session = %sk, err = %e, "startup recovery: failed to send response");
@@ -1307,14 +1323,15 @@ struct SchedulerContext {
     persist_backend: Arc<dyn crate::storage::SessionBackend>,
     agent: Agent,
     change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
-    channels: Arc<DashMap<String, Arc<dyn Channel>>>,
+    channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
     last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
 }
 
 /// Execute a heartbeat turn as an independent spawned task.
 async fn run_heartbeat_task(
     ctx: SchedulerContext,
-    target: String,
+    target_channel: Option<String>,
+    target_account: Option<String>,
     prompt: String,
     due: Vec<super::heartbeat_tasks::HeartbeatTask>,
     mut state: super::heartbeat_tasks::HeartbeatState,
@@ -1344,7 +1361,7 @@ async fn run_heartbeat_task(
             tracing::info!("heartbeat: nothing needs attention");
         }
         Ok(response) if !response.trim().is_empty() => {
-            send_to_target_internal(ctx.channels, ctx.last_channel, &target, &response).await;
+            send_to_target_internal(ctx.channels, ctx.last_channel, target_channel, target_account, &response).await;
         }
         Ok(_) => {}
         Err(e) => {
@@ -1359,7 +1376,8 @@ async fn run_cron_task(
     ctx: SchedulerContext,
     session_key: String,
     prompt: String,
-    target: String,
+    target_channel: Option<String>,
+    target_account: Option<String>,
     _job_id: String,
     _delivery: Option<crate::agents::scheduling::cron_types::DeliveryConfig>,
     _enabled_tools: Option<Vec<String>>,
@@ -1373,7 +1391,7 @@ async fn run_cron_task(
 
     match result {
         Ok(response) if !response.trim().is_empty() => {
-            send_to_target_internal(ctx.channels, ctx.last_channel, &target, &response).await;
+            send_to_target_internal(ctx.channels, ctx.last_channel, target_channel, target_account, &response).await;
         }
         Ok(_) => {}
         Err(e) => {
@@ -1405,26 +1423,38 @@ fn get_or_create_scheduled_loop(
 
 /// Send a response to the configured target channel (used by heartbeat).
 async fn send_to_target_internal(
-    channels: Arc<DashMap<String, Arc<dyn Channel>>>,
+    channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
     last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
-    target: &str,
+    target_channel: Option<String>,
+    target_account: Option<String>,
     content: &str,
 ) {
-    let channel_name = match target {
-        "none" => return,
-        "last" => last_channel.lock().await.clone(),
-        name => Some(name.to_string()),
+    let (ch_type, acc_id) = match (target_channel, target_account) {
+        (Some(ch), Some(acc)) => (ch, acc),
+        (Some(ch), None) => (ch, "default".to_string()),
+        (None, _) => {
+            // Resolve from last_channel (format: "channel_type:account_id")
+            let last = last_channel.lock().await.clone();
+            match last {
+                Some(ref key) => match key.split_once(':') {
+                    Some((ch, acc)) => (ch.to_string(), acc.to_string()),
+                    None => {
+                        tracing::warn!(key = %key, "invalid last_channel format");
+                        return;
+                    }
+                },
+                None => {
+                    tracing::warn!("no target channel for scheduled response");
+                    return;
+                }
+            }
+        }
     };
 
-    let Some(ch_name) = channel_name else {
-        tracing::warn!("no target channel for scheduled response");
-        return;
-    };
-
-    let channel = match channels.get(&ch_name) {
+    let channel = match channels.get(&(ch_type.clone(), acc_id.clone())) {
         Some(ch) => ch.clone(),
         None => {
-            tracing::warn!(channel = %ch_name, "target channel not found");
+            tracing::warn!(channel = %ch_type, account = %acc_id, "target channel not found");
             return;
         }
     };
@@ -1441,7 +1471,7 @@ async fn send_to_target_internal(
     };
 
     if let Err(e) = channel.send(&msg).await {
-        tracing::warn!(channel = %ch_name, error = %e, "failed to send scheduled response");
+        tracing::warn!(channel = %ch_type, account = %acc_id, error = %e, "failed to send scheduled response");
     }
 }
 
@@ -1452,8 +1482,8 @@ mod tests {
     #[test]
     fn test_session_key() {
         assert_eq!(
-            Orchestrator::session_key("wechat", "o9cq80zXpSX1Hz0ph_QNs591k4PA"),
-            "wechat:o9cq80zXpSX1Hz0ph_QNs591k4PA"
+            Orchestrator::session_key("wechat", "default", "o9cq80zXpSX1Hz0ph_QNs591k4PA"),
+            "wechat:default:o9cq80zXpSX1Hz0ph_QNs591k4PA"
         );
     }
 }

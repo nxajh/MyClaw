@@ -202,7 +202,8 @@ impl Scheduler {
                         continue;
                     }
                     match self.event_tx.send(SchedulerEvent::Heartbeat {
-                        target: config.target.clone(),
+                        target_channel: parse_target_channel(&config.target),
+                        target_account: parse_target_account(&config.target),
                     }).await {
                         Ok(()) => tracing::debug!("heartbeat event sent to orchestrator"),
                         Err(e) => tracing::warn!(error = %e, "failed to send heartbeat event"),
@@ -239,7 +240,8 @@ impl Scheduler {
                         let _ = self.event_tx.send(SchedulerEvent::Cron {
                             session_key: format!("_cron_{}", j.id),
                             prompt: j.prompt.clone(),
-                            target: j.target.clone(),
+                            target_channel: parse_target_channel(&j.target),
+                            target_account: parse_target_account(&j.target),
                             job_id: j.id.clone(),
                             delivery: j.delivery.clone(),
                             enabled_tools: j.enabled_tools.clone(),
@@ -618,14 +620,14 @@ fn generate_id() -> String {
 /// Heartbeat and cron use the Orchestrator event path instead.
 pub struct WebhookContext {
     pub agent: Agent,
-    pub channels: Arc<DashMap<String, Arc<dyn Channel>>>,
+    pub channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
     pub sessions: Arc<DashMap<String, Arc<TokioMutex<AgentLoop>>>>,
     /// Shared session manager — avoids creating throwaway instances per request.
     pub session_manager: Arc<crate::agents::session_manager::SessionManager>,
     /// Backend kept separately for persist hooks (BackendPersistHook needs it).
     pub session_backend: Arc<dyn SessionBackend>,
     pub timezone: String,
-    /// Last channel that received a user message.
+    /// Last channel that received a user message (format: "channel_type:account_id").
     pub last_channel: Arc<Mutex<Option<String>>>,
     pub change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
 }
@@ -655,6 +657,24 @@ pub fn parse_interval(s: &str) -> Option<Duration> {
 }
 
 // ── Active hours ───────────────────────────────────────────────────────────
+
+/// Parse target string "channel:account" into channel part.
+/// Returns None for "last", "none", or empty strings.
+fn parse_target_channel(target: &str) -> Option<String> {
+    match target {
+        "last" | "none" | "" => None,
+        _ => target.split_once(':').map(|(ch, _)| ch.to_string()).or_else(|| Some(target.to_string())),
+    }
+}
+
+/// Parse target string "channel:account" into account part.
+/// Returns None for "last", "none", or empty strings.
+fn parse_target_account(target: &str) -> Option<String> {
+    match target {
+        "last" | "none" | "" => None,
+        _ => target.split_once(':').map(|(_, acc)| acc.to_string()),
+    }
+}
 
 /// Check if current time is within active hours.
 /// Format: "HH:MM-HH:MM" e.g. "08:00-24:00".
@@ -724,21 +744,37 @@ fn get_or_create_loop(ctx: &WebhookContext, session_key: &str) -> Arc<TokioMutex
 
 /// Send a response to the configured target channel.
 pub async fn send_to_target(ctx: &WebhookContext, target: &str, content: &str) {
-    let channel_name = match target {
+    let (ch_type, acc_id) = match target {
         "none" => return,
-        "last" => ctx.last_channel.lock().await.clone(),
-        name => Some(name.to_string()),
+        "last" => {
+            let last = ctx.last_channel.lock().await.clone();
+            match last {
+                Some(ref key) => match key.split_once(':') {
+                    Some((ch, acc)) => (ch.to_string(), acc.to_string()),
+                    None => {
+                        tracing::warn!(key = %key, "invalid last_channel format");
+                        return;
+                    }
+                },
+                None => {
+                    tracing::warn!("no target channel for scheduled response");
+                    return;
+                }
+            }
+        }
+        name => {
+            // Parse "channel:account" or just "channel" (default account)
+            match name.split_once(':') {
+                Some((ch, acc)) => (ch.to_string(), acc.to_string()),
+                None => (name.to_string(), "default".to_string()),
+            }
+        }
     };
 
-    let Some(ch_name) = channel_name else {
-        tracing::warn!("no target channel for scheduled response");
-        return;
-    };
-
-    let channel = match ctx.channels.get(&ch_name) {
+    let channel = match ctx.channels.get(&(ch_type.clone(), acc_id.clone())) {
         Some(ch) => ch.clone(),
         None => {
-            tracing::warn!(channel = %ch_name, "target channel not found");
+            tracing::warn!(channel = %ch_type, account = %acc_id, "target channel not found");
             return;
         }
     };
@@ -755,7 +791,7 @@ pub async fn send_to_target(ctx: &WebhookContext, target: &str, content: &str) {
     };
 
     if let Err(e) = channel.send(&msg).await {
-        tracing::warn!(channel = %ch_name, error = %e, "failed to send scheduled response");
+        tracing::warn!(channel = %ch_type, account = %acc_id, error = %e, "failed to send scheduled response");
     }
 }
 

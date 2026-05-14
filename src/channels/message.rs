@@ -16,7 +16,6 @@ pub struct ChannelMessage {
     pub sender: String,
     pub reply_target: String,
     pub content: String,
-    pub channel: String,
     pub timestamp: u64,
     pub thread_ts: Option<String>,
     pub interruption_scope_id: Option<String>,

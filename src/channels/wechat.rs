@@ -38,7 +38,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::{Channel, ChannelMessage, DedupState, SendMessage};
-use crate::config::channel::WechatConfig;
+use crate::config::channel::WechatAccountConfig;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -348,7 +348,7 @@ struct ApiClient {
 }
 
 impl ApiClient {
-    fn new(config: &WechatConfig) -> Self {
+    fn new(config: &WechatAccountConfig) -> Self {
         let http = Client::builder()
             .timeout(Duration::from_secs(config.poll_timeout + 15))
             .build()
@@ -577,12 +577,12 @@ fn classify_backoff(err: &ApiError, count: u32) -> u64 {
 #[derive(Clone)]
 pub struct WechatChannel {
     api: ApiClient,
-    config: WechatConfig,
+    config: WechatAccountConfig,
     dedup: DedupState,
 }
 
 impl WechatChannel {
-    pub fn new(config: WechatConfig) -> Self {
+    pub fn new(config: WechatAccountConfig) -> Self {
         Self { api: ApiClient::new(&config), config, dedup: DedupState::new() }
     }
 
@@ -686,7 +686,6 @@ impl Channel for WechatChannel {
                                 sender: event.sender_wxid,
                                 reply_target: event.chat_id,
                                 content,
-                                channel: "wechat".to_string(),
                                 timestamp: event.raw_timestamp as u64,
                                 thread_ts: None,
                                 interruption_scope_id: None,

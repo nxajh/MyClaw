@@ -416,36 +416,51 @@ fn build_session_backend(config: &crate::config::AppConfig) -> Arc<dyn crate::st
     }
 }
 
-/// Build Channel adapters from config.
-fn build_channels(config: &crate::config::AppConfig) -> Vec<(&'static str, Arc<dyn Channel>)> {
-    let mut channels: Vec<(&'static str, Arc<dyn Channel>)> = Vec::new();
+/// Build Channel adapters from config, returning (channel_type, account_id, channel).
+fn build_channel_accounts(config: &crate::config::AppConfig) -> Vec<(String, String, Arc<dyn Channel>)> {
+    let mut channels: Vec<(String, String, Arc<dyn Channel>)> = Vec::new();
 
     if let Some(ref cfg) = config.channels.telegram {
         if cfg.enabled {
-            channels.push((
-                "telegram",
-                Arc::new(crate::channels::telegram::TelegramChannel::new(cfg.clone())),
-            ));
+            for (account_id, account_cfg) in &cfg.accounts {
+                if account_cfg.enabled {
+                    channels.push((
+                        "telegram".to_string(),
+                        account_id.clone(),
+                        Arc::new(crate::channels::telegram::TelegramChannel::new(account_cfg.clone())),
+                    ));
+                }
+            }
         }
     }
 
     #[cfg(feature = "wechat")]
     if let Some(ref cfg) = config.channels.wechat {
         if cfg.enabled {
-            channels.push((
-                "wechat",
-                Arc::new(crate::channels::wechat::WechatChannel::new(cfg.clone())),
-            ));
+            for (account_id, account_cfg) in &cfg.accounts {
+                if account_cfg.enabled {
+                    channels.push((
+                        "wechat".to_string(),
+                        account_id.clone(),
+                        Arc::new(crate::channels::wechat::WechatChannel::new(account_cfg.clone())),
+                    ));
+                }
+            }
         }
     }
 
     #[cfg(feature = "qqbot")]
     if let Some(ref cfg) = config.channels.qqbot {
         if cfg.enabled {
-            channels.push((
-                "qqbot",
-                Arc::new(crate::channels::qqbot::QQBotChannel::new(cfg.clone(), &config.workspace_dir)),
-            ));
+            for (account_id, account_cfg) in &cfg.accounts {
+                if account_cfg.enabled {
+                    channels.push((
+                        "qqbot".to_string(),
+                        account_id.clone(),
+                        Arc::new(crate::channels::qqbot::QQBotChannel::new(account_cfg.clone())),
+                    ));
+                }
+            }
         }
     }
 
@@ -676,7 +691,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
     let session_backend = build_session_backend(&config);
     let session_manager = Arc::new(SessionManager::new(Arc::clone(&session_backend)));
-    let mut channels = build_channels(&config);
+    let mut channels = build_channel_accounts(&config);
 
     // ── Sub-agent recovery: detect interrupted sub-agents from a previous run ──
     let sessions_root = config.workspace_dir.join("sessions");
@@ -733,7 +748,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         });
     #[cfg(feature = "client")]
     if let Some(ref cc) = _client_channel {
-        channels.push(("client", cc.clone() as Arc<dyn Channel>));
+        channels.push(("client".to_string(), "default".to_string(), cc.clone() as Arc<dyn Channel>));
     }
 
     let agent_config = AgentConfig {

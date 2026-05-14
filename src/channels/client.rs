@@ -279,7 +279,6 @@ impl ClientChannel {
                                                 sender: conn_id_clone.clone(),
                                                 reply_target: session_key_clone.clone(),
                                                 content,
-                                                channel: "client".to_string(),
                                                 timestamp: chrono::Utc::now().timestamp() as u64,
                                                 thread_ts: None,
                                                 interruption_scope_id: None,
