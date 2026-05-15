@@ -46,6 +46,7 @@ use super::session_manager::{Session, PersistHook};
 use crate::agents::prompt::{SystemPromptBuilder, SystemPromptConfig};
 use crate::agents::attachment::AttachmentManager;
 use crate::config::sub_agent::SubAgentConfig;
+use super::tool_executor::DefaultToolExecutor;
 
 pub(crate) mod types;
 mod run;
@@ -151,6 +152,7 @@ impl Agent {
     pub fn registry(&self) -> &Arc<dyn ServiceRegistry> { &self.registry }
     pub fn tools(&self) -> &Arc<super::tool_registry::ToolRegistry> { &self.tools }
     pub fn skills(&self) -> &Arc<RwLock<SkillManager>> { &self.skills }
+
     pub fn sub_agent_configs(&self) -> &Arc<RwLock<Vec<SubAgentConfig>>> { &self.sub_agent_configs }
     pub fn workspace_dir(&self) -> &str { &self.config.prompt_config.workspace_dir }
     pub fn compact_threshold(&self) -> f64 { self.config.context.compact_threshold }
@@ -219,12 +221,10 @@ impl Agent {
 
         AgentLoop {
             registry: Arc::clone(&self.registry),
-            tools: Arc::clone(&self.tools),
+            tool_executor: DefaultToolExecutor::new(Arc::clone(&self.tools), config.tool_timeout_secs),
             config,
             session,
             request_builder,
-            ask_user_handler: None,
-            delegate_handler: None,
             loop_breaker: LoopBreaker::new(LoopBreakerConfig {
                 max_tool_calls,
                 exact_repeat_threshold: self.config.loop_breaker_threshold,
@@ -232,7 +232,6 @@ impl Agent {
             }),
             policy,
             persist_hook,
-            sub_delegator: None,
             model_override,
             thinking_override,
             pending_retry_message: None,
@@ -243,7 +242,6 @@ impl Agent {
 /// Per-session agent loop handle. Execute `run(user_message)` to process a message.
 pub struct AgentLoop {
     pub(crate) registry: Arc<dyn ServiceRegistry>,
-    pub(crate) tools: Arc<ToolRegistry>,
     pub(crate) config: AgentConfig,
     pub(crate) session: Session,
     // ── Message building + attachments + images + hot-reload ──
@@ -251,9 +249,7 @@ pub struct AgentLoop {
     // ── Token tracking + compaction strategy ──
     pub(crate) policy: CompactionPolicy,
     // ── Tool execution ──
-    pub(crate) ask_user_handler: Option<AskUserHandler>,
-    pub(crate) delegate_handler: Option<DelegateHandler>,
-    pub(crate) sub_delegator: Option<Arc<super::sub_agent::SubAgentDelegator>>,
+    pub(crate) tool_executor: DefaultToolExecutor,
     // ── Infrastructure ──
     pub(crate) loop_breaker: LoopBreaker,
     pub(crate) persist_hook: Option<Arc<dyn PersistHook>>,
@@ -264,7 +260,7 @@ pub struct AgentLoop {
 
 impl AgentLoop {
     pub fn with_ask_user_handler(mut self, handler: AskUserHandler) -> Self {
-        self.ask_user_handler = Some(handler);
+        self.tool_executor.ask_user_handler = Some(handler);
         self
     }
 
@@ -289,12 +285,12 @@ impl AgentLoop {
     }
 
     pub fn with_delegate_handler(mut self, handler: DelegateHandler) -> Self {
-        self.delegate_handler = Some(handler);
+        self.tool_executor.delegate_handler = Some(handler);
         self
     }
 
     pub fn with_sub_delegator(mut self, delegator: Arc<super::sub_agent::SubAgentDelegator>) -> Self {
-        self.sub_delegator = Some(delegator);
+        self.tool_executor.sub_delegator = Some(delegator);
         self
     }
 
