@@ -10,6 +10,7 @@
 > 4. Phase 2 + Phase 4 合并，消除桥接中间状态（V7 问题 5）
 > 5. 图片字段归入 `RequestBuilder`（V7 遗漏）
 > 6. 新增 Phase 1：先修复增量压缩 Bug，再开始大重构
+> 7. `CompactionExecutor::execute` 增加 `tool_specs: &[ToolSpec]` 参数，保证 summarizer LLM 请求与主请求 cache key 一致（修复 V7/V8 初版缓存命中率问题）
 
 ---
 
@@ -463,11 +464,16 @@ impl CompactionExecutor {
     /// 接收只读历史切片——编译器保证不修改 session.history。
     /// 摘要生成后由调用方（AgentLoop）通过 session.apply_compaction() 应用。
     ///
-    /// system_prompt 与主请求保持一致（同 model / 同 tools），最大化 provider 前缀缓存命中。
+    /// **缓存一致性**：`tool_specs` 必须与主请求的 tool spec 列表完全相同。
+    /// Provider 前缀缓存的 key = model + system_prompt + tool_definitions + messages_prefix，
+    /// 任何一项不同都会导致缓存未命中。因此 summarizer LLM 请求必须使用与主对话
+    /// 完全相同的 tool spec，而不是 MemoryToolExecutor 的受限子集。
+    /// MemoryToolExecutor 仅用于实际工具执行（类型安全约束），不用于 LLM 请求。
     pub async fn execute(
         &self,
         history: &[ChatMessage],     // 只读
         system_prompt: &str,
+        tool_specs: &[ToolSpec],     // 主请求的完整 tool spec（保证缓存 key 一致）
         boundary: usize,
         model_id: &str,
     ) -> anyhow::Result<CompactionResult>;
@@ -496,11 +502,15 @@ fn find_incremental_range(history: &[ChatMessage], boundary: usize) -> (usize, u
 /// 图片剥离（summarizer 不需要图片内容）
 fn strip_images(msgs: &[ChatMessage]) -> Vec<ChatMessage> { /* ... */ }
 
-/// 构建 summarizer messages（复用 system_prompt 保证缓存前缀一致）
-fn build_summarizer_messages(...) -> Vec<ChatMessage> { /* ... */ }
+/// 构建 summarizer messages（复用 system_prompt + tool_specs，保证缓存 key 与主请求一致）
+fn build_summarizer_messages(system_prompt: &str, tool_specs: &[ToolSpec], ...) -> Vec<ChatMessage> { /* ... */ }
 
-/// Mini chat_loop（最多 max_rounds 轮，使用 MemoryToolExecutor 执行 memory 工具）
-async fn run_summarizer_loop(&self, messages: &mut Vec<ChatMessage>, model_id: &str) -> anyhow::Result<String> { /* ... */ }
+/// Mini chat_loop（最多 max_rounds 轮）
+///
+/// LLM 请求：使用传入的完整 tool_specs（cache key 与主请求一致 → 缓存命中）
+/// 工具执行：使用 MemoryToolExecutor（类型约束，不能访问 session → 无副作用泄漏）
+/// 两层分离：LLM 看到完整 tool spec，但实际只有 memory 工具可以被执行。
+async fn run_summarizer_loop(&self, messages: &mut Vec<ChatMessage>, tool_specs: &[ToolSpec], model_id: &str) -> anyhow::Result<String> { /* ... */ }
 
 /// 质量审计（非阻塞，失败只 warn）
 fn audit_summary_quality(to_compact: &[ChatMessage], summary: &str) -> (bool, Vec<String>) { /* ... */ }
@@ -663,9 +673,11 @@ async fn maybe_compact(&mut self, model_id: &str) -> anyhow::Result<()> {
     );
 
     // 执行压缩（只读历史，编译器保证不修改 session）
+    // specs 同时传给 compactor，保证 summarizer LLM 请求与主请求缓存 key 完全一致
     let result = match self.compactor.execute(
         &self.session.history,
         self.request_builder.system_prompt(),
+        &specs,
         boundary,
         model_id,
     ).await {
