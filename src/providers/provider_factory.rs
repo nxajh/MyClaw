@@ -112,6 +112,12 @@ pub struct BuildSttProviderRequest {
 /// Falls back to `ProviderHandle` for capabilities not yet migrated.
 pub struct ProviderFactory;
 
+impl Default for ProviderFactory {
+    fn default() -> Self {
+        Self
+    }
+}
+
 impl ProviderFactory {
     pub fn new() -> Self {
         Self
