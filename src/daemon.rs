@@ -17,6 +17,7 @@ use crate::agents::{
 };
 use crate::tools::TaskDelegator;
 use crate::config::sub_agent::SubAgentConfig;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -191,17 +192,41 @@ fn print_banner(config: &crate::config::AppConfig, mcp_servers: usize, mcp_tools
 
 /// Build the Registry and register all providers from config.
 fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::registry::Registry> {
+    use crate::providers::{ProviderId, detect_from_url};
+    use crate::providers::{
+        ProviderFactory,
+        BuildChatProviderRequest, BuildEmbeddingProviderRequest,
+        BuildImageProviderRequest, BuildTtsProviderRequest,
+        BuildSearchProviderRequest, BuildVideoProviderRequest, BuildSttProviderRequest,
+    };
+
+    let factory = ProviderFactory::new();
     let mut registry =
         crate::registry::Registry::from_config(config.providers.clone(), &config.routing)
             .context("failed to build registry")?;
 
     for (provider_key, provider_cfg) in &config.providers {
+        // Resolve provider identity: explicit override > base_url inference > generic
+        let provider_id = provider_cfg.provider.as_ref()
+            .map(|s| ProviderId::new(s.clone()))
+            .or_else(|| {
+                // Try to infer from the first capability's base_url
+                provider_cfg.chat.as_ref()
+                    .and_then(|c| detect_from_url(&c.base_url))
+                    .or_else(|| provider_cfg.embedding.as_ref().and_then(|e| detect_from_url(&e.base_url)))
+                    .or_else(|| provider_cfg.search.as_ref().and_then(|s| detect_from_url(&s.base_url)))
+            })
+            .unwrap_or_else(|| ProviderId::new("generic"));
+
+        tracing::info!(provider = %provider_key, id = %provider_id, "resolved provider identity");
+
         // ── Chat ──────────────────────────────────────────────────────
         if let Some(ref chat) = provider_cfg.chat {
             let api_key = provider_cfg.effective_api_key(chat.api_key.as_deref());
             let api_key = api_key
                 .with_context(|| format!("no API key for '{}'", provider_key))?;
-            let user_agent = chat.user_agent.as_deref();
+            let auth_style = provider_cfg.effective_auth_style(chat.auth_style);
+            let user_agent = chat.user_agent.clone();
 
             for (model_id, model_cfg) in &chat.models {
                 tracing::info!(
@@ -211,16 +236,23 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
                     "registering chat provider"
                 );
 
-                let handle = crate::providers::ProviderHandle::from_url_with_user_agent(
-                    api_key.clone(),
-                    &chat.base_url,
-                    user_agent,
-                ).with_context(|| format!(
-                    "cannot determine provider type from base_url '{}' (key='{}')",
-                    chat.base_url, provider_key
-                ))?;
+                let request = BuildChatProviderRequest {
+                    provider_key: provider_key.clone(),
+                    provider_id: provider_id.clone(),
+                    protocol: chat.protocol,
+                    base_url: chat.base_url.clone(),
+                    api_key: api_key.clone(),
+                    auth_style: auth_style.into(),
+                    user_agent: user_agent.clone(),
+                    extra_headers: HashMap::new(),
+                };
 
-                let chat_provider: Box<dyn crate::providers::ChatProvider> = handle.into_chat_provider();
+                let chat_provider = factory.build_chat_provider(request)
+                    .with_context(|| format!(
+                        "cannot build chat provider for base_url '{}' (key='{}')",
+                        chat.base_url, provider_key
+                    ))?;
+
                 registry.register_chat(chat_provider, model_id.clone(), model_cfg.clone());
             }
         }
@@ -230,7 +262,8 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
             let api_key = provider_cfg.effective_api_key(emb.api_key.as_deref());
             let api_key = api_key
                 .with_context(|| format!("no API key for '{}' embedding", provider_key))?;
-            let user_agent = emb.user_agent.as_deref();
+            let auth_style = provider_cfg.effective_auth_style(emb.auth_style);
+            let user_agent = emb.user_agent.clone();
 
             for model_id in emb.models.keys() {
                 tracing::info!(
@@ -240,9 +273,17 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
                     "registering embedding provider"
                 );
 
-                if let Some(emb_provider) = crate::providers::ProviderHandle::from_url_with_user_agent(
-                    api_key.clone(), &emb.base_url, user_agent,
-                ).and_then(|h| h.into_embedding_provider()) {
+                let request = BuildEmbeddingProviderRequest {
+                    provider_key: provider_key.clone(),
+                    provider_id: provider_id.clone(),
+                    base_url: emb.base_url.clone(),
+                    api_key: api_key.clone(),
+                    auth_style: auth_style.into(),
+                    user_agent: user_agent.clone(),
+                    extra_headers: HashMap::new(),
+                };
+
+                if let Some(emb_provider) = factory.build_embedding_provider(request) {
                     registry.register_embedding(emb_provider, model_id.clone());
                 }
             }
@@ -253,12 +294,21 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
             let api_key = provider_cfg.effective_api_key(sec.api_key.as_deref());
             let api_key = api_key
                 .with_context(|| format!("no API key for '{}' image_generation", provider_key))?;
-            let user_agent = sec.user_agent.as_deref();
+            let auth_style = provider_cfg.effective_auth_style(sec.auth_style);
+            let user_agent = sec.user_agent.clone();
 
             for model_id in sec.models.keys() {
-                if let Some(img) = crate::providers::ProviderHandle::from_url_with_user_agent(
-                    api_key.clone(), &sec.base_url, user_agent,
-                ).and_then(|h| h.into_image_provider()) {
+                let request = BuildImageProviderRequest {
+                    provider_key: provider_key.clone(),
+                    provider_id: provider_id.clone(),
+                    base_url: sec.base_url.clone(),
+                    api_key: api_key.clone(),
+                    auth_style: auth_style.into(),
+                    user_agent: user_agent.clone(),
+                    extra_headers: HashMap::new(),
+                };
+
+                if let Some(img) = factory.build_image_provider(request) {
                     registry.register_image(img, model_id.clone());
                 }
             }
@@ -269,12 +319,21 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
             let api_key = provider_cfg.effective_api_key(sec.api_key.as_deref());
             let api_key = api_key
                 .with_context(|| format!("no API key for '{}' tts", provider_key))?;
-            let user_agent = sec.user_agent.as_deref();
+            let auth_style = provider_cfg.effective_auth_style(sec.auth_style);
+            let user_agent = sec.user_agent.clone();
 
             for model_id in sec.models.keys() {
-                if let Some(tts) = crate::providers::ProviderHandle::from_url_with_user_agent(
-                    api_key.clone(), &sec.base_url, user_agent,
-                ).and_then(|h| h.into_tts_provider()) {
+                let request = BuildTtsProviderRequest {
+                    provider_key: provider_key.clone(),
+                    provider_id: provider_id.clone(),
+                    base_url: sec.base_url.clone(),
+                    api_key: api_key.clone(),
+                    auth_style: auth_style.into(),
+                    user_agent: user_agent.clone(),
+                    extra_headers: HashMap::new(),
+                };
+
+                if let Some(tts) = factory.build_tts_provider(request) {
                     registry.register_tts(tts, model_id.clone());
                 }
             }
@@ -285,12 +344,21 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
             let api_key = provider_cfg.effective_api_key(sec.api_key.as_deref());
             let api_key = api_key
                 .with_context(|| format!("no API key for '{}' video", provider_key))?;
-            let user_agent = sec.user_agent.as_deref();
+            let auth_style = provider_cfg.effective_auth_style(sec.auth_style);
+            let user_agent = sec.user_agent.clone();
 
             for model_id in sec.models.keys() {
-                if let Some(vid) = crate::providers::ProviderHandle::from_url_with_user_agent(
-                    api_key.clone(), &sec.base_url, user_agent,
-                ).and_then(|h| h.into_video_provider()) {
+                let request = BuildVideoProviderRequest {
+                    provider_key: provider_key.clone(),
+                    provider_id: provider_id.clone(),
+                    base_url: sec.base_url.clone(),
+                    api_key: api_key.clone(),
+                    auth_style: auth_style.into(),
+                    user_agent: user_agent.clone(),
+                    extra_headers: HashMap::new(),
+                };
+
+                if let Some(vid) = factory.build_video_provider(request) {
                     registry.register_video(vid, model_id.clone());
                 }
             }
@@ -301,12 +369,21 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
             let api_key = provider_cfg.effective_api_key(sec.api_key.as_deref());
             let api_key = api_key
                 .with_context(|| format!("no API key for '{}' search", provider_key))?;
-            let user_agent = sec.user_agent.as_deref();
+            let auth_style = provider_cfg.effective_auth_style(sec.auth_style);
+            let user_agent = sec.user_agent.clone();
 
             for model_id in sec.models.keys() {
-                if let Some(srch) = crate::providers::ProviderHandle::from_url_with_user_agent(
-                    api_key.clone(), &sec.base_url, user_agent,
-                ).and_then(|h| h.into_search_provider()) {
+                let request = BuildSearchProviderRequest {
+                    provider_key: provider_key.clone(),
+                    provider_id: provider_id.clone(),
+                    base_url: sec.base_url.clone(),
+                    api_key: api_key.clone(),
+                    auth_style: auth_style.into(),
+                    user_agent: user_agent.clone(),
+                    extra_headers: HashMap::new(),
+                };
+
+                if let Some(srch) = factory.build_search_provider(request) {
                     registry.register_search(srch, model_id.clone());
                 }
             }
@@ -317,12 +394,21 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
             let api_key = provider_cfg.effective_api_key(sec.api_key.as_deref());
             let api_key = api_key
                 .with_context(|| format!("no API key for '{}' stt", provider_key))?;
-            let user_agent = sec.user_agent.as_deref();
+            let auth_style = provider_cfg.effective_auth_style(sec.auth_style);
+            let user_agent = sec.user_agent.clone();
 
             for model_id in sec.models.keys() {
-                if let Some(stt) = crate::providers::ProviderHandle::from_url_with_user_agent(
-                    api_key.clone(), &sec.base_url, user_agent,
-                ).and_then(|h| h.into_stt_provider()) {
+                let request = BuildSttProviderRequest {
+                    provider_key: provider_key.clone(),
+                    provider_id: provider_id.clone(),
+                    base_url: sec.base_url.clone(),
+                    api_key: api_key.clone(),
+                    auth_style: auth_style.into(),
+                    user_agent: user_agent.clone(),
+                    extra_headers: HashMap::new(),
+                };
+
+                if let Some(stt) = factory.build_stt_provider(request) {
                     registry.register_stt(stt, model_id.clone());
                 }
             }

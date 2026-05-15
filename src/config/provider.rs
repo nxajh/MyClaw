@@ -15,6 +15,19 @@ pub use crate::providers::capability::{
 };
 pub use crate::providers::RotationStrategy;
 
+// ── Protocol ──────────────────────────────────────────────────────────────────
+
+/// API protocol used by a provider capability.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Protocol {
+    /// OpenAI Chat Completions protocol (or OpenAI-compatible).
+    #[default]
+    OpenAi,
+    /// Anthropic Messages protocol (or Anthropic-compatible).
+    Anthropic,
+}
+
 // ── AuthStyle ─────────────────────────────────────────────────────────────────
 
 /// How to authenticate with a provider.
@@ -28,6 +41,15 @@ pub enum AuthStyle {
     XApiKey,
 }
 
+impl From<AuthStyle> for crate::providers::AuthStyle {
+    fn from(style: AuthStyle) -> Self {
+        match style {
+            AuthStyle::Bearer => crate::providers::AuthStyle::Bearer,
+            AuthStyle::XApiKey => crate::providers::AuthStyle::XApiKey,
+        }
+    }
+}
+
 // ── Capability Sections ───────────────────────────────────────────────────────
 
 /// Chat capability section.
@@ -37,6 +59,8 @@ pub struct ChatSection {
     pub user_agent: Option<String>,
     pub api_key: Option<String>,
     pub auth_style: Option<AuthStyle>,
+    /// Explicit protocol override. If not set, inferred from base_url host.
+    pub protocol: Option<Protocol>,
     pub models: HashMap<String, ChatModelConfig>,
 }
 
@@ -47,6 +71,8 @@ pub struct EmbeddingSection {
     pub user_agent: Option<String>,
     pub api_key: Option<String>,
     pub auth_style: Option<AuthStyle>,
+    /// Explicit protocol override. If not set, inferred from base_url host.
+    pub protocol: Option<Protocol>,
     pub models: HashMap<String, EmbeddingModelConfig>,
 }
 
@@ -57,6 +83,8 @@ pub struct CapabilitySection {
     pub user_agent: Option<String>,
     pub api_key: Option<String>,
     pub auth_style: Option<AuthStyle>,
+    /// Explicit protocol override. If not set, inferred from base_url host.
+    pub protocol: Option<Protocol>,
     pub models: HashMap<String, BasicModelConfig>,
 }
 
@@ -72,6 +100,10 @@ pub struct CapabilitySection {
 /// falls back to environment-variable resolution at runtime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
+    /// Provider identity override (e.g. "glm", "anthropic").
+    /// If not set, inferred from the capability base_url host.
+    #[serde(default)]
+    pub provider: Option<String>,
     /// Provider-level API key (supports `${ENV_VAR}` expansion).
     /// Capability-level api_key takes precedence when set.
     pub api_key: Option<String>,
