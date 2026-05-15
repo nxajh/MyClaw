@@ -13,7 +13,6 @@ use std::path::PathBuf;
 use parking_lot::RwLock;
 use tokio::sync::watch;
 
-use crate::providers::ThinkingConfig;
 use crate::providers::ServiceRegistry;
 use crate::config::agent::ContextConfig;
 use crate::agents::session_manager::SessionOverride;
@@ -80,6 +79,10 @@ pub struct AgentConfig {
     /// Per-tool execution timeout in seconds (0 = no timeout).
     /// Does not apply to ask_user or agent_delegate (those have their own timeouts).
     pub tool_timeout_secs: u64,
+    /// Model override for this session (session override > Agent-level default).
+    pub model_override: Option<String>,
+    /// Thinking/reasoning config override for this session.
+    pub thinking_override: Option<crate::providers::ThinkingConfig>,
 }
 
 impl Default for AgentConfig {
@@ -93,6 +96,8 @@ impl Default for AgentConfig {
             max_output_bytes: 100 * 1024,
             loop_breaker_threshold: 3,
             tool_timeout_secs: 180,
+            model_override: None,
+            thinking_override: None,
         }
     }
 }
@@ -106,6 +111,8 @@ impl AgentConfig {
         if let Some(t) = ov.compact_threshold { cfg.context.compact_threshold = t; }
         if let Some(r) = ov.retain_work_units { cfg.context.retain_work_units = r; }
         if let Some(mtc) = ov.max_tool_calls   { cfg.max_tool_calls = mtc; }
+        cfg.model_override = ov.model.clone();
+        cfg.thinking_override = ov.to_thinking_config();
         cfg
     }
 
@@ -204,8 +211,11 @@ impl Agent {
             builder.build(&skills)
         };
 
-        let model_override = ov.model.clone().or_else(|| self.model_override.clone());
-        let thinking_override = ov.to_thinking_config();
+        // Apply Agent-level model_override as fallback if session didn't specify one.
+        let mut config = config;
+        if config.model_override.is_none() {
+            config.model_override = self.model_override.clone();
+        }
         let max_tool_calls = config.max_tool_calls;
         let policy = CompactionPolicy::from_context_config(&config.context);
 
@@ -239,8 +249,6 @@ impl Agent {
             }),
             policy,
             persist_hook,
-            model_override,
-            thinking_override,
             pending_retry_message: None,
         }
     }
@@ -262,8 +270,6 @@ pub struct AgentLoop {
     // ── Infrastructure ──
     pub(crate) loop_breaker: LoopBreaker,
     pub(crate) persist_hook: Option<Arc<dyn PersistHook>>,
-    pub(crate) model_override: Option<String>,
-    pub(crate) thinking_override: Option<ThinkingConfig>,
     pub(crate) pending_retry_message: Option<String>,
 }
 

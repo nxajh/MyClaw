@@ -24,10 +24,7 @@ impl AgentLoop {
             self.request_builder.diff_autonomy(autonomy);
         }
 
-        self.model_override = ov.model.clone();
-        self.thinking_override = ov.to_thinking_config();
-
-        // Apply all config fields via the shared helper.
+        // Apply all config fields via the shared helper (also sets model_override and thinking_override).
         let new_config = self.config.with_override(&ov);
         let new_max = new_config.max_tool_calls;
         self.config = new_config;
@@ -417,7 +414,7 @@ impl AgentLoop {
         // (rate-limit or server error) the FallbackChatProvider routes to a smaller model
         // whose context window may be exceeded by the current history.
         // Only runs when no model_override is active (overrides bypass the fallback chain).
-        if self.model_override.is_none() {
+        if self.config.model_override.is_none() {
             if let Err(e) = self.maybe_compact_for_fallback().await {
                 tracing::warn!(error = %e, "pre-fallback compaction check failed, continuing");
             }
@@ -441,7 +438,7 @@ impl AgentLoop {
             // 1. Get a chat provider via registry.
             // If model_override is set, use that model directly.
             // If images are pending, prefer a vision-capable model from the fallback chain.
-            let (provider, model_id) = if let Some(ref model) = self.model_override {
+            let (provider, model_id) = if let Some(ref model) = self.config.model_override {
                 match self.registry.get_chat_provider_by_model(model) {
                     Some((p, id)) => (p, id),
                     None => {
@@ -509,7 +506,7 @@ impl AgentLoop {
             };
 
             // Derive thinking config: session override takes priority over model config.
-            let thinking = if let Some(ref t) = self.thinking_override {
+            let thinking = if let Some(ref t) = self.config.thinking_override {
                 if t.enabled { Some(t.clone()) } else { None }
             } else {
                 self.registry.get_chat_model_config(&model_id)
