@@ -19,7 +19,7 @@ impl AgentLoop {
         }
 
         tracing::info!(
-            total_tokens = self.token_tracker.total_tokens(),
+            total_tokens = self.policy.token_total(),
             "starting manual compaction (/compact)"
         );
 
@@ -28,22 +28,17 @@ impl AgentLoop {
 
     /// Check if compaction is needed and perform incremental LLM-based summarization.
     pub(crate) async fn maybe_compact(&mut self, model_id: &str) -> anyhow::Result<()> {
-        let model_config = self.registry.get_chat_model_config(model_id)?;
-        let context_window = match model_config.context_window {
+        let context_window = match self.registry.get_chat_model_config(model_id)?.context_window {
             Some(cw) => cw,
             None => return Ok(()),
         };
 
-        let threshold = (context_window as f64 * self.config.context.compact_threshold) as u64;
-        let total = self.token_tracker.total_tokens();
-
-        if total < threshold {
+        if !self.policy.should_compact(context_window) {
             return Ok(());
         }
 
         tracing::info!(
-            total_tokens = total,
-            threshold,
+            total_tokens = self.policy.token_total(),
             context_window,
             "starting context compaction"
         );
@@ -59,7 +54,7 @@ impl AgentLoop {
             return Ok(());
         }
 
-        let conservative_total = (self.token_tracker.total_tokens() as f64 * 1.25) as u64;
+        let conservative_total = (self.policy.token_total() as f64 * 1.25) as u64;
 
         let target: Option<(String, u64)> = routing_models
             .iter()
@@ -100,29 +95,19 @@ impl AgentLoop {
                 + 8
         }).sum();
 
-        let threshold = self.config.context.compact_threshold;
-        let compress_budget = ((target_window as f64 * threshold) as u64)
-            .saturating_sub(system_prompt_tokens)
-            .saturating_sub(tool_spec_tokens);
-
-        if compress_budget == 0 {
-            anyhow::bail!(
-                "context window ({}) too small to compact into (model '{}')",
-                target_window, model_id
-            );
-        }
-
-        let retain_count = self.config.context.retain_work_units.max(1);
-        let boundary = match super::super::work_unit::find_compaction_boundary_for_budget(
+        let boundary = match self.policy.compaction_boundary(
             &self.session.history,
-            compress_budget,
-            retain_count,
+            target_window,
+            system_prompt_tokens,
+            tool_spec_tokens,
         ) {
             Some(b) => b,
             None => {
                 tracing::debug!(
-                    compress_budget,
-                    "no compaction boundary for budget (prefix too large or too few work units)"
+                    target_window,
+                    system_prompt_tokens,
+                    tool_spec_tokens,
+                    "no compaction boundary (budget too small or too few work units)"
                 );
                 return Ok(());
             }
@@ -135,7 +120,6 @@ impl AgentLoop {
 
         tracing::info!(
             target_window,
-            compress_budget,
             system_prompt_tokens,
             tool_spec_tokens,
             boundary,
@@ -276,9 +260,9 @@ Respond ONLY to the latest user message that appears AFTER this summary.\n\n";
             }
         }
 
-        self.token_tracker.adjust_for_compaction(removed_tokens, summary_tokens);
+        self.policy.adjust_for_compaction(removed_tokens, summary_tokens);
 
-        let new_total = self.token_tracker.total_tokens();
+        let new_total = self.policy.token_total();
         tracing::info!(
             compacted_messages = compacted_count,
             summary_tokens,
@@ -305,7 +289,7 @@ Respond ONLY to the latest user message that appears AFTER this summary.\n\n";
     fn find_incremental_range(&self, boundary: usize) -> (usize, usize, Option<String>) {
         let history = &self.session.history;
         let last_summary = history[..boundary].iter().rposition(|m| {
-            m.role == "user" && m.text_content().starts_with("[Context Summary]")
+            m.role == "user" && m.text_content().starts_with("[CONTEXT COMPACTION — REFERENCE ONLY]")
         });
         match last_summary {
             Some(idx) => {
@@ -625,7 +609,7 @@ Respond ONLY to the latest user message that appears AFTER this summary.\n\n";
             .sum();
         self.session.history.drain(..boundary);
         self.session.message_ids.drain(..boundary);
-        self.token_tracker.adjust_for_compaction(removed_tokens, 0);
+        self.policy.adjust_for_compaction(removed_tokens, 0);
 
         let version = self.session.compact_version + 1;
         self.session.compact_version = version;
@@ -669,7 +653,7 @@ Respond ONLY to the latest user message that appears AFTER this summary.\n\n";
 
                 let old_est = est;
                 let new_est = estimate_tokens(&self.session.history[i].text_content());
-                self.token_tracker.adjust_for_compaction(old_est, new_est);
+                self.policy.adjust_for_compaction(old_est, new_est);
 
                 tracing::warn!(
                     idx = i,
@@ -685,7 +669,7 @@ Respond ONLY to the latest user message that appears AFTER this summary.\n\n";
             .and_then(|cfg| cfg.context_window)
             .map(|cw| (cw as f64 * self.config.context.compact_threshold) as u64)
             .unwrap_or(u64::MAX);
-        if self.token_tracker.total_tokens() > threshold {
+        if self.policy.token_total() > threshold {
             self.drop_oldest_retained_work_unit(boundary);
         }
     }
@@ -720,7 +704,7 @@ Respond ONLY to the latest user message that appears AFTER this summary.\n\n";
 
         self.session.history.drain(boundary..drop_end);
         self.session.message_ids.drain(boundary..drop_end);
-        self.token_tracker.adjust_for_compaction(removed_tokens, 0);
+        self.policy.adjust_for_compaction(removed_tokens, 0);
 
         tracing::warn!(
             dropped_start = boundary,

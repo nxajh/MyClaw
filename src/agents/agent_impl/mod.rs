@@ -53,7 +53,8 @@ mod tools;
 mod compaction;
 mod images;
 
-pub(crate) use types::{estimate_message_tokens, TokenTracker};
+pub(crate) use types::estimate_message_tokens;
+use super::compaction_policy::CompactionPolicy;
 
 /// AgentConfig controls loop breaker thresholds and tool call limits.
 #[derive(Debug, Clone)]
@@ -237,6 +238,7 @@ impl Agent {
         let model_override = ov.model.clone().or_else(|| self.model_override.clone());
         let thinking_override = ov.to_thinking_config();
         let max_tool_calls = config.max_tool_calls;
+        let policy = CompactionPolicy::from_context_config(&config.context);
 
         AgentLoop {
             registry: Arc::clone(&self.registry),
@@ -253,7 +255,7 @@ impl Agent {
             }),
             pending_image_urls: None,
             pending_image_base64: None,
-            token_tracker: TokenTracker::default(),
+            policy,
             persist_hook,
             sub_delegator: None,
             model_override,
@@ -288,8 +290,8 @@ pub struct AgentLoop {
     pub(crate) pending_image_urls: Option<Vec<String>>,
     /// Pending base64 image data from the current user message.
     pub(crate) pending_image_base64: Option<Vec<String>>,
-    /// Token usage tracker for context window management.
-    pub(crate) token_tracker: TokenTracker,
+    /// Token usage tracker + compaction strategy.
+    pub(crate) policy: CompactionPolicy,
     /// Optional hook for persisting messages to the backend.
     pub(crate) persist_hook: Option<Arc<dyn PersistHook>>,
     /// Optional sub-agent delegator for compaction (shared with Orchestrator).
@@ -332,16 +334,12 @@ impl AgentLoop {
 
     /// Get the current estimated total tokens.
     pub fn token_total(&self) -> u64 {
-        self.token_tracker.total_tokens()
+        self.policy.token_total()
     }
 
     /// Get a breakdown of the last API call's token usage.
     pub fn last_usage(&self) -> (u64, u64, u64) {
-        (
-            self.token_tracker.last_input(),
-            self.token_tracker.last_cached(),
-            self.token_tracker.last_output(),
-        )
+        self.policy.last_usage()
     }
 
     /// Get the compact threshold ratio from config.

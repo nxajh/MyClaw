@@ -102,19 +102,19 @@ impl AgentLoop {
         self.loop_breaker.reset();
 
         // Initialize token tracker for fresh session / recovery.
-        if self.token_tracker.is_fresh() {
+        if self.policy.is_fresh() {
             if let Some(stored) = self.session.last_total_tokens {
                 // Precise value persisted from last API response — use directly.
-                self.token_tracker.update_from_usage(stored, 0, 0);
+                self.policy.update_usage(stored, 0, 0);
             } else {
                 // No stored value (brand-new session): estimate from history.
                 if !self.system_prompt.is_empty() {
-                    self.token_tracker.record_pending(
+                    self.policy.record_pending(
                         estimate_tokens(&self.system_prompt) + 4
                     );
                 }
                 for msg in &self.session.history {
-                    self.token_tracker.record_pending(estimate_message_tokens(msg));
+                    self.policy.record_pending(estimate_message_tokens(msg));
                 }
             }
         }
@@ -182,7 +182,7 @@ impl AgentLoop {
 
         // 4. Add combined user message to history and persist.
         let user_msg = ChatMessage::user_text(combined_user.clone());
-        self.token_tracker.record_pending(estimate_message_tokens(&user_msg));
+        self.policy.record_pending(estimate_message_tokens(&user_msg));
         // ★ Record snapshot length BEFORE adding user message, so rollback can
         //   undo everything added during this turn (user + assistant/tool_calls/tool_results).
         let turn_snapshot_len = self.session.history.len();
@@ -761,7 +761,7 @@ impl AgentLoop {
             // Real context = input_tokens (new) + cached_input_tokens + output_tokens.
             if let Some(ref usage) = response.usage {
                 let cached = usage.cached_input_tokens.unwrap_or(0);
-                self.token_tracker.update_from_usage(
+                self.policy.update_usage(
                     usage.input_tokens.unwrap_or(0),
                     usage.output_tokens.unwrap_or(0),
                     cached,
@@ -770,13 +770,13 @@ impl AgentLoop {
                     input_tokens = usage.input_tokens.unwrap_or(0),
                     cached_tokens = cached,
                     output_tokens = usage.output_tokens.unwrap_or(0),
-                    total_tracked = self.token_tracker.total_tokens(),
+                    total_tracked = self.policy.token_total(),
                     "token usage recorded"
                 );
 
                 // Persist the precise total so it survives restarts.
                 if let Some(ref hook) = self.persist_hook {
-                    hook.save_token_count(&self.session.id, self.token_tracker.total_tokens());
+                    hook.save_token_count(&self.session.id, self.policy.token_total());
                 }
             }
 
@@ -937,7 +937,7 @@ impl AgentLoop {
                 messages.push(tool_msg);
 
                 // Record estimated tokens for the tool result message.
-                self.token_tracker.record_pending(
+                self.policy.record_pending(
                     estimate_message_tokens(messages.last().unwrap())
                 );
 
@@ -1137,7 +1137,7 @@ impl AgentLoop {
         let context_window = model_config.context_window?;
         let max_output = model_config.max_output_tokens.unwrap_or(4096) as u64;
 
-        let total_tokens = self.token_tracker.total_tokens();
+        let total_tokens = self.policy.token_total();
         let available = context_window.saturating_sub(total_tokens);
         let max = max_output.min(available).min(u32::MAX as u64);
 
@@ -1163,7 +1163,7 @@ impl AgentLoop {
         // Double the output budget.
         let boosted = (default_max * 2).min(context_window);
 
-        let total_tokens = self.token_tracker.total_tokens();
+        let total_tokens = self.policy.token_total();
         let available = context_window.saturating_sub(total_tokens);
         let max = boosted.min(available).min(u32::MAX as u64);
 
