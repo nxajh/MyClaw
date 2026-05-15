@@ -615,11 +615,11 @@ impl Orchestrator {
                                 let cmd_ctx = super::slash_command::CommandContext {
                                     user_id:        &sk_cmd,
                                     registry:       &registry_cmd,
-                                    session_manager: &*sm_cmd,
+                                    session_manager: &sm_cmd,
                                     agent:          &agent_cmd,
                                     agent_loop:     session_loop.as_ref(),
                                     mcp_manager:    mcp_cmd.as_ref(),
-                                    sessions:       &*sessions_cmd,
+                                    sessions:       &sessions_cmd,
                                     search_cooldown: cooldown_cmd.as_ref(),
                                 };
                                 if let Some(response) = super::slash_command::dispatch(
