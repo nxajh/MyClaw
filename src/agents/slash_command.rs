@@ -50,6 +50,39 @@ pub fn parse_command(content: &str) -> Option<(&str, &str)> {
     Some((cmd, args))
 }
 
+/// Return true if `cmd` is a recognized slash command name.
+///
+/// Used by the orchestrator to decide whether to spawn dispatch in a background
+/// task (known commands) or fall through to the agent loop (unknown commands).
+pub fn is_known_command(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "help" | "h" | "?"
+        | "status"
+        | "new" | "reset"
+        | "compact"
+        | "model"
+        | "models"
+        | "stop"
+        | "tools"
+        | "config"
+        | "think"
+        | "autonomy"
+        | "settings"
+        | "mcp"
+        | "context"
+        | "btw"
+        | "export"
+        | "history"
+        | "skills" | "skill"
+        | "reload"
+        | "sessions" | "ss"
+        | "switch" | "sw"
+        | "rename" | "rn"
+        | "delete" | "del"
+    )
+}
+
 /// Dispatch a slash command. Returns the response text, or None if unrecognized.
 pub async fn dispatch(cmd: &str, args: &str, ctx: CommandContext<'_>) -> Option<String> {
     match cmd {

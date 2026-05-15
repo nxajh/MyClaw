@@ -399,6 +399,10 @@ impl AgentLoop {
     /// re-executes the necessary steps silently — the response is persisted to session
     /// history but NOT sent to any channel.
     pub async fn recover_interrupted_turn(&mut self) -> anyhow::Result<Option<String>> {
+        // Clear the flag unconditionally: calling this means we are actively
+        // handling whatever incomplete state existed, so the orchestrator must
+        // not treat the session as incomplete again after we return.
+        self.session.incomplete_turn = false;
         self.recover_incomplete_turn(&crate::agents::agent_impl::types::StreamMode::Collect).await
     }
 }
