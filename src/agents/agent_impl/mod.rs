@@ -116,9 +116,6 @@ impl AgentConfig {
         cfg
     }
 
-    pub(crate) fn autonomy_level(&self) -> &crate::config::agent::AutonomyLevel {
-        &self.prompt_config.autonomy
-    }
 }
 
 /// Agent is the shared factory — call `.loop_for(session)` to get an AgentLoop.

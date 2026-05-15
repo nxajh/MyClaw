@@ -528,7 +528,7 @@ impl AgentLoop {
                 thinking,
                 stop: None,
                 seed: None,
-                tools: if tools.is_empty() { None } else { Some(&tools[..]) },
+                tools: if tools.is_empty() { None } else { Some(tools.as_slice()) },
                 stream: true,
             };
 

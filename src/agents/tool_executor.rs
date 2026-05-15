@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::agent::AutonomyLevel;
-use crate::tools::TaskDelegator;
 use crate::providers::ToolCall;
 use crate::providers::capability_tool::ToolResult;
 use crate::providers::capability_chat::ToolSpec;
@@ -181,16 +180,6 @@ impl DefaultToolExecutor {
     }
 }
 
-/// Returns available sub-agent names (used for agent listing in diff_agents).
-impl DefaultToolExecutor {
-    pub(crate) fn available_agents(&self) -> Vec<(String, String)> {
-        if let Some(ref delegator) = self.sub_delegator {
-            delegator.available_agents()
-        } else {
-            Vec::new()
-        }
-    }
-}
 
 pub(crate) fn parse_tool_args(arguments: &str) -> serde_json::Value {
     if arguments.is_empty() {

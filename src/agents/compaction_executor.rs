@@ -183,7 +183,7 @@ impl CompactionExecutor {
                 thinking: thinking.clone(),
                 stop: None,
                 seed: None,
-                tools: if tool_specs.is_empty() { None } else { Some(&tool_specs[..]) },
+                tools: if tool_specs.is_empty() { None } else { Some(tool_specs) },
                 stream: true,
             };
 

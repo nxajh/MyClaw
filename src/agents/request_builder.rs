@@ -4,7 +4,6 @@ use tokio::sync::watch;
 
 use crate::config::agent::AutonomyLevel;
 use crate::providers::ChatMessage;
-use crate::providers::capability_chat::ToolSpec;
 use super::attachment::AttachmentManager;
 use super::resource_provider::ResourceProvider;
 use super::session_manager::Session;
@@ -172,23 +171,6 @@ impl RequestBuilder {
         self.pending_image_base64.as_ref()
     }
 
-    /// Clear images after they've been attached (prevents re-attachment on loop iterations).
-    pub(crate) fn clear_images(&mut self) {
-        self.pending_image_urls = None;
-        self.pending_image_base64 = None;
-    }
-
-    /// Estimate token count for a slice of tool specs.
-    pub(crate) fn estimate_tool_spec_tokens(&self, specs: &[ToolSpec]) -> u64 {
-        specs.iter().map(|spec| {
-            let schema = spec.input_schema.to_string();
-            estimate_tokens(&spec.name)
-                + spec.description.as_deref().map_or(0, estimate_tokens)
-                + estimate_tokens(&schema)
-                + 8
-        }).sum()
-    }
-
     /// Read-only access to the system prompt.
     pub(crate) fn system_prompt(&self) -> &str {
         &self.system_prompt
@@ -212,13 +194,5 @@ impl RequestBuilder {
     /// Set the change receiver (called by AgentLoop::with_change_rx).
     pub(crate) fn set_change_rx(&mut self, rx: watch::Receiver<ChangeSet>) {
         self.change_rx = Some(rx);
-    }
-
-    /// Available sub-agents (for diff_agents in apply_session_override).
-    pub(crate) fn available_agents(&self) -> Vec<(String, String)> {
-        self.resources.sub_agents.read()
-            .iter()
-            .map(|a| (a.name.clone(), a.description.clone().unwrap_or_default()))
-            .collect()
     }
 }
