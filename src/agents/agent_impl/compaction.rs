@@ -86,7 +86,7 @@ impl AgentLoop {
         model_id: &str,
         target_window: u64,
     ) -> anyhow::Result<()> {
-        let system_prompt_tokens = estimate_tokens(&self.system_prompt);
+        let system_prompt_tokens = self.request_builder.system_prompt_tokens();
         let tool_spec_tokens: u64 = self.build_tool_specs().iter().map(|spec| {
             let schema = spec.input_schema.to_string();
             estimate_tokens(&spec.name)
@@ -205,12 +205,12 @@ impl AgentLoop {
 
         // Refresh memory index (summarizer may have written memory files via tools).
         {
-            let memory_dir = std::path::Path::new(&self.config.prompt_config.knowledge_dir);
+            let memory_dir = std::path::Path::new(&self.request_builder.resources.knowledge_dir);
             let files = crate::memory::scan_memory_files(memory_dir);
             let entries: Vec<crate::memory::IndexEntry> =
                 files.iter().map(crate::memory::IndexEntry::from).collect();
             let history = self.session.history.clone();
-            self.attachments.diff_memory(&entries, &history);
+            self.request_builder.attachments.diff_memory(&entries, &history);
             tracing::info!(memory_count = entries.len(), "memory index refreshed after compaction");
         }
 
@@ -339,8 +339,8 @@ Respond ONLY to the latest user message that appears AFTER this summary.\n\n";
 
         let mut messages: Vec<ChatMessage> = Vec::new();
 
-        if !self.system_prompt.is_empty() {
-            messages.push(ChatMessage::system_text(&self.system_prompt));
+        if !self.request_builder.system_prompt().is_empty() {
+            messages.push(ChatMessage::system_text(self.request_builder.system_prompt()));
         }
 
         for msg in to_compact {
