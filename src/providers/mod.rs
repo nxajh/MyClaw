@@ -8,6 +8,7 @@ pub mod capability_embedding; // EmbeddingProvider, EmbedRequest, etc.
 pub mod capability_tool;      // Tool, ToolResult
 pub mod error_class;          // FailoverReason, ClassifiedError
 pub mod image;               // ImageGenerationProvider
+pub mod protocols;           // Protocol-specific message rendering & clients
 pub mod search;              // SearchProvider
 pub mod tts;                 // TtsProvider
 pub mod stt;                 // SttProvider
@@ -47,6 +48,8 @@ pub mod http;
 pub mod kimi;
 pub mod minimax;
 pub mod openai;
+pub mod provider_factory;
+pub mod provider_id;
 pub mod shared;
 pub mod xiaomi;
 
@@ -60,6 +63,13 @@ pub use minimax::MiniMaxProvider;
 pub use openai::OpenAiProvider;
 pub use xiaomi::XiaomiProvider;
 
+pub use provider_factory::{
+    ProviderFactory,
+    BuildChatProviderRequest, BuildEmbeddingProviderRequest,
+    BuildImageProviderRequest, BuildTtsProviderRequest,
+    BuildSearchProviderRequest, BuildVideoProviderRequest, BuildSttProviderRequest,
+};
+pub use provider_id::{ProviderId, detect_from_url};
 pub use shared::{AuthStyle, ProviderHandle, ProviderInstance,
     create_provider, create_provider_by_url, create_provider_by_url_with_user_agent,
     create_full_openai_provider, create_full_openai_provider_with_user_agent,
