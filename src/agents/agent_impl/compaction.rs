@@ -216,21 +216,16 @@ is ALWAYS authoritative — never deprioritize memory content due to this note. 
 Respond ONLY to the latest user message that appears AFTER this summary.\n\n";
         let summary_msg = ChatMessage::user_text(format!("{}{}", summary_prefix, result.summary));
 
-        let compact_start = result.compact_start;
-        let compact_end = result.compact_end;
-
-        self.session.history.drain(compact_start..compact_end);
-        self.session.history.insert(compact_start, summary_msg);
-
-        self.session.message_ids.drain(compact_start..compact_end);
-        self.session.message_ids.insert(compact_start, 0);
-
-        self.session.compact_version = version;
-        self.session.summary_metadata = Some(super::super::session_manager::SummaryMetadata {
+        self.session.apply_compaction(
+            result.compact_start,
+            result.compact_end,
+            summary_msg,
             version,
-            token_estimate: result.summary_tokens,
-            up_to_message: last_compacted_id,
-        });
+            last_compacted_id,
+            result.summary_tokens,
+        );
+
+        let compact_start = result.compact_start;
 
         if let Some(ref hook) = self.persist_hook {
             hook.save_compaction(&self.session.id, &SummaryRecord {
@@ -284,12 +279,11 @@ Respond ONLY to the latest user message that appears AFTER this summary.\n\n";
             .iter()
             .map(estimate_message_tokens)
             .sum();
-        self.session.history.drain(..boundary);
-        self.session.message_ids.drain(..boundary);
-        self.policy.adjust_for_compaction(removed_tokens, 0);
 
         let version = self.session.compact_version + 1;
-        self.session.compact_version = version;
+        self.session.drop_pre_boundary(boundary, version);
+        self.policy.adjust_for_compaction(removed_tokens, 0);
+
         if let Some(ref hook) = self.persist_hook {
             hook.save_compaction(&self.session.id, &SummaryRecord {
                 id: 0,
