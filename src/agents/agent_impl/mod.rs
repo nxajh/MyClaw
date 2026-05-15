@@ -47,6 +47,7 @@ use crate::agents::prompt::{SystemPromptBuilder, SystemPromptConfig};
 use crate::agents::attachment::AttachmentManager;
 use crate::config::sub_agent::SubAgentConfig;
 use super::tool_executor::DefaultToolExecutor;
+use super::compaction_executor::CompactionExecutor;
 
 pub(crate) mod types;
 mod run;
@@ -217,10 +218,16 @@ impl Agent {
             config.prompt_config.knowledge_dir.clone(),
             config.prompt_config.timezone_offset,
         );
-        let request_builder = RequestBuilder::new(prompt, resources);
+        let request_builder = RequestBuilder::new(prompt, Arc::clone(&resources));
 
         AgentLoop {
             registry: Arc::clone(&self.registry),
+            compactor: CompactionExecutor::new(
+                Arc::clone(&self.registry),
+                Arc::clone(&resources),
+                Arc::clone(&self.tools),
+                config.stream_chunk_timeout_secs,
+            ),
             tool_executor: DefaultToolExecutor::new(Arc::clone(&self.tools), config.tool_timeout_secs),
             config,
             session,
@@ -250,6 +257,8 @@ pub struct AgentLoop {
     pub(crate) policy: CompactionPolicy,
     // ── Tool execution ──
     pub(crate) tool_executor: DefaultToolExecutor,
+    // ── Compaction summarizer ──
+    pub(crate) compactor: CompactionExecutor,
     // ── Infrastructure ──
     pub(crate) loop_breaker: LoopBreaker,
     pub(crate) persist_hook: Option<Arc<dyn PersistHook>>,

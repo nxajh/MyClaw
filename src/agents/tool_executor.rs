@@ -192,12 +192,44 @@ impl DefaultToolExecutor {
     }
 }
 
-fn parse_tool_args(arguments: &str) -> serde_json::Value {
+pub(crate) fn parse_tool_args(arguments: &str) -> serde_json::Value {
     if arguments.is_empty() {
         serde_json::Value::Object(serde_json::Map::new())
     } else {
         serde_json::from_str(arguments).unwrap_or_else(|_| {
             serde_json::json!({ "raw": arguments })
         })
+    }
+}
+
+/// Restricted tool executor for the compaction summarizer.
+///
+/// Only allows file read/write/edit and shell — prevents the summarizer from
+/// touching session state, triggering ask_user, or spawning sub-agents.
+pub(crate) struct MemoryToolExecutor {
+    tools: Arc<ToolRegistry>,
+}
+
+impl MemoryToolExecutor {
+    const ALLOWED: &'static [&'static str] = &["file_read", "file_write", "file_edit", "shell"];
+
+    pub(crate) fn new(tools: Arc<ToolRegistry>) -> Self {
+        Self { tools }
+    }
+
+    pub(crate) async fn execute(&self, call: &ToolCall) -> anyhow::Result<ToolResult> {
+        if !Self::ALLOWED.contains(&call.name.as_str()) {
+            tracing::warn!(tool = %call.name, "summarizer tried to call restricted tool, blocking");
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!("tool '{}' not available during compaction summarization", call.name)),
+            });
+        }
+        let tool = self.tools.get(&call.name).ok_or_else(|| {
+            anyhow::anyhow!("tool '{}' not found in registry", call.name)
+        })?;
+        let args = parse_tool_args(&call.arguments);
+        tool.execute(args).await
     }
 }
