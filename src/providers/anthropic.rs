@@ -105,6 +105,10 @@ pub(crate) fn parse_anthropic_sse(
                     let text = delta.get("thinking").and_then(|v| v.as_str()).unwrap_or("");
                     if !text.is_empty() { vec![SE::Thinking { text: text.to_string() }] } else { vec![] }
                 }
+                "signature_delta" => {
+                    let sig = delta.get("signature").and_then(|v| v.as_str()).unwrap_or("");
+                    if sig.is_empty() { vec![] } else { vec![SE::ThinkingSignature { signature: sig.to_string() }] }
+                }
                 "input_json_delta" => {
                     let index = match evt.get("index").and_then(|v| v.as_u64()) {
                         Some(i) => i,

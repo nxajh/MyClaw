@@ -161,7 +161,7 @@ fn build_glm_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
             let reasoning: Option<String> = {
                 let parts: Vec<&str> = msg.parts.iter()
                     .filter_map(|p| match p {
-                        ContentPart::Thinking { thinking } => Some(thinking.as_str()),
+                        ContentPart::Thinking { thinking, .. } => Some(thinking.as_str()),
                         _ => None,
                     })
                     .collect();
@@ -175,7 +175,7 @@ fn build_glm_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                     "type": "image_url",
                     "image_url": { "url": url, "detail": format!("{:?}", detail).to_lowercase() }
                 })),
-                ContentPart::ImageB64 { b64_json, detail } => Some(json!({
+                ContentPart::ImageB64 { b64_json, detail, .. } => Some(json!({
                     "type": "image_url",
                     "image_url": { "url": format!("data:image;base64,{}", b64_json), "detail": format!("{:?}", detail).to_lowercase() }
                 })),

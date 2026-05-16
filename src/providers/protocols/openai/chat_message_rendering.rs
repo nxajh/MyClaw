@@ -22,7 +22,7 @@ pub fn render_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                     "type": "image_url",
                     "image_url": { "url": url, "detail": format!("{:?}", detail).to_lowercase() }
                 }),
-                ContentPart::ImageB64 { b64_json, detail } => json!({
+                ContentPart::ImageB64 { b64_json, detail, .. } => json!({
                     "type": "image_url",
                     "image_url": { "url": format!("data:image;base64,{}", b64_json), "detail": format!("{:?}", detail).to_lowercase() }
                 }),

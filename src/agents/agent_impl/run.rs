@@ -703,7 +703,10 @@ impl AgentLoop {
                 use crate::providers::ContentPart;
                 assistant_msg.parts.insert(
                     0,
-                    ContentPart::Thinking { thinking: thinking.clone() },
+                    ContentPart::Thinking {
+                        thinking: thinking.clone(),
+                        signature: response.thinking_signature.clone(),
+                    },
                 );
             }
 
@@ -866,6 +869,7 @@ impl AgentLoop {
     ) -> anyhow::Result<CollectedResponse> {
         let mut text = String::new();
         let mut reasoning_content: Option<String> = None;
+        let mut thinking_signature: Option<String> = None;
         let mut tool_calls = Vec::new();
         let mut stop_reason = StopReason::EndTurn;
         let mut usage: Option<ChatUsage> = None;
@@ -877,7 +881,7 @@ impl AgentLoop {
             // Cancellation checkpoint (streaming path only).
             if let Some(cancel) = cancel {
                 if cancel.is_cancelled() {
-                    return Ok(CollectedResponse { text, reasoning_content, tool_calls, stop_reason, usage });
+                    return Ok(CollectedResponse { text, reasoning_content, thinking_signature, tool_calls, stop_reason, usage });
                 }
             }
 
@@ -917,6 +921,9 @@ impl AgentLoop {
                                     }
                                 }
                             }
+                        }
+                        StreamEvent::ThinkingSignature { signature } => {
+                            thinking_signature = Some(signature);
                         }
                         StreamEvent::ToolCallStart { id, name, initial_arguments } => {
                             tool_calls.push(crate::providers::ToolCall {
@@ -992,6 +999,7 @@ impl AgentLoop {
         Ok(CollectedResponse {
             text,
             reasoning_content,
+            thinking_signature,
             tool_calls,
             stop_reason,
             usage,

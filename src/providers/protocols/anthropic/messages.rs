@@ -41,7 +41,8 @@ impl AnthropicMessagesClient {
 impl ChatProvider for AnthropicMessagesClient {
     fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
         let url = self.chat_url();
-        let auth = format!("Bearer {}", self.api_key);
+        let api_key = self.api_key.clone();
+        let thinking_enabled = req.thinking.as_ref().map_or(false, |t| t.enabled);
         let body = build_anthropic_body(&req);
         let client = self.client.clone();
         let user_agent = self.user_agent.clone();
@@ -49,9 +50,12 @@ impl ChatProvider for AnthropicMessagesClient {
 
         tokio::spawn(async move {
             let mut headers = reqwest::header::HeaderMap::new();
-            headers.insert(reqwest::header::AUTHORIZATION, auth.parse().unwrap());
+            headers.insert("x-api-key", api_key.parse().unwrap());
             headers.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
             headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
+            if thinking_enabled {
+                headers.insert("anthropic-beta", "interleaved-thinking-2025-05-14".parse().unwrap());
+            }
             if let Some(ref ua) = user_agent {
                 headers.insert(reqwest::header::USER_AGENT, ua.parse().unwrap());
             }
@@ -64,9 +68,11 @@ impl ChatProvider for AnthropicMessagesClient {
             if resp.error_for_status_ref().is_err() {
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_default();
+                let message = parse_anthropic_error_body(&text)
+                    .unwrap_or_else(|| format!("HTTP {}: {}", status, text));
                 let _ = tx.send(StreamEvent::HttpError {
                     status: status.as_u16(),
-                    message: format!("HTTP {}: {}", status, text),
+                    message,
                 }).await;
                 return;
             }
@@ -110,4 +116,14 @@ impl ChatProvider for AnthropicMessagesClient {
 
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
+}
+
+/// Extract a human-readable message from an Anthropic error response body.
+/// Anthropic returns `{"type":"error","error":{"type":"...","message":"..."}}`.
+fn parse_anthropic_error_body(body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let err = v.get("error")?;
+    let kind = err.get("type").and_then(|v| v.as_str()).unwrap_or("error");
+    let msg = err.get("message").and_then(|v| v.as_str())?;
+    Some(format!("{}: {}", kind, msg))
 }
