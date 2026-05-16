@@ -5,7 +5,7 @@
 //! `provider` / `protocol` config overrides.
 
 use crate::config::provider::Protocol;
-use crate::providers::{AuthStyle, ProviderId, ProviderHandle};
+use crate::providers::{AuthStyle, ProviderId};
 use crate::providers::capability_chat::ChatProvider;
 use crate::providers::capability_embedding::EmbeddingProvider;
 use crate::providers::image::ImageGenerationProvider;
@@ -100,7 +100,6 @@ pub struct BuildSttProviderRequest {
 /// Central factory for constructing provider trait objects.
 ///
 /// Uses `(provider_id, protocol)` to dispatch to the correct protocol client.
-/// Falls back to `ProviderHandle` for capabilities not yet migrated.
 pub struct ProviderFactory;
 
 impl Default for ProviderFactory {
@@ -119,12 +118,10 @@ impl ProviderFactory {
         if let Some(p) = configured {
             return p;
         }
-        // Provider-specific defaults based on vendor identity.
         match provider_id.as_str() {
             well_known::ANTHROPIC => Protocol::Anthropic,
             well_known::XIAOMI => Protocol::Anthropic,
             well_known::MINIMAX => Protocol::Anthropic,
-            // All others default to OpenAI-compatible.
             _ => Protocol::OpenAi,
         }
     }
@@ -147,7 +144,7 @@ impl ProviderFactory {
 
         match (id, protocol) {
             // ── OpenAI-compatible providers ──
-            (well_known::OPENAI | well_known::KIMI | well_known::GENERIC, Protocol::OpenAi) => {
+            (_, Protocol::OpenAi) if id != well_known::GOOGLE => {
                 let client = crate::providers::protocols::openai::chat_completions::OpenAiChatCompletionsClient::new(
                     request.api_key, request.base_url,
                 );
@@ -157,8 +154,8 @@ impl ProviderFactory {
                 };
                 Ok(Box::new(client))
             }
-            // ── Anthropic-compatible providers ──
-            (well_known::ANTHROPIC | well_known::XIAOMI | well_known::MINIMAX | well_known::GENERIC, Protocol::Anthropic) => {
+            // ── Anthropic-protocol providers ──
+            (_, Protocol::Anthropic) => {
                 let client = crate::providers::protocols::anthropic::messages::AnthropicMessagesClient::new(
                     request.api_key, request.base_url,
                 );
@@ -168,27 +165,19 @@ impl ProviderFactory {
                 };
                 Ok(Box::new(client))
             }
-            // ── Fallback: delegate to old ProviderHandle for unmatched combinations ──
-            _ => {
-                tracing::warn!(
-                    provider = %request.provider_key,
-                    id = %id,
-                    protocol = ?protocol,
-                    "no dedicated protocol client for this combination, falling back to ProviderHandle"
-                );
-                let handle = ProviderHandle::from_url_with_user_agent(
-                    request.api_key,
-                    &request.base_url,
-                    request.user_agent.as_deref(),
-                ).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "cannot determine provider type from base_url '{}' (key='{}')",
-                        request.base_url,
-                        request.provider_key,
-                    )
-                })?;
-                Ok(handle.into_chat_provider())
+            // ── Google: not supported as a chat provider ──
+            (well_known::GOOGLE, _) => {
+                anyhow::bail!(
+                    "Google provider ('{}') does not support the chat capability",
+                    request.provider_key
+                )
             }
+            // ── Unreachable guard ──
+            _ => anyhow::bail!(
+                "no chat protocol client for provider '{}' (id='{}')",
+                request.provider_key,
+                id,
+            ),
         }
     }
 
@@ -197,11 +186,24 @@ impl ProviderFactory {
         &self,
         request: BuildEmbeddingProviderRequest,
     ) -> Option<Box<dyn EmbeddingProvider>> {
-        ProviderHandle::from_url_with_user_agent(
-            request.api_key,
-            &request.base_url,
-            request.user_agent.as_deref(),
-        ).and_then(|h| h.into_embedding_provider())
+        let id = request.provider_id.as_str();
+        match id {
+            well_known::GLM => {
+                let mut p = crate::providers::glm::GlmProvider::with_base_url(
+                    request.api_key, request.base_url,
+                );
+                if let Some(ua) = request.user_agent { p = p.with_user_agent(ua); }
+                Some(Box::new(p))
+            }
+            // OpenAI-compatible providers (OpenAI, Kimi, generic, etc.)
+            _ => {
+                let mut p = crate::providers::openai::OpenAiProvider::with_base_url(
+                    request.api_key, request.base_url,
+                );
+                if let Some(ua) = request.user_agent { p = p.with_user_agent(ua); }
+                Some(Box::new(p))
+            }
+        }
     }
 
     /// Build a boxed `ImageGenerationProvider`, if supported.
@@ -209,11 +211,18 @@ impl ProviderFactory {
         &self,
         request: BuildImageProviderRequest,
     ) -> Option<Box<dyn ImageGenerationProvider>> {
-        ProviderHandle::from_url_with_user_agent(
-            request.api_key,
-            &request.base_url,
-            request.user_agent.as_deref(),
-        ).and_then(|h| h.into_image_provider())
+        let id = request.provider_id.as_str();
+        match id {
+            // Only OpenAI-compatible providers support image generation.
+            well_known::OPENAI | well_known::GENERIC | well_known::KIMI => {
+                let mut p = crate::providers::openai::OpenAiProvider::with_base_url(
+                    request.api_key, request.base_url,
+                );
+                if let Some(ua) = request.user_agent { p = p.with_user_agent(ua); }
+                Some(Box::new(p))
+            }
+            _ => None,
+        }
     }
 
     /// Build a boxed `TtsProvider`, if supported.
@@ -221,11 +230,18 @@ impl ProviderFactory {
         &self,
         request: BuildTtsProviderRequest,
     ) -> Option<Box<dyn TtsProvider>> {
-        ProviderHandle::from_url_with_user_agent(
-            request.api_key,
-            &request.base_url,
-            request.user_agent.as_deref(),
-        ).and_then(|h| h.into_tts_provider())
+        let id = request.provider_id.as_str();
+        match id {
+            // Only OpenAI-compatible providers support TTS.
+            well_known::OPENAI | well_known::GENERIC | well_known::KIMI => {
+                let mut p = crate::providers::openai::OpenAiProvider::with_base_url(
+                    request.api_key, request.base_url,
+                );
+                if let Some(ua) = request.user_agent { p = p.with_user_agent(ua); }
+                Some(Box::new(p))
+            }
+            _ => None,
+        }
     }
 
     /// Build a boxed `SearchProvider`, if supported.
@@ -233,34 +249,45 @@ impl ProviderFactory {
         &self,
         request: BuildSearchProviderRequest,
     ) -> Option<Box<dyn SearchProvider>> {
-        ProviderHandle::from_url_with_user_agent(
-            request.api_key,
-            &request.base_url,
-            request.user_agent.as_deref(),
-        ).and_then(|h| h.into_search_provider())
+        let id = request.provider_id.as_str();
+        match id {
+            well_known::GLM => {
+                let mut p = crate::providers::glm::GlmProvider::with_base_url(
+                    request.api_key, request.base_url,
+                );
+                if let Some(ua) = request.user_agent { p = p.with_user_agent(ua); }
+                Some(Box::new(p))
+            }
+            well_known::GOOGLE => {
+                let p = crate::providers::google::GoogleProvider::with_base_url(
+                    request.api_key, request.base_url,
+                );
+                Some(Box::new(p))
+            }
+            well_known::MINIMAX => {
+                let mut p = crate::providers::minimax::MiniMaxProvider::with_base_url(
+                    request.api_key, request.base_url,
+                );
+                if let Some(ua) = request.user_agent { p = p.with_user_agent(ua); }
+                Some(Box::new(p))
+            }
+            _ => None,
+        }
     }
 
     /// Build a boxed `VideoGenerationProvider`, if supported.
     pub fn build_video_provider(
         &self,
-        request: BuildVideoProviderRequest,
+        _request: BuildVideoProviderRequest,
     ) -> Option<Box<dyn VideoGenerationProvider>> {
-        ProviderHandle::from_url_with_user_agent(
-            request.api_key,
-            &request.base_url,
-            request.user_agent.as_deref(),
-        ).and_then(|h| h.into_video_provider())
+        None
     }
 
     /// Build a boxed `SttProvider`, if supported.
     pub fn build_stt_provider(
         &self,
-        request: BuildSttProviderRequest,
+        _request: BuildSttProviderRequest,
     ) -> Option<Box<dyn SttProvider>> {
-        ProviderHandle::from_url_with_user_agent(
-            request.api_key,
-            &request.base_url,
-            request.user_agent.as_deref(),
-        ).and_then(|h| h.into_stt_provider())
+        None
     }
 }
