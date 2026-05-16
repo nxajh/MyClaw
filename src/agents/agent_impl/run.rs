@@ -868,7 +868,6 @@ impl AgentLoop {
         let mut usage: Option<ChatUsage> = None;
 
         let first_chunk_timeout = Duration::from_secs(self.config.stream_first_chunk_timeout_secs);
-        let chunk_timeout = Duration::from_secs(self.config.stream_chunk_timeout_secs);
         let max_output_bytes = self.config.max_output_bytes;
         let mut received_first_chunk = false;
 
@@ -891,14 +890,26 @@ impl AgentLoop {
                 break;
             }
 
-            // Use a longer timeout for the first chunk: the API can be slow to start
-            // responding on large contexts. Subsequent chunks use the shorter timeout
-            // to catch mid-stream stalls quickly.
-            let active_timeout = if received_first_chunk { chunk_timeout } else { first_chunk_timeout };
+            // First chunk: enforce timeout (API can be slow to start on large contexts).
+            // Subsequent chunks: no application-level timeout — TCP keepalive detects dead
+            // connections at the OS level; a mid-stream gap only happens on network failure,
+            // which surfaces as a StreamEvent::Error rather than silence.
+            let event_opt = if !received_first_chunk {
+                match tokio::time::timeout(first_chunk_timeout, stream.next()).await {
+                    Ok(ev) => ev,
+                    Err(_) => {
+                        anyhow::bail!(
+                            "stream chunk timeout after {}s, no data received",
+                            first_chunk_timeout.as_secs()
+                        );
+                    }
+                }
+            } else {
+                stream.next().await
+            };
 
-            // Wait for next chunk with timeout
-            match tokio::time::timeout(active_timeout, stream.next()).await {
-                Ok(Some(event)) => {
+            match event_opt {
+                Some(event) => {
                     received_first_chunk = true;
                     match event {
                         StreamEvent::Delta { text: delta } => {
@@ -980,19 +991,10 @@ impl AgentLoop {
                         }
                     }
                 }
-                Ok(None) => {
+                None => {
                     // Stream ended without Done event
                     tracing::warn!("stream ended without Done event");
                     break;
-                }
-                Err(_) => {
-                    // Chunk timeout — treat as server-side failure so the
-                    // caller (chat_loop) can distinguish this from a genuine
-                    // MaxTokens condition and take appropriate action.
-                    anyhow::bail!(
-                        "stream chunk timeout after {}s, no data received",
-                        active_timeout.as_secs()
-                    );
                 }
             }
         }

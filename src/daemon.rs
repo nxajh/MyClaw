@@ -835,7 +835,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         prompt_config: build_prompt_config(&config.agent, &config.workspace_dir, &config.knowledge_dir),
         context: config.agent.context.clone(),
         stream_first_chunk_timeout_secs: config.agent.stream_first_chunk_timeout_secs,
-        stream_chunk_timeout_secs: config.agent.stream_chunk_timeout_secs,
         max_output_bytes: calculate_max_output_bytes(&config, &registry_arc),
         loop_breaker_threshold: config.agent.loop_breaker_threshold as usize,
         tool_timeout_secs: config.agent.tool_timeout_secs,
