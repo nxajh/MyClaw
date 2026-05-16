@@ -15,7 +15,7 @@ use crate::providers::{
     BoxStream, ChatProvider, ChatRequest, StreamEvent,
 };
 
-const DEFAULT_BASE_URL: &str = "https://api.moonshot.cn/v1";
+const DEFAULT_BASE_URL: &str = "https://api.moonshot.cn";
 
 #[derive(Clone)]
 pub struct KimiProvider {

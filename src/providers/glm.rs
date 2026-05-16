@@ -3,9 +3,9 @@
 //! Reference: https://docs.bigmodel.cn/api-reference/模型-api/对话补全.md
 //!
 //! Endpoints (relative to base_url):
-//!   Chat:      {base_url}/chat/completions
-//!   Embedding: {base_url}/embeddings
-//!   Search:    {base_url}/web_search
+//!   Chat:      {base_url}/v4/chat/completions
+//!   Embedding: {base_url}/v4/embeddings
+//!   Search:    {base_url}/v4/web_search
 //!
 //! GLM-specific behaviours handled here:
 //! - `do_sample` is required for non-greedy decoding
@@ -23,7 +23,7 @@ use crate::providers::{BoxStream, ChatProvider, ChatRequest, ContentPart, Stream
 use crate::providers::{EmbedInput, EmbedRequest, EmbedResponse, EmbeddingProvider};
 use crate::providers::{SearchProvider, SearchRequest, SearchResult, SearchResults};
 
-const DEFAULT_BASE_URL: &str = "https://open.bigmodel.cn/api/paas/v4";
+const DEFAULT_BASE_URL: &str = "https://open.bigmodel.cn/api/paas";
 
 #[derive(Clone)]
 pub struct GlmProvider {
@@ -52,11 +52,11 @@ impl GlmProvider {
     }
 
     fn embeddings_url(&self) -> String {
-        format!("{}/embeddings", self.base_url.trim_end_matches('/'))
+        format!("{}/v4/embeddings", self.base_url.trim_end_matches('/'))
     }
 
     fn web_search_url(&self) -> String {
-        format!("{}/web_search", self.base_url.trim_end_matches('/'))
+        format!("{}/v4/web_search", self.base_url.trim_end_matches('/'))
     }
 }
 
@@ -65,7 +65,7 @@ impl GlmProvider {
 #[async_trait]
 impl ChatProvider for GlmProvider {
     fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
-        let url = format!("{}/chat/completions", self.base_url);
+        let url = format!("{}/v4/chat/completions", self.base_url.trim_end_matches('/'));
         let body = build_glm_body(&req);
         let auth = self.auth();
         let client = self.client.clone();

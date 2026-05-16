@@ -92,7 +92,7 @@ api_key = "${GLM_API_KEY}"
 auth_style = "bearer"
 
 [providers.glm.chat]
-base_url = "https://open.bigmodel.cn/api/paas/v4"
+base_url = "https://open.bigmodel.cn/api/paas"
 
 [providers.glm.chat.models.glm-4-plus]
 input = ["text", "image"]
@@ -105,7 +105,7 @@ input = 50.0
 output = 50.0
 
 [providers.glm.embedding]
-base_url = "https://open.bigmodel.cn/api/paas/v4"
+base_url = "https://open.bigmodel.cn/api/paas"
 
 [providers.glm.embedding.models.embedding-3]
 dimensions = 2048
