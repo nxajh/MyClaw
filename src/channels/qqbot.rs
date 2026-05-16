@@ -232,7 +232,7 @@ impl TokenManager {
         // so that listen() returns with a populated cache and get_token() won't
         // race with a fallback do_refresh().
         if let Err(e) = self.do_refresh().await {
-            error!(error = %e, "QQ Bot initial token fetch failed");
+            error!(err = %e, "QQ Bot initial token fetch failed");
         }
         let this = Arc::clone(self);
         *handle = Some(tokio::spawn(async move {
@@ -275,7 +275,7 @@ impl TokenManager {
             }
 
             if let Err(e) = self.do_refresh().await {
-                error!(error = %e, "QQ Bot background token refresh failed, retrying in 5s");
+                error!(err = %e, "QQ Bot background token refresh failed, retrying in 5s");
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
@@ -1004,7 +1004,7 @@ impl QQBotChannel {
 
             // Token expired? Force-refresh and retry once.
             if status.as_u16() == 401 || text.contains("11244") {
-                warn!(status = %status, "Group keyboard got token-expired error, refreshing and retrying");
+                warn!(status = %status, "group keyboard got token-expired error, refreshing and retrying");
                 let new_token = self.token_manager.refresh().await?;
                 let resp = self.http_client
                     .post(&url)
@@ -1043,7 +1043,7 @@ impl QQBotChannel {
             let token = match token_mgr.get_token().await {
                 Ok(t) => t,
                 Err(e) => {
-                    warn!(error = %e, "failed to get token for interaction ACK");
+                    warn!(err = %e, "failed to get token for interaction ACK");
                     return;
                 }
             };
@@ -1074,7 +1074,7 @@ impl QQBotChannel {
                     debug!(event_id = %event_id, "interaction acknowledged");
                 }
                 Err(e) => {
-                    warn!(event_id = %event_id, error = %e, "interaction ACK request failed");
+                    warn!(event_id = %event_id, err = %e, "interaction ACK request failed");
                 }
             }
         });
@@ -1136,7 +1136,7 @@ Type any command or just chat!"#;
             for (i, chunk) in chunks.iter().enumerate() {
                 let seq = self.next_msg_seq() + i as u32;
                 if let Err(e) = self.send_c2c_message(openid, chunk, msg_id, seq).await {
-                    warn!(chunk = i, error = %e, "failed to send bot command reply chunk");
+                    warn!(chunk = i, err = %e, "failed to send bot command reply chunk");
                     return true;
                 }
                 if i > 0 {
@@ -1147,7 +1147,7 @@ Type any command or just chat!"#;
             for (i, chunk) in chunks.iter().enumerate() {
                 let seq = self.next_msg_seq() + i as u32;
                 if let Err(e) = self.send_group_message(group_openid, chunk, msg_id, seq).await {
-                    warn!(chunk = i, error = %e, "failed to send bot command reply chunk");
+                    warn!(chunk = i, err = %e, "failed to send bot command reply chunk");
                     return true;
                 }
                 if i > 0 {
@@ -1240,7 +1240,7 @@ impl Channel for QQBotChannel {
             };
 
             if let Err(e) = result {
-                error!(chunk = i, error = %e, "failed to send chunk");
+                error!(chunk = i, err = %e, "failed to send chunk");
                 return Err(e);
             }
 
@@ -1293,12 +1293,12 @@ impl QQBotChannel {
             match result {
                 Ok(WsDisconnect::TryResume) => {
                     // Resume-capable disconnect — try immediately with short delay
-                    info!("QQ Bot WebSocket disconnected (resumable), reconnecting...");
+                    info!("QQ Bot WebSocket disconnected (resumable), reconnecting");
                     attempt = 0;
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
                 Ok(WsDisconnect::Clean) => {
-                    warn!("QQ Bot WebSocket disconnected, reconnecting...");
+                    warn!("QQ Bot WebSocket disconnected, reconnecting");
                     if rapid { attempt += 1; } else { attempt = 0; }
                     let delay = if attempt >= RAPID_RECONNECT_LIMIT {
                         Duration::from_secs(60)
@@ -1313,7 +1313,7 @@ impl QQBotChannel {
                 Ok(WsDisconnect::TokenExpired) => {
                     warn!("QQ Bot token expired, forcing refresh before reconnect");
                     if let Err(e) = self.token_manager.refresh().await {
-                        error!(error = %e, "token refresh failed");
+                        error!(err = %e, "token refresh failed");
                     }
                     *self.session.lock() = None;
                     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -1323,7 +1323,7 @@ impl QQBotChannel {
                     return;
                 }
                 Err(e) => {
-                    error!(error = %e, "QQ Bot WebSocket error, reconnecting...");
+                    error!(err = %e, "QQ Bot WebSocket error, reconnecting");
                     if rapid { attempt += 1; } else { attempt = 0; }
                     let delay = if attempt >= RAPID_RECONNECT_LIMIT {
                         Duration::from_secs(60)
@@ -1418,7 +1418,7 @@ impl QQBotChannel {
                     });
                     let text = serde_json::to_string(&payload).unwrap_or_default();
                     if let Err(e) = write.send(Message::Text(text.into())).await {
-                        warn!(error = %e, "heartbeat send failed, connection likely closed");
+                        warn!(err = %e, "heartbeat send failed, connection likely closed");
                         return Ok(WsDisconnect::TryResume);
                     }
                     debug!("heartbeat sent");
@@ -1432,7 +1432,7 @@ impl QQBotChannel {
                             }
                         }
                         Some(Err(e)) => {
-                            warn!(error = %e, "WebSocket read error");
+                            warn!(err = %e, "WebSocket read error");
                             return Ok(WsDisconnect::Clean);
                         }
                         None => {
@@ -1490,7 +1490,7 @@ impl QQBotChannel {
         let payload: GatewayPayload = match serde_json::from_str(&text) {
             Ok(p) => p,
             Err(e) => {
-                warn!(error = %e, "failed to parse WebSocket payload");
+                warn!(err = %e, "failed to parse WebSocket payload");
                 return None;
             }
         };

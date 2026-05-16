@@ -488,7 +488,7 @@ fn build_session_backend(config: &crate::config::AppConfig) -> Arc<dyn crate::st
             Arc::new(backend)
         }
         Err(e) => {
-            tracing::warn!(error = %e, "failed to open session storage, falling back to in-memory");
+            tracing::warn!(err = %e, "failed to open session storage, falling back to in-memory");
             Arc::new(InMemoryBackend::new())
         }
     }
@@ -623,7 +623,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // Write PID file for hot-switch coordination (used by `myclaw update`).
     let pid_file = std::env::temp_dir().join("myclaw.pid");
     if let Err(e) = std::fs::write(&pid_file, std::process::id().to_string()) {
-        tracing::warn!(error = %e, "failed to write PID file (non-fatal)");
+        tracing::warn!(err = %e, "failed to write PID file");
     } else {
         tracing::debug!(pid = %std::process::id(), path = %pid_file.display(), "PID file written");
     }
@@ -632,7 +632,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     if let Err(e) = crate::memory::ensure_memory_dir(
         config.knowledge_dir.to_str().unwrap_or("."),
     ) {
-        tracing::warn!(error = %e, "failed to create knowledge directory (non-fatal)");
+        tracing::warn!(err = %e, "failed to create knowledge directory");
     }
 
     // ── Composition Root: assemble all components ──────────────────────────
@@ -641,7 +641,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
     let mcp_manager = McpManager::new();
     if let Err(e) = mcp_manager.connect(&config.mcp_servers).await {
-        tracing::warn!(error = %e, "MCP server connection had errors (non-fatal), continuing");
+        tracing::warn!(err = %e, "MCP server connection had errors");
     }
 
     // Build skill manager (SKILL.md files).
@@ -810,7 +810,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             }
         }
         Err(e) => {
-            tracing::warn!(error = %e, "failed to process session queues (non-fatal)");
+            tracing::warn!(err = %e, "failed to process session queues");
         }
     }
 
@@ -922,7 +922,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
                         Some(l)
                     }
                     Err(e) => {
-                        tracing::warn!(port = wh_config.port, error = %e,
+                        tracing::warn!(port = wh_config.port, err = %e,
                             "SO_REUSEPORT bind failed, webhook server will use normal bind");
                         None
                     }
@@ -982,7 +982,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
                         // (scheduler, channel routing, model selection, etc.)
                     }
                     Err(e) => {
-                        tracing::error!(error = %e, "config reload failed, keeping current config");
+                        tracing::error!(err = %e, "config reload failed, keeping current config");
                     }
                 }
             }
@@ -1064,8 +1064,8 @@ fn reset_telegram_offset() {
     let offset_path = data_dir.join("telegram_offset");
     if offset_path.exists() {
         if let Err(e) = std::fs::remove_file(&offset_path) {
-            tracing::warn!(error = %e, path = %offset_path.display(),
-                "failed to remove telegram offset file (non-fatal)");
+            tracing::warn!(err = %e, path = %offset_path.display(),
+                "failed to remove telegram offset file");
         } else {
             tracing::info!(path = %offset_path.display(),
                 "telegram offset cleared — new process will fetch fresh updates");

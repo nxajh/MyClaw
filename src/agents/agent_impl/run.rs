@@ -415,7 +415,7 @@ impl AgentLoop {
         // Only runs when no model_override is active (overrides bypass the fallback chain).
         if self.config.model_override.is_none() {
             if let Err(e) = self.maybe_compact_for_fallback().await {
-                tracing::warn!(error = %e, "pre-fallback compaction check failed, continuing");
+                tracing::warn!(err = %e, "pre-fallback compaction check failed");
             }
         }
 
@@ -455,7 +455,7 @@ impl AgentLoop {
             // pushed context over threshold. Compact before building messages to avoid
             // sending an oversized context. No-op on first iteration.
             if let Err(e) = self.maybe_compact(&model_id).await {
-                tracing::warn!(error = %e, "pre-API compaction check failed, continuing");
+                tracing::warn!(err = %e, "pre-API compaction check failed");
             }
 
             // Use initial_messages on the first iteration (includes system-reminder
@@ -463,14 +463,14 @@ impl AgentLoop {
             // calls or compaction).
             let mut messages = if first_iteration {
                 first_iteration = false;
-                tracing::info!(
+                tracing::debug!(
                     msg_count = initial_messages.len(),
                     "chat_loop: first iteration using initial_messages"
                 );
                 for (i, m) in initial_messages.iter().enumerate() {
                     let text = m.text_content();
                     let has_reminder = text.contains("<system-reminder>");
-                    tracing::info!(
+                    tracing::debug!(
                         idx = i,
                         role = %m.role,
                         len = text.len(),
@@ -531,23 +531,15 @@ impl AgentLoop {
                 stream: true,
             };
 
-            // Log the message sequence being sent to the model.
             tracing::info!(
                 msg_count = messages.len(),
                 tool_count = tool_calls_count,
-                "sending messages to model: {:?}",
-                messages.iter().map(|m| {
-                    let content = m.text_content();
-                    let truncated = if content.len() > 100 {
-                        format!("{}...", crate::str_utils::truncate_chars(&content, 97))
-                    } else { content.to_string() };
-                    format!("{}: {}", m.role, truncated)
-                }).collect::<Vec<_>>()
+                "sending messages to model"
             );
 
             // 4. Call chat and process stream.
             let stream = provider.chat(req)?;
-            tracing::info!("chat stream started, collecting...");
+            tracing::info!("collecting chat stream");
 
             // Branch on StreamMode: Collect (existing) vs Streamed (forward events).
             let response = {
@@ -596,7 +588,7 @@ impl AgentLoop {
                                     tracing::warn!(
                                         attempt = retry_count,
                                         reason = ?classified.reason,
-                                        "retryable error, retrying..."
+                                        "retryable error, retrying"
                                     );
                                     continue;
                                 }
@@ -644,7 +636,7 @@ impl AgentLoop {
             // This eliminates the one-turn delay that results from checking before the
             // API call: we now always have accurate data when deciding to compact.
             if let Err(e) = self.maybe_compact(&model_id).await {
-                tracing::warn!(error = %e, "compaction failed, continuing");
+                tracing::warn!(err = %e, "compaction failed");
             }
 
             // 5. No tool calls → return text.
@@ -659,15 +651,15 @@ impl AgentLoop {
                     match response.stop_reason {
                         StopReason::MaxTokens => {
                             // Output budget exhausted — boost and retry (context-related, not provider failure).
-                            tracing::warn!(attempt = empty_response_retries, "output hit max_tokens with no text, boosting output budget for retry...");
+                            tracing::warn!(attempt = empty_response_retries, "output hit max_tokens with no text, boosting output budget for retry");
                             boosted_max_tokens = true;
                         }
                         StopReason::StopSequence | StopReason::EndTurn => {
                             // Model stopped naturally but produced no text — may be a transient issue.
-                            tracing::warn!(attempt = empty_response_retries, stop = ?response.stop_reason, "empty response with natural stop, retrying...");
+                            tracing::warn!(attempt = empty_response_retries, stop = ?response.stop_reason, "empty response with natural stop, retrying");
                         }
                         _ => {
-                            tracing::warn!(attempt = empty_response_retries, stop = ?response.stop_reason, "chat response text is empty, retrying...");
+                            tracing::warn!(attempt = empty_response_retries, stop = ?response.stop_reason, "chat response text is empty, retrying");
                         }
                     }
                     continue;

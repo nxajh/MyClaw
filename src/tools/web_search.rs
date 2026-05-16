@@ -65,7 +65,7 @@ impl Tool for WebSearchTool {
         let chain = match self.registry.get_search_fallback_chain() {
             Ok(chain) => chain,
             Err(e) => {
-                tracing::debug!(error = %e, "no search provider available");
+                tracing::debug!(err = %e, "no search provider available");
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
@@ -154,7 +154,7 @@ impl Tool for WebSearchTool {
                     }
 
                     tracing::warn!(
-                        error = %e,
+                        err = %e,
                         provider = %provider_name,
                         reason = ?reason,
                         "search provider failed, trying next"

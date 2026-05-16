@@ -705,7 +705,7 @@ impl Orchestrator {
                 let content = match std::fs::read_to_string(heartbeat_path) {
                     Ok(c) => c,
                     Err(e) => {
-                        tracing::warn!(error = %e, "heartbeat skipped: cannot read HEARTBEAT.md");
+                        tracing::warn!(err = %e, "heartbeat skipped: cannot read HEARTBEAT.md");
                         return;
                     }
                 };
@@ -1557,7 +1557,7 @@ async fn run_heartbeat_task(
         }
         Ok(_) => {}
         Err(e) => {
-            tracing::warn!(error = %e, "heartbeat run failed");
+            tracing::warn!(err = %e, "heartbeat run failed");
         }
     }
 }
@@ -1587,7 +1587,7 @@ async fn run_cron_task(
         }
         Ok(_) => {}
         Err(e) => {
-            tracing::warn!(session_key = %session_key, error = %e, "cron job failed");
+            tracing::warn!(session_key = %session_key, err = %e, "cron job failed");
         }
     }
 }
@@ -1668,7 +1668,7 @@ async fn send_to_target_internal(
     };
 
     if let Err(e) = channel.send(&msg).await {
-        tracing::warn!(channel = %ch_type, account = %acc_id, error = %e, "failed to send scheduled response");
+        tracing::warn!(channel = %ch_type, account = %acc_id, err = %e, "failed to send scheduled response");
     }
 }
 

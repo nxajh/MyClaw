@@ -174,7 +174,7 @@ pub fn render_anthropic_messages<'a>(req: &ChatRequest<'a>) -> RenderedAnthropic
                 if is_text {
                     let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
                     if text.trim().is_empty() {
-                        tracing::warn!("Dropping empty text block from message");
+                        tracing::warn!("dropping empty text block from message");
                         return false;
                     }
                 }
@@ -194,7 +194,7 @@ pub fn render_anthropic_messages<'a>(req: &ChatRequest<'a>) -> RenderedAnthropic
             _ => true,
         };
         if !has_content {
-            tracing::warn!(role = ?msg.get("role"), "Dropping message with empty content");
+            tracing::warn!(role = ?msg.get("role"), "dropping message with empty content");
         }
         has_content
     });

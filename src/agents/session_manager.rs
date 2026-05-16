@@ -864,7 +864,7 @@ impl SessionManager {
                 // crashing the whole process.
                 let ephemeral = format!("ephemeral:{}", uuid::Uuid::new_v4());
                 tracing::error!(
-                    error = %e,
+                    err = %e,
                     user = %user_id,
                     session = %ephemeral,
                     "backend failed to create session; using ephemeral (non-persisted) session"

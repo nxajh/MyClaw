@@ -206,7 +206,7 @@ impl Scheduler {
                         target_account: parse_target_account(&config.target),
                     }).await {
                         Ok(()) => tracing::debug!("heartbeat event sent to orchestrator"),
-                        Err(e) => tracing::warn!(error = %e, "failed to send heartbeat event"),
+                        Err(e) => tracing::warn!(err = %e, "failed to send heartbeat event"),
                     }
                 }
                 _ = cron_ticker.tick() => {
@@ -566,7 +566,7 @@ fn compute_next_run_inner(
             let cron_schedule: cron::Schedule = match expr.parse() {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::warn!(schedule = %expr, error = %e, "invalid cron expression");
+                    tracing::warn!(schedule = %expr, err = %e, "invalid cron expression");
                     return None;
                 }
             };
@@ -586,7 +586,7 @@ fn compute_next_run_inner(
             let cron_schedule: cron::Schedule = match schedule.parse() {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::warn!(schedule = %schedule, error = %e, "invalid cron expression");
+                    tracing::warn!(schedule = %schedule, err = %e, "invalid cron expression");
                     return None;
                 }
             };
@@ -792,7 +792,7 @@ pub async fn send_to_target(ctx: &WebhookContext, target: &str, content: &str) {
     };
 
     if let Err(e) = channel.send(&msg).await {
-        tracing::warn!(channel = %ch_type, account = %acc_id, error = %e, "failed to send scheduled response");
+        tracing::warn!(channel = %ch_type, account = %acc_id, err = %e, "failed to send scheduled response");
     }
 }
 
@@ -820,7 +820,7 @@ pub async fn run_webhook_server(
         match tokio::net::TcpListener::from_std(std_listener) {
             Ok(l) => l,
             Err(e) => {
-                tracing::error!(port = config.port, error = %e, "webhook: failed to convert pre-bound listener");
+                tracing::error!(port = config.port, err = %e, "webhook: failed to convert pre-bound listener");
                 return;
             }
         }
@@ -828,7 +828,7 @@ pub async fn run_webhook_server(
         match tokio::net::TcpListener::bind(("0.0.0.0", config.port)).await {
             Ok(l) => l,
             Err(e) => {
-                tracing::error!(port = config.port, error = %e, "webhook: failed to bind");
+                tracing::error!(port = config.port, err = %e, "webhook: failed to bind");
                 return;
             }
         }
@@ -847,7 +847,7 @@ pub async fn run_webhook_server(
         let (stream, _addr) = match listener.accept().await {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(error = %e, "webhook: accept failed");
+                tracing::warn!(err = %e, "webhook: accept failed");
                 continue;
             }
         };
@@ -866,7 +866,7 @@ pub async fn run_webhook_server(
             });
 
             if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
-                tracing::debug!(error = %e, "webhook: connection error");
+                tracing::debug!(err = %e, "webhook: connection error");
             }
         });
     }
@@ -915,7 +915,7 @@ async fn handle_request(
     let body_bytes = match collect_body(req.into_body()).await {
         Ok(b) => b,
         Err(e) => {
-            tracing::warn!(error = %e, "webhook: failed to read body");
+            tracing::warn!(err = %e, "webhook: failed to read body");
             return ok_response(StatusCode::BAD_REQUEST, "failed to read body");
         }
     };
@@ -968,7 +968,7 @@ async fn handle_request(
             ok_response(StatusCode::OK, "ok")
         }
         Err(e) => {
-            tracing::warn!(error = %e, "webhook: agent run failed");
+            tracing::warn!(err = %e, "webhook: agent run failed");
             ok_response(StatusCode::INTERNAL_SERVER_ERROR, "agent error")
         }
     }
@@ -994,7 +994,7 @@ async fn handle_hooks_agent(
     let payload: serde_json::Value = match serde_json::from_slice(&body_bytes) {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!(error = %e, "/hooks/agent: invalid JSON body");
+            tracing::warn!(err = %e, "/hooks/agent: invalid JSON body");
             return ok_response(StatusCode::BAD_REQUEST, "invalid JSON");
         }
     };
@@ -1024,7 +1024,7 @@ async fn handle_hooks_agent(
             ok_response(StatusCode::OK, "ok")
         }
         Err(e) => {
-            tracing::warn!(error = %e, "/hooks/agent: agent run failed");
+            tracing::warn!(err = %e, "/hooks/agent: agent run failed");
             ok_response(StatusCode::INTERNAL_SERVER_ERROR, "agent error")
         }
     }
@@ -1049,7 +1049,7 @@ async fn handle_hooks_wake(
     let payload: serde_json::Value = match serde_json::from_slice(&body_bytes) {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!(error = %e, "/hooks/wake: invalid JSON body");
+            tracing::warn!(err = %e, "/hooks/wake: invalid JSON body");
             return ok_response(StatusCode::BAD_REQUEST, "invalid JSON");
         }
     };
