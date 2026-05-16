@@ -23,6 +23,9 @@ pub(crate) enum StreamMode {
 pub(crate) struct CollectedResponse {
     pub(crate) text: String,
     pub(crate) reasoning_content: Option<String>,
+    /// Anthropic-issued opaque signature for the thinking block, required when
+    /// echoing the block back in subsequent turns.
+    pub(crate) thinking_signature: Option<String>,
     pub(crate) tool_calls: Vec<ToolCall>,
     #[allow(dead_code)]
     pub(crate) stop_reason: StopReason,
@@ -42,7 +45,7 @@ pub(crate) fn estimate_message_tokens(msg: &ChatMessage) -> u64 {
             ContentPart::Text { text } => estimate_tokens(text),
             ContentPart::ImageUrl { .. } => 800,
             ContentPart::ImageB64 { .. } => 800,
-            ContentPart::Thinking { thinking } => estimate_tokens(thinking),
+            ContentPart::Thinking { thinking, .. } => estimate_tokens(thinking),
         };
     }
     // Estimate tool_calls overhead (id + name + arguments).

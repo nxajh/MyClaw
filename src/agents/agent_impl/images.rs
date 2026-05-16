@@ -38,6 +38,7 @@ impl AgentLoop {
                 for b64 in b64s {
                     last_user.parts.push(crate::providers::ContentPart::ImageB64 {
                         b64_json: b64.clone(),
+                        media_type: None,
                         detail: crate::providers::ImageDetail::Auto,
                     });
                 }

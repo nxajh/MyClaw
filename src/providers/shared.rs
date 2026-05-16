@@ -1,6 +1,6 @@
 //! Shared utilities for providers: auth, SSE parsing, body building, factory.
 
-use crate::providers::{ChatRequest, ContentPart, StreamEvent, StopReason};
+use crate::providers::{ChatRequest, ChatUsage, ContentPart, StreamEvent, StopReason};
 
 // ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -19,14 +19,21 @@ pub fn build_auth(auth: &AuthStyle, credential: &str) -> String {
 
 // ── SSE parsing ──────────────────────────────────────────────────────────────
 
-pub fn parse_openai_sse(line: &str) -> Option<StreamEvent> {
+pub fn parse_openai_sse(line: &str) -> Vec<StreamEvent> {
     let line = line.trim();
-    if line.is_empty() || line.starts_with(':') { return None; }
-    let data = line.strip_prefix("data:")?.trim();
-    if data == "[DONE]" { return None; }
+    if line.is_empty() || line.starts_with(':') { return vec![]; }
+    let data = match line.strip_prefix("data:") {
+        Some(d) => d.trim(),
+        None => return vec![],
+    };
+    if data == "[DONE]" { return vec![]; }
 
     #[derive(serde::Deserialize)]
-    struct Chunk { choices: Vec<Choice> }
+    struct Chunk {
+        #[serde(default)]
+        choices: Vec<Choice>,
+        usage: Option<ChunkUsage>,
+    }
     #[derive(serde::Deserialize)]
     struct Choice { delta: Delta, finish_reason: Option<String> }
     #[derive(serde::Deserialize)]
@@ -41,19 +48,40 @@ pub fn parse_openai_sse(line: &str) -> Option<StreamEvent> {
     #[derive(serde::Deserialize, serde::Serialize)]
     #[allow(dead_code)]
     struct FuncDelta { name: Option<String>, arguments: Option<String> }
+    #[derive(serde::Deserialize)]
+    struct ChunkUsage { prompt_tokens: Option<u64>, completion_tokens: Option<u64> }
 
-    let chunk: Chunk = serde_json::from_str(data).ok()?;
+    let chunk: Chunk = match serde_json::from_str(data) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+
+    // Usage-only chunk: choices is empty but usage is present (stream_options.include_usage).
+    if chunk.choices.is_empty() {
+        if let Some(u) = chunk.usage {
+            return vec![StreamEvent::Usage(ChatUsage {
+                input_tokens: u.prompt_tokens,
+                output_tokens: u.completion_tokens,
+                cached_input_tokens: None,
+                reasoning_tokens: None,
+                cache_write_tokens: None,
+            })];
+        }
+        return vec![];
+    }
+
+    let mut events = Vec::new();
 
     for choice in &chunk.choices {
         // Check tool_calls FIRST — some providers (GLM) occasionally send both
         // content and tool_calls in the same chunk.  When that happens the
         // content is usually a text representation of the tool call and must
         // be ignored in favour of the structured tool_calls field.
+        let mut emitted_tool_event = false;
         if let Some(tcs) = &choice.delta.tool_calls {
-            // Log raw tool_calls delta for debugging.
             tracing::debug!(raw_tool_calls = %serde_json::to_string(tcs).unwrap_or_default(), "SSE tool_calls delta");
 
-            if let Some(tc) = tcs.first() {
+            for tc in tcs {
                 let id = tc.id.clone().unwrap_or_default();
                 let func = tc.function.as_ref();
 
@@ -63,43 +91,61 @@ pub fn parse_openai_sse(line: &str) -> Option<StreamEvent> {
                 // initial_arguments along.
                 if !id.is_empty() && func.is_some_and(|f| f.name.is_some()) {
                     let initial_args = func.and_then(|f| f.arguments.clone()).unwrap_or_default();
-                    return Some(StreamEvent::ToolCallStart {
-                        id: id.clone(),
+                    events.push(StreamEvent::ToolCallStart {
+                        id,
                         name: func.and_then(|f| f.name.clone()).unwrap_or_default(),
                         initial_arguments: initial_args,
                     });
-                }
-
-                // Subsequent deltas carry argument fragments.
-                let args = func.and_then(|f| f.arguments.clone()).unwrap_or_default();
-                if !args.is_empty() {
-                    return Some(StreamEvent::ToolCallDelta { id, delta: args });
+                    emitted_tool_event = true;
+                } else {
+                    // Subsequent deltas carry argument fragments.
+                    // Use index as fallback id for parallel tool calls where id is absent.
+                    let args = func.and_then(|f| f.arguments.clone()).unwrap_or_default();
+                    if !args.is_empty() {
+                        let delta_id = if id.is_empty() { format!("#{}", tc.index) } else { id };
+                        events.push(StreamEvent::ToolCallDelta { id: delta_id, delta: args });
+                        emitted_tool_event = true;
+                    }
                 }
             }
         }
 
-        if let Some(text) = &choice.delta.content {
-            if !text.is_empty() { return Some(StreamEvent::Delta { text: text.clone() }); }
+        // Skip content when tool_calls were present in this choice (avoids emitting
+        // the text shadow some providers include alongside structured tool_calls).
+        if !emitted_tool_event {
+            if let Some(text) = &choice.delta.content {
+                if !text.is_empty() { events.push(StreamEvent::Delta { text: text.clone() }); }
+            }
+            if let Some(reasoning) = &choice.delta.reasoning_content {
+                if !reasoning.is_empty() { events.push(StreamEvent::Thinking { text: reasoning.clone() }); }
+            }
         }
-        if let Some(reasoning) = &choice.delta.reasoning_content {
-            if !reasoning.is_empty() { return Some(StreamEvent::Thinking { text: reasoning.clone() }); }
-        }
-        if choice.finish_reason.is_some() {
-            let reason = choice.finish_reason.as_ref().and_then(|r| match r.as_str() {
-                "stop" => Some(StopReason::EndTurn),
-                "length" => Some(StopReason::MaxTokens),
-                "content_filter" => Some(StopReason::ContentFilter),
-                "tool_calls" => Some(StopReason::ToolUse),
-                _ => None,
-            }).unwrap_or(StopReason::EndTurn);
-            return Some(StreamEvent::Done { reason });
+
+        // finish_reason can appear in the same chunk as content or tool_calls.
+        if let Some(ref r) = choice.finish_reason {
+            let reason = match r.as_str() {
+                "stop" => StopReason::EndTurn,
+                "length" => StopReason::MaxTokens,
+                "content_filter" => StopReason::ContentFilter,
+                "tool_calls" => StopReason::ToolUse,
+                _ => StopReason::EndTurn,
+            };
+            events.push(StreamEvent::Done { reason });
         }
     }
 
-    None
+    events
 }
 
 // ── Body building ─────────────────────────────────────────────────────────────
+
+fn detect_image_media_type_openai(b64: &str) -> &'static str {
+    if b64.starts_with("/9j/")       { "image/jpeg" }
+    else if b64.starts_with("iVBOR") { "image/png"  }
+    else if b64.starts_with("R0lG")  { "image/gif"  }
+    else if b64.starts_with("UklG")  { "image/webp" }
+    else                              { "image/jpeg" }
+}
 
 pub fn build_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
     use serde_json::json;
@@ -107,23 +153,31 @@ pub fn build_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
     let messages: Vec<serde_json::Value> = req.messages
         .iter()
         .map(|msg| {
+            // Thinking blocks are not supported by OpenAI-compatible APIs — skip entirely.
             let content_vec: Vec<serde_json::Value> = msg.parts.iter().filter_map(|part| match part {
                 ContentPart::Text { text } => Some(serde_json::json!({"type": "text", "text": text})),
                 ContentPart::ImageUrl { url, detail } => Some(serde_json::json!({
                     "type": "image_url",
                     "image_url": { "url": url, "detail": format!("{:?}", detail).to_lowercase() }
                 })),
-                ContentPart::ImageB64 { b64_json, detail } => Some(serde_json::json!({
-                    "type": "image_url",
-                    "image_url": { "url": format!("data:image;base64,{}", b64_json), "detail": format!("{:?}", detail).to_lowercase() }
-                })),
-                ContentPart::Thinking { .. } => {
-                    // OpenAI-compatible APIs do not support thinking blocks — skip entirely.
-                    None
+                ContentPart::ImageB64 { b64_json, detail, media_type } => {
+                    let mime = media_type.as_deref()
+                        .unwrap_or_else(|| detect_image_media_type_openai(b64_json));
+                    Some(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:{};base64,{}", mime, b64_json),
+                            "detail": format!("{:?}", detail).to_lowercase()
+                        }
+                    }))
                 }
+                ContentPart::Thinking { .. } => None,
             }).collect();
 
-            let content = if content_vec.len() == 1 {
+            let content = if content_vec.is_empty() {
+                // All parts were filtered (e.g. only Thinking parts) — empty content.
+                serde_json::json!("")
+            } else if content_vec.len() == 1 {
                 // For a single text part, emit plain string content for maximum compatibility.
                 if let Some(text) = msg.parts.iter().find_map(|p| match p {
                     ContentPart::Text { text } => Some(text.as_str()),
@@ -133,9 +187,6 @@ pub fn build_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                 } else {
                     content_vec.into_iter().next().unwrap()
                 }
-            } else if content_vec.is_empty() {
-                // All parts were filtered (e.g. only Thinking parts) — empty content.
-                serde_json::json!("")
             } else {
                 serde_json::json!(content_vec)
             };
@@ -147,14 +198,10 @@ pub fn build_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                 if let Some(tc_id) = &msg.tool_call_id {
                     msg_json["tool_call_id"] = serde_json::json!(tc_id);
                 } else if let Some(n) = &msg.name {
-                    // Backward compat: name field used as tool_call_id.
                     msg_json["tool_call_id"] = serde_json::json!(n);
                 }
                 msg_json["content"] = serde_json::json!(content);
             } else if msg.role == "assistant" {
-                // Assistant message may carry tool_calls from a previous turn.
-                // For empty content (text-only with empty string, or all parts filtered),
-                // emit null — many providers reject empty string content.
                 let is_empty = match &content {
                     serde_json::Value::String(s) => s.is_empty(),
                     serde_json::Value::Array(arr) => arr.is_empty(),
@@ -180,11 +227,17 @@ pub fn build_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
         "model": req.model,
         "messages": messages,
         "stream": true,
+        "stream_options": { "include_usage": true },
     });
 
     if let Some(temp) = req.temperature { body["temperature"] = serde_json::json!(temp); }
-    if let Some(max) = req.max_tokens { body["max_tokens"] = serde_json::json!(max); }
+    // max_completion_tokens is preferred; include max_tokens for older providers.
+    if let Some(max) = req.max_tokens {
+        body["max_completion_tokens"] = serde_json::json!(max);
+        body["max_tokens"] = serde_json::json!(max);
+    }
     if let Some(stop) = &req.stop { body["stop"] = serde_json::json!(stop); }
+    if let Some(seed) = req.seed { body["seed"] = serde_json::json!(seed); }
     if let Some(tools) = req.tools {
         body["tools"] = serde_json::json!(tools.iter().map(|t| {
             serde_json::json!({
@@ -192,6 +245,7 @@ pub fn build_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                 "function": { "name": t.name, "description": t.description, "parameters": t.input_schema }
             })
         }).collect::<Vec<_>>());
+        body["parallel_tool_calls"] = serde_json::json!(true);
     }
 
     body

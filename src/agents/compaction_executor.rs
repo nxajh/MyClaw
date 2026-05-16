@@ -216,7 +216,7 @@ impl CompactionExecutor {
             if let Some(ref thinking_text) = response.reasoning_content {
                 assistant_msg.parts.insert(
                     0,
-                    ContentPart::Thinking { thinking: thinking_text.clone() },
+                    ContentPart::Thinking { thinking: thinking_text.clone(), signature: None },
                 );
             }
             messages.push(assistant_msg);
@@ -292,6 +292,7 @@ impl CompactionExecutor {
                         }
                     }
                     StreamEvent::Done { .. } => break,
+                    StreamEvent::ThinkingSignature { .. } => {}
                     StreamEvent::HttpError { message, .. } => anyhow::bail!("summarizer stream error: {}", message),
                     StreamEvent::Error(e) => anyhow::bail!("summarizer stream error: {}", e),
                 },

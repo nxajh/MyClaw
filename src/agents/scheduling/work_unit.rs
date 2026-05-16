@@ -98,7 +98,7 @@ fn estimate_msg_tokens(msg: &ChatMessage) -> u64 {
     use crate::providers::ContentPart;
     let text_len: usize = msg.parts.iter().map(|p| match p {
         ContentPart::Text { text } => text.len(),
-        ContentPart::Thinking { thinking } => thinking.len(),
+        ContentPart::Thinking { thinking, .. } => thinking.len(),
         ContentPart::ImageUrl { .. } | ContentPart::ImageB64 { .. } => 400,
     }).sum();
     let tool_len: usize = msg.tool_calls.as_ref().map_or(0, |tcs| {

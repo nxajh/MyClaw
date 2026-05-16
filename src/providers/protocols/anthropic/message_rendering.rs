@@ -6,6 +6,15 @@
 use serde_json::json;
 use crate::providers::ChatRequest;
 
+/// Infer image MIME type from the leading bytes of a base64-encoded image.
+fn detect_image_media_type(b64: &str) -> &'static str {
+    if b64.starts_with("/9j/")  { "image/jpeg" }
+    else if b64.starts_with("iVBOR") { "image/png"  }
+    else if b64.starts_with("R0lG")  { "image/gif"  }
+    else if b64.starts_with("UklG")  { "image/webp" }
+    else                              { "image/jpeg" }
+}
+
 /// Rendered Anthropic messages: top-level system prompt + conversation messages.
 pub struct RenderedAnthropicMessages {
     pub system_prompt: Option<String>,
@@ -57,12 +66,20 @@ pub fn render_anthropic_messages<'a>(req: &ChatRequest<'a>) -> RenderedAnthropic
                         serde_json::json!({"type": "text", "text": text}),
                     crate::providers::ContentPart::ImageUrl { url, .. } =>
                         serde_json::json!({"type": "image", "source": {"type": "url", "url": url}}),
-                    crate::providers::ContentPart::ImageB64 { b64_json, .. } =>
+                    crate::providers::ContentPart::ImageB64 { b64_json, media_type, .. } => {
+                        let mime = media_type.as_deref()
+                            .unwrap_or_else(|| detect_image_media_type(b64_json));
                         serde_json::json!({"type": "image", "source": {
-                            "type": "base64", "media_type": "image/jpeg", "data": b64_json,
-                        }}),
-                    crate::providers::ContentPart::Thinking { thinking } =>
-                        serde_json::json!({"type": "thinking", "thinking": thinking}),
+                            "type": "base64", "media_type": mime, "data": b64_json,
+                        }})
+                    }
+                    crate::providers::ContentPart::Thinking { thinking, signature } => {
+                        let mut block = serde_json::json!({"type": "thinking", "thinking": thinking});
+                        if let Some(sig) = signature {
+                            block["signature"] = serde_json::json!(sig);
+                        }
+                        block
+                    }
                 }).collect();
 
                 if msg.role == "assistant" {
@@ -201,7 +218,18 @@ pub fn build_anthropic_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
         body["system"] = serde_json::json!(system);
     }
     if let Some(temp) = req.temperature { body["temperature"] = serde_json::json!(temp); }
-    if let Some(max) = req.max_tokens { body["max_tokens"] = serde_json::json!(max); }
+    // max_tokens is required by the Anthropic API; default to 8192 when not set.
+    body["max_tokens"] = serde_json::json!(req.max_tokens.unwrap_or(8192));
+    if let Some(ref thinking) = req.thinking {
+        if thinking.enabled {
+            let budget_tokens: u32 = match thinking.effort.as_deref() {
+                Some("high") => 10_000,
+                Some("low")  =>  1_000,
+                _            =>  5_000,
+            };
+            body["thinking"] = json!({"type": "enabled", "budget_tokens": budget_tokens});
+        }
+    }
     if let Some(tools) = req.tools {
         body["tools"] = serde_json::json!(tools.iter().map(|t| {
             serde_json::json!({

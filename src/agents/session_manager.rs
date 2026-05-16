@@ -613,7 +613,7 @@ impl Session {
         msg.tool_calls = Some(tool_calls);
         if let Some(thinking) = thinking {
             use crate::providers::ContentPart;
-            msg.parts.insert(0, ContentPart::Thinking { thinking });
+            msg.parts.insert(0, ContentPart::Thinking { thinking, signature: None });
         }
         self.history.push(msg);
         self.message_ids.push(0);

@@ -139,12 +139,13 @@ impl TtsProvider for OpenAiProvider {
         headers.insert(reqwest::header::AUTHORIZATION, auth.parse().unwrap());
         headers.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
 
+        let voice_id = match &req.voice {
+            TtsVoice::Id(id) => id.clone(),
+        };
         let body = serde_json::json!({
             "model": req.model,
             "input": req.input,
-            "voice": match &req.voice {
-                TtsVoice::Id(id) => serde_json::json!({"type": "tts-1", "voice": id})
-            },
+            "voice": voice_id,
             "response_format": match req.response_format {
                 Some(TtsFormat::Mp3) | None => "mp3",
                 Some(TtsFormat::Opus) => "opus",
@@ -156,6 +157,7 @@ impl TtsProvider for OpenAiProvider {
 
         let bytes = futures::executor::block_on(async move {
             let resp = self.client.post(&url).headers(headers).json(&body).send().await?;
+            let resp = resp.error_for_status()?;
             resp.bytes().await
         })?;
 

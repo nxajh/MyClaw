@@ -13,12 +13,25 @@ use std::pin::Pin;
 pub enum ContentPart {
     Text { text: String },
     ImageUrl { url: String, detail: ImageDetail },
-    ImageB64 { b64_json: String, detail: ImageDetail },
+    ImageB64 {
+        b64_json: String,
+        /// MIME type of the image (e.g. "image/png"). When absent the renderer
+        /// infers the type from the base64 header bytes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        media_type: Option<String>,
+        detail: ImageDetail,
+    },
     /// Extended thinking block — stored in message history so it can be
     /// re-sent to the model on subsequent turns (Anthropic protocol requires
-    /// the model to see its own reasoning).
+    /// the model to see its own reasoning, including the opaque signature).
     #[serde(rename = "thinking")]
-    Thinking { thinking: String },
+    Thinking {
+        thinking: String,
+        /// Anthropic-issued signature that must be echoed back in subsequent
+        /// turns when this block appears in the conversation history.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
 }
 
 /// Image detail level.
@@ -82,6 +95,10 @@ pub type BoxStream<T> = Pin<Box<dyn Stream<Item = T> + Send>>;
 pub enum StreamEvent {
     Delta { text: String },
     Thinking { text: String },
+    /// Opaque signature for the preceding thinking block (Anthropic extended
+    /// thinking). Must be stored alongside the thinking text and echoed back
+    /// in subsequent requests.
+    ThinkingSignature { signature: String },
     ToolCallStart { id: String, name: String, initial_arguments: String },
     ToolCallDelta { id: String, delta: String },
     ToolCallEnd { id: String, name: String, arguments: String },
@@ -261,6 +278,7 @@ impl ChatResponse {
                     stop_reason = reason;
                     break;
                 }
+                StreamEvent::ThinkingSignature { .. } => {}
                 StreamEvent::HttpError { message, .. } => {
                     anyhow::bail!("Stream error: HTTP {}", message);
                 }

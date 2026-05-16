@@ -561,7 +561,22 @@ impl AgentLoop {
                 match result {
                     Ok(r) => r,
                     Err(e) => {
-                        let classified = crate::providers::ClassifiedError::from_message(&e.to_string());
+                        let err_str = e.to_string();
+                        // Fallback chain signals: do not restart from the outer loop in
+                        // either case — the chain already did everything it could.
+                        if err_str.contains(crate::providers::fallback::CHAIN_EXHAUSTED_TAG) {
+                            tracing::warn!("fallback chain exhausted all providers, not retrying");
+                            return Err(super::super::error::AgentError::ProviderChainExhausted.into());
+                        }
+                        if err_str.contains(crate::providers::fallback::CHAIN_ALL_COOLING_TAG) {
+                            let wait_secs = err_str
+                                .rsplit_once("retry in ")
+                                .and_then(|(_, rest)| rest.trim_end_matches('s').parse::<u64>().ok())
+                                .unwrap_or(0);
+                            tracing::warn!(wait_secs, "fallback chain: all providers on cooldown");
+                            return Err(super::super::error::AgentError::ProviderChainCooling { wait_secs }.into());
+                        }
+                        let classified = crate::providers::ClassifiedError::from_message(&err_str);
                         if classified.retryable {
                             match classified.reason {
                                 crate::providers::FailoverReason::Timeout => {
@@ -688,7 +703,10 @@ impl AgentLoop {
                 use crate::providers::ContentPart;
                 assistant_msg.parts.insert(
                     0,
-                    ContentPart::Thinking { thinking: thinking.clone() },
+                    ContentPart::Thinking {
+                        thinking: thinking.clone(),
+                        signature: response.thinking_signature.clone(),
+                    },
                 );
             }
 
@@ -851,6 +869,7 @@ impl AgentLoop {
     ) -> anyhow::Result<CollectedResponse> {
         let mut text = String::new();
         let mut reasoning_content: Option<String> = None;
+        let mut thinking_signature: Option<String> = None;
         let mut tool_calls = Vec::new();
         let mut stop_reason = StopReason::EndTurn;
         let mut usage: Option<ChatUsage> = None;
@@ -862,7 +881,7 @@ impl AgentLoop {
             // Cancellation checkpoint (streaming path only).
             if let Some(cancel) = cancel {
                 if cancel.is_cancelled() {
-                    return Ok(CollectedResponse { text, reasoning_content, tool_calls, stop_reason, usage });
+                    return Ok(CollectedResponse { text, reasoning_content, thinking_signature, tool_calls, stop_reason, usage });
                 }
             }
 
@@ -902,6 +921,9 @@ impl AgentLoop {
                                     }
                                 }
                             }
+                        }
+                        StreamEvent::ThinkingSignature { signature } => {
+                            thinking_signature = Some(signature);
                         }
                         StreamEvent::ToolCallStart { id, name, initial_arguments } => {
                             tool_calls.push(crate::providers::ToolCall {
@@ -977,6 +999,7 @@ impl AgentLoop {
         Ok(CollectedResponse {
             text,
             reasoning_content,
+            thinking_signature,
             tool_calls,
             stop_reason,
             usage,

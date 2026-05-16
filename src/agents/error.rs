@@ -50,4 +50,14 @@ pub enum AgentError {
         /// The original user message that was rolled back.
         user_message: String,
     },
+
+    /// Every provider in the fallback chain was tried and all returned
+    /// retryable errors.  The outer loop must not restart the chain.
+    #[error("all providers in fallback chain failed")]
+    ProviderChainExhausted,
+
+    /// Every provider in the fallback chain is on cooldown; no request was
+    /// attempted.  The caller should wait before retrying.
+    #[error("all providers on cooldown, retry in {wait_secs}s")]
+    ProviderChainCooling { wait_secs: u64 },
 }
