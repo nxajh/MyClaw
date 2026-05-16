@@ -10,6 +10,7 @@ use crate::providers::{
     BoxStream, ChatProvider, ChatRequest, StreamEvent, StopReason,
 };
 use reqwest::Client;
+use std::time::Duration;
 use crate::providers::http::build_reqwest_client;
 use crate::providers::protocols::openai::chat_message_rendering::render_openai_chat_body;
 
@@ -61,9 +62,18 @@ impl ChatProvider for OpenAiChatCompletionsClient {
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(100);
 
         tokio::spawn(async move {
-            let resp = match client.post(&url).headers(headers).json(&body).send().await {
-                Ok(r) => r,
-                Err(e) => { let _ = tx.send(StreamEvent::Error(e.to_string())).await; return; }
+            let resp = match tokio::time::timeout(
+                Duration::from_secs(30),
+                client.post(&url).headers(headers).json(&body).send()
+            ).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => { let _ = tx.send(StreamEvent::Error(e.to_string())).await; return; }
+                Err(_) => {
+                    let _ = tx.send(StreamEvent::Error(
+                        "timed out waiting for response headers".to_string()
+                    )).await;
+                    return;
+                }
             };
 
             if resp.error_for_status_ref().is_err() {

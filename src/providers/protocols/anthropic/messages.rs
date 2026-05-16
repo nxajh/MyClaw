@@ -11,6 +11,7 @@ use crate::providers::{
     BoxStream, ChatProvider, ChatRequest, StreamEvent, StopReason,
 };
 use reqwest::Client;
+use std::time::Duration;
 use crate::providers::http::build_reqwest_client;
 use crate::providers::protocols::anthropic::message_rendering::build_anthropic_body;
 
@@ -61,9 +62,20 @@ impl ChatProvider for AnthropicMessagesClient {
                 headers.insert(reqwest::header::USER_AGENT, ua.parse().unwrap());
             }
 
-            let resp = match client.post(&url).headers(headers).json(&body).send().await {
-                Ok(r) => r,
-                Err(e) => { let _ = tx.send(StreamEvent::Error(e.to_string())).await; return; }
+            // Bound the time spent waiting for the initial HTTP response headers.
+            // Once headers arrive, per-chunk timeouts in collect_stream_inner take over.
+            let resp = match tokio::time::timeout(
+                Duration::from_secs(30),
+                client.post(&url).headers(headers).json(&body).send()
+            ).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => { let _ = tx.send(StreamEvent::Error(e.to_string())).await; return; }
+                Err(_) => {
+                    let _ = tx.send(StreamEvent::Error(
+                        "timed out waiting for response headers".to_string()
+                    )).await;
+                    return;
+                }
             };
 
             if resp.error_for_status_ref().is_err() {
