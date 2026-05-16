@@ -9,6 +9,10 @@
 /// to avoid restarting the whole chain from scratch.
 pub const CHAIN_EXHAUSTED_TAG: &str = "fallback_chain_exhausted";
 
+/// Tag embedded in the error message when every provider in the chain is
+/// currently on cooldown and none was attempted.
+pub const CHAIN_ALL_COOLING_TAG: &str = "fallback_chain_all_cooling";
+
 use async_trait::async_trait;
 use crate::providers::{
     BoxStream, ChatProvider, ChatRequest, ChatMessage, StreamEvent, ChatToolSpec,
@@ -16,7 +20,9 @@ use crate::providers::{
 };
 use crate::providers::credential_pool::SharedCredentialPool;
 use futures_util::StreamExt;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 /// An entry in the fallback chain: a provider + its model ID + optional credential pool.
 #[derive(Clone)]
@@ -31,12 +37,19 @@ pub struct FallbackEntry {
 #[derive(Clone)]
 pub struct FallbackChatProvider {
     chain: Vec<FallbackEntry>,
+    /// Per-model cooldown deadlines, shared across clones so all requests see
+    /// the same state.  Keyed by model_id; value is the earliest Instant at
+    /// which the model should be tried again.
+    model_cooldowns: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 impl FallbackChatProvider {
     pub fn new(chain: Vec<FallbackEntry>) -> Self {
         assert!(!chain.is_empty(), "fallback chain must not be empty");
-        Self { chain }
+        Self {
+            chain,
+            model_cooldowns: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 }
 
@@ -50,6 +63,17 @@ fn is_provider_error(cat: &ErrorCategory) -> bool {
             | ErrorCategory::Billing
             | ErrorCategory::ModelNotFound
     )
+}
+
+/// Record a cooldown deadline for `model_id` if the classified error carries one.
+fn record_cooldown(
+    cooldowns: &Mutex<HashMap<String, Instant>>,
+    model_id: &str,
+    classified: &ClassifiedError,
+) {
+    if let Some(d) = classified.cooldown_duration() {
+        cooldowns.lock().unwrap().insert(model_id.to_string(), Instant::now() + d);
+    }
 }
 
 #[async_trait]
@@ -71,9 +95,34 @@ impl ChatProvider for FallbackChatProvider {
         let stream_flag = req.stream;
 
         let chain = self.chain.clone();
+        let cooldowns = Arc::clone(&self.model_cooldowns);
 
         tokio::spawn(async move {
+            let mut soonest_cooling: Option<Instant> = None;
+            let mut any_attempted = false;
+
             for entry in &chain {
+                // ── Cooldown gate ──────────────────────────────────────────────
+                {
+                    let mut cg = cooldowns.lock().unwrap();
+                    if let Some(&available_at) = cg.get(&entry.model_id) {
+                        if Instant::now() < available_at {
+                            soonest_cooling = Some(
+                                soonest_cooling.map_or(available_at, |s: Instant| s.min(available_at))
+                            );
+                            tracing::info!(
+                                model = %entry.model_id,
+                                secs_remaining = available_at.saturating_duration_since(Instant::now()).as_secs(),
+                                "skipping model: on cooldown"
+                            );
+                            continue;
+                        }
+                        // Cooldown expired — remove stale entry.
+                        cg.remove(&entry.model_id);
+                    }
+                }
+                any_attempted = true;
+
                 let req = ChatRequest {
                     model: &entry.model_id,
                     messages: &messages,
@@ -98,11 +147,10 @@ impl ChatProvider for FallbackChatProvider {
                             retryable = classified.recovery_hints().retry,
                             "chat() failed: {}", classified.message
                         );
-                        // Only continue to next provider if classified as a provider
-                        // error or if retryable.
                         if is_provider_error(&classified.category)
                             || classified.recovery_hints().retry
                         {
+                            record_cooldown(&cooldowns, &entry.model_id, &classified);
                             continue;
                         }
                         // Non-retryable setup error — propagate immediately.
@@ -146,6 +194,7 @@ impl ChatProvider for FallbackChatProvider {
                             if is_provider_error(&classified.category)
                                 || classified.recovery_hints().retry
                             {
+                                record_cooldown(&cooldowns, &entry.model_id, &classified);
                                 should_failover = true;
                                 break;
                             }
@@ -170,6 +219,7 @@ impl ChatProvider for FallbackChatProvider {
                             if is_provider_error(&classified.category)
                                 || classified.recovery_hints().retry
                             {
+                                record_cooldown(&cooldowns, &entry.model_id, &classified);
                                 tracing::warn!(
                                     model = %entry.model_id,
                                     category = %classified.category,
@@ -196,10 +246,21 @@ impl ChatProvider for FallbackChatProvider {
                 // else: continue to next provider in chain
             }
 
-            // Exhausted all providers.
-            let _ = tx.send(StreamEvent::Error(
-                format!("{CHAIN_EXHAUSTED_TAG}: All providers in fallback chain failed with retryable errors")
-            )).await;
+            // ── All entries processed ──────────────────────────────────────────
+            if !any_attempted {
+                // Every entry was skipped due to active cooldown.
+                let wait_secs = soonest_cooling
+                    .map(|at| at.saturating_duration_since(Instant::now()).as_secs())
+                    .unwrap_or(0);
+                let _ = tx.send(StreamEvent::Error(
+                    format!("{CHAIN_ALL_COOLING_TAG}: all providers on cooldown, retry in {wait_secs}s")
+                )).await;
+            } else {
+                // Tried at least one provider; all failed with retryable errors.
+                let _ = tx.send(StreamEvent::Error(
+                    format!("{CHAIN_EXHAUSTED_TAG}: All providers in fallback chain failed with retryable errors")
+                )).await;
+            }
         });
 
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))

@@ -1341,6 +1341,44 @@ async fn run_message_task(
                 return;
             }
 
+            if let Some(crate::agents::error::AgentError::ProviderChainExhausted) =
+                e.downcast_ref::<crate::agents::error::AgentError>()
+            {
+                channel.on_status(&reply_target, ProcessingStatus::Error).await;
+                tracing::warn!(session = %sk, "all providers in fallback chain failed");
+                {
+                    let mut guard = loop_.lock().await;
+                    guard.set_pending_retry(content.clone());
+                }
+                let send_msg = retry_abort_prompt(
+                    "⚠️ 所有 AI 服务均暂时不可用，请稍后重试。".to_string(),
+                    &sk, reply_target, reply_to_id,
+                );
+                if let Err(se) = channel.send(&send_msg).await {
+                    error!(session = %sk, err = %se, "failed to send retry prompt");
+                }
+                return;
+            }
+
+            if let Some(crate::agents::error::AgentError::ProviderChainCooling { wait_secs }) =
+                e.downcast_ref::<crate::agents::error::AgentError>()
+            {
+                channel.on_status(&reply_target, ProcessingStatus::Error).await;
+                tracing::warn!(session = %sk, wait_secs, "all providers on cooldown");
+                {
+                    let mut guard = loop_.lock().await;
+                    guard.set_pending_retry(content.clone());
+                }
+                let send_msg = retry_abort_prompt(
+                    format!("⚠️ 所有 AI 服务均处于冷却期，约 {} 秒后可重试。", wait_secs),
+                    &sk, reply_target, reply_to_id,
+                );
+                if let Err(se) = channel.send(&send_msg).await {
+                    error!(session = %sk, err = %se, "failed to send retry prompt");
+                }
+                return;
+            }
+
             // Non-retryable error — still offer retry/abort for manual recovery.
             channel.on_status(&reply_target, ProcessingStatus::Error).await;
             error!(session = %sk, err = %e, "non-retryable loop error, offering retry/abort");

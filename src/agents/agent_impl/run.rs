@@ -562,11 +562,19 @@ impl AgentLoop {
                     Ok(r) => r,
                     Err(e) => {
                         let err_str = e.to_string();
-                        // If the fallback chain already tried every provider and
-                        // all failed, do not restart the chain from the outer loop.
+                        // Fallback chain signals: do not restart from the outer loop in
+                        // either case — the chain already did everything it could.
                         if err_str.contains(crate::providers::fallback::CHAIN_EXHAUSTED_TAG) {
                             tracing::warn!("fallback chain exhausted all providers, not retrying");
-                            return Err(e);
+                            return Err(super::super::error::AgentError::ProviderChainExhausted.into());
+                        }
+                        if err_str.contains(crate::providers::fallback::CHAIN_ALL_COOLING_TAG) {
+                            let wait_secs = err_str
+                                .rsplit_once("retry in ")
+                                .and_then(|(_, rest)| rest.trim_end_matches('s').parse::<u64>().ok())
+                                .unwrap_or(0);
+                            tracing::warn!(wait_secs, "fallback chain: all providers on cooldown");
+                            return Err(super::super::error::AgentError::ProviderChainCooling { wait_secs }.into());
                         }
                         let classified = crate::providers::ClassifiedError::from_message(&err_str);
                         if classified.retryable {
