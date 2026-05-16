@@ -143,6 +143,14 @@ impl ProviderFactory {
         );
 
         match (id, protocol) {
+            // ── GLM: dedicated provider with v4 endpoints ──
+            (well_known::GLM, _) => {
+                let mut p = crate::providers::glm::GlmProvider::with_base_url(
+                    request.api_key, request.base_url,
+                );
+                if let Some(ua) = request.user_agent { p = p.with_user_agent(ua); }
+                Ok(Box::new(p))
+            }
             // ── OpenAI-compatible providers ──
             (_, Protocol::OpenAi) if id != well_known::GOOGLE => {
                 let client = crate::providers::protocols::openai::chat_completions::OpenAiChatCompletionsClient::new(
@@ -195,14 +203,14 @@ impl ProviderFactory {
                 if let Some(ua) = request.user_agent { p = p.with_user_agent(ua); }
                 Some(Box::new(p))
             }
-            // OpenAI-compatible providers (OpenAI, Kimi, generic, etc.)
-            _ => {
+            well_known::OPENAI | well_known::KIMI | well_known::GENERIC => {
                 let mut p = crate::providers::openai::OpenAiProvider::with_base_url(
                     request.api_key, request.base_url,
                 );
                 if let Some(ua) = request.user_agent { p = p.with_user_agent(ua); }
                 Some(Box::new(p))
             }
+            _ => None,
         }
     }
 
