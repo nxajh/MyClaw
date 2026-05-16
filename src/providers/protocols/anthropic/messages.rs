@@ -42,7 +42,7 @@ impl ChatProvider for AnthropicMessagesClient {
     fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
         let url = self.chat_url();
         let api_key = self.api_key.clone();
-        let thinking_enabled = req.thinking.as_ref().map_or(false, |t| t.enabled);
+        let thinking_enabled = req.thinking.as_ref().is_some_and(|t| t.enabled);
         let body = build_anthropic_body(&req);
         let client = self.client.clone();
         let user_agent = self.user_agent.clone();
