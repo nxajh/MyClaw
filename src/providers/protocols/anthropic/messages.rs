@@ -105,7 +105,7 @@ impl ChatProvider for AnthropicMessagesClient {
                 while let Some(pos) = buffer.find('\n') {
                     let line = buffer[..pos].to_string();
                     buffer.drain(..=pos);
-                    let events = crate::providers::anthropic::parse_anthropic_sse(&line, &mut tool_index_map);
+                    let events = parse_anthropic_sse(&line, &mut tool_index_map);
                     for event in events {
                         let _ = tx.send(event).await;
                     }
@@ -126,4 +126,113 @@ fn parse_anthropic_error_body(body: &str) -> Option<String> {
     let kind = err.get("type").and_then(|v| v.as_str()).unwrap_or("error");
     let msg = err.get("message").and_then(|v| v.as_str())?;
     Some(format!("{}: {}", kind, msg))
+}
+
+fn parse_anthropic_sse(
+    line: &str,
+    tool_index_map: &mut HashMap<u64, (String, String)>,
+) -> Vec<StreamEvent> {
+    use crate::providers::{ChatUsage, StopReason};
+
+    let line = line.trim();
+    if line.is_empty() || line.starts_with(':') { return vec![]; }
+    let data = match line.strip_prefix("data:") {
+        Some(d) => d.trim(),
+        None => return vec![],
+    };
+    if data == "[DONE]" { return vec![]; }
+
+    let evt = match serde_json::from_str::<serde_json::Value>(data) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    let ty = match evt.get("type").and_then(|v| v.as_str()) {
+        Some(t) => t,
+        None => return vec![],
+    };
+
+    match ty {
+        "content_block_start" => {
+            let index = match evt.get("index").and_then(|v| v.as_u64()) {
+                Some(i) => i,
+                None => return vec![],
+            };
+            if let Some(cb) = evt.get("content_block") {
+                if cb.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
+                    let id = cb.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let name = cb.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    if !id.is_empty() && !name.is_empty() {
+                        tool_index_map.insert(index, (id.clone(), name.clone()));
+                        return vec![StreamEvent::ToolCallStart { id, name, initial_arguments: String::new() }];
+                    }
+                }
+            }
+            vec![]
+        }
+        "content_block_delta" => {
+            let delta = match evt.get("delta") {
+                Some(d) => d,
+                None => return vec![],
+            };
+            match delta.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+                "text_delta" => {
+                    let text = delta.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    if !text.is_empty() { vec![StreamEvent::Delta { text: text.to_string() }] } else { vec![] }
+                }
+                "thinking_delta" => {
+                    let text = delta.get("thinking").and_then(|v| v.as_str()).unwrap_or("");
+                    if !text.is_empty() { vec![StreamEvent::Thinking { text: text.to_string() }] } else { vec![] }
+                }
+                "signature_delta" => {
+                    let sig = delta.get("signature").and_then(|v| v.as_str()).unwrap_or("");
+                    if sig.is_empty() { vec![] } else { vec![StreamEvent::ThinkingSignature { signature: sig.to_string() }] }
+                }
+                "input_json_delta" => {
+                    let index = match evt.get("index").and_then(|v| v.as_u64()) {
+                        Some(i) => i,
+                        None => return vec![],
+                    };
+                    let (id, _name) = match tool_index_map.get(&index) {
+                        Some(entry) => entry.clone(),
+                        None => return vec![],
+                    };
+                    let args = delta.get("partial_json").and_then(|v| v.as_str()).unwrap_or("");
+                    vec![StreamEvent::ToolCallDelta { id, delta: args.to_string() }]
+                }
+                _ => vec![],
+            }
+        }
+        "message_start" | "message_delta" => {
+            let mut events = Vec::new();
+            let usage = evt
+                .get("message").and_then(|m| m.get("usage"))
+                .or_else(|| evt.get("usage"));
+            if let Some(usage) = usage {
+                events.push(StreamEvent::Usage(ChatUsage {
+                    input_tokens: usage.get("input_tokens").and_then(|v| v.as_u64()),
+                    output_tokens: usage.get("output_tokens").and_then(|v| v.as_u64()),
+                    cached_input_tokens: usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()),
+                    reasoning_tokens: None,
+                    cache_write_tokens: usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()),
+                }));
+            }
+            if ty == "message_delta" {
+                if let Some(delta) = evt.get("delta") {
+                    if let Some(reason_str) = delta.get("stop_reason").and_then(|v| v.as_str()) {
+                        let reason = match reason_str {
+                            "end_turn" => StopReason::EndTurn,
+                            "max_tokens" => StopReason::MaxTokens,
+                            "tool_use" => StopReason::ToolUse,
+                            "content_filter" => StopReason::ContentFilter,
+                            _ => StopReason::EndTurn,
+                        };
+                        events.push(StreamEvent::Done { reason });
+                    }
+                }
+            }
+            events
+        }
+        "message_stop" => vec![StreamEvent::Done { reason: StopReason::EndTurn }],
+        _ => vec![],
+    }
 }
