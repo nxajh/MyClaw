@@ -36,13 +36,7 @@ impl OpenAiChatCompletionsClient {
     }
 
     fn chat_url(&self) -> String {
-        let base = self.base_url.trim_end_matches('/');
-        if base.contains("/v4") {
-            // GLM uses /v4/chat/completions — don't inject /v1.
-            format!("{}/chat/completions", base)
-        } else {
-            format!("{}/v1/chat/completions", base)
-        }
+        format!("{}/v1/chat/completions", self.base_url.trim_end_matches('/'))
     }
 
     fn common_headers(&self) -> reqwest::header::HeaderMap {
