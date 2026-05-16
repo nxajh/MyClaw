@@ -43,7 +43,7 @@ pub use delegation::{DelegationEvent, DelegationManager};
 pub use loop_breaker::{LoopBreak, LoopBreakReason, LoopBreaker, LoopBreakerConfig};
 pub use session_manager::{InMemoryBackend, PersistHook, BackendPersistHook, Session, BreakpointItem};
 pub use session_manager::{identify_breakpoint, detect_incomplete_turn, process_all_queues};
-pub use orchestrator::{Orchestrator, OrchestratorParts, SharedSessions, SchedulerEvent};
+pub use orchestrator::{Orchestrator, OrchestratorParts, SharedSessions, SchedulerEvent, SessionHandle};
 pub use prompt::{AutonomyLevel, SkillsPromptInjectionMode, SystemPromptBuilder, SystemPromptConfig};
 pub use session_manager::SessionManager;
 pub use crate::storage::SessionBackend;

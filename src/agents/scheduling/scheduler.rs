@@ -621,7 +621,7 @@ fn generate_id() -> String {
 pub struct WebhookContext {
     pub agent: Agent,
     pub channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
-    pub sessions: Arc<DashMap<String, Arc<TokioMutex<AgentLoop>>>>,
+    pub sessions: Arc<DashMap<String, Arc<crate::agents::SessionHandle>>>,
     /// Shared session manager — avoids creating throwaway instances per request.
     pub session_manager: Arc<crate::agents::session_manager::SessionManager>,
     /// Backend kept separately for persist hooks (BackendPersistHook needs it).
@@ -724,7 +724,7 @@ pub async fn run_scheduled_task(
 
 fn get_or_create_loop(ctx: &WebhookContext, session_key: &str) -> Arc<TokioMutex<AgentLoop>> {
     if let Some(existing) = ctx.sessions.get(session_key) {
-        return existing.clone();
+        return existing.loop_.clone();
     }
 
     let session = ctx.session_manager.get_or_create(session_key);
@@ -737,9 +737,10 @@ fn get_or_create_loop(ctx: &WebhookContext, session_key: &str) -> Arc<TokioMutex
         loop_ = loop_.with_change_rx(rx);
     }
 
-    let entry: Arc<TokioMutex<AgentLoop>> = Arc::new(TokioMutex::new(loop_));
-    ctx.sessions.insert(session_key.to_string(), entry.clone());
-    entry
+    let loop_arc: Arc<TokioMutex<AgentLoop>> = Arc::new(TokioMutex::new(loop_));
+    let handle = Arc::new(crate::agents::SessionHandle::new_direct(loop_arc.clone()));
+    ctx.sessions.insert(session_key.to_string(), handle);
+    loop_arc
 }
 
 /// Send a response to the configured target channel.

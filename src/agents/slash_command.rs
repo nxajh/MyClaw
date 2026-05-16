@@ -23,7 +23,7 @@ pub struct CommandContext<'a> {
     /// MCP manager (for /mcp command).
     pub mcp_manager: Option<&'a Arc<McpManager>>,
     /// Sessions cache — needed by /new to evict stale agent loops.
-    pub sessions: &'a DashMap<String, Arc<TokioMutex<AgentLoop>>>,
+    pub sessions: &'a DashMap<String, Arc<crate::agents::SessionHandle>>,
     /// Search provider cooldown tracker (for /status command).
     pub search_cooldown: Option<&'a Arc<crate::tools::search_cooldown::SearchProviderCooldown>>,
 }
