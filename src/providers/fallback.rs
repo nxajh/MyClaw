@@ -4,6 +4,11 @@
 //! This keeps fallback logic entirely within the Infrastructure layer.
 //! The Application layer (Agent) only sees a single `ChatProvider`.
 
+/// Tag embedded in the error message when every provider in the chain has
+/// been tried and all failed.  The outer retry loop in run.rs checks for this
+/// to avoid restarting the whole chain from scratch.
+pub const CHAIN_EXHAUSTED_TAG: &str = "fallback_chain_exhausted";
+
 use async_trait::async_trait;
 use crate::providers::{
     BoxStream, ChatProvider, ChatRequest, ChatMessage, StreamEvent, ChatToolSpec,
@@ -193,7 +198,7 @@ impl ChatProvider for FallbackChatProvider {
 
             // Exhausted all providers.
             let _ = tx.send(StreamEvent::Error(
-                "All providers in fallback chain failed with retryable errors".to_string()
+                format!("{CHAIN_EXHAUSTED_TAG}: All providers in fallback chain failed with retryable errors")
             )).await;
         });
 

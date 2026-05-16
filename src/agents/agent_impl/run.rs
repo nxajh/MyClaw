@@ -561,7 +561,14 @@ impl AgentLoop {
                 match result {
                     Ok(r) => r,
                     Err(e) => {
-                        let classified = crate::providers::ClassifiedError::from_message(&e.to_string());
+                        let err_str = e.to_string();
+                        // If the fallback chain already tried every provider and
+                        // all failed, do not restart the chain from the outer loop.
+                        if err_str.contains(crate::providers::fallback::CHAIN_EXHAUSTED_TAG) {
+                            tracing::warn!("fallback chain exhausted all providers, not retrying");
+                            return Err(e);
+                        }
+                        let classified = crate::providers::ClassifiedError::from_message(&err_str);
                         if classified.retryable {
                             match classified.reason {
                                 crate::providers::FailoverReason::Timeout => {

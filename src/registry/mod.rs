@@ -58,6 +58,9 @@ pub struct Registry {
     video_providers: HashMap<String, Arc<dyn VideoGenerationProvider>>,
     search_providers: HashMap<String, Arc<dyn SearchProvider>>,
     stt_providers: HashMap<String, Arc<dyn SttProvider>>,
+    // Stored separately so the primary model's raw entry in chat_providers is
+    // never overwritten and remains reachable via get_chat_provider_by_model.
+    fallback_chat_provider: Option<(Arc<dyn ChatProvider>, String)>,
 }
 
 impl Registry {
@@ -73,6 +76,7 @@ impl Registry {
             video_providers: HashMap::new(),
             search_providers: HashMap::new(),
             stt_providers: HashMap::new(),
+            fallback_chat_provider: None,
         }
     }
 
@@ -382,12 +386,10 @@ impl Registry {
 
         let fallback_provider = FallbackChatProvider::new(chain);
         let primary_model = entry.models[0].clone();
-        // Insert fallback wrapper under the primary model key.
-        // Individual model entries remain in the map for direct access (e.g. vision routing).
-        self.chat_providers.insert(
-            primary_model,
-            Arc::new(fallback_provider),
-        );
+        // Store in a dedicated field so the primary model's raw entry in
+        // chat_providers is preserved for direct-model lookups (model_override,
+        // vision routing, get_chat_provider_by_model).
+        self.fallback_chat_provider = Some((Arc::new(fallback_provider), primary_model));
     }
 }
 
@@ -395,6 +397,13 @@ impl Registry {
 
 impl ServiceRegistry for Registry {
     fn get_chat_provider(&self, capability: Capability) -> anyhow::Result<(Arc<dyn ChatProvider>, String)> {
+        // For Chat capability, prefer the dedicated fallback wrapper when present.
+        // This keeps get_chat_provider_by_model pointing at the raw per-model provider.
+        if capability == Capability::Chat {
+            if let Some((ref fp, ref model_id)) = self.fallback_chat_provider {
+                return Ok((Arc::clone(fp), model_id.clone()));
+            }
+        }
         let entry = self.routing.get(capability)
             .with_context(|| format!("No routing for {:?}", capability))?;
         let model = self.select_model(entry, capability)?;
