@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use crate::providers::Client;
 use crate::providers::{
-    AuthStyle, BoxStream, ChatProvider, ChatRequest, StreamEvent, StopReason,
+    BoxStream, ChatProvider, ChatRequest, StreamEvent, StopReason,
 };
 use crate::providers::protocols::anthropic::message_rendering::build_anthropic_body;
 
@@ -20,12 +20,11 @@ pub struct AnthropicMessagesClient {
     api_key: String,
     client: Client,
     user_agent: Option<String>,
-    auth_style: AuthStyle,
 }
 
 impl AnthropicMessagesClient {
     pub fn new(api_key: String, base_url: String) -> Self {
-        Self { base_url, api_key, client: Client::new(), user_agent: None, auth_style: AuthStyle::Bearer }
+        Self { base_url, api_key, client: Client::new(), user_agent: None }
     }
 
     pub fn with_user_agent(mut self, user_agent: String) -> Self {
@@ -33,18 +32,8 @@ impl AnthropicMessagesClient {
         self
     }
 
-    pub fn with_auth_style(mut self, style: AuthStyle) -> Self {
-        self.auth_style = style;
-        self
-    }
-
     fn chat_url(&self) -> String {
-        let base = self.base_url.trim_end_matches('/');
-        if base.contains("/v1") || base.contains("/v2") || base.contains("/v3") {
-            format!("{}/messages", base)
-        } else {
-            format!("{}/v1/messages", base)
-        }
+        format!("{}/v1/messages", self.base_url.trim_end_matches('/'))
     }
 }
 
@@ -59,18 +48,9 @@ impl ChatProvider for AnthropicMessagesClient {
         let user_agent = self.user_agent.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(100);
 
-        let auth_style = self.auth_style.clone();
         tokio::spawn(async move {
             let mut headers = reqwest::header::HeaderMap::new();
-            match auth_style {
-                AuthStyle::Bearer => {
-                    let val = format!("Bearer {}", api_key);
-                    headers.insert(reqwest::header::AUTHORIZATION, val.parse().unwrap());
-                }
-                AuthStyle::XApiKey => {
-                    headers.insert("x-api-key", api_key.parse().unwrap());
-                }
-            }
+            headers.insert("x-api-key", api_key.parse().unwrap());
             headers.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
             headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
             if thinking_enabled {

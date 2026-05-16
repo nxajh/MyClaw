@@ -36,10 +36,12 @@ impl OpenAiChatCompletionsClient {
     }
 
     fn chat_url(&self) -> String {
-        if self.base_url.contains("/v1") || self.base_url.contains("/v4") {
-            format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
+        let base = self.base_url.trim_end_matches('/');
+        if base.contains("/v4") {
+            // GLM uses /v4/chat/completions — don't inject /v1.
+            format!("{}/chat/completions", base)
         } else {
-            format!("{}/v1/chat/completions", self.base_url.trim_end_matches('/'))
+            format!("{}/v1/chat/completions", base)
         }
     }
 
