@@ -518,10 +518,12 @@ impl Orchestrator {
 
                         if is_retry {
                             // Take the pending retry message from the agent loop.
+                            // Use try_lock: pending_retry is only set after a turn finishes
+                            // (lock released). If the session is still locked, there is no
+                            // pending retry and we must not block the main dispatch loop.
                             let pending = {
                                 let loop_ = registry.get_or_create(&sk, &reply_target);
-                                let mut guard = loop_.lock().await;
-                                guard.take_pending_retry()
+                                loop_.try_lock().ok().and_then(|mut g| g.take_pending_retry())
                             };
 
                             if let Some(user_msg) = pending {
@@ -540,9 +542,10 @@ impl Orchestrator {
                             }
                         } else {
                             // Abort — clear pending retry and acknowledge.
+                            // Use try_lock for the same reason: pending_retry only exists
+                            // after a turn ends. Always send the ack regardless.
                             let loop_ = registry.get_or_create(&sk, &reply_target);
-                            {
-                                let mut guard = loop_.lock().await;
+                            if let Ok(mut guard) = loop_.try_lock() {
                                 guard.take_pending_retry();
                             }
                             let send_msg = SendMessage::new(MSG_ABORT_ACK, reply_target.clone());
@@ -554,33 +557,39 @@ impl Orchestrator {
                     // Check for an incomplete turn loaded from a previous crash/SIGKILL.
                     // If the session's last message is a user message without a reply,
                     // prompt the user to retry or abort before processing new input.
+                    //
+                    // Use try_lock: a session cannot be both incomplete (idle) and actively
+                    // processing. If try_lock fails, the session is busy — skip this check
+                    // so the main dispatch loop is never blocked by a running run_message_task.
                     {
                         let loop_ = registry.get_or_create(&sk, &msg.reply_target);
-                        let mut guard = loop_.lock().await;
-                        if guard.session.incomplete_turn {
-                            guard.session.incomplete_turn = false;
+                        if let Ok(mut guard) = loop_.try_lock() {
+                            if guard.session.incomplete_turn {
+                                guard.session.incomplete_turn = false;
 
-                            // Extract the orphaned user message for retry.
-                            let last_user_msg = guard.session.history.last()
-                                .filter(|m| m.role == "user")
-                                .map(|m| m.text_content().to_string())
-                                .unwrap_or_default();
-                            guard.set_pending_retry(last_user_msg.clone());
+                                // Extract the orphaned user message for retry.
+                                let last_user_msg = guard.session.history.last()
+                                    .filter(|m| m.role == "user")
+                                    .map(|m| m.text_content().to_string())
+                                    .unwrap_or_default();
+                                guard.set_pending_retry(last_user_msg.clone());
+                                drop(guard);
 
-                            let channel = match channels.get(&channel_key).map(|r| r.clone()) {
-                                Some(c) => c,
-                                None => continue,
-                            };
-                            let send_msg = retry_abort_prompt(
-                                MSG_INCOMPLETE_TURN,
-                                &sk,
-                                msg.reply_target.clone(),
-                                Some(msg.id.clone()),
-                            );
-                            if let Err(e) = channel.send(&send_msg).await {
-                                error!(session = %sk, err = %e, "failed to send incomplete-turn prompt");
+                                let channel = match channels.get(&channel_key).map(|r| r.clone()) {
+                                    Some(c) => c,
+                                    None => continue,
+                                };
+                                let send_msg = retry_abort_prompt(
+                                    MSG_INCOMPLETE_TURN,
+                                    &sk,
+                                    msg.reply_target.clone(),
+                                    Some(msg.id.clone()),
+                                );
+                                if let Err(e) = channel.send(&send_msg).await {
+                                    error!(session = %sk, err = %e, "failed to send incomplete-turn prompt");
+                                }
+                                continue;
                             }
-                            continue;
                         }
                     }
 
