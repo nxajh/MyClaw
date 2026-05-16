@@ -76,8 +76,8 @@ pub type ChannelMsgSender = mpsc::Sender<((String, String), ChannelMessage)>;
 pub struct Orchestrator {
     /// Channels, keyed by (channel_type, account_id).
     channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
-    /// Per-session agent loops: "channel:account:sender" → Arc<Mutex<AgentLoop>>.
-    sessions: Arc<DashMap<String, Arc<TokioMutex<AgentLoop>>>>,
+    /// Per-session actor handles: "channel:account:sender" → Arc<SessionHandle>.
+    sessions: Arc<DashMap<String, Arc<SessionHandle>>>,
     agent: Agent,
     session_manager: Arc<SessionManager>,
     /// The message receiver, owned and consumed by run().
@@ -119,7 +119,7 @@ pub struct Orchestrator {
 
 /// Resources shared between Orchestrator and scheduler tasks.
 pub struct SharedSessions {
-    pub sessions: Arc<DashMap<String, Arc<TokioMutex<AgentLoop>>>>,
+    pub sessions: Arc<DashMap<String, Arc<SessionHandle>>>,
     pub channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
     pub last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
     pub last_recipient: Arc<tokio::sync::Mutex<Option<String>>>,
@@ -518,17 +518,16 @@ impl Orchestrator {
 
                         if is_retry {
                             // Take the pending retry message from the agent loop.
-                            let pending = {
-                                let loop_ = registry.get_or_create(&sk, &reply_target);
-                                let mut guard = loop_.lock().await;
-                                guard.take_pending_retry()
-                            };
+                            // pending_retry is only set after a turn finishes (lock released),
+                            // so try_lock is safe and never blocks the main dispatch loop.
+                            let handle = registry.get_or_create(&sk, &reply_target);
+                            let pending = handle.loop_.try_lock().ok()
+                                .and_then(|mut g| g.take_pending_retry());
 
                             if let Some(user_msg) = pending {
-                                let loop_ = registry.get_or_create(&sk, &reply_target);
                                 let reply_to_id = Some(msg.id.clone());
                                 tokio::spawn(run_retry_task(
-                                    sk.clone(), channel, loop_,
+                                    sk.clone(), channel, handle.loop_.clone(),
                                     user_msg, reply_target.clone(), reply_to_id,
                                 ));
                             } else {
@@ -540,9 +539,9 @@ impl Orchestrator {
                             }
                         } else {
                             // Abort — clear pending retry and acknowledge.
-                            let loop_ = registry.get_or_create(&sk, &reply_target);
-                            {
-                                let mut guard = loop_.lock().await;
+                            // pending_retry only exists after a turn ends; try_lock is safe.
+                            let handle = registry.get_or_create(&sk, &reply_target);
+                            if let Ok(mut guard) = handle.loop_.try_lock() {
                                 guard.take_pending_retry();
                             }
                             let send_msg = SendMessage::new(MSG_ABORT_ACK, reply_target.clone());
@@ -552,35 +551,37 @@ impl Orchestrator {
                     }
 
                     // Check for an incomplete turn loaded from a previous crash/SIGKILL.
-                    // If the session's last message is a user message without a reply,
-                    // prompt the user to retry or abort before processing new input.
+                    // A session that is incomplete is idle (actor is waiting); try_lock succeeds.
+                    // If it fails the session is busy — skip and let the actor queue the message.
                     {
-                        let loop_ = registry.get_or_create(&sk, &msg.reply_target);
-                        let mut guard = loop_.lock().await;
-                        if guard.session.incomplete_turn {
-                            guard.session.incomplete_turn = false;
+                        let handle = registry.get_or_create(&sk, &msg.reply_target);
+                        if let Ok(mut guard) = handle.loop_.try_lock() {
+                            if guard.session.incomplete_turn {
+                                guard.session.incomplete_turn = false;
 
-                            // Extract the orphaned user message for retry.
-                            let last_user_msg = guard.session.history.last()
-                                .filter(|m| m.role == "user")
-                                .map(|m| m.text_content().to_string())
-                                .unwrap_or_default();
-                            guard.set_pending_retry(last_user_msg.clone());
+                                // Extract the orphaned user message for retry.
+                                let last_user_msg = guard.session.history.last()
+                                    .filter(|m| m.role == "user")
+                                    .map(|m| m.text_content().to_string())
+                                    .unwrap_or_default();
+                                guard.set_pending_retry(last_user_msg.clone());
+                                drop(guard);
 
-                            let channel = match channels.get(&channel_key).map(|r| r.clone()) {
-                                Some(c) => c,
-                                None => continue,
-                            };
-                            let send_msg = retry_abort_prompt(
-                                MSG_INCOMPLETE_TURN,
-                                &sk,
-                                msg.reply_target.clone(),
-                                Some(msg.id.clone()),
-                            );
-                            if let Err(e) = channel.send(&send_msg).await {
-                                error!(session = %sk, err = %e, "failed to send incomplete-turn prompt");
+                                let channel = match channels.get(&channel_key).map(|r| r.clone()) {
+                                    Some(c) => c,
+                                    None => continue,
+                                };
+                                let send_msg = retry_abort_prompt(
+                                    MSG_INCOMPLETE_TURN,
+                                    &sk,
+                                    msg.reply_target.clone(),
+                                    Some(msg.id.clone()),
+                                );
+                                if let Err(e) = channel.send(&send_msg).await {
+                                    error!(session = %sk, err = %e, "failed to send incomplete-turn prompt");
+                                }
+                                continue;
                             }
-                            continue;
                         }
                     }
 
@@ -600,7 +601,7 @@ impl Orchestrator {
                             let sk_cmd        = sk.clone();
                             let cmd_owned     = cmd.to_string();
                             let cmd_args_owned = cmd_args.to_string();
-                            let session_loop  = sessions.get(&sk).map(|r| r.clone());
+                            let session_loop  = sessions.get(&sk).map(|r| r.loop_.clone());
                             let registry_cmd  = agent.registry().clone();
                             let sm_cmd        = self.session_manager.clone();
                             let agent_cmd     = agent.clone();
@@ -661,134 +662,30 @@ impl Orchestrator {
                         Some(c) => c,
                         None => continue,
                     };
-                    let loop_ = registry.get_or_create(&sk, &reply_target);
-                    tokio::spawn(run_message_task(
-                        sk, channel, loop_,
-                        TurnInput { content, image_urls, image_base64 },
-                        reply_target, reply_to_id,
-                    ));
+                    let handle = registry.get_or_create(&sk, &reply_target);
+                    if let Err(e) = handle.tx.send(TurnMessage {
+                        content,
+                        image_urls,
+                        image_base64,
+                        channel,
+                        reply_target,
+                        reply_to_id,
+                    }).await {
+                        error!(session = %sk, err = %e, "session actor inbox closed");
+                    }
                 }
                 ChannelEvent::Delegation(event) => {
-                    self.handle_delegation_event(event).await;
+                    let sessions = self.sessions.clone();
+                    let channels = self.channels.clone();
+                    tokio::spawn(async move {
+                        handle_delegation_task(sessions, channels, event).await;
+                    });
                 }
             }
         }
 
         info!("all listeners stopped, exiting");
         Ok(())
-    }
-
-    /// Handle a delegation event from a background sub-agent.
-    async fn handle_delegation_event(&self, event: DelegationEvent) {
-        match event {
-            DelegationEvent::Completed { task_id, session_key, reply_target, summary, duration_secs } => {
-                tracing::info!(task_id = %task_id, duration_secs, "delegation completed, waking main agent");
-
-                let loop_ = match self.sessions.get(&session_key) {
-                    Some(l) => l.clone(),
-                    None => {
-                        tracing::warn!(session = %session_key, "session not found for delegation event");
-                        return;
-                    }
-                };
-
-                // Construct synthetic message to wake the main agent.
-                let synthetic_msg = format!(
-                    "[系统通知] 子代理已完成后台任务 (task_id: {}, 耗时: {}s)，结果如下：\n{}",
-                    task_id, duration_secs, summary
-                );
-
-                // Run the main agent with the synthetic message.
-                let response = {
-                    let mut guard = loop_.lock().await;
-                    guard.run(&synthetic_msg, None, None).await
-                };
-
-                // Send the main agent's response to the user.
-                match response {
-                    Ok(text) if !text.is_empty() => {
-                        let (ch_type, acc_id, _) = match parse_session_key(&session_key) {
-                            Some(triple) => triple,
-                            None => {
-                                tracing::warn!(session = %session_key, "invalid session key in delegation event");
-                                return;
-                            }
-                        };
-                        if let Some(channel) = self.channels.get(&(ch_type.to_string(), acc_id.to_string())) {
-                            let send_msg = SendMessage {
-                                recipient: reply_target,
-                                content: text,
-                                subject: None,
-                                thread_ts: None,
-                                cancellation_token: None,
-                                attachments: vec![],
-                                image_urls: None,
-                                inline_buttons: None,
-                            };
-                            if let Err(e) = channel.send(&send_msg).await {
-                                tracing::error!(session = %session_key, err = %e, "send delegation result failed");
-                            }
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::error!(session = %session_key, err = %e, "main agent failed to process delegation result");
-                    }
-                }
-            }
-            DelegationEvent::Failed { task_id, session_key, reply_target, error } => {
-                tracing::warn!(task_id = %task_id, "delegation failed, waking main agent");
-
-                let loop_ = match self.sessions.get(&session_key) {
-                    Some(l) => l.clone(),
-                    None => {
-                        tracing::warn!(session = %session_key, "session not found for delegation event");
-                        return;
-                    }
-                };
-
-                let synthetic_msg = format!(
-                    "[系统通知] 子代理后台任务失败 (task_id: {})，错误：\n{}",
-                    task_id, error
-                );
-
-                let response = {
-                    let mut guard = loop_.lock().await;
-                    guard.run(&synthetic_msg, None, None).await
-                };
-
-                match response {
-                    Ok(text) if !text.is_empty() => {
-                        let (ch_type, acc_id, _) = match parse_session_key(&session_key) {
-                            Some(triple) => triple,
-                            None => {
-                                tracing::warn!(session = %session_key, "invalid session key in delegation event");
-                                return;
-                            }
-                        };
-                        if let Some(channel) = self.channels.get(&(ch_type.to_string(), acc_id.to_string())) {
-                            let send_msg = SendMessage {
-                                recipient: reply_target,
-                                content: text,
-                                subject: None,
-                                thread_ts: None,
-                                cancellation_token: None,
-                                attachments: vec![],
-                                image_urls: None,
-                                inline_buttons: None,
-                            };
-                            if let Err(e) = channel.send(&send_msg).await {
-                                tracing::error!(session = %session_key, err = %e, "send delegation result failed");
-                            }
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::error!(session = %session_key, err = %e, "main agent failed to process delegation failure");
-                    }
-                }
-            }
-        }
     }
 
     /// Handle a scheduler event (from the Scheduler task via mpsc).
@@ -897,8 +794,8 @@ impl Orchestrator {
             }
             tracing::info!(session = %sk, "startup recovery: found incomplete turn");
             let reply_target = format!("startup:recovery:{}", sk);
-            let loop_ = registry.get_or_create(sk, &reply_target);
-            let mut guard = loop_.lock().await;
+            let handle = registry.get_or_create(sk, &reply_target);
+            let mut guard = handle.loop_.lock().await;
             match guard.recover_interrupted_turn().await {
                 Ok(Some(text)) if !text.is_empty() => {
                     recovered += 1;
@@ -952,8 +849,8 @@ impl Orchestrator {
             }
             tracing::info!(task_id = %sa.task_id, agent = %sa.agent_name, "sub-agent startup recovery: found incomplete turn");
             let reply_target = format!("startup:recovery:sub:{}", sa.task_id);
-            let loop_ = registry.get_or_create(&sub_sk, &reply_target);
-            let mut guard = loop_.lock().await;
+            let handle = registry.get_or_create(&sub_sk, &reply_target);
+            let mut guard = handle.loop_.lock().await;
             match guard.recover_interrupted_turn().await {
                 Ok(Some(text)) if !text.is_empty() => {
                     tracing::info!(task_id = %sa.task_id, "sub-agent startup recovery: turn completed");
@@ -997,7 +894,7 @@ impl Orchestrator {
 /// once at the start of `Orchestrator::run()` and referenced throughout without
 /// re-borrowing `self`.
 struct LoopRegistry {
-    sessions: Arc<DashMap<String, Arc<TokioMutex<AgentLoop>>>>,
+    sessions: Arc<DashMap<String, Arc<SessionHandle>>>,
     agent: Agent,
     session_manager: Arc<SessionManager>,
     channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
@@ -1010,8 +907,8 @@ struct LoopRegistry {
 }
 
 impl LoopRegistry {
-    /// Return the existing `AgentLoop` for `sk`, or create and wire a new one.
-    fn get_or_create(&self, sk: &str, reply_target: &str) -> Arc<TokioMutex<AgentLoop>> {
+    /// Return the existing `SessionHandle` for `sk`, or create and wire a new one.
+    fn get_or_create(&self, sk: &str, reply_target: &str) -> Arc<SessionHandle> {
         if let Some(existing) = self.sessions.get(sk) {
             return existing.clone();
         }
@@ -1098,9 +995,16 @@ impl LoopRegistry {
             loop_ = loop_.with_change_rx(rx);
         }
 
-        let entry: Arc<TokioMutex<AgentLoop>> = Arc::new(TokioMutex::new(loop_));
-        self.sessions.insert(sk.into(), entry.clone());
-        entry
+        let loop_arc: Arc<TokioMutex<AgentLoop>> = Arc::new(TokioMutex::new(loop_));
+
+        // Spawn a per-session actor that processes messages one at a time.
+        // The main dispatch loop routes via tx; this task never blocks the main loop.
+        let (tx, rx) = mpsc::channel::<TurnMessage>(32);
+        tokio::spawn(run_session_actor(sk.to_string(), loop_arc.clone(), rx));
+
+        let handle = Arc::new(SessionHandle { loop_: loop_arc, tx });
+        self.sessions.insert(sk.into(), handle.clone());
+        handle
     }
 }
 
@@ -1149,6 +1053,178 @@ struct TurnInput {
     content: String,
     image_urls: Option<Vec<String>>,
     image_base64: Option<Vec<String>>,
+}
+
+/// Message queued into a per-session actor task.
+struct TurnMessage {
+    content: String,
+    image_urls: Option<Vec<String>>,
+    image_base64: Option<Vec<String>>,
+    channel: Arc<dyn Channel>,
+    reply_target: String,
+    reply_to_id: Option<String>,
+}
+
+/// Per-session actor handle.
+///
+/// The main dispatch loop sends `TurnMessage` values via `tx` without ever
+/// waiting on the session mutex.  The background actor task processes them
+/// sequentially, one turn at a time.
+pub struct SessionHandle {
+    pub loop_: Arc<TokioMutex<AgentLoop>>,
+    tx: mpsc::Sender<TurnMessage>,
+}
+
+impl SessionHandle {
+    /// Create a handle for sessions driven directly (not via the actor inbox).
+    ///
+    /// Scheduled sessions (heartbeat/cron/webhook) call `loop_.lock()` directly
+    /// rather than sending via the channel, so they only need the mutex wrapped
+    /// in a `SessionHandle` for storage in the shared sessions map.
+    pub fn new_direct(loop_: Arc<TokioMutex<AgentLoop>>) -> Self {
+        let (tx, _rx) = mpsc::channel(1);
+        Self { loop_, tx }
+    }
+}
+
+/// Per-session actor: drains `TurnMessage` values one at a time for one session.
+///
+/// Runs in its own spawned task for the lifetime of the session.  Because
+/// `run_message_task` is awaited sequentially, messages for the same session
+/// never interleave and the session mutex is contended only here.
+async fn run_session_actor(
+    sk: String,
+    loop_: Arc<TokioMutex<AgentLoop>>,
+    mut rx: mpsc::Receiver<TurnMessage>,
+) {
+    while let Some(msg) = rx.recv().await {
+        run_message_task(
+            sk.clone(),
+            msg.channel,
+            loop_.clone(),
+            TurnInput { content: msg.content, image_urls: msg.image_urls, image_base64: msg.image_base64 },
+            msg.reply_target,
+            msg.reply_to_id,
+        ).await;
+    }
+}
+
+/// Process a delegation event from a background sub-agent (spawned task).
+///
+/// Runs the main agent with a synthetic "sub-agent completed" message and
+/// delivers the response back to the user.  Spawned by the main dispatch
+/// loop so it never blocks message routing for other sessions.
+async fn handle_delegation_task(
+    sessions: Arc<DashMap<String, Arc<SessionHandle>>>,
+    channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
+    event: DelegationEvent,
+) {
+    match event {
+        DelegationEvent::Completed { task_id, session_key, reply_target, summary, duration_secs } => {
+            tracing::info!(task_id = %task_id, duration_secs, "delegation completed, waking main agent");
+
+            let handle = match sessions.get(&session_key) {
+                Some(h) => h.clone(),
+                None => {
+                    tracing::warn!(session = %session_key, "session not found for delegation event");
+                    return;
+                }
+            };
+
+            let synthetic_msg = format!(
+                "[系统通知] 子代理已完成后台任务 (task_id: {}, 耗时: {}s)，结果如下：\n{}",
+                task_id, duration_secs, summary
+            );
+
+            let response = {
+                let mut guard = handle.loop_.lock().await;
+                guard.run(&synthetic_msg, None, None).await
+            };
+
+            match response {
+                Ok(text) if !text.is_empty() => {
+                    let (ch_type, acc_id, _) = match parse_session_key(&session_key) {
+                        Some(triple) => triple,
+                        None => {
+                            tracing::warn!(session = %session_key, "invalid session key in delegation event");
+                            return;
+                        }
+                    };
+                    if let Some(channel) = channels.get(&(ch_type.to_string(), acc_id.to_string())) {
+                        let send_msg = SendMessage {
+                            recipient: reply_target,
+                            content: text,
+                            subject: None,
+                            thread_ts: None,
+                            cancellation_token: None,
+                            attachments: vec![],
+                            image_urls: None,
+                            inline_buttons: None,
+                        };
+                        if let Err(e) = channel.send(&send_msg).await {
+                            tracing::error!(session = %session_key, err = %e, "send delegation result failed");
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!(session = %session_key, err = %e, "main agent failed to process delegation result");
+                }
+            }
+        }
+        DelegationEvent::Failed { task_id, session_key, reply_target, error } => {
+            tracing::warn!(task_id = %task_id, "delegation failed, waking main agent");
+
+            let handle = match sessions.get(&session_key) {
+                Some(h) => h.clone(),
+                None => {
+                    tracing::warn!(session = %session_key, "session not found for delegation event");
+                    return;
+                }
+            };
+
+            let synthetic_msg = format!(
+                "[系统通知] 子代理后台任务失败 (task_id: {})，错误：\n{}",
+                task_id, error
+            );
+
+            let response = {
+                let mut guard = handle.loop_.lock().await;
+                guard.run(&synthetic_msg, None, None).await
+            };
+
+            match response {
+                Ok(text) if !text.is_empty() => {
+                    let (ch_type, acc_id, _) = match parse_session_key(&session_key) {
+                        Some(triple) => triple,
+                        None => {
+                            tracing::warn!(session = %session_key, "invalid session key in delegation event");
+                            return;
+                        }
+                    };
+                    if let Some(channel) = channels.get(&(ch_type.to_string(), acc_id.to_string())) {
+                        let send_msg = SendMessage {
+                            recipient: reply_target,
+                            content: text,
+                            subject: None,
+                            thread_ts: None,
+                            cancellation_token: None,
+                            attachments: vec![],
+                            image_urls: None,
+                            inline_buttons: None,
+                        };
+                        if let Err(e) = channel.send(&send_msg).await {
+                            tracing::error!(session = %session_key, err = %e, "send delegation result failed");
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!(session = %session_key, err = %e, "main agent failed to process delegation failure");
+                }
+            }
+        }
+    }
 }
 
 /// Execute a retry turn (spawned by the __retry callback handler).
@@ -1414,7 +1490,7 @@ pub(crate) fn is_silent_ok(response: &str, prefix: &str) -> bool {
 
 /// Shared resources for spawned scheduler tasks (heartbeat/cron).
 struct SchedulerContext {
-    sessions: Arc<DashMap<String, Arc<TokioMutex<AgentLoop>>>>,
+    sessions: Arc<DashMap<String, Arc<SessionHandle>>>,
     session_manager: Arc<SessionManager>,
     persist_backend: Arc<dyn crate::storage::SessionBackend>,
     agent: Agent,
@@ -1503,7 +1579,7 @@ fn get_or_create_scheduled_loop(
     session_key: &str,
 ) -> Arc<TokioMutex<AgentLoop>> {
     if let Some(existing) = ctx.sessions.get(session_key) {
-        return existing.clone();
+        return existing.loop_.clone();
     }
     let session = ctx.session_manager.get_or_create(session_key);
     let persist_hook: Arc<dyn PersistHook> = Arc::new(
@@ -1513,9 +1589,10 @@ fn get_or_create_scheduled_loop(
     if let Some(rx) = ctx.change_rx.as_ref() {
         loop_ = loop_.with_change_rx(rx.clone());
     }
-    let entry: Arc<TokioMutex<AgentLoop>> = Arc::new(TokioMutex::new(loop_));
-    ctx.sessions.insert(session_key.to_string(), entry.clone());
-    entry
+    let loop_arc: Arc<TokioMutex<AgentLoop>> = Arc::new(TokioMutex::new(loop_));
+    let handle = Arc::new(SessionHandle::new_direct(loop_arc.clone()));
+    ctx.sessions.insert(session_key.to_string(), handle);
+    loop_arc
 }
 
 /// Send a response to the configured target channel (used by heartbeat).
