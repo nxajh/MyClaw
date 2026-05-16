@@ -65,7 +65,14 @@ pub struct AgentConfig {
     #[serde(default = "default_tool_timeout")]
     pub tool_timeout_secs: u64,
 
-    /// Stream chunk timeout in seconds — max time to wait for next chunk.
+    /// Stream chunk timeout in seconds — max time to wait for the first chunk.
+    /// Longer than the mid-stream timeout because the API can be slow to start
+    /// responding when context is large.
+    #[serde(default = "default_stream_first_chunk_timeout")]
+    pub stream_first_chunk_timeout_secs: u64,
+
+    /// Stream chunk timeout in seconds — max time to wait for each subsequent chunk
+    /// after the first. Shorter to catch mid-stream stalls quickly.
     #[serde(default = "default_stream_chunk_timeout")]
     pub stream_chunk_timeout_secs: u64,
 
@@ -88,6 +95,7 @@ pub struct AgentConfig {
 fn default_max_tool_calls() -> usize { 100 }
 fn default_max_history() -> usize { 200 }
 fn default_tool_timeout() -> u64 { 180 }
+fn default_stream_first_chunk_timeout() -> u64 { 90 }
 fn default_stream_chunk_timeout() -> u64 { 30 }
 fn default_loop_breaker_threshold() -> u32 { 3 }
 
@@ -98,6 +106,7 @@ impl Default for AgentConfig {
             max_history: default_max_history(),
             autonomy_level: AutonomyLevel::Default,
             tool_timeout_secs: default_tool_timeout(),
+            stream_first_chunk_timeout_secs: default_stream_first_chunk_timeout(),
             stream_chunk_timeout_secs: default_stream_chunk_timeout(),
             loop_breaker_threshold: default_loop_breaker_threshold(),
             prompt: PromptConfig::default(),

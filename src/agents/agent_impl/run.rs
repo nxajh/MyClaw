@@ -874,8 +874,10 @@ impl AgentLoop {
         let mut stop_reason = StopReason::EndTurn;
         let mut usage: Option<ChatUsage> = None;
 
+        let first_chunk_timeout = Duration::from_secs(self.config.stream_first_chunk_timeout_secs);
         let chunk_timeout = Duration::from_secs(self.config.stream_chunk_timeout_secs);
         let max_output_bytes = self.config.max_output_bytes;
+        let mut received_first_chunk = false;
 
         loop {
             // Cancellation checkpoint (streaming path only).
@@ -896,9 +898,15 @@ impl AgentLoop {
                 break;
             }
 
+            // Use a longer timeout for the first chunk: the API can be slow to start
+            // responding on large contexts. Subsequent chunks use the shorter timeout
+            // to catch mid-stream stalls quickly.
+            let active_timeout = if received_first_chunk { chunk_timeout } else { first_chunk_timeout };
+
             // Wait for next chunk with timeout
-            match tokio::time::timeout(chunk_timeout, stream.next()).await {
+            match tokio::time::timeout(active_timeout, stream.next()).await {
                 Ok(Some(event)) => {
+                    received_first_chunk = true;
                     match event {
                         StreamEvent::Delta { text: delta } => {
                             text.push_str(&delta);
@@ -990,7 +998,7 @@ impl AgentLoop {
                     // MaxTokens condition and take appropriate action.
                     anyhow::bail!(
                         "stream chunk timeout after {}s, no data received",
-                        chunk_timeout.as_secs()
+                        active_timeout.as_secs()
                     );
                 }
             }

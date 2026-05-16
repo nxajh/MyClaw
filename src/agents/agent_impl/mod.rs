@@ -70,7 +70,9 @@ pub struct AgentConfig {
     pub prompt_config: SystemPromptConfig,
     /// Context window management settings.
     pub context: ContextConfig,
-    /// Stream chunk timeout in seconds — max time to wait for next chunk.
+    /// Timeout for the first chunk from the stream (API startup latency on large contexts).
+    pub stream_first_chunk_timeout_secs: u64,
+    /// Timeout for each subsequent chunk (mid-stream stall detection).
     pub stream_chunk_timeout_secs: u64,
     /// Max output bytes before forcing stream stop (derived from max_output_tokens).
     pub max_output_bytes: usize,
@@ -92,7 +94,8 @@ impl Default for AgentConfig {
             max_history: 200,
             prompt_config: SystemPromptConfig::default(),
             context: ContextConfig::default(),
-            stream_chunk_timeout_secs: 90,
+            stream_first_chunk_timeout_secs: 90,
+            stream_chunk_timeout_secs: 30,
             max_output_bytes: 100 * 1024,
             loop_breaker_threshold: 3,
             tool_timeout_secs: 180,
