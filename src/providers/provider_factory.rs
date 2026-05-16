@@ -170,7 +170,7 @@ impl ProviderFactory {
             (well_known::ANTHROPIC | well_known::XIAOMI | well_known::MINIMAX | well_known::GENERIC, Protocol::Anthropic) => {
                 let client = crate::providers::protocols::anthropic::messages::AnthropicMessagesClient::new(
                     request.api_key, request.base_url,
-                );
+                ).with_auth_style(request.auth_style);
                 let client = match request.user_agent {
                     Some(ua) => client.with_user_agent(ua),
                     None => client,

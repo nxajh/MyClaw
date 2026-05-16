@@ -154,6 +154,7 @@ cache_read = 0.3
 
 [providers.xiaomi]
 api_key = "${XIAOMI_API_KEY}"
+auth_style = "bearer"
 
 [providers.xiaomi.chat]
 base_url = "https://api.xiaomimimo.com/anthropic/v1"
