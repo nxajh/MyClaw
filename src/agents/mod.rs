@@ -1,7 +1,11 @@
 //! agents — Agent loop, session management, and prompt construction.
 
 mod agent_impl;
-pub mod context_engine;
+pub(crate) mod compaction_policy;
+pub(crate) mod resource_provider;
+pub(crate) mod request_builder;
+pub(crate) mod tool_executor;
+pub(crate) mod compaction_executor;
 pub mod error;
 pub mod attachment;
 pub mod recovery;
@@ -56,4 +60,3 @@ pub use tool_registry::ToolRegistry;
 pub use mcp_manager::McpManager;
 pub use sub_agent::SubAgentDelegator;
 pub use error::AgentError;
-pub use context_engine::{ContextEngine, TokenStats, CompactionResult, TokenTracker};

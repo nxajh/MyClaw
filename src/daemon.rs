@@ -846,6 +846,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         max_output_bytes: calculate_max_output_bytes(&config, &registry_arc),
         loop_breaker_threshold: config.agent.loop_breaker_threshold as usize,
         tool_timeout_secs: config.agent.tool_timeout_secs,
+        model_override: None,
+        thinking_override: None,
     };
     let mcp_manager_arc = Arc::new(mcp_manager);
 

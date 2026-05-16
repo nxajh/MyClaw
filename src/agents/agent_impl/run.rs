@@ -8,10 +8,8 @@ use crate::providers::{
     BoxStream, ChatMessage, ChatRequest, ChatUsage, StopReason, StreamEvent, ThinkingConfig,
 };
 use crate::providers::Capability;
-use crate::tools::TaskDelegator;
-
 use super::AgentLoop;
-use super::types::{StreamMode, CollectedResponse, estimate_tokens, estimate_message_tokens};
+use super::types::{StreamMode, CollectedResponse, estimate_message_tokens};
 use super::super::TurnEvent;
 use super::super::loop_breaker::LoopBreak;
 
@@ -23,13 +21,10 @@ impl AgentLoop {
         // Autonomy change: inject a system-reminder so the model learns the new policy
         // on the next turn. The actual hard enforcement is in execute_tool regardless.
         if let Some(ref autonomy) = ov.autonomy {
-            self.attachments.diff_autonomy(autonomy);
+            self.request_builder.diff_autonomy(autonomy);
         }
 
-        self.model_override = ov.model.clone();
-        self.thinking_override = ov.to_thinking_config();
-
-        // Apply all config fields via the shared helper.
+        // Apply all config fields via the shared helper (also sets model_override and thinking_override).
         let new_config = self.config.with_override(&ov);
         let new_max = new_config.max_tool_calls;
         self.config = new_config;
@@ -102,87 +97,31 @@ impl AgentLoop {
         self.loop_breaker.reset();
 
         // Initialize token tracker for fresh session / recovery.
-        if self.token_tracker.is_fresh() {
+        if self.policy.is_fresh() {
             if let Some(stored) = self.session.last_total_tokens {
-                // Precise value persisted from last API response — use directly.
-                self.token_tracker.update_from_usage(stored, 0, 0);
+                self.policy.init_from_stored(stored);
             } else {
-                // No stored value (brand-new session): estimate from history.
-                if !self.system_prompt.is_empty() {
-                    self.token_tracker.record_pending(
-                        estimate_tokens(&self.system_prompt) + 4
-                    );
-                }
-                for msg in &self.session.history {
-                    self.token_tracker.record_pending(estimate_message_tokens(msg));
-                }
+                self.policy.init_from_history(
+                    self.request_builder.system_prompt(),
+                    &self.session.history,
+                );
             }
         }
 
-        // 1. Hot-reload (may update skills/agents) — runs before any diff so that
-        //    subsequent diffs see the freshest state.
-        self.check_changes();
+        // 1+2. Hot-reload check + attachment diffs (before adding the user message).
+        self.request_builder.refresh(&self.session);
+        tracing::info!(
+            pending_keys = ?self.request_builder.pending_keys(),
+            "run: diff complete"
+        );
 
-        // 2. Compute all attachment deltas against current history (before adding
-        //    the new user message, so rebuild_from_history sees only prior turns).
-        {
-            let history = self.session.history.clone();
-            {
-                let skills = self.skills.read();
-                tracing::info!(
-                    history_len = history.len(),
-                    skill_count = skills.skill_count(),
-                    "run: diff_skills"
-                );
-                self.attachments.diff_skills(&skills, &history);
-            }
-            if let Some(ref delegator) = self.sub_delegator {
-                let agents = delegator.available_agents();
-                tracing::info!(agent_count = agents.len(), "run: diff_agents");
-                self.attachments.diff_agents(&agents, &history);
-            }
-            if !self.mcp_instructions.is_empty() {
-                tracing::info!(mcp_count = self.mcp_instructions.len(), "run: diff_mcp");
-                self.attachments.diff_mcp(&self.mcp_instructions, &history);
-            }
-            // Memory index — 每 turn 都检查，首次或 compaction 后自动全量注入
-            {
-                let memory_dir = std::path::Path::new(&self.config.prompt_config.knowledge_dir);
-                let files = crate::memory::scan_memory_files(memory_dir);
-                let entries: Vec<crate::memory::IndexEntry> =
-                    files.iter().map(crate::memory::IndexEntry::from).collect();
-                tracing::info!(
-                    memory_count = entries.len(),
-                    "run: diff_memory"
-                );
-                self.attachments.diff_memory(&entries, &history);
-            }
-            let tz = self.config.prompt_config.timezone_offset;
-            self.attachments.diff_date(tz, &history);
-            tracing::info!(
-                pending_keys = ?self.attachments.pending_keys(),
-                "run: diff complete"
-            );
-        }
-
-        // 3. Build attachment text and merge it into the user message.
-        //    The <system-reminder> is prepended so the model sees context before input.
-        //    Both are persisted as a single history entry — no consecutive user messages.
-        let combined_user = {
-            let skills = self.skills.read();
-            match self.attachments.build_text(&skills) {
-                Some(reminder) => {
-                    tracing::info!(reminder_len = reminder.len(), "merging attachment into user message");
-                    format!("{}\n\n{}", reminder, user_message)
-                }
-                None => user_message.to_string(),
-            }
-        };
-        self.attachments.clear_pending();
+        // 3. Merge attachment text into the user message.
+        let combined_user = self.request_builder.merge_attachments(user_message);
+        self.request_builder.clear_pending();
 
         // 4. Add combined user message to history and persist.
         let user_msg = ChatMessage::user_text(combined_user.clone());
-        self.token_tracker.record_pending(estimate_message_tokens(&user_msg));
+        self.policy.record_pending(estimate_message_tokens(&user_msg));
         // ★ Record snapshot length BEFORE adding user message, so rollback can
         //   undo everything added during this turn (user + assistant/tool_calls/tool_results).
         let turn_snapshot_len = self.session.history.len();
@@ -198,11 +137,10 @@ impl AgentLoop {
             }
         }
 
-        self.pending_image_urls = image_urls;
-        self.pending_image_base64 = image_base64;
+        self.request_builder.set_images(image_urls, image_base64);
 
         // 5. Build the full message list for this turn (pure: no side effects).
-        let messages = self.build_messages().await?;
+        let messages = self.request_builder.build(&self.session);
 
         // Save a flag for whether we're in streaming mode, so we can send
         // TurnEvent::EmptyResponse after chat_loop takes ownership of stream_mode.
@@ -358,7 +296,7 @@ impl AgentLoop {
                 "detected incomplete turn (missing tool results), resuming"
             );
 
-            let mut messages = self.build_messages().await?;
+            let mut messages = self.request_builder.build(&self.session);
 
             for call in &pending_calls {
                 tracing::info!(tool = %call.name, id = %call.id, "re-executing interrupted tool call");
@@ -416,7 +354,7 @@ impl AgentLoop {
         // Case B: all tool results present but no final assistant response → call LLM.
         if has_trailing_tool_results && pending_calls.is_empty() {
             tracing::info!("detected incomplete turn (missing LLM continuation), resuming");
-            let messages = self.build_messages().await?;
+            let messages = self.request_builder.build(&self.session);
             let text = self.chat_loop(messages, stream_mode.clone()).await?;
             // Persist the recovered assistant response so the turn is no longer incomplete.
             if !text.is_empty() {
@@ -438,7 +376,7 @@ impl AgentLoop {
         // Case C: last message is user — daemon was killed before model responded.
         if history.last().is_some_and(|m| m.role == "user") {
             tracing::info!("detected incomplete turn (user message with no assistant response), resuming");
-            let messages = self.build_messages().await?;
+            let messages = self.request_builder.build(&self.session);
             let text = self.chat_loop(messages, stream_mode.clone()).await?;
             if !text.is_empty() {
                 self.session.add_assistant_text(text.clone());
@@ -459,91 +397,6 @@ impl AgentLoop {
         Ok(None)
     }
 
-    /// Build the message list: system prompt + history.
-    ///
-    /// Pure function — no side effects on session state.
-    /// All attachment merging and hot-reload happens in `run_turn_core` before this is called.
-    pub(crate) async fn build_messages(&mut self) -> anyhow::Result<Vec<ChatMessage>> {
-        let mut messages = Vec::with_capacity(self.session.history.len() + 2);
-
-        if !self.system_prompt.is_empty() {
-            messages.push(ChatMessage::system_text(&self.system_prompt));
-        }
-
-        messages.extend(self.session.history.iter().cloned());
-
-        // Remove orphan tool results before sending to provider.
-        super::super::session_manager::sanitize_history(&mut messages);
-
-        Ok(messages)
-    }
-
-    /// Check for file changes (hot-reload).
-    pub(crate) fn check_changes(&mut self) {
-        let rx = match self.change_rx.as_mut() {
-            Some(rx) => rx,
-            None => {
-                tracing::debug!("check_changes: change_rx is None, skipping");
-                return;
-            }
-        };
-
-        let changed = rx.has_changed();
-        tracing::info!(
-            has_changed = ?changed,
-            "check_changes: polled watcher"
-        );
-
-        while rx.has_changed().unwrap_or(false) {
-            let changes = rx.borrow_and_update().clone();
-            tracing::info!(?changes, "check_changes: processing change");
-
-            if changes.skills_changed {
-                let new_defs = super::super::skill_loader::load_skills_from_dir(&self.skills_dir);
-                let new_skills: Vec<super::super::skills::Skill> =
-                    new_defs.iter().map(super::super::skills::Skill::from_definition).collect();
-                {
-                    let mut skills = self.skills.write();
-                    skills.reload(new_skills);
-                }
-                let skills = self.skills.read();
-                let history = self.session.history.clone();
-                tracing::debug!(
-                    history_len = history.len(),
-                    current_count = skills.skill_count(),
-                    "check_changes: calling diff_skills"
-                );
-                self.attachments.diff_skills(&skills, &history);
-                tracing::info!(skill_count = skills.skill_count(), "skills hot-reloaded");
-            }
-
-            if changes.agents_changed {
-                let new_agents = super::super::agent_loader::load_agents_from_dir(&self.agents_dir);
-                let agent_list: Vec<(String, String)> = new_agents
-                    .iter()
-                    .map(|a| (a.name.clone(), a.description.clone().unwrap_or_default()))
-                    .collect();
-                {
-                    let mut configs = self.sub_agent_configs.write();
-                    *configs = new_agents;
-                }
-                let history = self.session.history.clone();
-                self.attachments.diff_agents(&agent_list, &history);
-                tracing::info!(agent_count = agent_list.len(), "agents hot-reloaded");
-            }
-
-            if changes.memory_changed {
-                let memory_dir = std::path::Path::new(&self.config.prompt_config.knowledge_dir);
-                let files = crate::memory::scan_memory_files(memory_dir);
-                let entries: Vec<crate::memory::IndexEntry> =
-                    files.iter().map(crate::memory::IndexEntry::from).collect();
-                let history = self.session.history.clone();
-                self.attachments.diff_memory(&entries, &history);
-                tracing::info!(memory_count = entries.len(), "memory hot-reloaded");
-            }
-        }
-    }
-
     /// Core chat loop: call LLM, handle tool calls, repeat until text response.
     async fn chat_loop(&mut self, initial_messages: Vec<ChatMessage>, stream_mode: StreamMode) -> anyhow::Result<String> {
         let mut tool_calls_count = 0usize;
@@ -555,14 +408,13 @@ impl AgentLoop {
         let mut images_attached = false;
 
         // Check if we have pending images that need a vision-capable model.
-        let has_images = self.pending_image_urls.as_ref().is_some_and(|v| !v.is_empty())
-            || self.pending_image_base64.as_ref().is_some_and(|v| !v.is_empty());
+        let has_images = self.request_builder.has_images();
 
         // Pre-emptive compaction for fallback models: when the primary model is unavailable
         // (rate-limit or server error) the FallbackChatProvider routes to a smaller model
         // whose context window may be exceeded by the current history.
         // Only runs when no model_override is active (overrides bypass the fallback chain).
-        if self.model_override.is_none() {
+        if self.config.model_override.is_none() {
             if let Err(e) = self.maybe_compact_for_fallback().await {
                 tracing::warn!(error = %e, "pre-fallback compaction check failed, continuing");
             }
@@ -586,7 +438,7 @@ impl AgentLoop {
             // 1. Get a chat provider via registry.
             // If model_override is set, use that model directly.
             // If images are pending, prefer a vision-capable model from the fallback chain.
-            let (provider, model_id) = if let Some(ref model) = self.model_override {
+            let (provider, model_id) = if let Some(ref model) = self.config.model_override {
                 match self.registry.get_chat_provider_by_model(model) {
                     Some((p, id)) => (p, id),
                     None => {
@@ -630,7 +482,7 @@ impl AgentLoop {
                 }
                 initial_messages.clone()
             } else {
-                self.build_messages().await?
+                self.request_builder.build(&self.session)
             };
 
             // Attach pending images to the last user message only on the first iteration.
@@ -654,7 +506,7 @@ impl AgentLoop {
             };
 
             // Derive thinking config: session override takes priority over model config.
-            let thinking = if let Some(ref t) = self.thinking_override {
+            let thinking = if let Some(ref t) = self.config.thinking_override {
                 if t.enabled { Some(t.clone()) } else { None }
             } else {
                 self.registry.get_chat_model_config(&model_id)
@@ -676,7 +528,7 @@ impl AgentLoop {
                 thinking,
                 stop: None,
                 seed: None,
-                tools: if tools.is_empty() { None } else { Some(&tools[..]) },
+                tools: if tools.is_empty() { None } else { Some(tools.as_slice()) },
                 stream: true,
             };
 
@@ -761,7 +613,7 @@ impl AgentLoop {
             // Real context = input_tokens (new) + cached_input_tokens + output_tokens.
             if let Some(ref usage) = response.usage {
                 let cached = usage.cached_input_tokens.unwrap_or(0);
-                self.token_tracker.update_from_usage(
+                self.policy.update_usage(
                     usage.input_tokens.unwrap_or(0),
                     usage.output_tokens.unwrap_or(0),
                     cached,
@@ -770,13 +622,13 @@ impl AgentLoop {
                     input_tokens = usage.input_tokens.unwrap_or(0),
                     cached_tokens = cached,
                     output_tokens = usage.output_tokens.unwrap_or(0),
-                    total_tracked = self.token_tracker.total_tokens(),
+                    total_tracked = self.policy.token_total(),
                     "token usage recorded"
                 );
 
                 // Persist the precise total so it survives restarts.
                 if let Some(ref hook) = self.persist_hook {
-                    hook.save_token_count(&self.session.id, self.token_tracker.total_tokens());
+                    hook.save_token_count(&self.session.id, self.policy.token_total());
                 }
             }
 
@@ -937,7 +789,7 @@ impl AgentLoop {
                 messages.push(tool_msg);
 
                 // Record estimated tokens for the tool result message.
-                self.token_tracker.record_pending(
+                self.policy.record_pending(
                     estimate_message_tokens(messages.last().unwrap())
                 );
 
@@ -1137,7 +989,7 @@ impl AgentLoop {
         let context_window = model_config.context_window?;
         let max_output = model_config.max_output_tokens.unwrap_or(4096) as u64;
 
-        let total_tokens = self.token_tracker.total_tokens();
+        let total_tokens = self.policy.token_total();
         let available = context_window.saturating_sub(total_tokens);
         let max = max_output.min(available).min(u32::MAX as u64);
 
@@ -1163,7 +1015,7 @@ impl AgentLoop {
         // Double the output budget.
         let boosted = (default_max * 2).min(context_window);
 
-        let total_tokens = self.token_tracker.total_tokens();
+        let total_tokens = self.policy.token_total();
         let available = context_window.saturating_sub(total_tokens);
         let max = boosted.min(available).min(u32::MAX as u64);
 

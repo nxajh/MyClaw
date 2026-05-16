@@ -652,6 +652,37 @@ impl Session {
         self.history.truncate(len);
         self.message_ids.truncate(len);
     }
+
+    /// Replace history[compact_start..compact_end] with a single summary message.
+    /// Updates compact_version and summary_metadata atomically.
+    pub(crate) fn apply_compaction(
+        &mut self,
+        compact_start: usize,
+        compact_end: usize,
+        summary_msg: ChatMessage,
+        version: u32,
+        up_to_message: i64,
+        summary_tokens: u64,
+    ) {
+        self.history.drain(compact_start..compact_end);
+        self.history.insert(compact_start, summary_msg);
+        self.message_ids.drain(compact_start..compact_end);
+        self.message_ids.insert(compact_start, 0);
+        self.compact_version = version;
+        self.summary_metadata = Some(SummaryMetadata {
+            version,
+            token_estimate: summary_tokens,
+            up_to_message,
+        });
+    }
+
+    /// Drop history[..boundary] with no summary (fallback when summarizer fails).
+    /// Bumps compact_version so the backend can record the event.
+    pub(crate) fn drop_pre_boundary(&mut self, boundary: usize, version: u32) {
+        self.history.drain(..boundary);
+        self.message_ids.drain(..boundary);
+        self.compact_version = version;
+    }
 }
 
 /// Manages session lifecycle — creates, retrieves, and persists sessions.

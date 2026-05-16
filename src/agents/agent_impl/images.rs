@@ -7,10 +7,7 @@ use super::AgentLoop;
 impl AgentLoop {
     /// Attach pending image URLs and base64 data to the last user message if model supports it.
     pub(crate) fn attach_images_if_supported(&self, messages: &mut [crate::providers::ChatMessage], model_id: &str) {
-        let has_urls = self.pending_image_urls.as_ref().is_some_and(|v| !v.is_empty());
-        let has_b64 = self.pending_image_base64.as_ref().is_some_and(|v| !v.is_empty());
-
-        if !has_urls && !has_b64 {
+        if !self.request_builder.has_images() {
             return;
         }
 
@@ -29,7 +26,7 @@ impl AgentLoop {
         }
 
         if let Some(last_user) = messages.iter_mut().rev().find(|m| m.role == "user") {
-            if let Some(urls) = self.pending_image_urls.as_ref() {
+            if let Some(urls) = self.request_builder.image_urls() {
                 for url in urls {
                     last_user.parts.push(crate::providers::ContentPart::ImageUrl {
                         url: url.clone(),
@@ -37,7 +34,7 @@ impl AgentLoop {
                     });
                 }
             }
-            if let Some(b64s) = self.pending_image_base64.as_ref() {
+            if let Some(b64s) = self.request_builder.image_b64() {
                 for b64 in b64s {
                     last_user.parts.push(crate::providers::ContentPart::ImageB64 {
                         b64_json: b64.clone(),
@@ -45,8 +42,8 @@ impl AgentLoop {
                     });
                 }
             }
-            let total = self.pending_image_urls.as_ref().map_or(0, |v| v.len())
-                + self.pending_image_base64.as_ref().map_or(0, |v| v.len());
+            let total = self.request_builder.image_urls().map_or(0, |v| v.len())
+                + self.request_builder.image_b64().map_or(0, |v| v.len());
             tracing::info!("attached {} image(s) to user message", total);
         }
     }
