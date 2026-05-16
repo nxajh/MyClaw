@@ -1387,6 +1387,25 @@ async fn run_message_task(
                 return;
             }
 
+            if let Some(crate::agents::error::AgentError::StreamTimeout { secs }) =
+                e.downcast_ref::<crate::agents::error::AgentError>()
+            {
+                channel.on_status(&reply_target, ProcessingStatus::Error).await;
+                tracing::warn!(session = %sk, secs, "stream timeout, offering retry");
+                {
+                    let mut guard = loop_.lock().await;
+                    guard.set_pending_retry(content.clone());
+                }
+                let send_msg = retry_abort_prompt(
+                    format!("⚠️ AI 响应超时（{}s 内未收到数据），请稍后重试。", secs),
+                    &sk, reply_target, reply_to_id,
+                );
+                if let Err(se) = channel.send(&send_msg).await {
+                    error!(session = %sk, err = %se, "failed to send stream timeout prompt");
+                }
+                return;
+            }
+
             if let Some(crate::agents::error::AgentError::EmptyResponse { user_message }) =
                 e.downcast_ref::<crate::agents::error::AgentError>()
             {

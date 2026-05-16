@@ -400,7 +400,6 @@ impl AgentLoop {
     /// Core chat loop: call LLM, handle tool calls, repeat until text response.
     async fn chat_loop(&mut self, initial_messages: Vec<ChatMessage>, stream_mode: StreamMode) -> anyhow::Result<String> {
         let mut tool_calls_count = 0usize;
-        let mut stream_timeout_retries = 0usize;
         let mut retry_count = 0usize;
         let mut empty_response_retries = 0usize;
         let mut boosted_max_tokens = false;
@@ -580,16 +579,10 @@ impl AgentLoop {
                         if classified.retryable {
                             match classified.reason {
                                 crate::providers::FailoverReason::Timeout => {
-                                    stream_timeout_retries += 1;
-                                    if stream_timeout_retries > 1 {
-                                        tracing::error!("stream timeout after 1 retry, giving up");
-                                        return Ok(String::new());
-                                    }
-                                    tracing::warn!(
-                                        attempt = stream_timeout_retries,
-                                        "stream chunk timeout, retrying once..."
-                                    );
-                                    continue;
+                                    tracing::error!("stream timeout, giving up");
+                                    return Err(super::super::error::AgentError::StreamTimeout {
+                                        secs: self.config.stream_first_chunk_timeout_secs,
+                                    }.into());
                                 }
                                 _ => {
                                     retry_count += 1;

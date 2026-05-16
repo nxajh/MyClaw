@@ -95,7 +95,7 @@ pub struct AgentConfig {
 fn default_max_tool_calls() -> usize { 100 }
 fn default_max_history() -> usize { 200 }
 fn default_tool_timeout() -> u64 { 180 }
-fn default_stream_first_chunk_timeout() -> u64 { 90 }
+fn default_stream_first_chunk_timeout() -> u64 { 600 }
 fn default_stream_chunk_timeout() -> u64 { 30 }
 fn default_loop_breaker_threshold() -> u32 { 3 }
 

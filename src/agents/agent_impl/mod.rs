@@ -94,7 +94,7 @@ impl Default for AgentConfig {
             max_history: 200,
             prompt_config: SystemPromptConfig::default(),
             context: ContextConfig::default(),
-            stream_first_chunk_timeout_secs: 90,
+            stream_first_chunk_timeout_secs: 600,
             stream_chunk_timeout_secs: 30,
             max_output_bytes: 100 * 1024,
             loop_breaker_threshold: 3,
