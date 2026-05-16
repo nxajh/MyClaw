@@ -70,9 +70,6 @@ pub use provider_factory::{
     BuildSearchProviderRequest, BuildVideoProviderRequest, BuildSttProviderRequest,
 };
 pub use provider_id::{ProviderId, detect_from_url};
-pub use shared::{AuthStyle, ProviderHandle, ProviderInstance,
-    create_provider, create_provider_by_url, create_provider_by_url_with_user_agent,
-    create_full_openai_provider, create_full_openai_provider_with_user_agent,
-    parse_openai_sse, build_openai_chat_body};
+pub use shared::{AuthStyle};
 
 pub use reqwest::Client;

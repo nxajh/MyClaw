@@ -17,7 +17,6 @@ use crate::agents::{
 };
 use crate::tools::TaskDelegator;
 use crate::config::sub_agent::SubAgentConfig;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -244,7 +243,6 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
                     api_key: api_key.clone(),
                     auth_style: auth_style.into(),
                     user_agent: user_agent.clone(),
-                    extra_headers: HashMap::new(),
                 };
 
                 let chat_provider = factory.build_chat_provider(request)
@@ -280,7 +278,6 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
                     api_key: api_key.clone(),
                     auth_style: auth_style.into(),
                     user_agent: user_agent.clone(),
-                    extra_headers: HashMap::new(),
                 };
 
                 if let Some(emb_provider) = factory.build_embedding_provider(request) {
@@ -305,7 +302,6 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
                     api_key: api_key.clone(),
                     auth_style: auth_style.into(),
                     user_agent: user_agent.clone(),
-                    extra_headers: HashMap::new(),
                 };
 
                 if let Some(img) = factory.build_image_provider(request) {
@@ -330,7 +326,6 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
                     api_key: api_key.clone(),
                     auth_style: auth_style.into(),
                     user_agent: user_agent.clone(),
-                    extra_headers: HashMap::new(),
                 };
 
                 if let Some(tts) = factory.build_tts_provider(request) {
@@ -355,7 +350,6 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
                     api_key: api_key.clone(),
                     auth_style: auth_style.into(),
                     user_agent: user_agent.clone(),
-                    extra_headers: HashMap::new(),
                 };
 
                 if let Some(vid) = factory.build_video_provider(request) {
@@ -380,7 +374,6 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
                     api_key: api_key.clone(),
                     auth_style: auth_style.into(),
                     user_agent: user_agent.clone(),
-                    extra_headers: HashMap::new(),
                 };
 
                 if let Some(srch) = factory.build_search_provider(request) {
@@ -405,7 +398,6 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
                     api_key: api_key.clone(),
                     auth_style: auth_style.into(),
                     user_agent: user_agent.clone(),
-                    extra_headers: HashMap::new(),
                 };
 
                 if let Some(stt) = factory.build_stt_provider(request) {

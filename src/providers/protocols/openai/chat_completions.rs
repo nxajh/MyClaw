@@ -6,10 +6,12 @@
 use async_trait::async_trait;
 use futures_util::StreamExt;
 
-use crate::providers::Client;
 use crate::providers::{
     BoxStream, ChatProvider, ChatRequest, StreamEvent, StopReason,
 };
+use reqwest::Client;
+use std::time::Duration;
+use crate::providers::http::build_reqwest_client;
 use crate::providers::protocols::openai::chat_message_rendering::render_openai_chat_body;
 
 /// OpenAI Chat Completions protocol client.
@@ -23,7 +25,7 @@ pub struct OpenAiChatCompletionsClient {
 
 impl OpenAiChatCompletionsClient {
     pub fn new(api_key: String, base_url: String) -> Self {
-        Self { base_url, api_key, client: Client::new(), user_agent: None }
+        Self { base_url, api_key, client: build_reqwest_client(), user_agent: None }
     }
 
     pub fn with_user_agent(mut self, user_agent: String) -> Self {
@@ -60,9 +62,18 @@ impl ChatProvider for OpenAiChatCompletionsClient {
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(100);
 
         tokio::spawn(async move {
-            let resp = match client.post(&url).headers(headers).json(&body).send().await {
-                Ok(r) => r,
-                Err(e) => { let _ = tx.send(StreamEvent::Error(e.to_string())).await; return; }
+            let resp = match tokio::time::timeout(
+                Duration::from_secs(30),
+                client.post(&url).headers(headers).json(&body).send()
+            ).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => { let _ = tx.send(StreamEvent::Error(e.to_string())).await; return; }
+                Err(_) => {
+                    let _ = tx.send(StreamEvent::Error(
+                        "timed out waiting for response headers".to_string()
+                    )).await;
+                    return;
+                }
             };
 
             if resp.error_for_status_ref().is_err() {
@@ -104,7 +115,7 @@ impl ChatProvider for OpenAiChatCompletionsClient {
                 while let Some(pos) = buffer.find('\n') {
                     let line = buffer[..pos].to_string();
                     buffer.drain(..=pos);
-                    let events = crate::providers::shared::parse_openai_sse(&line);
+                    let events = parse_openai_sse(&line);
                     for ev in events {
                         match ev {
                             StreamEvent::ToolCallStart { .. } | StreamEvent::ToolCallDelta { .. } => {
@@ -138,4 +149,113 @@ impl ChatProvider for OpenAiChatCompletionsClient {
 
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
+}
+
+fn parse_openai_sse(line: &str) -> Vec<StreamEvent> {
+    use crate::providers::{ChatUsage, StopReason};
+
+    let line = line.trim();
+    if line.is_empty() || line.starts_with(':') { return vec![]; }
+    let data = match line.strip_prefix("data:") {
+        Some(d) => d.trim(),
+        None => return vec![],
+    };
+    if data == "[DONE]" { return vec![]; }
+
+    #[derive(serde::Deserialize)]
+    struct Chunk {
+        #[serde(default)]
+        choices: Vec<Choice>,
+        usage: Option<ChunkUsage>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Choice { delta: Delta, finish_reason: Option<String> }
+    #[derive(serde::Deserialize)]
+    struct Delta {
+        content: Option<String>,
+        reasoning_content: Option<String>,
+        tool_calls: Option<Vec<TcDelta>>,
+    }
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[allow(dead_code)]
+    struct TcDelta { index: u32, id: Option<String>, function: Option<FuncDelta> }
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[allow(dead_code)]
+    struct FuncDelta { name: Option<String>, arguments: Option<String> }
+    #[derive(serde::Deserialize)]
+    struct ChunkUsage { prompt_tokens: Option<u64>, completion_tokens: Option<u64> }
+
+    let chunk: Chunk = match serde_json::from_str(data) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+
+    if chunk.choices.is_empty() {
+        if let Some(u) = chunk.usage {
+            return vec![StreamEvent::Usage(ChatUsage {
+                input_tokens: u.prompt_tokens,
+                output_tokens: u.completion_tokens,
+                cached_input_tokens: None,
+                reasoning_tokens: None,
+                cache_write_tokens: None,
+            })];
+        }
+        return vec![];
+    }
+
+    let mut events = Vec::new();
+
+    for choice in &chunk.choices {
+        let mut emitted_tool_event = false;
+        if let Some(tcs) = &choice.delta.tool_calls {
+            tracing::debug!(raw_tool_calls = %serde_json::to_string(tcs).unwrap_or_default(), "SSE tool_calls delta");
+
+            for tc in tcs {
+                let id = tc.id.clone().unwrap_or_default();
+                let func = tc.function.as_ref();
+
+                // First chunk for this tool call carries id + name → ToolCallStart.
+                // GLM sends id + name + arguments all in one chunk.
+                if !id.is_empty() && func.is_some_and(|f| f.name.is_some()) {
+                    let initial_args = func.and_then(|f| f.arguments.clone()).unwrap_or_default();
+                    events.push(StreamEvent::ToolCallStart {
+                        id,
+                        name: func.and_then(|f| f.name.clone()).unwrap_or_default(),
+                        initial_arguments: initial_args,
+                    });
+                    emitted_tool_event = true;
+                } else {
+                    let args = func.and_then(|f| f.arguments.clone()).unwrap_or_default();
+                    if !args.is_empty() {
+                        let delta_id = if id.is_empty() { format!("#{}", tc.index) } else { id };
+                        events.push(StreamEvent::ToolCallDelta { id: delta_id, delta: args });
+                        emitted_tool_event = true;
+                    }
+                }
+            }
+        }
+
+        // Skip content when tool_calls were present (some providers send both).
+        if !emitted_tool_event {
+            if let Some(text) = &choice.delta.content {
+                if !text.is_empty() { events.push(StreamEvent::Delta { text: text.clone() }); }
+            }
+            if let Some(reasoning) = &choice.delta.reasoning_content {
+                if !reasoning.is_empty() { events.push(StreamEvent::Thinking { text: reasoning.clone() }); }
+            }
+        }
+
+        if let Some(ref r) = choice.finish_reason {
+            let reason = match r.as_str() {
+                "stop" => StopReason::EndTurn,
+                "length" => StopReason::MaxTokens,
+                "content_filter" => StopReason::ContentFilter,
+                "tool_calls" => StopReason::ToolUse,
+                _ => StopReason::EndTurn,
+            };
+            events.push(StreamEvent::Done { reason });
+        }
+    }
+
+    events
 }

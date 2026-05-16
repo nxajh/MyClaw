@@ -581,13 +581,13 @@ impl AgentLoop {
                             match classified.reason {
                                 crate::providers::FailoverReason::Timeout => {
                                     stream_timeout_retries += 1;
-                                    if stream_timeout_retries > 3 {
-                                        tracing::error!("stream timeout after 3 retries, giving up");
+                                    if stream_timeout_retries > 1 {
+                                        tracing::error!("stream timeout after 1 retry, giving up");
                                         return Ok(String::new());
                                     }
                                     tracing::warn!(
                                         attempt = stream_timeout_retries,
-                                        "stream chunk timeout, retrying..."
+                                        "stream chunk timeout, retrying once..."
                                     );
                                     continue;
                                 }

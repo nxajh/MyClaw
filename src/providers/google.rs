@@ -18,6 +18,7 @@
 //!   [providers.google.search.models."gemini-2.0-flash"]
 
 use crate::providers::{SearchProvider, SearchRequest, SearchResult, SearchResults};
+use crate::providers::http::build_reqwest_client;
 
 const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com";
 const DEFAULT_MODEL: &str = "gemini-2.0-flash";
@@ -38,7 +39,7 @@ impl GoogleProvider {
         Self {
             base_url,
             api_key,
-            client: reqwest::Client::new(),
+            client: build_reqwest_client(),
         }
     }
 }
