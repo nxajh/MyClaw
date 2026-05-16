@@ -292,10 +292,10 @@ impl SubAgentDelegator {
         };
         let mut loop_ = agent.loop_for_with_persist(session, persist_hook);
 
-        tracing::info!(agent = %config.name, "sub-agent started");
+        tracing::debug!(agent = %config.name, "sub-agent started");
         let result = loop_.run(task, None, None).await;
         match &result {
-            Ok(text) => tracing::info!(agent = %config.name, text_len = text.len(), "sub-agent completed"),
+            Ok(text) => tracing::debug!(agent = %config.name, text_len = text.len(), "sub-agent completed"),
             Err(e) => tracing::warn!(agent = %config.name, err = %e, "sub-agent failed"),
         }
 
@@ -343,7 +343,7 @@ impl SubAgentDelegator {
                                 tracing::warn!(branch = %branch_name, err = %e, "failed to run git merge");
                             }
                             _ => {
-                                tracing::info!(branch = %branch_name, "merged sub-agent branch");
+                                tracing::debug!(branch = %branch_name, "merged sub-agent branch");
                             }
                         }
                     } else {
@@ -355,7 +355,7 @@ impl SubAgentDelegator {
                     }
                 }
             } else {
-                tracing::info!(branch = %branch_name, "no new commits, skipping merge");
+                tracing::debug!(branch = %branch_name, "no new commits, skipping merge");
             }
         }
 
@@ -369,7 +369,7 @@ impl SubAgentDelegator {
                     .args(["branch", "-D", bn])
                     .output();
             }
-            tracing::info!(path = %worktree_path.display(), "cleaned up worktree and branch");
+            tracing::debug!(path = %worktree_path.display(), "cleaned up worktree and branch");
         }
 
         // Cleanup the running-state marker file — sub-agent is done (success or failure).

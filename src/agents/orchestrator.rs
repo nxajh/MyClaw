@@ -388,14 +388,14 @@ impl Orchestrator {
 
         loop {
             if *shutdown_rx.borrow() {
-                tracing::info!("shutdown requested, exiting message loop");
+                tracing::debug!("shutdown requested, exiting message loop");
                 break;
             }
 
             // Hot switch checkpoint: SIGUSR1 set the flag — exit loop so
             // daemon.rs can trigger fork+execv.
             if crate::is_shutting_down() {
-                tracing::info!("shutdown flag detected in orchestrator, exiting for hot switch");
+                tracing::debug!("shutdown flag detected in orchestrator, exiting for hot switch");
                 break;
             }
 
@@ -695,7 +695,7 @@ impl Orchestrator {
     async fn handle_scheduler_event(&self, event: SchedulerEvent) {
         match event {
             SchedulerEvent::Heartbeat { target_channel, target_account } => {
-                tracing::info!("heartbeat triggered (from scheduler)");
+                tracing::debug!("heartbeat triggered (from scheduler)");
                 // Pre-flight: cheap checks before spawning.
                 let heartbeat_path = std::path::Path::new("HEARTBEAT.md");
                 if !heartbeat_path.exists() {
@@ -754,7 +754,7 @@ impl Orchestrator {
                 ));
             }
             SchedulerEvent::Cron { session_key, prompt, target_channel, target_account, job_id, delivery, enabled_tools, disabled_tools } => {
-                tracing::info!(session_key = %session_key, "cron job triggered (from scheduler)");
+                tracing::debug!(session_key = %session_key, "cron job triggered (from scheduler)");
                 let ctx = SchedulerContext {
                     sessions: self.sessions.clone(),
                     session_manager: self.session_manager.clone(),
@@ -838,7 +838,7 @@ impl Orchestrator {
     ) {
         for sa in unfinished {
             if sa.sub_session_id.is_empty() || sa.session_key.is_empty() {
-                tracing::info!(task_id = %sa.task_id, "sub-agent recovery: skipping (no session_id or session_key)");
+                tracing::debug!(task_id = %sa.task_id, "sub-agent recovery: skipping (no session_id or session_key)");
                 continue;
             }
             let sub_sk = format!("{}:{}", sa.agent_name, sa.sub_session_id);
@@ -865,7 +865,7 @@ impl Orchestrator {
                     }
                 }
                 Ok(_) => {
-                    tracing::info!(task_id = %sa.task_id, "sub-agent startup recovery: no recovery needed");
+                    tracing::debug!(task_id = %sa.task_id, "sub-agent startup recovery: no recovery needed");
                 }
                 Err(e) => {
                     tracing::warn!(task_id = %sa.task_id, err = %e, "sub-agent startup recovery failed");
@@ -880,7 +880,7 @@ impl Orchestrator {
         for h in handles {
             h.abort();
         }
-        tracing::info!("all listener tasks aborted");
+        tracing::debug!("all listener tasks aborted");
     }
 }
 
@@ -1339,7 +1339,7 @@ async fn run_message_task(
 
     match response {
         Ok(text) if !text.is_empty() => {
-            tracing::info!(session = %sk, text_len = text.len(), "sending response");
+
             let send_msg = SendMessage {
                 recipient: reply_target.clone(),
                 content: text,
@@ -1409,7 +1409,7 @@ async fn run_message_task(
             if let Some(crate::agents::error::AgentError::EmptyResponse { user_message }) =
                 e.downcast_ref::<crate::agents::error::AgentError>()
             {
-                tracing::info!(session = %sk, "empty response, sending retry prompt");
+                tracing::debug!(session = %sk, "empty response, sending retry prompt");
                 channel.on_status(&reply_target, ProcessingStatus::Done).await;
                 {
                     let mut guard = loop_.lock().await;
@@ -1426,7 +1426,7 @@ async fn run_message_task(
                 e.downcast_ref::<crate::agents::error::AgentError>()
             {
                 channel.on_status(&reply_target, ProcessingStatus::Error).await;
-                error!(session = %sk, attempts, err = %source, "retries exhausted, offering retry/abort");
+                warn!(session = %sk, attempts, err = %source, "retries exhausted, offering retry/abort");
                 {
                     let mut guard = loop_.lock().await;
                     guard.set_pending_retry(content.clone());
@@ -1481,7 +1481,7 @@ async fn run_message_task(
 
             // Non-retryable error — still offer retry/abort for manual recovery.
             channel.on_status(&reply_target, ProcessingStatus::Error).await;
-            error!(session = %sk, err = %e, "non-retryable loop error, offering retry/abort");
+            warn!(session = %sk, err = %e, "non-retryable loop error, offering retry/abort");
             {
                 let mut guard = loop_.lock().await;
                 guard.set_pending_retry(content.clone());
@@ -1550,7 +1550,7 @@ async fn run_heartbeat_task(
 
     match result {
         Ok(response) if is_silent_ok(&response, "heartbeat") => {
-            tracing::info!("heartbeat: nothing needs attention");
+            tracing::debug!("heartbeat: nothing needs attention");
         }
         Ok(response) if !response.trim().is_empty() => {
             send_to_target_internal(ctx.channels, ctx.last_channel, ctx.last_recipient.clone(), target_channel, target_account, &response).await;

@@ -298,7 +298,7 @@ impl ClientChannel {
                                             let contexts = stream_contexts_clone.read();
                                             if let Some(ctx) = contexts.get(&session_key_clone) {
                                                 ctx.cancel.cancel();
-                                                tracing::info!(session = %session_key_clone, "turn cancelled by client");
+                                                tracing::debug!(session = %session_key_clone, "turn cancelled by client");
                                             }
                                         }
 
@@ -361,7 +361,7 @@ impl ClientChannel {
                                 }
                             }
 
-                            tracing::info!(conn_id = %conn_id_clone, "WebSocket client disconnected");
+                            tracing::debug!(conn_id = %conn_id_clone, "WebSocket client disconnected");
                         });
                     }
                     Err(e) => {

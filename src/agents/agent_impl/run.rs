@@ -85,8 +85,6 @@ impl AgentLoop {
         image_base64: Option<Vec<String>>,
         stream_mode: StreamMode,
     ) -> anyhow::Result<String> {
-        tracing::info!(user_input = %user_message, "user message received");
-
         // ── Breakpoint recovery: auto-resume interrupted turn ─────────────
         // If the session ends with assistant tool_calls that have no matching
         // tool results (process was killed mid-turn), re-execute the missing
@@ -110,7 +108,7 @@ impl AgentLoop {
 
         // 1+2. Hot-reload check + attachment diffs (before adding the user message).
         self.request_builder.refresh(&self.session);
-        tracing::info!(
+        tracing::debug!(
             pending_keys = ?self.request_builder.pending_keys(),
             "run: diff complete"
         );
@@ -423,14 +421,14 @@ impl AgentLoop {
             // Cancellation checkpoint 3: before next LLM call (top of loop).
             if let StreamMode::Streamed { cancel, .. } = &stream_mode {
                 if cancel.is_cancelled() {
-                    tracing::info!("turn cancelled before next LLM call");
+                    tracing::debug!("turn cancelled before next LLM call");
                     return Ok(String::new());
                 }
             }
 
             // Hot switch checkpoint: before next LLM call.
             if crate::is_shutting_down() {
-                tracing::info!("shutdown flag set, exiting at LLM checkpoint");
+                tracing::debug!("shutdown flag set, exiting at LLM checkpoint");
                 return Ok(String::new());
             }
 
@@ -531,15 +529,10 @@ impl AgentLoop {
                 stream: true,
             };
 
-            tracing::info!(
-                msg_count = messages.len(),
-                tool_count = tool_calls_count,
-                "sending messages to model"
-            );
+            tracing::debug!(msg_count = messages.len(), tool_count = tool_calls_count, "sending messages to model");
 
             // 4. Call chat and process stream.
             let stream = provider.chat(req)?;
-            tracing::info!("collecting chat stream");
 
             // Branch on StreamMode: Collect (existing) vs Streamed (forward events).
             let response = {
@@ -602,12 +595,12 @@ impl AgentLoop {
             // Cancellation checkpoint 4: after stream collected, before tool loop.
             if let StreamMode::Streamed { cancel, .. } = &stream_mode {
                 if cancel.is_cancelled() {
-                    tracing::info!("turn cancelled after stream collection");
+                    tracing::debug!("turn cancelled after stream collection");
                     return Ok(response.text);
                 }
             }
 
-            tracing::info!(text_len = response.text.len(), tool_calls = response.tool_calls.len(), stop = ?response.stop_reason, "chat stream collected");
+            tracing::debug!(text_len = response.text.len(), tool_calls = response.tool_calls.len(), stop = ?response.stop_reason, "chat stream collected");
 
             // Record token usage from API response.
             // Real context = input_tokens (new) + cached_input_tokens + output_tokens.
@@ -673,7 +666,7 @@ impl AgentLoop {
 
             // 6. Tool calls present → execute them and append results.
             for call in &response.tool_calls {
-                tracing::info!(tool = %call.name, id = %call.id, arguments = %call.arguments, "model requested tool call");
+                tracing::debug!(tool = %call.name, id = %call.id, arguments = %call.arguments, "model requested tool call");
             }
 
             // Build the assistant's tool_calls message to append to conversation.
@@ -721,7 +714,7 @@ impl AgentLoop {
                 // Cancellation checkpoint 2: before each tool execution.
                 if let StreamMode::Streamed { cancel, event_tx } = &stream_mode {
                     if cancel.is_cancelled() {
-                        tracing::info!(tool = %call.name, "turn cancelled before tool execution");
+                        tracing::debug!(tool = %call.name, "turn cancelled before tool execution");
                         let _ = event_tx.send(TurnEvent::Cancelled { partial: response.text.clone() }).await;
                         return Ok(response.text.clone());
                     }
@@ -736,7 +729,7 @@ impl AgentLoop {
 
                 // Hot switch checkpoint: before tool execution.
                 if crate::is_shutting_down() {
-                    tracing::info!(tool = %call.name, "shutdown flag set, exiting before tool execution");
+                    tracing::debug!(tool = %call.name, "shutdown flag set, exiting before tool execution");
                     return Ok(String::new());
                 }
 
@@ -764,7 +757,7 @@ impl AgentLoop {
                     Err(e) => (format!("error: {}", e), true),
                 };
 
-                tracing::info!(tool = %call.name, success = !is_error, "tool result:\n{}", result_content);
+                tracing::debug!(tool = %call.name, success = !is_error, "tool result:\n{}", result_content);
 
                 // Streamed mode: send ToolResult event to client.
                 if let StreamMode::Streamed { event_tx, .. } = &stream_mode {
@@ -815,7 +808,7 @@ impl AgentLoop {
                 // executes. Check here so we exit before the next tool call in
                 // the same batch (e.g. kill/pkill) can run.
                 if crate::is_shutting_down() {
-                    tracing::info!(
+                    tracing::debug!(
                         tool = %call.name,
                         "shutdown flag set after tool execution, exiting before next tool"
                     );
@@ -1037,7 +1030,7 @@ impl AgentLoop {
         let available = context_window.saturating_sub(total_tokens);
         let max = boosted.min(available).min(u32::MAX as u64);
 
-        tracing::info!(
+        tracing::debug!(
             boosted_max = max,
             available,
             "boosted max_tokens for retry"
