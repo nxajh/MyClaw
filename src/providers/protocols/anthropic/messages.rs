@@ -7,10 +7,11 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use std::collections::HashMap;
 
-use crate::providers::Client;
 use crate::providers::{
     BoxStream, ChatProvider, ChatRequest, StreamEvent, StopReason,
 };
+use reqwest::Client;
+use crate::providers::http::build_reqwest_client;
 use crate::providers::protocols::anthropic::message_rendering::build_anthropic_body;
 
 /// Anthropic Messages protocol client.
@@ -24,7 +25,7 @@ pub struct AnthropicMessagesClient {
 
 impl AnthropicMessagesClient {
     pub fn new(api_key: String, base_url: String) -> Self {
-        Self { base_url, api_key, client: Client::new(), user_agent: None }
+        Self { base_url, api_key, client: build_reqwest_client(), user_agent: None }
     }
 
     pub fn with_user_agent(mut self, user_agent: String) -> Self {

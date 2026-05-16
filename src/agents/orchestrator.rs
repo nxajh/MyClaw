@@ -1223,7 +1223,6 @@ async fn run_message_task(
     reply_to_id: Option<String>,
 ) {
     let TurnInput { content, image_urls, image_base64 } = input;
-    channel.on_status(&reply_target, ProcessingStatus::Thinking).await;
 
     if channel.supports_streaming() {
         let stream_ctx = channel.take_stream_context(&reply_target);
@@ -1231,13 +1230,18 @@ async fn run_message_task(
             Some(ctx) => ctx,
             None => {
                 tracing::warn!(session = %sk, "no stream context, falling back to run()");
+                channel.on_status(&reply_target, ProcessingStatus::Thinking).await;
                 let mut guard = loop_.lock().await;
                 let _ = guard.run(&content, image_urls, image_base64).await;
                 return;
             }
         };
+        // Acquire the per-session mutex before signalling Thinking, so the
+        // indicator only appears when this task is actually executing — not
+        // while it is queued behind a prior hung request.
         let response = {
             let mut guard = loop_.lock().await;
+            channel.on_status(&reply_target, ProcessingStatus::Thinking).await;
             guard.run_streamed(&content, image_urls, image_base64, event_tx, cancel).await
         };
         match response {
@@ -1253,6 +1257,7 @@ async fn run_message_task(
     // Non-streaming path.
     let response = {
         let mut guard = loop_.lock().await;
+        channel.on_status(&reply_target, ProcessingStatus::Thinking).await;
         guard.run(&content, image_urls, image_base64).await
     };
 
