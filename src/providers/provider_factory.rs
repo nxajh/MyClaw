@@ -4,8 +4,6 @@
 //! in `daemon.rs` with a single entry point that respects explicit
 //! `provider` / `protocol` config overrides.
 
-use std::collections::HashMap;
-
 use crate::config::provider::Protocol;
 use crate::providers::{AuthStyle, ProviderId, ProviderHandle};
 use crate::providers::capability_chat::ChatProvider;
@@ -29,7 +27,6 @@ pub struct BuildChatProviderRequest {
     pub api_key: String,
     pub auth_style: AuthStyle,
     pub user_agent: Option<String>,
-    pub extra_headers: HashMap<String, String>,
 }
 
 /// Request to build an embedding provider.
@@ -41,7 +38,6 @@ pub struct BuildEmbeddingProviderRequest {
     pub api_key: String,
     pub auth_style: AuthStyle,
     pub user_agent: Option<String>,
-    pub extra_headers: HashMap<String, String>,
 }
 
 /// Request to build an image generation provider.
@@ -53,7 +49,6 @@ pub struct BuildImageProviderRequest {
     pub api_key: String,
     pub auth_style: AuthStyle,
     pub user_agent: Option<String>,
-    pub extra_headers: HashMap<String, String>,
 }
 
 /// Request to build a TTS provider.
@@ -65,7 +60,6 @@ pub struct BuildTtsProviderRequest {
     pub api_key: String,
     pub auth_style: AuthStyle,
     pub user_agent: Option<String>,
-    pub extra_headers: HashMap<String, String>,
 }
 
 /// Request to build a search provider.
@@ -77,7 +71,6 @@ pub struct BuildSearchProviderRequest {
     pub api_key: String,
     pub auth_style: AuthStyle,
     pub user_agent: Option<String>,
-    pub extra_headers: HashMap<String, String>,
 }
 
 /// Request to build a video provider.
@@ -89,7 +82,6 @@ pub struct BuildVideoProviderRequest {
     pub api_key: String,
     pub auth_style: AuthStyle,
     pub user_agent: Option<String>,
-    pub extra_headers: HashMap<String, String>,
 }
 
 /// Request to build an STT provider.
@@ -101,7 +93,6 @@ pub struct BuildSttProviderRequest {
     pub api_key: String,
     pub auth_style: AuthStyle,
     pub user_agent: Option<String>,
-    pub extra_headers: HashMap<String, String>,
 }
 
 // ── Factory ───────────────────────────────────────────────────────────────────
