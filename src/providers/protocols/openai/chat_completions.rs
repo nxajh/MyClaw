@@ -80,6 +80,7 @@ impl ChatProvider for OpenAiChatCompletionsClient {
             }
 
             let mut saw_tool_call = false;
+            let mut sse_stop_reason: Option<StopReason> = None;
             let mut buffer = String::new();
             let mut utf8_buf = Vec::new();
             let mut stream = resp.bytes_stream();
@@ -107,17 +108,35 @@ impl ChatProvider for OpenAiChatCompletionsClient {
                 while let Some(pos) = buffer.find('\n') {
                     let line = buffer[..pos].to_string();
                     buffer.drain(..=pos);
-                    let parsed = crate::providers::shared::parse_openai_sse(&line);
-                    if let Some(ev) = parsed {
-                        if matches!(ev, StreamEvent::ToolCallStart { .. } | StreamEvent::ToolCallDelta { .. }) {
-                            saw_tool_call = true;
+                    let events = crate::providers::shared::parse_openai_sse(&line);
+                    for ev in events {
+                        match ev {
+                            StreamEvent::ToolCallStart { .. } | StreamEvent::ToolCallDelta { .. } => {
+                                saw_tool_call = true;
+                                let _ = tx.send(ev).await;
+                            }
+                            // Consume SSE-reported Done; emit a single authoritative Done at the end.
+                            StreamEvent::Done { reason } => {
+                                sse_stop_reason = Some(reason);
+                            }
+                            _ => { let _ = tx.send(ev).await; }
                         }
-                        let _ = tx.send(ev).await;
                     }
                 }
             }
-            // OpenAI may report finish_reason="stop" even when tool calls were present.
-            let final_reason = if saw_tool_call { StopReason::ToolUse } else { StopReason::EndTurn };
+
+            // Determine final stop reason: prefer the SSE-reported reason (which carries
+            // MaxTokens / ContentFilter), but override with ToolUse when tool calls were
+            // made and the provider reported "stop" instead of "tool_calls".
+            let final_reason = match sse_stop_reason {
+                Some(StopReason::ToolUse) => StopReason::ToolUse,
+                Some(r) if saw_tool_call => {
+                    tracing::debug!(?r, "overriding SSE stop reason with ToolUse (saw tool call events)");
+                    StopReason::ToolUse
+                }
+                Some(r) => r,
+                None => if saw_tool_call { StopReason::ToolUse } else { StopReason::EndTurn },
+            };
             let _ = tx.send(StreamEvent::Done { reason: final_reason }).await;
         });
 

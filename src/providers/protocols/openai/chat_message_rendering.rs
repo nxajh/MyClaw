@@ -6,6 +6,14 @@
 use serde_json::json;
 use crate::providers::{ChatRequest, ContentPart};
 
+fn detect_image_media_type(b64: &str) -> &'static str {
+    if b64.starts_with("/9j/")   { "image/jpeg" }
+    else if b64.starts_with("iVBOR") { "image/png"  }
+    else if b64.starts_with("R0lG")  { "image/gif"  }
+    else if b64.starts_with("UklG")  { "image/webp" }
+    else                              { "image/jpeg" }
+}
+
 /// Build the request body for the OpenAI Chat Completions API.
 ///
 /// Per the latest OpenAI documentation:
@@ -16,23 +24,29 @@ pub fn render_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
     let messages: Vec<serde_json::Value> = req.messages
         .iter()
         .map(|msg| {
-            let content_vec: Vec<serde_json::Value> = msg.parts.iter().map(|part| match part {
-                ContentPart::Text { text } => json!({"type": "text", "text": text}),
-                ContentPart::ImageUrl { url, detail } => json!({
+            // Thinking blocks are not supported by OpenAI — skip them entirely.
+            let content_vec: Vec<serde_json::Value> = msg.parts.iter().filter_map(|part| match part {
+                ContentPart::Text { text } => Some(json!({"type": "text", "text": text})),
+                ContentPart::ImageUrl { url, detail } => Some(json!({
                     "type": "image_url",
                     "image_url": { "url": url, "detail": format!("{:?}", detail).to_lowercase() }
-                }),
-                ContentPart::ImageB64 { b64_json, detail, .. } => json!({
-                    "type": "image_url",
-                    "image_url": { "url": format!("data:image;base64,{}", b64_json), "detail": format!("{:?}", detail).to_lowercase() }
-                }),
-                ContentPart::Thinking { .. } => {
-                    // OpenAI does not support thinking blocks — skip silently.
-                    json!({"type": "text", "text": ""})
+                })),
+                ContentPart::ImageB64 { b64_json, detail, media_type } => {
+                    let mime = media_type.as_deref().unwrap_or_else(|| detect_image_media_type(b64_json));
+                    Some(json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:{};base64,{}", mime, b64_json),
+                            "detail": format!("{:?}", detail).to_lowercase()
+                        }
+                    }))
                 }
+                ContentPart::Thinking { .. } => None,
             }).collect();
 
-            let content = if content_vec.len() == 1 {
+            let content = if content_vec.is_empty() {
+                json!("")
+            } else if content_vec.len() == 1 {
                 if let Some(text) = msg.parts.iter().find_map(|p| match p {
                     ContentPart::Text { text } => Some(text.as_str()),
                     _ => None,
@@ -55,7 +69,12 @@ pub fn render_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                 }
                 msg_json["content"] = json!(content);
             } else if msg.role == "assistant" {
-                msg_json["content"] = if content.is_string() && content.as_str().unwrap_or("").is_empty() {
+                let is_empty = match &content {
+                    serde_json::Value::String(s) => s.is_empty(),
+                    serde_json::Value::Array(arr) => arr.is_empty(),
+                    _ => false,
+                };
+                msg_json["content"] = if is_empty {
                     serde_json::Value::Null
                 } else {
                     json!(content)
@@ -80,8 +99,8 @@ pub fn render_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
 
     if let Some(temp) = req.temperature { body["temperature"] = json!(temp); }
 
-    // max_completion_tokens is the current parameter; fall back to max_tokens
-    // for providers that haven't updated yet.
+    // max_completion_tokens is the current parameter; include max_tokens for
+    // providers that haven't updated yet.
     if let Some(max) = req.max_tokens {
         body["max_completion_tokens"] = json!(max);
         body["max_tokens"] = json!(max);
