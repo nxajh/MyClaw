@@ -17,7 +17,7 @@ level = "info"
 api_key = "${OPENAI_API_KEY}"
 
 [providers.openai.chat]
-base_url = "https://api.openai.com/v1"
+base_url = "https://api.openai.com"
 user_agent = "MyClaw/0.1"
 
 [providers.openai.chat.models.gpt-4o]
@@ -43,7 +43,7 @@ output = 0.6
 cache_read = 0.075
 
 [providers.openai.embedding]
-base_url = "https://api.openai.com/v1"
+base_url = "https://api.openai.com"
 
 [providers.openai.embedding.models.text-embedding-3-small]
 dimensions = 1536
@@ -52,7 +52,7 @@ dimensions = 1536
 input = 0.02
 
 [providers.openai.image_generation]
-base_url = "https://api.openai.com/v1"
+base_url = "https://api.openai.com"
 
 [providers.openai.image_generation.models.dall-e-3]
 
@@ -60,7 +60,7 @@ base_url = "https://api.openai.com/v1"
 per_unit = 0.04
 
 [providers.openai.tts]
-base_url = "https://api.openai.com/v1"
+base_url = "https://api.openai.com"
 
 [providers.openai.tts.models.tts-1]
 
@@ -73,7 +73,7 @@ per_unit = 15.0
 api_key = "${MINIMAX_API_KEY}"
 
 [providers.minimax.chat]
-base_url = "https://api.minimaxi.chat/v1"
+base_url = "https://api.minimaxi.chat"
 
 [providers.minimax.chat.models.minimax-m2.7]
 input = ["text", "image"]
@@ -92,7 +92,7 @@ api_key = "${GLM_API_KEY}"
 auth_style = "bearer"
 
 [providers.glm.chat]
-base_url = "https://open.bigmodel.cn/api/paas/v4"
+base_url = "https://open.bigmodel.cn/api/paas"
 
 [providers.glm.chat.models.glm-4-plus]
 input = ["text", "image"]
@@ -105,7 +105,7 @@ input = 50.0
 output = 50.0
 
 [providers.glm.embedding]
-base_url = "https://open.bigmodel.cn/api/paas/v4"
+base_url = "https://open.bigmodel.cn/api/paas"
 
 [providers.glm.embedding.models.embedding-3]
 dimensions = 2048
@@ -116,7 +116,7 @@ dimensions = 2048
 api_key = "${KIMI_API_KEY}"
 
 [providers.kimi.chat]
-base_url = "https://api.moonshot.cn/v1"
+base_url = "https://api.moonshot.cn"
 
 [providers.kimi.chat.models.moonshot-v1-8k]
 input = ["text"]
@@ -137,7 +137,7 @@ api_key = "${ANTHROPIC_API_KEY}"
 auth_style = "x_api_key"
 
 [providers.anthropic.chat]
-base_url = "https://api.anthropic.com/v1"
+base_url = "https://api.anthropic.com"
 
 [providers.anthropic.chat.models.claude-sonnet-4-20250514]
 input = ["text", "image"]
@@ -154,9 +154,10 @@ cache_read = 0.3
 
 [providers.xiaomi]
 api_key = "${XIAOMI_API_KEY}"
+auth_style = "bearer"
 
 [providers.xiaomi.chat]
-base_url = "https://api.xiaomimimo.com/anthropic/v1"
+base_url = "https://api.xiaomimimo.com/anthropic"
 
 [providers.xiaomi.chat.models.mimo-7b]
 input = ["text"]

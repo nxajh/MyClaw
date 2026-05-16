@@ -36,11 +36,7 @@ impl OpenAiChatCompletionsClient {
     }
 
     fn chat_url(&self) -> String {
-        if self.base_url.contains("/v1") || self.base_url.contains("/v4") {
-            format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
-        } else {
-            format!("{}/v1/chat/completions", self.base_url.trim_end_matches('/'))
-        }
+        format!("{}/v1/chat/completions", self.base_url.trim_end_matches('/'))
     }
 
     fn common_headers(&self) -> reqwest::header::HeaderMap {

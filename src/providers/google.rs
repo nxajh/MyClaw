@@ -6,20 +6,20 @@
 //! to search the web. No Custom Search Engine ID (cx) needed — the grounding
 //! is built into the Gemini API itself.
 //!
-//! Endpoint: {base_url}/models/{model}:generateContent?key={api_key}
+//! Endpoint: {base_url}/v1beta/models/{model}:generateContent?key={api_key}
 //!
 //! Config example:
 //!   [providers.google]
 //!   api_key = "YOUR_GEMINI_API_KEY"
 //!
 //!   [providers.google.search]
-//!   base_url = "https://generativelanguage.googleapis.com/v1beta"
+//!   base_url = "https://generativelanguage.googleapis.com"
 //!
 //!   [providers.google.search.models."gemini-2.0-flash"]
 
 use crate::providers::{SearchProvider, SearchRequest, SearchResult, SearchResults};
 
-const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
+const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com";
 const DEFAULT_MODEL: &str = "gemini-2.0-flash";
 
 #[derive(Clone)]
@@ -119,7 +119,7 @@ impl SearchProvider for GoogleProvider {
             .unwrap_or(DEFAULT_MODEL);
 
         let url = format!(
-            "{}/models/{}:generateContent?key={}",
+            "{}/v1beta/models/{}:generateContent?key={}",
             self.base_url.trim_end_matches('/'),
             model,
             self.api_key,
