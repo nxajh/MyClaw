@@ -178,6 +178,7 @@ impl ChatProvider for FallbackChatProvider {
                                 category = %classified.category,
                                 reason = ?classified.reason,
                                 cooldown = ?classified.cooldown_duration(),
+                                body = %classified.message,
                                 "classified HTTP error"
                             );
                             if classified.should_rotate_credential {
