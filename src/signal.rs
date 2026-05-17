@@ -5,9 +5,20 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
+/// Canonical path for the daemon PID file.
+///
+/// Stored under `~/.myclaw/` so both the daemon (which may run with
+/// `PrivateTmp=true`) and CLI subcommands (running outside the service
+/// namespace) can always find it.
+pub fn pid_file_path() -> PathBuf {
+    std::env::var("HOME")
+        .map(|h| PathBuf::from(h).join(".myclaw/myclaw.pid"))
+        .unwrap_or_else(|_| std::env::temp_dir().join("myclaw.pid"))
+}
+
 /// Find the daemon PID from the PID file, or fallback to pgrep.
 pub fn find_daemon_pid() -> Result<i32> {
-    let pid_file = PathBuf::from("/tmp/myclaw.pid");
+    let pid_file = pid_file_path();
     if pid_file.exists() {
         let pid_str = std::fs::read_to_string(&pid_file)?;
         let pid: i32 = pid_str

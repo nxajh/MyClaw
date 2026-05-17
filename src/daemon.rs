@@ -619,7 +619,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     }
 
     // Write PID file for hot-switch coordination (used by `myclaw update`).
-    let pid_file = std::env::temp_dir().join("myclaw.pid");
+    let pid_file = crate::signal::pid_file_path();
     if let Err(e) = std::fs::write(&pid_file, std::process::id().to_string()) {
         tracing::warn!(err = %e, "failed to write PID file");
     } else {
@@ -1038,7 +1038,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     tracing::info!("myclaw daemon stopped");
 
     // Clean up PID file
-    let pid_file = std::env::temp_dir().join("myclaw.pid");
+    let pid_file = crate::signal::pid_file_path();
     if pid_file.exists() {
         let _ = std::fs::remove_file(&pid_file);
         tracing::debug!("PID file removed");
