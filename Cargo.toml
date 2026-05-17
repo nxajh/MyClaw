@@ -77,6 +77,9 @@ hmac = "0.12"
 # SO_REUSEPORT support (hot switch)
 socket2 = { version = "0.5", features = ["all"] }
 
+# systemd sd_notify support (hot switch / Type=notify)
+sd-notify = "0.4"
+
 # WeChat crypto (feature-gated)
 aes = { version = "0.8", optional = true }
 ecb = { version = "0.1", optional = true }

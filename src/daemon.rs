@@ -612,12 +612,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         // to read them using the proper session backend.
 
         // ── Notify old process ────────────────────────────────────────────
-        // SIGUSR2 tells the old process that the new one is ready; the old
-        // process will exit(0).
-        if let Some(old_pid) = crate::hot_switch::old_pid() {
-            tracing::debug!(old_pid, "sending SIGUSR2 to old process — I am ready");
-            unsafe { libc::kill(old_pid, libc::SIGUSR2); }
-        }
+        // SIGUSR2 is sent after full initialization (just before orchestrator.run())
+        // so the old process doesn't exit before we are truly ready to serve.
     }
 
     // Write PID file for hot-switch coordination (used by `myclaw update`).
@@ -1008,6 +1004,37 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         });
     }
 
+    // ── sd_notify: signal systemd that the daemon is ready ────────────────
+    // For hot-switch startups: also tell systemd to track the new PID *before*
+    // signalling the old process to exit, so systemd doesn't kill the cgroup.
+    #[cfg(unix)]
+    {
+        if crate::hot_switch::is_hot_switch() {
+            // New process (started via fork+execv from old process):
+            // 1. Update systemd's main PID so it tracks us, not the dying parent.
+            // 2. Mark ourselves as ready.
+            // 3. Signal old process to exit cleanly.
+            let new_pid = std::process::id();
+            if let Err(e) = sd_notify::notify(false, &[
+                sd_notify::NotifyState::MainPid(new_pid),
+                sd_notify::NotifyState::Ready,
+            ]) {
+                tracing::warn!(err = %e, "sd_notify MAINPID+READY failed");
+            } else {
+                tracing::debug!(new_pid, "sd_notify MAINPID+READY sent");
+            }
+            if let Some(old_pid) = crate::hot_switch::old_pid() {
+                tracing::debug!(old_pid, "sending SIGUSR2 to old process — new process is ready");
+                unsafe { libc::kill(old_pid as libc::pid_t, libc::SIGUSR2); }
+            }
+        } else {
+            // Normal startup: tell systemd we are ready to accept connections.
+            if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]) {
+                tracing::debug!(err = %e, "sd_notify READY failed (not running under systemd)");
+            }
+        }
+    }
+
     // Run the message dispatch loop (blocks until shutdown).
     orchestrator.run(shutdown_rx).await.context("orchestrator run error")?;
 
@@ -1015,9 +1042,22 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     tracing::debug!("dispatch loop ended, shutting down listeners");
     orchestrator.shutdown_listeners().await;
 
-    // ── If SIGUSR1 set the flag, exit cleanly — systemd will restart with new binary ──
+    // ── Hot switch: fork+execv new binary, inherit listen socket ──────────
+    // When SIGUSR1 set the shutdown flag (triggered by `myclaw update`), the
+    // new binary is already on disk.  Fork a child, execv it with the inherited
+    // listen socket fd, and wait for the child to signal readiness via SIGUSR2.
+    // If the fork/execv fails, roll back (clear shutdown flag) — currently that
+    // path is not reached because we exit after this block.
+    #[cfg(unix)]
     if crate::is_shutting_down() {
-        tracing::debug!("shutdown flag set, exiting for restart (systemd will start new binary)");
+        let socket_fd = LISTEN_SOCKET_FD.load(Ordering::SeqCst);
+        tracing::debug!(socket_fd, "shutdown flag set, executing hot switch (fork+execv)");
+        if let Err(e) = tokio::task::block_in_place(|| crate::hot_switch::do_hot_switch(socket_fd)) {
+            tracing::warn!(err = %e, "hot switch failed, daemon will exit normally");
+        }
+        // do_hot_switch either: (a) exits via the SIGUSR2 handler when new
+        // process is ready, or (b) returns Err on failure. Either way we
+        // fall through to normal exit below.
     }
 
     tracing::info!("myclaw daemon stopped");
