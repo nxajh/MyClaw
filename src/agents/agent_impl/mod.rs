@@ -124,11 +124,7 @@ pub struct Agent {
     registry: Arc<dyn ServiceRegistry>,
     tools: Arc<ToolRegistry>,
     skills: Arc<RwLock<SkillManager>>,
-    /// Stable at-startup config for values that must never change live
-    /// (workspace paths, etc.).  New AgentLoops read from `live_config`.
     config: AgentConfig,
-    /// Live config shared across all clones — updated by SIGHUP reload.
-    live_config: Arc<RwLock<AgentConfig>>,
     system_prompt: String,
     model_override: Option<String>,
     mcp_instructions: Vec<(String, String)>,
@@ -144,13 +140,11 @@ impl Agent {
         skills: Arc<RwLock<SkillManager>>,
         config: AgentConfig,
     ) -> Self {
-        let live_config = Arc::new(RwLock::new(config.clone()));
         Self {
             registry,
             tools,
             skills,
             config,
-            live_config,
             system_prompt: String::new(),
             model_override: None,
             mcp_instructions: Vec::new(),
@@ -165,20 +159,8 @@ impl Agent {
     pub fn skills(&self) -> &Arc<RwLock<SkillManager>> { &self.skills }
 
     pub fn sub_agent_configs(&self) -> &Arc<RwLock<Vec<SubAgentConfig>>> { &self.sub_agent_configs }
-    /// Returns the workspace directory path (stable, from startup config).
     pub fn workspace_dir(&self) -> &str { &self.config.prompt_config.workspace_dir }
-    pub fn compact_threshold(&self) -> f64 { self.live_config.read().context.compact_threshold }
-
-    /// Apply a new config from SIGHUP reload.  Takes effect for the next
-    /// AgentLoop created by any clone that shares this `live_config` Arc.
-    pub fn update_config(&self, new: AgentConfig) {
-        *self.live_config.write() = new;
-    }
-
-    /// Snapshot the current live config (e.g. to read stable values during reload).
-    pub fn config_snapshot(&self) -> AgentConfig {
-        self.live_config.read().clone()
-    }
+    pub fn compact_threshold(&self) -> f64 { self.config.context.compact_threshold }
 
     pub fn with_system_prompt(mut self, prompt: String) -> Self {
         self.system_prompt = prompt;
@@ -216,8 +198,7 @@ impl Agent {
         persist_hook: Option<Arc<dyn PersistHook>>,
     ) -> AgentLoop {
         let ov = &session.session_override;
-        // Snapshot the live config (updated by SIGHUP reload) for this loop.
-        let config = self.live_config.read().clone().with_override(ov);
+        let config = self.config.with_override(ov);
 
         let prompt = if !self.system_prompt.is_empty() {
             self.system_prompt.clone()
