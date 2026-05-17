@@ -225,6 +225,7 @@ impl ChatProvider for FallbackChatProvider {
                                     model = %entry.model_id,
                                     category = %classified.category,
                                     reason = ?classified.reason,
+                                    message = %classified.message,
                                     "classified stream error, failing over"
                                 );
                                 should_failover = true;

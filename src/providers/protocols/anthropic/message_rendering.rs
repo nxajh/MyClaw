@@ -86,7 +86,10 @@ pub fn render_anthropic_messages<'a>(req: &ChatRequest<'a>) -> RenderedAnthropic
                     if let Some(ref tcs) = msg.tool_calls {
                         for tc in tcs {
                             let input = serde_json::from_str::<serde_json::Value>(&tc.arguments)
-                                .unwrap_or(serde_json::Value::Object(Default::default()));
+                                .unwrap_or_else(|e| {
+                                    tracing::warn!(tool_id = %tc.id, name = %tc.name, error = %e, "tool arguments JSON parse failed, using empty input");
+                                    serde_json::Value::Object(Default::default())
+                                });
                             p.push(serde_json::json!({
                                 "type": "tool_use",
                                 "id": tc.id,
