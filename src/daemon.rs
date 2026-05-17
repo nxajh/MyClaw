@@ -90,24 +90,51 @@ fn bind_reusable(port: u16) -> anyhow::Result<std::net::TcpListener> {
 }
 
 /// Initialize tracing subscriber based on config.
+/// Stored reload function for the tracing filter — set once by `init_tracing`.
+static LOG_RELOAD: std::sync::OnceLock<Box<dyn Fn(String) -> bool + Send + Sync + 'static>> =
+    std::sync::OnceLock::new();
+
+/// Build a RUST_LOG-style directive string from the logging config.
+fn build_log_directives(cfg: &crate::config::LoggingConfig) -> String {
+    let level = cfg.level.as_deref().unwrap_or("info");
+    let mut parts = vec![level.to_string()];
+    for (module, mod_level) in &cfg.modules {
+        parts.push(format!("{}={}", module, mod_level));
+    }
+    parts.join(",")
+}
+
 pub fn init_tracing(config: &crate::config::AppConfig) {
-    use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+    use tracing_subscriber::{fmt, prelude::*, EnvFilter, reload};
 
-    let level = config
-        .logging
-        .level
-        .as_deref()
-        .unwrap_or("info");
-
+    // Prefer RUST_LOG env var; fall back to config.
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(level));
+        .unwrap_or_else(|_| {
+            let directives = build_log_directives(&config.logging);
+            EnvFilter::new(directives)
+        });
+
+    let (reload_layer, handle) = reload::Layer::new(filter);
 
     let subscriber = tracing_subscriber::registry()
-        .with(filter)
+        .with(reload_layer)
         .with(fmt::layer().with_target(true).with_thread_ids(true));
 
     tracing::subscriber::set_global_default(subscriber)
         .expect("failed to set tracing subscriber");
+
+    let _ = LOG_RELOAD.set(Box::new(move |directives: String| {
+        let new_filter = EnvFilter::try_new(&directives)
+            .unwrap_or_else(|_| EnvFilter::new("info"));
+        handle.reload(new_filter).is_ok()
+    }));
+}
+
+/// Reload the tracing log filter from a new logging config.
+/// Returns true if the reload succeeded, false if the handle is unavailable.
+pub fn reload_log_filter(cfg: &crate::config::LoggingConfig) -> bool {
+    let directives = build_log_directives(cfg);
+    LOG_RELOAD.get().map_or(false, |f| f(directives))
 }
 
 /// Calculate max output bytes from model config (max_output_tokens).
@@ -962,6 +989,9 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     #[cfg(unix)]
     {
         let config_path = config.config_path.clone();
+        let workspace_dir = config.workspace_dir.clone();
+        let knowledge_dir = config.knowledge_dir.clone();
+        let agent_for_reload = agent.clone();
         let mut sighup = signal(SignalKind::hangup())
             .expect("failed to register SIGHUP handler");
         tokio::spawn(async move {
@@ -970,12 +1000,35 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
                 tracing::debug!("SIGHUP received, reloading config from {}", config_path.display());
                 match crate::config::ConfigLoader::from_file(&config_path) {
                     Ok(new_cfg) => {
+                        // 1. Reload log filter (level + per-module overrides).
+                        reload_log_filter(&new_cfg.logging);
+
+                        // 2. Rebuild agent config from the new file.
+                        //    Preserve max_output_bytes — computed from model config at
+                        //    startup and does not change without a full restart.
+                        let cur = agent_for_reload.config_snapshot();
+                        let new_agent_config = AgentConfig {
+                            max_tool_calls: new_cfg.agent.max_tool_calls,
+                            max_history: new_cfg.agent.max_history,
+                            prompt_config: build_prompt_config(
+                                &new_cfg.agent, &workspace_dir, &knowledge_dir,
+                            ),
+                            context: new_cfg.agent.context.clone(),
+                            stream_first_chunk_timeout_secs: new_cfg.agent.stream_first_chunk_timeout_secs,
+                            max_output_bytes: cur.max_output_bytes,
+                            loop_breaker_threshold: new_cfg.agent.loop_breaker_threshold as usize,
+                            tool_timeout_secs: new_cfg.agent.tool_timeout_secs,
+                            model_override: None,
+                            thinking_override: None,
+                        };
+                        agent_for_reload.update_config(new_agent_config);
+
                         tracing::info!(
-                            model = %new_cfg.defaults.model,
-                            "config reloaded successfully"
+                            log_level = new_cfg.logging.level.as_deref().unwrap_or("info"),
+                            max_tool_calls = new_cfg.agent.max_tool_calls,
+                            tool_timeout_secs = new_cfg.agent.tool_timeout_secs,
+                            "config reloaded"
                         );
-                        // TODO: propagate config changes to running components
-                        // (scheduler, channel routing, model selection, etc.)
                     }
                     Err(e) => {
                         tracing::error!(err = %e, "config reload failed, keeping current config");
