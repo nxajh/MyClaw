@@ -67,8 +67,13 @@ impl ChatProvider for OpenAiChatCompletionsClient {
                 client.post(&url).headers(headers).json(&body).send()
             ).await {
                 Ok(Ok(r)) => r,
-                Ok(Err(e)) => { let _ = tx.send(StreamEvent::Error(e.to_string())).await; return; }
+                Ok(Err(e)) => {
+                    tracing::warn!(url = %url, error = %e, "request failed");
+                    let _ = tx.send(StreamEvent::Error(e.to_string())).await;
+                    return;
+                }
                 Err(_) => {
+                    tracing::warn!(url = %url, "timed out waiting for response headers");
                     let _ = tx.send(StreamEvent::Error(
                         "timed out waiting for response headers".to_string()
                     )).await;
@@ -95,7 +100,11 @@ impl ChatProvider for OpenAiChatCompletionsClient {
             while let Some(item) = stream.next().await {
                 let bytes = match item {
                     Ok(b) => b,
-                    Err(e) => { let _ = tx.send(StreamEvent::Error(e.to_string())).await; return; }
+                    Err(e) => {
+                        tracing::warn!(url = %url, error = %e, "stream read error");
+                        let _ = tx.send(StreamEvent::Error(e.to_string())).await;
+                        return;
+                    }
                 };
                 utf8_buf.extend_from_slice(&bytes);
                 let try_decode = std::str::from_utf8(&utf8_buf);
