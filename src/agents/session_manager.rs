@@ -863,8 +863,8 @@ impl SessionManager {
                 // session ID so the agent can still operate this turn, rather than
                 // crashing the whole process.
                 let ephemeral = format!("ephemeral:{}", uuid::Uuid::new_v4());
-                tracing::error!(
-                    error = %e,
+                tracing::warn!(
+                    err = %e,
                     user = %user_id,
                     session = %ephemeral,
                     "backend failed to create session; using ephemeral (non-persisted) session"

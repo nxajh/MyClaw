@@ -96,7 +96,7 @@ pub fn load_agents_from_dir(agents_dir: &Path) -> Vec<SubAgentConfig> {
     let entries = match std::fs::read_dir(agents_dir) {
         Ok(e) => e,
         Err(e) => {
-            warn!(dir = %agents_dir.display(), error = %e, "failed to read agents directory");
+            warn!(dir = %agents_dir.display(), err = %e, "failed to read agents directory");
             return agents;
         }
     };
@@ -123,7 +123,7 @@ pub fn load_agents_from_dir(agents_dir: &Path) -> Vec<SubAgentConfig> {
                 agents.push(agent);
             }
             Err(e) => {
-                warn!(path = %agent_md.display(), error = %e, "failed to parse AGENT.md");
+                warn!(path = %agent_md.display(), err = %e, "failed to parse AGENT.md");
             }
         }
     }

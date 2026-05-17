@@ -122,7 +122,7 @@ impl CompactionExecutor {
                 anyhow::bail!("summarize returned empty text")
             }
             Err(e) => {
-                tracing::warn!(error = %e, "summarize failed");
+                tracing::warn!(err = %e, "summarize failed");
                 Err(e)
             }
         }

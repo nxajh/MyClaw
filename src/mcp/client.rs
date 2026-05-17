@@ -258,7 +258,7 @@ impl McpRegistry {
                 }
                 // Non-fatal — log and continue with remaining servers
                 Err(e) => {
-                    tracing::error!("Failed to connect to MCP server `{}`: {:#}", config.name, e);
+                    tracing::warn!(server = %config.name, err = %e, "failed to connect to MCP server");
                 }
             }
         }

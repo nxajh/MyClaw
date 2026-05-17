@@ -70,8 +70,8 @@ pub struct AgentConfig {
     pub prompt_config: SystemPromptConfig,
     /// Context window management settings.
     pub context: ContextConfig,
-    /// Stream chunk timeout in seconds — max time to wait for next chunk.
-    pub stream_chunk_timeout_secs: u64,
+    /// Timeout for the first chunk from the stream (API startup latency on large contexts).
+    pub stream_first_chunk_timeout_secs: u64,
     /// Max output bytes before forcing stream stop (derived from max_output_tokens).
     pub max_output_bytes: usize,
     /// Loop breaker exact-repeat threshold: N identical consecutive calls → break.
@@ -92,7 +92,7 @@ impl Default for AgentConfig {
             max_history: 200,
             prompt_config: SystemPromptConfig::default(),
             context: ContextConfig::default(),
-            stream_chunk_timeout_secs: 90,
+            stream_first_chunk_timeout_secs: 600,
             max_output_bytes: 100 * 1024,
             loop_breaker_threshold: 3,
             tool_timeout_secs: 180,
@@ -233,7 +233,7 @@ impl Agent {
                 Arc::clone(&self.registry),
                 Arc::clone(&resources),
                 Arc::clone(&self.tools),
-                config.stream_chunk_timeout_secs,
+                config.stream_first_chunk_timeout_secs,
             ),
             tool_executor: DefaultToolExecutor::new(Arc::clone(&self.tools), config.tool_timeout_secs),
             config,

@@ -102,7 +102,7 @@ pub fn load_webhook_jobs(webhooks_dir: &Path) -> Vec<WebhookJobDef> {
     let entries = match std::fs::read_dir(webhooks_dir) {
         Ok(e) => e,
         Err(e) => {
-            warn!(dir = %webhooks_dir.display(), error = %e, "failed to read webhooks directory");
+            warn!(dir = %webhooks_dir.display(), err = %e, "failed to read webhooks directory");
             return jobs;
         }
     };
@@ -128,7 +128,7 @@ pub fn load_webhook_jobs(webhooks_dir: &Path) -> Vec<WebhookJobDef> {
                 jobs.push(job);
             }
             Err(e) => {
-                warn!(path = %path.display(), error = %e, "failed to parse webhook file");
+                warn!(path = %path.display(), err = %e, "failed to parse webhook file");
             }
         }
     }

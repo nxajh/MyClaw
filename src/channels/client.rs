@@ -142,7 +142,7 @@ impl ClientChannel {
                         let ws_stream = match ws_result {
                             Ok(ws) => ws,
                             Err(e) => {
-                                tracing::warn!(peer = %peer_addr, error = %e, "WebSocket handshake failed");
+                                tracing::warn!(peer = %peer_addr, err = %e, "WebSocket handshake failed");
                                 continue;
                             }
                         };
@@ -210,7 +210,7 @@ impl ClientChannel {
                                         Ok(Message::Close(_)) => break,
                                         Ok(_) => continue, // Ignore binary, ping, pong
                                         Err(e) => {
-                                            tracing::warn!(conn_id = %conn_id_clone, error = %e, "WebSocket read error");
+                                            tracing::warn!(conn_id = %conn_id_clone, err = %e, "WebSocket read error");
                                             break;
                                         }
                                     };
@@ -288,7 +288,7 @@ impl ClientChannel {
                                             };
 
                                             if message_tx_clone.send(channel_msg).await.is_err() {
-                                                tracing::warn!("Orchestrator message channel closed");
+                                                tracing::warn!("orchestrator message channel closed");
                                                 break;
                                             }
                                         }
@@ -298,7 +298,7 @@ impl ClientChannel {
                                             let contexts = stream_contexts_clone.read();
                                             if let Some(ctx) = contexts.get(&session_key_clone) {
                                                 ctx.cancel.cancel();
-                                                tracing::info!(session = %session_key_clone, "turn cancelled by client");
+                                                tracing::debug!(session = %session_key_clone, "turn cancelled by client");
                                             }
                                         }
 
@@ -361,11 +361,11 @@ impl ClientChannel {
                                 }
                             }
 
-                            tracing::info!(conn_id = %conn_id_clone, "WebSocket client disconnected");
+                            tracing::debug!(conn_id = %conn_id_clone, "WebSocket client disconnected");
                         });
                     }
                     Err(e) => {
-                        tracing::error!(error = %e, "failed to accept WebSocket connection");
+                        tracing::error!(err = %e, "failed to accept WebSocket connection");
                     }
                 }
             }

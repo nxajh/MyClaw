@@ -128,7 +128,7 @@ fn calculate_max_output_bytes(
                         if let Some(max_tokens) = model_config.max_output_tokens {
                             // 1 token ≈ 4 bytes, minimum 100KB
                             let bytes = (max_tokens as usize * 4).max(default_bytes);
-                            tracing::info!(
+                            tracing::debug!(
                                 model = %model_id,
                                 max_output_tokens = max_tokens,
                                 max_output_bytes = bytes,
@@ -142,7 +142,7 @@ fn calculate_max_output_bytes(
         }
     }
     
-    tracing::info!(max_output_bytes = default_bytes, "using default max output bytes");
+    tracing::debug!(max_output_bytes = default_bytes, "using default max output bytes");
     default_bytes
 }
 
@@ -217,7 +217,7 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
             })
             .unwrap_or_else(|| ProviderId::new("generic"));
 
-        tracing::info!(provider = %provider_key, id = %provider_id, "resolved provider identity");
+        tracing::debug!(provider = %provider_key, id = %provider_id, "resolved provider identity");
 
         // ── Chat ──────────────────────────────────────────────────────
         if let Some(ref chat) = provider_cfg.chat {
@@ -228,7 +228,7 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
             let user_agent = chat.user_agent.clone();
 
             for (model_id, model_cfg) in &chat.models {
-                tracing::info!(
+                tracing::debug!(
                     provider = %provider_key,
                     model = %model_id,
                     capability = "chat",
@@ -264,7 +264,7 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
             let user_agent = emb.user_agent.clone();
 
             for model_id in emb.models.keys() {
-                tracing::info!(
+                tracing::debug!(
                     provider = %provider_key,
                     model = %model_id,
                     capability = "embedding",
@@ -459,7 +459,7 @@ fn build_skill_manager(workspace_dir: &std::path::Path) -> SkillManager {
     let skills_dir = workspace_dir.join("skills");
     let definitions = crate::agents::skill_loader::load_skills_from_dir(&skills_dir);
     for def in definitions {
-        tracing::info!(name = %def.name, "skill registered");
+        tracing::debug!(name = %def.name, "skill registered");
         manager.register(Skill::from_definition(&def));
     }
     tracing::info!(skill_count = manager.skill_count(), "skill manager built");
@@ -488,7 +488,7 @@ fn build_session_backend(config: &crate::config::AppConfig) -> Arc<dyn crate::st
             Arc::new(backend)
         }
         Err(e) => {
-            tracing::warn!(error = %e, "failed to open session storage, falling back to in-memory");
+            tracing::warn!(err = %e, "failed to open session storage, falling back to in-memory");
             Arc::new(InMemoryBackend::new())
         }
     }
@@ -615,7 +615,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         // SIGUSR2 tells the old process that the new one is ready; the old
         // process will exit(0).
         if let Some(old_pid) = crate::hot_switch::old_pid() {
-            tracing::info!(old_pid, "sending SIGUSR2 to old process — I am ready");
+            tracing::debug!(old_pid, "sending SIGUSR2 to old process — I am ready");
             unsafe { libc::kill(old_pid, libc::SIGUSR2); }
         }
     }
@@ -623,7 +623,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // Write PID file for hot-switch coordination (used by `myclaw update`).
     let pid_file = std::env::temp_dir().join("myclaw.pid");
     if let Err(e) = std::fs::write(&pid_file, std::process::id().to_string()) {
-        tracing::warn!(error = %e, "failed to write PID file (non-fatal)");
+        tracing::warn!(err = %e, "failed to write PID file");
     } else {
         tracing::debug!(pid = %std::process::id(), path = %pid_file.display(), "PID file written");
     }
@@ -632,7 +632,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     if let Err(e) = crate::memory::ensure_memory_dir(
         config.knowledge_dir.to_str().unwrap_or("."),
     ) {
-        tracing::warn!(error = %e, "failed to create knowledge directory (non-fatal)");
+        tracing::warn!(err = %e, "failed to create knowledge directory");
     }
 
     // ── Composition Root: assemble all components ──────────────────────────
@@ -641,7 +641,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
     let mcp_manager = McpManager::new();
     if let Err(e) = mcp_manager.connect(&config.mcp_servers).await {
-        tracing::warn!(error = %e, "MCP server connection had errors (non-fatal), continuing");
+        tracing::warn!(err = %e, "MCP server connection had errors");
     }
 
     // Build skill manager (SKILL.md files).
@@ -671,7 +671,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         );
         let count = migrator.migrate_from_markdown(&cron_dir);
         if count > 0 {
-            tracing::info!(count = count, "migrated cron jobs from markdown to JSON");
+            tracing::debug!(count = count, "migrated cron jobs from markdown to JSON");
         }
     }
 
@@ -751,7 +751,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             parent_tools.register(tool);
         }
         parent_tools.register(Arc::new(delegate_tool));
-        tracing::info!("agent_delegate tool registered (multi-agent mode)");
+        tracing::debug!("agent_delegate tool registered (multi-agent mode)");
 
         let tool_search = crate::tools::ToolSearchTool::new(Arc::clone(&base_tools_arc));
         parent_tools.register(Arc::new(tool_search));
@@ -775,15 +775,15 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let sessions_root = config.workspace_dir.join("sessions");
     let unfinished_subagents = crate::agents::recovery::scan_unfinished_subagents(&sessions_root);
     if !unfinished_subagents.is_empty() {
-        tracing::info!(
+        tracing::warn!(
             count = unfinished_subagents.len(),
             "detected unfinished sub-agents from previous run"
         );
         for sa in &unfinished_subagents {
-            tracing::info!(
+            tracing::warn!(
                 agent = %sa.agent_name,
                 task_id = %sa.task_id,
-                "  unfinished sub-agent"
+                "unfinished sub-agent"
             );
         }
     }
@@ -810,7 +810,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             }
         }
         Err(e) => {
-            tracing::warn!(error = %e, "failed to process session queues (non-fatal)");
+            tracing::warn!(err = %e, "failed to process session queues");
         }
     }
 
@@ -834,7 +834,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         max_history: config.agent.max_history,
         prompt_config: build_prompt_config(&config.agent, &config.workspace_dir, &config.knowledge_dir),
         context: config.agent.context.clone(),
-        stream_chunk_timeout_secs: config.agent.stream_chunk_timeout_secs,
+        stream_first_chunk_timeout_secs: config.agent.stream_first_chunk_timeout_secs,
         max_output_bytes: calculate_max_output_bytes(&config, &registry_arc),
         loop_breaker_threshold: config.agent.loop_breaker_threshold as usize,
         tool_timeout_secs: config.agent.tool_timeout_secs,
@@ -922,7 +922,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
                         Some(l)
                     }
                     Err(e) => {
-                        tracing::warn!(port = wh_config.port, error = %e,
+                        tracing::warn!(port = wh_config.port, err = %e,
                             "SO_REUSEPORT bind failed, webhook server will use normal bind");
                         None
                     }
@@ -956,7 +956,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         let shutdown_tx_usr1 = shutdown_tx.clone();
         tokio::spawn(async move {
             sigusr1.recv().await;
-            tracing::info!("SIGUSR1 received, setting shutdown flag");
+            tracing::debug!("SIGUSR1 received, setting shutdown flag");
             crate::SHUTDOWN_FLAG.store(true, Ordering::SeqCst);
             let _ = shutdown_tx_usr1.send(true);
         });
@@ -971,7 +971,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         tokio::spawn(async move {
             loop {
                 sighup.recv().await;
-                tracing::info!("SIGHUP received, reloading config from {}", config_path.display());
+                tracing::debug!("SIGHUP received, reloading config from {}", config_path.display());
                 match crate::config::ConfigLoader::from_file(&config_path) {
                     Ok(new_cfg) => {
                         tracing::info!(
@@ -982,7 +982,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
                         // (scheduler, channel routing, model selection, etc.)
                     }
                     Err(e) => {
-                        tracing::error!(error = %e, "config reload failed, keeping current config");
+                        tracing::error!(err = %e, "config reload failed, keeping current config");
                     }
                 }
             }
@@ -993,7 +993,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     tokio::spawn(async move {
         let _ = wait_for_signal().await;
         let _ = shutdown_tx.send(true);
-        tracing::info!("shutdown signal received, initiating graceful shutdown...");
+        tracing::debug!("shutdown signal received, initiating graceful shutdown");
     });
 
     // ── SIGUSR2: new process ready, exit immediately ──────────────────────
@@ -1012,12 +1012,12 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     orchestrator.run(shutdown_rx).await.context("orchestrator run error")?;
 
     // Graceful shutdown.
-    tracing::info!("dispatch loop ended, shutting down listeners...");
+    tracing::debug!("dispatch loop ended, shutting down listeners");
     orchestrator.shutdown_listeners().await;
 
     // ── If SIGUSR1 set the flag, exit cleanly — systemd will restart with new binary ──
     if crate::is_shutting_down() {
-        tracing::info!("shutdown flag set, exiting for restart (systemd will start new binary)");
+        tracing::debug!("shutdown flag set, exiting for restart (systemd will start new binary)");
     }
 
     tracing::info!("myclaw daemon stopped");
@@ -1046,7 +1046,7 @@ async fn wait_for_signal() -> Result<()> {
             tracing::debug!("received SIGTERM");
         }
         _ = sigusr1.recv() => {
-            tracing::info!("received SIGUSR1 — hot switch triggered by `myclaw update`");
+            tracing::debug!("received SIGUSR1 — hot switch triggered by `myclaw update`");
         }
     }
     Ok(())
@@ -1064,8 +1064,8 @@ fn reset_telegram_offset() {
     let offset_path = data_dir.join("telegram_offset");
     if offset_path.exists() {
         if let Err(e) = std::fs::remove_file(&offset_path) {
-            tracing::warn!(error = %e, path = %offset_path.display(),
-                "failed to remove telegram offset file (non-fatal)");
+            tracing::warn!(err = %e, path = %offset_path.display(),
+                "failed to remove telegram offset file");
         } else {
             tracing::info!(path = %offset_path.display(),
                 "telegram offset cleared — new process will fetch fresh updates");

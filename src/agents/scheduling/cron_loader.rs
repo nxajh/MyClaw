@@ -53,7 +53,7 @@ pub fn load_cron_jobs(cron_dir: &Path) -> Vec<CronJob> {
     let entries = match std::fs::read_dir(cron_dir) {
         Ok(e) => e,
         Err(e) => {
-            warn!(dir = %cron_dir.display(), error = %e, "failed to read cron directory");
+            warn!(dir = %cron_dir.display(), err = %e, "failed to read cron directory");
             return jobs;
         }
     };
@@ -78,7 +78,7 @@ pub fn load_cron_jobs(cron_dir: &Path) -> Vec<CronJob> {
                 jobs.push(job);
             }
             Err(e) => {
-                warn!(path = %path.display(), error = %e, "failed to parse cron file");
+                warn!(path = %path.display(), err = %e, "failed to parse cron file");
             }
         }
     }

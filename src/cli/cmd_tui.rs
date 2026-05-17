@@ -10,7 +10,7 @@ pub async fn run(url: Option<&str>) -> Result<()> {
         .map(|s| s.to_string())
         .unwrap_or_else(|| DEFAULT_WS_URL.to_string());
 
-    tracing::info!("Starting TUI client, connecting to {ws_url}");
+    tracing::info!("starting TUI client, connecting to {ws_url}");
 
     let mut app = myclaw::tui::App::new(ws_url);
     app.run().await?;

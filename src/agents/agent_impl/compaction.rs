@@ -73,7 +73,7 @@ impl AgentLoop {
                 "pre-fallback: context would overflow fallback model, compacting"
             );
             if let Err(e) = self.compact_to_budget(&fallback_model, window).await {
-                tracing::warn!(error = %e, "pre-fallback compaction failed");
+                tracing::warn!(err = %e, "pre-fallback compaction failed");
             }
         }
 
@@ -182,7 +182,7 @@ impl AgentLoop {
         let result = match result {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!(error = %e, "summarizer failed, dropping pre-boundary history");
+                tracing::warn!(err = %e, "summarizer failed, dropping pre-boundary history");
                 self.drop_pre_boundary_with_record(boundary, last_compacted_id);
                 return Ok(());
             }

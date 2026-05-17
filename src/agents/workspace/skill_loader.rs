@@ -71,7 +71,7 @@ pub fn load_skills_from_dir(skills_dir: &Path) -> Vec<SkillDefinition> {
     let entries = match std::fs::read_dir(skills_dir) {
         Ok(e) => e,
         Err(e) => {
-            warn!(dir = %skills_dir.display(), error = %e, "failed to read skills directory");
+            warn!(dir = %skills_dir.display(), err = %e, "failed to read skills directory");
             return skills;
         }
     };
@@ -93,7 +93,7 @@ pub fn load_skills_from_dir(skills_dir: &Path) -> Vec<SkillDefinition> {
                 skills.push(skill);
             }
             Err(e) => {
-                warn!(path = %skill_md.display(), error = %e, "failed to parse SKILL.md");
+                warn!(path = %skill_md.display(), err = %e, "failed to parse SKILL.md");
             }
         }
     }

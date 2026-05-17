@@ -90,7 +90,7 @@ impl Registry {
                 }
             }
         }
-        tracing::warn!(model_id, available_providers = ?self.providers.keys().collect::<Vec<_>>(), "No provider found for model");
+        tracing::warn!(model_id, available_providers = ?self.providers.keys().collect::<Vec<_>>(), "no provider found for model");
         anyhow::bail!("No provider found for model: {}", model_id)
     }
 
@@ -374,7 +374,7 @@ impl Registry {
         }
 
         if chain.is_empty() {
-            tracing::error!("Fallback routing configured but no chat providers found");
+            tracing::error!("fallback routing configured but no chat providers found");
             return;
         }
 
