@@ -31,6 +31,7 @@ export type ChatMessage = UserMessage | AssistantMessage
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected'
 
 export const AUTH_TOKEN_KEY = 'myclaw_auth_token'
+const MESSAGES_KEY = 'myclaw_messages'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -49,6 +50,16 @@ function getWsUrl(): string {
   return `${proto}//${window.location.host}/myclaw`
 }
 
+function loadPersistedMessages(): ChatMessage[] {
+  try {
+    const raw = localStorage.getItem(MESSAGES_KEY)
+    if (!raw) return []
+    return JSON.parse(raw) as ChatMessage[]
+  } catch {
+    return []
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Hook
 // ---------------------------------------------------------------------------
@@ -57,7 +68,7 @@ export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null)
   const [status, setStatus] = useState<ConnectionStatus>('disconnected')
-  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [messages, setMessages] = useState<ChatMessage[]>(loadPersistedMessages)
   const [isGenerating, setIsGenerating] = useState(false)
   // true = auth was attempted and rejected by the server
   const [authFailed, setAuthFailed] = useState(false)
@@ -72,6 +83,13 @@ export function useWebSocket() {
   const authPending = useRef(false)
   // When true, suppress the automatic reconnect (e.g. after auth failure).
   const suppressReconnect = useRef(false)
+
+  // Persist messages to localStorage whenever they change.
+  useEffect(() => {
+    try {
+      localStorage.setItem(MESSAGES_KEY, JSON.stringify(messages))
+    } catch { /* quota exceeded — ignore */ }
+  }, [messages])
 
   // -----------------------------------------------------------------------
   // Listener management
@@ -188,33 +206,36 @@ export function useWebSocket() {
       }
 
       case 'tool_call': {
+        const callId = (data.id as string) || uid()
         const name = (data.name as string) || 'unknown'
         const args = (data.args as Record<string, unknown>) || {}
-        const tcId = uid()
         setMessages((prev) => {
           const last = prev[prev.length - 1]
           if (last && last.role === 'assistant' && !last.done) {
             return [
               ...prev.slice(0, -1),
-              { ...last, toolCalls: [...last.toolCalls, { name, args: args as Record<string, unknown>, id: tcId }] },
+              { ...last, toolCalls: [...last.toolCalls, { name, args, id: callId }] },
             ]
           }
           const id = uid()
           currentAssistantId.current = id
-          return [...prev, { role: 'assistant', content: '', toolCalls: [{ name, args: args as Record<string, unknown>, id: tcId }], id, done: false }]
+          return [...prev, { role: 'assistant', content: '', toolCalls: [{ name, args, id: callId }], id, done: false }]
         })
         break
       }
 
       case 'tool_result': {
+        const callId = (data.id as string) || ''
         const name = (data.name as string) || 'unknown'
         const output = (data.output as string) || ''
         setMessages((prev) => {
           const last = prev[prev.length - 1]
           if (last && last.role === 'assistant' && !last.done) {
-            const newToolCalls = last.toolCalls.map((tc) =>
-              tc.name === name && tc.output === undefined ? { ...tc, output } : tc,
-            )
+            const newToolCalls = last.toolCalls.map((tc) => {
+              // Match by server-provided call ID; fall back to first pending by name.
+              const matches = callId ? tc.id === callId : (tc.name === name && tc.output === undefined)
+              return matches ? { ...tc, output } : tc
+            })
             return [...prev.slice(0, -1), { ...last, toolCalls: newToolCalls }]
           }
           return prev

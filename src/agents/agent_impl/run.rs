@@ -726,6 +726,7 @@ impl AgentLoop {
                     let args: serde_json::Value = serde_json::from_str(&call.arguments)
                         .unwrap_or(serde_json::Value::Null);
                     let _ = event_tx.send(TurnEvent::ToolCall {
+                        id: call.id.clone(),
                         name: call.name.clone(),
                         args,
                     }).await;
@@ -766,6 +767,7 @@ impl AgentLoop {
                 // Streamed mode: send ToolResult event to client.
                 if let StreamMode::Streamed { event_tx, .. } = &stream_mode {
                     let _ = event_tx.send(TurnEvent::ToolResult {
+                        id: call.id.clone(),
                         name: call.name.clone(),
                         output: result_content.clone(),
                     }).await;

@@ -561,13 +561,13 @@ fn handle_api_request(
         }
 
         "sessions.switch" => {
-            let session_id = match params["session_id"].as_str() {
+            let session_id = match params["id"].as_str() {
                 Some(s) => s,
                 None => {
                     return serde_json::json!({
                         "type": "api_error",
                         "id": id,
-                        "error": "missing session_id parameter"
+                        "error": "missing id parameter"
                     }).to_string();
                 }
             };
@@ -589,13 +589,13 @@ fn handle_api_request(
         }
 
         "sessions.delete" => {
-            let session_id = match params["session_id"].as_str() {
+            let session_id = match params["id"].as_str() {
                 Some(s) => s,
                 None => {
                     return serde_json::json!({
                         "type": "api_error",
                         "id": id,
-                        "error": "missing session_id parameter"
+                        "error": "missing id parameter"
                     }).to_string();
                 }
             };
