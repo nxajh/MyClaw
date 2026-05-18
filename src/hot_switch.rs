@@ -116,6 +116,18 @@ pub fn do_hot_switch(socket_fd: i32) -> anyhow::Result<()> {
         anyhow::bail!("fork failed: {}", std::io::Error::last_os_error());
     }
 
+    // Parent: immediately tell systemd to track the child as the new main PID.
+    // This MUST be sent from the current main PID (us) — systemd rejects
+    // MAINPID updates from any other PID.  We send it before the child has
+    // even called execve so that systemd's tracking is updated before we exit.
+    if pid > 0 {
+        if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::MainPid(pid as u32)]) {
+            tracing::warn!(err = %e, child_pid = pid, "sd_notify MAINPID failed");
+        } else {
+            tracing::debug!(child_pid = pid, "sd_notify MAINPID sent — systemd now tracks child");
+        }
+    }
+
     if pid == 0 {
         // ── Child: execve the new binary ───────────────────────────────
         // Do NOT call std::env::set_var here — the env mutex may be held
