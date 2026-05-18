@@ -216,7 +216,7 @@ impl CompactionExecutor {
             if let Some(ref thinking_text) = response.reasoning_content {
                 assistant_msg.parts.insert(
                     0,
-                    ContentPart::Thinking { thinking: thinking_text.clone(), signature: None },
+                    ContentPart::Thinking { thinking: thinking_text.clone(), signature: response.thinking_signature.clone() },
                 );
             }
             messages.push(assistant_msg);
@@ -247,6 +247,7 @@ impl CompactionExecutor {
     async fn collect_summary_stream(&self, mut stream: BoxStream<StreamEvent>) -> anyhow::Result<SummaryResponse> {
         let mut text = String::new();
         let mut reasoning_content: Option<String> = None;
+        let mut thinking_signature: Option<String> = None;
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut usage: Option<ChatUsage> = None;
         let chunk_timeout = Duration::from_secs(self.stream_chunk_timeout_secs);
@@ -292,7 +293,9 @@ impl CompactionExecutor {
                         }
                     }
                     StreamEvent::Done { .. } => break,
-                    StreamEvent::ThinkingSignature { .. } => {}
+                    StreamEvent::ThinkingSignature { signature } => {
+                        thinking_signature = Some(signature);
+                    }
                     StreamEvent::HttpError { message, .. } => anyhow::bail!("summarizer stream error: {}", message),
                     StreamEvent::Error(e) => anyhow::bail!("summarizer stream error: {}", e),
                 },
@@ -307,13 +310,14 @@ impl CompactionExecutor {
             }
         }
 
-        Ok(SummaryResponse { text, reasoning_content, tool_calls, usage })
+        Ok(SummaryResponse { text, reasoning_content, thinking_signature, tool_calls, usage })
     }
 }
 
 struct SummaryResponse {
     text: String,
     reasoning_content: Option<String>,
+    thinking_signature: Option<String>,
     tool_calls: Vec<ToolCall>,
     usage: Option<ChatUsage>,
 }
