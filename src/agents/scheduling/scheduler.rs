@@ -623,7 +623,7 @@ pub struct WebhookContext {
     pub channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
     pub sessions: Arc<DashMap<String, Arc<crate::agents::SessionHandle>>>,
     /// Shared session manager — avoids creating throwaway instances per request.
-    pub session_manager: Arc<crate::agents::session_manager::SessionManager>,
+    pub session_manager: Arc<crate::agents::session::SessionManager>,
     /// Backend kept separately for persist hooks (BackendPersistHook needs it).
     pub session_backend: Arc<dyn SessionBackend>,
     pub timezone: String,
