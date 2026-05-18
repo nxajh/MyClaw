@@ -574,7 +574,16 @@ impl AgentLoop {
                             tracing::warn!(wait_secs, "fallback chain: all providers on cooldown");
                             return Err(super::super::error::AgentError::ProviderChainCooling { wait_secs }.into());
                         }
-                        let classified = crate::providers::ClassifiedError::from_message(&err_str);
+                        // Use the HTTP status from ProviderHttpError when available so
+                        // that e.g. a 400 FormatError is not mis-classified as Timeout
+                        // (from_message always passes status=0 which maps to Timeout).
+                        let classified = if let Some(http_err) =
+                            e.downcast_ref::<crate::providers::ProviderHttpError>()
+                        {
+                            crate::providers::ClassifiedError::classify("", http_err.status, &http_err.message)
+                        } else {
+                            crate::providers::ClassifiedError::from_message(&err_str)
+                        };
                         if classified.retryable {
                             match classified.reason {
                                 crate::providers::FailoverReason::Timeout => {
@@ -982,8 +991,8 @@ impl AgentLoop {
                             stop_reason = reason;
                             break;
                         }
-                        StreamEvent::HttpError { message, .. } => {
-                            anyhow::bail!("Stream error: {}", message);
+                        StreamEvent::HttpError { status, message } => {
+                            return Err(crate::providers::ProviderHttpError { status, message }.into());
                         }
                         StreamEvent::Error(e) => {
                             anyhow::bail!("Stream error: {}", e);

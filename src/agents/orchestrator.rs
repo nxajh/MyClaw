@@ -383,8 +383,10 @@ impl Orchestrator {
         };
 
         // ── Startup recovery ──────────────────────────────────────────────
-        self.startup_recover_sessions(&registry).await;
-        self.startup_recover_subagents(&registry, &unfinished_subagents, &delegation_manager).await;
+        // Sessions are registered synchronously (actor spawned), then the LLM
+        // work runs in background tasks so the event loop starts immediately.
+        self.startup_recover_sessions(&registry);
+        self.startup_recover_subagents(&registry, &unfinished_subagents, &delegation_manager);
 
         loop {
             if *shutdown_rx.borrow() {
@@ -781,10 +783,12 @@ impl Orchestrator {
     }
 
     /// Scan all persisted sessions for incomplete turns and resume them.
-    /// Called once at startup, before the main event loop.
-    async fn startup_recover_sessions(&self, registry: &LoopRegistry) {
+    ///
+    /// Registers each session's actor synchronously (so new messages can be
+    /// queued immediately), then spawns the LLM recovery work in background
+    /// tasks so the event loop starts without waiting for them to finish.
+    fn startup_recover_sessions(&self, registry: &LoopRegistry) {
         let all_sessions = self.session_manager.list_all_sessions();
-        let mut recovered = 0;
         for session_info in &all_sessions {
             let sk = &session_info.owner;
             let session = self.session_manager.get_or_create(sk);
@@ -792,45 +796,50 @@ impl Orchestrator {
             if history.is_empty() || !history_has_incomplete_turn(history) {
                 continue;
             }
-            tracing::info!(session = %sk, "startup recovery: found incomplete turn");
+            tracing::info!(session = %sk, "startup recovery: found incomplete turn, spawning background task");
             let reply_target = format!("startup:recovery:{}", sk);
+            // get_or_create registers the session actor synchronously.
             let handle = registry.get_or_create(sk, &reply_target);
-            let mut guard = handle.loop_.lock().await;
-            match guard.recover_interrupted_turn().await {
-                Ok(Some(text)) if !text.is_empty() => {
-                    recovered += 1;
-                    tracing::info!(session = %sk, "startup recovery: turn completed");
-                    // Use persisted reply_target if available (handles QQ Bot c2c:/group: prefix).
-                    let recipient = self.persist_backend.load_reply_target(sk)
-                        .unwrap_or_else(|| {
-                            parse_session_key(sk)
-                                .map(|(_, _, sender)| sender.to_string())
-                                .unwrap_or_default()
-                        });
-                    if let Some((ch_type, acc_id, _)) = parse_session_key(sk) {
-                        if let Some(channel) = self.channels.get(&(ch_type.to_string(), acc_id.to_string())).map(|r| r.clone()) {
-                            let send_msg = SendMessage::new(&text, &recipient);
-                            if let Err(e) = channel.send(&send_msg).await {
-                                tracing::warn!(session = %sk, err = %e, "startup recovery: failed to send response");
+            let loop_ = handle.loop_.clone();
+            let sk_owned = sk.clone();
+            let persist_backend = self.persist_backend.clone();
+            let channels = self.channels.clone();
+
+            tokio::spawn(async move {
+                let mut guard = loop_.lock().await;
+                match guard.recover_interrupted_turn().await {
+                    Ok(Some(text)) if !text.is_empty() => {
+                        tracing::info!(session = %sk_owned, "startup recovery: turn completed");
+                        // Use persisted reply_target if available (handles QQ Bot c2c:/group: prefix).
+                        let recipient = persist_backend.load_reply_target(&sk_owned)
+                            .unwrap_or_else(|| {
+                                parse_session_key(&sk_owned)
+                                    .map(|(_, _, sender)| sender.to_string())
+                                    .unwrap_or_default()
+                            });
+                        if let Some((ch_type, acc_id, _)) = parse_session_key(&sk_owned) {
+                            if let Some(channel) = channels.get(&(ch_type.to_string(), acc_id.to_string())).map(|r| r.clone()) {
+                                let send_msg = SendMessage::new(&text, &recipient);
+                                if let Err(e) = channel.send(&send_msg).await {
+                                    tracing::warn!(session = %sk_owned, err = %e, "startup recovery: failed to send response");
+                                }
                             }
                         }
                     }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(session = %sk_owned, err = %e, "startup recovery failed");
+                    }
                 }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(session = %sk, err = %e, "startup recovery failed");
-                }
-            }
-        }
-        if recovered > 0 {
-            tracing::info!(count = recovered, "startup recovery complete");
+            });
         }
     }
 
     /// Recover sub-agents that were interrupted by a previous daemon shutdown.
-    /// Resumes each incomplete sub-agent turn and emits a delegation event so
-    /// the parent agent receives the result.
-    async fn startup_recover_subagents(
+    ///
+    /// Registers each sub-agent actor synchronously, then spawns the LLM
+    /// recovery work in background tasks (same pattern as startup_recover_sessions).
+    fn startup_recover_subagents(
         &self,
         registry: &LoopRegistry,
         unfinished: &[crate::agents::UnfinishedSubAgent],
@@ -847,30 +856,38 @@ impl Orchestrator {
             if history.is_empty() || !history_has_incomplete_turn(history) {
                 continue;
             }
-            tracing::info!(task_id = %sa.task_id, agent = %sa.agent_name, "sub-agent startup recovery: found incomplete turn");
+            tracing::info!(task_id = %sa.task_id, agent = %sa.agent_name, "sub-agent startup recovery: found incomplete turn, spawning background task");
             let reply_target = format!("startup:recovery:sub:{}", sa.task_id);
             let handle = registry.get_or_create(&sub_sk, &reply_target);
-            let mut guard = handle.loop_.lock().await;
-            match guard.recover_interrupted_turn().await {
-                Ok(Some(text)) if !text.is_empty() => {
-                    tracing::info!(task_id = %sa.task_id, "sub-agent startup recovery: turn completed");
-                    if let Some(dm) = delegation_manager {
-                        let _ = dm.event_sender().send(DelegationEvent::Completed {
-                            task_id: sa.task_id.clone(),
-                            session_key: sa.session_key.clone(),
-                            reply_target: sa.reply_target.clone(),
-                            summary: text,
-                            duration_secs: 0,
-                        }).await;
+            let loop_ = handle.loop_.clone();
+            let task_id = sa.task_id.clone();
+            let session_key = sa.session_key.clone();
+            let sa_reply_target = sa.reply_target.clone();
+            let dm = delegation_manager.clone();
+
+            tokio::spawn(async move {
+                let mut guard = loop_.lock().await;
+                match guard.recover_interrupted_turn().await {
+                    Ok(Some(text)) if !text.is_empty() => {
+                        tracing::info!(task_id = %task_id, "sub-agent startup recovery: turn completed");
+                        if let Some(dm) = dm {
+                            let _ = dm.event_sender().send(DelegationEvent::Completed {
+                                task_id,
+                                session_key,
+                                reply_target: sa_reply_target,
+                                summary: text,
+                                duration_secs: 0,
+                            }).await;
+                        }
+                    }
+                    Ok(_) => {
+                        tracing::debug!(task_id = %task_id, "sub-agent startup recovery: no recovery needed");
+                    }
+                    Err(e) => {
+                        tracing::warn!(task_id = %task_id, err = %e, "sub-agent startup recovery failed");
                     }
                 }
-                Ok(_) => {
-                    tracing::debug!(task_id = %sa.task_id, "sub-agent startup recovery: no recovery needed");
-                }
-                Err(e) => {
-                    tracing::warn!(task_id = %sa.task_id, err = %e, "sub-agent startup recovery failed");
-                }
-            }
+            });
         }
     }
 
