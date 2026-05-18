@@ -6,14 +6,20 @@ import LoginOverlay from './components/LoginOverlay'
 import Chat from './pages/Chat'
 import Sessions from './pages/Sessions'
 import Placeholder from './pages/Placeholder'
+import { AUTH_TOKEN_KEY } from './hooks/useWebSocket'
 
 function AppShell() {
-  const { authFailed, submitToken } = useWebSocketContext()
+  const { authFailed, submitToken, status } = useWebSocketContext()
+
+  // Show login overlay when auth was rejected, or when there is no stored
+  // token and we haven't connected yet (first-time / unauthenticated visitor).
+  const hasStoredToken = !!localStorage.getItem(AUTH_TOKEN_KEY)
+  const showLogin = authFailed || (!hasStoredToken && status !== 'connected')
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-zinc-900 text-zinc-100">
-      {authFailed && (
-        <LoginOverlay onSubmit={submitToken} isRetry />
+      {showLogin && (
+        <LoginOverlay onSubmit={submitToken} isRetry={authFailed} />
       )}
       <Sidebar />
       <main className="flex-1 flex flex-col min-w-0">
