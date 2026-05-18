@@ -156,7 +156,7 @@ impl AgentLoop {
                 // the session at the last tool_result so the new process can resume
                 // from this breakpoint.
                 if e.downcast_ref::<crate::agents::error::AgentError>()
-                    .map_or(false, |ae| matches!(ae, crate::agents::error::AgentError::GracefulShutdown))
+                    .is_some_and(|ae| matches!(ae, crate::agents::error::AgentError::GracefulShutdown))
                 {
                     tracing::info!("checkpoint exit, skipping rollback for resumption");
                     return Err(e);
