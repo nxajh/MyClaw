@@ -181,7 +181,7 @@ impl ClientChannel {
                         let session_manager_clone = session_manager.clone();
                         let tool_names_clone = tool_names.clone();
                         let workspace_dir_clone = workspace_dir.clone();
-                        let _auth_token_clone = auth_token.clone();
+                        let auth_token_clone = auth_token.clone();
 
                         tracing::info!(
                             conn_id = %conn_id,
@@ -204,6 +204,11 @@ impl ClientChannel {
 
                             // Incoming message handler: WebSocket stream → message_tx.
                             let incoming = async {
+                                // If auth_token is configured, connections must authenticate
+                                // before sending any other message type.
+                                // If auth_token is None, all connections are pre-authenticated.
+                                let mut is_authenticated = auth_token_clone.is_none();
+
                                 while let Some(msg_result) = futures_util::StreamExt::next(&mut ws_stream).await {
                                     let msg = match msg_result {
                                         Ok(Message::Text(text)) => text.to_string(),
@@ -226,6 +231,41 @@ impl ClientChannel {
                                     };
 
                                     let msg_type = parsed["type"].as_str().unwrap_or("");
+
+                                    // ── Auth gate ──────────────────────────────────────
+                                    // Handle the "auth" message type first (before the gate).
+                                    if msg_type == "auth" {
+                                        let provided = parsed["token"].as_str().unwrap_or("");
+                                        let ok = match &auth_token_clone {
+                                            None => true, // no auth required — accept any token
+                                            Some(required) => provided == required.as_str(),
+                                        };
+                                        if ok {
+                                            is_authenticated = true;
+                                            let _ = ws_sender.send(r#"{"type":"auth_ok"}"#.to_string()).await;
+                                            tracing::debug!(conn_id = %conn_id_clone, "WebSocket client authenticated");
+                                        } else {
+                                            let err = serde_json::json!({
+                                                "type": "error",
+                                                "message": "Unauthorized: invalid token"
+                                            });
+                                            let _ = ws_sender.send(err.to_string()).await;
+                                            tracing::warn!(conn_id = %conn_id_clone, "WebSocket auth failed, closing connection");
+                                            break; // Close connection on invalid token
+                                        }
+                                        continue;
+                                    }
+
+                                    // Reject all other messages until authenticated.
+                                    if !is_authenticated {
+                                        let err = serde_json::json!({
+                                            "type": "error",
+                                            "message": "Authentication required: send {\"type\":\"auth\",\"token\":\"...\"} first"
+                                        });
+                                        let _ = ws_sender.send(err.to_string()).await;
+                                        tracing::warn!(conn_id = %conn_id_clone, msg_type, "rejected unauthenticated message");
+                                        break;
+                                    }
 
                                     match msg_type {
                                         "message" => {

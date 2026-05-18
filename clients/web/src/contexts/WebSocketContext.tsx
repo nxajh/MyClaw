@@ -6,6 +6,8 @@ interface WebSocketContextValue {
   status: ConnectionStatus
   messages: ChatMessage[]
   isGenerating: boolean
+  authFailed: boolean
+  submitToken: (token: string) => void
   sendMessage: (content: string) => void
   cancel: () => void
   sendRaw: (obj: Record<string, unknown>) => void

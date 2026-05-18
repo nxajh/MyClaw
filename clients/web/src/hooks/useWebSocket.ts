@@ -30,6 +30,8 @@ export type ChatMessage = UserMessage | AssistantMessage
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected'
 
+export const AUTH_TOKEN_KEY = 'myclaw_auth_token'
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -57,6 +59,8 @@ export function useWebSocket() {
   const [status, setStatus] = useState<ConnectionStatus>('disconnected')
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [isGenerating, setIsGenerating] = useState(false)
+  // true = auth was attempted and rejected by the server
+  const [authFailed, setAuthFailed] = useState(false)
 
   // Registry of listeners for raw server messages (used by useApi)
   const listenersRef = useRef<Set<(data: Record<string, unknown>) => void>>(new Set())
@@ -64,6 +68,10 @@ export function useWebSocket() {
   // We keep a ref to the latest assistant message id so we can append chunks
   // without depending on state in the onmessage handler.
   const currentAssistantId = useRef<string | null>(null)
+  // True while we are waiting for the server's auth_ok response.
+  const authPending = useRef(false)
+  // When true, suppress the automatic reconnect (e.g. after auth failure).
+  const suppressReconnect = useRef(false)
 
   // -----------------------------------------------------------------------
   // Listener management
@@ -87,15 +95,21 @@ export function useWebSocket() {
       setStatus('connecting')
 
       ws.onopen = () => {
-        setStatus('connected')
+        // Send auth immediately; status stays 'connecting' until auth_ok.
+        // If the server has no auth configured it responds auth_ok right away.
+        authPending.current = true
+        const token = localStorage.getItem(AUTH_TOKEN_KEY) ?? ''
+        ws.send(JSON.stringify({ type: 'auth', token }))
       }
 
       ws.onclose = () => {
         setStatus('disconnected')
         setIsGenerating(false)
         currentAssistantId.current = null
-        // Auto-reconnect after 2 s
-        reconnectTimer.current = setTimeout(connect, 2000)
+        authPending.current = false
+        if (!suppressReconnect.current) {
+          reconnectTimer.current = setTimeout(connect, 2000)
+        }
       }
 
       ws.onerror = () => {
@@ -131,6 +145,13 @@ export function useWebSocket() {
     const type = data.type as string
 
     switch (type) {
+      case 'auth_ok': {
+        authPending.current = false
+        setAuthFailed(false)
+        setStatus('connected')
+        break
+      }
+
       case 'chunk': {
         const delta = (data.delta as string) || ''
         setMessages((prev) => {
@@ -217,6 +238,15 @@ export function useWebSocket() {
 
       case 'error': {
         const message = (data.message as string) || 'Unknown error'
+        if (authPending.current) {
+          // Auth was rejected — show login overlay, stop reconnecting.
+          authPending.current = false
+          suppressReconnect.current = true
+          setAuthFailed(true)
+          // The server closes the connection after sending this error; status
+          // will transition to 'disconnected' via onclose.
+          break
+        }
         setMessages((prev) => [
           ...prev,
           { role: 'assistant', content: `⚠️ Error: ${message}`, toolCalls: [], id: uid(), done: true },
@@ -293,6 +323,25 @@ export function useWebSocket() {
     sendRaw({ type: 'ping' })
   }, [sendRaw])
 
+  const submitToken = useCallback((token: string) => {
+    if (token) {
+      localStorage.setItem(AUTH_TOKEN_KEY, token)
+    } else {
+      localStorage.removeItem(AUTH_TOKEN_KEY)
+    }
+    suppressReconnect.current = false
+    setAuthFailed(false)
+    const ws = wsRef.current
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      // Already connected — send auth directly.
+      authPending.current = true
+      ws.send(JSON.stringify({ type: 'auth', token }))
+    } else {
+      // Reconnect; onopen will send auth automatically.
+      connect()
+    }
+  }, [connect])
+
   // -----------------------------------------------------------------------
   // Lifecycle
   // -----------------------------------------------------------------------
@@ -313,6 +362,8 @@ export function useWebSocket() {
     status,
     messages,
     isGenerating,
+    authFailed,
+    submitToken,
     sendMessage,
     cancel,
     sendRaw,
