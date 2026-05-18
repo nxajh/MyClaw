@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 
-use crate::config::agent::AutonomyLevel;
+use crate::config::agent::PermissionMode;
 use crate::providers::ChatMessage;
 use super::attachment::AttachmentManager;
 use super::resource_provider::ResourceProvider;
@@ -177,7 +177,7 @@ impl RequestBuilder {
     }
 
     /// Proxy for diff_autonomy (used by apply_session_override in AgentLoop).
-    pub(crate) fn diff_autonomy(&mut self, autonomy: &AutonomyLevel) {
+    pub(crate) fn diff_autonomy(&mut self, autonomy: &PermissionMode) {
         self.attachments.diff_autonomy(autonomy);
     }
 

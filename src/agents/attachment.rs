@@ -366,11 +366,11 @@ impl AttachmentManager {
 
     /// Notify the model that the autonomy level has changed.
     /// Called from `apply_session_override` when `autonomy` is updated.
-    pub fn diff_autonomy(&mut self, new_level: &crate::config::agent::AutonomyLevel) {
+    pub fn diff_autonomy(&mut self, new_level: &crate::config::agent::PermissionMode) {
         let label = match new_level {
-            crate::config::agent::AutonomyLevel::Full => "full",
-            crate::config::agent::AutonomyLevel::Default => "default",
-            crate::config::agent::AutonomyLevel::ReadOnly => "read_only",
+            crate::config::agent::PermissionMode::Full => "full",
+            crate::config::agent::PermissionMode::Default => "default",
+            crate::config::agent::PermissionMode::ReadOnly => "read_only",
         };
         self.pending.insert(
             AttachmentKind::AutonomyNotice,

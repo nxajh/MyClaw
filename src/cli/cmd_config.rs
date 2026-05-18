@@ -119,7 +119,7 @@ workspace_dir = "~/.myclaw/workspace"
 model = "minimax-m2.7"
 
 [agent]
-autonomy_level = "default"
+permission_mode = "default"
 
 [memory]
 storage = "sqlite"

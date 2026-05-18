@@ -33,7 +33,7 @@ pub use agents::{
     Agent, AgentConfig, AgentLoop, InMemoryBackend, Session, SessionManager,
     ToolRegistry, SkillManager, Orchestrator, OrchestratorParts,
     SystemPromptBuilder, SystemPromptConfig,
-    AutonomyLevel, SkillsPromptInjectionMode,
+    PermissionMode, RunMode,
     McpManager, AskUserHandler, DelegateHandler, SubAgentDelegator,
     DelegationEvent, DelegationManager,
 };

@@ -1,19 +1,19 @@
 //! System Prompt Builder
 //!
-//! Assembles the system prompt from ordered sections per §10 architecture.
+//! Assembles the system prompt from ordered sections.
 //!
 //! ## Section order
 //!
-//! - 0. Anti-narration
-//! - 0b. Tool Honesty
-//! - 1c. Action instruction (native vs XML protocol)
-//! - 2. Safety (autonomy_level)
-//! - 3. Skills (Full or Compact)
-//! - 4. Workspace
-//! - 5. Bootstrap files (OpenClaw format)
-//! - 6. Runtime
-//! - 7. Channel Capabilities (skip in compact)
-//! - 9. Truncation (max_system_prompt_chars)
+//!  1. Anti-Narration           (static constant)
+//!  2. Tool Honesty             (static constant)
+//!  3. Actions                  (by PermissionMode + native_tools)
+//!  4. Safety                   (by PermissionMode)
+//!  5. RunMode Rules            (Interactive or Background, by RunMode)
+//!  6-10. Behavioral Rules      (from RULES.md if present, else hardcoded defaults)
+//! 11. Read Before Edit         (static constant)
+//! 12. System Reminders         (static constant)
+//! 13. Workspace Files          (IDENTITY.md, SOUL.md, USER.md)
+//! 14. Runtime                  (OS version, arch, shell — detected at build time)
 
 use std::path::Path;
 
@@ -22,49 +22,44 @@ use serde::{Deserialize, Serialize};
 use crate::agents::SkillManager;
 use crate::str_utils;
 
-// ── Config types ─────────────────────────────────────────────────────────────
+// ── Re-exports ────────────────────────────────────────────────────────────────
 
-/// Autonomy level controls safety section.
-/// Re-exported from `config::agent` — single canonical definition.
-pub use crate::config::agent::AutonomyLevel;
+pub use crate::config::agent::PermissionMode;
 
-/// Skill injection mode.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+// ── RunMode ───────────────────────────────────────────────────────────────────
+
+/// Controls execution context: is there a human user present?
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SkillsPromptInjectionMode {
-    /// Full: name + description.
-    Full,
-    /// Compact: name only.
+pub enum RunMode {
+    /// Interactive session — a user or supervisor is present.
     #[default]
-    Compact,
+    Interactive,
+    /// Autonomous background task (Cron, Webhook) — no active user.
+    Background,
 }
+
+// ── Config ────────────────────────────────────────────────────────────────────
 
 /// SystemPromptBuilder configuration.
 #[derive(Debug, Clone)]
 pub struct SystemPromptConfig {
-    /// Workspace directory (contains SOUL.md, USER.md, etc.).
+    /// Workspace directory (contains IDENTITY.md, SOUL.md, USER.md, RULES.md).
     pub workspace_dir: String,
     /// Knowledge directory (contains memory/*.md files).
     pub knowledge_dir: String,
-    /// Current model name (e.g. "minimax-cn/MiniMax-M2.7").
-    pub model_name: String,
-    /// Autonomy level (safety section).
-    pub autonomy: AutonomyLevel,
-    /// Skill injection mode.
-    pub skills_mode: SkillsPromptInjectionMode,
-    /// Compact context (tools/skills name-only, skip channel caps).
-    pub compact: bool,
-    /// Total character limit (0 = unlimited).
+    /// Permission mode — controls tool access level.
+    pub permission_mode: PermissionMode,
+    /// Run mode — controls execution context rules.
+    pub run_mode: RunMode,
+    /// Total character limit for the system prompt (0 = unlimited).
     pub max_chars: usize,
     /// Per-bootstrap-file character limit.
     pub bootstrap_max_chars: usize,
     /// Whether the provider supports native tool calling.
     pub native_tools: bool,
-    /// Channel name (e.g. "wechat", "telegram").
-    pub channel_name: Option<String>,
-    /// Host information for Runtime section.
-    pub host_info: Option<String>,
-    /// Timezone offset in hours (e.g. 8 for UTC+8). Used for date injection.
+    /// Timezone offset in hours — passed to ResourceProvider for date injection;
+    /// NOT embedded in the system prompt text.
     pub timezone_offset: i32,
 }
 
@@ -73,23 +68,19 @@ impl Default for SystemPromptConfig {
         Self {
             workspace_dir: String::new(),
             knowledge_dir: String::new(),
-            model_name: String::new(),
-            autonomy: AutonomyLevel::Default,
-            skills_mode: SkillsPromptInjectionMode::Compact,
-            compact: false,
+            permission_mode: PermissionMode::Default,
+            run_mode: RunMode::Interactive,
             max_chars: 0,
             bootstrap_max_chars: 20_000,
             native_tools: true,
-            channel_name: None,
-            host_info: None,
             timezone_offset: 8,
         }
     }
 }
 
-// ── Builder ──────────────────────────────────────────────────────────────────
+// ── Builder ───────────────────────────────────────────────────────────────────
 
-/// System prompt builder with fluent API.
+/// System prompt builder.
 #[derive(Clone)]
 pub struct SystemPromptBuilder {
     config: SystemPromptConfig,
@@ -101,26 +92,23 @@ impl SystemPromptBuilder {
     }
 
     /// Build the full system prompt string.
-    pub fn build(
-        &self,
-        skills: &SkillManager,
-    ) -> String {
+    pub fn build(&self, _skills: &SkillManager) -> String {
         let mut sections = vec![
             SECTION_ANTI_NARRATION.to_string(),
             SECTION_TOOL_HONESTY.to_string(),
             self.build_action_instruction(),
             self.build_safety(),
-            SECTION_SYSTEM_REMINDERS.to_string(),
-            self.build_skills(skills),
-            self.build_workspace(),
-            self.build_bootstrap_files(),
-            self.build_memory_section(),
-            self.build_runtime(),
+            self.build_run_mode_rules(),
         ];
 
-        if !self.config.compact {
-            sections.push(self.build_channel_caps());
-        }
+        // Sections 6–10: from RULES.md if present, else individual defaults.
+        sections.extend(self.build_behavioral_rules());
+
+        sections.push(SECTION_READ_BEFORE_EDIT.to_string());
+        sections.push(SECTION_SYSTEM_REMINDERS.to_string());
+        sections.push(self.build_workspace());
+        sections.push(self.build_bootstrap_files());
+        sections.push(self.build_runtime());
 
         let prompt = sections
             .into_iter()
@@ -128,18 +116,17 @@ impl SystemPromptBuilder {
             .collect::<Vec<_>>()
             .join("\n\n");
 
-        // 9. Truncation
         self.truncate(prompt)
     }
 
-    // ── Section builders ────────────────────────────────────────────────────
+    // ── Section builders ──────────────────────────────────────────────────────
 
     fn build_action_instruction(&self) -> String {
         if self.config.native_tools {
-            match self.config.autonomy {
-                AutonomyLevel::Full => "## Actions\n\nExecute directly using your available tools. No confirmation needed for routine operations.".to_string(),
-                AutonomyLevel::Default => "## Actions\n\nYou can execute code, read/write files, search the web, and more using your available tools. Use them proactively for internal actions; ask before external ones.".to_string(),
-                AutonomyLevel::ReadOnly => "## Actions\n\nYou have read-only tools available (search, read, analyze). Do not write or execute.".to_string(),
+            match self.config.permission_mode {
+                PermissionMode::Full => "## Actions\n\nExecute directly using your available tools. No confirmation needed for routine operations.".to_string(),
+                PermissionMode::Default => "## Actions\n\nYou can execute code, read/write files, search the web, and more using your available tools. Use them proactively for internal actions; ask before external ones.".to_string(),
+                PermissionMode::ReadOnly => "## Actions\n\nYou have read-only tools available (search, read, analyze). Do not write or execute.".to_string(),
             }
         } else {
             "## Actions\n\nWhen you need to perform an action, use the <invoke> XML format to call tools.".to_string()
@@ -147,22 +134,43 @@ impl SystemPromptBuilder {
     }
 
     fn build_safety(&self) -> String {
-        match self.config.autonomy {
-            AutonomyLevel::Full => SECTION_SAFETY_FULL.to_string(),
-            AutonomyLevel::Default => {
+        match self.config.permission_mode {
+            PermissionMode::Full => SECTION_SAFETY_FULL.to_string(),
+            PermissionMode::Default => {
                 "## Safety\n\nAsk for confirmation before performing potentially destructive, irreversible, or public actions (e.g., deleting files, sending public messages). For internal actions (reading, searching, organizing), proceed directly.".to_string()
             }
-            AutonomyLevel::ReadOnly => {
+            PermissionMode::ReadOnly => {
                 "## Safety\n\nYou are in read-only mode. Do not execute commands, write files, or send external messages. Perform only information-gathering actions.".to_string()
             }
         }
     }
 
-    fn build_skills(&self, _skills: &SkillManager) -> String {
-        // Skills 通过 attachment 增量注入，不再嵌入 system prompt。
-        // AttachmentManager 在每 turn 的 build_messages() 中生成
-        // <system-reminder> 消息，包含 skill 列表。
-        String::new()
+    fn build_run_mode_rules(&self) -> String {
+        match self.config.run_mode {
+            RunMode::Interactive => SECTION_INTERACTIVE_RULES.to_string(),
+            RunMode::Background => SECTION_AUTONOMOUS_RULES.to_string(),
+        }
+    }
+
+    /// Sections 6–10: loads RULES.md if present; otherwise returns five
+    /// individual hardcoded defaults.
+    fn build_behavioral_rules(&self) -> Vec<String> {
+        if !self.config.workspace_dir.is_empty() {
+            let path = Path::new(&self.config.workspace_dir).join("RULES.md");
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let trimmed = content.trim();
+                if !trimmed.is_empty() {
+                    return vec![Self::truncate_str(trimmed, self.config.bootstrap_max_chars)];
+                }
+            }
+        }
+        vec![
+            SECTION_TASK_PERSISTENCE.to_string(),
+            SECTION_NO_OVER_ENGINEERING.to_string(),
+            SECTION_MANDATORY_TOOL_USE.to_string(),
+            SECTION_TOOL_PRIORITY.to_string(),
+            SECTION_MEMORY_GUIDE.to_string(),
+        ]
     }
 
     fn build_workspace(&self) -> String {
@@ -170,7 +178,7 @@ impl SystemPromptBuilder {
             return String::new();
         }
         format!(
-            "## Workspace\n\nWorking directory: {}\n\nYour workspace files (SOUL.md, USER.md, AGENTS.md, etc.) are pre-loaded below.",
+            "## Workspace\n\nWorking directory: {}\n\nYour workspace files are pre-loaded below.",
             self.config.workspace_dir
         )
     }
@@ -179,17 +187,8 @@ impl SystemPromptBuilder {
         if self.config.workspace_dir.is_empty() {
             return String::new();
         }
-
         let dir = Path::new(&self.config.workspace_dir);
-        let files = [
-            "SOUL.md",
-            "USER.md",
-            "AGENTS.md",
-            "TOOLS.md",
-            "IDENTITY.md",
-            "BOOTSTRAP.md",
-        ];
-
+        let files = ["IDENTITY.md", "SOUL.md", "USER.md"];
         let mut sections = Vec::new();
         for filename in files {
             let path = dir.join(filename);
@@ -202,48 +201,24 @@ impl SystemPromptBuilder {
                 sections.push(format!("### {}\n\n{}", filename, truncated));
             }
         }
-
         if sections.is_empty() {
             String::new()
         } else {
-            format!("## Workspace Bootstrap Files\n\n{}", sections.join("\n\n"))
+            format!("## Workspace Files\n\n{}", sections.join("\n\n"))
         }
     }
 
-    fn build_memory_section(&self) -> String {
-        // Memory 通过 attachment 增量注入，不再嵌入 system prompt。
-        // AttachmentManager 在每 turn 的 build_messages() 中生成
-        // <system-reminder> 消息，包含 memory 索引。
-        String::new()
-    }
-
     fn build_runtime(&self) -> String {
-        let host = self.config.host_info.as_deref().unwrap_or("unknown");
-        let model = &self.config.model_name;
+        let os_version = detect_os_version();
         let os = std::env::consts::OS;
         let arch = std::env::consts::ARCH;
-
-        format!(
-            "## Runtime\n\nHost: {} | OS: {} | Arch: {} | Model: {}",
-            host, os, arch, model
-        )
+        let shell = std::env::var("SHELL")
+            .map(|s| s.rsplit('/').next().unwrap_or(&s).to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+        format!("## Runtime\n\nOS: {} ({}/{}) | Shell: {}", os_version, os, arch, shell)
     }
 
-    fn build_channel_caps(&self) -> String {
-        let channel = self.config.channel_name.as_deref().unwrap_or("unknown");
-        let caps = match channel {
-            "wechat" => "- Markdown fully supported (tables, code blocks, bold, etc.)",
-            "telegram" => "- Markdown formatting is supported.\n- Code blocks, tables, and bold text are rendered correctly.",
-            "discord" | "whatsapp" => "- No markdown tables — use bullet lists instead.\n- No headers — use **bold** or CAPS for emphasis.",
-            _ => "- Markdown formatting is supported.",
-        };
-        format!(
-            "## Channel Capabilities\n\nYou are responding via {} channel.\n\n{}\n- TTS is handled by the channel transport — do not synthesize speech yourself.",
-            channel, caps
-        )
-    }
-
-    // ── Utilities ──────────────────────────────────────────────────────────
+    // ── Utilities ─────────────────────────────────────────────────────────────
 
     fn truncate(&self, mut text: String) -> String {
         if self.config.max_chars == 0 || text.chars().count() <= self.config.max_chars {
@@ -266,9 +241,20 @@ impl SystemPromptBuilder {
     }
 }
 
-// ── Static section strings ─────────────────────────────────────────────────────
+fn detect_os_version() -> String {
+    if let Ok(content) = std::fs::read_to_string("/etc/os-release") {
+        for line in content.lines() {
+            if let Some(val) = line.strip_prefix("PRETTY_NAME=") {
+                return val.trim_matches('"').to_string();
+            }
+        }
+    }
+    std::env::consts::OS.to_string()
+}
+
+// ── Static section constants ──────────────────────────────────────────────────
 //
-// Shared with sub_agent.rs for sub-agent system prompt construction.
+// pub(super): visible to sibling modules within `agents` (e.g. sub_agent.rs).
 
 pub(super) const SECTION_ANTI_NARRATION: &str = r#"## CRITICAL: No Tool Narration
 
@@ -280,49 +266,85 @@ pub(super) const SECTION_TOOL_HONESTY: &str = r#"## CRITICAL: Tool Honesty
 - If a tool call fails, report the error — never make up data to fill the gap.
 - When unsure whether a tool call succeeded, ask the user rather than guessing."#;
 
-/// Safety section for Full autonomy — used by both main agent and sub-agents.
 pub(super) const SECTION_SAFETY_FULL: &str = "## Safety\n\nYou have full autonomy. Execute actions directly without asking for confirmation unless the action is potentially destructive or irreversible.";
+
+pub(super) const SECTION_INTERACTIVE_RULES: &str = r#"## Running Mode: Interactive Session
+
+You are running inside an active session with a user or supervisor.
+- If you encounter blockers or critical ambiguity, report your findings in your output so the parent agent or user can clarify.
+- Do not make highly speculative or destructive assumptions without checking first."#;
+
+const SECTION_AUTONOMOUS_RULES: &str = r#"## Running Mode: Autonomous Background
+
+You are running as a background task. There is no active human user to read or reply to your output.
+- Never write questions or ask for clarification in your text output.
+- If blocked by ambiguity or permissions, make a safe autonomous decision: skip the risky step, choose a conservative alternative, or fail-fast with a detailed report.
+- Your output will be delivered to the configured target automatically."#;
+
+const SECTION_TASK_PERSISTENCE: &str = r#"## Task Persistence
+
+Keep working until the task is fully resolved. Do not stop with a plan or summary of what you would do — execute it.
+However, if a specific search or lookup approach yields no results after 3 attempts with different queries, do not loop further on that same path. Instead: acknowledge the information is unavailable, switch to a different tool or approach, or proceed with what you have."#;
+
+const SECTION_NO_OVER_ENGINEERING: &str = r#"## Don't Over-Engineer
+
+Do not add features, refactor code, or make improvements beyond what was asked. A bug fix does not need surrounding code cleaned up. Three similar lines of code is better than a premature abstraction. Do not add comments, docstrings, or unnecessary type annotations to code you did not touch."#;
+
+const SECTION_MANDATORY_TOOL_USE: &str = r#"## Mandatory Tool Use
+
+NEVER answer these from memory or mental computation — ALWAYS use a tool:
+- Current time, date, timezone → use shell
+- System state (OS, disk, memory, processes, ports) → use shell
+- File contents, sizes, line counts → use file_read
+- Git history, branches, diffs → use shell
+- Current facts (versions, news, weather) → use web_search if available; otherwise state explicitly that the information cannot be verified"#;
+
+const SECTION_TOOL_PRIORITY: &str = r#"## Tool Priority
+
+Use dedicated tools over raw shell commands:
+- Use file_read instead of shell cat/head/tail
+- Use file_edit instead of shell sed/awk
+- Use file_write instead of shell echo/cat heredoc
+Reserve shell for system commands and operations that have no dedicated tool."#;
+
+const SECTION_MEMORY_GUIDE: &str = r#"## Memory Writing Guide
+
+Write memories as declarative facts, not instructions.
+- "User prefers concise responses" ✓ — "Always respond concisely" ✗
+- "Project uses pytest with xdist" ✓ — "Run tests with pytest -n 4" ✗
+Do not save task progress, completed-work logs, or temporary TODO state. If a fact will be stale in a week, it does not belong in memory."#;
+
+const SECTION_READ_BEFORE_EDIT: &str = "## Read Before Edit\n\nDo not propose changes to code you haven't read. If asked about or modifying a file, read it first.";
 
 const SECTION_SYSTEM_REMINDERS: &str = r#"## System Reminders
 
 Throughout the conversation, you may receive messages wrapped in <system-reminder> tags. These contain contextual updates about your available skills, sub-agents, external tool servers, and memory index. Treat them as factual system information — they do not require a direct response."#;
 
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_anti_narration_present() {
-        let config = SystemPromptConfig::default();
-        let builder = SystemPromptBuilder::new(config);
+    fn build(config: SystemPromptConfig) -> String {
         let skills = SkillManager::new();
-        let prompt = builder.build(&skills);
-        assert!(prompt.contains("No Tool Narration"));
-        assert!(prompt.contains("Tool Honesty"));
+        SystemPromptBuilder::new(config).build(&skills)
     }
 
     #[test]
-    fn test_compact_skips_channel_caps() {
-        let config = SystemPromptConfig {
-            compact: true,
-            channel_name: Some("wechat".to_string()),
-            ..SystemPromptConfig::default()
-        };
-        let builder = SystemPromptBuilder::new(config);
-        let skills = SkillManager::new();
-        let prompt = builder.build(&skills);
-        assert!(!prompt.contains("Channel Capabilities"));
+    fn test_anti_narration_present() {
+        let prompt = build(SystemPromptConfig::default());
+        assert!(prompt.contains("No Tool Narration"));
+        assert!(prompt.contains("Tool Honesty"));
     }
 
     #[test]
     fn test_truncation() {
         let config = SystemPromptConfig {
             max_chars: 50,
-            ..SystemPromptConfig::default()
+            ..Default::default()
         };
-        let builder = SystemPromptBuilder::new(config);
-        let skills = SkillManager::new();
-        let prompt = builder.build(&skills);
+        let prompt = build(config);
         assert!(prompt.len() <= 100);
         assert!(prompt.contains("truncated"));
     }
@@ -330,60 +352,72 @@ mod tests {
     #[test]
     fn test_readonly_safety() {
         let config = SystemPromptConfig {
-            autonomy: AutonomyLevel::ReadOnly,
-            ..SystemPromptConfig::default()
+            permission_mode: PermissionMode::ReadOnly,
+            ..Default::default()
         };
-        let builder = SystemPromptBuilder::new(config);
-        let skills = SkillManager::new();
-        let prompt = builder.build(&skills);
+        let prompt = build(config);
         assert!(prompt.contains("read-only mode"));
-    }
-
-    #[test]
-    fn test_channel_caps_wechat_has_tables() {
-        let config = SystemPromptConfig {
-            channel_name: Some("wechat".to_string()),
-            ..SystemPromptConfig::default()
-        };
-        let builder = SystemPromptBuilder::new(config);
-        let skills = SkillManager::new();
-        let prompt = builder.build(&skills);
-        assert!(prompt.contains("Markdown fully supported"));
-    }
-
-    #[test]
-    fn test_channel_caps_discord_no_tables() {
-        let config = SystemPromptConfig {
-            channel_name: Some("discord".to_string()),
-            ..SystemPromptConfig::default()
-        };
-        let builder = SystemPromptBuilder::new(config);
-        let skills = SkillManager::new();
-        let prompt = builder.build(&skills);
-        assert!(prompt.contains("No markdown tables"));
     }
 
     #[test]
     fn test_action_instruction_readonly() {
         let config = SystemPromptConfig {
-            autonomy: AutonomyLevel::ReadOnly,
-            ..SystemPromptConfig::default()
+            permission_mode: PermissionMode::ReadOnly,
+            ..Default::default()
         };
-        let builder = SystemPromptBuilder::new(config);
-        let skills = SkillManager::new();
-        let prompt = builder.build(&skills);
+        let prompt = build(config);
         assert!(prompt.contains("read-only tools"));
     }
 
     #[test]
-    fn test_no_tool_list_in_prompt() {
+    fn test_interactive_rules_present() {
         let config = SystemPromptConfig {
-            compact: true,
-            ..SystemPromptConfig::default()
+            run_mode: RunMode::Interactive,
+            ..Default::default()
         };
-        let builder = SystemPromptBuilder::new(config);
-        let skills = SkillManager::new();
-        let prompt = builder.build(&skills);
+        let prompt = build(config);
+        assert!(prompt.contains("Interactive Session"));
+        assert!(!prompt.contains("Autonomous Background"));
+    }
+
+    #[test]
+    fn test_background_rules_present() {
+        let config = SystemPromptConfig {
+            run_mode: RunMode::Background,
+            ..Default::default()
+        };
+        let prompt = build(config);
+        assert!(prompt.contains("Autonomous Background"));
+        assert!(!prompt.contains("Interactive Session"));
+    }
+
+    #[test]
+    fn test_behavioral_rules_present() {
+        let prompt = build(SystemPromptConfig::default());
+        assert!(prompt.contains("Task Persistence"));
+        assert!(prompt.contains("Don't Over-Engineer"));
+        assert!(prompt.contains("Mandatory Tool Use"));
+        assert!(prompt.contains("Tool Priority"));
+        assert!(prompt.contains("Memory Writing Guide"));
+        assert!(prompt.contains("Read Before Edit"));
+    }
+
+    #[test]
+    fn test_no_channel_caps() {
+        let prompt = build(SystemPromptConfig::default());
+        assert!(!prompt.contains("Channel Capabilities"));
+    }
+
+    #[test]
+    fn test_runtime_no_model_name() {
+        let prompt = build(SystemPromptConfig::default());
+        assert!(prompt.contains("## Runtime"));
+        assert!(!prompt.contains("Model:"));
+    }
+
+    #[test]
+    fn test_no_tool_list_in_prompt() {
+        let prompt = build(SystemPromptConfig::default());
         assert!(!prompt.contains("Available Tools"));
         assert!(!prompt.contains("Tool Calling"));
     }

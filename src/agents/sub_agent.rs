@@ -28,7 +28,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::agents::delegation::{DelegationEvent, DelegationManager};
-use crate::agents::prompt::{SECTION_ANTI_NARRATION, SECTION_SAFETY_FULL, SECTION_TOOL_HONESTY};
+use crate::agents::prompt::{SECTION_ANTI_NARRATION, SECTION_INTERACTIVE_RULES, SECTION_SAFETY_FULL, SECTION_TOOL_HONESTY};
 use crate::agents::session_manager::{BackendPersistHook, PersistHook, Session};
 use crate::agents::skills::SkillManager;
 use crate::agents::tool_registry::ToolRegistry;
@@ -226,23 +226,25 @@ impl SubAgentDelegator {
 
         let system_prompt = if config.system_prompt.is_empty() {
             format!(
-                "You are a specialized agent named '{}'.{}\n\n{}\n{}\n{}\n\nCurrent date: {}\n\nAvailable tools: {}",
+                "You are a specialized agent named '{}'.{}\n\n{}\n\n{}\n\n{}\n\n{}\n\nCurrent date: {}\n\nAvailable tools: {}",
                 config.name,
                 workspace_section,
                 SECTION_ANTI_NARRATION,
                 SECTION_TOOL_HONESTY,
                 SECTION_SAFETY_FULL,
+                SECTION_INTERACTIVE_RULES,
                 today,
                 tool_names.join(", "),
             )
         } else {
             format!(
-                "{}{}\n\n{}\n{}\n{}\n\nCurrent date: {}\n\nAvailable tools: {}",
+                "{}{}\n\n{}\n\n{}\n\n{}\n\n{}\n\nCurrent date: {}\n\nAvailable tools: {}",
                 config.system_prompt,
                 workspace_section,
                 SECTION_ANTI_NARRATION,
                 SECTION_TOOL_HONESTY,
                 SECTION_SAFETY_FULL,
+                SECTION_INTERACTIVE_RULES,
                 today,
                 tool_names.join(", "),
             )
@@ -272,8 +274,7 @@ impl SubAgentDelegator {
             max_history: 100,
             prompt_config: crate::agents::SystemPromptConfig {
                 workspace_dir,
-                autonomy: crate::agents::AutonomyLevel::Full,
-                compact: true,
+                permission_mode: crate::agents::PermissionMode::Full,
                 ..Default::default()
             },
             ..Default::default()

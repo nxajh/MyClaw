@@ -105,8 +105,11 @@ impl Default for AgentConfig {
 impl AgentConfig {
     pub fn with_override(&self, ov: &super::session_manager::SessionOverride) -> Self {
         let mut cfg = self.clone();
-        if let Some(ref autonomy) = ov.autonomy {
-            cfg.prompt_config.autonomy = *autonomy;
+        if let Some(ref permission_mode) = ov.permission_mode {
+            cfg.prompt_config.permission_mode = *permission_mode;
+        }
+        if let Some(run_mode) = ov.run_mode {
+            cfg.prompt_config.run_mode = run_mode;
         }
         if let Some(t) = ov.compact_threshold { cfg.context.compact_threshold = t; }
         if let Some(r) = ov.retain_work_units { cfg.context.retain_work_units = r; }

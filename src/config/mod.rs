@@ -39,7 +39,7 @@
 //! allowed_users = ["*"]
 //!
 //! [agent]
-//! autonomy_level = "default"
+//! permission_mode = "default"
 //!
 //! [memory]
 //! storage = "sqlite"
@@ -357,7 +357,7 @@ models = ["gpt-4o"]
         let config = ConfigLoader::from_toml("").unwrap();
         assert!(config.providers.is_empty());
         assert!(config.channels.enabled_channels().is_empty());
-        assert_eq!(config.agent.autonomy_level, agent::AutonomyLevel::Default);
+        assert_eq!(config.agent.permission_mode, agent::PermissionMode::Default);
     }
 
     #[test]
@@ -408,10 +408,9 @@ allowed_users = ["*"]
 
 [agent]
 max_tool_calls = 50
-autonomy_level = "full"
+permission_mode = "full"
 
 [agent.prompt]
-compact = true
 
 [memory]
 storage = "sqlite"

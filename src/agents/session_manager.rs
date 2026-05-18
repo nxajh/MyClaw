@@ -25,9 +25,12 @@ pub struct SessionOverride {
     /// Thinking effort level when thinking is enabled ("low"/"medium"/"high").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
-    /// Override autonomy level for this session.
+    /// Override permission mode for this session.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub autonomy: Option<crate::config::agent::AutonomyLevel>,
+    pub permission_mode: Option<crate::config::agent::PermissionMode>,
+    /// Override run mode for this session (Interactive vs Background).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_mode: Option<crate::agents::prompt::RunMode>,
     /// Override max tool calls per turn (0 = unlimited).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tool_calls: Option<usize>,
@@ -45,7 +48,8 @@ impl SessionOverride {
         self.model.is_none()
             && self.thinking.is_none()
             && self.effort.is_none()
-            && self.autonomy.is_none()
+            && self.permission_mode.is_none()
+            && self.run_mode.is_none()
             && self.max_tool_calls.is_none()
             && self.compact_threshold.is_none()
             && self.retain_work_units.is_none()
