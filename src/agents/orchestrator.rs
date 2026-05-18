@@ -1372,6 +1372,14 @@ async fn run_message_task(
             }
         }
         Err(e) => {
+            if let Some(crate::agents::error::AgentError::GracefulShutdown) =
+                e.downcast_ref::<crate::agents::error::AgentError>()
+            {
+                tracing::debug!(session = %sk, "graceful shutdown at checkpoint, no user notification");
+                channel.on_status(&reply_target, ProcessingStatus::Done).await;
+                return;
+            }
+
             if let Some(crate::agents::error::AgentError::LoopBreak { reason }) =
                 e.downcast_ref::<crate::agents::error::AgentError>()
             {
