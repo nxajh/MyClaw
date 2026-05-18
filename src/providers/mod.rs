@@ -25,7 +25,7 @@ pub use capability_chat::{
     BoxStream, ChatProvider, ChatRequest, ChatResponse, ChatMessage, ContentPart,
     StopReason, StreamEvent, ToolCall, ToolSpec as ChatToolSpec, ThinkingConfig, ImageDetail, ChatUsage,
 };
-pub use error_class::{ClassifiedError, ErrorCategory, FailoverReason, RecoveryHints};
+pub use error_class::{ClassifiedError, ErrorCategory, FailoverReason, ProviderHttpError, RecoveryHints};
 pub use capability_embedding::{
     EmbeddingProvider, EmbedRequest, EmbedResponse, EmbeddingUsage, EmbedInput,
 };

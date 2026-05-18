@@ -9,6 +9,21 @@
 use std::fmt;
 use std::time::Duration;
 
+// ── ProviderHttpError ─────────────────────────────────────────────────────
+
+/// Typed carrier for an HTTP error from a provider stream.
+///
+/// `collect_stream_inner` returns this when it receives
+/// `StreamEvent::HttpError`, preserving the status code so that
+/// `chat_loop` can call `ClassifiedError::classify(status, …)` instead of
+/// the status-less `from_message` (which always classifies as Timeout).
+#[derive(Debug, thiserror::Error)]
+#[error("provider HTTP {status}: {message}")]
+pub struct ProviderHttpError {
+    pub status: u16,
+    pub message: String,
+}
+
 // ── ErrorCategory ────────────────────────────────────────────────────────
 
 /// Error category — determines recovery strategy via [`RecoveryHints`].
