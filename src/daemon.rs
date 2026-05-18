@@ -12,7 +12,7 @@
 use anyhow::{Context, Result};
 use crate::agents::{
     Agent, AgentConfig, InMemoryBackend, Orchestrator, OrchestratorParts, SessionManager,
-    ToolRegistry, SkillManager, Skill, SystemPromptConfig, SkillsPromptInjectionMode,
+    ToolRegistry, SkillManager, Skill, SystemPromptConfig, RunMode,
     McpManager, SubAgentDelegator, DelegationManager,
 };
 use crate::tools::TaskDelegator;
@@ -556,18 +556,12 @@ fn build_prompt_config(
     SystemPromptConfig {
         workspace_dir: workspace_dir.to_string_lossy().to_string(),
         knowledge_dir: knowledge_dir.to_string_lossy().to_string(),
-        model_name: cfg.prompt.model_name.clone().unwrap_or_default(),
-        // agents::AutonomyLevel is a re-export of config::agent::AutonomyLevel —
-        // same type, assign directly.
-        autonomy: cfg.autonomy_level,
-        skills_mode: SkillsPromptInjectionMode::Compact,
-        compact: cfg.prompt.compact,
+        permission_mode: cfg.permission_mode,
+        run_mode: RunMode::Interactive,
         max_chars: cfg.prompt.max_chars,
         bootstrap_max_chars: cfg.prompt.bootstrap_max_chars,
         native_tools: cfg.prompt.native_tools,
-        channel_name: cfg.prompt.channel_name.clone(),
-        host_info: None,
-        timezone_offset: cfg.prompt.timezone_offset,
+        identity_header: None,
     }
 }
 
@@ -838,6 +832,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         tool_timeout_secs: config.agent.tool_timeout_secs,
         model_override: None,
         thinking_override: None,
+        timezone_offset: config.agent.prompt.timezone_offset,
     };
     let mcp_manager_arc = Arc::new(mcp_manager);
 

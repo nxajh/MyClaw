@@ -23,6 +23,7 @@ pub mod registry;
 pub mod signal;
 pub mod storage;
 pub mod str_utils;
+pub mod sys_info;
 pub mod tools;
 
 #[cfg(feature = "tui")]
@@ -33,7 +34,7 @@ pub use agents::{
     Agent, AgentConfig, AgentLoop, InMemoryBackend, Session, SessionManager,
     ToolRegistry, SkillManager, Orchestrator, OrchestratorParts,
     SystemPromptBuilder, SystemPromptConfig,
-    AutonomyLevel, SkillsPromptInjectionMode,
+    PermissionMode, RunMode,
     McpManager, AskUserHandler, DelegateHandler, SubAgentDelegator,
     DelegationEvent, DelegationManager,
 };

@@ -28,7 +28,6 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::agents::delegation::{DelegationEvent, DelegationManager};
-use crate::agents::prompt::{SECTION_ANTI_NARRATION, SECTION_SAFETY_FULL, SECTION_TOOL_HONESTY};
 use crate::agents::session_manager::{BackendPersistHook, PersistHook, Session};
 use crate::agents::skills::SkillManager;
 use crate::agents::tool_registry::ToolRegistry;
@@ -173,8 +172,6 @@ impl SubAgentDelegator {
         );
 
         let tools = self.build_filtered_tools(&config.tools);
-        let tool_names = tools.tool_names_sorted();
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
 
         // --- worktree creation (moved BEFORE prompt so we can inject the path) ---
         let (worktree_path, cleanup_worktree, branch_name) = match config.isolation {
@@ -224,28 +221,10 @@ impl SubAgentDelegator {
             format!("\n\nWorking directory: {}", workspace_dir)
         };
 
-        let system_prompt = if config.system_prompt.is_empty() {
-            format!(
-                "You are a specialized agent named '{}'.{}\n\n{}\n{}\n{}\n\nCurrent date: {}\n\nAvailable tools: {}",
-                config.name,
-                workspace_section,
-                SECTION_ANTI_NARRATION,
-                SECTION_TOOL_HONESTY,
-                SECTION_SAFETY_FULL,
-                today,
-                tool_names.join(", "),
-            )
+        let identity = if config.system_prompt.is_empty() {
+            format!("You are a specialized agent named '{}'.{}", config.name, workspace_section)
         } else {
-            format!(
-                "{}{}\n\n{}\n{}\n{}\n\nCurrent date: {}\n\nAvailable tools: {}",
-                config.system_prompt,
-                workspace_section,
-                SECTION_ANTI_NARRATION,
-                SECTION_TOOL_HONESTY,
-                SECTION_SAFETY_FULL,
-                today,
-                tool_names.join(", "),
-            )
+            format!("{}{}", config.system_prompt, workspace_section)
         };
 
         let (session_id, persist_hook) = self.open_sub_session(parent_session_id, &config.name);
@@ -272,8 +251,8 @@ impl SubAgentDelegator {
             max_history: 100,
             prompt_config: crate::agents::SystemPromptConfig {
                 workspace_dir,
-                autonomy: crate::agents::AutonomyLevel::Full,
-                compact: true,
+                permission_mode: crate::agents::PermissionMode::Full,
+                identity_header: Some(identity),
                 ..Default::default()
             },
             ..Default::default()
@@ -285,7 +264,6 @@ impl SubAgentDelegator {
             Arc::new(RwLock::new(SkillManager::new())),
             agent_config,
         );
-        let agent = agent.with_system_prompt(system_prompt);
         let agent = match &config.model {
             Some(m) => agent.with_model(m.clone()),
             None => agent,

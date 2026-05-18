@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::agent::AutonomyLevel;
+use crate::config::agent::PermissionMode;
 use crate::providers::ToolCall;
 use crate::providers::capability_tool::ToolResult;
 use crate::providers::capability_chat::ToolSpec;
@@ -58,11 +58,11 @@ impl DefaultToolExecutor {
         &self,
         call: &ToolCall,
         session: &mut Session,
-        autonomy: Option<&AutonomyLevel>,
+        autonomy: Option<&PermissionMode>,
     ) -> anyhow::Result<ToolResult> {
         // Autonomy enforcement: block write tools in ReadOnly mode.
         if let Some(autonomy) = autonomy {
-            if matches!(autonomy, AutonomyLevel::ReadOnly) && is_write_tool(&call.name) {
+            if matches!(autonomy, PermissionMode::ReadOnly) && is_write_tool(&call.name) {
                 tracing::info!(tool = %call.name, "tool blocked by ReadOnly autonomy policy");
                 return Ok(ToolResult {
                     success: false,

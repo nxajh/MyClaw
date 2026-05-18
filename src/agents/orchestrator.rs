@@ -1600,7 +1600,9 @@ fn get_or_create_scheduled_loop(
     if let Some(existing) = ctx.sessions.get(session_key) {
         return existing.loop_.clone();
     }
-    let session = ctx.session_manager.get_or_create(session_key);
+    let mut session = ctx.session_manager.get_or_create(session_key);
+    // Scheduled tasks run without an active user — enforce Background mode.
+    session.session_override.run_mode = Some(crate::config::agent::RunMode::Background);
     let persist_hook: Arc<dyn PersistHook> = Arc::new(
         BackendPersistHook::new(ctx.persist_backend.clone())
     );

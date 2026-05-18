@@ -10,7 +10,7 @@ impl AgentLoop {
 
     pub(crate) async fn execute_tool(&mut self, call: &ToolCall) -> anyhow::Result<ToolResult> {
         // Copy autonomy so we can pass &mut self.session without a borrow conflict.
-        let autonomy = self.session.session_override.autonomy;
+        let autonomy = self.session.session_override.permission_mode;
         self.tool_executor.execute(call, &mut self.session, autonomy.as_ref()).await
     }
 }

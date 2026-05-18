@@ -20,8 +20,8 @@ impl AgentLoop {
     pub fn apply_session_override(&mut self, ov: crate::agents::session_manager::SessionOverride) {
         // Autonomy change: inject a system-reminder so the model learns the new policy
         // on the next turn. The actual hard enforcement is in execute_tool regardless.
-        if let Some(ref autonomy) = ov.autonomy {
-            self.request_builder.diff_autonomy(autonomy);
+        if let Some(ref permission_mode) = ov.permission_mode {
+            self.request_builder.diff_autonomy(permission_mode);
         }
 
         // Apply all config fields via the shared helper (also sets model_override and thinking_override).
