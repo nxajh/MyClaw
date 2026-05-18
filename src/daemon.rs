@@ -814,6 +814,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             cc.set_session_manager(session_manager.clone());
             cc.set_tool_names(tools_arc.all_tools().iter().map(|t| t.spec().name.to_string()).collect());
             cc.set_workspace_dir(config.workspace_dir.clone());
+            cc.set_config_path(config.config_path.clone());
             Arc::new(cc)
         });
     #[cfg(feature = "client")]

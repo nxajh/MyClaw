@@ -2,10 +2,9 @@ import { useEffect, useState, useCallback } from 'react'
 import { Wrench } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useApi } from '../lib/api'
+import { Page, ErrorBanner, LoadingRow, EmptyState } from '../components/PageLayout'
 
-interface Tool {
-  name: string
-}
+interface Tool { name: string }
 
 export default function Tools() {
   const { status, sendRaw, addMessageListener } = useWebSocketContext()
@@ -19,8 +18,7 @@ export default function Tools() {
     setLoading(true)
     setError(null)
     try {
-      const result = (await request('tools.list')) as Tool[]
-      setTools(result || [])
+      setTools((await request('tools.list') as Tool[]) || [])
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -28,53 +26,33 @@ export default function Tools() {
     }
   }, [status, request])
 
-  useEffect(() => {
-    if (status === 'connected') fetchTools()
-  }, [status, fetchTools])
+  useEffect(() => { if (status === 'connected') fetchTools() }, [status, fetchTools])
 
   return (
-    <>
-      <header className="border-b border-zinc-700/50 px-6 py-3 flex items-center justify-between shrink-0">
-        <h2 className="text-sm font-semibold text-zinc-300 flex items-center gap-2">
-          <Wrench size={16} />
-          Tools
-        </h2>
-        <span className="text-xs text-zinc-500">{tools.length} tool{tools.length !== 1 ? 's' : ''}</span>
-      </header>
-
-      <div className="flex-1 overflow-y-auto px-6 py-6 max-w-3xl w-full mx-auto">
-        {status !== 'connected' && (
-          <div className="text-sm text-zinc-500">Waiting for connection…</div>
-        )}
-
-        {error && (
-          <div className="rounded-lg bg-red-900/30 border border-red-700/40 px-4 py-3 text-sm text-red-300 mb-4">
-            {error}
-          </div>
-        )}
-
-        {loading && (
-          <div className="text-sm text-zinc-500 animate-pulse">Loading tools…</div>
-        )}
-
-        {!loading && tools.length === 0 && status === 'connected' && (
-          <div className="text-sm text-zinc-500">No tools registered.</div>
-        )}
-
-        {!loading && tools.length > 0 && (
-          <div className="grid gap-2">
-            {tools.map((tool) => (
-              <div
-                key={tool.name}
-                className="flex items-center gap-3 rounded-lg border border-zinc-700/40 bg-zinc-800/50 px-4 py-3"
-              >
-                <Wrench size={14} className="text-amber-400 shrink-0" />
-                <span className="font-mono text-sm text-zinc-200">{tool.name}</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </>
+    <Page
+      icon={Wrench}
+      title="Tools"
+      meta={tools.length ? ` · ${tools.length}` : undefined}
+    >
+      {error && <ErrorBanner message={error} />}
+      {loading && <LoadingRow />}
+      {!loading && status !== 'connected' && <EmptyState>Waiting for connection…</EmptyState>}
+      {!loading && status === 'connected' && tools.length === 0 && (
+        <EmptyState>No tools registered.</EmptyState>
+      )}
+      {!loading && tools.length > 0 && (
+        <div className="space-y-1">
+          {tools.map((tool) => (
+            <div
+              key={tool.name}
+              className="flex items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-3"
+            >
+              <Wrench size={13} className="text-amber-400 shrink-0" />
+              <span className="font-mono text-sm text-zinc-300">{tool.name}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </Page>
   )
 }
