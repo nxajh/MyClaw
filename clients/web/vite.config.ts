@@ -3,9 +3,8 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig({
-  // Set VITE_BASE_PATH at build time when deploying under a subpath,
-  // e.g.  VITE_BASE_PATH=/myclaw-ui/ npm run build
-  base: process.env.VITE_BASE_PATH ?? '/',
+  // Relative paths so assets resolve correctly via the <base href> tag.
+  base: './',
   plugins: [react(), tailwindcss()],
   server: {
     proxy: {

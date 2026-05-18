@@ -6,7 +6,7 @@ import App from './App'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <BrowserRouter basename={import.meta.env.BASE_URL}>
+    <BrowserRouter basename={document.querySelector('base')?.getAttribute('href') ?? '/'}>
       <App />
     </BrowserRouter>
   </StrictMode>,
