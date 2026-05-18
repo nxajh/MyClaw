@@ -131,6 +131,15 @@ pub fn extract_yaml_list(yaml: &str, key: &str) -> Vec<String> {
     items
 }
 
+/// Extract a boolean value from simple YAML text by key.
+pub fn extract_yaml_bool(yaml: &str, key: &str) -> Option<bool> {
+    extract_yaml_string(yaml, key).and_then(|v| match v.to_lowercase().as_str() {
+        "true" | "yes" | "on" => Some(true),
+        "false" | "no" | "off" => Some(false),
+        _ => None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +183,19 @@ mod tests {
         let yaml = "tools:\n  - shell\n  - file_read\n  - file_write";
         let items = extract_yaml_list(yaml, "tools");
         assert_eq!(items, vec!["shell", "file_read", "file_write"]);
+    }
+
+    #[test]
+    fn test_extract_yaml_bool() {
+        let yaml = "user_invocable: true\nagent_invocable: false\nother: yes\nfoo: no\nbar: on\nbaz: off";
+        assert_eq!(extract_yaml_bool(yaml, "user_invocable"), Some(true));
+        assert_eq!(extract_yaml_bool(yaml, "agent_invocable"), Some(false));
+        assert_eq!(extract_yaml_bool(yaml, "other"), Some(true));
+        assert_eq!(extract_yaml_bool(yaml, "foo"), Some(false));
+        assert_eq!(extract_yaml_bool(yaml, "bar"), Some(true));
+        assert_eq!(extract_yaml_bool(yaml, "baz"), Some(false));
+        assert_eq!(extract_yaml_bool(yaml, "missing"), None);
+        let yaml2 = "flag: notabool";
+        assert_eq!(extract_yaml_bool(yaml2, "flag"), None);
     }
 }

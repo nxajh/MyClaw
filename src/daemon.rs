@@ -415,11 +415,12 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
     Ok(registry)
 }
 
-/// Build ToolRegistry with all built-in + MCP + SkillTool registered.
+/// Build ToolRegistry with all built-in + MCP + skill tools registered.
 async fn build_tools(
     mcp_manager: &McpManager,
     skills: &Arc<parking_lot::RwLock<SkillManager>>,
     shared_scheduler: &crate::agents::SharedScheduler,
+    workspace_dir: &std::path::Path,
 ) -> ToolRegistry {
     let mut tools = ToolRegistry::new();
     let builtin = crate::tools::builtin_tools();
@@ -435,6 +436,15 @@ async fn build_tools(
 
     // SkillTool — loads skill body on demand.
     tools.register(Arc::new(crate::tools::SkillTool::new(Arc::clone(skills))));
+
+    // SkillsListTool — lists skill metadata.
+    tools.register(Arc::new(crate::tools::SkillsListTool::new(Arc::clone(skills))));
+
+    // SkillManageTool — CRUD for skills.
+    tools.register(Arc::new(crate::tools::SkillManageTool::new(
+        Arc::clone(skills),
+        workspace_dir.to_path_buf(),
+    )));
 
     // CronJobTool — manage scheduled cron jobs.
     tools.register(Arc::new(crate::tools::CronJobTool::new(Arc::clone(shared_scheduler))));
@@ -678,8 +688,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         jobs_json_path.clone(), tz_name.clone(), heartbeat_config, scheduler_tx.clone(),
     );
 
-    // Build tool registry (all built-in + MCP + SkillTool).
-    let mut tools = build_tools(&mcp_manager, &skills_arc, &shared_scheduler).await;
+    // Build tool registry (all built-in + MCP + skill tools).
+    let mut tools = build_tools(&mcp_manager, &skills_arc, &shared_scheduler, &config.workspace_dir).await;
 
     // Build sub-agent configs (AGENT.md files from workspace/agents/).
     let sub_agent_configs = build_sub_agents(&config.workspace_dir);

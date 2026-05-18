@@ -161,8 +161,9 @@ impl AttachmentManager {
     /// 从 history 重建 announced 状态。
     pub fn diff_skills(&mut self, skills: &SkillManager, history: &[ChatMessage]) {
         let announced = Self::rebuild_from_history(history);
+        // Only agent_invocable skills appear in the model's index.
         let current: HashSet<String> =
-            skills.skills_iter().map(|(n, _)| n.to_string()).collect();
+            skills.agent_skills_iter().map(|(n, _)| n.to_string()).collect();
 
         let added: Vec<String> = current.difference(&announced.skills).cloned().collect();
         let removed: Vec<String> = announced.skills.difference(&current).cloned().collect();
@@ -414,16 +415,23 @@ impl AttachmentManager {
         if !delta.added.is_empty() {
             lines.push(
                 "Skills provide behavioral instructions for specific tasks. \
-                 Use the `use_skill` tool to load a skill's full instructions when needed."
+                 Use the `skill_view` tool to load a skill's full instructions when needed."
                     .to_string(),
             );
             for name in &delta.added {
-                let desc = skills.get(name).map(|s| s.description.as_str()).unwrap_or("");
-                if desc.is_empty() {
-                    lines.push(format!("- **{}**", name));
-                } else {
-                    lines.push(format!("- **{}**: {}", name, desc));
+                let skill = skills.get(name);
+                let desc = skill.map(|s| s.description.as_str()).unwrap_or("");
+
+                let mut parts = vec![format!("- **{}**", name)];
+                if !desc.is_empty() {
+                    parts.push(format!(": {}", desc));
                 }
+                if let Some(s) = skill {
+                    if let Some(ref w) = s.when_to_use {
+                        parts.push(format!(" (trigger: {})", w));
+                    }
+                }
+                lines.push(parts.join(""));
             }
         }
 
@@ -510,6 +518,13 @@ mod tests {
                 description: format!("{} description", name),
                 keywords: vec![],
                 prompt_body: String::new(),
+                version: None,
+                when_to_use: None,
+                argument_hint: None,
+                arguments: vec![],
+                user_invocable: true,
+                agent_invocable: true,
+                skill_dir: None,
             });
         }
         mgr

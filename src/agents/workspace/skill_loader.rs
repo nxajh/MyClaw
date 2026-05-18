@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use tracing::{info, warn};
 
-use crate::str_utils::{parse_front_matter, extract_yaml_string, extract_yaml_list};
+use crate::str_utils::{parse_front_matter, extract_yaml_string, extract_yaml_list, extract_yaml_bool};
 
 /// 从 SKILL.md 解析的 Skill 定义
 #[derive(Debug, Clone)]
@@ -25,8 +25,14 @@ pub struct SkillDefinition {
     pub name: String,
     pub description: String,
     pub keywords: Vec<String>,
-    pub prompt_body: String,  // Markdown body（注入到 system prompt）
+    pub prompt_body: String,
     pub source_path: PathBuf,
+    pub version: Option<String>,
+    pub when_to_use: Option<String>,
+    pub argument_hint: Option<String>,
+    pub arguments: Vec<String>,
+    pub user_invocable: bool,
+    pub agent_invocable: bool,
 }
 
 /// 解析 SKILL.md 文件
@@ -50,6 +56,12 @@ pub fn parse_skill_file(path: &Path) -> Result<SkillDefinition> {
         .unwrap_or_default();
 
     let keywords = extract_yaml_list(&front_matter, "keywords");
+    let version = extract_yaml_string(&front_matter, "version");
+    let when_to_use = extract_yaml_string(&front_matter, "when_to_use");
+    let argument_hint = extract_yaml_string(&front_matter, "argument_hint");
+    let arguments = extract_yaml_list(&front_matter, "arguments");
+    let user_invocable = extract_yaml_bool(&front_matter, "user_invocable").unwrap_or(true);
+    let agent_invocable = extract_yaml_bool(&front_matter, "agent_invocable").unwrap_or(true);
 
     Ok(SkillDefinition {
         name,
@@ -57,6 +69,12 @@ pub fn parse_skill_file(path: &Path) -> Result<SkillDefinition> {
         keywords,
         prompt_body: body.trim().to_string(),
         source_path: path.to_path_buf(),
+        version,
+        when_to_use,
+        argument_hint,
+        arguments,
+        user_invocable,
+        agent_invocable,
     })
 }
 
@@ -130,6 +148,57 @@ Use curl."#;
         assert_eq!(skill.description, "Get weather");
         assert_eq!(skill.keywords, vec!["weather"]);
         assert!(skill.prompt_body.contains("# Weather"));
+    }
+
+    #[test]
+    fn test_parse_skill_file_new_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("flight");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+
+        let content = r#"---
+name: flight
+description: "Search for flights"
+version: "1.2.0"
+when_to_use: "用户查机票时"
+argument_hint: "[出发城市] [到达城市]"
+arguments: [from_city, to_city]
+user_invocable: true
+agent_invocable: false
+keywords: [flights, 机票]
+---
+
+# Flight Skill
+
+Search flights."#;
+
+        std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+
+        let skill = parse_skill_file(&skill_dir.join("SKILL.md")).unwrap();
+        assert_eq!(skill.name, "flight");
+        assert_eq!(skill.version, Some("1.2.0".to_string()));
+        assert_eq!(skill.when_to_use, Some("用户查机票时".to_string()));
+        assert_eq!(skill.argument_hint, Some("[出发城市] [到达城市]".to_string()));
+        assert_eq!(skill.arguments, vec!["from_city", "to_city"]);
+        assert!(skill.user_invocable);
+        assert!(!skill.agent_invocable);
+    }
+
+    #[test]
+    fn test_parse_skill_file_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("simple");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+
+        let content = "---\nname: simple\ndescription: \"Simple\"\n---\n# Simple";
+        std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+
+        let skill = parse_skill_file(&skill_dir.join("SKILL.md")).unwrap();
+        assert!(skill.user_invocable);
+        assert!(skill.agent_invocable);
+        assert!(skill.version.is_none());
+        assert!(skill.when_to_use.is_none());
+        assert!(skill.arguments.is_empty());
     }
 
     #[test]

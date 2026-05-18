@@ -20,7 +20,13 @@ pub async fn run(cli: &Cli, prompt: Option<&str>, agent: Option<&str>, model: Op
     tools.register(Arc::new(myclaw::tools::ListDirTool::new()));
     let skills_arc: Arc<parking_lot::RwLock<myclaw::SkillManager>> =
         Arc::new(parking_lot::RwLock::new(myclaw::SkillManager::new()));
+    let workspace_dir = std::path::PathBuf::from(&cfg.workspace_dir);
     tools.register(Arc::new(myclaw::tools::SkillTool::new(Arc::clone(&skills_arc))));
+    tools.register(Arc::new(myclaw::tools::SkillsListTool::new(Arc::clone(&skills_arc))));
+    tools.register(Arc::new(myclaw::tools::SkillManageTool::new(
+        Arc::clone(&skills_arc),
+        workspace_dir,
+    )));
     let tools_arc = Arc::new(tools);
 
     let agent_config = myclaw::AgentConfig::default();
