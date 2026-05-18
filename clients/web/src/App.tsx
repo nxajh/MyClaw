@@ -5,7 +5,9 @@ import Sidebar from './components/Sidebar'
 import LoginOverlay from './components/LoginOverlay'
 import Chat from './pages/Chat'
 import Sessions from './pages/Sessions'
-import Placeholder from './pages/Placeholder'
+import Tools from './pages/Tools'
+import Memory from './pages/Memory'
+import Config from './pages/Config'
 import { AUTH_TOKEN_KEY } from './hooks/useWebSocket'
 
 function AppShell() {
@@ -17,7 +19,7 @@ function AppShell() {
   const showLogin = authFailed || (!hasStoredToken && status !== 'connected')
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-zinc-900 text-zinc-100">
+    <div className="flex h-screen w-screen overflow-hidden bg-zinc-950 text-zinc-100">
       {showLogin && (
         <LoginOverlay onSubmit={submitToken} isRetry={authFailed} />
       )}
@@ -26,9 +28,9 @@ function AppShell() {
         <Routes>
           <Route path="/" element={<Chat />} />
           <Route path="/sessions" element={<Sessions />} />
-          <Route path="/tools" element={<Placeholder title="Tools" />} />
-          <Route path="/memory" element={<Placeholder title="Memory" />} />
-          <Route path="/config" element={<Placeholder title="Config" />} />
+          <Route path="/tools" element={<Tools />} />
+          <Route path="/memory" element={<Memory />} />
+          <Route path="/config" element={<Config />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>

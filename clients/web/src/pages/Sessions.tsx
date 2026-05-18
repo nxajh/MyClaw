@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Layers, Plus, ArrowRightLeft, Trash2 } from 'lucide-react'
+import { Layers, Plus, ArrowRightLeft, Trash2, CheckCircle } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useApi } from '../lib/api'
 
@@ -7,10 +7,11 @@ interface Session {
   id: string
   name: string
   created_at?: string
+  is_active?: boolean
 }
 
 export default function Sessions() {
-  const { status, sendRaw, addMessageListener } = useWebSocketContext()
+  const { status, sendRaw, addMessageListener, setMessages } = useWebSocketContext()
   const { request } = useApi(sendRaw, addMessageListener)
   const [sessions, setSessions] = useState<Session[]>([])
   const [newName, setNewName] = useState('')
@@ -49,11 +50,15 @@ export default function Sessions() {
       setError(null)
       try {
         await request('sessions.switch', { id })
+        // Clear chat messages since we've switched to a different session context.
+        setMessages([])
+        // Refresh list to update is_active highlights.
+        await fetchSessions()
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
       }
     },
-    [status, request],
+    [status, request, setMessages, fetchSessions],
   )
 
   const handleDelete = useCallback(
@@ -70,7 +75,6 @@ export default function Sessions() {
     [status, request, fetchSessions],
   )
 
-  // Fetch on mount and when connection changes
   useEffect(() => {
     if (status === 'connected') {
       fetchSessions()
@@ -85,6 +89,13 @@ export default function Sessions() {
           <Layers size={16} />
           Sessions
         </h2>
+        <button
+          onClick={fetchSessions}
+          disabled={status !== 'connected' || loading}
+          className="text-xs text-zinc-500 hover:text-zinc-300 disabled:opacity-40 transition"
+        >
+          Refresh
+        </button>
       </header>
 
       <div className="flex-1 overflow-y-auto px-6 py-6 max-w-3xl w-full mx-auto space-y-6">
@@ -130,21 +141,40 @@ export default function Sessions() {
           {sessions.map((session) => (
             <div
               key={session.id}
-              className="flex items-center gap-3 rounded-lg border border-zinc-700/40 bg-zinc-800/50 px-4 py-3 hover:bg-zinc-800 transition group"
+              className={`flex items-center gap-3 rounded-lg border px-4 py-3 transition group ${
+                session.is_active
+                  ? 'border-blue-500/50 bg-blue-900/20'
+                  : 'border-zinc-700/40 bg-zinc-800/50 hover:bg-zinc-800'
+              }`}
             >
               <div className="flex-1 min-w-0">
-                <div className="text-sm font-medium text-zinc-200 truncate">{session.name}</div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-zinc-200 truncate">{session.name}</span>
+                  {session.is_active && (
+                    <span className="flex items-center gap-1 text-xs text-blue-400 shrink-0">
+                      <CheckCircle size={12} />
+                      active
+                    </span>
+                  )}
+                </div>
                 <div className="text-xs text-zinc-500 font-mono">{session.id}</div>
+                {session.created_at && (
+                  <div className="text-xs text-zinc-600">
+                    {new Date(session.created_at).toLocaleString()}
+                  </div>
+                )}
               </div>
-              <button
-                onClick={() => handleSwitch(session.id)}
-                disabled={status !== 'connected'}
-                className="flex items-center gap-1 rounded-md bg-zinc-700/60 hover:bg-zinc-600 px-3 py-1.5 text-xs text-zinc-300 transition opacity-0 group-hover:opacity-100"
-                title="Switch to session"
-              >
-                <ArrowRightLeft size={12} />
-                Switch
-              </button>
+              {!session.is_active && (
+                <button
+                  onClick={() => handleSwitch(session.id)}
+                  disabled={status !== 'connected'}
+                  className="flex items-center gap-1 rounded-md bg-zinc-700/60 hover:bg-zinc-600 px-3 py-1.5 text-xs text-zinc-300 transition opacity-0 group-hover:opacity-100"
+                  title="Switch to session"
+                >
+                  <ArrowRightLeft size={12} />
+                  Switch
+                </button>
+              )}
               <button
                 onClick={() => handleDelete(session.id)}
                 disabled={status !== 'connected'}

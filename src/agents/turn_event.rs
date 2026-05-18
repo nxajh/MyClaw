@@ -20,13 +20,14 @@ pub enum TurnEvent {
     /// Agent 正在调用工具
     #[serde(rename = "tool_call")]
     ToolCall {
+        id: String,
         name: String,
         args: serde_json::Value,
     },
 
     /// 工具返回结果
     #[serde(rename = "tool_result")]
-    ToolResult { name: String, output: String },
+    ToolResult { id: String, name: String, output: String },
 
     /// Turn 被用户取消
     #[serde(rename = "cancelled")]
@@ -62,6 +63,7 @@ mod tests {
     #[test]
     fn serialize_tool_call() {
         let event = TurnEvent::ToolCall {
+            id: "tc-1".into(),
             name: "shell".into(),
             args: serde_json::json!({"cmd": "ls"}),
         };
