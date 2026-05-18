@@ -609,6 +609,7 @@ impl Session {
         text: String,
         tool_calls: Vec<crate::providers::ToolCall>,
         thinking: Option<String>,
+        thinking_signature: Option<String>,
     ) {
         if text.trim().is_empty() && tool_calls.is_empty() {
             return;
@@ -617,7 +618,7 @@ impl Session {
         msg.tool_calls = Some(tool_calls);
         if let Some(thinking) = thinking {
             use crate::providers::ContentPart;
-            msg.parts.insert(0, ContentPart::Thinking { thinking, signature: None });
+            msg.parts.insert(0, ContentPart::Thinking { thinking, signature: thinking_signature });
         }
         self.history.push(msg);
         self.message_ids.push(0);

@@ -718,6 +718,7 @@ impl AgentLoop {
                 response.text.clone(),
                 response.tool_calls.clone(),
                 response.reasoning_content.clone(),
+                response.thinking_signature.clone(),
             );
 
             // Persist assistant tool-call message via hook; capture DB id.
