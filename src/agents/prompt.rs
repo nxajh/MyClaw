@@ -2,46 +2,35 @@
 //!
 //! Assembles the system prompt from ordered sections.
 //!
-//! ## Section order
+//! ## Section order (main agent)
 //!
-//!  1. Anti-Narration           (static constant)
-//!  2. Tool Honesty             (static constant)
-//!  3. Actions                  (by PermissionMode + native_tools)
-//!  4. Safety                   (by PermissionMode)
-//!  5. RunMode Rules            (Interactive or Background, by RunMode)
-//!  6-10. Behavioral Rules      (from RULES.md if present, else hardcoded defaults)
-//! 11. Read Before Edit         (static constant)
-//! 12. System Reminders         (static constant)
-//! 13. Workspace Files          (IDENTITY.md, SOUL.md, USER.md)
-//! 14. Runtime                  (OS version, arch, shell — detected at build time)
+//!  0. Identity header      (optional, for sub-agents)
+//!  1. Anti-Narration       (static)
+//!  2. Tool Honesty         (static)
+//!  3. Actions              (by PermissionMode + native_tools)
+//!  4. Safety               (by PermissionMode)
+//!  5. RunMode Rules        (Interactive or Background)
+//!  6-10. Behavioral Rules  (RULES.md if present, else five hardcoded defaults)
+//! 11. Read Before Edit     (static)
+//! 12. System Reminders     (static)
+//! 13. Workspace Files      (IDENTITY.md, SOUL.md, USER.md)
+//! 14. Runtime              (OS version, arch, shell)
 
 use std::path::Path;
-
-use serde::{Deserialize, Serialize};
 
 use crate::agents::SkillManager;
 use crate::str_utils;
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
 
-pub use crate::config::agent::PermissionMode;
-
-// ── RunMode ───────────────────────────────────────────────────────────────────
-
-/// Controls execution context: is there a human user present?
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RunMode {
-    /// Interactive session — a user or supervisor is present.
-    #[default]
-    Interactive,
-    /// Autonomous background task (Cron, Webhook) — no active user.
-    Background,
-}
+pub use crate::config::agent::{PermissionMode, RunMode};
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
 /// SystemPromptBuilder configuration.
+///
+/// Contains only values that directly affect the generated prompt text.
+/// Runtime concerns (timezone, model selection) live in `AgentConfig`.
 #[derive(Debug, Clone)]
 pub struct SystemPromptConfig {
     /// Workspace directory (contains IDENTITY.md, SOUL.md, USER.md, RULES.md).
@@ -52,15 +41,16 @@ pub struct SystemPromptConfig {
     pub permission_mode: PermissionMode,
     /// Run mode — controls execution context rules.
     pub run_mode: RunMode,
+    /// Optional identity header prepended before all sections.
+    /// Used by sub-agents to inject their name and role without
+    /// exposing SECTION_* constants outside this module.
+    pub identity_header: Option<String>,
     /// Total character limit for the system prompt (0 = unlimited).
     pub max_chars: usize,
     /// Per-bootstrap-file character limit.
     pub bootstrap_max_chars: usize,
     /// Whether the provider supports native tool calling.
     pub native_tools: bool,
-    /// Timezone offset in hours — passed to ResourceProvider for date injection;
-    /// NOT embedded in the system prompt text.
-    pub timezone_offset: i32,
 }
 
 impl Default for SystemPromptConfig {
@@ -70,10 +60,10 @@ impl Default for SystemPromptConfig {
             knowledge_dir: String::new(),
             permission_mode: PermissionMode::Default,
             run_mode: RunMode::Interactive,
+            identity_header: None,
             max_chars: 0,
             bootstrap_max_chars: 20_000,
             native_tools: true,
-            timezone_offset: 8,
         }
     }
 }
@@ -93,13 +83,17 @@ impl SystemPromptBuilder {
 
     /// Build the full system prompt string.
     pub fn build(&self, _skills: &SkillManager) -> String {
-        let mut sections = vec![
-            SECTION_ANTI_NARRATION.to_string(),
-            SECTION_TOOL_HONESTY.to_string(),
-            self.build_action_instruction(),
-            self.build_safety(),
-            self.build_run_mode_rules(),
-        ];
+        let mut sections = Vec::new();
+
+        if let Some(ref header) = self.config.identity_header {
+            sections.push(header.clone());
+        }
+
+        sections.push(SECTION_ANTI_NARRATION.to_string());
+        sections.push(SECTION_TOOL_HONESTY.to_string());
+        sections.push(self.build_action_instruction());
+        sections.push(self.build_safety());
+        sections.push(self.build_run_mode_rules());
 
         // Sections 6–10: from RULES.md if present, else individual defaults.
         sections.extend(self.build_behavioral_rules());
@@ -209,13 +203,7 @@ impl SystemPromptBuilder {
     }
 
     fn build_runtime(&self) -> String {
-        let os_version = detect_os_version();
-        let os = std::env::consts::OS;
-        let arch = std::env::consts::ARCH;
-        let shell = std::env::var("SHELL")
-            .map(|s| s.rsplit('/').next().unwrap_or(&s).to_string())
-            .unwrap_or_else(|_| "unknown".to_string());
-        format!("## Runtime\n\nOS: {} ({}/{}) | Shell: {}", os_version, os, arch, shell)
+        format!("## Runtime\n\nOS: {}", crate::sys_info::runtime_info())
     }
 
     // ── Utilities ─────────────────────────────────────────────────────────────
@@ -241,34 +229,21 @@ impl SystemPromptBuilder {
     }
 }
 
-fn detect_os_version() -> String {
-    if let Ok(content) = std::fs::read_to_string("/etc/os-release") {
-        for line in content.lines() {
-            if let Some(val) = line.strip_prefix("PRETTY_NAME=") {
-                return val.trim_matches('"').to_string();
-            }
-        }
-    }
-    std::env::consts::OS.to_string()
-}
-
 // ── Static section constants ──────────────────────────────────────────────────
-//
-// pub(super): visible to sibling modules within `agents` (e.g. sub_agent.rs).
 
-pub(super) const SECTION_ANTI_NARRATION: &str = r#"## CRITICAL: No Tool Narration
+const SECTION_ANTI_NARRATION: &str = r#"## CRITICAL: No Tool Narration
 
 Do NOT narrate tool usage. Never say "Let me check...", "I'll fetch that...", "Searching now...", or describe which tool you're using. The user sees only the final answer. Tool calls are invisible infrastructure — skip straight to the answer."#;
 
-pub(super) const SECTION_TOOL_HONESTY: &str = r#"## CRITICAL: Tool Honesty
+const SECTION_TOOL_HONESTY: &str = r#"## CRITICAL: Tool Honesty
 
 - NEVER fabricate, invent, or guess tool results. If a tool returns empty results, say "No results found."
 - If a tool call fails, report the error — never make up data to fill the gap.
 - When unsure whether a tool call succeeded, ask the user rather than guessing."#;
 
-pub(super) const SECTION_SAFETY_FULL: &str = "## Safety\n\nYou have full autonomy. Execute actions directly without asking for confirmation unless the action is potentially destructive or irreversible.";
+const SECTION_SAFETY_FULL: &str = "## Safety\n\nYou have full autonomy. Execute actions directly without asking for confirmation unless the action is potentially destructive or irreversible.";
 
-pub(super) const SECTION_INTERACTIVE_RULES: &str = r#"## Running Mode: Interactive Session
+const SECTION_INTERACTIVE_RULES: &str = r#"## Running Mode: Interactive Session
 
 You are running inside an active session with a user or supervisor.
 - If you encounter blockers or critical ambiguity, report your findings in your output so the parent agent or user can clarify.
@@ -371,22 +346,20 @@ mod tests {
 
     #[test]
     fn test_interactive_rules_present() {
-        let config = SystemPromptConfig {
+        let prompt = build(SystemPromptConfig {
             run_mode: RunMode::Interactive,
             ..Default::default()
-        };
-        let prompt = build(config);
+        });
         assert!(prompt.contains("Interactive Session"));
         assert!(!prompt.contains("Autonomous Background"));
     }
 
     #[test]
     fn test_background_rules_present() {
-        let config = SystemPromptConfig {
+        let prompt = build(SystemPromptConfig {
             run_mode: RunMode::Background,
             ..Default::default()
-        };
-        let prompt = build(config);
+        });
         assert!(prompt.contains("Autonomous Background"));
         assert!(!prompt.contains("Interactive Session"));
     }
@@ -413,6 +386,15 @@ mod tests {
         let prompt = build(SystemPromptConfig::default());
         assert!(prompt.contains("## Runtime"));
         assert!(!prompt.contains("Model:"));
+    }
+
+    #[test]
+    fn test_identity_header_prepended() {
+        let prompt = build(SystemPromptConfig {
+            identity_header: Some("You are Agent X.".to_string()),
+            ..Default::default()
+        });
+        assert!(prompt.starts_with("You are Agent X."));
     }
 
     #[test]

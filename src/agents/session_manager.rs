@@ -30,7 +30,7 @@ pub struct SessionOverride {
     pub permission_mode: Option<crate::config::agent::PermissionMode>,
     /// Override run mode for this session (Interactive vs Background).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub run_mode: Option<crate::agents::prompt::RunMode>,
+    pub run_mode: Option<crate::config::agent::RunMode>,
     /// Override max tool calls per turn (0 = unlimited).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tool_calls: Option<usize>,

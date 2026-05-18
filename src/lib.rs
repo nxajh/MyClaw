@@ -23,6 +23,7 @@ pub mod registry;
 pub mod signal;
 pub mod storage;
 pub mod str_utils;
+pub mod sys_info;
 pub mod tools;
 
 #[cfg(feature = "tui")]

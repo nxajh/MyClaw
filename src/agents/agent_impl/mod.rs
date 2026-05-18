@@ -83,6 +83,8 @@ pub struct AgentConfig {
     pub model_override: Option<String>,
     /// Thinking/reasoning config override for this session.
     pub thinking_override: Option<crate::providers::ThinkingConfig>,
+    /// Timezone offset in hours — passed to ResourceProvider for date injection.
+    pub timezone_offset: i32,
 }
 
 impl Default for AgentConfig {
@@ -98,6 +100,7 @@ impl Default for AgentConfig {
             tool_timeout_secs: 180,
             model_override: None,
             thinking_override: None,
+            timezone_offset: 8,
         }
     }
 }
@@ -226,7 +229,7 @@ impl Agent {
             self.skills_dir.clone(),
             self.agents_dir.clone(),
             config.prompt_config.knowledge_dir.clone(),
-            config.prompt_config.timezone_offset,
+            config.timezone_offset,
         );
         let request_builder = RequestBuilder::new(prompt, Arc::clone(&resources));
 

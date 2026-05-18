@@ -559,7 +559,7 @@ fn build_prompt_config(
         max_chars: cfg.prompt.max_chars,
         bootstrap_max_chars: cfg.prompt.bootstrap_max_chars,
         native_tools: cfg.prompt.native_tools,
-        timezone_offset: cfg.prompt.timezone_offset,
+        identity_header: None,
     }
 }
 
@@ -834,6 +834,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         tool_timeout_secs: config.agent.tool_timeout_secs,
         model_override: None,
         thinking_override: None,
+        timezone_offset: config.agent.prompt.timezone_offset,
     };
     let mcp_manager_arc = Arc::new(mcp_manager);
 
