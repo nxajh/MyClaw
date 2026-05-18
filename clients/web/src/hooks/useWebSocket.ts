@@ -226,6 +226,20 @@ export function useWebSocket() {
         break
       }
 
+      case 'cancelled': {
+        // Server confirmed cancellation — mark the current message done and stop generating.
+        setMessages((prev) => {
+          const last = prev[prev.length - 1]
+          if (last && last.role === 'assistant' && !last.done) {
+            return [...prev.slice(0, -1), { ...last, done: true }]
+          }
+          return prev
+        })
+        setIsGenerating(false)
+        currentAssistantId.current = null
+        break
+      }
+
       // api_response / api_error are handled by external listeners (useApi)
       default:
         break
