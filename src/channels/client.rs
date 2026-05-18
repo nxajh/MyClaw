@@ -250,9 +250,12 @@ impl ClientChannel {
                                             }
 
                                             // Spawn event forwarder: event_rx → ws_sender.
+                                            // NOTE: do NOT remove the stream_context entry here.
+                                            // The orchestrator calls take_stream_context() which
+                                            // removes the entry atomically before processing
+                                            // begins.  Removing it here would race with the next
+                                            // message's context insertion and silently drop it.
                                             let fwd_sender = ws_sender.clone();
-                                            let fwd_session = session_key_clone.clone();
-                                            let fwd_contexts = stream_contexts_clone.clone();
                                             tokio::spawn(async move {
                                                 while let Some(event) = event_rx.recv().await {
                                                     let json = match serde_json::to_string(&event) {
@@ -265,11 +268,6 @@ impl ClientChannel {
                                                     if fwd_sender.send(json).await.is_err() {
                                                         break; // Client gone
                                                     }
-                                                }
-                                                // Clean up stream context when forwarding ends.
-                                                {
-                                                    let mut contexts = fwd_contexts.write();
-                                                    contexts.remove(&fwd_session);
                                                 }
                                             });
 
@@ -440,8 +438,12 @@ impl Channel for ClientChannel {
         &self,
         session_key: &str,
     ) -> Option<(mpsc::Sender<TurnEvent>, CancellationToken)> {
-        let contexts = self.stream_contexts.read();
-        contexts.get(session_key).map(|ctx| (ctx.event_tx.clone(), ctx.cancel.clone()))
+        // Remove the entry so the event_forwarder task (which holds event_rx)
+        // will exit naturally once run_streamed drops the returned event_tx —
+        // no separate cleanup step needed, and no race with the next message's
+        // context insertion.
+        let mut contexts = self.stream_contexts.write();
+        contexts.remove(session_key).map(|ctx| (ctx.event_tx, ctx.cancel))
     }
 
     fn cancel_turn(&self, session_key: &str) {
