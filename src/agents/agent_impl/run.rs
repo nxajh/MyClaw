@@ -152,7 +152,17 @@ impl AgentLoop {
         let text = match self.chat_loop(messages, stream_mode).await {
             Ok(text) => text,
             Err(e) => {
-                // Roll back turn for ALL errors so the user can retry cleanly.
+                // GracefulShutdown: daemon is reloading. Do NOT rollback — leave
+                // the session at the last tool_result so the new process can resume
+                // from this breakpoint.
+                if e.downcast_ref::<crate::agents::error::AgentError>()
+                    .map_or(false, |ae| matches!(ae, crate::agents::error::AgentError::GracefulShutdown))
+                {
+                    tracing::info!("checkpoint exit, skipping rollback for resumption");
+                    return Err(e);
+                }
+
+                // Roll back turn for ALL other errors so the user can retry cleanly.
                 tracing::warn!(
                     turn_snapshot_len,
                     current_len = self.session.history.len(),
