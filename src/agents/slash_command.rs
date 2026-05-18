@@ -912,7 +912,16 @@ fn cmd_skill(ctx: CommandContext<'_>) -> String {
             let kw_str: Vec<&str> = skill.keywords.iter().map(|s| s.as_str()).take(5).collect();
             format!(" `[{}]`", kw_str.join(", "))
         };
-        lines.push(format!("• **{}**{} — {}", name, kw, desc));
+        let ver = skill.version.as_deref()
+            .map(|v| format!(" v{}", v))
+            .unwrap_or_default();
+        let invocable_mark = match (skill.user_invocable, skill.agent_invocable) {
+            (true, true)   => String::new(),
+            (true, false)  => " 👤".to_string(),
+            (false, true)  => " 🤖".to_string(),
+            (false, false) => " 🚫".to_string(),
+        };
+        lines.push(format!("• **{}**{}{}{} — {}", name, ver, invocable_mark, kw, desc));
     }
     lines.join("\n")
 }

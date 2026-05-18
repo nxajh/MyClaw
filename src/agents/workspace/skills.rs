@@ -4,6 +4,7 @@
 //! NOT an executable tool. Tools live in ToolRegistry.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use super::skill_loader::SkillDefinition;
 
@@ -14,6 +15,13 @@ pub struct Skill {
     pub description: String,
     pub keywords: Vec<String>,
     pub prompt_body: String,
+    pub version: Option<String>,
+    pub when_to_use: Option<String>,
+    pub argument_hint: Option<String>,
+    pub arguments: Vec<String>,
+    pub user_invocable: bool,
+    pub agent_invocable: bool,
+    pub skill_dir: Option<PathBuf>,
 }
 
 impl Skill {
@@ -24,6 +32,13 @@ impl Skill {
             description: def.description.clone(),
             keywords: def.keywords.clone(),
             prompt_body: def.prompt_body.clone(),
+            version: def.version.clone(),
+            when_to_use: def.when_to_use.clone(),
+            argument_hint: def.argument_hint.clone(),
+            arguments: def.arguments.clone(),
+            user_invocable: def.user_invocable,
+            agent_invocable: def.agent_invocable,
+            skill_dir: def.source_path.parent().map(|p| p.to_path_buf()),
         }
     }
 }
@@ -59,6 +74,18 @@ impl SkillManager {
     /// Iterate over all skills (name, &Skill).
     pub fn skills_iter(&self) -> impl Iterator<Item = (&str, &Skill)> {
         self.skills.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// Iterate only agent-invocable skills (for attachment injection).
+    pub fn agent_skills_iter(&self) -> impl Iterator<Item = (&str, &Skill)> {
+        self.skills.iter()
+            .filter(|(_, s)| s.agent_invocable)
+            .map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// Get skill directory path by name.
+    pub fn skill_dir(&self, name: &str) -> Option<&Path> {
+        self.skills.get(name).and_then(|s| s.skill_dir.as_deref())
     }
 
     /// Get a skill by name.
