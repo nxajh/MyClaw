@@ -132,10 +132,9 @@ pub fn agent_skills_iter(&self) -> impl Iterator<Item = (&str, &Skill)> {
 }
 
 /// Get skill directory path by name.
-/// Returns the parent directory of source_path stored in the skill.
-/// Note: requires source_path to be stored in Skill (see §4.4).
+/// Returns the skill_dir field stored in the Skill (see §4.4).
 pub fn skill_dir(&self, name: &str) -> Option<&Path> {
-    self.skills.get(name).and_then(|s| s.source_path.as_deref())
+    self.skills.get(name).and_then(|s| s.skill_dir.as_deref())
 }
 
 /// Replace all skills with a new set (used by refresh_skills after write operations).
@@ -423,10 +422,12 @@ match action:
 1. 校验参数: content 必填
 2. validate_name(name):
    - 非空, ≤64 字符, 匹配 ^[a-z0-9][a-z0-9._-]*$
-3. validate_frontmatter(content):
+3. validate_frontmatter(content, expected_name=name):
    - 必须以 --- 开头
    - 必须有闭合 ---
    - YAML 中必须有 name 字段
+   - YAML 中的 name 必须与参数 name 相同，否则报错:
+     "Frontmatter name '{yaml_name}' does not match skill name '{name}'"
    - YAML 中必须有 description 字段
    - description ≤1024 字符
    - body 不能为空
@@ -451,7 +452,7 @@ match action:
 
 ```
 1. 校验参数: content 必填
-2. validate_frontmatter(content): 同 create 的步骤 3
+2. validate_frontmatter(content, expected_name=name): 同 create 的步骤 3
 3. validate_content_size(content)
 4. skills.get(name) → 不存在则报错
 5. 获取 skill_dir
@@ -853,7 +854,6 @@ pub use skill_tool::SkillTool;
 | `src/agents/workspace/skills.rs` | `Skill` +7 字段 (含 skill_dir) + `from_definition` 映射 + `agent_skills_iter()` + `skills_iter()` + `reload()` |
 | `src/tools/skill_tool.rs` | name → `skill_view` + `agent_invocable` 校验 + `file_path` 参数 |
 | `src/tools/mod.rs` | +2 mod + 2 pub use |
-| `src/tools/lib.rs` | +2 mod + 2 pub use |
 | `src/agents/attachment.rs` | `diff_skills` 用 `agent_skills_iter()` + `render_skills` 增强 + `"use_skill"` → `"skill_view"` |
 | `src/agents/slash_command.rs` | `/skills` 展示 version + invocable 标注 |
 | `src/daemon.rs` | `build_tools()` 注册 2 个新工具 |
