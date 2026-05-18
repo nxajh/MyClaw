@@ -198,7 +198,7 @@ impl AgentLoop {
         //    last tool_result so a new process can resume from the breakpoint.
         if text.is_empty() && crate::is_shutting_down() {
             tracing::info!("checkpoint exit with empty response, skipping persistence");
-            return Ok(text);
+            return Err(super::super::error::AgentError::GracefulShutdown.into());
         }
 
         if text.is_empty() {
@@ -433,7 +433,7 @@ impl AgentLoop {
             // Hot switch checkpoint: before next LLM call.
             if crate::is_shutting_down() {
                 tracing::debug!("shutdown flag set, exiting at LLM checkpoint");
-                return Ok(String::new());
+                return Err(super::super::error::AgentError::GracefulShutdown.into());
             }
 
             // 1. Get a chat provider via registry.
@@ -734,7 +734,7 @@ impl AgentLoop {
                 // Hot switch checkpoint: before tool execution.
                 if crate::is_shutting_down() {
                     tracing::debug!(tool = %call.name, "shutdown flag set, exiting before tool execution");
-                    return Ok(String::new());
+                    return Err(super::super::error::AgentError::GracefulShutdown.into());
                 }
 
                 // Hard limit check.
@@ -816,7 +816,7 @@ impl AgentLoop {
                         tool = %call.name,
                         "shutdown flag set after tool execution, exiting before next tool"
                     );
-                    return Ok(String::new());
+                    return Err(super::super::error::AgentError::GracefulShutdown.into());
                 }
             }
         }

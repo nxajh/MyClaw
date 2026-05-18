@@ -60,4 +60,9 @@ pub enum AgentError {
     /// attempted.  The caller should wait before retrying.
     #[error("all providers on cooldown, retry in {wait_secs}s")]
     ProviderChainCooling { wait_secs: u64 },
+
+    /// The daemon is reloading or shutting down; the turn was abandoned
+    /// cleanly at a checkpoint.  The orchestrator must not notify the user.
+    #[error("graceful shutdown at checkpoint")]
+    GracefulShutdown,
 }
