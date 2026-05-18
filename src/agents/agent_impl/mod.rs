@@ -15,7 +15,7 @@ use tokio::sync::watch;
 
 use crate::providers::ServiceRegistry;
 use crate::config::agent::ContextConfig;
-use crate::agents::session_manager::SessionOverride;
+use crate::agents::session::SessionOverride;
 
 use super::skills::SkillManager;
 use super::tool_registry::ToolRegistry;
@@ -41,7 +41,7 @@ pub type DelegateHandler = Arc<
 >;
 
 use super::loop_breaker::{LoopBreaker, LoopBreakerConfig};
-use super::session_manager::{Session, PersistHook};
+use super::session::{Session, PersistHook};
 use crate::agents::prompt::{SystemPromptBuilder, SystemPromptConfig};
 use crate::agents::attachment::AttachmentManager;
 use crate::config::sub_agent::SubAgentConfig;
@@ -50,6 +50,8 @@ use super::compaction_executor::CompactionExecutor;
 
 pub(crate) mod types;
 mod run;
+mod turn;
+mod chat_loop;
 mod tools;
 mod compaction;
 mod images;
@@ -106,7 +108,7 @@ impl Default for AgentConfig {
 }
 
 impl AgentConfig {
-    pub fn with_override(&self, ov: &super::session_manager::SessionOverride) -> Self {
+    pub fn with_override(&self, ov: &super::session::SessionOverride) -> Self {
         let mut cfg = self.clone();
         if let Some(ref permission_mode) = ov.permission_mode {
             cfg.prompt_config.permission_mode = *permission_mode;
@@ -282,7 +284,7 @@ impl AgentLoop {
         self
     }
 
-    pub fn session(&self) -> &super::session_manager::Session {
+    pub fn session(&self) -> &super::session::Session {
         &self.session
     }
 

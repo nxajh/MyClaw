@@ -13,11 +13,11 @@ mod delegation;
 mod loop_breaker;
 mod orchestrator;
 mod prompt;
-mod session_manager;
+pub mod session;
 mod tool_registry;
 mod mcp_manager;
 mod sub_agent;
-pub mod slash_command;
+pub mod commands;
 pub mod turn_event;
 
 /// Scheduling: cron jobs, webhooks, heartbeat scheduler.
@@ -41,11 +41,11 @@ pub use attachment::AttachmentManager;
 pub use workspace::watcher::{WorkspaceWatcher, ChangeSet};
 pub use delegation::{DelegationEvent, DelegationManager};
 pub use loop_breaker::{LoopBreak, LoopBreakReason, LoopBreaker, LoopBreakerConfig};
-pub use session_manager::{InMemoryBackend, PersistHook, BackendPersistHook, Session, BreakpointItem};
-pub use session_manager::{identify_breakpoint, detect_incomplete_turn, process_all_queues};
+pub use session::{InMemoryBackend, PersistHook, BackendPersistHook, Session, BreakpointItem};
+pub use session::{identify_breakpoint, detect_incomplete_turn, process_all_queues};
 pub use orchestrator::{Orchestrator, OrchestratorParts, SharedSessions, SchedulerEvent, SessionHandle};
 pub use prompt::{PermissionMode, RunMode, SystemPromptBuilder, SystemPromptConfig};
-pub use session_manager::SessionManager;
+pub use session::SessionManager;
 pub use crate::storage::SessionBackend;
 pub use workspace::skill_loader::SkillDefinition;
 pub use scheduling::cron_types::{DeliveryConfig, RunRecord, RunStatus, ScheduleKind};

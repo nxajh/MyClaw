@@ -28,7 +28,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::agents::delegation::{DelegationEvent, DelegationManager};
-use crate::agents::session_manager::{BackendPersistHook, PersistHook, Session};
+use crate::agents::session::{BackendPersistHook, PersistHook, Session};
 use crate::agents::skills::SkillManager;
 use crate::agents::tool_registry::ToolRegistry;
 use crate::config::sub_agent::{AgentIsolation, SubAgentConfig};

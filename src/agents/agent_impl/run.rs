@@ -5,19 +5,18 @@ use tokio_util::sync::CancellationToken;
 use futures_util::StreamExt;
 
 use crate::providers::{
-    BoxStream, ChatMessage, ChatRequest, ChatUsage, StopReason, StreamEvent, ThinkingConfig,
+    BoxStream, ChatMessage, ChatUsage, StopReason, StreamEvent,
 };
-use crate::providers::Capability;
 use super::AgentLoop;
-use super::types::{StreamMode, CollectedResponse, estimate_message_tokens};
+use super::types::{StreamMode, CollectedResponse};
 use super::super::TurnEvent;
-use super::super::loop_breaker::LoopBreak;
+use super::{turn, chat_loop};
 
 impl AgentLoop {
     /// Apply a new session override to this live agent loop.
     /// Updates the in-flight state so the override takes effect on the next
     /// message without waiting for the loop to be recreated.
-    pub fn apply_session_override(&mut self, ov: crate::agents::session_manager::SessionOverride) {
+    pub fn apply_session_override(&mut self, ov: crate::agents::session::SessionOverride) {
         // Autonomy change: inject a system-reminder so the model learns the new policy
         // on the next turn. The actual hard enforcement is in execute_tool regardless.
         if let Some(ref permission_mode) = ov.permission_mode {
@@ -51,8 +50,9 @@ impl AgentLoop {
     ///
     /// This is the main entry point used by all existing channels (Telegram, QQ Bot, etc.).
     /// Internally delegates to `run_turn_core` with `StreamMode::Collect`.
+    #[tracing::instrument(skip(self, image_urls, image_base64), fields(session = %self.session.id))]
     pub async fn run(&mut self, user_message: &str, image_urls: Option<Vec<String>>, image_base64: Option<Vec<String>>) -> anyhow::Result<String> {
-        self.run_turn_core(user_message, image_urls, image_base64, StreamMode::Collect).await
+        turn::run_turn_core(self, user_message, image_urls, image_base64, StreamMode::Collect).await
     }
 
     /// Process a user message with streaming events sent to `event_tx`.
@@ -67,192 +67,13 @@ impl AgentLoop {
         event_tx: mpsc::Sender<TurnEvent>,
         cancel: CancellationToken,
     ) -> anyhow::Result<String> {
-        self.run_turn_core(
+        turn::run_turn_core(
+            self,
             user_message,
             image_urls,
             image_base64,
             StreamMode::Streamed { event_tx, cancel },
         ).await
-    }
-
-    /// Shared implementation for `run()` and `run_streamed()`.
-    ///
-    /// Preamble (reset, diff, persist user message) → chat_loop → postamble (persist assistant).
-    async fn run_turn_core(
-        &mut self,
-        user_message: &str,
-        image_urls: Option<Vec<String>>,
-        image_base64: Option<Vec<String>>,
-        stream_mode: StreamMode,
-    ) -> anyhow::Result<String> {
-        // Clone event_tx early so we can send terminal error events even after
-        // stream_mode is moved into chat_loop (where it is consumed).
-        let error_event_tx = if let StreamMode::Streamed { ref event_tx, .. } = stream_mode {
-            Some(event_tx.clone())
-        } else {
-            None
-        };
-
-        // ── Breakpoint recovery: auto-resume interrupted turn ─────────────
-        // If the session ends with assistant tool_calls that have no matching
-        // tool results (process was killed mid-turn), re-execute the missing
-        // tools and let chat_loop continue from there.
-        let _recovery_text = self.recover_incomplete_turn(&stream_mode).await?;
-
-        // Reset loop breaker for new turn.
-        self.loop_breaker.reset();
-
-        // Initialize token tracker for fresh session / recovery.
-        if self.policy.is_fresh() {
-            if let Some(stored) = self.session.last_total_tokens {
-                self.policy.init_from_stored(stored);
-            } else {
-                self.policy.init_from_history(
-                    self.request_builder.system_prompt(),
-                    &self.session.history,
-                );
-            }
-        }
-
-        // 1+2. Hot-reload check + attachment diffs (before adding the user message).
-        self.request_builder.refresh(&self.session);
-        tracing::debug!(
-            pending_keys = ?self.request_builder.pending_keys(),
-            "run: diff complete"
-        );
-
-        // 3. Merge attachment text into the user message.
-        let combined_user = self.request_builder.merge_attachments(user_message);
-        self.request_builder.clear_pending();
-
-        // 4. Add combined user message to history and persist.
-        let user_msg = ChatMessage::user_text(combined_user.clone());
-        self.policy.record_pending(estimate_message_tokens(&user_msg));
-        // ★ Record snapshot length BEFORE adding user message, so rollback can
-        //   undo everything added during this turn (user + assistant/tool_calls/tool_results).
-        let turn_snapshot_len = self.session.history.len();
-        self.session.add_user_text(combined_user.clone());
-
-        if let Some(ref hook) = self.persist_hook {
-            if let Some(msg) = self.session.history.last() {
-                if let Some(id) = hook.persist_message(&self.session.id, msg) {
-                    if let Some(last_id) = self.session.message_ids.last_mut() {
-                        *last_id = id;
-                    }
-                }
-            }
-        }
-
-        self.request_builder.set_images(image_urls, image_base64);
-
-        // 5. Build the full message list for this turn (pure: no side effects).
-        let messages = self.request_builder.build(&self.session);
-
-        // 3. Run the chat loop (handles tool calls iteratively).
-        let text = match self.chat_loop(messages, stream_mode).await {
-            Ok(text) => text,
-            Err(e) => {
-                // GracefulShutdown: daemon is reloading. Do NOT rollback — leave
-                // the session at the last tool_result so the new process can resume
-                // from this breakpoint.
-                if e.downcast_ref::<crate::agents::error::AgentError>()
-                    .is_some_and(|ae| matches!(ae, crate::agents::error::AgentError::GracefulShutdown))
-                {
-                    tracing::info!("checkpoint exit, skipping rollback for resumption");
-                    return Err(e);
-                }
-
-                // Roll back turn for ALL other errors so the user can retry cleanly.
-                tracing::warn!(
-                    turn_snapshot_len,
-                    current_len = self.session.history.len(),
-                    err = %e,
-                    "chat_loop failed, rolling back turn"
-                );
-
-                // Roll back in-memory history to pre-turn state.
-                self.session.rollback_to(turn_snapshot_len);
-
-                // Roll back persisted history.
-                if let Some(ref hook) = self.persist_hook {
-                    hook.truncate_messages(&self.session.id, turn_snapshot_len);
-                }
-
-                // Notify streaming client of the error so it is not left hanging.
-                // stream_mode was moved into chat_loop, so we use the pre-cloned sender.
-                if let Some(ref tx) = error_event_tx {
-                    let _ = tx.send(TurnEvent::Error { message: e.to_string() }).await;
-                }
-
-                // Check if this is a LoopBreak error — re-raise with specific type
-                // so the orchestrator can show a tailored retry prompt.
-                if let Some(crate::agents::error::AgentError::LoopBreak { reason }) =
-                    e.downcast_ref::<crate::agents::error::AgentError>()
-                {
-                    return Err(crate::agents::error::AgentError::LoopBreak {
-                        reason: reason.clone(),
-                    }.into());
-                }
-
-                // Propagate as-is (already rolled back).
-                return Err(e);
-            }
-        };
-
-        // 5. Handle empty response: rollback turn and return error.
-        //    chat_loop retries internally (stream timeout × 3, empty response × 3).
-        //    If it still returns empty, the turn is irrecoverable.
-        //
-        //    BUT: if the empty response is due to a checkpoint exit (SIGUSR1),
-        //    skip persistence and return cleanly — let the session stay at the
-        //    last tool_result so a new process can resume from the breakpoint.
-        if text.is_empty() && crate::is_shutting_down() {
-            tracing::info!("checkpoint exit with empty response, skipping persistence");
-            return Err(super::super::error::AgentError::GracefulShutdown.into());
-        }
-
-        if text.is_empty() {
-            tracing::warn!(
-                turn_snapshot_len,
-                current_len = self.session.history.len(),
-                "empty response after retries, rolling back turn"
-            );
-
-            // Roll back in-memory history to pre-turn state.
-            self.session.rollback_to(turn_snapshot_len);
-
-            // Roll back persisted history.
-            if let Some(ref hook) = self.persist_hook {
-                hook.truncate_messages(&self.session.id, turn_snapshot_len);
-            }
-
-            // Notify streaming client so it is not left hanging with isGenerating=true.
-            if let Some(ref tx) = error_event_tx {
-                let _ = tx.send(TurnEvent::Error {
-                    message: "模型未返回有效回复，请稍后重试".to_string(),
-                }).await;
-            }
-
-            return Err(crate::agents::error::AgentError::EmptyResponse {
-                user_message: combined_user,
-            }.into());
-        }
-
-        // 5. Persist assistant response.
-        self.session.add_assistant_text(text.clone());
-
-        // Persist assistant message via hook; capture the assigned DB id.
-        if let Some(ref hook) = self.persist_hook {
-            if let Some(msg) = self.session.history.last() {
-                if let Some(id) = hook.persist_message(&self.session.id, msg) {
-                    if let Some(last_id) = self.session.message_ids.last_mut() {
-                        *last_id = id;
-                    }
-                }
-            }
-        }
-
-        Ok(text)
     }
 
     /// Detect and recover an interrupted turn from session history.
@@ -345,7 +166,7 @@ impl AgentLoop {
                 }
             }
 
-            let text = self.chat_loop(messages, stream_mode.clone()).await?;
+            let text = chat_loop::chat_loop(self, messages, stream_mode.clone()).await?;
             // Persist the recovered assistant response so the turn is no longer incomplete.
             if !text.is_empty() {
                 self.session.add_assistant_text(text.clone());
@@ -367,7 +188,7 @@ impl AgentLoop {
         if has_trailing_tool_results && pending_calls.is_empty() {
             tracing::info!("detected incomplete turn (missing LLM continuation), resuming");
             let messages = self.request_builder.build(&self.session);
-            let text = self.chat_loop(messages, stream_mode.clone()).await?;
+            let text = chat_loop::chat_loop(self, messages, stream_mode.clone()).await?;
             // Persist the recovered assistant response so the turn is no longer incomplete.
             if !text.is_empty() {
                 self.session.add_assistant_text(text.clone());
@@ -389,7 +210,7 @@ impl AgentLoop {
         if history.last().is_some_and(|m| m.role == "user") {
             tracing::info!("detected incomplete turn (user message with no assistant response), resuming");
             let messages = self.request_builder.build(&self.session);
-            let text = self.chat_loop(messages, stream_mode.clone()).await?;
+            let text = chat_loop::chat_loop(self, messages, stream_mode.clone()).await?;
             if !text.is_empty() {
                 self.session.add_assistant_text(text.clone());
                 if let Some(ref hook) = self.persist_hook {
@@ -409,441 +230,6 @@ impl AgentLoop {
         Ok(None)
     }
 
-    /// Core chat loop: call LLM, handle tool calls, repeat until text response.
-    async fn chat_loop(&mut self, initial_messages: Vec<ChatMessage>, stream_mode: StreamMode) -> anyhow::Result<String> {
-        let mut tool_calls_count = 0usize;
-        let mut retry_count = 0usize;
-        let mut empty_response_retries = 0usize;
-        let mut boosted_max_tokens = false;
-        let mut first_iteration = true;
-        let mut images_attached = false;
-
-        // Check if we have pending images that need a vision-capable model.
-        let has_images = self.request_builder.has_images();
-
-        // Pre-emptive compaction for fallback models: when the primary model is unavailable
-        // (rate-limit or server error) the FallbackChatProvider routes to a smaller model
-        // whose context window may be exceeded by the current history.
-        // Only runs when no model_override is active (overrides bypass the fallback chain).
-        if self.config.model_override.is_none() {
-            if let Err(e) = self.maybe_compact_for_fallback().await {
-                tracing::warn!(err = %e, "pre-fallback compaction check failed");
-            }
-        }
-
-        loop {
-            // Cancellation checkpoint 3: before next LLM call (top of loop).
-            if let StreamMode::Streamed { cancel, .. } = &stream_mode {
-                if cancel.is_cancelled() {
-                    tracing::debug!("turn cancelled before next LLM call");
-                    return Ok(String::new());
-                }
-            }
-
-            // Hot switch checkpoint: before next LLM call.
-            if crate::is_shutting_down() {
-                tracing::debug!("shutdown flag set, exiting at LLM checkpoint");
-                return Err(super::super::error::AgentError::GracefulShutdown.into());
-            }
-
-            // 1. Get a chat provider via registry.
-            // If model_override is set, use that model directly.
-            // If images are pending, prefer a vision-capable model from the fallback chain.
-            let (provider, model_id) = if let Some(ref model) = self.config.model_override {
-                match self.registry.get_chat_provider_by_model(model) {
-                    Some((p, id)) => (p, id),
-                    None => {
-                        tracing::warn!(model = %model, "model_override not found, falling back to default");
-                        self.registry.get_chat_provider(Capability::Chat)?
-                    }
-                }
-            } else if has_images {
-                self.select_vision_provider().await?
-            } else {
-                self.registry.get_chat_provider(Capability::Chat)?
-            };
-
-            // Pre-API compaction check: tool results from the previous round may have
-            // pushed context over threshold. Compact before building messages to avoid
-            // sending an oversized context. No-op on first iteration.
-            if let Err(e) = self.maybe_compact(&model_id).await {
-                tracing::warn!(err = %e, "pre-API compaction check failed");
-            }
-
-            // Use initial_messages on the first iteration (includes system-reminder
-            // from AttachmentManager), rebuild on subsequent iterations (after tool
-            // calls or compaction).
-            let mut messages = if first_iteration {
-                first_iteration = false;
-                tracing::debug!(
-                    msg_count = initial_messages.len(),
-                    "chat_loop: first iteration using initial_messages"
-                );
-                for (i, m) in initial_messages.iter().enumerate() {
-                    let text = m.text_content();
-                    let has_reminder = text.contains("<system-reminder>");
-                    tracing::debug!(
-                        idx = i,
-                        role = %m.role,
-                        len = text.len(),
-                        has_reminder,
-                        preview = %text.chars().take(80).collect::<String>(),
-                        "chat_loop: initial_messages entry"
-                    );
-                }
-                initial_messages.clone()
-            } else {
-                self.request_builder.build(&self.session)
-            };
-
-            // Attach pending images to the last user message only on the first iteration.
-            // Subsequent iterations (after tool calls) rebuild from history which already
-            // has the text content; re-attaching would send images repeatedly.
-            if !images_attached {
-                self.attach_images_if_supported(&mut messages, &model_id);
-                images_attached = true;
-            }
-
-            // 2. Build tool specs from skills manager.
-            let tools = self.build_tool_specs();
-
-            // 3. Build request.
-            // Calculate max_tokens based on context window and current usage.
-            // On retry after MaxTokens with empty text, boost the output budget.
-            let max_tokens = if boosted_max_tokens {
-                self.calculate_boosted_max_tokens(&model_id)
-            } else {
-                self.calculate_max_tokens(&model_id)
-            };
-
-            // Derive thinking config: session override takes priority over model config.
-            let thinking = if let Some(ref t) = self.config.thinking_override {
-                if t.enabled { Some(t.clone()) } else { None }
-            } else {
-                self.registry.get_chat_model_config(&model_id)
-                    .ok()
-                    .and_then(|cfg| {
-                        if cfg.reasoning {
-                            Some(ThinkingConfig { enabled: true, effort: None })
-                        } else {
-                            None
-                        }
-                    })
-            };
-
-            let req = ChatRequest {
-                model: &model_id,
-                messages: &messages,
-                temperature: None,
-                max_tokens,
-                thinking,
-                stop: None,
-                seed: None,
-                tools: if tools.is_empty() { None } else { Some(tools.as_slice()) },
-                stream: true,
-            };
-
-            tracing::debug!(msg_count = messages.len(), tool_count = tool_calls_count, "sending messages to model");
-
-            // 4. Call chat and process stream.
-            let stream = provider.chat(req)?;
-
-            // Branch on StreamMode: Collect (existing) vs Streamed (forward events).
-            let response = {
-                let result = match &stream_mode {
-                    StreamMode::Collect => self.collect_stream(stream).await,
-                    StreamMode::Streamed { event_tx, cancel } => {
-                        self.collect_stream_with_events(stream, event_tx, cancel).await
-                    }
-                };
-                match result {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let err_str = e.to_string();
-                        // Fallback chain signals: do not restart from the outer loop in
-                        // either case — the chain already did everything it could.
-                        if err_str.contains(crate::providers::fallback::CHAIN_EXHAUSTED_TAG) {
-                            tracing::warn!("fallback chain exhausted all providers, not retrying");
-                            return Err(super::super::error::AgentError::ProviderChainExhausted.into());
-                        }
-                        if err_str.contains(crate::providers::fallback::CHAIN_ALL_COOLING_TAG) {
-                            let wait_secs = err_str
-                                .rsplit_once("retry in ")
-                                .and_then(|(_, rest)| rest.trim_end_matches('s').parse::<u64>().ok())
-                                .unwrap_or(0);
-                            tracing::warn!(wait_secs, "fallback chain: all providers on cooldown");
-                            return Err(super::super::error::AgentError::ProviderChainCooling { wait_secs }.into());
-                        }
-                        // Use the HTTP status from ProviderHttpError when available so
-                        // that e.g. a 400 FormatError is not mis-classified as Timeout
-                        // (from_message always passes status=0 which maps to Timeout).
-                        let classified = if let Some(http_err) =
-                            e.downcast_ref::<crate::providers::ProviderHttpError>()
-                        {
-                            crate::providers::ClassifiedError::classify("", http_err.status, &http_err.message)
-                        } else {
-                            crate::providers::ClassifiedError::from_message(&err_str)
-                        };
-                        if classified.retryable {
-                            match classified.reason {
-                                crate::providers::FailoverReason::Timeout => {
-                                    tracing::error!("stream timeout, giving up");
-                                    return Err(super::super::error::AgentError::StreamTimeout {
-                                        secs: self.config.stream_first_chunk_timeout_secs,
-                                    }.into());
-                                }
-                                _ => {
-                                    retry_count += 1;
-                                    if retry_count > 3 {
-                                        tracing::error!(reason = ?classified.reason, "retryable error after 3 attempts, giving up");
-                                        return Err(super::super::error::AgentError::RetryExhausted {
-                                            attempts: retry_count,
-                                            source: e,
-                                        }.into());
-                                    }
-                                    tracing::warn!(
-                                        attempt = retry_count,
-                                        reason = ?classified.reason,
-                                        "retryable error, retrying"
-                                    );
-                                    continue;
-                                }
-                            }
-                        }
-                        return Err(e);
-                    }
-                }
-            };
-
-            // Cancellation checkpoint 4: after stream collected, before tool loop.
-            if let StreamMode::Streamed { cancel, .. } = &stream_mode {
-                if cancel.is_cancelled() {
-                    tracing::debug!("turn cancelled after stream collection");
-                    return Ok(response.text);
-                }
-            }
-
-            tracing::debug!(text_len = response.text.len(), tool_calls = response.tool_calls.len(), stop = ?response.stop_reason, "chat stream collected");
-
-            // Record token usage from API response.
-            // Real context = input_tokens (new) + cached_input_tokens + output_tokens.
-            if let Some(ref usage) = response.usage {
-                let cached = usage.cached_input_tokens.unwrap_or(0);
-                self.policy.update_usage(
-                    usage.input_tokens.unwrap_or(0),
-                    usage.output_tokens.unwrap_or(0),
-                    cached,
-                );
-                tracing::debug!(
-                    input_tokens = usage.input_tokens.unwrap_or(0),
-                    cached_tokens = cached,
-                    output_tokens = usage.output_tokens.unwrap_or(0),
-                    total_tracked = self.policy.token_total(),
-                    "token usage recorded"
-                );
-
-                // Persist the precise total so it survives restarts.
-                if let Some(ref hook) = self.persist_hook {
-                    hook.save_token_count(&self.session.id, self.policy.token_total());
-                }
-            }
-
-            // Check compaction using the precise token counts just reported by the API.
-            // This eliminates the one-turn delay that results from checking before the
-            // API call: we now always have accurate data when deciding to compact.
-            if let Err(e) = self.maybe_compact(&model_id).await {
-                tracing::warn!(err = %e, "compaction failed");
-            }
-
-            // 5. No tool calls → return text.
-            if response.tool_calls.is_empty() {
-                if response.text.is_empty() {
-                    empty_response_retries += 1;
-                    if empty_response_retries > 3 {
-                        tracing::error!("empty response after 3 retries, giving up");
-                        return Ok(String::new());
-                    }
-
-                    match response.stop_reason {
-                        StopReason::MaxTokens => {
-                            // Output budget exhausted — boost and retry (context-related, not provider failure).
-                            tracing::warn!(attempt = empty_response_retries, "output hit max_tokens with no text, boosting output budget for retry");
-                            boosted_max_tokens = true;
-                        }
-                        StopReason::StopSequence | StopReason::EndTurn => {
-                            // Model stopped naturally but produced no text — may be a transient issue.
-                            tracing::warn!(attempt = empty_response_retries, stop = ?response.stop_reason, "empty response with natural stop, retrying");
-                        }
-                        _ => {
-                            tracing::warn!(attempt = empty_response_retries, stop = ?response.stop_reason, "chat response text is empty, retrying");
-                        }
-                    }
-                    continue;
-                }
-                // Streamed mode: send Done event before returning.
-                if let StreamMode::Streamed { event_tx, .. } = &stream_mode {
-                    let _ = event_tx.send(TurnEvent::Done { text: response.text.clone() }).await;
-                }
-                return Ok(response.text);
-            }
-
-            // 6. Tool calls present → execute them and append results.
-            for call in &response.tool_calls {
-                tracing::debug!(tool = %call.name, id = %call.id, arguments = %call.arguments, "model requested tool call");
-            }
-
-            // Build the assistant's tool_calls message to append to conversation.
-            // Store in canonical ToolCall format — each provider's build_body()
-            // translates to its own wire format.
-            let mut assistant_msg = ChatMessage::assistant_text(&response.text);
-            assistant_msg.tool_calls = Some(response.tool_calls.clone());
-
-            // If the model emitted thinking content, add it as a Thinking part
-            // so it is re-sent to the model on subsequent turns.
-            if let Some(ref thinking) = response.reasoning_content {
-                use crate::providers::ContentPart;
-                assistant_msg.parts.insert(
-                    0,
-                    ContentPart::Thinking {
-                        thinking: thinking.clone(),
-                        signature: response.thinking_signature.clone(),
-                    },
-                );
-            }
-
-            messages.push(assistant_msg);
-
-            // Persist assistant message with tool_calls to session history.
-            self.session.add_assistant_with_tools(
-                response.text.clone(),
-                response.tool_calls.clone(),
-                response.reasoning_content.clone(),
-                response.thinking_signature.clone(),
-            );
-
-            // Persist assistant tool-call message via hook; capture DB id.
-            if let Some(ref hook) = self.persist_hook {
-                if let Some(msg) = self.session.history.last() {
-                    if let Some(id) = hook.persist_message(&self.session.id, msg) {
-                        if let Some(last_id) = self.session.message_ids.last_mut() {
-                            *last_id = id;
-                        }
-                    }
-                }
-            }
-
-            for call in &response.tool_calls {
-                tool_calls_count += 1;
-
-                // Cancellation checkpoint 2: before each tool execution.
-                if let StreamMode::Streamed { cancel, event_tx } = &stream_mode {
-                    if cancel.is_cancelled() {
-                        tracing::debug!(tool = %call.name, "turn cancelled before tool execution");
-                        let _ = event_tx.send(TurnEvent::Cancelled { partial: response.text.clone() }).await;
-                        return Ok(response.text.clone());
-                    }
-                    // Send ToolCall event to client.
-                    let args: serde_json::Value = serde_json::from_str(&call.arguments)
-                        .unwrap_or(serde_json::Value::Null);
-                    let _ = event_tx.send(TurnEvent::ToolCall {
-                        id: call.id.clone(),
-                        name: call.name.clone(),
-                        args,
-                    }).await;
-                }
-
-                // Hot switch checkpoint: before tool execution.
-                if crate::is_shutting_down() {
-                    tracing::debug!(tool = %call.name, "shutdown flag set, exiting before tool execution");
-                    return Err(super::super::error::AgentError::GracefulShutdown.into());
-                }
-
-                // Hard limit check.
-                if self.config.max_tool_calls > 0
-                    && tool_calls_count > self.config.max_tool_calls
-                {
-                    anyhow::bail!(
-                        "Tool call limit reached ({}), loop broken",
-                        self.config.max_tool_calls
-                    );
-                }
-
-                let result = self.execute_tool(call).await;
-                let (result_content, is_error) = match &result {
-                    Ok(r) => {
-                        let mut out = r.output.clone();
-                        if let Some(ref err) = r.error {
-                            if out.is_empty() {
-                                out = format!("error: {}", err);
-                            }
-                        }
-                        (out, !r.success)
-                    }
-                    Err(e) => (format!("error: {}", e), true),
-                };
-
-                tracing::debug!(tool = %call.name, success = !is_error, "tool result:\n{}", result_content);
-
-                // Streamed mode: send ToolResult event to client.
-                if let StreamMode::Streamed { event_tx, .. } = &stream_mode {
-                    let _ = event_tx.send(TurnEvent::ToolResult {
-                        id: call.id.clone(),
-                        name: call.name.clone(),
-                        output: result_content.clone(),
-                    }).await;
-                }
-
-                // Loop breaker check.
-                match self.loop_breaker.record_and_check(&call.name, &call.arguments, &result_content) {
-                    LoopBreak::Detected(reason) => {
-                        tracing::warn!(reason = ?reason, "loop breaker triggered, aborting turn");
-                        return Err(crate::agents::error::AgentError::LoopBreak {
-                            reason: format!("{:?}", reason),
-                        }.into());
-                    }
-                    LoopBreak::None => {}
-                }
-
-                // Append tool result with tool_call_id and is_error.
-                let mut tool_msg = ChatMessage::text("tool", &result_content);
-                tool_msg.tool_call_id = Some(call.id.clone());
-                tool_msg.is_error = Some(is_error);
-                messages.push(tool_msg);
-
-                // Record estimated tokens for the tool result message.
-                self.policy.record_pending(
-                    estimate_message_tokens(messages.last().unwrap())
-                );
-
-                // Persist tool result to session history.
-                self.session.add_tool_result(call.id.clone(), result_content, is_error);
-
-                // Persist tool result via hook; capture DB id.
-                if let Some(ref hook) = self.persist_hook {
-                    if let Some(msg) = self.session.history.last() {
-                        if let Some(id) = hook.persist_message(&self.session.id, msg) {
-                            if let Some(last_id) = self.session.message_ids.last_mut() {
-                                *last_id = id;
-                            }
-                        }
-                    }
-                }
-
-                // Hot switch checkpoint: after tool execution.
-                // SIGUSR1 may arrive during or immediately after `myclaw restart`
-                // executes. Check here so we exit before the next tool call in
-                // the same batch (e.g. kill/pkill) can run.
-                if crate::is_shutting_down() {
-                    tracing::debug!(
-                        tool = %call.name,
-                        "shutdown flag set after tool execution, exiting before next tool"
-                    );
-                    return Err(super::super::error::AgentError::GracefulShutdown.into());
-                }
-            }
-        }
-    }
-
     /// Collect all events from a streaming chat response.
     pub(crate) async fn collect_stream(
         &self,
@@ -854,7 +240,7 @@ impl AgentLoop {
 
     /// Like `collect_stream`, but also forwards text/thinking chunks as
     /// `TurnEvent`s via `event_tx` and respects `CancellationToken`.
-    async fn collect_stream_with_events(
+    pub(crate) async fn collect_stream_with_events(
         &self,
         stream: BoxStream<StreamEvent>,
         event_tx: &mpsc::Sender<TurnEvent>,
@@ -1021,7 +407,7 @@ impl AgentLoop {
     }
 
     /// Calculate max_tokens for the current request based on context window.
-    fn calculate_max_tokens(&self, model_id: &str) -> Option<u32> {
+    pub(super) fn calculate_max_tokens(&self, model_id: &str) -> Option<u32> {
         let model_config = self.registry.get_chat_model_config(model_id).ok()?;
         let context_window = model_config.context_window?;
         let max_output = model_config.max_output_tokens.unwrap_or(4096) as u64;
@@ -1045,7 +431,7 @@ impl AgentLoop {
 
     /// Calculate boosted max_tokens for retry after MaxTokens exhaustion.
     /// Doubles the output budget (up to context window limit).
-    fn calculate_boosted_max_tokens(&self, model_id: &str) -> Option<u32> {
+    pub(super) fn calculate_boosted_max_tokens(&self, model_id: &str) -> Option<u32> {
         let model_config = self.registry.get_chat_model_config(model_id).ok()?;
         let context_window = model_config.context_window?;
         let default_max = model_config.max_output_tokens.unwrap_or(4096) as u64;

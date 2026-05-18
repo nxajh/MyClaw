@@ -1,22 +1,6 @@
-//! QQ Bot channel adapter.
-//!
-//! Implements the [`Channel`] trait for the QQ Bot API (WebSocket gateway + REST).
-//!
-//! # Features
-//!
-//! - WebSocket connection with auto-reconnect (Resume + incremental backoff)
-//! - Proactive background token refresh (single-writer, SystemTime-based expiry)
-//! - C2C private chat + Group @bot message receive/send
-//! - Markdown message format (msg_type=2)
-//! - Message chunking (~2000 char limit) + 429 rate-limit retry
-//! - Typing indicator (C2C only, msg_type=6, 60s validity, refreshed by typing task)
-//! - Interaction API: Keyboard buttons + CallbackQuery → text + ACK
-//! - Bot- prefixed slash commands (/bot-ping, /bot-version, /bot-help, etc.)
-//! - Message dedup via DedupState
-//! - WebSocket session Resume (session_id + last_seq preservation)
+//! QQBotChannel struct + all impl blocks + Channel trait + WebSocket loop.
 
 #![allow(dead_code)]
-
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
@@ -25,7 +9,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
-use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
@@ -33,20 +16,23 @@ use tracing::{debug, error, info, warn};
 use crate::{Channel, ChannelMessage, DedupState, SendMessage};
 use crate::config::channel::QQBotAccountConfig;
 use super::message::split_message_chunk;
+use super::types::*;
+use super::keyboard::*;
+use super::token::TokenManager;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /// QQ Bot message max length (conservative, real limit may vary).
-const QQ_MAX_MESSAGE_LENGTH: usize = 2000;
+pub const QQ_MAX_MESSAGE_LENGTH: usize = 2000;
 
 /// WebSocket gateway URL endpoint.
-const GATEWAY_URL: &str = "https://api.sgroup.qq.com/gateway/bot";
+pub const GATEWAY_URL: &str = "https://api.sgroup.qq.com/gateway/bot";
 
 /// Token endpoint.
-const TOKEN_URL: &str = "https://bots.qq.com/app/getAppAccessToken";
+pub const TOKEN_URL: &str = "https://bots.qq.com/app/getAppAccessToken";
 
 /// REST API base for v2 messages.
-const API_BASE: &str = "https://api.sgroup.qq.com";
+pub const API_BASE: &str = "https://api.sgroup.qq.com";
 
 /// WebSocket intents:
 ///   PUBLIC_GUILD_MESSAGES   = 1 << 30 = 1073741824
@@ -54,342 +40,46 @@ const API_BASE: &str = "https://api.sgroup.qq.com";
 ///   C2C_MESSAGE_CREATE      = 1 << 25 = 33554432
 ///   DIRECT_MESSAGE          = 1 << 12 = 4096
 ///   INTERACTION             = 1 << 26 = 67108864
-const INTENTS: u32 = (1 << 30) | (1 << 25) | (1 << 12) | (1 << 26);
+pub const INTENTS: u32 = (1 << 30) | (1 << 25) | (1 << 12) | (1 << 26);
 
 /// WebSocket opcodes.
-const OP_RESUME: u32 = 6;
-const OP_HELLO: u32 = 10;
-const OP_IDENTIFY: u32 = 2;
-const OP_HEARTBEAT: u32 = 1;
-const OP_HEARTBEAT_ACK: u32 = 11;
-const OP_DISPATCH: u32 = 0;
-const OP_RECONNECT: u32 = 7;
-const OP_INVALID_SESSION: u32 = 9;
-
-/// Build User-Agent string for QQ Bot HTTP requests.
-fn user_agent() -> String {
-    let os = std::env::consts::OS;
-    format!("MyClaw/{} (Rust; {})", env!("MYCLAW_VERSION"), os)
-}
+pub const OP_RESUME: u32 = 6;
+pub const OP_HELLO: u32 = 10;
+pub const OP_IDENTIFY: u32 = 2;
+pub const OP_HEARTBEAT: u32 = 1;
+pub const OP_HEARTBEAT_ACK: u32 = 11;
+pub const OP_DISPATCH: u32 = 0;
+pub const OP_RECONNECT: u32 = 7;
+pub const OP_INVALID_SESSION: u32 = 9;
 
 /// Reconnect delay schedule (seconds).
-const RECONNECT_DELAYS: &[u64] = &[1, 2, 5, 10, 30, 60];
+pub const RECONNECT_DELAYS: &[u64] = &[1, 2, 5, 10, 30, 60];
 /// Maximum rapid reconnects before backing off.
-const RAPID_RECONNECT_LIMIT: usize = 3;
-const RAPID_RECONNECT_WINDOW_SECS: u64 = 5;
+pub const RAPID_RECONNECT_LIMIT: usize = 3;
+pub const RAPID_RECONNECT_WINDOW_SECS: u64 = 5;
 
-/// Session state for WebSocket Resume.
-#[derive(Clone)]
-struct SessionState {
-    session_id: String,
-    last_seq: u64,
-}
-
-/// Result of a WebSocket disconnection, used by ws_loop to decide reconnect strategy.
-enum WsDisconnect {
-    /// Normal disconnect or unknown close code — reconnect with fresh Identify.
-    Clean,
-    /// Should try Resume (e.g. server-initiated Reconnect opcode).
-    TryResume,
-    /// Fatal — do not reconnect (e.g. close codes 4914/4915).
-    Fatal,
-    /// Token-related — refresh token before reconnecting.
-    TokenExpired,
-}
-
-// ── Interaction / Keyboard types ──────────────────────────────────────────────
-
-/// Permission metadata for a keyboard button. type=2 means all users can click.
-#[derive(Clone, serde::Serialize)]
-struct ButtonPermission {
-    r#type: u32,
-}
-
-/// What happens when a button is clicked.
-#[derive(Clone, serde::Serialize)]
-struct ButtonAction {
-    /// 1 = Callback (INTERACTION_CREATE), 2 = Link (opens URL).
-    r#type: u32,
-    /// Payload delivered in data.resolved.button_data when type=1.
-    data: String,
-    permission: ButtonPermission,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    click_limit: Option<u32>,
-}
-
-/// Visual rendering of a button.
-#[derive(Clone, serde::Serialize)]
-struct ButtonRenderData {
-    label: String,
-    visited_label: String,
-    style: u32,
-}
-
-/// A single button in a keyboard row.
-#[derive(Clone, serde::Serialize)]
-struct Button {
-    id: String,
-    render_data: ButtonRenderData,
-    action: ButtonAction,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    group_id: Option<String>,
-}
-
-/// A row of buttons.
-#[derive(Clone, serde::Serialize)]
-struct ButtonRow {
-    buttons: Vec<Button>,
-}
-
-/// Keyboard content wrapper.
-#[derive(Clone, serde::Serialize)]
-struct KeyboardContent {
-    rows: Vec<ButtonRow>,
-}
-
-/// A keyboard (grid of button rows). Top-level payload for message body.
-#[derive(Clone, serde::Serialize)]
-struct Keyboard {
-    content: KeyboardContent,
-}
-
-impl Keyboard {
-    /// Create a keyboard from a slice of label/value pairs (one row per pair).
-    /// Max 5 buttons per row, max 5 rows.
-    fn from_pairs(pairs: &[(impl AsRef<str>, impl AsRef<str>)]) -> Self {
-        let mut rows = Vec::new();
-        let mut current_row = Vec::new();
-        for (i, (label, value)) in pairs.iter().enumerate() {
-            current_row.push(Button {
-                id: format!("btn_{}", i),
-                render_data: ButtonRenderData {
-                    label: label.as_ref().to_string(),
-                    visited_label: format!("✓ {}", label.as_ref()),
-                    style: 1,
-                },
-                action: ButtonAction {
-                    r#type: 1, // Callback
-                    data: value.as_ref().to_string(),
-                    permission: ButtonPermission { r#type: 2 }, // All users
-                    click_limit: None,
-                },
-                group_id: None,
-            });
-            if current_row.len() >= 5 {
-                rows.push(ButtonRow { buttons: std::mem::take(&mut current_row) });
-            }
-        }
-        if !current_row.is_empty() {
-            rows.push(ButtonRow { buttons: current_row });
-        }
-        Self { content: KeyboardContent { rows } }
-    }
-}
-
-// ── Token state ───────────────────────────────────────────────────────────────
-
-#[derive(Clone)]
-struct TokenState {
-    access_token: String,
-    /// Wall-clock expiry time. Uses `SystemTime` instead of `Instant` so that
-    /// token expiry is correctly detected after system suspend (e.g. laptop
-    /// sleep). NTP adjustments of a few seconds are negligible compared to the
-    /// typical ~2-hour token lifetime.
-    expires_at: std::time::SystemTime,
-}
-
-struct TokenManager {
-    state: tokio::sync::RwLock<Option<TokenState>>,
-    app_id: String,
-    client_secret: String,
-    http_client: reqwest::Client,
-    /// Background refresh task handle.
-    bg_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
-}
-
-impl TokenManager {
-    fn new(app_id: String, client_secret: String) -> Self {
-        Self {
-            state: tokio::sync::RwLock::new(None),
-            app_id,
-            client_secret,
-            http_client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(15))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
-            bg_handle: tokio::sync::Mutex::new(None),
-        }
-    }
-
-    /// Start the background token refresh loop.
-    /// Refreshes the token before it expires, so callers always get a valid token.
-    async fn start_background_refresh(self: &Arc<Self>) {
-        let mut handle = self.bg_handle.lock().await;
-        if handle.is_some() {
-            return; // Already running.
-        }
-        // Synchronously fetch the first token before spawning the background loop,
-        // so that listen() returns with a populated cache and get_token() won't
-        // race with a fallback do_refresh().
-        if let Err(e) = self.do_refresh().await {
-            error!(err = %e, "QQ Bot initial token fetch failed");
-        }
-        let this = Arc::clone(self);
-        *handle = Some(tokio::spawn(async move {
-            this.background_refresh_loop().await;
-        }));
-    }
-
-    /// Background loop: refresh token before expiry.
-    /// The initial fetch is already done by `start_background_refresh`; this loop
-    /// handles ongoing periodic refresh.  If the initial fetch failed, the token
-    /// cache is still empty, so the first sleep_duration will be 5 s and the loop
-    /// will retry naturally.
-    async fn background_refresh_loop(&self) {
-        loop {
-            // Calculate sleep duration until next refresh.
-            let sleep_duration = {
-                let state = self.state.read().await;
-                match *state {
-                    Some(ref s) => {
-                        let remaining = s.expires_at
-                            .duration_since(std::time::SystemTime::now())
-                            .unwrap_or(Duration::ZERO);
-                        // Refresh early — but never more than 1/3 of the remaining lifetime,
-                        // so short-lived tokens still get a reasonable sleep window.
-                        let refresh_ahead = Duration::min(
-                            Duration::from_secs(300),
-                            remaining / 3,
-                        );
-                        let jitter = Duration::from_millis(
-                            rand::random::<u64>() % 30_000
-                        );
-                        remaining.saturating_sub(refresh_ahead).saturating_sub(jitter)
-                    }
-                    None => Duration::from_secs(5), // No token, retry soon.
-                }
-            };
-
-            if !sleep_duration.is_zero() {
-                tokio::time::sleep(sleep_duration).await;
-            }
-
-            if let Err(e) = self.do_refresh().await {
-                error!(err = %e, "QQ Bot background token refresh failed, retrying in 5s");
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-        }
-    }
-
-    /// Get a valid access token from cache.
-    /// The background task ensures the token is always fresh; this is a read-only fast path.
-    async fn get_token(&self) -> anyhow::Result<String> {
-        let state = self.state.read().await;
-        if let Some(ref s) = *state {
-            if s.expires_at > std::time::SystemTime::now() {
-                return Ok(s.access_token.clone());
-            }
-        }
-        drop(state);
-        Err(anyhow::anyhow!("QQ Bot token not available (expired or not initialized)"))
-    }
-
-    /// Force refresh the access token.
-    async fn refresh(&self) -> anyhow::Result<String> {
-        self.do_refresh().await
-    }
-
-    /// Internal: fetch a new token and update the cache.
-    async fn do_refresh(&self) -> anyhow::Result<String> {
-        let token_state = self.fetch_new_token().await?;
-        let token = token_state.access_token.clone();
-        *self.state.write().await = Some(token_state);
-        Ok(token)
-    }
-
-    /// Actually fetch a new token from the API.
-    async fn fetch_new_token(&self) -> anyhow::Result<TokenState> {
-        let body = serde_json::json!({
-            "appId": self.app_id,
-            "clientSecret": self.client_secret,
-        });
-
-        let ua = user_agent();
-        let resp = self
-            .http_client
-            .post(TOKEN_URL)
-            .json(&body)
-            .header("User-Agent", &ua)
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("token request failed: {}", e))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!(
-                "token request returned {}: {}",
-                status,
-                text
-            ));
-        }
-
-        let data: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| anyhow::anyhow!("token parse error: {}", e))?;
-
-        let access_token = data["access_token"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("missing access_token in response"))?
-            .to_string();
-
-        let expires_in: u64 = data["expires_in"]
-            .as_u64()
-            .unwrap_or(7000);
-
-        let token_state = TokenState {
-            access_token: access_token.clone(),
-            expires_at: std::time::SystemTime::now() + Duration::from_secs(expires_in),
-        };
-
-        info!(expires_in_secs = expires_in, "QQ Bot access token refreshed");
-        Ok(token_state)
-    }
-}
-
-// ── Gateway payload types ─────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-struct GatewayPayload {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    op: u32,
-    #[serde(default)]
-    s: Option<u64>,
-    #[serde(default)]
-    t: Option<String>,
-    #[serde(default)]
-    d: serde_json::Value,
+/// Build User-Agent string for QQ Bot HTTP requests.
+pub fn user_agent() -> String {
+    let os = std::env::consts::OS;
+    format!("MyClaw/{} (Rust; {})", env!("MYCLAW_VERSION"), os)
 }
 
 // ── QQ Bot Channel ────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 pub struct QQBotChannel {
-    config: QQBotAccountConfig,
-    token_manager: Arc<TokenManager>,
-    dedup: DedupState,
+    pub(super) config: QQBotAccountConfig,
+    pub(super) token_manager: Arc<TokenManager>,
+    pub(super) dedup: DedupState,
     /// Last sequence number for heartbeat.
-    last_seq: Arc<Mutex<Option<u64>>>,
-    http_client: reqwest::Client,
+    pub(super) last_seq: Arc<Mutex<Option<u64>>>,
+    pub(super) http_client: reqwest::Client,
     /// Active typing keep-alive tasks, keyed by recipient (e.g. "c2c:xxx").
-    typing_tasks: Arc<Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>>,
+    pub(super) typing_tasks: Arc<Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>>,
     /// WebSocket session for Resume support.
-    session: Arc<Mutex<Option<SessionState>>>,
+    pub(super) session: Arc<Mutex<Option<SessionState>>>,
     /// Monotonic counter for proactive message msg_seq to avoid collisions.
-    msg_seq_counter: Arc<AtomicU32>,
+    pub(super) msg_seq_counter: Arc<AtomicU32>,
 }
 
 impl QQBotChannel {
