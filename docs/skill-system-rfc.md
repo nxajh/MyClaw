@@ -137,7 +137,7 @@ pub fn skill_dir(&self, name: &str) -> Option<&Path> {
     self.skills.get(name).and_then(|s| s.skill_dir.as_deref())
 }
 
-/// Replace all skills with a new set (used by refresh_skills after write operations).
+/// Replace all skills with a new set (used by refresh_skills after SKILL.md changes).
 pub fn reload(&mut self, new_skills: Vec<Skill>) {
     self.skills.clear();
     for skill in new_skills {
@@ -326,9 +326,11 @@ fn scan_skill_files(dir: &Path) -> HashMap<String, Vec<String>> {
     for subdir in ["references", "scripts", "templates", "assets"]:
         let d = dir.join(subdir)
         if d.exists():
-            let entries: Vec<String> = walk dir
+            // 递归收集 d 下所有文件，路径相对于 dir（含子目录前缀）
+            let entries: Vec<String> = walk_dir_recursive(&d)
                 .filter(|f| f.is_file())
-                .map(|f| f.relative_to(dir).to_string())
+                .map(|f| f.strip_prefix(dir).to_string())
+                .sorted()
                 .collect()
             if !entries.is_empty():
                 files.insert(subdir, entries)
@@ -521,8 +523,7 @@ match action:
 7. 路径安全: target 必须在 skill_dir 下 (resolve 后 starts_with)
 8. 创建父目录
 9. 原子写入
-10. refresh_skills()
-11. 返回:
+10. 返回:
     {
       "success": true,
       "message": "File '{file_path}' written.",
@@ -611,20 +612,33 @@ fn scan_skill_files(dir: &Path) -> HashMap<String, Vec<String>> {
     for subdir in ALLOWED_SUBDIRS {
         let d = dir.join(subdir);
         if d.exists() {
-            if let Ok(entries) = std::fs::read_dir(&d) {
-                let mut sub_files: Vec<String> = entries.flatten()
-                    .filter(|e| e.path().is_file())
-                    .filter_map(|e| e.path().strip_prefix(&d).ok()
-                        .map(|p| p.to_string_lossy().to_string()))
-                    .collect();
-                if !sub_files.is_empty() {
-                    sub_files.sort();
-                    files.insert(subdir.to_string(), sub_files);
-                }
+            let mut sub_files: Vec<String> = collect_files_recursive(&d)
+                .into_iter()
+                .filter_map(|p| p.strip_prefix(dir).ok()
+                    .map(|rel| rel.to_string_lossy().to_string()))
+                .collect();
+            if !sub_files.is_empty() {
+                sub_files.sort();
+                files.insert(subdir.to_string(), sub_files);
             }
         }
     }
     files
+}
+
+/// 递归收集 `dir` 下所有文件的绝对路径（跳过隐藏文件和目录）。
+fn collect_files_recursive(dir: &Path) -> Vec<PathBuf> {
+    let mut result = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else { return result };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            result.extend(collect_files_recursive(&path));
+        } else if path.is_file() {
+            result.push(path);
+        }
+    }
+    result
 }
 ```
 
@@ -917,7 +931,7 @@ pub use skill_tool::SkillTool;
 | `skill_loader::parse_skill_file` | 6 个新字段解析 + 缺失字段默认值 + 连字符/下划线兼容 | 单测，用临时 .md 文件 |
 | `Skill::from_definition` | 字段映射完整性 + `skill_dir` 从 `source_path` 提取 | 单测 |
 | `SkillManager` | `reload` 覆盖 + `agent_skills_iter` 过滤 + `skills_iter` 全量 | 单测 |
-| `scan_skill_files` | 空目录 + 部分子目录 + 混合文件类型 | 单测，用临时目录 |
+| `scan_skill_files` | 空目录 + 部分子目录 + 混合文件类型 + 嵌套子目录（路径含子目录前缀） | 单测，用临时目录 |
 | `SkillManageTool` | 6 个 action 端到端 + 参数校验 + 路径穿越防护 + 内置 skill 保护 | 集成测试，写到临时 `workspace_dir` |
 | `SkillsListTool` | 空 skill 目录 + 多 skill + 字段裁剪（false 字段不返回） | 集成测试 |
 | `SkillTool` | 主文件加载 + 辅助文件加载 + 二进制文件 + 路径穿越 + `agent_invocable` 拒绝 | 集成测试 |
