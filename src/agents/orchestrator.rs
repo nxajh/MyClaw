@@ -1305,10 +1305,14 @@ async fn run_message_task(
         let (event_tx, cancel) = match stream_ctx {
             Some(ctx) => ctx,
             None => {
-                tracing::warn!(session = %sk, "no stream context, falling back to run()");
-                channel.on_status(&reply_target, ProcessingStatus::Thinking).await;
-                let mut guard = loop_.lock().await;
-                let _ = guard.run(&content, image_urls, image_base64).await;
+                // Stream context missing — the WS client likely disconnected between
+                // sending the message and the session actor picking it up.
+                // Running the LLM without an event_tx would persist session history
+                // with no way to deliver the response.  Log and bail out instead.
+                tracing::warn!(
+                    session = %sk,
+                    "stream context not found (client disconnected?), skipping turn"
+                );
                 return;
             }
         };
