@@ -4,17 +4,17 @@
 //!
 //! ## Section order (main agent)
 //!
-//!  0. Identity header      (optional, for sub-agents)
-//!  1. Anti-Narration       (static)
-//!  2. Tool Honesty         (static)
-//!  3. Actions              (by PermissionMode + native_tools)
-//!  4. Safety               (by PermissionMode)
-//!  5. RunMode Rules        (Interactive or Background)
-//!  6-10. Behavioral Rules  (RULES.md if present, else five hardcoded defaults)
-//! 11. Read Before Edit     (static)
-//! 12. System Reminders     (static)
-//! 13. Workspace Files      (IDENTITY.md, SOUL.md, USER.md)
-//! 14. Runtime              (OS version, arch, shell)
+//!  0. Identity header    (optional, for sub-agents)
+//!  1. Anti-Narration     (static)
+//!  2. Tool Honesty       (static)
+//!  3. Actions            (by PermissionMode + native_tools)
+//!  4. Safety             (by PermissionMode)
+//!  5. RunMode Rules      (Interactive or Background)
+//!  6. Behavioral Rules   (RULES.md if present, else five hardcoded defaults — sections 6–10)
+//!  11. Read Before Edit  (static)
+//!  12. System Reminders  (static)
+//!  13. Workspace Files   (IDENTITY.md, SOUL.md, USER.md)
+//!  14. Runtime           (OS version, arch, shell)
 
 use std::path::Path;
 
