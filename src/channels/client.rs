@@ -613,6 +613,41 @@ fn handle_api_request(
             }
         }
 
+        "sessions.rename" => {
+            let session_id = match params["id"].as_str() {
+                Some(s) => s,
+                None => {
+                    return serde_json::json!({
+                        "type": "api_error",
+                        "id": id,
+                        "error": "missing id parameter"
+                    }).to_string();
+                }
+            };
+            let name = match params["name"].as_str() {
+                Some(s) if !s.trim().is_empty() => s.trim(),
+                _ => {
+                    return serde_json::json!({
+                        "type": "api_error",
+                        "id": id,
+                        "error": "missing or empty name parameter"
+                    }).to_string();
+                }
+            };
+            match sm.rename_session(session_id, name) {
+                Ok(()) => serde_json::json!({
+                    "type": "api_response",
+                    "id": id,
+                    "result": null
+                }).to_string(),
+                Err(e) => serde_json::json!({
+                    "type": "api_error",
+                    "id": id,
+                    "error": format!("failed to rename session: {}", e)
+                }).to_string(),
+            }
+        }
+
         "tools.list" => {
             let names = tool_names.read();
             let result: Vec<serde_json::Value> = names.iter().map(|n| {
@@ -653,6 +688,52 @@ fn handle_api_request(
                             "type": "api_error",
                             "id": id,
                             "error": format!("failed to read memory dir: {}", e)
+                        }).to_string(),
+                    }
+                }
+                None => serde_json::json!({
+                    "type": "api_error",
+                    "id": id,
+                    "error": "workspace directory not configured"
+                }).to_string(),
+            };
+            drop(dir_guard);
+            result
+        }
+
+        "memory.read" => {
+            let filename = match params["name"].as_str() {
+                Some(s) => s,
+                None => {
+                    return serde_json::json!({
+                        "type": "api_error",
+                        "id": id,
+                        "error": "missing name parameter"
+                    }).to_string();
+                }
+            };
+            // Reject path traversal attempts.
+            if filename.contains('/') || filename.contains('\\') || filename.starts_with('.') {
+                return serde_json::json!({
+                    "type": "api_error",
+                    "id": id,
+                    "error": "invalid filename"
+                }).to_string();
+            }
+            let dir_guard = workspace_dir.read();
+            let result = match dir_guard.as_ref() {
+                Some(dir) => {
+                    let path = dir.join("memory").join(filename);
+                    match std::fs::read_to_string(&path) {
+                        Ok(content) => serde_json::json!({
+                            "type": "api_response",
+                            "id": id,
+                            "result": { "name": filename, "content": content }
+                        }).to_string(),
+                        Err(e) => serde_json::json!({
+                            "type": "api_error",
+                            "id": id,
+                            "error": format!("failed to read file: {}", e)
                         }).to_string(),
                     }
                 }
