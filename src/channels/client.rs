@@ -358,11 +358,13 @@ impl ClientChannel {
 
                                             let resp = handle_api_request(
                                                 &id, &method, &params,
-                                                &conn_id_clone,
-                                                &session_manager_clone,
-                                                &tool_names_clone,
-                                                &workspace_dir_clone,
-                                                &config_path_clone,
+                                                &ApiContext {
+                                                    conn_id: &conn_id_clone,
+                                                    session_manager: &session_manager_clone,
+                                                    tool_names: &tool_names_clone,
+                                                    workspace_dir: &workspace_dir_clone,
+                                                    config_path: &config_path_clone,
+                                                },
                                             );
                                             let _ = ws_sender.send(resp).await;
                                         }
@@ -507,18 +509,23 @@ impl Channel for ClientChannel {
 
 // ── Management API Router ───────────────────────────────────────────────────
 
+/// Shared handles passed to every API request handler.
+struct ApiContext<'a> {
+    conn_id: &'a str,
+    session_manager: &'a Arc<RwLock<Option<Arc<crate::agents::SessionManager>>>>,
+    tool_names: &'a Arc<RwLock<Vec<String>>>,
+    workspace_dir: &'a Arc<RwLock<Option<std::path::PathBuf>>>,
+    config_path: &'a Arc<RwLock<Option<std::path::PathBuf>>>,
+}
+
 /// Route a management API request and return a JSON response string.
 fn handle_api_request(
     id: &str,
     method: &str,
     params: &serde_json::Value,
-    conn_id: &str,
-    session_manager: &Arc<RwLock<Option<Arc<crate::agents::SessionManager>>>>,
-    tool_names: &Arc<RwLock<Vec<String>>>,
-    workspace_dir: &Arc<RwLock<Option<std::path::PathBuf>>>,
-    config_path: &Arc<RwLock<Option<std::path::PathBuf>>>,
+    ctx: &ApiContext<'_>,
 ) -> String {
-    let guard = session_manager.read();
+    let guard = ctx.session_manager.read();
     let sm = match guard.as_ref() {
         Some(sm) => sm,
         None => {
@@ -531,7 +538,7 @@ fn handle_api_request(
     };
 
     // Use conn_id as user_id for session scoping.
-    let user_id = conn_id;
+    let user_id = ctx.conn_id;
 
     match method {
         "sessions.list" => {
@@ -661,7 +668,7 @@ fn handle_api_request(
         }
 
         "tools.list" => {
-            let names = tool_names.read();
+            let names = ctx.tool_names.read();
             let result: Vec<serde_json::Value> = names.iter().map(|n| {
                 serde_json::json!({ "name": n })
             }).collect();
@@ -673,7 +680,7 @@ fn handle_api_request(
         }
 
         "memory.list" => {
-            let dir_guard = workspace_dir.read();
+            let dir_guard = ctx.workspace_dir.read();
             let result = match dir_guard.as_ref() {
                 Some(dir) => {
                     let memory_dir = dir.join("memory");
@@ -722,7 +729,7 @@ fn handle_api_request(
                 return serde_json::json!({ "type": "api_error", "id": id, "error": "invalid filename" }).to_string();
             }
             let content = params["content"].as_str().unwrap_or("");
-            let dir_guard = workspace_dir.read();
+            let dir_guard = ctx.workspace_dir.read();
             let result = match dir_guard.as_ref() {
                 Some(dir) => {
                     let memory_dir = dir.join("memory");
@@ -747,7 +754,7 @@ fn handle_api_request(
             if filename.contains('/') || filename.contains('\\') || filename.starts_with('.') {
                 return serde_json::json!({ "type": "api_error", "id": id, "error": "invalid filename" }).to_string();
             }
-            let dir_guard = workspace_dir.read();
+            let dir_guard = ctx.workspace_dir.read();
             let result = match dir_guard.as_ref() {
                 Some(dir) => {
                     let path = dir.join("memory").join(filename);
@@ -781,7 +788,7 @@ fn handle_api_request(
                     "error": "invalid filename"
                 }).to_string();
             }
-            let dir_guard = workspace_dir.read();
+            let dir_guard = ctx.workspace_dir.read();
             let result = match dir_guard.as_ref() {
                 Some(dir) => {
                     let path = dir.join("memory").join(filename);
@@ -809,9 +816,9 @@ fn handle_api_request(
         }
 
         "config.get" => {
-            let tools = tool_names.read();
-            let ws_dir = workspace_dir.read();
-            let cfg_path = config_path.read();
+            let tools = ctx.tool_names.read();
+            let ws_dir = ctx.workspace_dir.read();
+            let cfg_path = ctx.config_path.read();
             serde_json::json!({
                 "type": "api_response",
                 "id": id,
@@ -824,7 +831,7 @@ fn handle_api_request(
         }
 
         "config.get_raw" => {
-            let cfg_guard = config_path.read();
+            let cfg_guard = ctx.config_path.read();
             match cfg_guard.as_ref() {
                 Some(path) => match std::fs::read_to_string(path) {
                     Ok(content) => serde_json::json!({
@@ -846,7 +853,7 @@ fn handle_api_request(
                 Some(s) => s,
                 None => return serde_json::json!({ "type": "api_error", "id": id, "error": "missing content parameter" }).to_string(),
             };
-            let cfg_guard = config_path.read();
+            let cfg_guard = ctx.config_path.read();
             match cfg_guard.as_ref() {
                 Some(path) => match std::fs::write(path, content) {
                     Ok(()) => serde_json::json!({ "type": "api_response", "id": id, "result": null }).to_string(),
