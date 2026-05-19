@@ -25,9 +25,13 @@ use tokio::sync::watch;
 
 use crate::channels::Channel;
 
-/// File descriptor of the SO_REUSEPORT listen socket, stored so the hot-switch
-/// child can inherit it.  `-1` means no socket has been bound yet.
+/// File descriptor of the SO_REUSEPORT webhook listen socket, stored so the
+/// hot-switch child can inherit it.  `-1` means no socket has been bound yet.
 pub static LISTEN_SOCKET_FD: AtomicI32 = AtomicI32::new(-1);
+
+/// File descriptor of the SO_REUSEPORT client WebSocket socket.
+/// Inherited by the hot-switch child to avoid EADDRINUSE during overlap.
+pub static CLIENT_SOCKET_FD: AtomicI32 = AtomicI32::new(-1);
 
 /// Default config file locations.
 const DEFAULT_CONFIG_PATHS: &[&str] = &[
@@ -612,6 +616,11 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             tracing::warn!("hot switch detected but MYCLAW_SOCKET_FD not set");
         }
 
+        if let Some(fd) = crate::hot_switch::inherited_client_socket_fd() {
+            tracing::info!(fd, "inherited client WebSocket socket from old process");
+            CLIENT_SOCKET_FD.store(fd, Ordering::SeqCst);
+        }
+
         // ── Telegram offset reset ─────────────────────────────────────────
         // The old process may have persisted an update offset that covers
         // messages it never finished processing.  Clear the offset file so
@@ -835,6 +844,34 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             cc.set_config_path(config.config_path.clone());
             cc.set_skill_manager(skills_arc.clone());
             cc.set_service_registry(registry_arc.clone());
+
+            // ── WebSocket socket: SO_REUSEPORT / fd inheritance ──────────────
+            // Hot switch: reuse the inherited fd so the new process can bind the
+            // same port while the old process's socket is still open.
+            // Normal startup: bind with SO_REUSEPORT and store the fd for the
+            // next hot switch.
+            #[cfg(unix)]
+            {
+                let inherited_fd = CLIENT_SOCKET_FD.load(Ordering::SeqCst);
+                if inherited_fd >= 0 {
+                    use std::os::unix::io::FromRawFd;
+                    let std_listener = unsafe { std::net::TcpListener::from_raw_fd(inherited_fd) };
+                    tracing::info!(fd = inherited_fd, "client channel reusing inherited socket (hot switch)");
+                    cc.set_pre_bound(std_listener);
+                } else if let Ok(addr) = cfg.bind.parse::<std::net::SocketAddr>() {
+                    match bind_reusable(addr.port()) {
+                        Ok(l) => {
+                            use std::os::unix::io::AsRawFd;
+                            CLIENT_SOCKET_FD.store(l.as_raw_fd(), Ordering::SeqCst);
+                            cc.set_pre_bound(l);
+                        }
+                        Err(e) => {
+                            tracing::warn!(port = addr.port(), err = %e,
+                                "SO_REUSEPORT bind failed for client channel, will rebind on listen()");
+                        }
+                    }
+                }
+            }
             Arc::new(cc)
         });
     #[cfg(feature = "client")]
@@ -1049,7 +1086,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     if crate::is_shutting_down() {
         let socket_fd = LISTEN_SOCKET_FD.load(Ordering::SeqCst);
         tracing::debug!(socket_fd, "shutdown flag set, executing hot switch (fork+execv)");
-        if let Err(e) = tokio::task::block_in_place(|| crate::hot_switch::do_hot_switch(socket_fd)) {
+        let client_fd = CLIENT_SOCKET_FD.load(Ordering::SeqCst);
+        if let Err(e) = tokio::task::block_in_place(|| crate::hot_switch::do_hot_switch(socket_fd, client_fd)) {
             tracing::warn!(err = %e, "hot switch failed, daemon will exit normally");
         }
         // do_hot_switch either: (a) exits via the SIGUSR2 handler when new

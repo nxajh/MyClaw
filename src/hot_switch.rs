@@ -21,6 +21,9 @@ pub const ENV_HOT_SWITCH: &str = "MYCLAW_HOT_SWITCH";
 /// Environment variable carrying the inherited listen socket fd.
 pub const ENV_SOCKET_FD: &str = "MYCLAW_SOCKET_FD";
 
+/// Environment variable carrying the inherited client WebSocket socket fd.
+pub const ENV_CLIENT_SOCKET_FD: &str = "MYCLAW_CLIENT_SOCKET_FD";
+
 /// Environment variable carrying the old (pre-switch) process PID.
 pub const ENV_OLD_PID: &str = "MYCLAW_OLD_PID";
 
@@ -36,6 +39,14 @@ pub fn inherited_socket_fd() -> Option<i32> {
         .and_then(|s| s.parse().ok())
 }
 
+/// Retrieve the inherited client WebSocket socket fd passed from the old process.
+pub fn inherited_client_socket_fd() -> Option<i32> {
+    std::env::var(ENV_CLIENT_SOCKET_FD)
+        .ok()
+        .and_then(|s| s.parse::<i32>().ok())
+        .filter(|&fd| fd >= 0)
+}
+
 /// Retrieve the old process PID passed from the fork parent.
 pub fn old_pid() -> Option<i32> {
     std::env::var(ENV_OLD_PID)
@@ -48,12 +59,16 @@ pub fn old_pid() -> Option<i32> {
 /// Called in the parent before fork so we never touch std::env inside the
 /// child — std::env uses a global mutex that may be held by another thread
 /// at fork time, causing a deadlock if accessed in the single-threaded child.
-fn build_child_envp(socket_fd: i32, current_pid: u32) -> anyhow::Result<Vec<CString>> {
-    let overrides = [
+fn build_child_envp(socket_fd: i32, client_fd: i32, current_pid: u32) -> anyhow::Result<Vec<CString>> {
+    let mut overrides = vec![
         (ENV_HOT_SWITCH, "1".to_string()),
         (ENV_SOCKET_FD, socket_fd.to_string()),
         (ENV_OLD_PID, current_pid.to_string()),
     ];
+    if client_fd >= 0 {
+        overrides.push((ENV_CLIENT_SOCKET_FD, client_fd.to_string()));
+    }
+    let overrides = overrides;
     let override_keys: std::collections::HashSet<&str> =
         overrides.iter().map(|(k, _)| *k).collect();
 
@@ -78,7 +93,7 @@ fn build_child_envp(socket_fd: i32, current_pid: u32) -> anyhow::Result<Vec<CStr
 /// will receive SIGUSR2 (from the new process) and `exit(0)` before `waitpid`
 /// ever returns.  If the child crashes, `waitpid` returns with a non-zero exit
 /// code and we roll back (clear the shutdown flag so the daemon keeps running).
-pub fn do_hot_switch(socket_fd: i32) -> anyhow::Result<()> {
+pub fn do_hot_switch(socket_fd: i32, client_fd: i32) -> anyhow::Result<()> {
     let current_exe = std::env::current_exe()?;
     let current_pid = std::process::id();
 
@@ -98,7 +113,7 @@ pub fn do_hot_switch(socket_fd: i32) -> anyhow::Result<()> {
     let c_run = CString::new("run")?;
     let argv: [*const libc::c_char; 3] = [c_path.as_ptr(), c_run.as_ptr(), std::ptr::null()];
 
-    let envp_strings = build_child_envp(socket_fd, current_pid)?;
+    let envp_strings = build_child_envp(socket_fd, client_fd, current_pid)?;
     let mut envp_ptrs: Vec<*const libc::c_char> =
         envp_strings.iter().map(|s| s.as_ptr()).collect();
     envp_ptrs.push(std::ptr::null());
