@@ -6,6 +6,7 @@ import LoginOverlay from './components/LoginOverlay'
 import Chat from './pages/Chat'
 import Sessions from './pages/Sessions'
 import Tools from './pages/Tools'
+import Skills from './pages/Skills'
 import Memory from './pages/Memory'
 import Config from './pages/Config'
 import { AUTH_TOKEN_KEY } from './hooks/useWebSocket'
@@ -29,6 +30,7 @@ function AppShell() {
           <Route path="/" element={<Chat />} />
           <Route path="/sessions" element={<Sessions />} />
           <Route path="/tools" element={<Tools />} />
+          <Route path="/skills" element={<Skills />} />
           <Route path="/memory" element={<Memory />} />
           <Route path="/config" element={<Config />} />
           <Route path="*" element={<Navigate to="/" replace />} />

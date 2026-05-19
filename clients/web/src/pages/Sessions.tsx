@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Layers, Plus, Pencil, Trash2, Check, X, Loader2 } from 'lucide-react'
+import { Plus, Pencil, Trash2, Check, X, Loader2 } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useApi } from '../lib/api'
-import { Page, ErrorBanner, LoadingRow, EmptyState, inputCls, btnPrimary } from '../components/PageLayout'
+import { ErrorBanner, LoadingRow, EmptyState, inputCls, btnPrimary } from '../components/PageLayout'
 
 interface Session {
   id: string
@@ -128,7 +128,7 @@ function SessionRow({
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function Sessions() {
-  const { status, sendRaw, addMessageListener, setMessages } = useWebSocketContext()
+  const { status, sendRaw, addMessageListener, reloadHistory } = useWebSocketContext()
   const { request } = useApi(sendRaw, addMessageListener)
   const [sessions, setSessions] = useState<Session[]>([])
   const [newName, setNewName] = useState('')
@@ -167,10 +167,10 @@ export default function Sessions() {
     setError(null)
     try {
       await request('sessions.switch', { id })
-      setMessages([])
+      await reloadHistory()
       await fetchSessions()
     } catch (err) { setError(err instanceof Error ? err.message : String(err)) }
-  }, [request, setMessages, fetchSessions])
+  }, [request, reloadHistory, fetchSessions])
 
   const handleRename = useCallback(async (id: string, name: string) => {
     setError(null)
@@ -191,11 +191,9 @@ export default function Sessions() {
   useEffect(() => { if (status === 'connected') fetchSessions() }, [status, fetchSessions])
 
   return (
-    <Page
-      icon={Layers}
-      title="Sessions"
-      meta={sessions.length ? ` · ${sessions.length}` : undefined}
-    >
+    <div className="flex flex-col h-full">
+      <div className="flex-1 overflow-y-auto">
+        <div className="max-w-2xl mx-auto px-6 py-6 space-y-4">
       {/* Create */}
       <div className="flex gap-2">
         <input
@@ -236,6 +234,8 @@ export default function Sessions() {
           ))}
         </div>
       )}
-    </Page>
+        </div>
+      </div>
+    </div>
   )
 }

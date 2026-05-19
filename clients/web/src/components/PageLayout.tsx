@@ -1,36 +1,5 @@
 import type { ReactNode } from 'react'
-import type { LucideIcon } from 'lucide-react'
 import { Loader2 } from 'lucide-react'
-
-// ── Page shell ───────────────────────────────────────────────────────────────
-
-interface PageProps {
-  icon: LucideIcon
-  title: string
-  meta?: string
-  actions?: ReactNode
-  children: ReactNode
-}
-
-export function Page({ icon: Icon, title, meta, actions, children }: PageProps) {
-  return (
-    <div className="flex flex-col h-full">
-      <header className="border-b border-zinc-800 px-6 h-12 flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-2 text-sm font-medium text-zinc-300">
-          <Icon size={15} className="text-zinc-500" />
-          {title}
-          {meta && <span className="text-zinc-600 font-normal">{meta}</span>}
-        </div>
-        {actions && <div className="flex items-center gap-2">{actions}</div>}
-      </header>
-      <div className="flex-1 overflow-y-auto">
-        <div className="max-w-2xl mx-auto px-6 py-6 space-y-4">
-          {children}
-        </div>
-      </div>
-    </div>
-  )
-}
 
 // ── Common UI atoms ──────────────────────────────────────────────────────────
 
