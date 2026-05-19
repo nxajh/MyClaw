@@ -1,6 +1,7 @@
-import { createContext, useContext, type ReactNode, type Dispatch, type SetStateAction } from 'react'
+import { createContext, useContext, useCallback, type ReactNode, type Dispatch, type SetStateAction } from 'react'
 import { useWebSocket } from '../hooks/useWebSocket'
-import type { ChatMessage, ConnectionStatus } from '../hooks/useWebSocket'
+import { useApi } from '../lib/api'
+import type { ChatMessage, ConnectionStatus, SendOptions } from '../hooks/useWebSocket'
 
 interface WebSocketContextValue {
   status: ConnectionStatus
@@ -8,18 +9,36 @@ interface WebSocketContextValue {
   isGenerating: boolean
   authFailed: boolean
   submitToken: (token: string) => void
-  sendMessage: (content: string) => void
+  sendMessage: (content: string, opts?: SendOptions) => void
   cancel: () => void
   sendRaw: (obj: Record<string, unknown>) => void
   setMessages: Dispatch<SetStateAction<ChatMessage[]>>
   addMessageListener: (fn: (data: Record<string, unknown>) => void) => () => void
+  request: (method: string, params?: Record<string, unknown>) => Promise<unknown>
+  reloadHistory: () => Promise<void>
 }
 
 const WebSocketContext = createContext<WebSocketContextValue | null>(null)
 
 export function WebSocketProvider({ children }: { children: ReactNode }) {
   const ws = useWebSocket()
-  return <WebSocketContext.Provider value={ws}>{children}</WebSocketContext.Provider>
+  const { request } = useApi(ws.sendRaw, ws.addMessageListener)
+  const { setMessages } = ws
+
+  const reloadHistory = useCallback(async () => {
+    try {
+      const result = await request('sessions.history')
+      setMessages((result as ChatMessage[] | null) ?? [])
+    } catch {
+      /* leave existing messages untouched on failure */
+    }
+  }, [request, setMessages])
+
+  return (
+    <WebSocketContext.Provider value={{ ...ws, request, reloadHistory }}>
+      {children}
+    </WebSocketContext.Provider>
+  )
 }
 
 export function useWebSocketContext(): WebSocketContextValue {

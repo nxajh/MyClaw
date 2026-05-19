@@ -825,6 +825,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             cc.set_tool_names(tools_arc.all_tools().iter().map(|t| t.spec().name.to_string()).collect());
             cc.set_workspace_dir(config.workspace_dir.clone());
             cc.set_config_path(config.config_path.clone());
+            cc.set_skill_manager(skills_arc.clone());
+            cc.set_service_registry(registry_arc.clone());
             Arc::new(cc)
         });
     #[cfg(feature = "client")]

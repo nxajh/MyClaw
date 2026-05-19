@@ -31,7 +31,10 @@ export type ChatMessage = UserMessage | AssistantMessage
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected'
 
 export const AUTH_TOKEN_KEY = 'myclaw_auth_token'
-const MESSAGES_KEY = 'myclaw_messages'
+const CLIENT_ID_KEY = 'myclaw_client_id'
+
+export interface Attachment { name: string; content: string }
+export interface SendOptions { images?: string[]; attachments?: Attachment[] }
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -42,22 +45,26 @@ function uid(): string {
   return `msg-${++msgCounter}-${Date.now()}`
 }
 
+// Stable per-browser identity so server-side sessions survive reconnects.
+function getClientId(): string {
+  try {
+    let id = localStorage.getItem(CLIENT_ID_KEY)
+    if (!id) {
+      id = (crypto.randomUUID?.() ?? `c-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+      localStorage.setItem(CLIENT_ID_KEY, id)
+    }
+    return id
+  } catch {
+    return `c-${Date.now()}`
+  }
+}
+
 function getWsUrl(): string {
   if (import.meta.env.DEV) {
     return 'ws://127.0.0.1:18789/myclaw'
   }
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   return `${proto}//${window.location.host}/myclaw`
-}
-
-function loadPersistedMessages(): ChatMessage[] {
-  try {
-    const raw = localStorage.getItem(MESSAGES_KEY)
-    if (!raw) return []
-    return JSON.parse(raw) as ChatMessage[]
-  } catch {
-    return []
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -68,7 +75,7 @@ export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null)
   const [status, setStatus] = useState<ConnectionStatus>('disconnected')
-  const [messages, setMessages] = useState<ChatMessage[]>(loadPersistedMessages)
+  const [messages, setMessages] = useState<ChatMessage[]>([])
   const [isGenerating, setIsGenerating] = useState(false)
   // true = auth was attempted and rejected by the server
   const [authFailed, setAuthFailed] = useState(false)
@@ -83,13 +90,6 @@ export function useWebSocket() {
   const authPending = useRef(false)
   // When true, suppress the automatic reconnect (e.g. after auth failure).
   const suppressReconnect = useRef(false)
-
-  // Persist messages to localStorage whenever they change.
-  useEffect(() => {
-    try {
-      localStorage.setItem(MESSAGES_KEY, JSON.stringify(messages))
-    } catch { /* quota exceeded — ignore */ }
-  }, [messages])
 
   // -----------------------------------------------------------------------
   // Listener management
@@ -117,7 +117,7 @@ export function useWebSocket() {
         // If the server has no auth configured it responds auth_ok right away.
         authPending.current = true
         const token = localStorage.getItem(AUTH_TOKEN_KEY) ?? ''
-        ws.send(JSON.stringify({ type: 'auth', token }))
+        ws.send(JSON.stringify({ type: 'auth', token, client_id: getClientId() }))
       }
 
       ws.onclose = () => {
@@ -291,6 +291,24 @@ export function useWebSocket() {
         break
       }
 
+      // Non-streamed server reply (slash-command output, ask_user prompts,
+      // acks). Fills the pending assistant placeholder, or appends a new one.
+      case 'message': {
+        const content = (data.content as string) || ''
+        if (!content) break
+        setMessages((prev) => {
+          const last = prev[prev.length - 1]
+          if (last && last.role === 'assistant' && !last.done) {
+            const merged = last.content ? `${last.content}\n\n${content}` : content
+            return [...prev.slice(0, -1), { ...last, content: merged, done: true }]
+          }
+          return [...prev, { role: 'assistant', content, toolCalls: [], id: uid(), done: true }]
+        })
+        setIsGenerating(false)
+        currentAssistantId.current = null
+        break
+      }
+
       // api_response / api_error are handled by external listeners (useApi)
       default:
         break
@@ -310,8 +328,16 @@ export function useWebSocket() {
   }, [])
 
   const sendMessage = useCallback(
-    (content: string) => {
-      const userMsg: ChatMessage = { role: 'user', content, id: uid() }
+    (content: string, opts?: SendOptions) => {
+      const images = opts?.images ?? []
+      const attachments = opts?.attachments ?? []
+      // What the user sees in their bubble (server inlines file bodies itself).
+      const hints: string[] = []
+      if (images.length) hints.push(`🖼️ ${images.length} image${images.length > 1 ? 's' : ''}`)
+      attachments.forEach((a) => hints.push(`📎 ${a.name}`))
+      const display = [content, hints.join('  ')].filter(Boolean).join('\n\n')
+
+      const userMsg: ChatMessage = { role: 'user', content: display || '(empty)', id: uid() }
       setMessages((prev) => [...prev, userMsg])
       // Prepare assistant placeholder
       const assistantId = uid()
@@ -321,7 +347,10 @@ export function useWebSocket() {
         { role: 'assistant', content: '', toolCalls: [], id: assistantId, done: false },
       ])
       setIsGenerating(true)
-      sendRaw({ type: 'message', content })
+      const payload: Record<string, unknown> = { type: 'message', content }
+      if (images.length) payload.image_base64 = images
+      if (attachments.length) payload.attachments = attachments
+      sendRaw(payload)
     },
     [sendRaw],
   )
@@ -356,7 +385,7 @@ export function useWebSocket() {
     if (ws && ws.readyState === WebSocket.OPEN) {
       // Already connected — send auth directly.
       authPending.current = true
-      ws.send(JSON.stringify({ type: 'auth', token }))
+      ws.send(JSON.stringify({ type: 'auth', token, client_id: getClientId() }))
     } else {
       // Reconnect; onopen will send auth automatically.
       connect()
