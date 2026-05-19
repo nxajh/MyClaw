@@ -105,6 +105,13 @@ impl Tool for SkillTool {
                     });
                 }
 
+                // Substitute ${SKILL_DIR} with the actual absolute path so
+                // the LLM sees concrete paths like /home/user/.myclaw/workspace/skills/foo/scripts/run.sh
+                // instead of having to guess or reconstruct the directory.
+                let rendered_content = skill.skill_dir.as_deref()
+                    .map(|dir| substitute_template_vars(&skill.prompt_body, dir))
+                    .unwrap_or_else(|| skill.prompt_body.clone());
+
                 let linked_files = skill.skill_dir.as_deref()
                     .map(scan_skill_files)
                     .filter(|m| !m.is_empty());
@@ -123,7 +130,7 @@ impl Tool for SkillTool {
                         "success": true,
                         "name": skill.name,
                         "description": skill.description,
-                        "content": skill.prompt_body,
+                        "content": rendered_content,
                         "skill_dir": skill.skill_dir.as_deref().map(|p| p.display().to_string()),
                         "linked_files": linked_files,
                         "usage_hint": usage_hint,
@@ -261,6 +268,17 @@ fn collect_files_recursive(dir: &Path) -> Vec<PathBuf> {
         }
     }
     result
+}
+
+/// Replace `${SKILL_DIR}` template variables in skill content with the
+/// actual absolute path.  Tokens that cannot be resolved are left as-is
+/// so the skill author can spot them.
+///
+/// Example: `${SKILL_DIR}/scripts/run.sh` →
+///          `/home/user/.myclaw/workspace/skills/foo/scripts/run.sh`
+fn substitute_template_vars(content: &str, skill_dir: &Path) -> String {
+    let dir_str = skill_dir.display().to_string();
+    content.replace("${SKILL_DIR}", &dir_str)
 }
 
 #[cfg(test)]

@@ -141,6 +141,7 @@ impl SkillManageTool {
             "success": true,
             "message": format!("Skill '{}' created.", name),
             "path": format!("skills/{}/SKILL.md", name),
+            "skill_dir": format!("{}", skill_dir.display()),
             "hint": format!(
                 "To add reference files, use skill_manage(action='write_file', name='{}', file_path='references/...', file_content='...')",
                 name
