@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import {
-  MessageSquare, Layers, Wrench, Brain, Settings,
+  MessageSquare, Layers, Wrench, Sparkles, Brain, Settings,
   Wifi, WifiOff, Loader, PanelLeftClose, PanelLeftOpen,
 } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
@@ -10,6 +10,7 @@ const links = [
   { to: '/', icon: MessageSquare, label: 'Chat' },
   { to: '/sessions', icon: Layers, label: 'Sessions' },
   { to: '/tools', icon: Wrench, label: 'Tools' },
+  { to: '/skills', icon: Sparkles, label: 'Skills' },
   { to: '/memory', icon: Brain, label: 'Memory' },
   { to: '/config', icon: Settings, label: 'Config' },
 ]

@@ -63,6 +63,10 @@ pub struct ClientChannel {
     workspace_dir: Arc<RwLock<Option<std::path::PathBuf>>>,
     /// Config file path for config read/write API (set after construction).
     config_path: Arc<RwLock<Option<std::path::PathBuf>>>,
+    /// Skill manager for skills API (set after construction).
+    skill_manager: Arc<RwLock<Option<Arc<RwLock<crate::agents::SkillManager>>>>>,
+    /// Service registry for models API (set after construction).
+    service_registry: Arc<RwLock<Option<Arc<dyn crate::providers::ServiceRegistry>>>>,
 }
 
 impl ClientChannel {
@@ -79,6 +83,8 @@ impl ClientChannel {
             tool_names: Arc::new(RwLock::new(Vec::new())),
             workspace_dir: Arc::new(RwLock::new(None)),
             config_path: Arc::new(RwLock::new(None)),
+            skill_manager: Arc::new(RwLock::new(None)),
+            service_registry: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -102,6 +108,16 @@ impl ClientChannel {
         *self.config_path.write() = Some(path);
     }
 
+    /// Set the skill manager (called from daemon.rs after construction).
+    pub fn set_skill_manager(&self, sm: Arc<RwLock<crate::agents::SkillManager>>) {
+        *self.skill_manager.write() = Some(sm);
+    }
+
+    /// Set the service registry (called from daemon.rs after construction).
+    pub fn set_service_registry(&self, sr: Arc<dyn crate::providers::ServiceRegistry>) {
+        *self.service_registry.write() = Some(sr);
+    }
+
     /// Start the WebSocket server (spawns a background task).
     /// Called lazily from listen() — the first time the Orchestrator starts consuming.
     async fn start(&self) -> anyhow::Result<()> {
@@ -120,6 +136,8 @@ impl ClientChannel {
         let tool_names = self.tool_names.clone();
         let workspace_dir = self.workspace_dir.clone();
         let config_path = self.config_path.clone();
+        let skill_manager = self.skill_manager.clone();
+        let service_registry = self.service_registry.clone();
 
         tracing::info!("WebSocket server listening on ws://{}/myclaw", addr);
 
@@ -191,6 +209,8 @@ impl ClientChannel {
                         let tool_names_clone = tool_names.clone();
                         let workspace_dir_clone = workspace_dir.clone();
                         let config_path_clone = config_path.clone();
+                        let skill_manager_clone = skill_manager.clone();
+                        let service_registry_clone = service_registry.clone();
                         let auth_token_clone = auth_token.clone();
 
                         tracing::info!(
@@ -218,6 +238,11 @@ impl ClientChannel {
                                 // before sending any other message type.
                                 // If auth_token is None, all connections are pre-authenticated.
                                 let mut is_authenticated = auth_token_clone.is_none();
+                                // Stable identity for session scoping. Defaults to the
+                                // ephemeral conn_id (TUI); a WebUI client supplies a
+                                // persistent client_id in its auth message so its
+                                // sessions survive reconnects.
+                                let mut client_id = conn_id_clone.clone();
 
                                 while let Some(msg_result) = futures_util::StreamExt::next(&mut ws_stream).await {
                                     let msg = match msg_result {
@@ -252,6 +277,12 @@ impl ClientChannel {
                                         };
                                         if ok {
                                             is_authenticated = true;
+                                            if let Some(cid) = parsed["client_id"].as_str() {
+                                                let cid = cid.trim();
+                                                if !cid.is_empty() {
+                                                    client_id = format!("web:{}", cid);
+                                                }
+                                            }
                                             let _ = ws_sender.send(r#"{"type":"auth_ok"}"#.to_string()).await;
                                             tracing::debug!(conn_id = %conn_id_clone, "WebSocket client authenticated");
                                         } else {
@@ -279,8 +310,37 @@ impl ClientChannel {
 
                                     match msg_type {
                                         "message" => {
-                                            let content = parsed["content"].as_str().unwrap_or("").to_string();
-                                            if content.is_empty() {
+                                            let mut content = parsed["content"].as_str().unwrap_or("").to_string();
+
+                                            // Inline text-file attachments into the prompt
+                                            // ({name, content} pairs sent by the WebUI).
+                                            if let Some(arr) = parsed["attachments"].as_array() {
+                                                for a in arr {
+                                                    let nm = a["name"].as_str().unwrap_or("file");
+                                                    let body = a["content"].as_str().unwrap_or("");
+                                                    content.push_str(&format!(
+                                                        "\n\n--- attached file: {} ---\n```\n{}\n```",
+                                                        nm, body
+                                                    ));
+                                                }
+                                            }
+
+                                            // Decode base64 images; strip any data: URL prefix.
+                                            let images: Vec<String> = parsed["image_base64"]
+                                                .as_array()
+                                                .map(|arr| {
+                                                    arr.iter()
+                                                        .filter_map(|v| v.as_str())
+                                                        .map(|s| match s.split_once("base64,") {
+                                                            Some((_, b)) => b.to_string(),
+                                                            None => s.to_string(),
+                                                        })
+                                                        .collect()
+                                                })
+                                                .unwrap_or_default();
+                                            let has_images = !images.is_empty();
+
+                                            if content.trim().is_empty() && !has_images {
                                                 let err = serde_json::json!({"type":"error","message":"empty content"});
                                                 let _ = ws_sender.send(err.to_string()).await;
                                                 continue;
@@ -324,7 +384,7 @@ impl ClientChannel {
                                             // Create ChannelMessage for Orchestrator.
                                             let channel_msg = ChannelMessage {
                                                 id: format!("{}-{}", conn_id_clone, chrono::Utc::now().timestamp_millis()),
-                                                sender: conn_id_clone.clone(),
+                                                sender: client_id.clone(),
                                                 reply_target: session_key_clone.clone(),
                                                 content,
                                                 timestamp: chrono::Utc::now().timestamp() as u64,
@@ -332,7 +392,7 @@ impl ClientChannel {
                                                 interruption_scope_id: None,
                                                 attachments: vec![],
                                                 image_urls: None,
-                                                image_base64: None,
+                                                image_base64: if has_images { Some(images) } else { None },
                                             };
 
                                             if message_tx_clone.send(channel_msg).await.is_err() {
@@ -356,14 +416,21 @@ impl ClientChannel {
                                             let method = parsed["method"].as_str().unwrap_or("").to_string();
                                             let params = parsed.get("params").cloned().unwrap_or(serde_json::Value::Null);
 
+                                            // Align the management-API session scope
+                                            // with the orchestrator's session key
+                                            // (channel:account:sender) so the WebUI
+                                            // sees the same sessions chat actually uses.
+                                            let api_user_id = format!("client:default:{}", client_id);
                                             let resp = handle_api_request(
                                                 &id, &method, &params,
                                                 &ApiContext {
-                                                    conn_id: &conn_id_clone,
+                                                    user_id: &api_user_id,
                                                     session_manager: &session_manager_clone,
                                                     tool_names: &tool_names_clone,
                                                     workspace_dir: &workspace_dir_clone,
                                                     config_path: &config_path_clone,
+                                                    skill_manager: &skill_manager_clone,
+                                                    service_registry: &service_registry_clone,
                                                 },
                                             );
                                             let _ = ws_sender.send(resp).await;
@@ -511,11 +578,14 @@ impl Channel for ClientChannel {
 
 /// Shared handles passed to every API request handler.
 struct ApiContext<'a> {
-    conn_id: &'a str,
+    /// Session-manager scope key (channel:account:sender), stable across reconnects.
+    user_id: &'a str,
     session_manager: &'a Arc<RwLock<Option<Arc<crate::agents::SessionManager>>>>,
     tool_names: &'a Arc<RwLock<Vec<String>>>,
     workspace_dir: &'a Arc<RwLock<Option<std::path::PathBuf>>>,
     config_path: &'a Arc<RwLock<Option<std::path::PathBuf>>>,
+    skill_manager: &'a Arc<RwLock<Option<Arc<RwLock<crate::agents::SkillManager>>>>>,
+    service_registry: &'a Arc<RwLock<Option<Arc<dyn crate::providers::ServiceRegistry>>>>,
 }
 
 /// Route a management API request and return a JSON response string.
@@ -537,8 +607,7 @@ fn handle_api_request(
         }
     };
 
-    // Use conn_id as user_id for session scoping.
-    let user_id = ctx.conn_id;
+    let user_id = ctx.user_id;
 
     match method {
         "sessions.list" => {
@@ -872,6 +941,95 @@ fn handle_api_request(
             serde_json::json!({ "type": "api_response", "id": id, "result": { "message": "Restarting…" } }).to_string()
         }
 
+        "sessions.history" => {
+            let session = sm.get_or_create(user_id);
+            let msgs = reconstruct_history(&session.history);
+            serde_json::json!({
+                "type": "api_response",
+                "id": id,
+                "result": msgs,
+            }).to_string()
+        }
+
+        "skills.list" => {
+            let guard = ctx.skill_manager.read();
+            let result: Vec<serde_json::Value> = match guard.as_ref() {
+                Some(mgr_arc) => {
+                    let mgr = mgr_arc.read();
+                    mgr.skills_iter()
+                        .map(|(name, s)| serde_json::json!({
+                            "name": name,
+                            "description": s.description,
+                            "keywords": s.keywords,
+                        }))
+                        .collect()
+                }
+                None => Vec::new(),
+            };
+            serde_json::json!({
+                "type": "api_response",
+                "id": id,
+                "result": result,
+            }).to_string()
+        }
+
+        "commands.list" => {
+            let result: Vec<serde_json::Value> = crate::agents::commands::command_catalog()
+                .into_iter()
+                .map(|(name, desc)| serde_json::json!({ "name": name, "description": desc }))
+                .collect();
+            serde_json::json!({
+                "type": "api_response",
+                "id": id,
+                "result": result,
+            }).to_string()
+        }
+
+        "models.list" => {
+            let guard = ctx.service_registry.read();
+            match guard.as_ref() {
+                Some(reg) => {
+                    let model_ids = reg.get_chat_routing_models();
+                    let active = sm.get_session_override(user_id).model
+                        .or_else(|| model_ids.first().cloned());
+                    let models: Vec<serde_json::Value> = model_ids.iter().map(|mid| {
+                        let supports_image = reg.get_chat_model_config(mid)
+                            .map(|c| c.supports_image_input())
+                            .unwrap_or(false);
+                        serde_json::json!({
+                            "id": mid,
+                            "active": active.as_deref() == Some(mid.as_str()),
+                            "supports_image": supports_image,
+                        })
+                    }).collect();
+                    serde_json::json!({
+                        "type": "api_response",
+                        "id": id,
+                        "result": { "models": models, "active": active },
+                    }).to_string()
+                }
+                None => serde_json::json!({
+                    "type": "api_response",
+                    "id": id,
+                    "result": { "models": [], "active": null },
+                }).to_string(),
+            }
+        }
+
+        "models.set" => {
+            let model = params["model"].as_str()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty());
+            let mut ov = sm.get_session_override(user_id);
+            ov.model = model.map(|s| s.to_string());
+            sm.save_session_override(user_id, ov);
+            serde_json::json!({
+                "type": "api_response",
+                "id": id,
+                "result": { "model": model },
+            }).to_string()
+        }
+
         _ => {
             serde_json::json!({
                 "type": "api_error",
@@ -880,4 +1038,85 @@ fn handle_api_request(
             }).to_string()
         }
     }
+}
+
+/// Reconstruct a session's stored history into WebUI chat-message shape.
+fn reconstruct_history(
+    history: &[crate::providers::capability_chat::ChatMessage],
+) -> Vec<serde_json::Value> {
+    use crate::providers::capability_chat::ContentPart;
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let mut counter = 0u64;
+    for m in history {
+        let mut text = String::new();
+        let mut thinking = String::new();
+        let mut has_image = false;
+        for p in &m.parts {
+            match p {
+                ContentPart::Text { text: t } => text.push_str(t),
+                ContentPart::Thinking { thinking: t, .. } => thinking.push_str(t),
+                ContentPart::ImageUrl { .. } | ContentPart::ImageB64 { .. } => has_image = true,
+            }
+        }
+        match m.role.as_str() {
+            "user" => {
+                let content = if !text.is_empty() {
+                    text
+                } else if has_image {
+                    "🖼️ (image)".to_string()
+                } else {
+                    continue;
+                };
+                counter += 1;
+                out.push(serde_json::json!({
+                    "role": "user",
+                    "content": content,
+                    "id": format!("h-{}", counter),
+                }));
+            }
+            "assistant" => {
+                let tool_calls: Vec<serde_json::Value> = m.tool_calls.as_ref()
+                    .map(|tcs| tcs.iter().map(|tc| {
+                        let args = serde_json::from_str::<serde_json::Value>(&tc.arguments)
+                            .unwrap_or_else(|_| serde_json::json!({}));
+                        serde_json::json!({ "id": tc.id, "name": tc.name, "args": args })
+                    }).collect())
+                    .unwrap_or_default();
+                if text.is_empty() && thinking.is_empty() && tool_calls.is_empty() {
+                    continue;
+                }
+                counter += 1;
+                let mut obj = serde_json::json!({
+                    "role": "assistant",
+                    "content": text,
+                    "toolCalls": tool_calls,
+                    "id": format!("h-{}", counter),
+                    "done": true,
+                });
+                if !thinking.is_empty() {
+                    obj["thinking"] = serde_json::json!(thinking);
+                }
+                out.push(obj);
+            }
+            "tool" => {
+                if let Some(tcid) = &m.tool_call_id {
+                    'outer: for msg in out.iter_mut().rev() {
+                        if msg["role"] != "assistant" {
+                            continue;
+                        }
+                        if let Some(arr) = msg.get_mut("toolCalls").and_then(|v| v.as_array_mut()) {
+                            for tc in arr.iter_mut() {
+                                if tc["id"] == serde_json::Value::String(tcid.clone()) {
+                                    tc["output"] = serde_json::json!(text);
+                                    break 'outer;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }

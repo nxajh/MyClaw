@@ -60,6 +60,42 @@ pub fn parse_command(content: &str) -> Option<(&str, &str)> {
     Some((cmd, args))
 }
 
+/// Return a catalog of all available slash commands as `(name, description)` pairs.
+/// Used by the WebUI to power slash-command autocomplete.
+pub fn command_catalog() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("help",      "Show available commands"),
+        ("status",    "Show current session status"),
+        ("new",       "Start a new session"),
+        ("reset",     "Reset the current session"),
+        ("compact",   "Compact conversation history"),
+        ("model",     "Set the active model"),
+        ("models",    "List available models"),
+        ("stop",      "Stop the daemon"),
+        ("tools",     "List available tools"),
+        ("config",    "View or set config options"),
+        ("think",     "Set thinking budget"),
+        ("autonomy",  "Set autonomy level"),
+        ("settings",  "Show current settings"),
+        ("mcp",       "MCP server status"),
+        ("context",   "Show context window usage"),
+        ("btw",       "Add a background note"),
+        ("export",    "Export conversation history"),
+        ("history",   "Show conversation history"),
+        ("skills",    "List loaded skills"),
+        ("skill",     "List loaded skills"),
+        ("reload",    "Reload skills and config"),
+        ("sessions",  "List all sessions"),
+        ("ss",        "List all sessions"),
+        ("switch",    "Switch to a session"),
+        ("sw",        "Switch to a session"),
+        ("rename",    "Rename a session"),
+        ("rn",        "Rename a session"),
+        ("delete",    "Delete a session"),
+        ("del",       "Delete a session"),
+    ]
+}
+
 /// Return true if `cmd` is a recognized slash command name.
 ///
 /// Used by the orchestrator to decide whether to spawn dispatch in a background

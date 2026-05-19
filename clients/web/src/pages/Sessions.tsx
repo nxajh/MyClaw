@@ -128,7 +128,7 @@ function SessionRow({
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function Sessions() {
-  const { status, sendRaw, addMessageListener, setMessages } = useWebSocketContext()
+  const { status, sendRaw, addMessageListener, reloadHistory } = useWebSocketContext()
   const { request } = useApi(sendRaw, addMessageListener)
   const [sessions, setSessions] = useState<Session[]>([])
   const [newName, setNewName] = useState('')
@@ -167,10 +167,10 @@ export default function Sessions() {
     setError(null)
     try {
       await request('sessions.switch', { id })
-      setMessages([])
+      await reloadHistory()
       await fetchSessions()
     } catch (err) { setError(err instanceof Error ? err.message : String(err)) }
-  }, [request, setMessages, fetchSessions])
+  }, [request, reloadHistory, fetchSessions])
 
   const handleRename = useCallback(async (id: string, name: string) => {
     setError(null)
