@@ -80,7 +80,7 @@ fn patch_mimo_thinking(body: &mut serde_json::Value) {
         });
 
         if !has_thinking && has_tool_use {
-            content.insert(0, serde_json::json!({"type": "thinking", "thinking": ""}));
+            content.insert(0, serde_json::json!({"type": "thinking", "thinking": "..."}));
         }
     }
 }
