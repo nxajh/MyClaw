@@ -79,19 +79,7 @@ export default function MessageList({ messages, containerRef }: Props) {
               </div>
 
               <div className="flex-1 min-w-0 space-y-3 pt-0.5">
-                {/* Thinking */}
-                {msg.thinking && <ThinkingBlock text={msg.thinking} />}
-
-                {/* Tool calls */}
-                {msg.toolCalls.length > 0 && (
-                  <div className="space-y-1.5">
-                    {msg.toolCalls.map((tc) => (
-                      <ToolCallCard key={tc.id} toolCall={tc} />
-                    ))}
-                  </div>
-                )}
-
-                {/* Text content */}
+                {/* 1. Text content */}
                 {msg.content && (
                   <div className="prose prose-invert prose-sm max-w-none
                     prose-p:leading-7 prose-p:my-2 first:prose-p:mt-0
@@ -107,8 +95,20 @@ export default function MessageList({ messages, containerRef }: Props) {
                   </div>
                 )}
 
-                {/* Generating */}
-                {!msg.done && !msg.content && msg.toolCalls.length === 0 && !msg.thinking && (
+                {/* 2. Reasoning / thinking */}
+                {msg.thinking && <ThinkingBlock text={msg.thinking} />}
+
+                {/* 3. Tool calls + results */}
+                {msg.toolCalls.length > 0 && (
+                  <div className="space-y-1.5">
+                    {msg.toolCalls.map((tc) => (
+                      <ToolCallCard key={tc.id} toolCall={tc} />
+                    ))}
+                  </div>
+                )}
+
+                {/* Generating indicator */}
+                {!msg.done && !msg.content && !msg.thinking && msg.toolCalls.length === 0 && (
                   <GeneratingDots />
                 )}
               </div>
