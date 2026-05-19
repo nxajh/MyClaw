@@ -179,7 +179,13 @@ pub(super) async fn chat_loop(
                         tracing::warn!(wait_secs, "fallback chain: all providers on cooldown");
                         return Err(super::super::error::AgentError::ProviderChainCooling { wait_secs }.into());
                     }
-                    let classified = crate::providers::ClassifiedError::from_message(&err_str);
+                    let classified = if let Some(http_err) =
+                        e.downcast_ref::<crate::providers::ProviderHttpError>()
+                    {
+                        crate::providers::ClassifiedError::classify("", http_err.status, &http_err.message)
+                    } else {
+                        crate::providers::ClassifiedError::from_message(&err_str)
+                    };
                     if classified.retryable {
                         match classified.reason {
                             crate::providers::FailoverReason::Timeout => {
