@@ -421,6 +421,7 @@ async fn build_tools(
     skills: &Arc<parking_lot::RwLock<SkillManager>>,
     shared_scheduler: &crate::agents::SharedScheduler,
     workspace_dir: &std::path::Path,
+    knowledge_dir: &str,
 ) -> ToolRegistry {
     let mut tools = ToolRegistry::new();
     let builtin = crate::tools::builtin_tools();
@@ -448,6 +449,13 @@ async fn build_tools(
 
     // CronJobTool — manage scheduled cron jobs.
     tools.register(Arc::new(crate::tools::CronJobTool::new(Arc::clone(shared_scheduler))));
+
+    // Memory tools — persistent memory management.
+    let kd = knowledge_dir.to_string();
+    tools.register(Arc::new(crate::tools::MemoryListTool::new(kd.clone())));
+    tools.register(Arc::new(crate::tools::MemoryViewTool::new(kd.clone())));
+    tools.register(Arc::new(crate::tools::MemorySearchTool::new(kd.clone())));
+    tools.register(Arc::new(crate::tools::MemoryManageTool::new(kd)));
 
     // Inject MCP tools (if any servers are configured and connected).
     if mcp_manager.is_connected().await {
@@ -689,7 +697,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     );
 
     // Build tool registry (all built-in + MCP + skill tools).
-    let mut tools = build_tools(&mcp_manager, &skills_arc, &shared_scheduler, &config.workspace_dir).await;
+    let mut tools = build_tools(&mcp_manager, &skills_arc, &shared_scheduler, &config.workspace_dir, config.knowledge_dir.to_str().unwrap_or(".")).await;
 
     // Build sub-agent configs (AGENT.md files from workspace/agents/).
     let sub_agent_configs = build_sub_agents(&config.workspace_dir);
@@ -880,6 +888,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         search_cooldown: Some(search_cooldown),
         unfinished_subagents,
         workspace_dir: config.workspace_dir.clone(),
+        scheduler: Some(shared_scheduler.clone()),
     };
 
     // ── Launch ─────────────────────────────────────────────────────────────

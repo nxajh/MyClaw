@@ -84,15 +84,12 @@ pub fn render_anthropic_messages<'a>(req: &ChatRequest<'a>) -> RenderedAnthropic
 
                 if msg.role == "assistant" {
                     if let Some(ref tcs) = msg.tool_calls {
-                        // If this assistant message has tool_calls but no thinking block,
-                        // insert an empty thinking block so providers that require
-                        // reasoning_content (e.g. MiMo) don't reject the history with 400.
-                        let has_thinking = p.iter().any(|b| {
-                            b.get("type").and_then(|v| v.as_str()) == Some("thinking")
-                        });
-                        if !has_thinking {
-                            p.insert(0, serde_json::json!({"type": "thinking", "thinking": ""}));
-                        }
+                        // NOTE: We intentionally do NOT insert an empty thinking block here.
+                        // The Anthropic Messages API requires every thinking block to have a
+                        // `signature` field — an empty block without signature triggers
+                        // "messages.X.content.X.thinking.signature: Field required" (400).
+                        // Xiaomi/MiMo historically needed this, but they should handle it
+                        // in their own body renderer if required.
                         for tc in tcs {
                             let input = serde_json::from_str::<serde_json::Value>(&tc.arguments)
                                 .unwrap_or_else(|e| {

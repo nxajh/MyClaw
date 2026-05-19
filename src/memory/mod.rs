@@ -5,7 +5,8 @@
 //! ```markdown
 //! ---
 //! name: user_language
-//! description: 用户要求中文回复
+//! abstract: 用户偏好使用中文进行所有交流
+//! tags: [user, language]
 //! type: user
 //! created_at: 2026-05-07
 //! ---
@@ -15,6 +16,12 @@
 //!
 //! No separate index file. The index is generated dynamically by scanning
 //! `memory/*.md` frontmatter. Cross-session sync via file watcher.
+//!
+//! ## System-reminder injection policy
+//!
+//! Only `user` (preferences) and `feedback` (behavior corrections) types are
+//! injected into system-reminders — these are facts the agent must always obey.
+//! `project` and `reference` types are available via memory_list / memory_search.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -56,7 +63,12 @@ impl MemoryType {
         }
     }
 
-    /// All types in canonical order (used for index grouping).
+    /// Types injected into system-reminders (agent must always obey).
+    pub fn injected_types() -> &'static [MemoryType] {
+        &[Self::User, Self::Feedback]
+    }
+
+    /// All types in canonical order (used for listing/grouping).
     pub fn all() -> &'static [MemoryType] {
         &[Self::User, Self::Feedback, Self::Project, Self::Reference]
     }
@@ -65,7 +77,8 @@ impl MemoryType {
 #[derive(Debug, Clone)]
 pub struct MemoryFile {
     pub name: String,
-    pub description: String,
+    pub abstract_text: String,
+    pub tags: Vec<String>,
     pub mem_type: MemoryType,
     pub created_at: String,
     pub content: String,
@@ -77,7 +90,8 @@ pub struct IndexEntry {
     pub mem_type: MemoryType,
     pub name: String,
     pub filename: String,
-    pub description: String,
+    pub abstract_text: String,
+    pub tags: Vec<String>,
 }
 
 impl From<&MemoryFile> for IndexEntry {
@@ -91,7 +105,8 @@ impl From<&MemoryFile> for IndexEntry {
                 .to_str()
                 .unwrap_or("")
                 .to_string(),
-            description: f.description.clone(),
+            abstract_text: f.abstract_text.clone(),
+            tags: f.tags.clone(),
         }
     }
 }
@@ -134,6 +149,9 @@ pub fn scan_memory_files(memory_dir: &Path) -> Vec<MemoryFile> {
 
 /// Parse a single `.md` file's YAML frontmatter + content.
 /// Returns `None` if frontmatter is missing or malformed.
+///
+/// Backward compatible: if `abstract` is absent but `description` is present,
+/// `description` value is used as `abstract_text`.
 fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
     let raw = fs::read_to_string(path).ok()?;
     let trimmed = raw.trim();
@@ -153,7 +171,8 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
 
     // Parse YAML frontmatter (simple key: value parsing)
     let mut name = None;
-    let mut description = None;
+    let mut abstract_text: Option<String> = None;
+    let mut tags: Vec<String> = Vec::new();
     let mut mem_type = None;
     let mut created_at = None;
 
@@ -164,7 +183,8 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
             let value = value.trim();
             match key {
                 "name" => name = Some(value.to_string()),
-                "description" => description = Some(value.to_string()),
+                "abstract" => abstract_text = Some(value.to_string()),
+                "tags" => tags = parse_tags(value),
                 "type" => mem_type = MemoryType::from_str_lossy(value),
                 "created_at" => created_at = Some(value.to_string()),
                 _ => {}
@@ -174,7 +194,8 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
 
     Some(MemoryFile {
         name: name?,
-        description: description.unwrap_or_default(),
+        abstract_text: abstract_text.unwrap_or_default(),
+        tags,
         mem_type: mem_type?,
         created_at: created_at.unwrap_or_default(),
         content,
@@ -182,27 +203,59 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
     })
 }
 
-// ── Index formatting ───────────────────────────────────────────────────────
+/// Parse a tags value. Supports:
+/// - YAML array: `[foo, bar, baz]`
+/// - Comma-separated: `foo, bar, baz`
+fn parse_tags(value: &str) -> Vec<String> {
+    let value = value.trim();
+    // Strip [ ] if present
+    let inner = if value.starts_with('[') && value.ends_with(']') {
+        &value[1..value.len() - 1]
+    } else {
+        value
+    };
+    inner
+        .split(',')
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect()
+}
 
-/// Generate a formatted index string from memory entries, grouped by type.
+// ── Index formatting (for system-reminder injection) ──────────────────────
+
+/// Generate a formatted index string for system-reminder injection.
+/// Only includes `user` and `feedback` types.
 pub fn format_memory_index(entries: &[IndexEntry]) -> String {
-    if entries.is_empty() {
-        return "暂无记忆。".to_string();
+    // Filter to injected types only
+    let injectable: Vec<&IndexEntry> = entries
+        .iter()
+        .filter(|e| MemoryType::injected_types().contains(&e.mem_type))
+        .collect();
+
+    if injectable.is_empty() {
+        return "暂无需要遵守的记忆。".to_string();
     }
 
     let mut lines = Vec::new();
 
-    for &mem_type in MemoryType::all() {
-        let group: Vec<&IndexEntry> = entries.iter().filter(|e| e.mem_type == mem_type).collect();
+    for &mem_type in MemoryType::injected_types() {
+        let group: Vec<&&IndexEntry> = injectable.iter().filter(|e| e.mem_type == mem_type).collect();
         if group.is_empty() {
             continue;
         }
 
-        lines.push(format!("## {}", mem_type.as_str()));
+        lines.push(format!("### {}", mem_type.as_str()));
         for entry in &group {
-            lines.push(format!("- {} — {}", entry.filename, entry.description));
+            let mut line = format!("- **{}**", entry.name);
+            if !entry.tags.is_empty() {
+                line.push_str(&format!(" [{}]", entry.tags.join(", ")));
+            }
+            lines.push(line);
+            if !entry.abstract_text.is_empty() {
+                lines.push(format!("  {}", entry.abstract_text));
+            }
         }
-        lines.push(String::new()); // blank line between groups
+        lines.push(String::new());
     }
 
     let text = lines.join("\n");
@@ -264,7 +317,7 @@ pub fn build_memory_section(knowledge_dir: &str) -> String {
 当记忆内容与当前任务相关时，用 file_read 读取详细文件。
 
 如果用户明确要求记住某事，或你发现偏好/行为模式变化，用 file_write 写入 memory/ 目录。
-文件必须包含 YAML frontmatter（name / description / type / created_at）。
+文件必须包含 YAML frontmatter（name / abstract / type / created_at），可选 tags。
 不要存可以从代码/文件推导的信息（代码路径、架构、git history）。
 
 ### 记忆索引
@@ -281,8 +334,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_frontmatter() {
-        let content = "---\nname: user_lang\ndescription: 用户要求中文\ntype: user\ncreated_at: 2026-05-07\n---\n\n中文交流。";
+    fn test_parse_frontmatter_with_abstract() {
+        let content = "---\nname: user_lang\nabstract: 用户偏好使用中文进行所有交流\ntags: [user, language, preference]\ntype: user\ncreated_at: 2026-05-07\n---\n\n中文交流。";
         let dir = std::env::temp_dir().join("myclaw_test_memory_parse");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("user_lang.md");
@@ -290,10 +343,27 @@ mod tests {
 
         let mf = parse_memory_file(&path).unwrap();
         assert_eq!(mf.name, "user_lang");
-        assert_eq!(mf.description, "用户要求中文");
+        assert_eq!(mf.abstract_text, "用户偏好使用中文进行所有交流");
+        assert_eq!(mf.tags, vec!["user", "language", "preference"]);
         assert_eq!(mf.mem_type, MemoryType::User);
         assert_eq!(mf.created_at, "2026-05-07");
         assert_eq!(mf.content, "中文交流。");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_parse_frontmatter_no_abstract() {
+        // Files without abstract should parse fine (empty abstract)
+        let content = "---\nname: test\ntype: project\ncreated_at: 2026-05-07\n---\n\nContent.";
+        let dir = std::env::temp_dir().join("myclaw_test_memory_no_abstract");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.md");
+        fs::write(&path, content).unwrap();
+
+        let mf = parse_memory_file(&path).unwrap();
+        assert_eq!(mf.name, "test");
+        assert_eq!(mf.abstract_text, "");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -311,44 +381,63 @@ mod tests {
     }
 
     #[test]
-    fn test_format_index_empty() {
-        let index = format_memory_index(&[]);
-        assert!(index.contains("暂无记忆"));
-    }
-
-    #[test]
-    fn test_format_index_grouped() {
+    fn test_format_index_only_user_and_feedback() {
         let entries = vec![
+            IndexEntry {
+                mem_type: MemoryType::Project,
+                name: "project1".into(),
+                filename: "project1.md".into(),
+                abstract_text: "Project context".into(),
+                tags: vec![],
+            },
             IndexEntry {
                 mem_type: MemoryType::Feedback,
                 name: "no_diff".into(),
                 filename: "feedback_no_diff.md".into(),
-                description: "不要总结 diff".into(),
+                abstract_text: "不要总结 diff".into(),
+                tags: vec!["workflow".into()],
             },
             IndexEntry {
                 mem_type: MemoryType::User,
                 name: "lang".into(),
                 filename: "user_lang.md".into(),
-                description: "中文回复".into(),
+                abstract_text: "中文回复".into(),
+                tags: vec![],
             },
         ];
         let index = format_memory_index(&entries);
-        assert!(index.contains("## user"));
-        assert!(index.contains("## feedback"));
-        // user section should come before feedback
-        let user_pos = index.find("## user").unwrap();
-        let fb_pos = index.find("## feedback").unwrap();
-        assert!(user_pos < fb_pos);
+        assert!(index.contains("### user"));
+        assert!(index.contains("### feedback"));
+        assert!(!index.contains("### project")); // project should NOT be injected
+        assert!(index.contains("lang"));
+        assert!(index.contains("no_diff"));
+        assert!(!index.contains("project1"));
+    }
+
+    #[test]
+    fn test_format_index_empty_injectable() {
+        // Only project/reference entries → empty index
+        let entries = vec![
+            IndexEntry {
+                mem_type: MemoryType::Project,
+                name: "project1".into(),
+                filename: "project1.md".into(),
+                abstract_text: "Project context".into(),
+                tags: vec![],
+            },
+        ];
+        let index = format_memory_index(&entries);
+        assert!(index.contains("暂无需要遵守的记忆"));
     }
 
     #[test]
     fn test_truncate_index() {
         let long: String = (0..300)
-            .map(|i| format!("- file{}.md — description {}", i, i))
+            .map(|i| format!("- file{}.md — abstract {}", i, i))
             .collect::<Vec<_>>()
             .join("\n");
         let truncated = truncate_index(&long, 200, 25_000);
         assert!(truncated.contains("WARNING"));
-        assert!(truncated.lines().count() <= 202); // 200 + warning lines
+        assert!(truncated.lines().count() <= 202);
     }
 }

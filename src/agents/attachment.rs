@@ -240,35 +240,74 @@ impl AttachmentManager {
         }
     }
 
-    /// 与 memory 索引做 diff，变更时生成 system-reminder。
-    /// 与 diff_skills 一致：始终检查 history，首次/compaction 后自动全量注入。
+    /// 与 memory 索引做 diff，变更时生成通知式 system-reminder。
+    /// 只注入 user + feedback 类型（agent 必须始终遵守的偏好和纠正）。
+    /// project + reference 通过 memory_list / memory_search 按需查找。
     pub fn diff_memory(
         &mut self,
         entries: &[crate::memory::IndexEntry],
         history: &[ChatMessage],
     ) {
-        let new_text = crate::memory::format_memory_index(entries);
+        // Filter to user + feedback only
+        let injectable: Vec<&crate::memory::IndexEntry> = entries
+            .iter()
+            .filter(|e| crate::memory::MemoryType::injected_types().contains(&e.mem_type))
+            .collect();
 
-        // 检查 history 中是否已有相同的 memory 索引
-        let marker = format!("## Memory\n\n{}", &new_text);
-        let already_injected = history.iter().any(|msg| {
-            msg.text_content().contains(&marker)
-        });
+        let new_key: String = injectable.iter()
+            .map(|e| e.name.clone())
+            .collect::<Vec<_>>()
+            .join(",");
 
-        if already_injected {
-            self.memory_index = Some(new_text);
-            return;
+        // Check if the same set was already injected
+        let old_key = self.memory_index.as_deref().unwrap_or("");
+        let same = new_key == old_key;
+
+        if same {
+            // Check if history still contains a memory reminder
+            let has_memory_reminder = history.iter().any(|msg| {
+                let text = msg.text_content();
+                text.contains("<system-reminder>") && text.contains("## Memory")
+            });
+            if has_memory_reminder {
+                return;
+            }
         }
 
-        // 首次 / 变更 / compaction 后 → 注入
+        // Build structured index for user + feedback
+        let mut added = Vec::new();
+        for &mem_type in crate::memory::MemoryType::injected_types() {
+            let group: Vec<&&crate::memory::IndexEntry> = injectable.iter()
+                .filter(|e| e.mem_type == mem_type)
+                .collect();
+            if group.is_empty() {
+                continue;
+            }
+            added.push(format!("### {}", mem_type.as_str()));
+            for entry in &group {
+                let mut line = format!("- **{}**", entry.name);
+                if !entry.tags.is_empty() {
+                    line.push_str(&format!(" [{}]", entry.tags.join(", ")));
+                }
+                added.push(line);
+                if !entry.abstract_text.is_empty() {
+                    added.push(format!("  {}", entry.abstract_text));
+                }
+            }
+        }
+
+        if added.is_empty() {
+            added.push("No user preferences or feedback stored.".to_string());
+        }
+
         self.pending.insert(
             AttachmentKind::MemoryListing,
             Delta {
-                added: vec![new_text.clone()],
+                added,
                 removed: vec![],
             },
         );
-        self.memory_index = Some(new_text);
+        self.memory_index = Some(new_key);
     }
 
     /// Check date injection. Generates a system-reminder with the current date
@@ -463,10 +502,15 @@ impl AttachmentManager {
 
     fn render_memory(delta: &Delta) -> String {
         let mut lines = vec!["## Memory".to_string()];
+        lines.push(
+            "The following memories are loaded and must be obeyed. \
+             For project context and reference docs, use memory_list() to browse, memory_search(query) to find."
+                .to_string(),
+        );
         for entry in &delta.added {
             lines.push(entry.clone());
         }
-        lines.join("\n\n")
+        lines.join("\n")
     }
 
     fn render_mcp(delta: &Delta) -> String {

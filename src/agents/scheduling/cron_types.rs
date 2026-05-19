@@ -24,6 +24,71 @@ pub struct DeliveryConfig {
     pub thread_id: Option<String>,
 }
 
+// ── Retry ──────────────────────────────────────────────────────────────────
+
+/// Error categories that can trigger retries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryableError {
+    RateLimit,
+    Timeout,
+    ServerError,
+    Network,
+    Overloaded,
+}
+
+/// Per-job retry policy for transient errors.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryConfig {
+    /// Max retries before marking as permanently failed (default: 3).
+    #[serde(default = "default_max_attempts")]
+    pub max_attempts: u32,
+    /// Backoff delays in milliseconds for each retry (default: [30000, 60000, 300000]).
+    #[serde(default = "default_backoff_ms")]
+    pub backoff_ms: Vec<u64>,
+}
+
+fn default_max_attempts() -> u32 { 3 }
+fn default_backoff_ms() -> Vec<u64> { vec![30_000, 60_000, 300_000] }
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: default_max_attempts(),
+            backoff_ms: default_backoff_ms(),
+        }
+    }
+}
+
+// ── Failure Alert ──────────────────────────────────────────────────────────
+
+/// Configuration for alerting on consecutive failures.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FailureAlertConfig {
+    /// Alert after N consecutive failures (default: 3).
+    #[serde(default = "default_after")]
+    pub after: u32,
+    /// Minimum seconds between repeated alerts (default: 3600).
+    #[serde(default = "default_cooldown_secs")]
+    pub cooldown_secs: u64,
+    /// Whether to include skipped runs in the failure count (default: false).
+    #[serde(default)]
+    pub include_skipped: bool,
+}
+
+fn default_after() -> u32 { 3 }
+fn default_cooldown_secs() -> u64 { 3600 }
+
+impl Default for FailureAlertConfig {
+    fn default() -> Self {
+        Self {
+            after: default_after(),
+            cooldown_secs: default_cooldown_secs(),
+            include_skipped: false,
+        }
+    }
+}
+
 // ── Run Record ──────────────────────────────────────────────────────────────
 
 /// Status of a single cron job execution.

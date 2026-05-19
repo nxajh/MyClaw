@@ -235,6 +235,9 @@ pub struct ChatResponse {
     pub tool_calls: Vec<ToolCall>,
     pub usage: Option<ChatUsage>,
     pub reasoning_content: Option<String>,
+    /// Anthropic-issued opaque signature for the thinking block.
+    /// Must be echoed back when the thinking block is re-sent in subsequent turns.
+    pub thinking_signature: Option<String>,
     pub stop_reason: StopReason,
 }
 
@@ -244,6 +247,7 @@ impl ChatResponse {
         use futures_util::StreamExt;
         let mut text = String::new();
         let mut reasoning_content = String::new();
+        let mut thinking_signature: Option<String> = None;
         let mut tool_calls = Vec::new();
         let mut stop_reason = StopReason::EndTurn;
         let mut usage: Option<ChatUsage> = None;
@@ -278,7 +282,9 @@ impl ChatResponse {
                     stop_reason = reason;
                     break;
                 }
-                StreamEvent::ThinkingSignature { .. } => {}
+                StreamEvent::ThinkingSignature { signature } => {
+                    thinking_signature = Some(signature);
+                }
                 StreamEvent::HttpError { message, .. } => {
                     anyhow::bail!("Stream error: HTTP {}", message);
                 }
@@ -295,6 +301,7 @@ impl ChatResponse {
             } else {
                 Some(reasoning_content)
             },
+            thinking_signature,
             stop_reason,
         })
     }
