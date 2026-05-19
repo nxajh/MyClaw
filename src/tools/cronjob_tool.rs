@@ -235,10 +235,10 @@ impl CronJobTool {
         let disabled_tools = parse_string_array(args.get("disabled_tools"));
 
         // Parse retry policy.
-        let retry = args.get("retry").and_then(|v| parse_retry_config(v));
+        let retry = args.get("retry").and_then(parse_retry_config);
 
         // Parse failure alert config.
-        let failure_alert = args.get("failure_alert").and_then(|v| parse_failure_alert(v));
+        let failure_alert = args.get("failure_alert").and_then(parse_failure_alert);
 
         let entry = JobEntry {
             id: String::new(),
