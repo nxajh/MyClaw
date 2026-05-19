@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
-use parking_lot::RwLock;
+use parking_lot::{Mutex as SyncMutex, RwLock};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
@@ -49,6 +49,9 @@ pub struct ClientChannel {
     message_tx: mpsc::Sender<ChannelMessage>,
     /// One-time take for listen().
     message_rx: Mutex<Option<mpsc::Receiver<ChannelMessage>>>,
+    /// Pre-bound listener passed from the old process during hot switch.
+    /// When set, start() reuses it instead of calling bind().
+    pre_bound: SyncMutex<Option<std::net::TcpListener>>,
     /// Per-session streaming context.
     stream_contexts: Arc<RwLock<HashMap<String, StreamContext>>>,
     /// Active connections: connection_id → ClientConnection.
@@ -76,6 +79,7 @@ impl ClientChannel {
             config,
             message_tx,
             message_rx: Mutex::new(Some(message_rx)),
+            pre_bound: SyncMutex::new(None),
             stream_contexts: Arc::new(RwLock::new(HashMap::new())),
             connections: Arc::new(RwLock::new(HashMap::new())),
             session_owners: Arc::new(RwLock::new(HashMap::new())),
@@ -86,6 +90,12 @@ impl ClientChannel {
             skill_manager: Arc::new(RwLock::new(None)),
             service_registry: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Supply a pre-bound std TcpListener (SO_REUSEPORT, from hot switch or
+    /// early daemon startup).  Must be called before listen().
+    pub fn set_pre_bound(&self, listener: std::net::TcpListener) {
+        *self.pre_bound.lock() = Some(listener);
     }
 
     /// Set the session manager (called from daemon.rs after construction).
@@ -121,10 +131,26 @@ impl ClientChannel {
     /// Start the WebSocket server (spawns a background task).
     /// Called lazily from listen() — the first time the Orchestrator starts consuming.
     async fn start(&self) -> anyhow::Result<()> {
-        let addr: SocketAddr = self.config.bind.parse()
-            .map_err(|e| anyhow::anyhow!("invalid client bind address '{}': {}", self.config.bind, e))?;
-        let listener = TcpListener::bind(addr).await
-            .map_err(|e| anyhow::anyhow!("failed to bind WebSocket server to {}: {}", addr, e))?;
+        // Prefer a pre-bound listener (hot switch / SO_REUSEPORT inheritance).
+        // Extract from the sync lock before any await so MutexGuard is not held
+        // across an await point (parking_lot::MutexGuard is not Send).
+        let pre_bound = self.pre_bound.lock().take();
+        let listener = if let Some(std_listener) = pre_bound {
+            std_listener.set_nonblocking(true)
+                .map_err(|e| anyhow::anyhow!("failed to set nonblocking on inherited client socket: {}", e))?;
+            let l = TcpListener::from_std(std_listener)
+                .map_err(|e| anyhow::anyhow!("failed to convert inherited client socket: {}", e))?;
+            tracing::info!(
+                addr = %l.local_addr().unwrap_or_else(|_| self.config.bind.parse().unwrap()),
+                "WebSocket server reusing inherited socket (hot switch)"
+            );
+            l
+        } else {
+            let addr: SocketAddr = self.config.bind.parse()
+                .map_err(|e| anyhow::anyhow!("invalid client bind address '{}': {}", self.config.bind, e))?;
+            TcpListener::bind(addr).await
+                .map_err(|e| anyhow::anyhow!("failed to bind WebSocket server to {}: {}", addr, e))?
+        };
 
         let max_connections = self.config.max_connections;
         let auth_token = self.config.auth_token.clone();
@@ -139,7 +165,8 @@ impl ClientChannel {
         let skill_manager = self.skill_manager.clone();
         let service_registry = self.service_registry.clone();
 
-        tracing::info!("WebSocket server listening on ws://{}/myclaw", addr);
+        let local_addr = listener.local_addr()?;
+        tracing::info!("WebSocket server listening on ws://{}/myclaw", local_addr);
 
         tokio::spawn(async move {
             let mut connection_count = 0u32;
