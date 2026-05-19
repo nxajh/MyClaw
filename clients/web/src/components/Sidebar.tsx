@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import {
   MessageSquare, Layers, Wrench, Sparkles, Brain, Settings,
-  Wifi, WifiOff, Loader, PanelLeftClose, PanelLeftOpen,
+  PanelLeftClose, PanelLeftOpen,
 } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 
@@ -19,13 +19,21 @@ export default function Sidebar() {
   const { status } = useWebSocketContext()
   const [collapsed, setCollapsed] = useState(false)
 
-  const StatusIcon = status === 'connected' ? Wifi : status === 'connecting' ? Loader : WifiOff
   const statusColor =
     status === 'connected' ? 'text-emerald-400' :
     status === 'connecting' ? 'text-amber-400 animate-pulse' : 'text-red-400'
   const statusText =
     status === 'connected' ? 'Connected' :
     status === 'connecting' ? 'Connecting…' : 'Disconnected'
+
+  const statusBgColor =
+    status === 'connected' ? 'bg-emerald-400' :
+    status === 'connecting' ? 'bg-amber-400' : 'bg-red-400'
+
+  const statusShadow =
+    status === 'connected' ? 'shadow-[0_0_8px_rgba(52,211,153,0.6)]' :
+    status === 'connecting' ? 'shadow-[0_0_8px_rgba(251,191,36,0.6)] animate-pulse' :
+    'shadow-[0_0_8px_rgba(248,113,113,0.6)]'
 
   return (
     <aside
@@ -54,30 +62,37 @@ export default function Sidebar() {
             end={to === '/'}
             title={collapsed ? label : undefined}
             className={({ isActive }) =>
-              `flex items-center gap-3 px-2.5 py-2 rounded-lg text-sm transition-colors ${
+              `flex items-center gap-3 px-2.5 py-2 rounded-lg text-sm transition-all duration-150 relative ${
                 collapsed ? 'justify-center' : ''
               } ${
                 isActive
-                  ? 'bg-zinc-800 text-zinc-100'
-                  : 'text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200'
+                  ? 'bg-zinc-800/80 text-zinc-100 shadow-sm border border-zinc-700/20'
+                  : 'text-zinc-400 hover:bg-zinc-800/40 hover:text-zinc-200'
               }`
             }
           >
-            <Icon size={17} className="shrink-0" />
-            {!collapsed && <span className="truncate">{label}</span>}
+            {({ isActive }) => (
+              <>
+                {isActive && !collapsed && (
+                  <span className="absolute left-0 top-2 bottom-2 w-1 rounded-r-md bg-blue-500" />
+                )}
+                <Icon size={17} className="shrink-0" />
+                {!collapsed && <span className="truncate">{label}</span>}
+              </>
+            )}
           </NavLink>
         ))}
       </nav>
 
       {/* Status */}
       <div
-        className={`flex items-center gap-2 px-3 py-3 border-t border-zinc-800 shrink-0 ${
+        className={`flex items-center gap-2.5 px-4 py-3.5 border-t border-zinc-800 shrink-0 ${
           collapsed ? 'justify-center' : ''
         }`}
         title={collapsed ? statusText : undefined}
       >
-        <StatusIcon size={13} className={`shrink-0 ${statusColor}`} />
-        {!collapsed && <span className={`text-xs truncate ${statusColor}`}>{statusText}</span>}
+        <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${statusBgColor} ${statusShadow}`} />
+        {!collapsed && <span className={`text-[10px] font-semibold tracking-wide truncate uppercase ${statusColor}`}>{statusText}</span>}
       </div>
     </aside>
   )

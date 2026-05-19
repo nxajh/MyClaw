@@ -1,10 +1,54 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, type ReactNode } from 'react'
 import type { RefObject } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { ChevronDown, ChevronRight } from 'lucide-react'
+import { ChevronDown, ChevronRight, Copy, Check } from 'lucide-react'
 import type { ChatMessage, MessageBlock } from '../hooks/useWebSocket'
 import ToolCallCard from './ToolCallCard'
+
+function PreCodeBlock({ children }: { children: ReactNode }) {
+  const [copied, setCopied] = useState(false)
+  const preRef = useRef<HTMLPreElement>(null)
+
+  const handleCopy = async () => {
+    if (!preRef.current) return
+    const text = preRef.current.innerText || ''
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      // ignore
+    }
+  }
+
+  return (
+    <div className="relative group/code my-4 overflow-hidden rounded-xl border border-zinc-850 bg-zinc-950 shadow-md">
+      <div className="flex items-center justify-between px-4 py-1.5 border-b border-zinc-900 bg-zinc-900/40 text-[10px] text-zinc-500 font-mono select-none">
+        <span>CODE BLOCK</span>
+        <button
+          onClick={handleCopy}
+          className="flex items-center gap-1 px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-850 hover:text-zinc-200 border border-zinc-800/60 opacity-60 group-hover/code:opacity-100 transition-opacity"
+        >
+          {copied ? (
+            <>
+              <Check size={10} className="text-emerald-400" />
+              <span className="text-emerald-400">Copied</span>
+            </>
+          ) : (
+            <>
+              <Copy size={10} />
+              <span>Copy</span>
+            </>
+          )}
+        </button>
+      </div>
+      <pre ref={preRef} className="p-4 overflow-x-auto text-xs leading-6 text-zinc-350 focus:outline-none !my-0 !bg-transparent !border-none">
+        {children}
+      </pre>
+    </div>
+  )
+}
 
 function GeneratingDots() {
   return (
@@ -50,13 +94,19 @@ function renderBlock(block: MessageBlock, index: number, isGenerating: boolean) 
         prose-p:leading-7 prose-p:my-2 first:prose-p:mt-0
         prose-headings:text-zinc-100 prose-headings:font-semibold prose-headings:mt-5 prose-headings:mb-2
         prose-code:text-zinc-200 prose-code:bg-zinc-800 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-md prose-code:text-[0.8em] prose-code:before:content-none prose-code:after:content-none
-        prose-pre:bg-zinc-950 prose-pre:border prose-pre:border-zinc-800 prose-pre:rounded-xl prose-pre:text-xs
         prose-blockquote:border-zinc-700 prose-blockquote:text-zinc-400
         prose-a:text-blue-400 prose-a:no-underline hover:prose-a:underline
         prose-strong:text-zinc-200 prose-strong:font-semibold
         prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5
         prose-hr:border-zinc-800">
-        <Markdown remarkPlugins={[remarkGfm]}>{block.text}</Markdown>
+        <Markdown
+          remarkPlugins={[remarkGfm]}
+          components={{
+            pre: ({ children }) => <PreCodeBlock>{children}</PreCodeBlock>,
+          }}
+        >
+          {block.text}
+        </Markdown>
       </div>
     )
   }
@@ -105,11 +155,11 @@ export default function MessageList({ messages, containerRef }: Props) {
           return (
             <div key={msg.id} className="flex gap-3.5">
               {/* Avatar */}
-              <div className="mt-0.5 h-7 w-7 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-base shrink-0 select-none">
+              <div className="mt-0.5 h-7 w-7 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-base shrink-0 select-none shadow-md">
                 🦀
               </div>
 
-              <div className="flex-1 min-w-0 space-y-3 pt-0.5">
+              <div className="flex-1 min-w-0 rounded-2xl border border-zinc-800/80 bg-zinc-900/25 px-5 py-4 space-y-3 shadow-sm hover:border-zinc-800 transition-colors">
                 {msg.blocks.map((block, i) => renderBlock(block, i, !msg.done))}
 
                 {/* Generating indicator — shown only before any content arrives */}
