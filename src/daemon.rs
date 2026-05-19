@@ -991,14 +991,23 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     #[cfg(unix)]
     {
         if crate::hot_switch::is_hot_switch() {
-            // The old process sent sd_notify(MAINPID=our_pid) right after fork
-            // so systemd already tracks us.  We just need to confirm readiness
-            // (now accepted because we are the registered main PID) and wake
-            // the old process so it can exit cleanly.
-            if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]) {
-                tracing::warn!(err = %e, "sd_notify READY failed during hot switch");
+            // Two-layer notification:
+            //   1. Old process already sent sd_notify(MAINPID=our_pid) right after
+            //      fork (do_hot_switch).  This is the preferred path because it
+            //      comes from the trusted main PID.
+            //   2. We also send MAINPID=self + READY here as a belt-and-suspenders
+            //      fallback for the first-generation bootstrap case: if the running
+            //      binary predates the MAINPID-relay fix, the old process never sent
+            //      MAINPID, and only NotifyAccess=all (set in the service file)
+            //      allows us to update it from here.
+            let new_pid = std::process::id();
+            if let Err(e) = sd_notify::notify(false, &[
+                sd_notify::NotifyState::MainPid(new_pid),
+                sd_notify::NotifyState::Ready,
+            ]) {
+                tracing::warn!(err = %e, "sd_notify MAINPID+READY failed");
             } else {
-                tracing::debug!("sd_notify READY sent (hot switch)");
+                tracing::debug!(new_pid, "sd_notify MAINPID+READY sent");
             }
             if let Some(old_pid) = crate::hot_switch::old_pid() {
                 tracing::debug!(old_pid, "sending SIGUSR2 to old process — new process is ready");
