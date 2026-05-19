@@ -287,7 +287,11 @@ const SECTION_MEMORY_GUIDE: &str = r#"## Memory Writing Guide
 Write memories as declarative facts, not instructions.
 - "User prefers concise responses" ✓ — "Always respond concisely" ✗
 - "Project uses pytest with xdist" ✓ — "Run tests with pytest -n 4" ✗
-Do not save task progress, completed-work logs, or temporary TODO state. If a fact will be stale in a week, it does not belong in memory."#;
+Do not save task progress, completed-work logs, or temporary TODO state. If a fact will be stale in a week, it does not belong in memory.
+Use the memory_manage tool to add/replace/remove memories. Use memory_search to find existing entries.
+Each memory must have: name, abstract (1-2 sentence summary), and type (user/feedback/project/reference).
+Tags are optional but recommended for searchability (e.g. ["rust","qqbot","bug"]).
+Only user and feedback types are injected into every conversation — use project/reference for on-demand context."#;
 
 const SECTION_READ_BEFORE_EDIT: &str = "## Read Before Edit\n\nDo not propose changes to code you haven't read. If asked about or modifying a file, read it first.";
 
