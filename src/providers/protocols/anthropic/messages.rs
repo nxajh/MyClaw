@@ -23,6 +23,15 @@ pub struct AnthropicMessagesClient {
     user_agent: Option<String>,
 }
 
+#[async_trait]
+impl ChatProvider for AnthropicMessagesClient {
+    fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
+        let thinking_enabled = req.thinking.as_ref().is_some_and(|t| t.enabled);
+        let body = build_anthropic_body(&req);
+        self.chat_with_body(body, thinking_enabled)
+    }
+}
+
 impl AnthropicMessagesClient {
     pub fn new(api_key: String, base_url: String) -> Self {
         Self { base_url, api_key, client: build_reqwest_client(), user_agent: None }
@@ -36,15 +45,18 @@ impl AnthropicMessagesClient {
     fn chat_url(&self) -> String {
         format!("{}/v1/messages", self.base_url.trim_end_matches('/'))
     }
-}
 
-#[async_trait]
-impl ChatProvider for AnthropicMessagesClient {
-    fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
+    /// Send a pre-built request body through the Anthropic Messages SSE stream.
+    ///
+    /// Use this when you need to patch the body before sending
+    /// (e.g. inserting empty thinking blocks for MiMo compatibility).
+    pub fn chat_with_body(
+        &self,
+        body: serde_json::Value,
+        thinking_enabled: bool,
+    ) -> anyhow::Result<BoxStream<StreamEvent>> {
         let url = self.chat_url();
         let api_key = self.api_key.clone();
-        let thinking_enabled = req.thinking.as_ref().is_some_and(|t| t.enabled);
-        let body = build_anthropic_body(&req);
         let client = self.client.clone();
         let user_agent = self.user_agent.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(100);
