@@ -87,6 +87,15 @@ impl AnthropicMessagesClient {
                 let text = resp.text().await.unwrap_or_default();
                 let message = parse_anthropic_error_body(&text)
                     .unwrap_or_else(|| format!("HTTP {}: {}", status, text));
+                if status.as_u16() == 400 {
+                    tracing::warn!(
+                        url = %url,
+                        status = status.as_u16(),
+                        error = %message,
+                        request_body = %body,
+                        "HTTP 400 from provider — dumping request body for diagnosis",
+                    );
+                }
                 let _ = tx.send(StreamEvent::HttpError {
                     status: status.as_u16(),
                     message,
