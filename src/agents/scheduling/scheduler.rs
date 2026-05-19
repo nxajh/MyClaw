@@ -947,6 +947,9 @@ fn parse_hhmm(s: &str) -> Option<u32> {
     let (h, m) = s.split_once(':')?;
     let hours: u32 = h.trim().parse().ok()?;
     let mins: u32 = m.trim().parse().ok()?;
+    if hours > 24 || mins >= 60 || (hours == 24 && mins > 0) {
+        return None;
+    }
     Some(hours * 60 + mins)
 }
 
