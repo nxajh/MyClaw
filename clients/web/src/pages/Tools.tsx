@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { Wrench } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useApi } from '../lib/api'
-import { Page, ErrorBanner, LoadingRow, EmptyState } from '../components/PageLayout'
+import { ErrorBanner, LoadingRow, EmptyState } from '../components/PageLayout'
 
 interface Tool { name: string }
 
@@ -29,30 +29,30 @@ export default function Tools() {
   useEffect(() => { if (status === 'connected') fetchTools() }, [status, fetchTools])
 
   return (
-    <Page
-      icon={Wrench}
-      title="Tools"
-      meta={tools.length ? ` · ${tools.length}` : undefined}
-    >
-      {error && <ErrorBanner message={error} />}
-      {loading && <LoadingRow />}
-      {!loading && status !== 'connected' && <EmptyState>Waiting for connection…</EmptyState>}
-      {!loading && status === 'connected' && tools.length === 0 && (
-        <EmptyState>No tools registered.</EmptyState>
-      )}
-      {!loading && tools.length > 0 && (
-        <div className="space-y-1">
-          {tools.map((tool) => (
-            <div
-              key={tool.name}
-              className="flex items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-3"
-            >
-              <Wrench size={13} className="text-amber-400 shrink-0" />
-              <span className="font-mono text-sm text-zinc-300">{tool.name}</span>
+    <div className="flex flex-col h-full">
+      <div className="flex-1 overflow-y-auto">
+        <div className="max-w-2xl mx-auto px-6 py-6 space-y-4">
+          {error && <ErrorBanner message={error} />}
+          {loading && <LoadingRow />}
+          {!loading && status !== 'connected' && <EmptyState>Waiting for connection…</EmptyState>}
+          {!loading && status === 'connected' && tools.length === 0 && (
+            <EmptyState>No tools registered.</EmptyState>
+          )}
+          {!loading && tools.length > 0 && (
+            <div className="space-y-1">
+              {tools.map((tool) => (
+                <div
+                  key={tool.name}
+                  className="flex items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-3"
+                >
+                  <Wrench size={13} className="text-amber-400 shrink-0" />
+                  <span className="font-mono text-sm text-zinc-300">{tool.name}</span>
+                </div>
+              ))}
             </div>
-          ))}
+          )}
         </div>
-      )}
-    </Page>
+      </div>
+    </div>
   )
 }
