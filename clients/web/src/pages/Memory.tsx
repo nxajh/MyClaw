@@ -157,13 +157,13 @@ export default function Memory() {
           {confirmDelete ? (
             <>
               <span className="text-xs text-red-400">Delete?</span>
-              <button onClick={() => handleDelete((view as { name: string }).name)} className={btnDanger}>Yes</button>
+              <button onClick={() => handleDelete(view.name)} className={btnDanger}>Yes</button>
               <button onClick={() => setConfirmDelete(false)} className={btnGhost}>No</button>
             </>
           ) : (
             <>
               <button
-                onClick={() => setView({ mode: 'edit', name: (view as any).name, content: (view as any).content })}
+                onClick={() => setView({ mode: 'edit', name: view.name, content: view.content })}
                 className={btnGhost}
               >
                 <Pencil size={13} /> Edit
@@ -194,7 +194,7 @@ export default function Memory() {
             {navRow}
             {error && <ErrorBanner message={error} />}
             <h1 className="text-base font-semibold text-zinc-100 font-mono mb-5">
-              {(view as any).name}
+              {view.name}
             </h1>
             <div className="prose prose-invert prose-sm max-w-none
               prose-p:leading-7 prose-headings:text-zinc-100 prose-headings:font-semibold
@@ -202,7 +202,7 @@ export default function Memory() {
               prose-pre:bg-zinc-950 prose-pre:border prose-pre:border-zinc-800 prose-pre:rounded-xl prose-pre:text-xs
               prose-blockquote:border-zinc-700 prose-blockquote:text-zinc-400
               prose-a:text-blue-400 prose-strong:text-zinc-200 prose-hr:border-zinc-800">
-              <Markdown remarkPlugins={[remarkGfm]}>{(view as any).content}</Markdown>
+              <Markdown remarkPlugins={[remarkGfm]}>{view.content}</Markdown>
             </div>
           </div>
         </div>
@@ -212,9 +212,9 @@ export default function Memory() {
             {navRow}
             {error && <ErrorBanner message={error} />}
             <FileEditor
-              initial={view.mode === 'new' ? { name: '', content: '' } : { name: (view as any).name, content: (view as any).content }}
+              initial={view.mode === 'new' ? { name: '', content: '' } : { name: view.name, content: view.content }}
               onSave={handleSave}
-              onCancel={() => view.mode === 'new' ? backToList() : setView({ mode: 'view', name: (view as any).name, content: (view as any).content })}
+              onCancel={() => view.mode === 'new' ? backToList() : setView({ mode: 'view', name: view.name, content: view.content })}
               saving={saving}
             />
           </div>

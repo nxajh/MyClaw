@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import type { RefObject } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -16,8 +16,15 @@ function GeneratingDots() {
   )
 }
 
-function ThinkingBlock({ text }: { text: string }) {
-  const [open, setOpen] = useState(false)
+function ThinkingBlock({ text, defaultOpen }: { text: string; defaultOpen?: boolean }) {
+  const [open, setOpen] = useState(defaultOpen ?? false)
+
+  useEffect(() => {
+    if (defaultOpen) {
+      setOpen(true)
+    }
+  }, [defaultOpen])
+
   return (
     <div className="rounded-xl border border-zinc-800 overflow-hidden text-xs">
       <button
@@ -36,7 +43,7 @@ function ThinkingBlock({ text }: { text: string }) {
   )
 }
 
-function renderBlock(block: MessageBlock, index: number) {
+function renderBlock(block: MessageBlock, index: number, isGenerating: boolean) {
   if (block.type === 'content') {
     return (
       <div key={index} className="prose prose-invert prose-sm max-w-none
@@ -54,7 +61,7 @@ function renderBlock(block: MessageBlock, index: number) {
     )
   }
   if (block.type === 'thinking') {
-    return <ThinkingBlock key={index} text={block.text} />
+    return <ThinkingBlock key={index} text={block.text} defaultOpen={isGenerating} />
   }
   // tool_call
   return <ToolCallCard key={block.id} block={block} />
@@ -103,7 +110,7 @@ export default function MessageList({ messages, containerRef }: Props) {
               </div>
 
               <div className="flex-1 min-w-0 space-y-3 pt-0.5">
-                {msg.blocks.map((block, i) => renderBlock(block, i))}
+                {msg.blocks.map((block, i) => renderBlock(block, i, !msg.done))}
 
                 {/* Generating indicator — shown only before any content arrives */}
                 {!msg.done && msg.blocks.length === 0 && <GeneratingDots />}

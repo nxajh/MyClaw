@@ -75,7 +75,9 @@ function getWsUrl(): string {
 
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null)
-  const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null)
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const reconnectAttempts = useRef<number>(0)
+  const pongTimeoutTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [status, setStatus] = useState<ConnectionStatus>('disconnected')
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [isGenerating, setIsGenerating] = useState(false)
@@ -127,8 +129,14 @@ export function useWebSocket() {
         setIsGenerating(false)
         currentAssistantId.current = null
         authPending.current = false
+        if (pongTimeoutTimer.current) {
+          clearTimeout(pongTimeoutTimer.current)
+          pongTimeoutTimer.current = null
+        }
         if (!suppressReconnect.current) {
-          reconnectTimer.current = setTimeout(connect, 2000)
+          const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.current), 30000)
+          reconnectAttempts.current += 1
+          reconnectTimer.current = setTimeout(connect, delay)
         }
       }
 
@@ -137,6 +145,10 @@ export function useWebSocket() {
       }
 
       ws.onmessage = (event) => {
+        if (pongTimeoutTimer.current) {
+          clearTimeout(pongTimeoutTimer.current)
+          pongTimeoutTimer.current = null
+        }
         try {
           const data = JSON.parse(event.data as string) as Record<string, unknown>
 
@@ -152,7 +164,13 @@ export function useWebSocket() {
       }
     } catch {
       setStatus('disconnected')
-      reconnectTimer.current = setTimeout(connect, 2000)
+      if (pongTimeoutTimer.current) {
+        clearTimeout(pongTimeoutTimer.current)
+        pongTimeoutTimer.current = null
+      }
+      const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.current), 30000)
+      reconnectAttempts.current += 1
+      reconnectTimer.current = setTimeout(connect, delay)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -169,6 +187,7 @@ export function useWebSocket() {
         authPending.current = false
         setAuthFailed(false)
         setStatus('connected')
+        reconnectAttempts.current = 0
         break
       }
 
@@ -378,7 +397,17 @@ export function useWebSocket() {
   }, [sendRaw])
 
   const ping = useCallback(() => {
-    sendRaw({ type: 'ping' })
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      if (pongTimeoutTimer.current) {
+        clearTimeout(pongTimeoutTimer.current)
+      }
+      pongTimeoutTimer.current = setTimeout(() => {
+        if (wsRef.current) {
+          wsRef.current.close()
+        }
+      }, 10000)
+      sendRaw({ type: 'ping' })
+    }
   }, [sendRaw])
 
   const submitToken = useCallback((token: string) => {
@@ -411,6 +440,7 @@ export function useWebSocket() {
     return () => {
       clearInterval(interval)
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
+      if (pongTimeoutTimer.current) clearTimeout(pongTimeoutTimer.current)
       wsRef.current?.close()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
