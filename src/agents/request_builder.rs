@@ -6,7 +6,7 @@ use crate::config::agent::PermissionMode;
 use crate::providers::ChatMessage;
 use super::attachment::AttachmentManager;
 use super::resource_provider::ResourceProvider;
-use super::session_manager::Session;
+use super::session::Session;
 use super::workspace::watcher::ChangeSet;
 use super::agent_impl::types::estimate_tokens;
 
@@ -142,7 +142,7 @@ impl RequestBuilder {
             messages.push(ChatMessage::system_text(&self.system_prompt));
         }
         messages.extend(session.history.iter().cloned());
-        super::session_manager::sanitize_history(&mut messages);
+        super::session::sanitize_history(&mut messages);
         messages
     }
 

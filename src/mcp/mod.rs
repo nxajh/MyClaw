@@ -7,7 +7,6 @@ pub mod protocol;
 pub mod tool;
 pub mod tool_trait;
 
-// `transport.rs` is a single file (not a directory)
 mod transport;
 
 pub use client::{McpRegistry, McpServer};

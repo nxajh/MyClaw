@@ -21,7 +21,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::agents::agent_impl::{Agent, AgentLoop, AskUserHandler, DelegateHandler};
-use crate::agents::session_manager::{SessionManager, PersistHook, BackendPersistHook};
+use crate::agents::session::{SessionManager, PersistHook, BackendPersistHook};
 
 const CHANNEL_QUEUE_SIZE: usize = 100;
 
@@ -35,6 +35,8 @@ const MSG_ABORT_ACK: &str = "已取消";
 const MSG_INCOMPLETE_TURN: &str = "⚠️ 检测到上次请求未处理完成（可能是服务重启）。\n\n请选择重试或放弃。";
 const MSG_TIMEOUT: &str = "⚠️ 处理超时，未收到模型回复。";
 const MSG_EMPTY_RESPONSE: &str = "⚠️ 处理失败，模型未返回有效回复。";
+const MSG_SUBAGENT_RECOVERY_HINT: &str =
+    "⚠️ 以下子代理在上次热切换中断，其 session 已持久化。如果需要，可以重新 delegate 它们继续工作：\n\n";
 const BTN_RETRY: &str = "🔄 重试";
 const BTN_ABORT: &str = "✖ 放弃";
 
@@ -598,8 +600,8 @@ impl Orchestrator {
                     // loop is never blocked waiting for the AgentLoop mutex — that mutex
                     // may already be held by a concurrent run_message_task.  Unknown
                     // "slash-like" inputs fall through to the normal agent-loop path.
-                    if let Some((cmd, cmd_args)) = super::slash_command::parse_command(&content) {
-                        if super::slash_command::is_known_command(cmd) {
+                    if let Some((cmd, cmd_args)) = super::commands::parse_command(&content) {
+                        if super::commands::is_known_command(cmd) {
                             let sk_cmd        = sk.clone();
                             let cmd_owned     = cmd.to_string();
                             let cmd_args_owned = cmd_args.to_string();
@@ -615,7 +617,7 @@ impl Orchestrator {
                             let rid_cmd       = reply_to_id.clone();
 
                             tokio::spawn(async move {
-                                let cmd_ctx = super::slash_command::CommandContext {
+                                let cmd_ctx = super::commands::CommandContext {
                                     user_id:        &sk_cmd,
                                     registry:       &registry_cmd,
                                     session_manager: &sm_cmd,
@@ -625,7 +627,7 @@ impl Orchestrator {
                                     sessions:       &sessions_cmd,
                                     search_cooldown: cooldown_cmd.as_ref(),
                                 };
-                                if let Some(response) = super::slash_command::dispatch(
+                                if let Some(response) = super::commands::dispatch(
                                     &cmd_owned, &cmd_args_owned, cmd_ctx,
                                 ).await {
                                     if let Some(channel) = channel_cmd {
@@ -934,9 +936,7 @@ impl LoopRegistry {
 
         // Inject recovery hint if sub-agents were interrupted by a hot-switch.
         if !self.unfinished_subagents.is_empty() {
-            let mut recovery_msg = String::from(
-                "⚠️ 以下子代理在上次热切换中断，其 session 已持久化。如果需要，可以重新 delegate 它们继续工作：\n\n"
-            );
+            let mut recovery_msg = String::from(MSG_SUBAGENT_RECOVERY_HINT);
             for agent_info in &self.unfinished_subagents {
                 recovery_msg.push_str(&format!(
                     "- {} (task: {}): {}\n",
