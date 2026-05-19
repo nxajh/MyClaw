@@ -200,7 +200,7 @@ pub fn split_message_chunk(message: &str, limit: usize) -> Vec<String> {
             .unwrap_or(remaining.len());
         let (chunk, rest) = remaining.split_at(byte_pos);
         chunks.push(chunk.trim_end().to_string());
-        remaining = rest.trim_start();
+        remaining = rest.trim_start_matches(|c: char| c == ' ' || c == '\t');
     }
 
     chunks
