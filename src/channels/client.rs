@@ -1049,13 +1049,12 @@ fn reconstruct_history(
     let mut counter = 0u64;
     for m in history {
         let mut text = String::new();
-        let mut thinking = String::new();
         let mut has_image = false;
         for p in &m.parts {
             match p {
                 ContentPart::Text { text: t } => text.push_str(t),
-                ContentPart::Thinking { thinking: t, .. } => thinking.push_str(t),
                 ContentPart::ImageUrl { .. } | ContentPart::ImageB64 { .. } => has_image = true,
+                _ => {}
             }
         }
         match m.role.as_str() {
@@ -1075,39 +1074,52 @@ fn reconstruct_history(
                 }));
             }
             "assistant" => {
-                let tool_calls: Vec<serde_json::Value> = m.tool_calls.as_ref()
-                    .map(|tcs| tcs.iter().map(|tc| {
+                let mut blocks: Vec<serde_json::Value> = Vec::new();
+                for p in &m.parts {
+                    match p {
+                        ContentPart::Text { text: t } if !t.is_empty() => {
+                            blocks.push(serde_json::json!({ "type": "content", "text": t }));
+                        }
+                        ContentPart::Thinking { thinking: t, .. } if !t.is_empty() => {
+                            blocks.push(serde_json::json!({ "type": "thinking", "text": t }));
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(tcs) = &m.tool_calls {
+                    for tc in tcs {
                         let args = serde_json::from_str::<serde_json::Value>(&tc.arguments)
                             .unwrap_or_else(|_| serde_json::json!({}));
-                        serde_json::json!({ "id": tc.id, "name": tc.name, "args": args })
-                    }).collect())
-                    .unwrap_or_default();
-                if text.is_empty() && thinking.is_empty() && tool_calls.is_empty() {
+                        blocks.push(serde_json::json!({
+                            "type": "tool_call",
+                            "id": tc.id,
+                            "name": tc.name,
+                            "args": args,
+                        }));
+                    }
+                }
+                if blocks.is_empty() {
                     continue;
                 }
                 counter += 1;
-                let mut obj = serde_json::json!({
+                out.push(serde_json::json!({
                     "role": "assistant",
-                    "content": text,
-                    "toolCalls": tool_calls,
+                    "blocks": blocks,
                     "id": format!("h-{}", counter),
                     "done": true,
-                });
-                if !thinking.is_empty() {
-                    obj["thinking"] = serde_json::json!(thinking);
-                }
-                out.push(obj);
+                }));
             }
             "tool" => {
                 if let Some(tcid) = &m.tool_call_id {
+                    let tcid_val = serde_json::Value::String(tcid.clone());
                     'outer: for msg in out.iter_mut().rev() {
                         if msg["role"] != "assistant" {
                             continue;
                         }
-                        if let Some(arr) = msg.get_mut("toolCalls").and_then(|v| v.as_array_mut()) {
-                            for tc in arr.iter_mut() {
-                                if tc["id"] == serde_json::Value::String(tcid.clone()) {
-                                    tc["output"] = serde_json::json!(text);
+                        if let Some(arr) = msg.get_mut("blocks").and_then(|v| v.as_array_mut()) {
+                            for block in arr.iter_mut() {
+                                if block["type"] == "tool_call" && block["id"] == tcid_val {
+                                    block["output"] = serde_json::json!(text);
                                     break 'outer;
                                 }
                             }

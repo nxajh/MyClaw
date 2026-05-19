@@ -3,7 +3,7 @@ import type { RefObject } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { ChevronDown, ChevronRight } from 'lucide-react'
-import type { ChatMessage } from '../hooks/useWebSocket'
+import type { ChatMessage, MessageBlock } from '../hooks/useWebSocket'
 import ToolCallCard from './ToolCallCard'
 
 function GeneratingDots() {
@@ -34,6 +34,30 @@ function ThinkingBlock({ text }: { text: string }) {
       )}
     </div>
   )
+}
+
+function renderBlock(block: MessageBlock, index: number) {
+  if (block.type === 'content') {
+    return (
+      <div key={index} className="prose prose-invert prose-sm max-w-none
+        prose-p:leading-7 prose-p:my-2 first:prose-p:mt-0
+        prose-headings:text-zinc-100 prose-headings:font-semibold prose-headings:mt-5 prose-headings:mb-2
+        prose-code:text-zinc-200 prose-code:bg-zinc-800 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-md prose-code:text-[0.8em] prose-code:before:content-none prose-code:after:content-none
+        prose-pre:bg-zinc-950 prose-pre:border prose-pre:border-zinc-800 prose-pre:rounded-xl prose-pre:text-xs
+        prose-blockquote:border-zinc-700 prose-blockquote:text-zinc-400
+        prose-a:text-blue-400 prose-a:no-underline hover:prose-a:underline
+        prose-strong:text-zinc-200 prose-strong:font-semibold
+        prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5
+        prose-hr:border-zinc-800">
+        <Markdown remarkPlugins={[remarkGfm]}>{block.text}</Markdown>
+      </div>
+    )
+  }
+  if (block.type === 'thinking') {
+    return <ThinkingBlock key={index} text={block.text} />
+  }
+  // tool_call
+  return <ToolCallCard key={block.id} block={block} />
 }
 
 interface Props {
@@ -79,38 +103,10 @@ export default function MessageList({ messages, containerRef }: Props) {
               </div>
 
               <div className="flex-1 min-w-0 space-y-3 pt-0.5">
-                {/* 1. Text content */}
-                {msg.content && (
-                  <div className="prose prose-invert prose-sm max-w-none
-                    prose-p:leading-7 prose-p:my-2 first:prose-p:mt-0
-                    prose-headings:text-zinc-100 prose-headings:font-semibold prose-headings:mt-5 prose-headings:mb-2
-                    prose-code:text-zinc-200 prose-code:bg-zinc-800 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-md prose-code:text-[0.8em] prose-code:before:content-none prose-code:after:content-none
-                    prose-pre:bg-zinc-950 prose-pre:border prose-pre:border-zinc-800 prose-pre:rounded-xl prose-pre:text-xs
-                    prose-blockquote:border-zinc-700 prose-blockquote:text-zinc-400
-                    prose-a:text-blue-400 prose-a:no-underline hover:prose-a:underline
-                    prose-strong:text-zinc-200 prose-strong:font-semibold
-                    prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5
-                    prose-hr:border-zinc-800">
-                    <Markdown remarkPlugins={[remarkGfm]}>{msg.content}</Markdown>
-                  </div>
-                )}
+                {msg.blocks.map((block, i) => renderBlock(block, i))}
 
-                {/* 2. Reasoning / thinking */}
-                {msg.thinking && <ThinkingBlock text={msg.thinking} />}
-
-                {/* 3. Tool calls + results */}
-                {msg.toolCalls.length > 0 && (
-                  <div className="space-y-1.5">
-                    {msg.toolCalls.map((tc) => (
-                      <ToolCallCard key={tc.id} toolCall={tc} />
-                    ))}
-                  </div>
-                )}
-
-                {/* Generating indicator */}
-                {!msg.done && !msg.content && !msg.thinking && msg.toolCalls.length === 0 && (
-                  <GeneratingDots />
-                )}
+                {/* Generating indicator — shown only before any content arrives */}
+                {!msg.done && msg.blocks.length === 0 && <GeneratingDots />}
               </div>
             </div>
           )

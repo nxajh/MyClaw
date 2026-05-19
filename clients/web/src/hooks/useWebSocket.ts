@@ -10,20 +10,22 @@ export interface UserMessage {
   id: string
 }
 
-export interface AssistantMessage {
-  role: 'assistant'
-  content: string
-  thinking?: string
-  toolCalls: ToolCall[]
+export interface ContentBlock { type: 'content'; text: string }
+export interface ThinkingBlock { type: 'thinking'; text: string }
+export interface ToolCallBlock {
+  type: 'tool_call'
   id: string
-  done: boolean
-}
-
-export interface ToolCall {
   name: string
   args: Record<string, unknown>
   output?: string
+}
+export type MessageBlock = ContentBlock | ThinkingBlock | ToolCallBlock
+
+export interface AssistantMessage {
+  role: 'assistant'
+  blocks: MessageBlock[]
   id: string
+  done: boolean
 }
 
 export type ChatMessage = UserMessage | AssistantMessage
@@ -175,15 +177,18 @@ export function useWebSocket() {
         setMessages((prev) => {
           const last = prev[prev.length - 1]
           if (last && last.role === 'assistant' && !last.done) {
-            return [
-              ...prev.slice(0, -1),
-              { ...last, content: last.content + delta },
-            ]
+            const blocks = [...last.blocks]
+            const lb = blocks[blocks.length - 1]
+            if (lb?.type === 'content') {
+              blocks[blocks.length - 1] = { type: 'content', text: lb.text + delta }
+            } else {
+              blocks.push({ type: 'content', text: delta })
+            }
+            return [...prev.slice(0, -1), { ...last, blocks }]
           }
-          // If no in-progress assistant message, create one
           const id = uid()
           currentAssistantId.current = id
-          return [...prev, { role: 'assistant', content: delta, toolCalls: [], id, done: false }]
+          return [...prev, { role: 'assistant', blocks: [{ type: 'content', text: delta }], id, done: false }]
         })
         break
       }
@@ -193,14 +198,18 @@ export function useWebSocket() {
         setMessages((prev) => {
           const last = prev[prev.length - 1]
           if (last && last.role === 'assistant' && !last.done) {
-            return [
-              ...prev.slice(0, -1),
-              { ...last, thinking: (last.thinking || '') + delta },
-            ]
+            const blocks = [...last.blocks]
+            const lb = blocks[blocks.length - 1]
+            if (lb?.type === 'thinking') {
+              blocks[blocks.length - 1] = { type: 'thinking', text: lb.text + delta }
+            } else {
+              blocks.push({ type: 'thinking', text: delta })
+            }
+            return [...prev.slice(0, -1), { ...last, blocks }]
           }
           const id = uid()
           currentAssistantId.current = id
-          return [...prev, { role: 'assistant', content: '', thinking: delta, toolCalls: [], id, done: false }]
+          return [...prev, { role: 'assistant', blocks: [{ type: 'thinking', text: delta }], id, done: false }]
         })
         break
       }
@@ -212,14 +221,12 @@ export function useWebSocket() {
         setMessages((prev) => {
           const last = prev[prev.length - 1]
           if (last && last.role === 'assistant' && !last.done) {
-            return [
-              ...prev.slice(0, -1),
-              { ...last, toolCalls: [...last.toolCalls, { name, args, id: callId }] },
-            ]
+            const blocks: MessageBlock[] = [...last.blocks, { type: 'tool_call', id: callId, name, args }]
+            return [...prev.slice(0, -1), { ...last, blocks }]
           }
           const id = uid()
           currentAssistantId.current = id
-          return [...prev, { role: 'assistant', content: '', toolCalls: [{ name, args, id: callId }], id, done: false }]
+          return [...prev, { role: 'assistant', blocks: [{ type: 'tool_call', id: callId, name, args }], id, done: false }]
         })
         break
       }
@@ -231,12 +238,12 @@ export function useWebSocket() {
         setMessages((prev) => {
           const last = prev[prev.length - 1]
           if (last && last.role === 'assistant' && !last.done) {
-            const newToolCalls = last.toolCalls.map((tc) => {
-              // Match by server-provided call ID; fall back to first pending by name.
-              const matches = callId ? tc.id === callId : (tc.name === name && tc.output === undefined)
-              return matches ? { ...tc, output } : tc
+            const blocks = last.blocks.map((b): MessageBlock => {
+              if (b.type !== 'tool_call') return b
+              const matches = callId ? b.id === callId : (b.name === name && b.output === undefined)
+              return matches ? { ...b, output } : b
             })
-            return [...prev.slice(0, -1), { ...last, toolCalls: newToolCalls }]
+            return [...prev.slice(0, -1), { ...last, blocks }]
           }
           return prev
         })
@@ -247,8 +254,7 @@ export function useWebSocket() {
         setMessages((prev) => {
           const last = prev[prev.length - 1]
           if (last && last.role === 'assistant' && !last.done) {
-            const text = (data.text as string) || last.content
-            return [...prev.slice(0, -1), { ...last, content: text, done: true }]
+            return [...prev.slice(0, -1), { ...last, done: true }]
           }
           return prev
         })
@@ -264,13 +270,11 @@ export function useWebSocket() {
           authPending.current = false
           suppressReconnect.current = true
           setAuthFailed(true)
-          // The server closes the connection after sending this error; status
-          // will transition to 'disconnected' via onclose.
           break
         }
         setMessages((prev) => [
           ...prev,
-          { role: 'assistant', content: `⚠️ Error: ${message}`, toolCalls: [], id: uid(), done: true },
+          { role: 'assistant', blocks: [{ type: 'content', text: `⚠️ Error: ${message}` }], id: uid(), done: true },
         ])
         setIsGenerating(false)
         currentAssistantId.current = null
@@ -278,7 +282,6 @@ export function useWebSocket() {
       }
 
       case 'cancelled': {
-        // Server confirmed cancellation — mark the current message done and stop generating.
         setMessages((prev) => {
           const last = prev[prev.length - 1]
           if (last && last.role === 'assistant' && !last.done) {
@@ -299,10 +302,16 @@ export function useWebSocket() {
         setMessages((prev) => {
           const last = prev[prev.length - 1]
           if (last && last.role === 'assistant' && !last.done) {
-            const merged = last.content ? `${last.content}\n\n${content}` : content
-            return [...prev.slice(0, -1), { ...last, content: merged, done: true }]
+            const blocks = [...last.blocks]
+            const lb = blocks[blocks.length - 1]
+            if (lb?.type === 'content') {
+              blocks[blocks.length - 1] = { type: 'content', text: lb.text ? `${lb.text}\n\n${content}` : content }
+            } else {
+              blocks.push({ type: 'content', text: content })
+            }
+            return [...prev.slice(0, -1), { ...last, blocks, done: true }]
           }
-          return [...prev, { role: 'assistant', content, toolCalls: [], id: uid(), done: true }]
+          return [...prev, { role: 'assistant', blocks: [{ type: 'content', text: content }], id: uid(), done: true }]
         })
         setIsGenerating(false)
         currentAssistantId.current = null
@@ -344,7 +353,7 @@ export function useWebSocket() {
       currentAssistantId.current = assistantId
       setMessages((prev) => [
         ...prev,
-        { role: 'assistant', content: '', toolCalls: [], id: assistantId, done: false },
+        { role: 'assistant', blocks: [], id: assistantId, done: false },
       ])
       setIsGenerating(true)
       const payload: Record<string, unknown> = { type: 'message', content }
@@ -358,7 +367,6 @@ export function useWebSocket() {
   const cancel = useCallback(() => {
     sendRaw({ type: 'cancel' })
     setIsGenerating(false)
-    // Mark current assistant message as done
     setMessages((prev) => {
       const last = prev[prev.length - 1]
       if (last && last.role === 'assistant' && !last.done) {
