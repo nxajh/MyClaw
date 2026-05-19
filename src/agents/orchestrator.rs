@@ -65,6 +65,8 @@ pub enum SchedulerEvent {
         delivery: Option<crate::agents::scheduling::cron_types::DeliveryConfig>,
         enabled_tools: Option<Vec<String>>,
         disabled_tools: Option<Vec<String>>,
+        model: Option<String>,
+        provider: Option<String>,
     },
 }
 
@@ -117,6 +119,8 @@ pub struct Orchestrator {
     /// Sub-agents that were interrupted by a hot-switch restart.
     /// Injected as a system reminder on the first session interaction, then cleared.
     unfinished_subagents: parking_lot::Mutex<Vec<crate::agents::UnfinishedSubAgent>>,
+    /// Shared scheduler for run result tracking from cron tasks.
+    scheduler: Option<crate::agents::SharedScheduler>,
 }
 
 /// Resources shared between Orchestrator and scheduler tasks.
@@ -201,6 +205,8 @@ pub struct OrchestratorParts {
     pub unfinished_subagents: Vec<crate::agents::UnfinishedSubAgent>,
     /// Workspace directory for persisting runtime state.
     pub workspace_dir: std::path::PathBuf,
+    /// Shared scheduler for run result tracking and auto-delete.
+    pub scheduler: Option<crate::agents::SharedScheduler>,
 }
 
 impl Orchestrator {
@@ -268,6 +274,7 @@ impl Orchestrator {
             scheduler_rx: Arc::new(TokioMutex::new(parts.scheduler_rx)),
             search_cooldown: parts.search_cooldown,
             unfinished_subagents: parking_lot::Mutex::new(parts.unfinished_subagents),
+            scheduler: parts.scheduler,
         };
 
         info!(channels = orchestrator.channels.len(), "orchestrator initialized");
@@ -746,6 +753,7 @@ impl Orchestrator {
                     channels: self.channels.clone(),
                     last_channel: self.last_channel.clone(),
                     last_recipient: self.last_recipient.clone(),
+                    scheduler: self.scheduler.clone(),
                 };
                 tokio::spawn(run_heartbeat_task(
                     ctx,
@@ -757,7 +765,7 @@ impl Orchestrator {
                     state_path.to_path_buf(),
                 ));
             }
-            SchedulerEvent::Cron { session_key, prompt, target_channel, target_account, job_id, delivery, enabled_tools, disabled_tools } => {
+            SchedulerEvent::Cron { session_key, prompt, target_channel, target_account, job_id, delivery, enabled_tools, disabled_tools, model, provider } => {
                 tracing::debug!(session_key = %session_key, "cron job triggered (from scheduler)");
                 let ctx = SchedulerContext {
                     sessions: self.sessions.clone(),
@@ -768,6 +776,7 @@ impl Orchestrator {
                     channels: self.channels.clone(),
                     last_channel: self.last_channel.clone(),
                     last_recipient: self.last_recipient.clone(),
+                    scheduler: self.scheduler.clone(),
                 };
                 tokio::spawn(run_cron_task(
                     ctx,
@@ -779,6 +788,8 @@ impl Orchestrator {
                     delivery,
                     enabled_tools,
                     disabled_tools,
+                    model,
+                    provider,
                 ));
             }
         }
@@ -1546,6 +1557,7 @@ struct SchedulerContext {
     channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
     last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
     last_recipient: Arc<tokio::sync::Mutex<Option<String>>>,
+    scheduler: Option<crate::agents::SharedScheduler>,
 }
 
 /// Execute a heartbeat turn as an independent spawned task.
@@ -1599,25 +1611,65 @@ async fn run_cron_task(
     prompt: String,
     target_channel: Option<String>,
     target_account: Option<String>,
-    _job_id: String,
+    job_id: String,
     _delivery: Option<crate::agents::scheduling::cron_types::DeliveryConfig>,
     _enabled_tools: Option<Vec<String>>,
     _disabled_tools: Option<Vec<String>>,
+    model: Option<String>,
+    _provider: Option<String>,
 ) {
+    let start = std::time::Instant::now();
     let result = {
         let loop_ = get_or_create_scheduled_loop(&ctx, &session_key);
         let mut guard = loop_.lock().await;
+        // Apply per-job model override if specified.
+        if let Some(ref m) = model {
+            guard.config.model_override = Some(m.clone());
+        }
         guard.run(&prompt, None, None).await
     };
+    let duration_ms = start.elapsed().as_millis() as u64;
 
-    match result {
-        Ok(response) if !response.trim().is_empty() => {
-            send_to_target_internal(ctx.channels, ctx.last_channel, ctx.last_recipient.clone(), target_channel, target_account, &response).await;
+    // Build run record and mark result in scheduler.
+    let record = match &result {
+        Ok(response) => {
+            crate::agents::scheduling::cron_types::RunRecord::now(
+                crate::agents::scheduling::cron_types::RunStatus::Ok,
+            ).with_duration(duration_ms).with_output_preview(response)
         }
-        Ok(_) => {}
         Err(e) => {
-            tracing::warn!(session_key = %session_key, err = %e, "cron job failed");
+            let err_str = e.to_string();
+            tracing::warn!(session_key = %session_key, err = %err_str, "cron job failed");
+            crate::agents::scheduling::cron_types::RunRecord::now(
+                crate::agents::scheduling::cron_types::RunStatus::Error,
+            ).with_duration(duration_ms).with_error(err_str)
         }
+    };
+
+    // Record run result in scheduler (returns failure alert message if needed).
+    let failure_alert = if let Some(ref scheduler) = ctx.scheduler {
+        scheduler.mark_run_result(&job_id, record)
+    } else {
+        None
+    };
+
+    // Send output to target channel (on success with non-empty output).
+    if let Ok(ref response) = result {
+        if !response.trim().is_empty() {
+            send_to_target_internal(
+                ctx.channels.clone(), ctx.last_channel.clone(), ctx.last_recipient.clone(),
+                target_channel.clone(), target_account.clone(), response,
+            ).await;
+        }
+    }
+
+    // Send failure alert to channel if generated.
+    if let Some(alert_msg) = failure_alert {
+        tracing::warn!(job_id = %job_id, alert = %alert_msg, "sending failure alert");
+        send_to_target_internal(
+            ctx.channels, ctx.last_channel, ctx.last_recipient,
+            target_channel, target_account, &alert_msg,
+        ).await;
     }
 }
 

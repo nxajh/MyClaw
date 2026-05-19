@@ -23,7 +23,7 @@ use tokio::sync::Mutex;
 use crate::agents::Agent;
 use crate::agents::AgentLoop;
 use crate::agents::orchestrator::SchedulerEvent;
-use crate::agents::scheduling::cron_types::{DeliveryConfig, RunRecord, ScheduleKind};
+use crate::agents::scheduling::cron_types::{DeliveryConfig, RunRecord, RunStatus, ScheduleKind};
 use crate::agents::webhook_loader::{WebhookAuth, WebhookJobDef, render_template};
 use crate::channels::{Channel, SendMessage};
 use crate::config::scheduler::{HeartbeatConfig, WebhookConfig};
@@ -71,7 +71,7 @@ pub struct JobEntry {
     /// Per-job delivery configuration (overrides target when set).
     #[serde(default)]
     pub delivery: Option<DeliveryConfig>,
-    /// Run history (most recent entries).
+    /// Run history (most recent entries, also persisted to run log file).
     #[serde(default)]
     pub last_runs: Vec<RunRecord>,
     /// Tool whitelist. If set, only these tools are available for this job.
@@ -83,6 +83,37 @@ pub struct JobEntry {
     /// Schedule kind override (every/at). If None, use schedule string as cron.
     #[serde(default)]
     pub schedule_kind: Option<ScheduleKind>,
+    // ── New fields ──────────────────────────────────────────────────────────
+    /// Per-job retry policy for transient errors.
+    #[serde(default)]
+    pub retry: Option<crate::agents::scheduling::cron_types::RetryConfig>,
+    /// Per-job failure alert configuration.
+    #[serde(default)]
+    pub failure_alert: Option<crate::agents::scheduling::cron_types::FailureAlertConfig>,
+    /// Consecutive error count (reset on success).
+    #[serde(default)]
+    pub consecutive_errors: u32,
+    /// Consecutive skip count.
+    #[serde(default)]
+    pub consecutive_skipped: u32,
+    /// Max number of successful runs before auto-disable (None = unlimited).
+    #[serde(default)]
+    pub max_runs: Option<u32>,
+    /// Number of completed runs (successful or not).
+    #[serde(default)]
+    pub completed_runs: u32,
+    /// Auto-delete after max_runs reached (default: false = just disable).
+    #[serde(default)]
+    pub delete_after_run: bool,
+    /// Per-job model override (e.g. "claude-sonnet-4-20250514").
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Per-job provider override (e.g. "anthropic").
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// ISO 8601 timestamp of last failure alert sent.
+    #[serde(default)]
+    pub last_failure_alert_at: Option<String>,
 }
 
 fn default_target() -> String { "last".to_string() }
@@ -101,6 +132,12 @@ pub struct JobUpdate {
     pub delivery: Option<DeliveryConfig>,
     pub enabled_tools: Option<Vec<String>>,
     pub disabled_tools: Option<Vec<String>>,
+    pub retry: Option<crate::agents::scheduling::cron_types::RetryConfig>,
+    pub failure_alert: Option<crate::agents::scheduling::cron_types::FailureAlertConfig>,
+    pub max_runs: Option<Option<u32>>,
+    pub delete_after_run: Option<bool>,
+    pub model: Option<Option<String>>,
+    pub provider: Option<Option<String>>,
 }
 
 /// The top-level JSON structure of `jobs.json`.
@@ -210,6 +247,8 @@ impl Scheduler {
                     }
                 }
                 _ = cron_ticker.tick() => {
+                    // Clean up one-shot jobs that reached max_runs + delete_after_run.
+                    self.drain_auto_delete();
                     self.maybe_reload();
 
                     // Find due jobs (clone to release read lock before sending).
@@ -246,6 +285,8 @@ impl Scheduler {
                             delivery: j.delivery.clone(),
                             enabled_tools: j.enabled_tools.clone(),
                             disabled_tools: j.disabled_tools.clone(),
+                            model: j.model.clone(),
+                            provider: j.provider.clone(),
                         }).await;
                         due_job_ids.push(j.id.clone());
                     }
@@ -312,7 +353,10 @@ impl Scheduler {
         let mut data = self.jobs.write();
         if let Some(job) = data.jobs.iter_mut().find(|j| j.id == id) {
             if let Some(name) = update.name { job.name = Some(name); }
-            if let Some(schedule) = update.schedule { job.schedule = schedule; }
+            if let Some(schedule) = update.schedule {
+                job.schedule = schedule;
+                job.next_run_at = compute_next_run(&job.schedule, job.last_run_at.as_deref(), job.tz.as_deref().unwrap_or(&self.timezone));
+            }
             if let Some(prompt) = update.prompt { job.prompt = prompt; }
             if let Some(target) = update.target { job.target = target; }
             if let Some(tz) = update.tz {
@@ -328,6 +372,12 @@ impl Scheduler {
             if let Some(delivery) = update.delivery { job.delivery = Some(delivery); }
             if let Some(enabled_tools) = update.enabled_tools { job.enabled_tools = Some(enabled_tools); }
             if let Some(disabled_tools) = update.disabled_tools { job.disabled_tools = Some(disabled_tools); }
+            if let Some(retry) = update.retry { job.retry = Some(retry); }
+            if let Some(failure_alert) = update.failure_alert { job.failure_alert = Some(failure_alert); }
+            if let Some(max_runs) = update.max_runs { job.max_runs = max_runs; }
+            if let Some(delete_after_run) = update.delete_after_run { job.delete_after_run = delete_after_run; }
+            if let Some(model) = update.model { job.model = model; }
+            if let Some(provider) = update.provider { job.provider = provider; }
             self.save_to_disk_inner(&data)?;
             Ok(true)
         } else {
@@ -354,7 +404,9 @@ impl Scheduler {
     }
 
     /// Record a run result for a job.
-    pub fn mark_run_result(&self, id: &str, record: RunRecord) {
+    /// Returns Some(alert_message) if failure alert should be sent.
+    pub fn mark_run_result(&self, id: &str, record: RunRecord) -> Option<String> {
+        let mut alert_msg = None;
         let mut data = self.jobs.write();
         if let Some(job) = data.jobs.iter_mut().find(|j| j.id == id) {
             job.last_run_at = Some(record.run_at.clone());
@@ -363,17 +415,146 @@ impl Scheduler {
                 job.last_run_at.as_deref(),
                 job.tz.as_deref().unwrap_or(&self.timezone),
             );
-            job.last_runs.push(record);
-            // Keep only the most recent 10 entries.
+
+            // Track consecutive failures.
+            match record.status {
+                RunStatus::Ok => {
+                    job.consecutive_errors = 0;
+                    job.consecutive_skipped = 0;
+                }
+                RunStatus::Error | RunStatus::Timeout => {
+                    job.consecutive_errors += 1;
+                    job.consecutive_skipped = 0;
+                }
+                RunStatus::Skipped => {
+                    job.consecutive_skipped += 1;
+                    // Optionally count skipped as failure for alerting.
+                    if job.failure_alert.as_ref().is_some_and(|a| a.include_skipped) {
+                        job.consecutive_errors += 1;
+                    }
+                }
+            }
+
+            // Check failure alert.
+            if let Some(alert_cfg) = &job.failure_alert {
+                if job.consecutive_errors >= alert_cfg.after {
+                    let should_alert = match &job.last_failure_alert_at {
+                        None => true,
+                        Some(last) => {
+                            let last_dt = chrono::DateTime::parse_from_rfc3339(last)
+                                .map(|dt| dt.with_timezone(&chrono::Utc))
+                                .unwrap_or_else(|_| chrono::Utc::now() - chrono::Duration::hours(24));
+                            let cooldown = chrono::Duration::seconds(alert_cfg.cooldown_secs as i64);
+                            chrono::Utc::now() - last_dt >= cooldown
+                        }
+                    };
+                    if should_alert {
+                        alert_msg = Some(format!(
+                            "⚠️ Cron job '{}' ({}) has failed {} consecutive times. Last error: {}",
+                            job.name.as_deref().unwrap_or(&job.id),
+                            job.id,
+                            job.consecutive_errors,
+                            record.error.as_deref().unwrap_or("unknown"),
+                        ));
+                        job.last_failure_alert_at = Some(chrono::Utc::now().to_rfc3339());
+                    }
+                }
+            }
+
+            // Append to in-memory run history.
+            job.last_runs.push(record.clone());
+            // Keep only the most recent 10 entries in-memory.
             if job.last_runs.len() > 10 {
                 let drain_count = job.last_runs.len() - 10;
                 job.last_runs.drain(0..drain_count);
             }
+
+            // Track completed runs.
+            job.completed_runs += 1;
+
+            // Check max_runs: auto-disable or auto-delete.
+            if let Some(max) = job.max_runs {
+                if job.completed_runs >= max {
+                    if job.delete_after_run {
+                        // Will be removed after releasing the lock.
+                        // For now, mark for deletion.
+                        tracing::info!(job_id = %job.id, completed = job.completed_runs, max, "job reached max_runs, marked for deletion");
+                    } else {
+                        job.enabled = false;
+                        job.next_run_at = None;
+                        tracing::info!(job_id = %job.id, completed = job.completed_runs, max, "job reached max_runs, auto-disabled");
+                    }
+                }
+            }
+
             // One-shot "at" jobs auto-disable after execution.
             if matches!(job.schedule_kind, Some(ScheduleKind::At { .. })) {
                 job.enabled = false;
             }
+
+            let job_id_for_log = job.id.clone();
             let _ = self.save_to_disk_inner(&data);
+            drop(data);
+
+            // Append to JSONL run log file (outside the write lock).
+            self.append_run_log_inner(&job_id_for_log, &record);
+        }
+        alert_msg
+    }
+
+    /// Get jobs that should be auto-deleted (reached max_runs with delete_after_run).
+    pub fn drain_auto_delete(&self) -> Vec<String> {
+        let mut data = self.jobs.write();
+        let to_delete: Vec<String> = data.jobs.iter()
+            .filter(|j| {
+                j.max_runs.is_some_and(|max| j.completed_runs >= max) && j.delete_after_run
+            })
+            .map(|j| j.id.clone())
+            .collect();
+        if !to_delete.is_empty() {
+            data.jobs.retain(|j| !to_delete.contains(&j.id));
+            let _ = self.save_to_disk_inner(&data);
+            tracing::info!(count = to_delete.len(), "auto-deleted completed one-shot jobs");
+        }
+        to_delete
+    }
+
+    /// Read recent run log entries from the JSONL file.
+    /// Returns entries in reverse chronological order (newest first).
+    pub fn read_run_log(&self, job_id: &str, limit: usize) -> Vec<RunRecord> {
+        let log_path = self.run_log_path(job_id);
+        let content = match std::fs::read_to_string(&log_path) {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        let mut records: Vec<RunRecord> = content.lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        records.reverse();
+        records.truncate(limit);
+        records
+    }
+
+    /// Path to the run log JSONL file for a given job.
+    fn run_log_path(&self, job_id: &str) -> PathBuf {
+        self.path.parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("run_logs")
+            .join(format!("{}.jsonl", job_id))
+    }
+
+    /// Append a run record to the job's JSONL log file.
+    fn append_run_log_inner(&self, job_id: &str, record: &RunRecord) {
+        let path = self.run_log_path(job_id);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(line) = serde_json::to_string(record) {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                let _ = writeln!(f, "{}", line);
+            }
         }
     }
 }
@@ -466,6 +647,16 @@ impl Scheduler {
                 enabled_tools: None,
                 disabled_tools: None,
                 schedule_kind: None,
+                retry: None,
+                failure_alert: None,
+                consecutive_errors: 0,
+                consecutive_skipped: 0,
+                max_runs: None,
+                completed_runs: 0,
+                delete_after_run: false,
+                model: None,
+                provider: None,
+                last_failure_alert_at: None,
             };
 
             data.jobs.push(entry);
@@ -509,6 +700,56 @@ pub fn scan_prompt_injection(prompt: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+// ── Schedule validation ─────────────────────────────────────────────────────
+
+/// Validate a schedule string (cron expression).
+/// Returns Ok(()) if valid, Err(reason) if invalid.
+pub fn validate_schedule(schedule: &str) -> Result<(), String> {
+    let parsed: Result<cron::Schedule, _> = schedule.parse();
+    match parsed {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("invalid cron expression '{}': {}", schedule, e)),
+    }
+}
+
+/// Validate a one-shot "at" timestamp.
+/// Returns Ok(()) if valid and in the future, Err(reason) otherwise.
+pub fn validate_at_timestamp(at: &str) -> Result<(), String> {
+    let dt = chrono::DateTime::parse_from_rfc3339(at)
+        .map_err(|e| format!("invalid ISO 8601 timestamp '{}': {}", at, e))?;
+    let now = chrono::Utc::now();
+    if dt.with_timezone(&chrono::Utc) <= now {
+        Err(format!("one-shot timestamp '{}' is in the past", at))
+    } else {
+        Ok(())
+    }
+}
+
+/// Validate a timezone string.
+/// Returns Ok(()) if valid IANA timezone, Err(reason) otherwise.
+pub fn validate_tz(tz: &str) -> Result<(), String> {
+    if tz.parse::<chrono_tz::Tz>().is_err() {
+        Err(format!("invalid IANA timezone '{}'", tz))
+    } else {
+        Ok(())
+    }
+}
+
+/// Validate active_hours format "HH:MM-HH:MM".
+/// Returns Ok(()) if valid, Err(reason) otherwise.
+pub fn validate_active_hours(hours: &str) -> Result<(), String> {
+    match parse_hours(hours) {
+        Some((start, end)) => {
+            if start >= end {
+                Err(format!("active_hours start ({}) must be before end ({})", start, end))
+            } else {
+                Ok(())
+            }
+        }
+        None => Err(format!("invalid active_hours format '{}', expected 'HH:MM-HH:MM'", hours)),
+    }
 }
 
 // ── Schedule computation ────────────────────────────────────────────────────
@@ -1196,5 +1437,45 @@ mod tests {
     #[test]
     fn verify_hmac_signature_wrong_length() {
         assert!(!verify_hmac_signature(b"body", "secret", "sha256=abc"));
+    }
+
+    #[test]
+    fn validate_schedule_valid() {
+        assert!(validate_schedule("0 0 9 * * *").is_ok());
+        assert!(validate_schedule("0 */30 * * * *").is_ok());
+    }
+
+    #[test]
+    fn validate_schedule_invalid() {
+        assert!(validate_schedule("not a cron").is_err());
+    }
+
+    #[test]
+    fn validate_tz_valid() {
+        assert!(validate_tz("Asia/Shanghai").is_ok());
+        assert!(validate_tz("UTC").is_ok());
+    }
+
+    #[test]
+    fn validate_tz_invalid() {
+        assert!(validate_tz("Invalid/Zone").is_err());
+    }
+
+    #[test]
+    fn validate_active_hours_valid() {
+        assert!(validate_active_hours("08:00-24:00").is_ok());
+        assert!(validate_active_hours("00:00-23:59").is_ok());
+    }
+
+    #[test]
+    fn validate_active_hours_invalid_format() {
+        assert!(validate_active_hours("bad").is_err());
+        assert!(validate_active_hours("25:00-26:00").is_err());
+    }
+
+    #[test]
+    fn validate_active_hours_start_ge_end() {
+        assert!(validate_active_hours("18:00-08:00").is_err());
+        assert!(validate_active_hours("12:00-12:00").is_err());
     }
 }

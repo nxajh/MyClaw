@@ -27,6 +27,12 @@ pub async fn run(cli: &Cli, prompt: &str, agent: Option<&str>, model: Option<&st
         Arc::clone(&skills_arc),
         workspace_dir,
     )));
+    // Memory tools
+    let kd = cfg.knowledge_dir.to_str().unwrap_or(".").to_string();
+    tools.register(Arc::new(myclaw::tools::MemoryListTool::new(kd.clone())));
+    tools.register(Arc::new(myclaw::tools::MemoryViewTool::new(kd.clone())));
+    tools.register(Arc::new(myclaw::tools::MemorySearchTool::new(kd.clone())));
+    tools.register(Arc::new(myclaw::tools::MemoryManageTool::new(kd)));
     let tools_arc = Arc::new(tools);
 
     let agent_config = myclaw::AgentConfig::default();
