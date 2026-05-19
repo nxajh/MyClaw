@@ -1,10 +1,10 @@
 import { useState } from 'react'
 import { ChevronDown, ChevronRight, Loader2, Zap } from 'lucide-react'
-import type { ToolCall } from '../hooks/useWebSocket'
+import type { ToolCallBlock } from '../hooks/useWebSocket'
 
-export default function ToolCallCard({ toolCall }: { toolCall: ToolCall }) {
+export default function ToolCallCard({ block }: { block: ToolCallBlock }) {
   const [expanded, setExpanded] = useState(false)
-  const running = toolCall.output === undefined
+  const running = block.output === undefined
 
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 text-xs overflow-hidden">
@@ -17,7 +17,7 @@ export default function ToolCallCard({ toolCall }: { toolCall: ToolCall }) {
         ) : (
           <Zap size={12} className="text-emerald-400 shrink-0" />
         )}
-        <span className="font-mono text-zinc-300 flex-1 truncate">{toolCall.name}</span>
+        <span className="font-mono text-zinc-300 flex-1 truncate">{block.name}</span>
         <span className={`shrink-0 ${running ? 'text-amber-400' : 'text-zinc-600'}`}>
           {running ? 'running…' : 'done'}
         </span>
@@ -28,23 +28,23 @@ export default function ToolCallCard({ toolCall }: { toolCall: ToolCall }) {
 
       {expanded && (
         <div className="border-t border-zinc-800">
-          {Object.keys(toolCall.args).length > 0 && (
+          {Object.keys(block.args).length > 0 && (
             <div className="px-3.5 py-2.5 border-b border-zinc-800/60">
               <div className="text-zinc-600 uppercase tracking-widest mb-2" style={{ fontSize: 9 }}>
                 Input
               </div>
               <pre className="text-zinc-400 whitespace-pre-wrap break-all font-mono leading-5">
-                {JSON.stringify(toolCall.args, null, 2)}
+                {JSON.stringify(block.args, null, 2)}
               </pre>
             </div>
           )}
-          {toolCall.output !== undefined && (
+          {block.output !== undefined && (
             <div className="px-3.5 py-2.5">
               <div className="text-zinc-600 uppercase tracking-widest mb-2" style={{ fontSize: 9 }}>
                 Output
               </div>
               <pre className="text-zinc-400 whitespace-pre-wrap break-all font-mono max-h-52 overflow-y-auto leading-5">
-                {toolCall.output || '(empty)'}
+                {block.output || '(empty)'}
               </pre>
             </div>
           )}
