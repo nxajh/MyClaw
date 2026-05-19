@@ -124,6 +124,7 @@ impl Tool for SkillTool {
                         "name": skill.name,
                         "description": skill.description,
                         "content": skill.prompt_body,
+                        "skill_dir": skill.skill_dir.as_deref().map(|p| p.display().to_string()),
                         "linked_files": linked_files,
                         "usage_hint": usage_hint,
                     }).to_string(),
