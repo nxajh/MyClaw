@@ -136,6 +136,21 @@ export default function Config() {
     setDraft(newDraft)
   }
 
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Tab') {
+      e.preventDefault()
+      const target = e.currentTarget
+      const start = target.selectionStart
+      const end = target.selectionEnd
+      const val = target.value
+      const newVal = val.substring(0, start) + "  " + val.substring(end)
+      setDraft(newVal)
+      setTimeout(() => {
+        target.selectionStart = target.selectionEnd = start + 2
+      }, 0)
+    }
+  }
+
   return (
     <div className="flex flex-col h-full bg-zinc-950">
       <div className="flex-1 overflow-y-auto">
@@ -274,6 +289,7 @@ export default function Config() {
                   <textarea
                     value={draft}
                     onChange={(e) => setDraft(e.target.value)}
+                    onKeyDown={handleKeyDown}
                     rows={22}
                     spellCheck={false}
                     className="w-full rounded-2xl border border-zinc-900 bg-zinc-950 px-4 py-3.5 text-xs font-mono text-zinc-300 outline-none focus:border-zinc-800 resize-y transition-colors leading-relaxed"

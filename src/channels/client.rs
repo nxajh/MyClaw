@@ -1118,15 +1118,24 @@ fn reconstruct_history(
                     }
                 }
 
-                // If the last message in out is also an assistant message, we merge blocks
-                // instead of creating a new bubble. This avoids bubble fragmentation after turns with tools.
-                if let Some(last_msg) = out.last_mut() {
-                    if last_msg["role"] == "assistant" {
-                        if let Some(arr) = last_msg.get_mut("blocks").and_then(|v| v.as_array_mut()) {
-                            arr.extend(blocks);
-                            continue;
-                        }
+                // Try to find the closest assistant message in out to merge blocks with,
+                // stopping if we encounter a user message. This robustly merges fragmented turns
+                // even if intermediate virtual turns are present.
+                let mut merged = false;
+                for msg in out.iter_mut().rev() {
+                    if msg["role"] == "user" {
+                        break;
                     }
+                    if msg["role"] == "assistant" {
+                        if let Some(arr) = msg.get_mut("blocks").and_then(|v| v.as_array_mut()) {
+                            arr.extend(blocks);
+                            merged = true;
+                        }
+                        break;
+                    }
+                }
+                if merged {
+                    continue;
                 }
 
                 if blocks.is_empty() {

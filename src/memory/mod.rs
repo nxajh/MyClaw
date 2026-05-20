@@ -181,7 +181,7 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
             let value = value.trim();
             match key {
                 "name" => name = Some(value.to_string()),
-                "summary" => summary = Some(value.to_string()),
+                "summary" | "description" => summary = Some(value.to_string()),
                 "tags" => tags = parse_tags(value),
                 "type" => mem_type = MemoryType::from_str_lossy(value),
                 "created_at" => created_at = Some(value.to_string()),

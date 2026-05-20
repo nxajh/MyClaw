@@ -110,7 +110,7 @@ function parseFrontmatter(raw: string) {
           meta.type = v as any
         }
       }
-      else if (k === 'summary') meta.summary = v
+      else if (k === 'summary' || k === 'description') meta.summary = v
       else if (k === 'created_at') meta.created_at = v
       else if (k === 'tags') {
         const inner = v.startsWith('[') && v.endsWith(']') ? v.slice(1, -1) : v

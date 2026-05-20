@@ -3,13 +3,14 @@ import { ChevronDown, ChevronRight, Loader2, Zap } from 'lucide-react'
 import type { ToolCallBlock } from '../hooks/useWebSocket'
 
 export default function ToolCallCard({ block }: { block: ToolCallBlock }) {
-  const [expanded, setExpanded] = useState(false)
+  const [userExpanded, setUserExpanded] = useState<boolean | null>(null)
   const running = block.output === undefined
+  const expanded = userExpanded !== null ? userExpanded : running
 
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 text-xs overflow-hidden">
       <button
-        onClick={() => setExpanded(!expanded)}
+        onClick={() => setUserExpanded(!expanded)}
         className="w-full flex items-center gap-2.5 px-3.5 py-2.5 hover:bg-zinc-800/50 text-left transition-colors"
       >
         {running ? (
