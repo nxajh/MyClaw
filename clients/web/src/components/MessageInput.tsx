@@ -24,8 +24,27 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
   const [images, setImages] = useState<PickedImage[]>([])
   const [texts, setTexts] = useState<PickedText[]>([])
   const [note, setNote] = useState<string | null>(null)
+  const [isDragging, setIsDragging] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault()
+    if (!disabled) setIsDragging(true)
+  }
+
+  const handleDragLeave = () => {
+    setIsDragging(false)
+  }
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    setIsDragging(false)
+    if (disabled) return
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      handleFiles(e.dataTransfer.files)
+    }
+  }
 
   // ── Slash-command autocomplete ────────────────────────────────────────────
   const [commands, setCommands] = useState<Command[]>([])
@@ -139,7 +158,25 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
         )}
 
         {/* Input box */}
-        <div className="relative rounded-2xl border border-zinc-700/60 bg-zinc-900 shadow-xl focus-within:border-zinc-600 transition-colors">
+        <div
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+          className={`relative rounded-2xl border shadow-xl transition-all ${
+            isDragging
+              ? 'border-blue-500 bg-zinc-900/90 scale-[1.01] ring-1 ring-blue-500/30'
+              : 'border-zinc-700/60 bg-zinc-900 focus-within:border-zinc-600'
+          }`}
+        >
+          {isDragging && (
+            <div className="absolute inset-0 z-30 rounded-2xl bg-zinc-950/75 backdrop-blur-[2px] flex items-center justify-center pointer-events-none">
+              <span className="text-sm font-medium text-blue-400 flex items-center gap-2">
+                <Paperclip size={16} className="animate-bounce" />
+                Drop files here to attach
+              </span>
+            </div>
+          )}
+
           {/* Attachment chips */}
           {hasAttachments && (
             <div className="flex flex-wrap gap-2 px-4 pt-3">
@@ -172,6 +209,12 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
             onChange={(e) => setText(e.target.value)}
             onKeyDown={handleKeyDown}
             onInput={handleInput}
+            onPaste={(e) => {
+              if (e.clipboardData.files && e.clipboardData.files.length > 0) {
+                e.preventDefault()
+                handleFiles(e.clipboardData.files)
+              }
+            }}
             placeholder={disabled ? 'Connecting…' : 'Message MyClaw…  (/ for commands)'}
             disabled={disabled && !isGenerating}
             rows={1}

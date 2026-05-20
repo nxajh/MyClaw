@@ -780,31 +780,23 @@ fn handle_api_request(
             let result = match dir_guard.as_ref() {
                 Some(dir) => {
                     let memory_dir = dir.join("memory");
-                    match std::fs::read_dir(&memory_dir) {
-                        Ok(entries) => {
-                            let files: Vec<serde_json::Value> = entries
-                                .filter_map(|e| e.ok())
-                                .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-                                .map(|e| {
-                                    let name = e.file_name().to_string_lossy().to_string();
-                                    let size = e.metadata().map(|m| m.len()).unwrap_or(0);
-                                    serde_json::json!({
-                                        "name": name,
-                                        "size": size,
-                                    })
-                                }).collect();
-                            serde_json::json!({
-                                "type": "api_response",
-                                "id": id,
-                                "result": files,
-                            }).to_string()
-                        }
-                        Err(e) => serde_json::json!({
-                            "type": "api_error",
-                            "id": id,
-                            "error": format!("failed to read memory dir: {}", e)
-                        }).to_string(),
-                    }
+                    let files = crate::memory::scan_memory_files(&memory_dir);
+                    let result: Vec<serde_json::Value> = files.iter().map(|f| {
+                        serde_json::json!({
+                            "name": f.path.file_name().and_then(|n| n.to_str()).unwrap_or(&f.name).to_string(),
+                            "size": std::fs::metadata(&f.path).map(|m| m.len()).unwrap_or(0),
+                            "mem_name": f.name,
+                            "summary": f.summary,
+                            "tags": f.tags,
+                            "mem_type": f.mem_type.as_str(),
+                            "created_at": f.created_at,
+                        })
+                    }).collect();
+                    serde_json::json!({
+                        "type": "api_response",
+                        "id": id,
+                        "result": result,
+                    }).to_string()
                 }
                 None => serde_json::json!({
                     "type": "api_error",

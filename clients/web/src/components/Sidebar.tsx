@@ -61,6 +61,14 @@ export default function Sidebar() {
             to={to}
             end={to === '/'}
             title={collapsed ? label : undefined}
+            onClick={(e) => {
+              if ((window as any).myclawUnsaved) {
+                const confirmLeave = window.confirm('You have unsaved changes. Are you sure you want to leave this page?')
+                if (!confirmLeave) {
+                  e.preventDefault()
+                }
+              }
+            }}
             className={({ isActive }) =>
               `flex items-center gap-3 px-2.5 py-2 rounded-lg text-sm transition-all duration-150 relative ${
                 collapsed ? 'justify-center' : ''

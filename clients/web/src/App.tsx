@@ -3,6 +3,7 @@ import { WebSocketProvider } from './contexts/WebSocketContext'
 import { useWebSocketContext } from './contexts/WebSocketContext'
 import Sidebar from './components/Sidebar'
 import LoginOverlay from './components/LoginOverlay'
+import CommandPalette from './components/CommandPalette'
 import Chat from './pages/Chat'
 import Sessions from './pages/Sessions'
 import Tools from './pages/Tools'
@@ -24,6 +25,7 @@ function AppShell() {
       {showLogin && (
         <LoginOverlay onSubmit={submitToken} isRetry={authFailed} />
       )}
+      <CommandPalette />
       <Sidebar />
       <main className="flex-1 flex flex-col min-w-0">
         <Routes>
