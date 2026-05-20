@@ -5,33 +5,33 @@ use super::get_history;
 
 pub fn cmd_help() -> String {
     "📦 **MyClaw Slash Commands**\n\n\
-     **基础**\n\
-     /help — 显示此帮助信息\n\
-     /status — 显示 provider 实时状态\n\
-     /new [名称] — 创建新会话\n\
-     /sessions — 列出所有会话\n\
-     /switch <序号> — 切换到指定会话\n\
-     /rename <序号> <名称> — 重命名会话\n\
-     /delete <序号> — 删除会话\n\
-     /compact — 手动触发上下文压缩\n\
-     /model [名称|off] — 查看或覆盖当前会话模型\n\
-     /models — 列出可用模型\n\
-     /stop — 中断当前运行\n\n\
-     **会话参数**\n\
-     /think [on|off|low|medium|high] — 控制推理模式（会话级持久生效）\n\
-     /autonomy [full|default|read_only] — 控制自主权级别（会话级持久生效）\n\
-     /settings — 查看当前会话所有参数\n\n\
-     **工具与配置**\n\
-     /tools — 列出可用工具及说明\n\
-     /skills — 列出已加载的 skill\n\
-     /config [key] — 查看运行时配置\n\n\
-     **上下文**\n\
-     /context — 上下文窗口使用详情\n\
-     /history — 显示会话历史摘要\n\
-     /export — 导出当前会话\n\n\
-     **其他**\n\
-     /mcp — 查看 MCP 服务器状态\n\
-     /btw <问题> — 旁路提问，不影响上下文\n\n\
+     **基础**  \n\
+     /help — 显示此帮助信息  \n\
+     /status — 显示 provider 实时状态  \n\
+     /new [名称] — 创建新会话  \n\
+     /sessions — 列出所有会话  \n\
+     /switch <序号> — 切换到指定会话  \n\
+     /rename <序号> <名称> — 重命名会话  \n\
+     /delete <序号> — 删除会话  \n\
+     /compact — 手动触发上下文压缩  \n\
+     /model [名称|off] — 查看或覆盖当前会话模型  \n\
+     /models — 列出可用模型  \n\
+     /stop — 中断当前运行  \n\n\
+     **会话参数**  \n\
+     /think [on|off|low|medium|high] — 控制推理模式（会话级持久生效）  \n\
+     /autonomy [full|default|read_only] — 控制自主权级别（会话级持久生效）  \n\
+     /settings — 查看当前会话所有参数  \n\n\
+     **工具与配置**  \n\
+     /tools — 列出可用工具及说明  \n\
+     /skills — 列出已加载的 skill  \n\
+     /config [key] — 查看运行时配置  \n\n\
+     **上下文**  \n\
+     /context — 上下文窗口使用详情  \n\
+     /history — 显示会话历史摘要  \n\
+     /export — 导出当前会话  \n\n\
+     **其他**  \n\
+     /mcp — 查看 MCP 服务器状态  \n\
+     /btw <问题> — 旁路提问，不影响上下文  \n\n\
      _别名: /h=/help, /n=/new, /ss=/sessions, /sw=/switch, /rn=/rename, /del=/delete_".to_string()
 }
 
