@@ -99,7 +99,7 @@ fn atomic_write(target: &Path, content: &str) -> std::io::Result<()> {
 /// Build frontmatter string.
 fn build_frontmatter(name: &str, abstract_text: &str, tags: &[String], mem_type: &crate::memory::MemoryType, created_at: &str) -> String {
     let mut fm = format!(
-        "---\nname: {}\nabstract: \"{}\"\ntype: {}\ncreated_at: {}",
+        "---\nname: {}\nsummary: \"{}\"\ntype: {}\ncreated_at: {}",
         name, abstract_text, mem_type.as_str(), created_at
     );
     if !tags.is_empty() {

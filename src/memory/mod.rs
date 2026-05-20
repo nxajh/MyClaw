@@ -5,7 +5,7 @@
 //! ```markdown
 //! ---
 //! name: user_language
-//! abstract: 用户偏好使用中文进行所有交流
+//! summary: 用户偏好使用中文进行所有交流
 //! tags: [user, language]
 //! type: user
 //! created_at: 2026-05-07
@@ -150,8 +150,7 @@ pub fn scan_memory_files(memory_dir: &Path) -> Vec<MemoryFile> {
 /// Parse a single `.md` file's YAML frontmatter + content.
 /// Returns `None` if frontmatter is missing or malformed.
 ///
-/// Backward compatible: if `abstract` is absent but `description` is present,
-/// `description` value is used as `abstract_text`.
+/// Backward compatible: accepts both `summary:` (current) and `abstract:` (legacy).
 fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
     let raw = fs::read_to_string(path).ok()?;
     let trimmed = raw.trim();
@@ -183,7 +182,7 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
             let value = value.trim();
             match key {
                 "name" => name = Some(value.to_string()),
-                "abstract" => abstract_text = Some(value.to_string()),
+                "summary" | "abstract" => abstract_text = Some(value.to_string()),
                 "tags" => tags = parse_tags(value),
                 "type" => mem_type = MemoryType::from_str_lossy(value),
                 "created_at" => created_at = Some(value.to_string()),
@@ -334,8 +333,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_frontmatter_with_abstract() {
-        let content = "---\nname: user_lang\nabstract: 用户偏好使用中文进行所有交流\ntags: [user, language, preference]\ntype: user\ncreated_at: 2026-05-07\n---\n\n中文交流。";
+    fn test_parse_frontmatter_with_summary() {
+        // New format uses "summary:", old "abstract:" still accepted (backward compat).
+        let content = "---\nname: user_lang\nsummary: 用户偏好使用中文进行所有交流\ntags: [user, language, preference]\ntype: user\ncreated_at: 2026-05-07\n---\n\n中文交流。";
         let dir = std::env::temp_dir().join("myclaw_test_memory_parse");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("user_lang.md");
