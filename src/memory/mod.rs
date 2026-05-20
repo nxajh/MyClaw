@@ -150,7 +150,6 @@ pub fn scan_memory_files(memory_dir: &Path) -> Vec<MemoryFile> {
 /// Parse a single `.md` file's YAML frontmatter + content.
 /// Returns `None` if frontmatter is missing or malformed.
 ///
-/// Backward compatible: accepts both `summary:` (current) and `abstract:` (legacy).
 fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
     let raw = fs::read_to_string(path).ok()?;
     let trimmed = raw.trim();
@@ -182,7 +181,7 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
             let value = value.trim();
             match key {
                 "name" => name = Some(value.to_string()),
-                "summary" | "abstract" => abstract_text = Some(value.to_string()),
+                "summary" => abstract_text = Some(value.to_string()),
                 "tags" => tags = parse_tags(value),
                 "type" => mem_type = MemoryType::from_str_lossy(value),
                 "created_at" => created_at = Some(value.to_string()),
