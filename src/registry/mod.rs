@@ -81,10 +81,10 @@ impl Registry {
     }
 
     fn find_provider_by_model(&self, model_id: &str) -> anyhow::Result<(&str, &ModelConfig)> {
-        tracing::debug!(model_id, "find_provider_by_model");
+        tracing::trace!(model_id, "find_provider_by_model");
         for (key, provider) in &self.providers {
             for model in &provider.models {
-                tracing::debug!(provider = %key, model = %model.model_id, "checking");
+                tracing::trace!(provider = %key, model = %model.model_id, "checking");
                 if model.model_id == model_id {
                     return Ok((key.as_str(), model));
                 }
