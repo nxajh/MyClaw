@@ -170,7 +170,7 @@ impl Tool for MemoryListTool {
             let mut obj = json!({
                 "type": e.mem_type.as_str(),
                 "name": e.name,
-                "abstract": e.abstract_text,
+                "summary": e.abstract_text,
             });
             if !e.tags.is_empty() {
                 obj["tags"] = json!(e.tags);
@@ -256,7 +256,7 @@ impl Tool for MemoryViewTool {
                     "success": true,
                     "name": mf.name,
                     "type": mf.mem_type.as_str(),
-                    "abstract": mf.abstract_text,
+                    "summary": mf.abstract_text,
                     "created_at": mf.created_at,
                     "content": mf.content,
                 });
@@ -400,7 +400,7 @@ impl Tool for MemorySearchTool {
             let mut result = json!({
                 "name": mf.name,
                 "type": mf.mem_type.as_str(),
-                "abstract": mf.abstract_text,
+                "summary": mf.abstract_text,
                 "snippet": snippet,
                 "relevance": score,
             });
@@ -472,7 +472,7 @@ impl Tool for MemoryManageTool {
                     "description": "Category. user=preferences (always injected), feedback=behavior corrections (always injected), \
                      project=project context (on-demand), reference=external references (on-demand). Default: project."
                 },
-                "abstract": {
+                "summary": {
                     "type": "string",
                     "description": "Brief summary of the key content (1-2 sentences). \
                      Required for user/feedback types (injected into system prompt). \
@@ -554,7 +554,7 @@ impl MemoryManageTool {
             "message": format!("Memory '{}' added.", name),
             "name": name,
             "type": mem_type.as_str(),
-            "abstract": abstract_text,
+            "summary": abstract_text,
             "tags": tags,
         }))
     }
@@ -582,7 +582,7 @@ impl MemoryManageTool {
         let mem_type = args["memory_type"].as_str()
             .and_then(crate::memory::MemoryType::from_str_lossy)
             .unwrap_or(existing.mem_type);
-        let abstract_text = if args["abstract"].as_str().is_some() {
+        let abstract_text = if args["summary"].as_str().is_some() {
             self.resolve_abstract(args, content)
         } else {
             existing.abstract_text.clone()
@@ -639,7 +639,7 @@ impl MemoryManageTool {
 
     /// Resolve abstract: explicit parameter, or auto-generate from content.
     fn resolve_abstract(&self, args: &serde_json::Value, content: &str) -> String {
-        if let Some(abs) = args["abstract"].as_str() {
+        if let Some(abs) = args["summary"].as_str() {
             let trimmed = abs.trim();
             if !trimmed.is_empty() {
                 if trimmed.chars().count() > MAX_ABSTRACT_CHARS {

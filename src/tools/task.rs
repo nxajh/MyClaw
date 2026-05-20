@@ -107,7 +107,7 @@ impl Tool for TaskManagerTool {
                     ],
                     "description": "Brief title. Pass a string for single creation, or an array for batch creation."
                 },
-                "description": {
+                "details": {
                     "type": "string",
                     "description": "Detailed description (optional for create)"
                 },
@@ -152,7 +152,7 @@ impl Tool for TaskManagerTool {
 impl TaskManagerTool {
     async fn handle_create(&self, args: &Value) -> anyhow::Result<ToolResult> {
         let parent = args["parent"].as_str();
-        let description = args["description"].as_str().unwrap_or("");
+        let description = args["details"].as_str().unwrap_or("");
 
         let mut state = self.state.write().await;
 
