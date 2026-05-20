@@ -100,7 +100,7 @@ pub fn cmd_tools(ctx: CommandContext<'_>) -> String {
             } else {
                 short.to_string()
             };
-            lines.push(format!("• **{}** — {}", name, truncated));
+            lines.push(format!("- **{}** — {}", name, truncated));
         }
     }
     lines.join("\n")
@@ -412,7 +412,7 @@ pub fn cmd_skill(ctx: CommandContext<'_>) -> String {
             (false, true)  => " 🤖".to_string(),
             (false, false) => " 🚫".to_string(),
         };
-        lines.push(format!("• **{}**{}{}{} — {}", name, ver, invocable_mark, kw, desc));
+        lines.push(format!("- **{}**{}{}{} — {}", name, ver, invocable_mark, kw, desc));
     }
     lines.join("\n")
 }
