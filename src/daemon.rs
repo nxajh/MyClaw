@@ -83,6 +83,12 @@ fn bind_reusable(port: u16) -> anyhow::Result<std::net::TcpListener> {
         .context("failed to create socket")?;
     socket.set_reuse_port(true).context("SO_REUSEPORT failed")?;
     socket.set_reuse_address(true).context("SO_REUSEADDR failed")?;
+    // socket2 v0.5 adds SOCK_CLOEXEC by default.  Clear it so that the fd
+    // survives fork+execve during hot switch.  Without this the child gets
+    // EBADF (fd closed by execve) or EPERM (fd number reused as a
+    // non-pollable file type before epoll_ctl(EPOLL_CTL_ADD) is called).
+    #[cfg(unix)]
+    socket.set_cloexec(false).context("clearing FD_CLOEXEC failed")?;
     socket
         .bind(&addr.into())
         .with_context(|| format!("failed to bind {addr}"))?;
