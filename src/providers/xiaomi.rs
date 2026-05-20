@@ -8,8 +8,9 @@
 //! - Different base URL
 //! - Usage includes `cache_read_input_tokens`
 //! - Extra stop reason: `repetition_truncation`
-//! - MiMo requires `reasoning_content` on every assistant tool_call message
-//!   when thinking mode is enabled (empty thinking block inserted if missing).
+//! - MiMo ALWAYS returns reasoning_content and requires it on every assistant
+//!   tool_call message in subsequent turns (empty thinking block inserted if
+//!   missing).
 //!
 //! The SSE parsing is identical to Anthropic, so this provider delegates
 //! to `AnthropicMessagesClient` from the protocols layer.
@@ -93,10 +94,11 @@ impl ChatProvider for XiaomiProvider {
         let thinking_enabled = req.thinking.as_ref().is_some_and(|t| t.enabled);
         let mut body = build_anthropic_body(&req);
 
-        // MiMo-specific: ensure every assistant tool_call message has a thinking block.
-        if thinking_enabled {
-            patch_mimo_thinking(&mut body);
-        }
+        // MiMo-specific: MiMo ALWAYS requires a thinking block in every assistant
+        // message that contains tool_use, regardless of whether the thinking
+        // parameter is enabled. When switching from a non-thinking model via
+        // fallback routing, history may lack thinking blocks — inject empty ones.
+        patch_mimo_thinking(&mut body);
 
         let client = AnthropicMessagesClient::new(self.api_key.clone(), self.base_url.clone());
         let client = if let Some(ref ua) = self.user_agent {
