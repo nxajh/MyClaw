@@ -1128,7 +1128,7 @@ fn reconstruct_history(
                     }
                     if msg["role"] == "assistant" {
                         if let Some(arr) = msg.get_mut("blocks").and_then(|v| v.as_array_mut()) {
-                            arr.extend(blocks);
+                            arr.extend(blocks.clone());
                             merged = true;
                         }
                         break;
