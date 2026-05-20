@@ -428,7 +428,7 @@ impl EmbeddingProvider for GlmProvider {
             body["dimensions"] = serde_json::json!(dim);
         }
 
-        let text = futures::executor::block_on(async {
+        let text = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async {
             let mut headers = reqwest::header::HeaderMap::new();
             headers.insert(reqwest::header::AUTHORIZATION, auth.parse().unwrap());
             headers.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
@@ -439,7 +439,7 @@ impl EmbeddingProvider for GlmProvider {
             let resp = self.client.post(&url).headers(headers).json(&body).send().await?;
             let resp = resp.error_for_status()?;
             resp.text().await
-        })?;
+        }))?;
 
         #[derive(serde::Deserialize)]
         struct Er { data: Vec<Ed>, usage: Option<Eu>, model: String }
@@ -479,7 +479,7 @@ impl SearchProvider for GlmProvider {
             "count": limit,
         });
 
-        let text = futures::executor::block_on(async {
+        let text = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async {
             let mut headers = reqwest::header::HeaderMap::new();
             headers.insert(reqwest::header::AUTHORIZATION, auth.parse().unwrap());
             headers.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
@@ -494,7 +494,7 @@ impl SearchProvider for GlmProvider {
                 anyhow::bail!("GLM web_search HTTP {}: {}", status, body);
             }
             resp.text().await.map_err(|e| anyhow::anyhow!(e.to_string()))
-        })?;
+        }))?;
 
         #[derive(serde::Deserialize)]
         struct SearchResp { #[serde(default)] search_result: Vec<Sr> }

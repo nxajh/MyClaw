@@ -137,7 +137,7 @@ impl SearchProvider for GoogleProvider {
             }]
         });
 
-        let resp_text = futures::executor::block_on(async {
+        let resp_text = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async {
             let resp = self
                 .client
                 .post(&url)
@@ -152,7 +152,7 @@ impl SearchProvider for GoogleProvider {
                 anyhow::bail!("Google Gemini HTTP {}: {}", status, text);
             }
             resp.text().await.map_err(|e| anyhow::anyhow!(e.to_string()))
-        })?;
+        }))?;
 
         let resp: GeminiResponse = serde_json::from_str(&resp_text)?;
 

@@ -106,11 +106,11 @@ impl ImageGenerationProvider for OpenAiProvider {
             },
         });
 
-        let text = futures::executor::block_on(async move {
+        let text = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async move {
             let resp = self.client.post(&url).headers(headers).json(&body).send().await?;
             let resp = resp.error_for_status()?;
             resp.text().await
-        })?;
+        }))?;
 
         #[derive(serde::Deserialize)]
         struct ImgResp { data: Vec<ImgData> }
@@ -156,11 +156,11 @@ impl TtsProvider for OpenAiProvider {
             "speed": req.speed.unwrap_or(1.0),
         });
 
-        let bytes = futures::executor::block_on(async move {
+        let bytes = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async move {
             let resp = self.client.post(&url).headers(headers).json(&body).send().await?;
             let resp = resp.error_for_status()?;
             resp.bytes().await
-        })?;
+        }))?;
 
         Ok(crate::providers::tts::AudioResponse {
             audio: crate::providers::tts::AudioData {
@@ -189,11 +189,11 @@ impl EmbeddingProvider for OpenAiProvider {
             body["dimensions"] = serde_json::json!(dim);
         }
 
-        let text = futures::executor::block_on(async move {
+        let text = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async move {
             let resp = self.client.post(&url).headers(headers).json(&body).send().await?;
             let resp = resp.error_for_status()?;
             resp.text().await
-        })?;
+        }))?;
 
         #[derive(serde::Deserialize)]
         struct Er { data: Vec<Ed>, usage: Option<Eu> }
