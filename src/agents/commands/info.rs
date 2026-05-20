@@ -41,7 +41,7 @@ pub async fn cmd_status(ctx: CommandContext<'_>) -> String {
         return "⚠️ 没有已注册的 provider。".to_string();
     }
 
-    let mut lines = vec!["📊 **Provider 实时状态**\n".to_string()];
+    let mut lines = vec!["📊 **Provider 实时状态**  \n\n```text".to_string()];
 
     // Header
     lines.push(format!(
@@ -77,7 +77,7 @@ pub async fn cmd_status(ctx: CommandContext<'_>) -> String {
         ));
     }
 
-    // Also show credential pool status for chat providers (if available).
+    lines.push("```".to_string());
     lines.push(String::new());
     lines.push("_模型详情请使用 /models_".to_string());
 
@@ -190,12 +190,12 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
         };
 
         format!(
-            "📐 **上下文详情**\n\n\
-             模型: `{}`\n\
-             上下文窗口: {} token (~{}KB)\n\
-             当前使用: {} token {} (~{}KB, {})\n\
-             压缩阈值: {}\n\
-             历史消息: {} 条\n\
+            "📐 **上下文详情**  \n\n\
+             模型: `{}`  \n\
+             上下文窗口: {} token (~{}KB)  \n\
+             当前使用: {} token {} (~{}KB, {})  \n\
+             压缩阈值: {}  \n\
+             历史消息: {} 条  \n\
              压缩状态: {}",
             model_id, context_window, window_kb, total, usage_detail, used_kb, usage_pct, threshold, history_len, summary_info
         )
@@ -204,9 +204,9 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
         let session = ctx.session_manager.get_or_create(ctx.user_id);
         if session.history.is_empty() {
             format!(
-                "📐 **上下文详情**\n\n\
-                 模型: `{}`\n\
-                 上下文窗口: {} token\n\
+                "📐 **上下文详情**  \n\n\
+                 模型: `{}`  \n\
+                 上下文窗口: {} token  \n\
                  状态: 新会话，无历史",
                 model_id, context_window
             )
@@ -234,12 +234,12 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
                 "尚未压缩".to_string()
             };
             format!(
-                "📐 **上下文详情**\n\n\
-                 模型: `{}`\n\
-                 上下文窗口: {} token (~{}KB)\n\
-                 当前使用: {} token (~{}KB, {})\n\
-                 压缩阈值: {}\n\
-                 历史消息: {} 条\n\
+                "📐 **上下文详情**  \n\n\
+                 模型: `{}`  \n\
+                 上下文窗口: {} token (~{}KB)  \n\
+                 当前使用: {} token (~{}KB, {})  \n\
+                 压缩阈值: {}  \n\
+                 历史消息: {} 条  \n\
                  压缩状态: {}",
                 model_id, context_window, window_kb,
                 total, used_kb, usage_pct,
@@ -249,11 +249,11 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
             // History exists but no stored token count (e.g. session predates
             // token persistence). Don't estimate — just report as unknown.
             format!(
-                "📐 **上下文详情**\n\n\
-                 模型: `{}`\n\
-                 上下文窗口: {} token\n\
-                 当前使用: 暂无记录（发送一条消息后获取精确值）\n\
-                 历史消息: {} 条\n\
+                "📐 **上下文详情**  \n\n\
+                 模型: `{}`  \n\
+                 上下文窗口: {} token  \n\
+                 当前使用: 暂无记录（发送一条消息后获取精确值）  \n\
+                 历史消息: {} 条  \n\
                  压缩状态: {}",
                 model_id, context_window,
                 session.history.len(),
@@ -364,18 +364,18 @@ pub async fn cmd_mcp(ctx: CommandContext<'_>) -> String {
             let tools = mgr.tool_count().await;
             if connected {
                 format!(
-                    "🔌 **MCP 状态**\n\n\
-                     状态: ✅ 已连接\n\
-                     服务器: {} 个\n\
+                    "🔌 **MCP 状态**  \n\n\
+                     状态: ✅ 已连接  \n\
+                     服务器: {} 个  \n\
                      MCP 工具: {} 个",
                     servers, tools
                 )
             } else {
-                "🔌 **MCP 状态**\n\n状态: ❌ 未连接\n\n\
+                "🔌 **MCP 状态**  \n\n状态: ❌ 未连接  \n\n\
                  请检查配置文件中的 `[mcp_servers]` 部分。".to_string()
             }
         }
-        None => "🔌 **MCP 状态**\n\n未配置 MCP 服务器。".to_string(),
+        None => "🔌 **MCP 状态**  \n\n未配置 MCP 服务器。".to_string(),
     }
 }
 
@@ -386,7 +386,7 @@ pub fn cmd_skill(ctx: CommandContext<'_>) -> String {
         return "📚 没有加载任何 skill。".to_string();
     }
 
-    let mut lines = vec![format!("📚 **已加载 Skill ({}个)**\n", count)];
+    let mut lines = vec![format!("📚 **已加载 Skill ({}个)**  \n\n", count)];
     let mut entries: Vec<_> = skills.skills_iter().collect();
     entries.sort_by(|a, b| a.0.cmp(b.0));
     for (name, skill) in entries {

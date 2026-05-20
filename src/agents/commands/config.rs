@@ -79,12 +79,12 @@ pub async fn cmd_settings(ctx: CommandContext<'_>) -> String {
     let m = |set: bool| if set { "* " } else { "  " };
 
     format!(
-        "⚙️ **会话参数**\n\n\
-         {}模型: {}\n\
-         {}推理模式: {}\n\
-         {}自主权: {}\n\
-         {}最大工具调用: {}\n\
-         {}压缩阈值: {}\n\
+        "⚙️ **会话参数**  \n\n\
+         {}模型: {}  \n\
+         {}推理模式: {}  \n\
+         {}自主权: {}  \n\
+         {}最大工具调用: {}  \n\
+         {}压缩阈值: {}  \n\
          {}保留工作单元: {}{}",
         m(ov.model.is_some()), model_str,
         m(ov.thinking.is_some()), thinking_str,

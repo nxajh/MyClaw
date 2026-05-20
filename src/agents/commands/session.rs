@@ -103,7 +103,7 @@ pub fn cmd_sessions(ctx: CommandContext<'_>) -> String {
 
     let active_id = ctx.session_manager.active_session_id(ctx.user_id);
 
-    let mut lines = vec!["📂 **会话列表**\n".to_string()];
+    let mut lines = vec!["📂 **会话列表**  \n\n".to_string()];
     for (i, s) in sessions.iter().enumerate() {
         let marker = if active_id.as_deref() == Some(&s.id) { " ← 当前" } else { "" };
         let name = s.display_name.as_deref().unwrap_or("(未命名)");
@@ -111,8 +111,8 @@ pub fn cmd_sessions(ctx: CommandContext<'_>) -> String {
         lines.push(format!("{}. **{}**{} — {}条消息 — `{}`",
             i + 1, name, marker, msg_count, s.id));
     }
-    lines.push("\n/new [名称] — 新建  /switch <N> — 切换  /rename <N> <名称> — 重命名  /delete <N> — 删除".to_string());
-    lines.join("\n")
+    lines.push("\n---\n_/new [名称] — 新建 | /switch <N> — 切换 | /rename <N> <名称> — 重命名 | /delete <N> — 删除_".to_string());
+    lines.join("  \n")
 }
 
 pub async fn cmd_switch(args: &str, ctx: CommandContext<'_>) -> String {
