@@ -15,7 +15,7 @@ use crate::providers::{Tool, ToolResult};
 // ── Shared types ──────────────────────────────────────────────────────────
 
 const MAX_CONTENT_CHARS: usize = 10_000;
-const MAX_ABSTRACT_CHARS: usize = 500;
+const MAX_SUMMARY_CHARS: usize = 500;
 const MAX_NAME_LENGTH: usize = 64;
 
 /// Validate a memory file name.
@@ -97,10 +97,10 @@ fn atomic_write(target: &Path, content: &str) -> std::io::Result<()> {
 }
 
 /// Build frontmatter string.
-fn build_frontmatter(name: &str, abstract_text: &str, tags: &[String], mem_type: &crate::memory::MemoryType, created_at: &str) -> String {
+fn build_frontmatter(name: &str, summary: &str, tags: &[String], mem_type: &crate::memory::MemoryType, created_at: &str) -> String {
     let mut fm = format!(
         "---\nname: {}\nsummary: \"{}\"\ntype: {}\ncreated_at: {}",
-        name, abstract_text, mem_type.as_str(), created_at
+        name, summary, mem_type.as_str(), created_at
     );
     if !tags.is_empty() {
         fm.push_str(&format!("\ntags: [{}]", tags.join(", ")));
@@ -170,7 +170,7 @@ impl Tool for MemoryListTool {
             let mut obj = json!({
                 "type": e.mem_type.as_str(),
                 "name": e.name,
-                "summary": e.abstract_text,
+                "summary": e.summary,
             });
             if !e.tags.is_empty() {
                 obj["tags"] = json!(e.tags);
@@ -256,7 +256,7 @@ impl Tool for MemoryViewTool {
                     "success": true,
                     "name": mf.name,
                     "type": mf.mem_type.as_str(),
-                    "summary": mf.abstract_text,
+                    "summary": mf.summary,
                     "created_at": mf.created_at,
                     "content": mf.content,
                 });
@@ -307,7 +307,7 @@ impl Tool for MemorySearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search memory entries by keyword. Searches across name, abstract, tags, and content. \
+        "Search memory entries by keyword. Searches across name, summary, tags, and content. \
          Returns matching entries with relevance info."
     }
 
@@ -317,7 +317,7 @@ impl Tool for MemorySearchTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search query. Matches against name, abstract, tags, and content."
+                    "description": "Search query. Matches against name, summary, tags, and content."
                 }
             },
             "required": ["query"]
@@ -345,7 +345,7 @@ impl Tool for MemorySearchTool {
 
         let files = crate::memory::scan_memory_files(&paths.memory_dir);
 
-        // Scoring: name=3, tags=2, abstract=2, content=1
+        // Scoring: name=3, tags=2, summary=2, content=1
         let mut results: Vec<(i32, &crate::memory::MemoryFile)> = Vec::new();
         for mf in &files {
             let mut score = 0i32;
@@ -355,7 +355,7 @@ impl Tool for MemorySearchTool {
             if mf.tags.iter().any(|t| t.to_lowercase().contains(&query)) {
                 score += 2;
             }
-            if mf.abstract_text.to_lowercase().contains(&query) {
+            if mf.summary.to_lowercase().contains(&query) {
                 score += 2;
             }
             if mf.content.to_lowercase().contains(&query) {
@@ -391,8 +391,8 @@ impl Tool for MemorySearchTool {
                 s.push_str(&mf.content[start..end]);
                 if end < mf.content.len() { s.push_str("..."); }
                 s
-            } else if mf.abstract_text.to_lowercase().contains(&query) {
-                mf.abstract_text.clone()
+            } else if mf.summary.to_lowercase().contains(&query) {
+                mf.summary.clone()
             } else {
                 mf.content.chars().take(80).collect()
             };
@@ -400,7 +400,7 @@ impl Tool for MemorySearchTool {
             let mut result = json!({
                 "name": mf.name,
                 "type": mf.mem_type.as_str(),
-                "summary": mf.abstract_text,
+                "summary": mf.summary,
                 "snippet": snippet,
                 "relevance": score,
             });
@@ -537,12 +537,12 @@ impl MemoryManageTool {
         }
 
         let mem_type = self.resolve_type(args);
-        let abstract_text = self.resolve_abstract(args, content);
+        let summary = self.resolve_summary(args, content);
         let tags = self.resolve_tags(args);
         let filename = format!("{}.md", name);
         let now = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
-        let frontmatter = build_frontmatter(name, &abstract_text, &tags, &mem_type, &now);
+        let frontmatter = build_frontmatter(name, &summary, &tags, &mem_type, &now);
         let file_content = format!("{}{}", frontmatter, content);
 
         let target = paths.memory_dir.join(&filename);
@@ -554,7 +554,7 @@ impl MemoryManageTool {
             "message": format!("Memory '{}' added.", name),
             "name": name,
             "type": mem_type.as_str(),
-            "summary": abstract_text,
+            "summary": summary,
             "tags": tags,
         }))
     }
@@ -582,10 +582,10 @@ impl MemoryManageTool {
         let mem_type = args["memory_type"].as_str()
             .and_then(crate::memory::MemoryType::from_str_lossy)
             .unwrap_or(existing.mem_type);
-        let abstract_text = if args["summary"].as_str().is_some() {
-            self.resolve_abstract(args, content)
+        let summary = if args["summary"].as_str().is_some() {
+            self.resolve_summary(args, content)
         } else {
-            existing.abstract_text.clone()
+            existing.summary.clone()
         };
         let tags = if args["tags"].is_array() {
             self.resolve_tags(args)
@@ -600,7 +600,7 @@ impl MemoryManageTool {
         let filename = if filename == name { &fallback_filename } else { filename };
         let now = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
-        let frontmatter = build_frontmatter(name, &abstract_text, &tags, &mem_type, &now);
+        let frontmatter = build_frontmatter(name, &summary, &tags, &mem_type, &now);
         let file_content = format!("{}{}", frontmatter, content);
 
         let target = paths.memory_dir.join(filename);
@@ -637,13 +637,13 @@ impl MemoryManageTool {
             .unwrap_or(crate::memory::MemoryType::Project)
     }
 
-    /// Resolve abstract: explicit parameter, or auto-generate from content.
-    fn resolve_abstract(&self, args: &serde_json::Value, content: &str) -> String {
+    /// Resolve summary: explicit parameter, or auto-generate from content.
+    fn resolve_summary(&self, args: &serde_json::Value, content: &str) -> String {
         if let Some(abs) = args["summary"].as_str() {
             let trimmed = abs.trim();
             if !trimmed.is_empty() {
-                if trimmed.chars().count() > MAX_ABSTRACT_CHARS {
-                    let truncated: String = trimmed.chars().take(MAX_ABSTRACT_CHARS).collect();
+                if trimmed.chars().count() > MAX_SUMMARY_CHARS {
+                    let truncated: String = trimmed.chars().take(MAX_SUMMARY_CHARS).collect();
                     return truncated;
                 }
                 return trimmed.to_string();

@@ -290,8 +290,8 @@ impl AttachmentManager {
                     line.push_str(&format!(" [{}]", entry.tags.join(", ")));
                 }
                 added.push(line);
-                if !entry.abstract_text.is_empty() {
-                    added.push(format!("  {}", entry.abstract_text));
+                if !entry.summary.is_empty() {
+                    added.push(format!("  {}", entry.summary));
                 }
             }
         }

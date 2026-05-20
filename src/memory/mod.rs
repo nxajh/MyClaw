@@ -77,7 +77,7 @@ impl MemoryType {
 #[derive(Debug, Clone)]
 pub struct MemoryFile {
     pub name: String,
-    pub abstract_text: String,
+    pub summary: String,
     pub tags: Vec<String>,
     pub mem_type: MemoryType,
     pub created_at: String,
@@ -90,7 +90,7 @@ pub struct IndexEntry {
     pub mem_type: MemoryType,
     pub name: String,
     pub filename: String,
-    pub abstract_text: String,
+    pub summary: String,
     pub tags: Vec<String>,
 }
 
@@ -105,7 +105,7 @@ impl From<&MemoryFile> for IndexEntry {
                 .to_str()
                 .unwrap_or("")
                 .to_string(),
-            abstract_text: f.abstract_text.clone(),
+            summary: f.summary.clone(),
             tags: f.tags.clone(),
         }
     }
@@ -169,7 +169,7 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
 
     // Parse YAML frontmatter (simple key: value parsing)
     let mut name = None;
-    let mut abstract_text: Option<String> = None;
+    let mut summary: Option<String> = None;
     let mut tags: Vec<String> = Vec::new();
     let mut mem_type = None;
     let mut created_at = None;
@@ -181,7 +181,7 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
             let value = value.trim();
             match key {
                 "name" => name = Some(value.to_string()),
-                "summary" => abstract_text = Some(value.to_string()),
+                "summary" => summary = Some(value.to_string()),
                 "tags" => tags = parse_tags(value),
                 "type" => mem_type = MemoryType::from_str_lossy(value),
                 "created_at" => created_at = Some(value.to_string()),
@@ -192,7 +192,7 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
 
     Some(MemoryFile {
         name: name?,
-        abstract_text: abstract_text.unwrap_or_default(),
+        summary: summary.unwrap_or_default(),
         tags,
         mem_type: mem_type?,
         created_at: created_at.unwrap_or_default(),
@@ -249,8 +249,8 @@ pub fn format_memory_index(entries: &[IndexEntry]) -> String {
                 line.push_str(&format!(" [{}]", entry.tags.join(", ")));
             }
             lines.push(line);
-            if !entry.abstract_text.is_empty() {
-                lines.push(format!("  {}", entry.abstract_text));
+            if !entry.summary.is_empty() {
+                lines.push(format!("  {}", entry.summary));
             }
         }
         lines.push(String::new());
@@ -315,7 +315,7 @@ pub fn build_memory_section(knowledge_dir: &str) -> String {
 当记忆内容与当前任务相关时，用 file_read 读取详细文件。
 
 如果用户明确要求记住某事，或你发现偏好/行为模式变化，用 file_write 写入 memory/ 目录。
-文件必须包含 YAML frontmatter（name / abstract / type / created_at），可选 tags。
+文件必须包含 YAML frontmatter（name / summary / type / created_at），可选 tags。
 不要存可以从代码/文件推导的信息（代码路径、架构、git history）。
 
 ### 记忆索引
@@ -333,7 +333,7 @@ mod tests {
 
     #[test]
     fn test_parse_frontmatter_with_summary() {
-        // New format uses "summary:", old "abstract:" still accepted (backward compat).
+        // New format uses "summary:", key is "summary:".
         let content = "---\nname: user_lang\nsummary: 用户偏好使用中文进行所有交流\ntags: [user, language, preference]\ntype: user\ncreated_at: 2026-05-07\n---\n\n中文交流。";
         let dir = std::env::temp_dir().join("myclaw_test_memory_parse");
         fs::create_dir_all(&dir).unwrap();
@@ -342,7 +342,7 @@ mod tests {
 
         let mf = parse_memory_file(&path).unwrap();
         assert_eq!(mf.name, "user_lang");
-        assert_eq!(mf.abstract_text, "用户偏好使用中文进行所有交流");
+        assert_eq!(mf.summary, "用户偏好使用中文进行所有交流");
         assert_eq!(mf.tags, vec!["user", "language", "preference"]);
         assert_eq!(mf.mem_type, MemoryType::User);
         assert_eq!(mf.created_at, "2026-05-07");
@@ -352,17 +352,17 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_frontmatter_no_abstract() {
-        // Files without abstract should parse fine (empty abstract)
+    fn test_parse_frontmatter_no_summary() {
+        // Files without summary should parse fine (empty summary)
         let content = "---\nname: test\ntype: project\ncreated_at: 2026-05-07\n---\n\nContent.";
-        let dir = std::env::temp_dir().join("myclaw_test_memory_no_abstract");
+        let dir = std::env::temp_dir().join("myclaw_test_memory_no_summary");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.md");
         fs::write(&path, content).unwrap();
 
         let mf = parse_memory_file(&path).unwrap();
         assert_eq!(mf.name, "test");
-        assert_eq!(mf.abstract_text, "");
+        assert_eq!(mf.summary, "");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -386,21 +386,21 @@ mod tests {
                 mem_type: MemoryType::Project,
                 name: "project1".into(),
                 filename: "project1.md".into(),
-                abstract_text: "Project context".into(),
+                summary: "Project context".into(),
                 tags: vec![],
             },
             IndexEntry {
                 mem_type: MemoryType::Feedback,
                 name: "no_diff".into(),
                 filename: "feedback_no_diff.md".into(),
-                abstract_text: "不要总结 diff".into(),
+                summary: "不要总结 diff".into(),
                 tags: vec!["workflow".into()],
             },
             IndexEntry {
                 mem_type: MemoryType::User,
                 name: "lang".into(),
                 filename: "user_lang.md".into(),
-                abstract_text: "中文回复".into(),
+                summary: "中文回复".into(),
                 tags: vec![],
             },
         ];
@@ -421,7 +421,7 @@ mod tests {
                 mem_type: MemoryType::Project,
                 name: "project1".into(),
                 filename: "project1.md".into(),
-                abstract_text: "Project context".into(),
+                summary: "Project context".into(),
                 tags: vec![],
             },
         ];
@@ -432,7 +432,7 @@ mod tests {
     #[test]
     fn test_truncate_index() {
         let long: String = (0..300)
-            .map(|i| format!("- file{}.md — abstract {}", i, i))
+            .map(|i| format!("- file{}.md — summary {}", i, i))
             .collect::<Vec<_>>()
             .join("\n");
         let truncated = truncate_index(&long, 200, 25_000);
