@@ -1117,6 +1117,18 @@ fn reconstruct_history(
                         }));
                     }
                 }
+
+                // If the last message in out is also an assistant message, we merge blocks
+                // instead of creating a new bubble. This avoids bubble fragmentation after turns with tools.
+                if let Some(last_msg) = out.last_mut() {
+                    if last_msg["role"] == "assistant" {
+                        if let Some(arr) = last_msg.get_mut("blocks").and_then(|v| v.as_array_mut()) {
+                            arr.extend(blocks);
+                            continue;
+                        }
+                    }
+                }
+
                 if blocks.is_empty() {
                     continue;
                 }
