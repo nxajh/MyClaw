@@ -49,6 +49,7 @@ impl ModelConfig {
 
 pub struct Registry {
     providers: HashMap<String, ProviderConfig>,
+    model_index: HashMap<String, (String, ModelConfig)>,
     routing: RoutingConfig,
     chat_providers: HashMap<String, Arc<dyn ChatProvider>>,
     chat_model_configs: HashMap<String, crate::providers::capability::ChatModelConfig>,
@@ -65,8 +66,14 @@ pub struct Registry {
 
 impl Registry {
     pub fn new(providers: HashMap<String, ProviderConfig>, routing: RoutingConfig) -> Self {
+        let model_index = providers.iter()
+            .flat_map(|(key, p)| {
+                p.models.iter().map(move |m| (m.model_id.clone(), (key.clone(), m.clone())))
+            })
+            .collect();
         Self {
             providers,
+            model_index,
             routing,
             chat_providers: HashMap::new(),
             chat_model_configs: HashMap::new(),
@@ -81,17 +88,12 @@ impl Registry {
     }
 
     fn find_provider_by_model(&self, model_id: &str) -> anyhow::Result<(&str, &ModelConfig)> {
-        tracing::trace!(model_id, "find_provider_by_model");
-        for (key, provider) in &self.providers {
-            for model in &provider.models {
-                tracing::trace!(provider = %key, model = %model.model_id, "checking");
-                if model.model_id == model_id {
-                    return Ok((key.as_str(), model));
-                }
-            }
-        }
-        tracing::warn!(model_id, available_providers = ?self.providers.keys().collect::<Vec<_>>(), "no provider found for model");
-        anyhow::bail!("No provider found for model: {}", model_id)
+        self.model_index.get(model_id)
+            .map(|(key, model)| (key.as_str(), model))
+            .ok_or_else(|| {
+                tracing::warn!(model_id, available_providers = ?self.providers.keys().collect::<Vec<_>>(), "no provider found for model");
+                anyhow::anyhow!("No provider found for model: {}", model_id)
+            })
     }
 
     fn select_model(&self, entry: &RouteEntry, capability: Capability) -> anyhow::Result<&ModelConfig> {
