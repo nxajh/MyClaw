@@ -211,9 +211,9 @@ impl Tool for ContentSearchTool {
         json!({
             "type": "object",
             "properties": {
-                "pattern": {
+                "regex": {
                     "type": "string",
-                    "description": "Regular expression pattern to search for."
+                    "description": "Regular expression to search for."
                 },
                 "path": {
                     "type": "string",
@@ -228,7 +228,7 @@ impl Tool for ContentSearchTool {
                     "description": "Maximum number of matching lines to return (default 200)."
                 }
             },
-            "required": ["pattern"]
+            "required": ["regex"]
         })
     }
 
@@ -237,9 +237,9 @@ impl Tool for ContentSearchTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let pattern = args["pattern"]
+        let pattern = args["regex"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("'pattern' is required"))?;
+            .ok_or_else(|| anyhow::anyhow!("'regex' is required"))?;
         let base = args["path"].as_str().unwrap_or(".");
         let include = args["include"].as_str();
         let max_results = args["max_results"].as_u64().unwrap_or(200) as usize;
