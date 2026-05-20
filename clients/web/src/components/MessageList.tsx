@@ -2,6 +2,8 @@ import { useState, useEffect, useRef, type ReactNode } from 'react'
 import type { RefObject } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
 import { ChevronDown, ChevronRight, Copy, Check } from 'lucide-react'
 import type { ChatMessage, MessageBlock } from '../hooks/useWebSocket'
 import ToolCallCard from './ToolCallCard'
@@ -100,7 +102,8 @@ function renderBlock(block: MessageBlock, index: number, isGenerating: boolean) 
         prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5
         prose-hr:border-zinc-800">
         <Markdown
-          remarkPlugins={[remarkGfm]}
+          remarkPlugins={[remarkGfm, remarkMath]}
+          rehypePlugins={[rehypeKatex]}
           components={{
             pre: ({ children }) => <PreCodeBlock>{children}</PreCodeBlock>,
           }}
@@ -143,9 +146,13 @@ export default function MessageList({ messages, containerRef }: Props) {
         {messages.map((msg) => {
           if (msg.role === 'user') {
             return (
-              <div key={msg.id} className="flex justify-end">
-                <div className="max-w-[78%] rounded-3xl rounded-br-lg bg-zinc-800 px-5 py-3.5 text-sm text-zinc-100 whitespace-pre-wrap leading-relaxed">
+              <div key={msg.id} className="flex justify-end gap-3.5">
+                <div className="max-w-[78%] rounded-2xl rounded-tr-lg bg-zinc-800 px-5 py-3.5 text-sm text-zinc-100 whitespace-pre-wrap leading-relaxed">
                   {msg.content}
+                </div>
+                {/* Avatar */}
+                <div className="mt-0.5 h-7 w-7 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-base shrink-0 select-none shadow-md">
+                  👤
                 </div>
               </div>
             )
