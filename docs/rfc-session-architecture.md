@@ -1,6 +1,6 @@
 # RFC: Session 架构重构
 
-> 状态：草案
+> 状态：草案 v2
 > 日期：2026-05-21
 > 背景：WebUI sessions.switch bug 修复过程中发现的设计问题
 
@@ -17,8 +17,8 @@
 消息流转经过四层：
 
 ```
-orchestrator → handle.tx.send(msg) → run_session_actor 从 rx 取出 
-→ mutex.lock(AgentLoop) → run()
+orchestrator → handle.tx.send(msg) → run_session_actor 从 rx 取出
+  → mutex.lock(AgentLoop) → run()
 ```
 
 `run_session_actor` 只是一个 `while let` 循环，纯粹为了串行化。actor task 拿着 `Arc<Mutex<AgentLoop>>`，但同一时刻只有它自己在用这个 mutex。
@@ -30,7 +30,7 @@ orchestrator → handle.tx.send(msg) → run_session_actor 从 rx 取出
 | 内容 | 性质 | 应该在 |
 |------|------|--------|
 | `registry`, `tools`, `skills` | 全局共享的基础设施引用 | Agent |
-| `request_builder`, `compactor` | registry/tools 的包装 | Agent |
+| `request_builder`, `compactor` | registry/tools 的包装 | 见下文：拆掉 |
 | `session` | 对话数据 | SessionContext |
 | `loop_breaker`, `policy` | per-turn 计数器 | `run()` 的局部变量 |
 | `persist_hook` | 持久化回调 | 全局共享 |
@@ -39,17 +39,32 @@ orchestrator → handle.tx.send(msg) → run_session_actor 从 rx 取出
 
 ### 4. 主 agent 与子代理配置不统一
 
-- 主 agent 配置散落在 `config.yaml` 的 `agent` 段
+- 主 agent 配置散落在 `config.toml` 的 `[agent]` 段
 - 子代理配置在 `workspace/agents/<name>/AGENT.md`
 - 两者格式不同，字段不对等，构建路径完全不同
 
 ### 5. Prompt 构建对主 agent 特化
 
-`SystemPromptBuilder` 硬编码了主 agent 的 prompt 结构（读 IDENTITY.md、SOUL.md、USER.md），子代理只多了个 `identity_header` workaround。实际上 prompt 的各部分应该由 agent 配置驱动，而不是代码里的 if/else。
+`SystemPromptBuilder` 硬编码了主 agent 的 prompt 结构（读 IDENTITY.md、SOUL.md、USER.md），子代理只多了个 `identity_header` workaround。
 
 ### 6. user_id 名不副实
 
 `user_id` 实际是路由 key（`"telegram:bot1:12345"`），不是真正的用户标识。WebUI 开两个标签页就是两个"用户"，session 互不可见。用户信息（USER.md）是全局共享的，无法 per-user。
+
+### 7. RequestBuilder 职责混杂
+
+`RequestBuilder` 名为"请求构建器"，实际承担五件事：
+1. system prompt 字符串存储
+2. 热重载监听（`change_rx`）
+3. 附件管理（`AttachmentManager`：skill / agent / mcp / memory / date 增量通告）
+4. 图片暂存（pending images）
+5. 消息列表组装（`build()`）
+
+五件事分属四种生命周期，挤在一个 struct 里。其中只有 AttachmentManager 是真正有状态的 per-session 数据，其他都可以拆。
+
+### 8. 配置参数耦合在 AgentConfig
+
+`max_tool_calls`、`compact_threshold`、`retain_work_units`、`max_history`、`tool_timeout_secs` 等是部署级运行参数，跟 agent 身份无关，但目前混在 AgentConfig 里 per-agent 配置。`permission_mode`、`run_mode`、`model`、`thinking`、`isolation` 是用户/触发源交互层面的临时 override，也不应该写死在 agent 配置里。
 
 ---
 
@@ -58,294 +73,523 @@ orchestrator → handle.tx.send(msg) → run_session_actor 从 rx 取出
 ### 整体结构
 
 ```
+config.toml (全局配置)
+  ├─ [runtime]   timezone
+  ├─ [limits]    max_tool_calls, max_history, max_output_bytes,
+  │              tool_timeout_secs, stream_first_chunk_timeout_secs,
+  │              loop_breaker_threshold
+  ├─ [context]   compact_threshold, retain_work_units
+  ├─ [defaults]  permission_mode, model
+  ├─ [prompt]    max_chars, bootstrap_max_chars, native_tools
+  └─ [providers] [channels] [mcp_servers] [scheduler] [users]
+
 daemon.rs (Composition Root)
   │
-  ├─ create ServiceRegistry          ← 全局，所有 Agent 共享
-  ├─ create ToolRegistry             ← 全局，所有 Agent 共享
-  ├─ create SkillManager             ← 全局，所有 Agent 共享
+  ├─ ServiceRegistry        ← 全局共享
+  ├─ ToolRegistry           ← 全局共享
+  ├─ SkillManager           ← Arc<RwLock>，WorkspaceWatcher 自动更新
+  ├─ McpManager             ← 全局共享
+  ├─ ContextEngine          ← 全局共享（compaction 引擎）
+  ├─ WorkspaceWatcher       ← 自维护，own skills/sub_agents RwLock
+  ├─ AskRouter              ← 全局共享（pending_asks 注册器）
+  ├─ DelegationCoordinator  ← 全局共享（子代理编排）
+  ├─ UserResolver           ← 全局共享（routing_key → user_id）
   │
-  ├─ load_agents_from_dir()          ← 返回 Vec<Agent>
-  │   ├─ Agent("main", ...)          ← 主 agent
-  │   ├─ Agent("coder", ...)         ← 子代理
-  │   └─ Agent("researcher", ...)    ← 子代理
+  ├─ AgentRegistry          ← 加载 workspace/agents/*/AGENT.md
   │
-  └─ create SessionManager(AgentRegistry)
-       └─ create SessionContext(...)  ← per session
+  └─ SessionManager
+       └─ SessionContext    ← per session
 ```
 
 ### Agent
 
 ```rust
-struct Agent {
-    // 身份与配置
+struct AgentConfig {
     name: String,
-    config: AgentConfig,              // max_tool_calls, compact_threshold 等
-    system_prompt: String,            // AGENT.md body（可以为空，由 builder 生成）
-    tool_names: Vec<String>,          // 这个 agent 能用哪些 tool
-    skill_names: Vec<String>,         // 这个 agent 绑定哪些 skill
+    description: Option<String>,
+    tools: ToolFilter,
+    skills: SkillFilter,
+    mcp: McpFilter,
+    system_prompt: String,         // AGENT.md body
+}
 
-    // 共享基础设施引用（不拥有）
+enum ToolFilter {
+    All,
+    Allow(Vec<String>),
+    Deny(Vec<String>),
+}
+// SkillFilter / McpFilter 同形
+
+struct Agent {
+    config: AgentConfig,
+    cached_prompt: String,         // 启动时算一次的系统提示词（不含 profile）
+
+    // 共享基础设施引用
     registry: Arc<dyn ServiceRegistry>,
-    tool_impls: Arc<ToolRegistry>,    // 全局 tool 实现池
+    tool_impls: Arc<ToolRegistry>,
     skills: Arc<RwLock<SkillManager>>,
+    context_engine: Arc<ContextEngine>,
 }
 
 impl Agent {
-    /// 无状态执行一轮 turn。LoopBreaker、CompactionPolicy 作为局部变量。
-    fn run(&self, session: &mut Session, msg: &str, ctx: &TurnContext) -> TurnResult;
+    /// 无状态执行一轮 turn。LoopBreaker、运行限制从 ctx.global 读。
+    async fn run(
+        &self,
+        session: &mut Session,
+        input: TurnInput,
+        ctx: &TurnContext<'_>,
+    ) -> Result<TurnResult>;
 }
 ```
 
-Agent 是同一个类型，不同实例有不同配置。"主 agent"和"子代理"不是不同类型，是同一个类型的不同实例。
+"主 agent"和"子代理"是同一个类型的不同实例。
 
 ### SessionContext
 
 ```rust
 struct SessionContext {
-    session: Session,                 // 对话数据：history, metadata
-    agent: Arc<Agent>,                // 绑定的 agent（创建时选定）
-    channel: Arc<dyn Channel>,        // 通信通道
-    user_profile: Arc<UserProfile>,   // 用户信息
-    mutex: tokio::sync::Mutex<()>,    // turn 串行化
+    session: Mutex<Session>,
+    agent: Arc<Agent>,
+    user_profile: Arc<UserProfile>,
+
+    // per-session 状态（跨 turn 保留，不持久化）
+    attachments: Mutex<AttachmentManager>,
+    pending_retry: Mutex<Option<String>>,
+
+    turn_lock: tokio::sync::Mutex<()>,
 }
 
 impl SessionContext {
-    async fn process_turn(&self, msg: TurnMessage) {
-        let _guard = self.mutex.lock().await;
-        self.channel.on_status(Thinking).await;
-        self.agent.run(&mut self.session, &msg, &ctx).await;
-        self.channel.on_status(Done).await;
-    }
+    /// channel 每轮注入，不存储 — 支持同一 session 跨通道访问
+    async fn process_turn(
+        &self,
+        input: TurnInput,
+        channel: Arc<dyn Channel>,
+        reply_target: String,
+        env: &TurnEnv,
+    ) -> Result<String>;
 }
 ```
 
 **职责**：
-- 持有 per-session 的所有状态
-- 保证 turn 串行化（mutex，不需要 channel + actor）
-- 不持有 AgentLoop，不持有 persist_hook
+- 持有 per-session 的对话数据 + attachment 状态
+- 保证 turn 串行化（turn_lock）
+- 不持有 channel（每轮注入）
+- 不持有 AgentLoop / persist_hook（全局共享）
+
+### TurnContext / TurnInput / TurnResult
+
+```rust
+struct TurnContext<'a> {
+    channel: &'a dyn Channel,
+    reply_target: &'a str,
+    user_profile: &'a UserProfile,
+    attachments: &'a mut AttachmentManager,
+
+    ask_router: &'a AskRouter,
+    delegator: &'a dyn AgentDelegator,
+    persist: &'a dyn PersistHook,
+
+    global: &'a GlobalConfig,           // 运行限制、默认值
+    session_override: &'a SessionOverride,
+
+    stream: Option<TurnStream<'a>>,     // None = Collect 模式
+}
+
+struct TurnStream<'a> {
+    event_tx: &'a mpsc::Sender<TurnEvent>,
+    cancel: &'a CancellationToken,
+}
+
+struct TurnInput {
+    text: String,
+    image_urls: Option<Vec<String>>,
+    image_base64: Option<Vec<String>>,
+}
+
+struct TurnResult {
+    text: String,
+    stop_reason: StopReason,
+    pending_retry: Option<String>,
+}
+```
 
 ### SessionManager
 
 ```rust
 struct SessionManager {
     backend: Arc<dyn SessionBackend>,
-    agents: HashMap<String, Arc<Agent>>,   // name → Agent 实例
+    agents: Arc<AgentRegistry>,
     active: HashMap<String, String>,        // routing_key → session_id
     contexts: HashMap<String, Arc<SessionContext>>,  // session_id → context
 }
 
 impl SessionManager {
-    fn switch_session(&mut self, routing_key: &str, session_id: &str) {
+    fn switch_session(&self, routing_key: &str, session_id: &str) {
         self.active.insert(routing_key, session_id);
-        // 天然一致，不需要 evict
+        // 天然一致 — context 是 session_id 的函数，与 routing_key 无关
     }
 
-    fn get_context(&self, routing_key: &str) -> Arc<SessionContext> {
-        let session_id = self.active.get(routing_key)?;
-        self.contexts.get(session_id)
+    fn get_context(&self, routing_key: &str) -> Arc<SessionContext>;
+    fn create_session(&self, routing_key: &str, agent_name: &str, ...) -> Arc<SessionContext>;
+}
+```
+
+### SessionOverride
+
+只剩用户交互或触发源真正需要 override 的字段：
+
+```rust
+struct SessionOverride {
+    run_mode: Option<RunMode>,              // 触发源决定，cron=Background
+    permission_mode: Option<PermissionMode>,// 用户在 WebUI/命令改
+    model: Option<String>,                  // 用户切模型
+    thinking: Option<ThinkingConfig>,       // 跟 model
+    isolation: Option<AgentIsolation>,      // 子代理委派时设
+}
+```
+
+运行参数（max_tool_calls / compact_threshold / retain_work_units 等）全部从 GlobalConfig 读，session 不感知。
+
+### ContextEngine
+
+```rust
+struct ContextEngine {
+    threshold: f64,
+    retain_work_units: usize,
+    registry: Arc<dyn ServiceRegistry>,
+    // ...
+}
+
+impl ContextEngine {
+    fn should_compact(&self, session: &Session, last_total_tokens: u64) -> bool;
+    async fn compact(&self, session: &mut Session, ...) -> Result<()>;
+}
+```
+
+`CompactionPolicy` + `CompactionExecutor` 合并为 `ContextEngine`，全局单例。配置从 `GlobalConfig.context` 读，不暴露给 session/agent。
+
+### WorkspaceWatcher（自维护）
+
+```rust
+struct WorkspaceWatcher {
+    skills: Arc<RwLock<SkillManager>>,
+    sub_agents: Arc<RwLock<Vec<AgentConfig>>>,
+    // 内部 spawn task 监听 workspace/skills/ 和 workspace/agents/ 变化，
+    // 直接更新 RwLock
+}
+```
+
+不再让每个 AgentLoop 各持一份 `change_rx`。Agent.run 读 RwLock 时自动看到最新值。AttachmentManager 在下一轮 turn 算 diff 时自然处理"通告变化"。
+
+### UserResolver (阶段 4)
+
+```rust
+struct UserResolver {
+    explicit: HashMap<String, String>,  // routing_key → user_id（来自 config.toml）
+}
+
+impl UserResolver {
+    fn resolve(&self, routing_key: &str) -> String {
+        self.explicit.get(routing_key).cloned()
+            .unwrap_or_else(|| routing_key.to_string())
     }
 }
 ```
 
-**消灭的东西**：
-- `LoopRegistry`（DashMap）→ 职责回归 SessionManager
-- `SessionHandle`（Arc<Mutex<AgentLoop>> + Sender）→ 不需要
-- `run_session_actor`（while let + channel）→ mutex 替代
-- `get_or_create()` 的工厂逻辑 → SessionContext 构造时一次性完成
+未配置映射时 user_id = routing_key，行为等价现状。
 
-### UserProfile
+### UserProfile (阶段 4)
 
 ```rust
 struct UserProfile {
-    id: String,                       // 用户标识
+    id: String,
     name: Option<String>,
     timezone: Option<String>,
     language: Option<String>,
     preferences: HashMap<String, String>,
+    free_form: String,                  // profile.md body
 }
 ```
 
-per user，跨 session 持久化，按用户隔离存储：
-
+存储：
 ```
-workspace/users/
-  albert/
-    profile.md          ← 基本身份信息（替代当前 USER.md）
-    preferences.md      ← 积累的偏好
-    memory/             ← 原 memory 目录，按用户隔离
+workspace/users/{user_id}/
+  profile.md          ← 基本身份信息（替代 USER.md）
+  preferences.md      ← 积累的偏好
+  memory/             ← memory 目录 per-user
 ```
 
-来源分层（高→低优先级）：
-
-```
-1. session 内对话中积累的偏好
-2. channel 提供的用户信息（Telegram profile 等）
-3. 全局默认（workspace/DEFAULT_USER.md）
-```
-
-在认证体系做好之前，先用 routing key 作为用户标识的 fallback——每个 channel endpoint 看作一个"用户"，和现在的行为一致，但数据结构上是 per-user 的。
+加载顺序（高→低优先级）：
+1. `workspace/users/{id}/profile.md`
+2. `workspace/users/{id}/preferences.md`
+3. channel 元数据（Telegram first_name 等）
+4. `workspace/DEFAULT_USER.md`
 
 ---
 
-## 三、Agent 配置统一
+## 三、配置文件分层
 
-### 目录结构
+### config.toml（全局，部署级）
 
+```toml
+[runtime]
+timezone = "Asia/Shanghai"
+
+[limits]
+max_tool_calls = 100
+max_history = 200
+max_output_bytes = 102400
+tool_timeout_secs = 180
+stream_first_chunk_timeout_secs = 600
+loop_breaker_threshold = 3
+
+[context]
+compact_threshold = 0.7
+retain_work_units = 3
+
+[defaults]
+permission_mode = "default"
+model = "claude-sonnet-4-6"
+
+[prompt]
+max_chars = 0
+bootstrap_max_chars = 20000
+native_tools = true
+
+# providers / channels / mcp_servers / scheduler 同现状
+
+[users]    # 阶段 4
+albert.routing_keys = ["telegram:bot1:12345", "client:webui:any"]
 ```
-workspace/agents/
-├── main/
-│   └── AGENT.md            ← 主 agent
-├── coder/
-│   └── AGENT.md            ← 子代理
-└── researcher/
-    └── AGENT.md            ← 子代理
-```
 
-每个 agent 一个目录，一个 `AGENT.md`。不需要 `IDENTITY.md`、`SOUL.md`、`RULES.md` 等中间文件。身份、行为准则、system prompt 全部在 AGENT.md 的 body 里。
-
-### AGENT.md 格式
+### AGENT.md（per-agent，能力定义）
 
 ```markdown
 ---
 name: coder
 description: "Expert programmer for writing and editing code"
-
-# 工具与技能
-tools: [shell, file_read, file_write, file_edit, content_search]
+tools: [shell, file_read, file_write, file_edit]
 skills: [code-review]
-model: claude-sonnet-4-20250514
-
-# 行为参数
-max_tool_calls: 30
-permission_mode: auto
-compact_threshold: 0.7
-isolation: shared
+mcp: [github, filesystem]
 ---
-
-# Coder Agent
 
 You are an expert programmer. Write clean, idiomatic code.
 
 ## Behavioral Principles
 
-Be concise. Don't over-engineer. Three similar lines of code is better
-than a premature abstraction.
-
-## Safety
-
-Ask before executing destructive shell commands.
+Be concise. Don't over-engineer.
 ```
 
-主 agent 的 AGENT.md body 可以留空，prompt 完全由 builder 的 builtin sections 生成：
-
+主 agent：
 ```markdown
 ---
 name: main
 tools: [all]
 skills: [all]
-model: null
+mcp: [all]
 ---
 
-（body 为空）
+(IDENTITY.md + SOUL.md + RULES.md 合并)
 ```
 
-### Prompt 构建
+### 三层解析
 
 ```
-最终 system prompt =
-  1. builtin sections                    ← 所有 agent 都有（行为规则、安全规则等）
-  2. AGENT.md body                       ← agent 自己定义的 prompt（可空）
-  3. user_profile.to_prompt()            ← 这个 session 的用户信息
-  4. runtime info                        ← OS 信息
-  5. skill 指令                          ← 按 agent 配置的 skills 过滤
-```
+permission_mode / model / thinking / run_mode:
+    SessionOverride > GlobalConfig.defaults
 
-不再硬编码读 IDENTITY.md / SOUL.md。USER.md 替换为 per-session 的 `user_profile`。
+max_tool_calls / context.* / limits.*:
+    GlobalConfig（单一来源，不可 per-session override）
+
+tools / skills / mcp / system_prompt:
+    AgentConfig（单一来源）
+
+isolation:
+    SessionOverride（仅子代理委派时设）
+```
 
 ---
 
-## 四、消息流转对比
+## 四、Prompt 构建
+
+```rust
+fn build_prompt(
+    agent: &AgentConfig,
+    profile: &UserProfile,
+    permission_mode: PermissionMode,
+    run_mode: RunMode,
+    global: &GlobalConfig,
+) -> String {
+    [
+        builtin_sections(permission_mode, run_mode, global.prompt.native_tools),
+        agent.system_prompt.clone(),
+        profile.to_prompt_section(),
+        runtime_info(),
+        skill_instructions(&agent.skills),
+    ].into_iter().filter(|s| !s.is_empty()).join("\n\n")
+}
+```
+
+- Agent 启动时算一次"半成品"（不含 profile），缓存在 `Agent.cached_prompt`
+- 每轮 turn 把 profile 拼上去（同 agent 不同用户 prompt 不同）
+- 完全去掉 IDENTITY.md / SOUL.md / USER.md / RULES.md 的硬编码读取
+
+---
+
+## 五、消息流转对比
 
 ### 现在
 
 ```
-用户消息 → Channel 收到 → orchestrator 主循环
-  → get_or_create(sk) 拿到 SessionHandle
-    ├─ SessionManager.get_or_create(sk)        ← 拿 Session
-    ├─ agent.loop_for_with_persist(session)     ← Session move 进 AgentLoop
-    ├─ 绑 ask_user / delegate handler 闭包
+用户消息 → Channel → orchestrator
+  → get_or_create(sk) 拿 SessionHandle
+    ├─ SessionManager.get_or_create(sk)
+    ├─ agent.loop_for_with_persist(session)
+    ├─ 绑 ask_user/delegate handler 闭包
     ├─ spawn run_session_actor
     └─ 存进 DashMap
   → handle.tx.send(TurnMessage)
-  → run_message_task
-    → loop_.lock().await
-    → AgentLoop.run()
+  → run_session_actor → run_message_task → loop_.lock().await → AgentLoop.run()
 ```
 
 ### 重构后
 
 ```
-用户消息 → Channel 收到 → orchestrator 主循环
+用户消息 → Channel → orchestrator
   → session_manager.get_context(routing_key)
-  → ctx.process_turn(msg)
-    → mutex.lock()
-    → agent.run(&mut session, msg, ctx)
+  → ctx.process_turn(input, channel, reply_target, env)
+    → turn_lock.lock()
+    → agent.run(&mut session, input, &turn_ctx)
 ```
 
-一层调用，没有 channel / actor / factory 间接层。
+四条入口路径（用户消息 / heartbeat / cron / webhook / 子代理）全部走同一条调用链，区别只是 sk 生成规则和 SessionOverride 字段：
+
+| 来源 | sk | channel | run_mode |
+|------|-----|---------|----------|
+| 用户消息 | `{type}:{account}:{sender}` | 来源 channel | Interactive |
+| Heartbeat | `_heartbeat_{uuid}` (ephemeral) | last_channel | Background |
+| Cron | `cron:{job_id}` | job 配置 target | Background |
+| Webhook | `webhook:{job_id}` | job 配置 target | Background |
+| 子代理 | `sub:{parent_sk}:{agent}:{uuid}` | 父 session 同 channel | Interactive |
 
 ---
 
-## 五、关键改动点
+## 六、关键改动点
 
 | 组件 | 现在 | 重构后 |
 |------|------|--------|
-| `Agent` | AgentLoop 工厂 | 无状态执行器，暴露 `run()` |
+| `Agent` | AgentLoop 工厂 | 无状态执行器，`run(&mut session, ...)` |
 | `AgentLoop` | 持有 Session ownership | 删除 |
-| `LoopRegistry` | `DashMap<sk, SessionHandle>` 独立缓存 | 删除，职责回归 SessionManager |
-| `SessionHandle` | `Arc<Mutex<AgentLoop>> + Sender` | 删除，SessionContext 自身保证串行化 |
-| `run_session_actor` | `while let` + channel 消费 | 删除，`process_turn` 直接调用 |
-| `run_message_task` | 独立函数 | SessionContext 方法 |
-| `ask_user` handler | per-session 闭包 | SessionContext 方法 |
-| `delegate` handler | per-session 闭包 | SessionContext 方法 |
+| `RequestBuilder` | 五职责混杂 struct | 删除（system_prompt 入 Agent，AttachmentManager 入 SessionContext，change_rx 入 WorkspaceWatcher，images 入 TurnInput，build() 改无状态函数） |
+| `LoopRegistry` | DashMap 平行缓存 | 删除 |
+| `SessionHandle` | Arc<Mutex<AgentLoop>> + Sender | 删除 |
+| `run_session_actor` | channel + actor | 删除（turn_lock 替代） |
+| `ask_user` handler | per-session 闭包 | `AskRouter` 全局共享 |
+| `delegate` handler | per-session 闭包 | `DelegationCoordinator` 全局共享 |
 | `persist_hook` | per-AgentLoop 创建 | 全局共享单例 |
-| `IDENTITY.md` / `SOUL.md` / `RULES.md` | workspace 根目录 | 删除，内容写入 AGENT.md body |
-| `USER.md` | workspace 根目录全局 | per-user profile |
-| `SubAgentConfig` | 与主 agent 配置格式不同 | 统一为 AgentConfig（从 AGENT.md 解析） |
+| `CompactionPolicy` + `CompactionExecutor` | per-AgentLoop | 合并为全局 `ContextEngine` |
+| `AttachmentManager` | RequestBuilder 字段 | `SessionContext` 字段 |
+| `change_rx` | 传给每个 AgentLoop | `WorkspaceWatcher` 自维护 RwLock |
+| `IDENTITY.md` / `SOUL.md` / `RULES.md` | workspace 根目录 | 合并进 main/AGENT.md body |
+| `USER.md` | workspace 根目录全局 | per-user UserProfile（阶段 4） |
+| `SubAgentConfig` | 与主 agent 配置不同 | 统一为 `AgentConfig` |
+| `SubAgentDelegator` | 持 agent 配置 + 临时构建 AgentLoop | `DelegationCoordinator` 编排 worktree，agent 通过 SessionManager 统一执行 |
+| `max_tool_calls` 等 limits | AgentConfig + SessionOverride | 仅 `GlobalConfig.limits` |
+| `compact_threshold` 等 context | AgentConfig + SessionOverride | 仅 `GlobalConfig.context`（ContextEngine 内部） |
+| `permission_mode` / `model` / `thinking` / `run_mode` / `isolation` | AgentConfig + SessionOverride | 仅 `SessionOverride`（agent 不感知） |
 
 ---
 
-## 六、实施策略
+## 七、实施策略
 
-### 阶段 1：AgentLoop 解耦 Session（最小改动，可独立部署）
+### 阶段 1：AgentLoop 解耦 Session
 
 1. `Agent.run()` / `AgentLoop.run()` 接收 `&mut Session` 参数，不再从 `self.session` 读取
-2. ~60 处 `self.session` → `session` 机械替换（run.rs 22 处，compaction.rs 32 处，tools.rs 3 处）
+2. ~57 处 `self.session` → `session` 机械替换（run.rs 22 处，compaction.rs 32 处，tools.rs 3 处）
 3. `persist_hook` 改为 `run()` 参数
-4. AgentLoop.session 字段删除
+4. `AgentLoop.session` 字段删除
 
-### 阶段 2：SessionContext + 去掉间接层
+可独立部署，顺带消除 `evict_loop` workaround 的根因。
 
-1. 新建 `SessionContext` 结构体
-2. 将 `LoopRegistry.get_or_create()` 迁移到 `SessionManager`
-3. 去掉 `run_session_actor`，用 `SessionContext.process_turn()` + mutex 替代
-4. `ask_user` / `delegate` 从闭包改为 SessionContext 方法
-5. 删除 `SessionHandle`、`LoopRegistry`、`run_session_actor`
+### 阶段 2：SessionContext + 去间接层 + 拆解 RequestBuilder
+
+1. 定义 `TurnContext` / `TurnInput` / `TurnResult` / `TurnStream` / `TurnEnv`
+2. 引入 `AskRouter`、`AgentDelegator` trait
+3. 新建 `SessionContext`（不存 channel；持 `AttachmentManager` 和 `pending_retry`）
+4. `SessionManager` 增 `contexts: HashMap<sid, Arc<SessionContext>>`，去掉 `cache`
+5. 拆解 `RequestBuilder`：
+   - `system_prompt` 挪进 `Agent.cached_prompt`
+   - `AttachmentManager` 挪进 `SessionContext.attachments`
+   - `change_rx` 删除（WorkspaceWatcher 自维护）
+   - pending images 改为 `TurnInput` 字段
+   - `build()` / `merge_attachments()` 改为无状态函数
+6. 合并 `CompactionPolicy` + `CompactionExecutor` → `ContextEngine`（全局单例）
+7. 删 `AgentLoop`、`SessionHandle`、`LoopRegistry`、`run_session_actor`
+8. `DelegationCoordinator` 接管 worktree / merge / cleanup；`SubAgentDelegator` 删除
+9. ClientChannel 删 `loop_registry`、`evict_loop`
+10. WorkspaceWatcher 改为自维护（own RwLock，文件变更直接更新）
+11. Scheduler / Webhook 路径收编：删 `SchedulerContext` / `WebhookContext`，全走 `session_manager.get_context()`
 
 ### 阶段 3：Agent 配置统一
 
-1. 扩展 AGENT.md front matter（加 skills、permission_mode 等）
-2. 主 agent 也从 AGENT.md 加载，与子代理走同一路径
-3. `SubAgentConfig` 和主 agent 配置统一为一个结构体
-4. 简化 `SystemPromptBuilder`，去掉 IDENTITY.md / SOUL.md 读取
+1. `AgentConfig` 简化：仅 `name` / `description` / `tools` / `skills` / `mcp` / `system_prompt`
+2. 实现 `ToolFilter` / `SkillFilter` / `McpFilter` enum
+3. `GlobalConfig` 拆出 `[limits]` / `[context]` / `[defaults]` / `[prompt]` 段
+4. `AgentRegistry` 加载所有 `workspace/agents/*/AGENT.md`（含 main）
+5. `prompt.rs` 删 IDENTITY/SOUL/USER.md 读取；prompt 组合改为参数化（`build_prompt(...)` 函数）
+6. 启动校验：`workspace/agents/main/AGENT.md` 缺失则报错退出
+7. 提供 `scripts/migrate_main_agent.sh` 一次性脚本
 
 ### 阶段 4：用户信息 per-user
 
-1. 新建 `UserProfile` 结构和 per-user 存储目录
-2. SessionContext 创建时加载 UserProfile
-3. prompt 注入从 USER.md 改为 user_profile
-4. routing key → user_id 的映射层（认证体系前置条件）
+1. `UserResolver`：routing_key → user_id 映射（默认透传）
+2. `UserProfile` 加载/序列化/`to_prompt_section`
+3. `SessionContext` 加 `user_profile: Arc<UserProfile>`
+4. `build_prompt` 补齐 profile section
+5. Memory tools 读写 `workspace/users/{id}/memory/`
+6. 提供 `scripts/migrate_memory.sh`（默认目标 `users/_default/memory/`）
+7. 提供 `scripts/migrate_user_profile.sh`（USER.md → `users/_default/profile.md`）
 
-### 当前 workaround
+阶段 3 和 4 可并行。
 
-在阶段 1 完成前，session switch/create/delete 的 API handler 通过 evict LoopRegistry 保证一致性（commit `a7a31ff`）。
+---
+
+## 八、迁移脚本
+
+### scripts/migrate_main_agent.sh
+
+读：
+- `config.toml::agent.*` 段（permission_mode / prompt.*）
+- `workspace/IDENTITY.md`、`SOUL.md`、`RULES.md`
+
+写：
+- `workspace/agents/main/AGENT.md`
+  - front matter: `name=main, tools=[all], skills=[all], mcp=[all]`
+  - body: `IDENTITY.md + "\n\n" + SOUL.md + "\n\n" + RULES.md`
+
+提示用户手动确认后删除：
+- `workspace/IDENTITY.md`、`SOUL.md`、`RULES.md`
+- `config.toml::[agent]` 段（合并到 `[defaults]` 和 `[prompt]`）
+
+### scripts/migrate_memory.sh
+
+```
+workspace/memory/  →  workspace/users/_default/memory/
+```
+
+未在 `config.toml::[users]` 配置映射的 routing_key 走 `_default`，等价原全局共享。
+
+### scripts/migrate_user_profile.sh
+
+```
+workspace/USER.md  →  workspace/users/_default/profile.md
+```
+
+格式转换：纯 Markdown → YAML front matter + body。
+
+---
+
+## 当前 workaround
+
+在阶段 1 完成前，session switch/create/delete 的 API handler 通过 evict LoopRegistry 保证一致性（commit `a7a31ff`）。阶段 1 落地后这段代码删除。

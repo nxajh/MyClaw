@@ -1,101 +1,105 @@
 # MyClaw 目标架构图（重构后）
 
-> 基于 RFC: Session 架构重构
+> 基于 RFC: Session 架构重构 v2
 > 日期：2026-05-21
 
 ## 组件关系总览
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
+│                          config.toml (全局配置)                              │
+│                                                                              │
+│  [runtime]   timezone                                                        │
+│  [limits]    max_tool_calls / max_history / tool_timeout_secs / ...          │
+│  [context]   compact_threshold / retain_work_units                           │
+│  [defaults]  permission_mode / model                                         │
+│  [prompt]    max_chars / bootstrap_max_chars / native_tools                  │
+│  [providers] [channels] [mcp_servers] [scheduler] [users]                    │
+└──────────────────────────────────────────────────────────────────────────────┘
+                                       │ 由 daemon.rs 加载
+                                       ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
 │                          daemon.rs (Composition Root)                        │
 │                                                                              │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐    │
 │  │ServiceRegistry│  │ ToolRegistry │  │ SkillManager │  │  McpManager  │    │
-│  │(LLM providers)│  │ (tool impls) │  │  (skills)    │  │  (MCP 连接)  │    │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘    │
-│         │                  │                  │                  │            │
-│         │    MCP tools ────┘                  │                  │            │
-│         │    Memory tools ────────────────────┘                  │            │
-│         │    Skill tools ─────────────────────┘                  │            │
-│         │                                                        │            │
-│         └──────────┬──────┬──────────────────┬───────────────────┘            │
-│                    │      │                  │                                │
-│         ┌──────────┴──────┴──────────────────┴──────────┐                     │
-│         │              AgentRegistry                    │                     │
-│         │  HashMap<name, Arc<Agent>>                    │                     │
-│         │                                               │                     │
-│         │  ┌────────┐ ┌────────┐ ┌──────────┐          │                     │
-│         │  │ "main" │ │"coder" │ │"researcher"│         │                     │
-│         │  │ Agent  │ │ Agent  │ │  Agent    │         │                     │
-│         │  │全套工具 │ │受限工具│ │搜索工具   │         │                     │
-│         │  └────────┘ └────────┘ └──────────┘          │                     │
-│         └──────────────────┬───────────────────────────┘                     │
-│                            │                                                  │
-│  ┌─────────────────────────┴──────────────────────────────────────────┐      │
-│  │                         SessionManager                             │      │
-│  │                                                                    │      │
-│  │  backend ────→ SessionBackend (持久化)                              │      │
-│  │  agents  ────→ AgentRegistry                                       │      │
-│  │  active  ────→ HashMap<routing_key, session_id>     ← 只是指针    │      │
-│  │  contexts ──→ HashMap<session_id, Arc<SessionContext>>             │      │
-│  │                                                                    │      │
-│  │  switch_session() = 改 active 指针，天然一致                        │      │
-│  └────────────────────────────────────────────────────────────────────┘      │
+│  │(LLM providers)│  │ (tool impls) │  │  Arc<RwLock> │  │  (MCP 连接)  │    │
+│  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘    │
+│                                            ▲                                 │
+│                                            │ 自动 reload                     │
+│  ┌──────────────┐  ┌──────────────┐  ┌────┴─────────┐  ┌──────────────┐    │
+│  │ContextEngine │  │  AskRouter   │  │ Workspace    │  │ Delegation   │    │
+│  │ (compaction) │  │(pending_asks)│  │ Watcher      │  │ Coordinator  │    │
+│  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘    │
 │                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐     │
-│  │                        Orchestrator (瘦身版)                         │     │
-│  │                                                                     │     │
-│  │  session_manager: SessionManager                                    │     │
-│  │  channels:       HashMap<(type, account), Arc<dyn Channel>>         │     │
-│  │  pending_asks:   HashMap<sk, (oneshot::Sender, target)>             │     │
-│  │                                                                     │     │
-│  │  职责：收消息 → 找 SessionContext → 投递                             │     │
-│  └──────────┬──────────────────────────────────────┬───────────────────┘     │
+│  ┌──────────────┐  ┌──────────────┐                                         │
+│  │ UserResolver │  │AgentRegistry │                                         │
+│  │(rk→user_id)  │  │HashMap<name, │                                         │
+│  └──────────────┘  │  Arc<Agent>> │                                         │
+│                    └──────┬───────┘                                          │
+│                           │                                                  │
+│  ┌────────────────────────┴────────────────────────────────────────────┐    │
+│  │                       SessionManager                                │    │
+│  │                                                                     │    │
+│  │  backend  ────→ SessionBackend (持久化)                              │    │
+│  │  agents   ────→ AgentRegistry                                       │    │
+│  │  active   ────→ HashMap<routing_key, session_id>     ← 仅指针       │    │
+│  │  contexts ───→ HashMap<session_id, Arc<SessionContext>>             │    │
+│  │                                                                     │    │
+│  │  switch_session() = 改 active 指针，天然一致                         │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │                       Orchestrator (瘦身版)                          │   │
+│  │                                                                      │   │
+│  │  session_manager: Arc<SessionManager>                                │   │
+│  │  channels:        HashMap<(type, account), Arc<dyn Channel>>         │   │
+│  │  ask_router:      Arc<AskRouter>                                     │   │
+│  │                                                                      │   │
+│  │  职责：收消息 → 找 SessionContext → 投递（无 actor、无 mutex 间接）   │   │
+│  └──────────┬──────────────────────────────────────┬────────────────────┘   │
 │             │                                      │                         │
 │  ┌──────────┼──────────────┐        ┌──────────────┤                         │
 │  ▼          ▼              ▼        ▼              ▼                         │
-│┌────────┐┌──────────┐┌──────────┐┌──────────┐┌──────────┐┌──────────────┐   │
-││Telegram││ClientChan││ QQBot    ││ Webhook  ││Scheduler ││ FileWatcher  │   │
-││Channel ││(WebUI WS)││ Channel  ││ Handler  ││(cron/hb) ││(hot-reload)  │   │
-│└────────┘└──────────┘└──────────┘└──────────┘└──────────┘└──────────────┘   │
-│             │                    │           │                   │             │
-│             │                    │           │                   │             │
-│             │            全部走 SessionManager.get_context()    │             │
-│             │                    │           │         change_rx 全局共享     │
-│             │                    │           │                   │             │
-│             ▼                    ▼           ▼                   ▼             │
-│  ┌──────────────────────────────────────────────────────────────────────┐    │
-│  │                        Memory 存储                                   │    │
-│  │  workspace/users/{user_id}/memory/{type}/                           │    │
-│  │  由 MemoryList/View/Search/Manage 四个 tool 操作                     │    │
-│  │  per-user 隔离，不再全局共享                                         │    │
-│  └──────────────────────────────────────────────────────────────────────┘    │
+│┌────────┐┌──────────┐┌──────────┐┌──────────┐┌──────────┐                   │
+││Telegram││ClientChan││ QQBot    ││ Webhook  ││Scheduler │  全部走           │
+││Channel ││(WebUI WS)││ Channel  ││ Handler  ││(cron/hb) │  SessionManager   │
+│└────────┘└──────────┘└──────────┘└──────────┘└──────────┘  .get_context()   │
 └──────────────────────────────────────────────────────────────────────────────┘
 
 
 SessionContext（per session，唯一 owner）
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-┌──────────────────────────────────┐
-│        SessionContext            │
-│                                  │
-│  session: Session                │ ← 对话数据（唯一 owner）
-│    ├─ history: Vec<ChatMessage>  │
-│    ├─ message_ids: Vec<i64>      │
-│    └─ compact_version: u32       │
-│                                  │
-│  agent: Arc<Agent>               │ ← 绑定的 agent（创建时选定）
-│  channel: Arc<dyn Channel>       │ ← 通信通道
-│  user_profile: Arc<UserProfile>  │ ← 用户信息
-│  mutex: tokio::sync::Mutex<()>   │ ← turn 串行化
-│                                  │
-│  process_turn(msg) {             │
-│    mutex.lock()                  │
-│    channel.on_status(Thinking)   │
-│    agent.run(&mut session, msg)  │
-│    channel.on_status(Done)       │
-│  }                               │
-└──────────────────────────────────┘
+┌──────────────────────────────────────┐
+│        SessionContext                │
+│                                      │
+│  session: Mutex<Session>             │ ← 对话数据（唯一 owner）
+│    ├─ history: Vec<ChatMessage>      │
+│    ├─ message_ids: Vec<i64>          │
+│    ├─ compact_version: u32           │
+│    └─ session_override: SessionOverride
+│                                      │
+│  agent: Arc<Agent>                   │ ← 绑定 agent（创建时选定）
+│  user_profile: Arc<UserProfile>      │ ← 用户信息
+│                                      │
+│  attachments: Mutex<                 │ ← per-session 增量通告状态
+│    AttachmentManager>                │   （跨 turn 保留，不持久化）
+│  pending_retry: Mutex<Option<String>>│ ← 空回复时的待重试消息
+│                                      │
+│  turn_lock: tokio::Mutex<()>         │ ← turn 串行化
+│                                      │
+│  process_turn(input, channel,        │
+│               reply_target, env) {   │
+│    turn_lock.lock()                  │
+│    channel.on_status(Thinking)       │
+│    agent.run(&mut session, input,    │
+│              &turn_ctx)              │
+│    channel.on_status(Done)           │
+│  }                                   │
+└──────────────────────────────────────┘
+
+注意：channel 不存储，每轮注入 — 同一 session 可跨通道访问。
 
 
 Agent（同类型，不同配置的实例）
@@ -104,42 +108,80 @@ Agent（同类型，不同配置的实例）
 ┌──────────────────────────────────┐
 │           Agent                  │
 │                                  │
-│  name: String                    │
-│  config: AgentConfig             │ ← max_tool_calls, compact_threshold
-│  system_prompt: String           │ ← AGENT.md body
-│  tool_names: Vec<String>         │ ← 这个 agent 能用哪些 tool
-│  skill_names: Vec<String>        │ ← 绑定哪些 skill
+│  config: AgentConfig             │
+│    ├─ name                       │
+│    ├─ description                │
+│    ├─ tools: ToolFilter          │ ← 能用哪些内置 tool
+│    ├─ skills: SkillFilter        │ ← 绑哪些 skill
+│    ├─ mcp: McpFilter             │ ← 允许哪些 MCP server
+│    └─ system_prompt              │ ← AGENT.md body
 │                                  │
-│  // 共享基础设施引用（不拥有）      │
-│  registry: &ServiceRegistry      │
-│  tool_impls: &ToolRegistry       │
-│  skills: &SkillManager           │
+│  cached_prompt: String           │ ← 启动时算好的完整 prompt（不含 profile）
 │                                  │
-│  run(&mut session, msg) {        │ ← 无状态执行一轮 turn
-│    LoopBreaker (局部变量)         │
-│    CompactionPolicy (局部变量)    │
+│  // 共享基础设施引用（不拥有）     │
+│  registry: Arc<dyn ServiceRegistry>
+│  tool_impls: Arc<ToolRegistry>   │
+│  skills: Arc<RwLock<SkillManager>>
+│  context_engine: Arc<ContextEngine>
+│                                  │
+│  run(&mut session, input, ctx) { │ ← 无状态执行一轮 turn
+│    LoopBreaker (局部变量)         │   limits 从 ctx.global 读
 │    ...调 LLM、执行 tool、写 history
 │  }                               │
 └──────────────────────────────────┘
 
 "主 agent" vs "子代理" = 同一个 struct，不同实例：
-┌──────────┐  ┌──────────┐  ┌──────────┐
-│ Agent    │  │ Agent    │  │ Agent    │
-│ "main"   │  │ "coder"  │  │"researcher"│
-│          │  │          │  │          │
-│ tools:   │  │ tools:   │  │ tools:   │
-│  [all]   │  │  [shell, │  │  [web_   │
-│          │  │   file_*]│  │   search]│
-│          │  │          │  │          │
-│ prompt:  │  │ prompt:  │  │ prompt:  │
-│  (builtin│  │  AGENT.md│  │  AGENT.md│
-│   sections│  │  body   │  │  body   │
-│   only)  │  │          │  │          │
-│          │  │          │  │          │
-│ skills:  │  │ skills:  │  │ skills:  │
-│  [all]   │  │  [code-  │  │  []      │
-│          │  │   review]│  │          │
-└──────────┘  └──────────┘  └──────────┘
+┌──────────┐  ┌──────────┐  ┌──────────────┐
+│ Agent    │  │ Agent    │  │ Agent        │
+│ "main"   │  │ "coder"  │  │ "researcher" │
+│          │  │          │  │              │
+│ tools:   │  │ tools:   │  │ tools:       │
+│  All     │  │ Allow([  │  │ Allow([      │
+│          │  │  shell,  │  │  web_search])│
+│ skills:  │  │  file_*])│  │              │
+│  All     │  │ skills:  │  │ skills: None │
+│          │  │ Allow([  │  │              │
+│ mcp:     │  │  code-   │  │ mcp: None    │
+│  All     │  │  review])│  │              │
+│          │  │ mcp:     │  │              │
+│ prompt:  │  │ Allow([  │  │ prompt:      │
+│ AGENT.md │  │  github])│  │ AGENT.md     │
+│   body   │  │ prompt:  │  │   body       │
+│          │  │ AGENT.md │  │              │
+│          │  │   body   │  │              │
+└──────────┘  └──────────┘  └──────────────┘
+```
+
+## TurnContext / TurnInput / TurnResult
+
+```rust
+struct TurnContext<'a> {
+    channel: &'a dyn Channel,
+    reply_target: &'a str,
+    user_profile: &'a UserProfile,
+    attachments: &'a mut AttachmentManager,
+
+    ask_router: &'a AskRouter,
+    delegator: &'a dyn AgentDelegator,
+    persist: &'a dyn PersistHook,
+
+    global: &'a GlobalConfig,
+    session_override: &'a SessionOverride,
+
+    stream: Option<TurnStream<'a>>,
+}
+
+struct TurnInput {
+    text: String,
+    image_urls: Option<Vec<String>>,
+    image_base64: Option<Vec<String>>,
+}
+
+struct TurnResult {
+    text: String,
+    stop_reason: StopReason,
+    pending_retry: Option<String>,
+}
 ```
 
 ## 消息流转
@@ -156,7 +198,6 @@ Agent（同类型，不同配置的实例）
                               ▼
                       ┌────────────────┐
                       │  Orchestrator  │
-                      │   .run()       │
                       └───────┬────────┘
                               │
                    ① 解析 routing_key
@@ -166,14 +207,19 @@ Agent（同类型，不同配置的实例）
                       ┌──────────────────┐
                       │  SessionContext  │
                       │                  │
-                      │  process_turn()  │
+                      │  process_turn(   │
+                      │    input,        │
+                      │    channel,      │ ← 每轮注入
+                      │    reply_target, │
+                      │    env)          │
                       │    │             │
-                      │    ├ mutex.lock()│
+                      │    ├ turn_lock   │
                       │    │             │
                       │    ▼             │
                       │  agent.run(      │
                       │    &mut session, │
-                      │    msg           │
+                      │    input,        │
+                      │    &turn_ctx     │
                       │  )               │
                       │    │             │
                       │    ├─ 构建 LLM request
@@ -181,10 +227,7 @@ Agent（同类型，不同配置的实例）
                       │    ├─ tool_call → tool_executor.execute()
                       │    ├─ 写 session.history
                       │    ├─ persist_message()
-                      │    └─ 返回结果    │
-                      │    │             │
-                      │    ▼             │
-                      │  mutex.unlock()  │
+                      │    └─ 返回 TurnResult
                       └───────┬──────────┘
                               │
                               ▼
@@ -194,8 +237,8 @@ Agent（同类型，不同配置的实例）
 对比现在的四层间接：
 ```
 现在：  orchestrator → tx.send() → actor(rx) → mutex.lock(AgentLoop) → run()
-重构后：orchestrator → session_ctx.process_turn(msg)
-                                           └→ agent.run(&mut session, msg)
+重构后：orchestrator → session_ctx.process_turn(input, channel, ...)
+                                           └→ agent.run(&mut session, ...)
 ```
 
 ## 数据持有关系
@@ -205,72 +248,68 @@ AgentRegistry (全局)
   └─ HashMap<String, Arc<Agent>>
        │
        ├─ "main" ────→ Agent
-       │                ├─ registry:    Arc<dyn ServiceRegistry>    ← 引用，不拥有
-       │                ├─ tool_impls:  Arc<ToolRegistry>           ← 引用，不拥有
-       │                ├─ skills:      Arc<RwLock<SkillManager>>   ← 引用，不拥有
-       │                ├─ config:      AgentConfig                 ← 自己的配置
-       │                ├─ system_prompt: String                    ← 自己的
-       │                ├─ tool_names:  Vec<String>                 ← 自己的
-       │                └─ skill_names: Vec<String>                 ← 自己的
+       │                ├─ config: AgentConfig（仅 5 字段）
+       │                ├─ cached_prompt: String
+       │                ├─ registry/tool_impls/skills (Arc 引用)
+       │                └─ context_engine (Arc 引用)
        │
-       ├─ "coder" ──→ Agent (同结构，不同实例，不同配置)
+       ├─ "coder" ──→ Agent (同结构，不同配置)
        └─ "researcher" → Agent
 
 SessionManager (全局)
   ├─ backend ────→ Arc<dyn SessionBackend>
-  ├─ agents ─────→ AgentRegistry
-  ├─ active ─────→ HashMap<routing_key, session_id>      ← 只是指针
+  ├─ agents ─────→ Arc<AgentRegistry>
+  ├─ active ─────→ HashMap<routing_key, session_id>      ← 仅指针
   └─ contexts ──→ HashMap<session_id, Arc<SessionContext>>
                      │
                      └─ SessionContext
-                          ├─ session: Session                  ← 唯一 owner ✅
-                          ├─ agent: Arc<Agent>                 ← 引用 AgentRegistry 中的某个
-                          ├─ channel: Arc<dyn Channel>         ← 引用 Orchestrator 中的某个
-                          ├─ user_profile: Arc<UserProfile>    ← per-user
-                          └─ mutex: Mutex<()>                  ← turn 串行化
+                          ├─ session: Mutex<Session>            ← 唯一 owner ✅
+                          ├─ agent: Arc<Agent>                  ← 引用 AgentRegistry
+                          ├─ user_profile: Arc<UserProfile>
+                          ├─ attachments: Mutex<AttachmentManager>
+                          ├─ pending_retry: Mutex<Option<String>>
+                          └─ turn_lock: tokio::Mutex<()>
 
 Orchestrator (全局，瘦身后)
   ├─ session_manager: Arc<SessionManager>
   ├─ channels: HashMap<(type, account), Arc<dyn Channel>>
-  ├─ pending_asks: HashMap<sk, (oneshot::Sender, target)>
+  ├─ ask_router: Arc<AskRouter>
   └─ listener_handles: Vec<JoinHandle<()>>
 
+ContextEngine (全局单例)
+  ├─ threshold: f64                    ← 从 GlobalConfig.context 读
+  ├─ retain_work_units: usize          ← 从 GlobalConfig.context 读
+  └─ registry (Arc 引用)
+  对外接口：should_compact / compact，session/agent 不感知配置细节
+
+WorkspaceWatcher (全局，自维护)
+  ├─ skills: Arc<RwLock<SkillManager>>      ← 直接 own，文件变更自动更新
+  ├─ sub_agents: Arc<RwLock<Vec<AgentConfig>>>
+  └─ 内部 spawn 文件监听 task
+  Agent.run() 读 RwLock 时自动看到最新值，
+  AttachmentManager 在下一轮 turn 算 diff 时通告变化
+
 McpManager (全局)
-  ├─ registry ────→ Arc<RwLock<Option<Arc<McpRegistry>>>>
-  ├─ tools ───────→ Arc<RwLock<Vec<Arc<dyn Tool>>>>
-  └─ server_count → AtomicUsize
-  启动时 connect() → 把 MCP tools 注册进 ToolRegistry
-  Agent 的 tool_names 决定是否使用 MCP tools
+  启动时 connect() → 注册 MCP tools 到 ToolRegistry
+  每个 tool 标注来源 server name → Agent.mcp filter 据此过滤
 
 Scheduler (全局)
-  ├─ jobs ────────→ RwLock<JobsFile>  (持久化到 jobs.json)
-  ├─ timezone     → String
-  ├─ heartbeat_config → Option<HeartbeatConfig>
-  └─ event_tx ────→ mpsc::Sender<SchedulerEvent>  → Orchestrator
-  触发时走 SessionManager.get_context()，不再独立持有 Agent/sessions
+  ├─ jobs (RwLock<JobsFile>)
+  ├─ heartbeat_config
+  └─ event_tx → mpsc → Orchestrator
+  触发时走 SessionManager.get_context()，不持 Agent/sessions
 
-WebhookHandler (全局)
-  ├─ session_manager: Arc<SessionManager>       ← 只需要这个引用
-  ├─ timezone     → String
-  └─ last_channel → Mutex<Option<String>>
-  大幅简化：不再持有 Agent、sessions DashMap、SessionBackend
-
-FileWatcher (全局)
-  ├─ 监听路径: workspace/skills/, workspace/agents/
-  └─ change_rx ──→ watch::Receiver<ChangeSet>  ← 全局共享
-  文件变更 → 通知所有 Agent（通过全局共享的 change_rx）
+UserResolver (全局)
+  └─ explicit: HashMap<routing_key, user_id>（来自 config.toml）
+     未配置时透传，user_id = routing_key
 
 Memory (per-user)
-  ├─ MemoryList / MemoryView / MemorySearch / MemoryManage
-  │   注册为 ToolRegistry 中的 tool
-  │   Agent 的 tool_names 决定是否可用
-  └─ 存储路径: workspace/users/{user_id}/memory/{type}/
+  └─ MemoryList/View/Search/Manage tool
+     存储路径：workspace/users/{user_id}/memory/{type}/
 
 UserProfile (per user)
-  ├─ id: String
-  ├─ name, timezone, language
-  └─ preferences: HashMap<String, String>
-  存储：workspace/users/{user_id}/profile.md
+  ├─ id, name, timezone, language, preferences, free_form
+  └─ 存储：workspace/users/{user_id}/profile.md + preferences.md
 ```
 
 ## Session 操作
@@ -283,16 +322,18 @@ switch_session(routing_key, session_id)
   不需要 evict，不需要重建 AgentLoop
 
 
-create_session(routing_key, name)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+create_session(routing_key, agent_name, ...)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   session = backend.create(name)
-  context = SessionContext::new(session, agent, channel, user_profile)
+  agent   = agents.get(agent_name)
+  profile = UserProfile::load(user_resolver.resolve(routing_key), ...)
+  context = SessionContext::new(session, agent, profile)
   contexts[session.id] = context
   active[routing_key] = session.id
 
 
 delete_session(routing_key, session_id)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   contexts.remove(session_id)            ← drop SessionContext
   if active[routing_key] == session_id:
     active.remove(routing_key)           ← 或切到默认 session
@@ -300,10 +341,13 @@ delete_session(routing_key, session_id)
 
 子代理委派
 ━━━━━━━━━━━
-  sub_context = session_manager.get_or_create(sub_sk)
-    → 绑定 agent: "coder"
-  sub_context.process_turn(task_msg)
-    → 和主 session 走完全一样的路径
+  delegation_coord.delegate(agent_name, task, parent_sk, ...)
+    ├─ 解析 SessionOverride.isolation
+    ├─ 如果 worktree: 创建 git worktree
+    ├─ sub_sk = "sub:{parent_sk}:{agent_name}:{uuid}"
+    ├─ sub_ctx = session_manager.create_session(sub_sk, agent_name, ...)
+    ├─ sub_ctx.process_turn(task, parent_channel, ...)
+    └─ 如果 worktree: merge + cleanup
 ```
 
 ## 删除的组件
@@ -312,26 +356,33 @@ delete_session(routing_key, session_id)
 ❌ AgentLoop           → Agent.run() 是无状态方法，不需要 struct
 ❌ SessionHandle       → SessionContext 直接提供 process_turn()
 ❌ LoopRegistry        → 职责回归 SessionManager
-❌ run_session_actor   → mutex 替代 channel + actor
+❌ run_session_actor   → turn_lock 替代 channel + actor
 ❌ TurnMessage/TurnInput → process_turn() 直接接收参数
-❌ get_or_create()     → 拆散到 SessionManager 和 SessionContext 构造
-❌ SchedulerContext    → 统一走 SessionManager，不再独立持有 Agent/sessions
-❌ WebhookContext      → 大幅简化，只持有 SessionManager 引用
-❌ SubAgentDelegator   → 子代理变成 AgentRegistry 中的实例，委派走统一路径
-❌ IDENTITY.md/SOUL.md → 内容写入 AGENT.md body
-❌ USER.md (全局)       → per-user profile
+❌ get_or_create()     → 拆散到 SessionManager.create_session
+❌ SchedulerContext    → 统一走 SessionManager
+❌ WebhookContext      → 大幅简化，只持 SessionManager 引用
+❌ SubAgentDelegator   → DelegationCoordinator + AgentRegistry
+❌ RequestBuilder      → 拆为 Agent.cached_prompt / SessionContext.attachments /
+                         WorkspaceWatcher / TurnInput / 无状态函数
+❌ CompactionPolicy    → 并入 ContextEngine
+❌ CompactionExecutor  → 并入 ContextEngine
+❌ AskUserHandler      → AskRouter
+❌ DelegateHandler     → AgentDelegator trait
+❌ IDENTITY.md/SOUL.md/RULES.md → 内容写入 main/AGENT.md body
+❌ USER.md (全局)       → per-user UserProfile
 
 保留不变的：
-✅ McpManager          → 启动时注册 MCP tools 到 ToolRegistry，逻辑不变
-✅ ToolRegistry        → 全局 tool 实现池，Agent 按 tool_names 选用
-✅ Memory tools        → 4 个 tool 不变，存储路径改为 per-user
-✅ FileWatcher         → 监听 skills/agents 变更，change_rx 全局共享
+✅ McpManager          → 启动时注册 MCP tools，逻辑不变
+✅ ToolRegistry        → 全局 tool 实现池
+✅ Memory tools        → 4 个 tool 不变，存储路径改 per-user
+✅ FileWatcher (改名 WorkspaceWatcher) → 自维护 RwLock
 ✅ Scheduler           → jobs.json + event_tx，触发方式不变
 
 保留但瘦身的：
 🔧 Orchestrator     → 只做路由：收消息 → 找 context → 投递
-🔧 SessionManager   → 加上 contexts 管理，去掉 cache（不再有两阶段）
-🔧 Agent            → 从工厂变成无状态执行器
+🔧 SessionManager   → contexts 管理，cache 去掉
+🔧 Agent            → 工厂 → 无状态执行器
+🔧 prompt.rs        → 去掉文件读取，prompt 组合参数化
 ```
 
 ## 通信方式
@@ -339,37 +390,37 @@ delete_session(routing_key, session_id)
 ```
 Channel ──ChannelMessage──→ mpsc ──→ Orchestrator.run()
                                           │
-                                          └── session_ctx.process_turn(msg)
+                                          └── session_ctx.process_turn(
+                                                  input, channel, reply_target, env)
                                                   │
-                                                  ├── agent.run(&mut session, msg)
+                                                  ├── agent.run(&mut session, input, &turn_ctx)
                                                   │       │
                                                   │       └── tool 需要问用户时：
-                                                  │           channel.send(question)
-                                                  │           pending_asks.insert(sk, tx)
-                                                  │           oneshot_rx.await → answer
+                                                  │           ask_router.ask(sk, channel, ...)
+                                                  │            ├─ channel.send(question)
+                                                  │            ├─ pending_asks.insert(sk, tx)
+                                                  │            └─ oneshot_rx.await → answer
                                                   │
                                                   └── channel.send(response) → 用户
 
 WebUI API ──WebSocket JSON──→ ClientChannel
-              ├── sessions.switch → session_manager.switch_session()   ← 天然一致
-              ├── sessions.create → session_manager.new_session()
+              ├── sessions.switch → session_manager.switch_session()  ← 天然一致
+              ├── sessions.create → session_manager.create_session()
               ├── sessions.delete → session_manager.delete_session()
               ├── sessions.list   → session_manager.list_sessions()
-              ├── tools.list      → agent_registry["main"].tool_specs
+              ├── tools.list      → agents["main"].tool_specs
               └── config/skills   → 同现在
 
 Scheduler ──SchedulerEvent──→ Orchestrator.run()
               └── session_manager.get_context(scheduled_sk)
-                  → 同一条路径，绑定 agent: "main", config.run_mode = Background
+                  → 走统一路径，SessionOverride.run_mode = Background
 
 Webhook ──HTTP request──→ WebhookHandler
             └── session_manager.get_context(webhook_sk)
-                → 绑定 agent: "main", channel: last_channel
-                → process_turn(webhook_payload)
-                → 和用户消息走同一条路径
+                → 走统一路径，SessionOverride.run_mode = Background
 
-FileWatcher ──文件变更──→ change_rx (watch::Receiver, 全局共享)
-                Agent.run() 内部读取，检测 skill/agent 配置变更
+WorkspaceWatcher ──文件变更──→ 直接更新 skills/sub_agents RwLock
+                Agent.run 读 RwLock，AttachmentManager 在 turn 内 diff 出变化
 
 Memory ──tool 调用──→ MemoryManage/Search/List/View
           读写 workspace/users/{user_id}/memory/{type}/
@@ -377,7 +428,7 @@ Memory ──tool 调用──→ MemoryManage/Search/List/View
 
 McpManager ──启动时──→ connect(config.mcp_servers)
              ├─ 注册 MCP tools 到 ToolRegistry（全局）
-             └─ Agent 的 tool_names 决定哪些 MCP tool 可用
+             └─ Agent.mcp filter 决定哪些 MCP tool 可用
 ```
 
 ## 统一入口路径
@@ -385,23 +436,25 @@ McpManager ──启动时──→ connect(config.mcp_servers)
 ```
 现在（四条独立路径）：
   用户消息  → Orchestrator → LoopRegistry → AgentLoop             ← 路径 A
-  Cron触发  → SchedulerContext → 临时构建 AgentLoop               ← 路径 B（绕过 LoopRegistry）
-  Webhook   → WebhookContext → 临时构建 AgentLoop                 ← 路径 C（又绕过）
-  子代理    → SubAgentDelegator → 临时构建 AgentLoop              ← 路径 D（再绕过）
+  Cron触发  → SchedulerContext → 临时构建 AgentLoop               ← 路径 B
+  Webhook   → WebhookContext → 临时构建 AgentLoop                 ← 路径 C
+  子代理    → SubAgentDelegator → 临时构建 AgentLoop              ← 路径 D
 
 重构后（一条统一路径）：
-  全部 → SessionManager.get_context(routing_key) → SessionContext.process_turn()
-  
-  区别只是绑定的参数不同：
-  ┌──────────┬──────────────┬───────────┬───────────────────┐
-  │ 来源      │ agent        │ channel   │ run_mode          │
-  ├──────────┼──────────────┼───────────┼───────────────────┤
-  │ 用户消息  │ "main"       │ 来源通道  │ Interactive       │
-  │ Cron     │ "main"       │ last_chan │ Background        │
-  │ Webhook  │ "main"       │ last_chan │ Background        │
-  │ 子代理    │ "coder" 等   │ 同父session│ Interactive      │
-  │ Heartbeat│ "main"       │ 指定通道  │ Background        │
-  └──────────┴──────────────┴───────────┴───────────────────┘
+  全部 → SessionManager.get_context(routing_key)
+       → SessionContext.process_turn(input, channel, reply_target, env)
+       → agent.run(&mut session, input, &turn_ctx)
+
+  区别只是 sk 生成规则和 SessionOverride：
+  ┌──────────┬──────────────┬───────────┬─────────────┬────────────┐
+  │ 来源      │ agent        │ channel   │ run_mode    │ 备注       │
+  ├──────────┼──────────────┼───────────┼─────────────┼────────────┤
+  │ 用户消息  │ "main"       │ 来源通道  │ Interactive │            │
+  │ Cron     │ "main"       │ last_chan │ Background  │            │
+  │ Webhook  │ "main"       │ last_chan │ Background  │            │
+  │ 子代理    │ "coder" 等   │ 同父 ctx  │ Interactive │ worktree?  │
+  │ Heartbeat│ "main"       │ 指定通道  │ Background  │ ephemeral  │
+  └──────────┴──────────────┴───────────┴─────────────┴────────────┘
 ```
 
 ## Agent 配置
@@ -419,10 +472,10 @@ workspace/agents/
 # workspace/agents/coder/AGENT.md
 ---
 name: coder
+description: "Expert programmer for writing and editing code"
 tools: [shell, file_read, file_write, file_edit]
 skills: [code-review]
-model: claude-sonnet-4-20250514
-max_tool_calls: 30
+mcp: [github, filesystem]
 ---
 
 You are an expert programmer. Write clean, idiomatic code.
@@ -433,5 +486,9 @@ Be concise. Don't over-engineer.
 ──────────────────────────────────────────────
 
 Prompt 构建：
-  builtin sections + AGENT.md body + user_profile + runtime + skills
+  builtin_sections(permission_mode, run_mode, native_tools)
+  + AGENT.md body
+  + user_profile.to_prompt_section()
+  + runtime_info()
+  + skill_instructions(filter)
 ```
