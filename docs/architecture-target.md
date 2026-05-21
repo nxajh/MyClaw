@@ -9,11 +9,12 @@
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │                          config.toml (全局配置)                              │
 │                                                                              │
-│  [runtime]   timezone                                                        │
-│  [limits]    max_tool_calls / max_history / tool_timeout_secs / ...          │
-│  [context]   compact_threshold / retain_work_units                           │
-│  [defaults]  permission_mode / model                                         │
+│  [locale]    timezone                                                        │
 │  [prompt]    max_chars / bootstrap_max_chars / native_tools                  │
+│  [agent]     permission_mode                                                 │
+│  [tool_executor]   timeout_secs                                              │
+│  [loop_breaker]    max_tool_calls / threshold                                │
+│  [context_engine]  compact_threshold / retain_work_units                     │
 │  [providers] [channels] [mcp_servers] [scheduler] [users]                    │
 └──────────────────────────────────────────────────────────────────────────────┘
                                        │ 由 daemon.rs 加载
@@ -114,19 +115,33 @@ Agent（同类型，不同配置的实例）
 │    ├─ tools: ToolFilter          │ ← 能用哪些内置 tool
 │    ├─ skills: SkillFilter        │ ← 绑哪些 skill
 │    ├─ mcp: McpFilter             │ ← 允许哪些 MCP server
+│    ├─ isolation: AgentIsolation  │ ← 作为 sub-agent 时是否要 worktree
 │    └─ system_prompt              │ ← AGENT.md body
 │                                  │
-│  cached_prompt: String           │ ← 启动时算好的完整 prompt（不含 profile）
+│  cached_prompt: String           │ ← AGENT.md body 部分（builtin/profile 等
+│                                  │   由 process_turn 每轮拼上去）
 │                                  │
 │  // 共享基础设施引用（不拥有）     │
 │  registry: Arc<dyn ServiceRegistry>
-│  tool_impls: Arc<ToolRegistry>   │
 │  skills: Arc<RwLock<SkillManager>>
 │  context_engine: Arc<ContextEngine>
+│  ask_router: Arc<AskRouter>
+│  delegator: Arc<dyn AgentDelegator>
+│  tool_executor: Arc<ToolExecutor>
+│  loop_breaker: Arc<LoopBreaker>
 │                                  │
 │  run(&mut session, input, ctx) { │ ← 无状态执行一轮 turn
-│    LoopBreaker (局部变量)         │   limits 从 ctx.global 读
-│    ...调 LLM、执行 tool、写 history
+│    let mut counter =             │   counter 从 self.loop_breaker.new_counter()
+│      self.loop_breaker.new_counter();
+│    let stream = self.registry    │
+│      .chat_stream(...).await?;   │
+│    let resp = llm_stream::read(  │ ← 模块级函数，硬编码 timeout/byte limit
+│      stream).await?;             │
+│    for call in resp.tool_calls { │
+│      counter.tick(&call)?;       │
+│      self.tool_executor.execute( │ ← 内部用自己的 tool_timeout
+│        &call, session, ...).await?;
+│    }                             │
 │  }                               │
 └──────────────────────────────────┘
 
@@ -156,20 +171,21 @@ Agent（同类型，不同配置的实例）
 
 ```rust
 struct TurnContext<'a> {
-    channel: &'a dyn Channel,
-    reply_target: &'a str,
-    user_profile: &'a UserProfile,
-    attachments: &'a mut AttachmentManager,
+    // process_turn 已 resolve 为标量后传入
+    system_prompt: &'a str,
+    model_id: &'a str,
+    thinking: Option<&'a ThinkingConfig>,
+    permission_mode: PermissionMode,
+    run_mode: RunMode,
 
-    ask_router: &'a AskRouter,
-    delegator: &'a dyn AgentDelegator,
-    persist: &'a dyn PersistHook,
-
-    global: &'a GlobalConfig,
-    session_override: &'a SessionOverride,
-
+    // 流式（None = Collect 模式）
     stream: Option<TurnStream<'a>>,
 }
+
+// 注：persist 由 Session 自己负责，channel/reply_target 不再传入
+// （channel 由 AskRouter 内部解析，reply_target 存于 session.last_reply_target）
+// ask_router / delegator / tool_executor / loop_breaker / context_engine
+// 都是 Agent 字段（全局 Arc），不在 TurnContext 里
 
 struct TurnInput {
     text: String,
@@ -248,10 +264,12 @@ AgentRegistry (全局)
   └─ HashMap<String, Arc<Agent>>
        │
        ├─ "main" ────→ Agent
-       │                ├─ config: AgentConfig（仅 5 字段）
+       │                ├─ config: AgentConfig (name/desc/tools/skills/mcp/isolation/system_prompt)
        │                ├─ cached_prompt: String
-       │                ├─ registry/tool_impls/skills (Arc 引用)
-       │                └─ context_engine (Arc 引用)
+       │                └─ Arc 引用：
+       │                   registry, skills, context_engine,
+       │                   ask_router, delegator,
+       │                   tool_executor, loop_breaker
        │
        ├─ "coder" ──→ Agent (同结构，不同配置)
        └─ "researcher" → Agent
@@ -277,10 +295,25 @@ Orchestrator (全局，瘦身后)
   └─ listener_handles: Vec<JoinHandle<()>>
 
 ContextEngine (全局单例)
-  ├─ threshold: f64                    ← 从 GlobalConfig.context 读
-  ├─ retain_work_units: usize          ← 从 GlobalConfig.context 读
-  └─ registry (Arc 引用)
-  对外接口：should_compact / compact，session/agent 不感知配置细节
+  ├─ compact_threshold / retain_work_units    ← from [context_engine]
+  ├─ registry / tools (Arc 引用)
+  └─ TokenTracker 不在这里 — 挪进 Session.token_tracker（per-session 状态）
+  对外接口：should_compact / compact
+
+ToolExecutor (全局单例)
+  ├─ timeout: Duration                         ← from [tool_executor].timeout_secs
+  └─ tools: Arc<ToolRegistry>
+  对外接口：execute(call, &mut session, ...)
+
+LoopBreaker (全局单例，发放 per-turn counter)
+  ├─ max_tool_calls                            ← from [loop_breaker].max_tool_calls
+  └─ threshold                                 ← from [loop_breaker].threshold
+  Agent.run() 每轮调 new_counter() 创建 LoopBreakerCounter（持 policy 借用 + tool_count + VecDeque）
+
+llm_stream（模块级，非 struct）
+  const FIRST_CHUNK_TIMEOUT: Duration = 600s     ← 硬编码安全网
+  const MAX_OUTPUT_BYTES: usize = 100 KB         ← 硬编码安全网
+  pub async fn read(stream) / read_streamed(stream, event_tx, cancel)
 
 WorkspaceWatcher (全局，自维护)
   ├─ skills: Arc<RwLock<SkillManager>>      ← 直接 own，文件变更自动更新
@@ -364,10 +397,15 @@ delete_session(routing_key, session_id)
 ❌ SubAgentDelegator   → DelegationCoordinator + AgentRegistry
 ❌ RequestBuilder      → 拆为 Agent.cached_prompt / SessionContext.attachments /
                          WorkspaceWatcher / TurnInput / 无状态函数
-❌ CompactionPolicy    → 并入 ContextEngine
+❌ CompactionPolicy    → 并入 ContextEngine（TokenTracker 挪进 Session）
 ❌ CompactionExecutor  → 并入 ContextEngine
-❌ AskUserHandler      → AskRouter
+❌ AskUserHandler      → AskRouter (struct + 方法)
 ❌ DelegateHandler     → AgentDelegator trait
+❌ DefaultToolExecutor → 重命名为 ToolExecutor，timeout 内化为字段
+❌ LlmResponseReader   → llm_stream::read 模块函数 + 硬编码常量
+❌ AgentConfig.max_history → 死代码，删除
+❌ stream_first_chunk_timeout_secs / max_output_bytes 配置 → 改硬编码安全网
+❌ [defaults] / [limits] / [context] 段 → 拆为按模块的多个段
 ❌ IDENTITY.md/SOUL.md/RULES.md → 内容写入 main/AGENT.md body
 ❌ USER.md (全局)       → per-user UserProfile
 

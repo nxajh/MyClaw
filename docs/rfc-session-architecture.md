@@ -110,7 +110,8 @@ struct AgentConfig {
     tools: ToolFilter,
     skills: SkillFilter,
     mcp: McpFilter,
-    system_prompt: String,         // AGENT.md body
+    isolation: AgentIsolation,        // 仅作为 sub-agent 被调用时生效
+    system_prompt: String,            // AGENT.md body
 }
 
 enum ToolFilter {
@@ -121,18 +122,25 @@ enum ToolFilter {
 // SkillFilter / McpFilter 同形
 
 struct Agent {
+    // 身份
     config: AgentConfig,
-    cached_prompt: String,         // 启动时算一次的系统提示词（不含 profile）
+    cached_prompt: String,             // 启动时算的"半成品"（不含 profile）
 
-    // 共享基础设施引用
+    // 全局基础设施引用（Arc）
     registry: Arc<dyn ServiceRegistry>,
-    tool_impls: Arc<ToolRegistry>,
     skills: Arc<RwLock<SkillManager>>,
     context_engine: Arc<ContextEngine>,
+    ask_router: Arc<AskRouter>,
+    delegator: Arc<dyn AgentDelegator>,
+
+    // 全局执行器（封装各自的 limits）
+    tool_executor: Arc<ToolExecutor>,  // owns: tool_timeout
+    loop_breaker: Arc<LoopBreaker>,    // owns: max_tool_calls, threshold
+    // 注：LLM 流式读取走 `llm_stream::read()` 模块级函数，无需 struct
 }
 
 impl Agent {
-    /// 无状态执行一轮 turn。LoopBreaker、运行限制从 ctx.global 读。
+    /// 无状态执行一轮 turn。运行参数全部已 resolve 为标量。
     async fn run(
         &self,
         session: &mut Session,
@@ -142,7 +150,7 @@ impl Agent {
 }
 ```
 
-"主 agent"和"子代理"是同一个类型的不同实例。
+"主 agent"和"子代理"是同一个类型的不同实例。Agent 自己持有的数据只剩 `config`（身份）+ `cached_prompt`（启动时算的字符串），其他全是对全局组件的 Arc 引用。
 
 ### SessionContext
 
@@ -179,26 +187,16 @@ impl SessionContext {
 
 ### TurnContext / TurnInput / TurnResult
 
-边界：`SessionContext.process_turn()` 是"配置解析层"，把 SessionOverride / GlobalConfig / Agent.config / UserProfile 解析为标量，组装 system_prompt；`Agent.run()` 是纯执行层，收到的全是已解析值。
+边界：`SessionContext.process_turn()` 是"配置解析层"——组装 system_prompt、resolve model/permission_mode/run_mode/thinking、算 attachment reminder；`Agent.run()` 是纯执行层，收到的全是已解析的标量与少量借用。
 
 ```rust
 struct TurnContext<'a> {
-    // ── 已 resolve 的运行参数 ──
-    system_prompt: &'a str,          // 含 builtin + body + profile + runtime + skills
+    // ── 本轮决策（process_turn 解析后传入）──
+    system_prompt: &'a str,           // 含 builtin + body + profile + runtime + skills
     model_id: &'a str,
     thinking: Option<&'a ThinkingConfig>,
     permission_mode: PermissionMode,
     run_mode: RunMode,
-    max_tool_calls: usize,
-    tool_timeout_secs: u64,
-    stream_first_chunk_timeout_secs: u64,
-    max_output_bytes: usize,
-
-    // ── 工具的回弹路径 ──
-    channel: &'a dyn Channel,        // ask_user 透传
-    reply_target: &'a str,
-    ask_router: &'a AskRouter,
-    delegator: &'a dyn AgentDelegator,
 
     // ── 流式（None = Collect 模式）──
     stream: Option<TurnStream<'a>>,
@@ -222,7 +220,19 @@ struct TurnResult {
 }
 ```
 
-注意 TurnContext **没有 persist**——持久化由 Session 自己负责（见下节）。也没有 `user_profile` / `GlobalConfig` / `SessionOverride` 引用——所有需要的值在 process_turn 解析后以标量传入。
+**TurnContext 极简的原因**——所有需要的能力都已收敛到合适的归属：
+
+| 不在 TurnContext 的东西 | 去处 |
+|------------------------|------|
+| `persist` | Session 内部（`Session.add_*` 方法） |
+| `ask_router` / `delegator` / `tool_executor` / `loop_breaker` | Agent 字段（全局 Arc） |
+| `tool_timeout` / `max_tool_calls` 等 limit | 各执行器内部 |
+| `user_profile` / `GlobalConfig` / `SessionOverride` / `AttachmentManager` | process_turn 边界全部消化掉 |
+| `channel` | AskRouter 内部按 session_id 解析（或 hint 覆盖） |
+| `session_key` | `session.id` 即可 |
+| `reply_target` | `session.last_reply_target`（process_turn 写入） |
+
+TurnContext 只保留"本轮 LLM 调用需要的决策 + 流式控制"。
 
 ### Session 自负责持久化
 
@@ -300,19 +310,22 @@ struct SessionOverride {
     permission_mode: Option<PermissionMode>,// 用户在 WebUI/命令改
     model: Option<String>,                  // 用户切模型
     thinking: Option<ThinkingConfig>,       // 跟 model
-    isolation: Option<AgentIsolation>,      // 子代理委派时设
 }
 ```
 
-运行参数（max_tool_calls / compact_threshold / retain_work_units 等）全部从 GlobalConfig 读，session 不感知。
+不含 `isolation`（agent 字段说了算，委派时由 DelegationCoordinator 直接读 agent.isolation）。运行参数（max_tool_calls / compact_threshold 等）从对应执行器读，session 不感知。
 
-### ContextEngine
+### 全局执行器：ContextEngine / ToolExecutor / LoopBreaker
+
+每个执行器持有自己的配置（从对应 GlobalConfig section 反序列化），daemon 启动时构造为全局 Arc。
 
 ```rust
+// CompactionPolicy + CompactionExecutor 合并
 struct ContextEngine {
-    threshold: f64,
+    compact_threshold: f64,
     retain_work_units: usize,
     registry: Arc<dyn ServiceRegistry>,
+    tools: Arc<ToolRegistry>,
     // ...
 }
 
@@ -320,9 +333,50 @@ impl ContextEngine {
     fn should_compact(&self, session: &Session, last_total_tokens: u64) -> bool;
     async fn compact(&self, session: &mut Session, ...) -> Result<()>;
 }
+
+// DefaultToolExecutor 重命名 + 简化
+struct ToolExecutor {
+    tools: Arc<ToolRegistry>,
+    timeout: Duration,                  // from [tool_executor].timeout_secs
+}
+
+impl ToolExecutor {
+    async fn execute(&self, call: &ToolCall, session: &mut Session, ...) -> Result<ToolResult>;
+}
+
+// LoopBreaker 拆为全局 policy + per-turn counter
+struct LoopBreaker {
+    max_tool_calls: usize,              // from [loop_breaker].max_tool_calls
+    threshold: usize,                   // from [loop_breaker].threshold
+}
+
+impl LoopBreaker {
+    fn new_counter(&self) -> LoopBreakerCounter;  // Agent.run() 每轮调一次
+}
+
+struct LoopBreakerCounter<'a> {
+    policy: &'a LoopBreaker,
+    tool_count: usize,
+    recent: VecDeque<String>,
+}
 ```
 
-`CompactionPolicy` + `CompactionExecutor` 合并为 `ContextEngine`，全局单例。配置从 `GlobalConfig.context` 读，不暴露给 session/agent。
+LLM 流式读取**不需要 struct**——常量 + 函数，挂在模块上：
+
+```rust
+// src/agents/llm_stream.rs
+const FIRST_CHUNK_TIMEOUT: Duration = Duration::from_secs(600);
+const MAX_OUTPUT_BYTES: usize = 100 * 1024;
+
+pub async fn read(stream: BoxStream<StreamEvent>) -> Result<CollectedResponse>;
+pub async fn read_streamed(
+    stream: BoxStream<StreamEvent>,
+    event_tx: &mpsc::Sender<TurnEvent>,
+    cancel: &CancellationToken,
+) -> Result<CollectedResponse>;
+```
+
+`first_chunk_timeout` 和 `max_output_bytes` 是安全网（防 LLM 卡死/无限输出），不暴露为配置。
 
 ### WorkspaceWatcher（自维护）
 
@@ -387,36 +441,51 @@ workspace/users/{user_id}/
 
 ### config.toml（全局，部署级）
 
+按**模块**组织，每个 section 对应一个组件，daemon 直接整体反序列化为该组件的 config struct，无跨段拼装。
+
 ```toml
-[runtime]
+[locale]
 timezone = "Asia/Shanghai"
-
-[limits]
-max_tool_calls = 100
-max_history = 200
-max_output_bytes = 102400
-tool_timeout_secs = 180
-stream_first_chunk_timeout_secs = 600
-loop_breaker_threshold = 3
-
-[context]
-compact_threshold = 0.7
-retain_work_units = 3
-
-[defaults]
-permission_mode = "default"
-model = "claude-sonnet-4-6"
 
 [prompt]
 max_chars = 0
 bootstrap_max_chars = 20000
 native_tools = true
 
-# providers / channels / mcp_servers / scheduler 同现状
+[agent]
+permission_mode = "default"          # 全局 agent 行为默认（SessionOverride 可覆盖）
+
+[tool_executor]
+timeout_secs = 180
+
+[loop_breaker]
+max_tool_calls = 100
+threshold = 3
+
+[context_engine]
+compact_threshold = 0.7
+retain_work_units = 3
+
+[providers]
+# 各 provider 注册顺序决定隐式默认 model（第一个 chat-capable）
+
+[channels]
+# ...
+
+[mcp_servers]
+# ...
+
+[scheduler]
+# ...
 
 [users]    # 阶段 4
 albert.routing_keys = ["telegram:bot1:12345", "client:webui:any"]
 ```
+
+**不出现的旧字段**：
+- `max_history` — 死代码，删
+- `first_chunk_timeout` / `max_output_bytes` — 硬编码为安全网常量
+- `[defaults].model` — provider 注册顺序提供隐式默认
 
 ### AGENT.md（per-agent，能力定义）
 
@@ -436,6 +505,20 @@ You are an expert programmer. Write clean, idiomatic code.
 Be concise. Don't over-engineer.
 ```
 
+含 permission_mode 与 isolation 字段：
+```markdown
+---
+name: coder
+description: "Expert programmer"
+tools: [shell, file_read, file_write, file_edit]
+skills: [code-review]
+mcp: [github, filesystem]
+isolation: worktree                # 仅作为 sub-agent 时生效
+---
+
+You are an expert programmer...
+```
+
 主 agent：
 ```markdown
 ---
@@ -451,22 +534,27 @@ mcp: [all]
 ### 三层解析
 
 ```
-permission_mode / model / thinking / run_mode:
-    SessionOverride > GlobalConfig.defaults
+permission_mode:
+    SessionOverride > [agent].permission_mode > 内置 PermissionMode::Default
 
-max_tool_calls / context.* / limits.*:
-    GlobalConfig（单一来源，不可 per-session override）
+model:
+    SessionOverride > providers 注册顺序的第一个 chat-capable
 
-tools / skills / mcp / system_prompt:
-    AgentConfig（单一来源）
+thinking / run_mode:
+    SessionOverride > 内置默认
 
-isolation:
-    SessionOverride（仅子代理委派时设）
+tool_timeout / max_tool_calls / threshold / compact_threshold / retain_work_units:
+    各执行器的 config struct（GlobalConfig 单一来源，无 override）
+
+tools / skills / mcp / isolation / system_prompt:
+    AgentConfig（单一来源，AGENT.md 决定）
 ```
 
 ---
 
 ## 四、Prompt 构建
+
+由 `SessionContext.process_turn()` 在每轮 turn 开始时调用：
 
 ```rust
 fn build_prompt(
@@ -474,10 +562,10 @@ fn build_prompt(
     profile: &UserProfile,
     permission_mode: PermissionMode,
     run_mode: RunMode,
-    global: &GlobalConfig,
+    prompt_cfg: &PromptConfig,
 ) -> String {
     [
-        builtin_sections(permission_mode, run_mode, global.prompt.native_tools),
+        builtin_sections(permission_mode, run_mode, prompt_cfg.native_tools),
         agent.system_prompt.clone(),
         profile.to_prompt_section(),
         runtime_info(),
@@ -486,8 +574,8 @@ fn build_prompt(
 }
 ```
 
-- Agent 启动时算一次"半成品"（不含 profile），缓存在 `Agent.cached_prompt`
-- 每轮 turn 把 profile 拼上去（同 agent 不同用户 prompt 不同）
+- Agent 启动时算一次"半成品"（仅 `agent.system_prompt` 部分），缓存在 `Agent.cached_prompt`
+- 每轮 turn 由 process_turn 把 profile + builtin（按当前 perm/run mode）+ runtime 拼上
 - 完全去掉 IDENTITY.md / SOUL.md / USER.md / RULES.md 的硬编码读取
 
 ---
@@ -551,8 +639,16 @@ fn build_prompt(
 | `SubAgentConfig` | 与主 agent 配置不同 | 统一为 `AgentConfig` |
 | `SubAgentDelegator` | 持 agent 配置 + 临时构建 AgentLoop | `DelegationCoordinator` 编排 worktree，agent 通过 SessionManager 统一执行 |
 | `max_tool_calls` 等 limits | AgentConfig + SessionOverride | 仅 `GlobalConfig.limits` |
-| `compact_threshold` 等 context | AgentConfig + SessionOverride | 仅 `GlobalConfig.context`（ContextEngine 内部） |
-| `permission_mode` / `model` / `thinking` / `run_mode` / `isolation` | AgentConfig + SessionOverride | 仅 `SessionOverride`（agent 不感知） |
+| `tool_timeout_secs` | `AgentConfig.tool_timeout_secs` | `ToolExecutor` 字段（来自 `[tool_executor]`） |
+| `max_tool_calls` / `loop_breaker_threshold` | `AgentConfig` + SessionOverride | `LoopBreaker` 字段（来自 `[loop_breaker]`） |
+| `compact_threshold` / `retain_work_units` | `AgentConfig.context` + SessionOverride | `ContextEngine` 字段（来自 `[context_engine]`） |
+| `stream_first_chunk_timeout_secs` / `max_output_bytes` | `AgentConfig` | **硬编码常量**（`llm_stream` 模块） |
+| `max_history` | `AgentConfig` | **删除**（死代码） |
+| `permission_mode` | `AgentConfig` + SessionOverride | `[agent].permission_mode` + SessionOverride 覆盖 |
+| `model` | `AgentConfig` + SessionOverride | SessionOverride + providers 隐式默认（无全局 [defaults]） |
+| `thinking` | `AgentConfig` + SessionOverride | 仅 `SessionOverride` |
+| `run_mode` | SessionOverride | 仅 `SessionOverride`（触发源决定） |
+| `isolation` | SessionOverride | 仅 `AgentConfig`（agent 身份） |
 
 ---
 
@@ -581,18 +677,22 @@ fn build_prompt(
    - `change_rx` 删除（WorkspaceWatcher 自维护）
    - pending images 改为 `TurnInput` 字段
    - `build()` / `merge_attachments()` 改为无状态函数
-8. 拆 `CompactionPolicy` → 全局 `ContextEngine`（仅持无状态部分）+ `Session.token_tracker`（per-session 状态）
-9. 删 `AgentLoop`、`SessionHandle`、`LoopRegistry`、`run_session_actor`
-10. `DelegationCoordinator` 接管 worktree / merge / cleanup；`SubAgentDelegator` 删除
-11. ClientChannel 删 `loop_registry`、`evict_loop`
-12. WorkspaceWatcher 改为自维护（own RwLock，文件变更直接更新）
-13. Scheduler / Webhook 路径收编：删 `SchedulerContext` / `WebhookContext`，全走 `session_manager.get_context()`
+8. 拆 `CompactionPolicy` + `CompactionExecutor` → 全局 `ContextEngine`（持 compact_threshold/retain_work_units）+ `Session.token_tracker`（per-session 状态）
+9. `DefaultToolExecutor` 重命名为 `ToolExecutor`，timeout 内化为字段
+10. 拆 `LoopBreaker` 为全局 policy + per-turn counter，配置从 `[loop_breaker]` 读
+11. `LlmResponseReader` 退化为 `llm_stream::read` 模块函数 + 硬编码常量
+12. 删 `AgentLoop`、`SessionHandle`、`LoopRegistry`、`run_session_actor`
+13. `DelegationCoordinator` 接管 worktree / merge / cleanup；`SubAgentDelegator` 删除
+14. ClientChannel 删 `loop_registry`、`evict_loop`
+15. WorkspaceWatcher 改为自维护（own RwLock，文件变更直接更新）
+16. Scheduler / Webhook 路径收编：删 `SchedulerContext` / `WebhookContext`，全走 `session_manager.get_context()`
+17. 删 `AgentConfig.max_history`（死代码）
 
 ### 阶段 3：Agent 配置统一
 
-1. `AgentConfig` 简化：仅 `name` / `description` / `tools` / `skills` / `mcp` / `system_prompt`
+1. `AgentConfig` 简化：仅 `name` / `description` / `tools` / `skills` / `mcp` / `isolation` / `system_prompt`
 2. 实现 `ToolFilter` / `SkillFilter` / `McpFilter` enum
-3. `GlobalConfig` 拆出 `[limits]` / `[context]` / `[defaults]` / `[prompt]` 段
+3. `GlobalConfig` 按模块拆段：`[locale]` / `[prompt]` / `[agent]` / `[tool_executor]` / `[loop_breaker]` / `[context_engine]` / `[providers]` / `[channels]` / `[mcp_servers]` / `[scheduler]` / `[users]`
 4. `AgentRegistry` 加载所有 `workspace/agents/*/AGENT.md`（含 main）
 5. `prompt.rs` 删 IDENTITY/SOUL/USER.md 读取；prompt 组合改为参数化（`build_prompt(...)` 函数）
 6. 启动校验：`workspace/agents/main/AGENT.md` 缺失则报错退出
@@ -617,17 +717,19 @@ fn build_prompt(
 ### scripts/migrate_main_agent.sh
 
 读：
-- `config.toml::agent.*` 段（permission_mode / prompt.*）
+- `config.toml`（旧布局：`[agent]` / `[limits]` / `[context]` / `[defaults]` / `[prompt]` 等扁平段）
 - `workspace/IDENTITY.md`、`SOUL.md`、`RULES.md`
 
 写：
+- 重写 `config.toml` 为新的按模块布局
+  - `[locale]` / `[prompt]` / `[agent]` / `[tool_executor]` / `[loop_breaker]` / `[context_engine]`
+  - 删除 `max_history` / `stream_first_chunk_timeout_secs` / `max_output_bytes` 字段
 - `workspace/agents/main/AGENT.md`
   - front matter: `name=main, tools=[all], skills=[all], mcp=[all]`
   - body: `IDENTITY.md + "\n\n" + SOUL.md + "\n\n" + RULES.md`
 
 提示用户手动确认后删除：
 - `workspace/IDENTITY.md`、`SOUL.md`、`RULES.md`
-- `config.toml::[agent]` 段（合并到 `[defaults]` 和 `[prompt]`）
 
 ### scripts/migrate_memory.sh
 

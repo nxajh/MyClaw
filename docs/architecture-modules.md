@@ -19,17 +19,19 @@
 ═════════════════════════════════════════════════════════════════════════════════
 
   config.toml              workspace/
-   ┌──────────┐             ┌──────────────────────────────────────┐
-   │ [runtime]│             │  agents/{name}/AGENT.md              │
-   │ [limits] │             │  skills/{name}/SKILL.md              │
-   │ [context]│             │  sessions/{sid}/history.jsonl, ...   │
-   │ [default]│             │  users/{uid}/profile.md              │
-   │ [prompt] │             │  users/{uid}/preferences.md          │
-   │ [provid] │             │  users/{uid}/memory/{type}/          │
-   │ [channel]│             │  cron/jobs.json                      │
-   │ [mcp]    │             │  DEFAULT_USER.md                     │
-   │ [users]  │             └──────────────────────────────────────┘
-   └─────┬────┘                       │
+   ┌────────────────┐       ┌──────────────────────────────────────┐
+   │ [locale]       │       │  agents/{name}/AGENT.md              │
+   │ [prompt]       │       │  skills/{name}/SKILL.md              │
+   │ [agent]        │       │  sessions/{sid}/history.jsonl, ...   │
+   │ [tool_executor]│       │  users/{uid}/profile.md              │
+   │ [loop_breaker] │       │  users/{uid}/preferences.md          │
+   │ [context_eng]  │       │  users/{uid}/memory/{type}/          │
+   │ [providers]    │       │  cron/jobs.json                      │
+   │ [channels]     │       │  DEFAULT_USER.md                     │
+   │ [mcp_servers]  │       └──────────────────────────────────────┘
+   │ [scheduler]    │                 │
+   │ [users]        │                 │
+   └─────┬──────────┘                 │
          │ 加载                        │ load/save/watch
          ▼                            ▼
 
@@ -61,28 +63,41 @@
   ┃  │  内部 task 监听文件系统变化              │        ┃                ┃
   ┃  └─────────────────────────────────────────┘        ┃                ┃
   ┃                                                     ┃                ┃
-  ┃  ┌─────────────────┐   ┌──────────────┐   ┌─────────▼────────┐       ┃
-  ┃  │  ContextEngine  │   │SessionBackend│   │  AgentRegistry   │       ┃
-  ┃  │ (compact 逻辑+   │   │ (JSONL 持久化)│   │ HashMap<name,    │       ┃
-  ┃  │  registry 引用) │╌╌╌│              │   │   Arc<Agent>>    │       ┃
-  ┃  │ ★ 无状态        │   └──────────────┘   └──┬───┬──────┬────┘       ┃
-  ┃  └─────────────────┘                          ┃   ┃      ┃            ┃
-  ┃           ╲                                   ╋   ╋      ╋            ┃
-  ┃            ╲ 每个 Agent 引用：                ▼   ▼      ▼            ┃
-  ┃             ╲╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌▶  Agent  Agent  Agent       ┃
-  ┃                          ↑                  "main" "coder" "..."     ┃
-  ┃           ServiceRegistry ┘                                            ┃
-  ┃           ToolRegistry ────────────────────╌╌▶ (Arc 引用，不拥有)     ┃
+  ┃  ┌─────────────────┐   ┌──────────────┐   ┌─────────────────┐       ┃
+  ┃  │  ContextEngine  │   │SessionBackend│   │  ToolExecutor   │       ┃
+  ┃  │ (compact_thresh,│   │ (JSONL 持久化)│   │ (timeout,       │       ┃
+  ┃  │  retain_units,  │   │              │   │  ToolRegistry   │       ┃
+  ┃  │  registry ref)  │   │              │   │  ref)           │       ┃
+  ┃  │ from [context_  │   │              │   │ from [tool_     │       ┃
+  ┃  │   engine]       │   │              │   │   executor]     │       ┃
+  ┃  └─────────────────┘   └──────────────┘   └─────────────────┘       ┃
+  ┃                                                                       ┃
+  ┃  ┌─────────────────┐   ┌──────────────────────────────────────┐      ┃
+  ┃  │  LoopBreaker    │   │  llm_stream (模块，非 struct)        │      ┃
+  ┃  │ (max_tool_calls,│   │   const FIRST_CHUNK_TIMEOUT = 600s   │      ┃
+  ┃  │  threshold)     │   │   const MAX_OUTPUT_BYTES   = 100KB   │      ┃
+  ┃  │ from [loop_     │   │   pub fn read(stream) -> Response    │      ┃
+  ┃  │   breaker]      │   │   pub fn read_streamed(...)          │      ┃
+  ┃  └─────────────────┘   └──────────────────────────────────────┘      ┃
   ┃                                                                       ┃
   ┃  ┌─────────────────┐   ┌──────────────┐   ┌─────────────────┐       ┃
-  ┃  │   AskRouter     │   │ UserResolver │   │ DelegationCoord │       ┃
-  ┃  │ (pending_asks   │   │ (rk→user_id) │   │ (worktree 编排  │       ┃
-  ┃  │  注册器)        │   │              │   │  +AgentRegistry)│       ┃
-  ┃  └─────────────────┘   └──────────────┘   └────────┬────────┘       ┃
-  ┃                                                     ┃                ┃
-  ┃                                                     ╋                ┃
-  ┃                                  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌▶  references     ┃
-  ┃                                  AgentRegistry, SessionManager        ┃
+  ┃  │  AgentRegistry  │   │  AskRouter   │   │ UserResolver    │       ┃
+  ┃  │ HashMap<name,   │   │ (pending_    │   │ (rk → user_id)  │       ┃
+  ┃  │   Arc<Agent>>   │   │   asks)      │   │                 │       ┃
+  ┃  └──┬───┬──────┬───┘   └──────────────┘   └─────────────────┘       ┃
+  ┃     ┃   ┃      ┃                                                    ┃
+  ┃     ▼   ▼      ▼                                                    ┃
+  ┃   Agent Agent Agent  "main" / "coder" / "..."                       ┃
+  ┃     ┃                                                                ┃
+  ┃     ┗━ 每个 Agent 引用上面的全局组件（不拥有）：                       ┃
+  ┃         ServiceRegistry, SkillManager RwLock, ContextEngine,         ┃
+  ┃         AskRouter, AgentDelegator, ToolExecutor, LoopBreaker         ┃
+  ┃                                                                       ┃
+  ┃  ┌─────────────────────────────────────────────────────┐             ┃
+  ┃  │            DelegationCoordinator                    │             ┃
+  ┃  │  references: SessionManager + AgentRegistry         │             ┃
+  ┃  │  worktree 编排 + 调 SessionManager.create_session   │             ┃
+  ┃  └─────────────────────────────────────────────────────┘             ┃
   ┃                                                                       ┃
   ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
   │
@@ -213,8 +228,10 @@
 
 | 组件 | 持有的引用 |
 |------|-----------|
-| **Agent** | ServiceRegistry, ToolRegistry, Arc<RwLock<SkillManager>>, ContextEngine |
+| **Agent** | ServiceRegistry, Arc<RwLock<SkillManager>>, ContextEngine, AskRouter, AgentDelegator, ToolExecutor, LoopBreaker |
 | **ContextEngine** | ServiceRegistry, ToolRegistry |
+| **ToolExecutor** | ToolRegistry（own timeout 字段） |
+| **LoopBreaker** | (own max_tool_calls + threshold) |
 | **AgentRegistry** | HashMap<name, Arc<Agent>>（拥有） |
 | **WorkspaceWatcher** | Arc<RwLock<SkillManager>>, Arc<RwLock<Vec<AgentConfig>>>（拥有 RwLock） |
 | **McpManager** | ToolRegistry（注册到里面） |
@@ -223,7 +240,8 @@
 | **DelegationCoordinator** | SessionManager, AgentRegistry |
 | **Orchestrator** | SessionManager, AskRouter, UserResolver, DelegationCoordinator, Scheduler, WebhookHandler, channels DashMap |
 | **Session** | Option<Arc<dyn PersistHook>>（自负责持久化） |
-| **TurnContext (借用)** | &str system_prompt, &str model_id, &Channel, &AskRouter, &AgentDelegator, Option<TurnStream> |
+| **TurnContext (借用)** | &str system_prompt, &str model_id, Option<&ThinkingConfig>, PermissionMode, RunMode, Option<TurnStream> |
+| `llm_stream::read*()` 模块函数 | 硬编码常量 FIRST_CHUNK_TIMEOUT / MAX_OUTPUT_BYTES |
 
 ---
 
