@@ -937,6 +937,13 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // ── Launch ─────────────────────────────────────────────────────────────
 
     let (mut orchestrator, _msg_tx) = Orchestrator::new(parts);
+
+    // Wire the loop registry into ClientChannel so that session switch/create/delete
+    // can evict the cached AgentLoop (same mechanism as /switch slash command).
+    if let Some(ref cc) = _client_channel {
+        cc.set_loop_registry(orchestrator.shared().sessions);
+    }
+
     print_banner(&config, mcp_manager_arc.server_count().await, mcp_manager_arc.tool_count().await, sub_agent_count, &sub_agent_names);
 
     // ── Scheduler tasks ────────────────────────────────────────────────────

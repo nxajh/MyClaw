@@ -9,6 +9,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::{Mutex as SyncMutex, RwLock};
 use tokio::net::TcpListener;
@@ -70,6 +71,8 @@ pub struct ClientChannel {
     skill_manager: Arc<RwLock<Option<Arc<RwLock<crate::agents::SkillManager>>>>>,
     /// Service registry for models API (set after construction).
     service_registry: Arc<RwLock<Option<Arc<dyn crate::providers::ServiceRegistry>>>>,
+    /// Loop registry for evicting cached AgentLoop on session switch (set after construction).
+    loop_registry: Arc<RwLock<Option<Arc<DashMap<String, Arc<crate::agents::orchestrator::SessionHandle>>>>>>,
 }
 
 impl ClientChannel {
@@ -89,6 +92,7 @@ impl ClientChannel {
             config_path: Arc::new(RwLock::new(None)),
             skill_manager: Arc::new(RwLock::new(None)),
             service_registry: Arc::new(RwLock::new(None)),
+            loop_registry: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -128,6 +132,11 @@ impl ClientChannel {
         *self.service_registry.write() = Some(sr);
     }
 
+    /// Set the loop registry for evicting cached AgentLoop on session switch.
+    pub fn set_loop_registry(&self, lr: Arc<DashMap<String, Arc<crate::agents::orchestrator::SessionHandle>>>) {
+        *self.loop_registry.write() = Some(lr);
+    }
+
     /// Start the WebSocket server (spawns a background task).
     /// Called lazily from listen() — the first time the Orchestrator starts consuming.
     async fn start(&self) -> anyhow::Result<()> {
@@ -164,6 +173,7 @@ impl ClientChannel {
         let config_path = self.config_path.clone();
         let skill_manager = self.skill_manager.clone();
         let service_registry = self.service_registry.clone();
+        let loop_registry = self.loop_registry.clone();
 
         let local_addr = listener.local_addr()?;
         tracing::info!("WebSocket server listening on ws://{}/myclaw", local_addr);
@@ -238,6 +248,7 @@ impl ClientChannel {
                         let config_path_clone = config_path.clone();
                         let skill_manager_clone = skill_manager.clone();
                         let service_registry_clone = service_registry.clone();
+                        let loop_registry_clone = loop_registry.clone();
                         let auth_token_clone = auth_token.clone();
 
                         tracing::info!(
@@ -458,6 +469,7 @@ impl ClientChannel {
                                                     config_path: &config_path_clone,
                                                     skill_manager: &skill_manager_clone,
                                                     service_registry: &service_registry_clone,
+                                                    loop_registry: &loop_registry_clone,
                                                 },
                                             );
                                             let _ = ws_sender.send(resp).await;
@@ -613,6 +625,16 @@ struct ApiContext<'a> {
     config_path: &'a Arc<RwLock<Option<std::path::PathBuf>>>,
     skill_manager: &'a Arc<RwLock<Option<Arc<RwLock<crate::agents::SkillManager>>>>>,
     service_registry: &'a Arc<RwLock<Option<Arc<dyn crate::providers::ServiceRegistry>>>>,
+    loop_registry: &'a Arc<RwLock<Option<Arc<DashMap<String, Arc<crate::agents::orchestrator::SessionHandle>>>>>>,
+}
+
+/// Evict the cached AgentLoop for `user_id` so the next message creates a fresh one
+/// bound to the newly activated session history.
+fn evict_loop(ctx: &ApiContext<'_>, user_id: &str) {
+    let guard = ctx.loop_registry.read();
+    if let Some(registry) = guard.as_ref() {
+        registry.remove(user_id);
+    }
 }
 
 /// Route a management API request and return a JSON response string.
@@ -658,15 +680,18 @@ fn handle_api_request(
         "sessions.create" => {
             let name = params["name"].as_str();
             match sm.new_session(user_id, name) {
-                Ok(info) => serde_json::json!({
-                    "type": "api_response",
-                    "id": id,
-                    "result": {
-                        "id": info.id,
-                        "name": info.display_name,
-                        "created_at": info.created_at.to_rfc3339(),
-                    }
-                }).to_string(),
+                Ok(info) => {
+                    evict_loop(ctx, user_id);
+                    serde_json::json!({
+                        "type": "api_response",
+                        "id": id,
+                        "result": {
+                            "id": info.id,
+                            "name": info.display_name,
+                            "created_at": info.created_at.to_rfc3339(),
+                        }
+                    }).to_string()
+                }
                 Err(e) => serde_json::json!({
                     "type": "api_error",
                     "id": id,
@@ -687,7 +712,9 @@ fn handle_api_request(
                 }
             };
             match sm.switch_session(user_id, session_id) {
-                Ok(info) => serde_json::json!({
+                Ok(info) => {
+                    evict_loop(ctx, user_id);
+                    serde_json::json!({
                     "type": "api_response",
                     "id": id,
                     "result": {
@@ -715,11 +742,14 @@ fn handle_api_request(
                 }
             };
             match sm.delete_session(user_id, session_id) {
-                Ok(()) => serde_json::json!({
-                    "type": "api_response",
-                    "id": id,
-                    "result": null
-                }).to_string(),
+                Ok(()) => {
+                    evict_loop(ctx, user_id);
+                    serde_json::json!({
+                        "type": "api_response",
+                        "id": id,
+                        "result": null
+                    }).to_string()
+                }
                 Err(e) => serde_json::json!({
                     "type": "api_error",
                     "id": id,
