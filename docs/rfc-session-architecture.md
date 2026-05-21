@@ -121,69 +121,89 @@ enum ToolFilter {
 }
 // SkillFilter / McpFilter 同形
 
+// Agent 退化为"纯身份"——无 Arc 字段
 struct Agent {
-    // 身份
     config: AgentConfig,
-    cached_prompt: String,             // 启动时算的"半成品"（不含 profile）
+    cached_prompt: String,             // AGENT.md body 部分
+}
 
-    // 全局基础设施引用（Arc）
+// 全局基础设施 bundle，daemon 启动时构造，run 时传入
+struct AgentRuntime {
     registry: Arc<dyn ServiceRegistry>,
-    skills: Arc<RwLock<SkillManager>>,
     context_engine: Arc<ContextEngine>,
-    ask_router: Arc<AskRouter>,
-    delegator: Arc<dyn AgentDelegator>,
-
-    // 全局执行器（封装各自的 limits）
-    tool_executor: Arc<ToolExecutor>,  // owns: tool_timeout
-    loop_breaker: Arc<LoopBreaker>,    // owns: max_tool_calls, threshold
-    // 注：LLM 流式读取走 `llm_stream::read()` 模块级函数，无需 struct
+    tool_executor: Arc<ToolExecutor>,    // 内部 ToolRegistry 含所有自带 Arc 的 tool
+    loop_breaker: Arc<LoopBreaker>,
 }
 
 impl Agent {
-    /// 无状态执行一轮 turn。运行参数全部已 resolve 为标量。
     async fn run(
         &self,
         session: &mut Session,
         input: TurnInput,
         ctx: &TurnContext<'_>,
+        rt: &AgentRuntime,
     ) -> Result<TurnResult>;
 }
 ```
 
-"主 agent"和"子代理"是同一个类型的不同实例。Agent 自己持有的数据只剩 `config`（身份）+ `cached_prompt`（启动时算的字符串），其他全是对全局组件的 Arc 引用。
+**Agent 不持有 ask_router / delegator / skills**——这些是工具的内部依赖：
+- `AskUserTool` 持 `Arc<AskRouter>`
+- `DelegateTool` 持 `Arc<dyn AgentDelegator>`
+- daemon 构造 tool 时注入这些 Arc，tool 进 ToolRegistry，Agent 通过 ToolExecutor 间接访问
+
+"主 agent"和"子代理"是同一个类型的不同实例。
+
+### Session 与 SessionContext 的关系
+
+**SessionContext 拥有 Session**。两类不同的关注点：
+
+| 类 | 关注点 | 含字段 |
+|----|--------|--------|
+| **Session** | 对话**本身**的数据 | history、message_ids、token_tracker、session_override 等；transient backing：persist、channel |
+| **SessionContext** | 运行这段对话的**容器** | agent 绑定、attachment 通告状态、pending_retry、turn 串行化 |
+
+类比：Session 是录音，SessionContext 是正在播放它的播放器（含绑定的音箱、播放进度、音量）。录音可以独立存在（list_sessions、序列化磁盘）；播放器只在"打开"录音时存在。
 
 ### SessionContext
 
 ```rust
 struct SessionContext {
-    session: Mutex<Session>,
-    agent: Arc<Agent>,
-    user_profile: Arc<UserProfile>,
+    session: Mutex<Session>,           // ← owns
+    agent: Arc<Agent>,                 // ref
+    user_profile: Arc<UserProfile>,    // ref (per user)
 
-    // per-session 状态（跨 turn 保留，不持久化）
     attachments: Mutex<AttachmentManager>,
     pending_retry: Mutex<Option<String>>,
-
     turn_lock: tokio::sync::Mutex<()>,
 }
 
 impl SessionContext {
-    /// channel 每轮注入，不存储 — 支持同一 session 跨通道访问
     async fn process_turn(
         &self,
         input: TurnInput,
         channel: Arc<dyn Channel>,
         reply_target: String,
-        env: &TurnEnv,
-    ) -> Result<String>;
+        rt: &AgentRuntime,
+    ) -> Result<String> {
+        let _guard = self.turn_lock.lock().await;
+        {
+            let mut session = self.session.lock();
+            session.channel = Some(channel.clone());           // 透传给工具
+            session.last_reply_target = Some(reply_target.clone());
+        }
+        // attachment diff → merge reminder → agent.run
+        ...
+    }
+    
+    async fn recover_pending_turn(&self, rt: &AgentRuntime, ...) -> Result<()>;
 }
 ```
 
 **职责**：
-- 持有 per-session 的对话数据 + attachment 状态
+- 拥有 per-session 的对话数据 + attachment 状态
 - 保证 turn 串行化（turn_lock）
-- 不持有 channel（每轮注入）
-- 不持有 AgentLoop / persist_hook（全局共享）
+- 把 channel/reply_target 透传到 Session.channel / Session.last_reply_target，工具直接从 session 读
+- 不持有 channel 字段（每轮注入到 session）
 
 ### TurnContext / TurnInput / TurnResult
 
@@ -224,22 +244,25 @@ struct TurnResult {
 
 | 不在 TurnContext 的东西 | 去处 |
 |------------------------|------|
-| `persist` | Session 内部（`Session.add_*` 方法） |
-| `ask_router` / `delegator` / `tool_executor` / `loop_breaker` | Agent 字段（全局 Arc） |
+| `persist` | Session 内部（transient 字段 + `add_*` 方法） |
+| `channel` | Session.channel（transient，process_turn 写入） |
+| `reply_target` | Session.last_reply_target（process_turn 写入） |
+| `ask_router` | `AskUserTool` 内部 Arc 字段（Agent 不感知） |
+| `delegator` | `DelegateTool` 内部 Arc 字段（Agent 不感知） |
+| `tool_executor` / `loop_breaker` / `context_engine` | `AgentRuntime` 字段，run() 参数 |
 | `tool_timeout` / `max_tool_calls` 等 limit | 各执行器内部 |
-| `user_profile` / `GlobalConfig` / `SessionOverride` / `AttachmentManager` | process_turn 边界全部消化掉 |
-| `channel` | AskRouter 内部按 session_id 解析（或 hint 覆盖） |
-| `session_key` | `session.id` 即可 |
-| `reply_target` | `session.last_reply_target`（process_turn 写入） |
+| `user_profile` / `AttachmentManager` | process_turn 边界消化（profile 拼进 system_prompt，attachment 算成 reminder） |
+| `session_key` | `session.id` |
 
 TurnContext 只保留"本轮 LLM 调用需要的决策 + 流式控制"。
 
-### Session 自负责持久化
+### Session 自负责持久化 + 持有 transient channel
 
-Session 内嵌 `Option<Arc<dyn PersistHook>>`，对外只暴露 `add_*` 方法。Agent.run() 不再关心持久化——写 history 即落盘。
+Session 内嵌 `Option<Arc<dyn PersistHook>>` 和 `Option<Arc<dyn Channel>>`（都 `#[serde(skip)]`），对外暴露 `add_*` 方法。Agent.run() 不再关心持久化——写 history 即落盘。工具读 `session.channel` 自己发送。
 
 ```rust
 struct Session {
+    // ── 持久化字段 ──
     id: String,
     owner: String,
     history: Vec<ChatMessage>,
@@ -251,9 +274,11 @@ struct Session {
     incomplete_turn: bool,
     last_reply_target: Option<String>,
 
+    // ── transient 运行时 backing（不持久化）──
     #[serde(skip)]
     persist: Option<Arc<dyn PersistHook>>,    // None = ephemeral（CLI 模式）
-}
+    #[serde(skip)]
+    channel: Option<Arc<dyn Channel>>,        // process_turn 每次写入
 
 impl Session {
     pub fn add_user_text(&mut self, text: String) {
@@ -599,22 +624,43 @@ fn build_prompt(
 ### 重构后
 
 ```
-用户消息 → Channel → orchestrator
-  → session_manager.get_context(routing_key)
-  → ctx.process_turn(input, channel, reply_target, env)
-    → turn_lock.lock()
-    → agent.run(&mut session, input, &turn_ctx)
+用户消息 / cron / heartbeat / webhook
+    → Channel/Scheduler/WebhookHandler （仅做协议解码）
+    → mpsc::send(OrchestratorEvent)
+    → Orchestrator.run() 主循环
+        → session_manager.get_context(routing_key)
+        → ctx.process_turn(input, channel, reply_target, rt)
+            → turn_lock.lock()
+            → agent.run(&mut session, input, &turn_ctx, rt)
+
+子代理委派（特例）：
+  agent.run() 内 → DelegateTool.execute() → DelegationCoordinator.delegate()
+    → session_manager.get_or_create_sub(...).process_turn(...)
+  （DelegationCoordinator 就近调，不绕 Orchestrator）
 ```
 
-四条入口路径（用户消息 / heartbeat / cron / webhook / 子代理）全部走同一条调用链，区别只是 sk 生成规则和 SessionOverride 字段：
+`OrchestratorEvent` 是统一的事件类型：
 
-| 来源 | sk | channel | run_mode |
-|------|-----|---------|----------|
-| 用户消息 | `{type}:{account}:{sender}` | 来源 channel | Interactive |
-| Heartbeat | `_heartbeat_{uuid}` (ephemeral) | last_channel | Background |
-| Cron | `cron:{job_id}` | job 配置 target | Background |
-| Webhook | `webhook:{job_id}` | job 配置 target | Background |
-| 子代理 | `sub:{parent_sk}:{agent}:{uuid}` | 父 session 同 channel | Interactive |
+```rust
+enum OrchestratorEvent {
+    UserMessage(ChannelMessage, ChannelKey),    // 各 channel 用户消息
+    Scheduler(SchedulerEvent),                  // cron / heartbeat
+    Webhook(WebhookEvent),                      // HTTP webhook 触发
+    Delegation(DelegationEvent),                // 子代理完成回填
+}
+```
+
+四条入口路径走同一条调用链，区别只是 sk 生成规则和 SessionOverride 字段：
+
+| 来源 | 进入 Orchestrator 的事件 | sk | channel | run_mode |
+|------|------------------------|-----|---------|----------|
+| 用户消息 | `UserMessage` | `{type}:{account}:{sender}` | 来源 channel | Interactive |
+| Heartbeat | `Scheduler` | `_heartbeat:{uuid}` (ephemeral) | last_channel | Background |
+| Cron | `Scheduler` | `cron:{job_id}` | job 配置 target | Background |
+| Webhook | `Webhook` | `webhook:{job_id}` | job 配置 target | Background |
+| 子代理 | （不进 Orchestrator） | `sub:{parent_sk}:{agent}:{uuid}` | 父 session 同 channel | Interactive |
+
+**WebhookHandler 退化为协议适配器**：跟 TelegramChannel 同位，只负责签名校验 + 模板渲染 + 把 `WebhookEvent` 发给 Orchestrator。原来直接持 `Arc<SessionManager>` 的旁路删除。
 
 ---
 
@@ -622,15 +668,18 @@ fn build_prompt(
 
 | 组件 | 现在 | 重构后 |
 |------|------|--------|
-| `Agent` | AgentLoop 工厂 | 无状态执行器，`run(&mut session, ...)` |
+| `Agent` | AgentLoop 工厂 + 大量 Arc 字段 | 纯身份（config + cached_prompt），无 Arc 字段 |
 | `AgentLoop` | 持有 Session ownership | 删除 |
-| `RequestBuilder` | 五职责混杂 struct | 删除（system_prompt 入 Agent，AttachmentManager 入 SessionContext，change_rx 入 WorkspaceWatcher，images 入 TurnInput，build() 改无状态函数） |
+| `AgentRuntime` | （不存在） | 新增，bundle 全局基础设施（registry/context_engine/tool_executor/loop_breaker），Agent.run() 参数 |
+| `RequestBuilder` | 五职责混杂 struct | 删除（system_prompt 入 process_turn，AttachmentManager 入 SessionContext，change_rx 入 WorkspaceWatcher，images 入 TurnInput，build() 改无状态函数） |
 | `LoopRegistry` | DashMap 平行缓存 | 删除 |
 | `SessionHandle` | Arc<Mutex<AgentLoop>> + Sender | 删除 |
 | `run_session_actor` | channel + actor | 删除（turn_lock 替代） |
-| `ask_user` handler | per-session 闭包 | `AskRouter` 全局共享 |
-| `delegate` handler | per-session 闭包 | `DelegationCoordinator` 全局共享 |
-| `persist_hook` | per-AgentLoop 创建，Agent.run() 手动调用 | Session 内嵌（Option<Arc<dyn PersistHook>>），通过 `Session::add_*` 方法自动持久化 |
+| `ask_user` handler | per-session 闭包 | `AskUserTool` 内部持 `Arc<AskRouter>`，Agent 不感知 |
+| `delegate` handler | per-session 闭包 | `DelegateTool` 内部持 `Arc<dyn AgentDelegator>`，Agent 不感知 |
+| `persist_hook` | per-AgentLoop 创建，Agent.run() 手动调用 | Session 内嵌（transient `Option<Arc<dyn PersistHook>>`），通过 `Session::add_*` 方法自动持久化 |
+| `Session.channel` | （不存在） | 新增 transient 字段（`Option<Arc<dyn Channel>>`），process_turn 写入，工具直接读取 |
+| `WebhookContext` | 独立持 SessionManager + sessions 等 | 删除；`WebhookHandler` 退化为协议适配器，发 `WebhookEvent` 给 Orchestrator |
 | `CompactionPolicy` + `CompactionExecutor` | per-AgentLoop | 合并为全局 `ContextEngine` |
 | `AttachmentManager` | RequestBuilder 字段 | `SessionContext` 字段 |
 | `change_rx` | 传给每个 AgentLoop | `WorkspaceWatcher` 自维护 RwLock |

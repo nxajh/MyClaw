@@ -83,15 +83,20 @@
   ┃  ┌─────────────────┐   ┌──────────────┐   ┌─────────────────┐       ┃
   ┃  │  AgentRegistry  │   │  AskRouter   │   │ UserResolver    │       ┃
   ┃  │ HashMap<name,   │   │ (pending_    │   │ (rk → user_id)  │       ┃
-  ┃  │   Arc<Agent>>   │   │   asks)      │   │                 │       ┃
-  ┃  └──┬───┬──────┬───┘   └──────────────┘   └─────────────────┘       ┃
-  ┃     ┃   ┃      ┃                                                    ┃
-  ┃     ▼   ▼      ▼                                                    ┃
-  ┃   Agent Agent Agent  "main" / "coder" / "..."                       ┃
+  ┃  │   Arc<Agent>>   │   │  oneshot map)│   │                 │       ┃
+  ┃  └──┬───┬──────┬───┘   └───┬──────────┘   └─────────────────┘       ┃
+  ┃     ┃   ┃      ┃           │ 仅注入到 AskUserTool 内部              ┃
+  ┃     ▼   ▼      ▼           │ Agent / AgentRuntime 不感知            ┃
+  ┃   Agent Agent Agent        ▼                                        ┃
+  ┃   "main" "coder" "..."   AskUserTool ─→ 进 ToolRegistry            ┃
   ┃     ┃                                                                ┃
-  ┃     ┗━ 每个 Agent 引用上面的全局组件（不拥有）：                       ┃
-  ┃         ServiceRegistry, SkillManager RwLock, ContextEngine,         ┃
-  ┃         AskRouter, AgentDelegator, ToolExecutor, LoopBreaker         ┃
+  ┃     ┗━ Agent 退化为"纯身份"：config + cached_prompt，无 Arc 字段     ┃
+  ┃                                                                       ┃
+  ┃  ┌──────────────────────────────────────────────────────────┐        ┃
+  ┃  │           AgentRuntime (启动时构造的全局 bundle)           │        ┃
+  ┃  │   registry / context_engine / tool_executor / loop_breaker│        ┃
+  ┃  │   Agent.run(session, input, ctx, rt) 时传入                │        ┃
+  ┃  └──────────────────────────────────────────────────────────┘        ┃
   ┃                                                                       ┃
   ┃  ┌─────────────────────────────────────────────────────┐             ┃
   ┃  │            DelegationCoordinator                    │             ┃
@@ -129,8 +134,9 @@
   ┃   │   │  ├─ session_override                 │                │      ┃
   ┃   │   │  ├─ token_tracker                    │                │      ┃
   ┃   │   │  ├─ incomplete_turn, last_reply_targ │                │      ┃
-  ┃   │   │  └─ persist: Option<Arc<PersistHook>>│ ← 自己负责落盘 │      ┃
-  ┃   │   │     methods: add_user_text(),        │                │      ┃
+  ┃   │   │  ├─ persist: Option<Arc<PersistHook>>│ ← serde(skip)  │      ┃
+  ┃   │   │  └─ channel: Option<Arc<dyn Channel>>│ ← serde(skip)  │      ┃
+  ┃   │   │     methods: add_user_text(),        │   process_turn │      ┃
   ┃   │   │              add_assistant_text(),   │                │      ┃
   ┃   │   │              add_tool_*(), ...       │                │      ┃
   ┃   │   └──────────────────────────────────────┘                │      ┃
@@ -228,7 +234,10 @@
 
 | 组件 | 持有的引用 |
 |------|-----------|
-| **Agent** | ServiceRegistry, Arc<RwLock<SkillManager>>, ContextEngine, AskRouter, AgentDelegator, ToolExecutor, LoopBreaker |
+| **Agent** | （无 Arc 字段，仅 config + cached_prompt） |
+| **AgentRuntime** | ServiceRegistry, ContextEngine, ToolExecutor, LoopBreaker |
+| **AskUserTool** | AskRouter（在 ToolRegistry 内部，Agent 不感知） |
+| **DelegateTool** | AgentDelegator（DelegationCoordinator impl，Agent 不感知） |
 | **ContextEngine** | ServiceRegistry, ToolRegistry |
 | **ToolExecutor** | ToolRegistry（own timeout 字段） |
 | **LoopBreaker** | (own max_tool_calls + threshold) |
@@ -236,10 +245,11 @@
 | **WorkspaceWatcher** | Arc<RwLock<SkillManager>>, Arc<RwLock<Vec<AgentConfig>>>（拥有 RwLock） |
 | **McpManager** | ToolRegistry（注册到里面） |
 | **SessionManager** | SessionBackend, AgentRegistry, UserResolver |
-| **SessionContext** | Arc<Agent>, Arc<UserProfile> |
+| **SessionContext** | Arc<Agent>, Arc<UserProfile>；own Mutex<Session> |
 | **DelegationCoordinator** | SessionManager, AgentRegistry |
-| **Orchestrator** | SessionManager, AskRouter, UserResolver, DelegationCoordinator, Scheduler, WebhookHandler, channels DashMap |
-| **Session** | Option<Arc<dyn PersistHook>>（自负责持久化） |
+| **Orchestrator** | SessionManager, AskRouter, UserResolver, Scheduler, WebhookHandler, channels DashMap |
+| **WebhookHandler** | event_tx 给 Orchestrator（协议适配器） |
+| **Session** | Option<Arc<dyn PersistHook>>, Option<Arc<dyn Channel>>（transient） |
 | **TurnContext (借用)** | &str system_prompt, &str model_id, Option<&ThinkingConfig>, PermissionMode, RunMode, Option<TurnStream> |
 | `llm_stream::read*()` 模块函数 | 硬编码常量 FIRST_CHUNK_TIMEOUT / MAX_OUTPUT_BYTES |
 
@@ -292,12 +302,13 @@
        │
        ▼
 ② TelegramChannel.listen() 收到，转为 ChannelMessage
-       │ mpsc
+       │ mpsc(OrchestratorEvent::UserMessage)
        ▼
-③ Orchestrator.run() 主循环 select 到 ChannelMessage
+③ Orchestrator.run() 主循环 select 到事件
        │
        ├── 解析 routing_key = "telegram:bot1:12345"
-       ├── 检查 AskRouter.fulfill()（若 pending_asks 有等待，oneshot 投递后跳出）
+       ├── routing_key → session_id（查 active）
+       ├── 先 AskRouter.fulfill(session_id, ...)（若 pending 有等待则被消费，return）
        │
        ▼
 ④ session_manager.get_context(routing_key)
@@ -307,33 +318,37 @@
        │                       或：从 backend 加载 Session → 包成 SessionContext
        │
        ▼
-⑤ session_ctx.process_turn(input, channel, reply_target, env)
+⑤ session_ctx.process_turn(input, channel, reply_target, rt)
        │
-       ├── turn_lock.lock()                ← 串行化本 session 的 turn
-       ├── 构造 TurnContext（borrow attachments / user_profile / global / ...）
+       ├── turn_lock.lock()                  ← 串行化本 session 的 turn
+       ├── session.channel = Some(channel)   ← transient 字段，工具读取
+       ├── session.last_reply_target = Some(reply_target)
+       ├── 在 SessionContext 内 attachments.diff_and_render(...) → <system-reminder>
+       ├── 组装 system_prompt（agent.cached_prompt + profile + runtime + skills）
+       ├── 构造 TurnContext { system_prompt, model_id, thinking, perm, run_mode, stream }
        │
        ▼
-⑥ agent.run(&mut session, input, &turn_ctx)
+⑥ agent.run(&mut session, input, &turn_ctx, rt)
        │
-       ├── attachments.diff_and_render(...) → <system-reminder> 文本
-       ├── 拼用户消息 → session.history.push()
-       ├── 持久化：turn_ctx.persist.persist_message(...)
+       ├── session.add_user_text(merged_text)   ← 内部 persist
        │
        ├── 循环：
-       │     ├── context_engine.should_compact(&session.token_tracker, ctx_window)?
-       │     │      └─ true → context_engine.execute(...) 调 LLM 做 summary
+       │     ├── rt.context_engine.should_compact(&session.token_tracker, ctx_window)?
+       │     │      └─ true → rt.context_engine.execute(...) 调 LLM 做 summary
        │     ├── 构建 ChatRequest（system_prompt + history + tool_specs）
        │     ├── service_registry.chat(req) → LLM 响应
        │     ├── 更新 session.token_tracker
        │     ├── 解析响应：
-       │     │     ├─ tool_call → tool_executor.execute()
-       │     │     │   ├─ ask_user → turn_ctx.ask_router.ask(...)
-       │     │     │   │     └─ channel.send(question); 挂 oneshot
-       │     │     ├─ delegate → turn_ctx.delegator.delegate_async(...)
-       │     │     │   └─ DelegationCoordinator 编排 worktree + sub_ctx.process_turn
-       │     │     ├─ 其他 tool → tool_impls 查表执行
-       │     │     └─ 写 tool result 到 session.history + persist
-       │     ├─ text → session.history.push(assistant) + persist
+       │     │     ├─ tool_call → rt.tool_executor.execute(call, &session)
+       │     │     │   ├─ AskUserTool.execute(args, session)
+       │     │     │   │   ├─ session.channel.send(question)        ← 读 transient
+       │     │     │   │   └─ self.ask_router.wait_for_reply(&session.id)
+       │     │     │   ├─ DelegateTool.execute(args, session)
+       │     │     │   │   └─ self.delegator.delegate(agent, task, &session.id)
+       │     │     │   │       └─ DelegationCoordinator 编排 worktree + sub_ctx.process_turn
+       │     │     │   └─ 其他 tool → session 不变或 add_tool_result
+       │     │     ├─ session.add_tool_result(...)                   ← 内部 persist
+       │     ├─ text → session.add_assistant_text(text)              ← 内部 persist
        │     └─ stop_reason 决定继续/退出
        │
        └── 返回 TurnResult { text, pending_retry }
@@ -354,7 +369,7 @@
   └─ AgentConfig (AGENT.md front matter + body)
 
 运行时参数（"系统怎么跑")
-  └─ GlobalConfig.{limits, context, defaults, prompt}
+  └─ GlobalConfig.{prompt, agent, tool_executor, loop_breaker, context_engine, ...}
 
 用户/触发源临时改（"这次这么跑")
   └─ SessionOverride

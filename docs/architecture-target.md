@@ -393,7 +393,7 @@ delete_session(routing_key, session_id)
 ❌ TurnMessage/TurnInput → process_turn() 直接接收参数
 ❌ get_or_create()     → 拆散到 SessionManager.create_session
 ❌ SchedulerContext    → 统一走 SessionManager
-❌ WebhookContext      → 大幅简化，只持 SessionManager 引用
+❌ WebhookContext      → WebhookHandler 退化为协议适配器，发 WebhookEvent 给 Orchestrator
 ❌ SubAgentDelegator   → DelegationCoordinator + AgentRegistry
 ❌ RequestBuilder      → 拆为 Agent.cached_prompt / SessionContext.attachments /
                          WorkspaceWatcher / TurnInput / 无状态函数
@@ -453,9 +453,11 @@ Scheduler ──SchedulerEvent──→ Orchestrator.run()
               └── session_manager.get_context(scheduled_sk)
                   → 走统一路径，SessionOverride.run_mode = Background
 
-Webhook ──HTTP request──→ WebhookHandler
-            └── session_manager.get_context(webhook_sk)
-                → 走统一路径，SessionOverride.run_mode = Background
+Webhook ──HTTP request──→ WebhookHandler （协议适配器）
+            └── 签名校验 + 模板渲染 → WebhookEvent
+                → mpsc → Orchestrator.run()
+                    └── session_manager.get_context(webhook_sk)
+                        → 走统一路径，SessionOverride.run_mode = Background
 
 WorkspaceWatcher ──文件变更──→ 直接更新 skills/sub_agents RwLock
                 Agent.run 读 RwLock，AttachmentManager 在 turn 内 diff 出变化
