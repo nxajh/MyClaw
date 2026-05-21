@@ -72,7 +72,7 @@ pub struct ClientChannel {
     /// Service registry for models API (set after construction).
     service_registry: Arc<RwLock<Option<Arc<dyn crate::providers::ServiceRegistry>>>>,
     /// Loop registry for evicting cached AgentLoop on session switch (set after construction).
-    loop_registry: Arc<RwLock<Option<Arc<DashMap<String, Arc<crate::agents::orchestrator::SessionHandle>>>>>>,
+    loop_registry: Arc<RwLock<Option<Arc<DashMap<String, Arc<crate::agents::SessionHandle>>>>>>,
 }
 
 impl ClientChannel {
@@ -133,7 +133,7 @@ impl ClientChannel {
     }
 
     /// Set the loop registry for evicting cached AgentLoop on session switch.
-    pub fn set_loop_registry(&self, lr: Arc<DashMap<String, Arc<crate::agents::orchestrator::SessionHandle>>>) {
+    pub fn set_loop_registry(&self, lr: Arc<DashMap<String, Arc<crate::agents::SessionHandle>>>) {
         *self.loop_registry.write() = Some(lr);
     }
 
@@ -625,7 +625,7 @@ struct ApiContext<'a> {
     config_path: &'a Arc<RwLock<Option<std::path::PathBuf>>>,
     skill_manager: &'a Arc<RwLock<Option<Arc<RwLock<crate::agents::SkillManager>>>>>,
     service_registry: &'a Arc<RwLock<Option<Arc<dyn crate::providers::ServiceRegistry>>>>,
-    loop_registry: &'a Arc<RwLock<Option<Arc<DashMap<String, Arc<crate::agents::orchestrator::SessionHandle>>>>>>,
+    loop_registry: &'a Arc<RwLock<Option<Arc<DashMap<String, Arc<crate::agents::SessionHandle>>>>>>,
 }
 
 /// Evict the cached AgentLoop for `user_id` so the next message creates a fresh one
@@ -715,13 +715,14 @@ fn handle_api_request(
                 Ok(info) => {
                     evict_loop(ctx, user_id);
                     serde_json::json!({
-                    "type": "api_response",
-                    "id": id,
-                    "result": {
-                        "id": info.id,
-                        "name": info.display_name,
-                    }
-                }).to_string(),
+                        "type": "api_response",
+                        "id": id,
+                        "result": {
+                            "id": info.id,
+                            "name": info.display_name,
+                        }
+                    }).to_string()
+                }
                 Err(e) => serde_json::json!({
                     "type": "api_error",
                     "id": id,
