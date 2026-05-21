@@ -4,153 +4,348 @@
 > 日期：2026-05-21
 > 背景：WebUI sessions.switch bug 修复过程中发现的设计问题
 
-## 问题
+---
+
+## 一、当前问题
 
 ### 1. AgentLoop 不应持有 Session
 
-当前 `AgentLoop` 通过 ownership 持有 `Session`（history + metadata），而 Session 的生命周期管理（创建/切换/删除）属于更上层的 `SessionManager`。这导致：
+`AgentLoop` 通过 ownership 持有 `Session`（history + metadata），而 Session 的生命周期管理（创建/切换/删除）属于更上层的 `SessionManager`。`get_or_create()` 将 Session 从 SessionManager move 进 AgentLoop 后，两层数据分家，外部切 session 时需要 evict 手动同步。
 
-- `SessionManager.switch_session()` 更新了 active 指针，但 AgentLoop 仍持有旧 Session
-- 需要 evict 机制（`LoopRegistry.remove()`）手动同步两层缓存
-- 本质是把 SessionManager 的职责拆成了两个地方
+### 2. 不必要的间接层
 
-### 2. 两层缓存的同步问题
+消息流转经过四层：
 
 ```
-SessionManager.cache   → 缓存"还没被 AgentLoop 认领"的 Session 数据
-LoopRegistry.sessions  → 缓存运行中的 AgentLoop（内含 Session）
+orchestrator → handle.tx.send(msg) → run_session_actor 从 rx 取出 
+→ mutex.lock(AgentLoop) → run()
 ```
 
-`get_or_create()` 将 Session 从第一层 move 到第二层后，两层数据分家，sync 只能靠人工 evict。
+`run_session_actor` 只是一个 `while let` 循环，纯粹为了串行化。actor task 拿着 `Arc<Mutex<AgentLoop>>`，但同一时刻只有它自己在用这个 mutex。
 
-### 3. user_id 名不副实
+### 3. AgentLoop 不需要存在
 
-当前 `user_id` 实际是路由 key（`"telegram:bot1:12345"`、`"client:default:ws_conn_abc"`），不是真正的用户标识。WebUI 开两个标签页就是两个"用户"，session 互不可见。
+`AgentLoop` 持有的东西分三类：
 
-### 4. `get_or_create` 做了太多事
+| 内容 | 性质 | 应该在 |
+|------|------|--------|
+| `registry`, `tools`, `skills` | 全局共享的基础设施引用 | Agent |
+| `request_builder`, `compactor` | registry/tools 的包装 | Agent |
+| `session` | 对话数据 | SessionContext |
+| `loop_breaker`, `policy` | per-turn 计数器 | `run()` 的局部变量 |
+| `persist_hook` | 持久化回调 | 全局共享 |
 
-一个方法承担了：创建 Session → 构建 AgentLoop → 绑 ask_user/delegate handler → spawn actor task → 存缓存。所有初始化逻辑耦合在一起。
+真正 per-turn 的 `LoopBreaker`（tool call 计数）和 `CompactionPolicy`（token 追踪）不需要持久化，作为 `Agent.run()` 的局部变量就行。AgentLoop 整个 struct 不需要存在。
 
-### 5. 不必要的 actor + channel 间接层
+### 4. 主 agent 与子代理配置不统一
 
-消息流转经过三层间接：
+- 主 agent 配置散落在 `config.yaml` 的 `agent` 段
+- 子代理配置在 `workspace/agents/<name>/AGENT.md`
+- 两者格式不同，字段不对等，构建路径完全不同
 
-```
-orchestrator → tx.send(msg) → actor task 从 rx 取出 → mutex.lock(AgentLoop) → run()
-```
+### 5. Prompt 构建对主 agent 特化
 
-`run_session_actor` 只是一个 `while let` 循环 + `Mutex<AgentLoop>` 访问，纯粹为了串行化。Actor task 拿着 `Arc<Mutex<AgentLoop>>`，但同一时刻只有它自己在用这个 mutex。
+`SystemPromptBuilder` 硬编码了主 agent 的 prompt 结构（读 IDENTITY.md、SOUL.md、USER.md），子代理只多了个 `identity_header` workaround。实际上 prompt 的各部分应该由 agent 配置驱动，而不是代码里的 if/else。
 
-## 方案
+### 6. user_id 名不副实
 
-### 核心原则
+`user_id` 实际是路由 key（`"telegram:bot1:12345"`），不是真正的用户标识。WebUI 开两个标签页就是两个"用户"，session 互不可见。用户信息（USER.md）是全局共享的，无法 per-user。
 
-- **AgentLoop 是无状态的执行器**：不持有 Session，turn 开始时拿到 history，turn 结束时写回结果
-- **SessionContext 拥有一切**：Session 数据 + 执行能力 + 串行化保证，归属权单一
-- **去掉 LoopRegistry**：不再有平行于 SessionManager 的缓存层
+---
 
-### 目标结构
+## 二、目标架构
 
-```
-SessionManager (全局单例)
-  ├─ backend: Arc<dyn SessionBackend>    ← 持久化
-  ├─ persist_hook: Arc<dyn PersistHook>  ← 全局共享，不再 per-AgentLoop 创建
-  ├─ active: HashMap<UserId, SessionId>  ← 当前活跃 session
-  └─ contexts: HashMap<SessionId, Arc<SessionContext>>
-
-SessionContext (per session)
-  ├─ session: Mutex<Session>             ← history + metadata
-  ├─ channel: Arc<dyn Channel>           ← 发消息给用户
-  ├─ mutex: tokio::sync::Mutex<()>       ← turn 串行化
-  └─ agent: &Agent                       ← 无状态执行器引用
-
-AgentLoop (无状态，全局共享或 per-turn 临时)
-  ├─ registry: &ServiceRegistry
-  ├─ config: &AgentConfig
-  ├─ tool_executor: &DefaultToolExecutor
-  └─ fn turn(session: &mut Session, msg: &str) → TurnResult
-```
-
-### 消息流转（重构后）
+### 整体结构
 
 ```
-orchestrator → session_manager.get_context(session_id) → ctx.process_turn(msg)
-
-process_turn:
-  self.mutex.lock().await          ← 串行化
-  agent.run(&mut self.session, &msg)  ← 无状态执行
+daemon.rs (Composition Root)
+  │
+  ├─ create ServiceRegistry          ← 全局，所有 Agent 共享
+  ├─ create ToolRegistry             ← 全局，所有 Agent 共享
+  ├─ create SkillManager             ← 全局，所有 Agent 共享
+  │
+  ├─ load_agents_from_dir()          ← 返回 Vec<Agent>
+  │   ├─ Agent("main", ...)          ← 主 agent
+  │   ├─ Agent("coder", ...)         ← 子代理
+  │   └─ Agent("researcher", ...)    ← 子代理
+  │
+  └─ create SessionManager(AgentRegistry)
+       └─ create SessionContext(...)  ← per session
 ```
 
-一层调用，没有 channel/actor 间接层。
-
-### session 操作
+### Agent
 
 ```rust
-switch_session(user_id, session_id) {
-    // 1. 切 active 指针
-    self.active.insert(user_id, session_id);
-    // 下次 process_turn 自动用新 context，无需 evict
+struct Agent {
+    // 身份与配置
+    name: String,
+    config: AgentConfig,              // max_tool_calls, compact_threshold 等
+    system_prompt: String,            // AGENT.md body（可以为空，由 builder 生成）
+    tool_names: Vec<String>,          // 这个 agent 能用哪些 tool
+    skill_names: Vec<String>,         // 这个 agent 绑定哪些 skill
+
+    // 共享基础设施引用（不拥有）
+    registry: Arc<dyn ServiceRegistry>,
+    tool_impls: Arc<ToolRegistry>,    // 全局 tool 实现池
+    skills: Arc<RwLock<SkillManager>>,
 }
 
-delete_session(user_id, session_id) {
-    // 1. drop SessionContext → 资源清理
-    self.contexts.remove(session_id);
-    // 2. 如果删的是 active，切到默认 session
-}
-
-create_session(user_id, name) {
-    // 1. 创建 SessionContext
-    // 2. 设为 active
+impl Agent {
+    /// 无状态执行一轮 turn。LoopBreaker、CompactionPolicy 作为局部变量。
+    fn run(&self, session: &mut Session, msg: &str, ctx: &TurnContext) -> TurnResult;
 }
 ```
 
-天然一致，没有 evict，没有两层缓存同步。
+Agent 是同一个类型，不同实例有不同配置。"主 agent"和"子代理"不是不同类型，是同一个类型的不同实例。
 
-### 关键改动点
+### SessionContext
+
+```rust
+struct SessionContext {
+    session: Session,                 // 对话数据：history, metadata
+    agent: Arc<Agent>,                // 绑定的 agent（创建时选定）
+    channel: Arc<dyn Channel>,        // 通信通道
+    user_profile: Arc<UserProfile>,   // 用户信息
+    mutex: tokio::sync::Mutex<()>,    // turn 串行化
+}
+
+impl SessionContext {
+    async fn process_turn(&self, msg: TurnMessage) {
+        let _guard = self.mutex.lock().await;
+        self.channel.on_status(Thinking).await;
+        self.agent.run(&mut self.session, &msg, &ctx).await;
+        self.channel.on_status(Done).await;
+    }
+}
+```
+
+**职责**：
+- 持有 per-session 的所有状态
+- 保证 turn 串行化（mutex，不需要 channel + actor）
+- 不持有 AgentLoop，不持有 persist_hook
+
+### SessionManager
+
+```rust
+struct SessionManager {
+    backend: Arc<dyn SessionBackend>,
+    agents: HashMap<String, Arc<Agent>>,   // name → Agent 实例
+    active: HashMap<String, String>,        // routing_key → session_id
+    contexts: HashMap<String, Arc<SessionContext>>,  // session_id → context
+}
+
+impl SessionManager {
+    fn switch_session(&mut self, routing_key: &str, session_id: &str) {
+        self.active.insert(routing_key, session_id);
+        // 天然一致，不需要 evict
+    }
+
+    fn get_context(&self, routing_key: &str) -> Arc<SessionContext> {
+        let session_id = self.active.get(routing_key)?;
+        self.contexts.get(session_id)
+    }
+}
+```
+
+**消灭的东西**：
+- `LoopRegistry`（DashMap）→ 职责回归 SessionManager
+- `SessionHandle`（Arc<Mutex<AgentLoop>> + Sender）→ 不需要
+- `run_session_actor`（while let + channel）→ mutex 替代
+- `get_or_create()` 的工厂逻辑 → SessionContext 构造时一次性完成
+
+### UserProfile
+
+```rust
+struct UserProfile {
+    id: String,                       // 用户标识
+    name: Option<String>,
+    timezone: Option<String>,
+    language: Option<String>,
+    preferences: HashMap<String, String>,
+}
+```
+
+per user，跨 session 持久化，按用户隔离存储：
+
+```
+workspace/users/
+  albert/
+    profile.md          ← 基本身份信息（替代当前 USER.md）
+    preferences.md      ← 积累的偏好
+    memory/             ← 原 memory 目录，按用户隔离
+```
+
+来源分层（高→低优先级）：
+
+```
+1. session 内对话中积累的偏好
+2. channel 提供的用户信息（Telegram profile 等）
+3. 全局默认（workspace/DEFAULT_USER.md）
+```
+
+在认证体系做好之前，先用 routing key 作为用户标识的 fallback——每个 channel endpoint 看作一个"用户"，和现在的行为一致，但数据结构上是 per-user 的。
+
+---
+
+## 三、Agent 配置统一
+
+### 目录结构
+
+```
+workspace/agents/
+├── main/
+│   └── AGENT.md            ← 主 agent
+├── coder/
+│   └── AGENT.md            ← 子代理
+└── researcher/
+    └── AGENT.md            ← 子代理
+```
+
+每个 agent 一个目录，一个 `AGENT.md`。不需要 `IDENTITY.md`、`SOUL.md`、`RULES.md` 等中间文件。身份、行为准则、system prompt 全部在 AGENT.md 的 body 里。
+
+### AGENT.md 格式
+
+```markdown
+---
+name: coder
+description: "Expert programmer for writing and editing code"
+
+# 工具与技能
+tools: [shell, file_read, file_write, file_edit, content_search]
+skills: [code-review]
+model: claude-sonnet-4-20250514
+
+# 行为参数
+max_tool_calls: 30
+permission_mode: auto
+compact_threshold: 0.7
+isolation: shared
+---
+
+# Coder Agent
+
+You are an expert programmer. Write clean, idiomatic code.
+
+## Behavioral Principles
+
+Be concise. Don't over-engineer. Three similar lines of code is better
+than a premature abstraction.
+
+## Safety
+
+Ask before executing destructive shell commands.
+```
+
+主 agent 的 AGENT.md body 可以留空，prompt 完全由 builder 的 builtin sections 生成：
+
+```markdown
+---
+name: main
+tools: [all]
+skills: [all]
+model: null
+---
+
+（body 为空）
+```
+
+### Prompt 构建
+
+```
+最终 system prompt =
+  1. builtin sections                    ← 所有 agent 都有（行为规则、安全规则等）
+  2. AGENT.md body                       ← agent 自己定义的 prompt（可空）
+  3. user_profile.to_prompt()            ← 这个 session 的用户信息
+  4. runtime info                        ← OS 信息
+  5. skill 指令                          ← 按 agent 配置的 skills 过滤
+```
+
+不再硬编码读 IDENTITY.md / SOUL.md。USER.md 替换为 per-session 的 `user_profile`。
+
+---
+
+## 四、消息流转对比
+
+### 现在
+
+```
+用户消息 → Channel 收到 → orchestrator 主循环
+  → get_or_create(sk) 拿到 SessionHandle
+    ├─ SessionManager.get_or_create(sk)        ← 拿 Session
+    ├─ agent.loop_for_with_persist(session)     ← Session move 进 AgentLoop
+    ├─ 绑 ask_user / delegate handler 闭包
+    ├─ spawn run_session_actor
+    └─ 存进 DashMap
+  → handle.tx.send(TurnMessage)
+  → run_message_task
+    → loop_.lock().await
+    → AgentLoop.run()
+```
+
+### 重构后
+
+```
+用户消息 → Channel 收到 → orchestrator 主循环
+  → session_manager.get_context(routing_key)
+  → ctx.process_turn(msg)
+    → mutex.lock()
+    → agent.run(&mut session, msg, ctx)
+```
+
+一层调用，没有 channel / actor / factory 间接层。
+
+---
+
+## 五、关键改动点
 
 | 组件 | 现在 | 重构后 |
 |------|------|--------|
-| `AgentLoop` | 持有 `Session` ownership | 无状态，接收 `&mut Session` |
-| `LoopRegistry` | `DashMap<sk, SessionHandle>` 独立缓存 | 删除，职责回归 `SessionManager` |
-| `SessionHandle` | `Arc<Mutex<AgentLoop>> + msc::Sender` | 删除，`SessionContext` 自身保证串行化 |
+| `Agent` | AgentLoop 工厂 | 无状态执行器，暴露 `run()` |
+| `AgentLoop` | 持有 Session ownership | 删除 |
+| `LoopRegistry` | `DashMap<sk, SessionHandle>` 独立缓存 | 删除，职责回归 SessionManager |
+| `SessionHandle` | `Arc<Mutex<AgentLoop>> + Sender` | 删除，SessionContext 自身保证串行化 |
 | `run_session_actor` | `while let` + channel 消费 | 删除，`process_turn` 直接调用 |
-| `ask_user` handler | per-session 闭包捕获 Arc | `SessionContext` 的方法 |
-| `delegate` handler | per-session 闭包捕获 Arc | `SessionContext` 的方法 |
-| `persist_hook` | 每次 `get_or_create` 新建 | 全局共享单例 |
-| `user_id` | 路由 key 混用 | 拆分为 `UserId` + `ChannelEndpoint`（远期） |
+| `run_message_task` | 独立函数 | SessionContext 方法 |
+| `ask_user` handler | per-session 闭包 | SessionContext 方法 |
+| `delegate` handler | per-session 闭包 | SessionContext 方法 |
+| `persist_hook` | per-AgentLoop 创建 | 全局共享单例 |
+| `IDENTITY.md` / `SOUL.md` / `RULES.md` | workspace 根目录 | 删除，内容写入 AGENT.md body |
+| `USER.md` | workspace 根目录全局 | per-user profile |
+| `SubAgentConfig` | 与主 agent 配置格式不同 | 统一为 AgentConfig（从 AGENT.md 解析） |
 
-### 未覆盖：user_id 拆分
+---
 
-当前 `user_id` 实际是 `format!("{}:{}:{}", channel_type, account_id, sender)`，同时承担路由和身份两个职责。远期应拆分为：
+## 六、实施策略
 
-```
-user_id:      真实用户身份（"albert"）
-channel_endpoint: 通道端点（"telegram:bot1:12345"）
-```
+### 阶段 1：AgentLoop 解耦 Session（最小改动，可独立部署）
 
-这涉及通道层认证体系，不在本次重构范围内。
+1. `Agent.run()` / `AgentLoop.run()` 接收 `&mut Session` 参数，不再从 `self.session` 读取
+2. ~60 处 `self.session` → `session` 机械替换（run.rs 22 处，compaction.rs 32 处，tools.rs 3 处）
+3. `persist_hook` 改为 `run()` 参数
+4. AgentLoop.session 字段删除
 
-## 实施策略
-
-### 阶段 1：AgentLoop 解耦 Session（核心）
-
-1. `AgentLoop.run()` 改为接收 `&mut Session` 参数而非从 `self.session` 读取
-2. `Session` 不再作为 `AgentLoop` 字段，改为外部传入
-3. 验证所有 tool 对 session 的访问方式是否兼容
-
-### 阶段 2：SessionContext + 去掉 LoopRegistry
+### 阶段 2：SessionContext + 去掉间接层
 
 1. 新建 `SessionContext` 结构体
-2. 将 `LoopRegistry.get_or_create()` 的逻辑迁移到 `SessionManager/SessionContext`
-3. 去掉 `run_session_actor`，用 `SessionContext.process_turn()` 替代
-4. `ask_user`/`delegate` handler 从闭包改为 `SessionContext` 方法
+2. 将 `LoopRegistry.get_or_create()` 迁移到 `SessionManager`
+3. 去掉 `run_session_actor`，用 `SessionContext.process_turn()` + mutex 替代
+4. `ask_user` / `delegate` 从闭包改为 SessionContext 方法
+5. 删除 `SessionHandle`、`LoopRegistry`、`run_session_actor`
 
-### 阶段 3：清理
+### 阶段 3：Agent 配置统一
 
-1. 删除 `SessionHandle`、`LoopRegistry`、`run_session_actor`
-2. 清理 orchestrator 中的 `sessions: DashMap` 字段
-3. 更新 `SharedSessions` 和所有消费方
+1. 扩展 AGENT.md front matter（加 skills、permission_mode 等）
+2. 主 agent 也从 AGENT.md 加载，与子代理走同一路径
+3. `SubAgentConfig` 和主 agent 配置统一为一个结构体
+4. 简化 `SystemPromptBuilder`，去掉 IDENTITY.md / SOUL.md 读取
+
+### 阶段 4：用户信息 per-user
+
+1. 新建 `UserProfile` 结构和 per-user 存储目录
+2. SessionContext 创建时加载 UserProfile
+3. prompt 注入从 USER.md 改为 user_profile
+4. routing key → user_id 的映射层（认证体系前置条件）
 
 ### 当前 workaround
 
-在阶段 1 完成前，session switch/create/delete 的 API handler 通过 evict `LoopRegistry` 保证一致性（commit `a7a31ff`）。
+在阶段 1 完成前，session switch/create/delete 的 API handler 通过 evict LoopRegistry 保证一致性（commit `a7a31ff`）。
