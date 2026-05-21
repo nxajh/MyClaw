@@ -6,55 +6,71 @@
 ## 组件关系总览
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│                       daemon.rs (Composition Root)                   │
-│                                                                      │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐               │
-│  │ServiceRegistry│  │ ToolRegistry │  │ SkillManager │               │
-│  │(LLM providers)│  │ (tool impls) │  │  (skills)    │               │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘               │
-│         │                  │                  │                       │
-│         └──────────┬───────┴──────────┬──────┘                       │
-│                    │                  │                               │
-│         ┌──────────┴──────────────────┴──────────┐                   │
-│         │            AgentRegistry               │                   │
-│         │  HashMap<name, Arc<Agent>>              │                   │
-│         │                                         │                   │
-│         │  ┌────────┐ ┌────────┐ ┌──────────┐    │                   │
-│         │  │ "main" │ │"coder" │ │"researcher"│   │                   │
-│         │  │ Agent  │ │ Agent  │ │  Agent    │   │                   │
-│         │  │全套工具 │ │受限工具│ │搜索工具   │   │                   │
-│         │  └────────┘ └────────┘ └──────────┘    │                   │
-│         └──────────────────┬──────────────────────┘                   │
-│                            │                                          │
-│  ┌─────────────────────────┴────────────────────────────────────┐    │
-│  │                     SessionManager                            │    │
-│  │                                                               │    │
-│  │  backend ────→ SessionBackend (持久化)                         │    │
-│  │  agents  ────→ AgentRegistry                                  │    │
-│  │  active  ────→ HashMap<routing_key, session_id>   ← 只是指针  │    │
-│  │  contexts ──→ HashMap<session_id, Arc<SessionContext>>         │    │
-│  │                                                               │    │
-│  │  switch_session() = 改 active 指针，天然一致                    │    │
-│  └───────────────────────────────────────────────────────────────┘    │
-│                                                                      │
-│  ┌───────────────────────────────────────────────────────────────┐    │
-│  │                      Orchestrator                             │    │
-│  │                                                               │    │
-│  │  channels ──→ HashMap<(type, account), Arc<dyn Channel>>      │    │
-│  │  pending_asks ──→ HashMap<sk, (oneshot::Sender, target)>      │    │
-│  │                                                               │    │
-│  │  职责：收消息 → 找 SessionContext → 投递                       │    │
-│  │  不管：Session 创建、AgentLoop、actor                         │    │
-│  └───────────┬──────────────────────────────┬────────────────────┘    │
-│              │                              │                         │
-│    ┌─────────┼──────────────┐               │                         │
-│    ▼         ▼              ▼               ▼                         │
-│  ┌────────┐ ┌──────────┐ ┌──────────┐  ┌──────────┐                 │
-│  │Telegram│ │ClientChan│ │ QQBot    │  │Scheduler │                 │
-│  │Channel │ │(WebUI WS)│ │ Channel  │  │(cron/hb) │                 │
-│  └────────┘ └──────────┘ └──────────┘  └──────────┘                 │
-└──────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                          daemon.rs (Composition Root)                        │
+│                                                                              │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐    │
+│  │ServiceRegistry│  │ ToolRegistry │  │ SkillManager │  │  McpManager  │    │
+│  │(LLM providers)│  │ (tool impls) │  │  (skills)    │  │  (MCP 连接)  │    │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘    │
+│         │                  │                  │                  │            │
+│         │    MCP tools ────┘                  │                  │            │
+│         │    Memory tools ────────────────────┘                  │            │
+│         │    Skill tools ─────────────────────┘                  │            │
+│         │                                                        │            │
+│         └──────────┬──────┬──────────────────┬───────────────────┘            │
+│                    │      │                  │                                │
+│         ┌──────────┴──────┴──────────────────┴──────────┐                     │
+│         │              AgentRegistry                    │                     │
+│         │  HashMap<name, Arc<Agent>>                    │                     │
+│         │                                               │                     │
+│         │  ┌────────┐ ┌────────┐ ┌──────────┐          │                     │
+│         │  │ "main" │ │"coder" │ │"researcher"│         │                     │
+│         │  │ Agent  │ │ Agent  │ │  Agent    │         │                     │
+│         │  │全套工具 │ │受限工具│ │搜索工具   │         │                     │
+│         │  └────────┘ └────────┘ └──────────┘          │                     │
+│         └──────────────────┬───────────────────────────┘                     │
+│                            │                                                  │
+│  ┌─────────────────────────┴──────────────────────────────────────────┐      │
+│  │                         SessionManager                             │      │
+│  │                                                                    │      │
+│  │  backend ────→ SessionBackend (持久化)                              │      │
+│  │  agents  ────→ AgentRegistry                                       │      │
+│  │  active  ────→ HashMap<routing_key, session_id>     ← 只是指针    │      │
+│  │  contexts ──→ HashMap<session_id, Arc<SessionContext>>             │      │
+│  │                                                                    │      │
+│  │  switch_session() = 改 active 指针，天然一致                        │      │
+│  └────────────────────────────────────────────────────────────────────┘      │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐     │
+│  │                        Orchestrator (瘦身版)                         │     │
+│  │                                                                     │     │
+│  │  session_manager: SessionManager                                    │     │
+│  │  channels:       HashMap<(type, account), Arc<dyn Channel>>         │     │
+│  │  pending_asks:   HashMap<sk, (oneshot::Sender, target)>             │     │
+│  │                                                                     │     │
+│  │  职责：收消息 → 找 SessionContext → 投递                             │     │
+│  └──────────┬──────────────────────────────────────┬───────────────────┘     │
+│             │                                      │                         │
+│  ┌──────────┼──────────────┐        ┌──────────────┤                         │
+│  ▼          ▼              ▼        ▼              ▼                         │
+│┌────────┐┌──────────┐┌──────────┐┌──────────┐┌──────────┐┌──────────────┐   │
+││Telegram││ClientChan││ QQBot    ││ Webhook  ││Scheduler ││ FileWatcher  │   │
+││Channel ││(WebUI WS)││ Channel  ││ Handler  ││(cron/hb) ││(hot-reload)  │   │
+│└────────┘└──────────┘└──────────┘└──────────┘└──────────┘└──────────────┘   │
+│             │                    │           │                   │             │
+│             │                    │           │                   │             │
+│             │            全部走 SessionManager.get_context()    │             │
+│             │                    │           │         change_rx 全局共享     │
+│             │                    │           │                   │             │
+│             ▼                    ▼           ▼                   ▼             │
+│  ┌──────────────────────────────────────────────────────────────────────┐    │
+│  │                        Memory 存储                                   │    │
+│  │  workspace/users/{user_id}/memory/{type}/                           │    │
+│  │  由 MemoryList/View/Search/Manage 四个 tool 操作                     │    │
+│  │  per-user 隔离，不再全局共享                                         │    │
+│  └──────────────────────────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────────────────────────┘
 
 
 SessionContext（per session，唯一 owner）
@@ -219,6 +235,37 @@ Orchestrator (全局，瘦身后)
   ├─ pending_asks: HashMap<sk, (oneshot::Sender, target)>
   └─ listener_handles: Vec<JoinHandle<()>>
 
+McpManager (全局)
+  ├─ registry ────→ Arc<RwLock<Option<Arc<McpRegistry>>>>
+  ├─ tools ───────→ Arc<RwLock<Vec<Arc<dyn Tool>>>>
+  └─ server_count → AtomicUsize
+  启动时 connect() → 把 MCP tools 注册进 ToolRegistry
+  Agent 的 tool_names 决定是否使用 MCP tools
+
+Scheduler (全局)
+  ├─ jobs ────────→ RwLock<JobsFile>  (持久化到 jobs.json)
+  ├─ timezone     → String
+  ├─ heartbeat_config → Option<HeartbeatConfig>
+  └─ event_tx ────→ mpsc::Sender<SchedulerEvent>  → Orchestrator
+  触发时走 SessionManager.get_context()，不再独立持有 Agent/sessions
+
+WebhookHandler (全局)
+  ├─ session_manager: Arc<SessionManager>       ← 只需要这个引用
+  ├─ timezone     → String
+  └─ last_channel → Mutex<Option<String>>
+  大幅简化：不再持有 Agent、sessions DashMap、SessionBackend
+
+FileWatcher (全局)
+  ├─ 监听路径: workspace/skills/, workspace/agents/
+  └─ change_rx ──→ watch::Receiver<ChangeSet>  ← 全局共享
+  文件变更 → 通知所有 Agent（通过全局共享的 change_rx）
+
+Memory (per-user)
+  ├─ MemoryList / MemoryView / MemorySearch / MemoryManage
+  │   注册为 ToolRegistry 中的 tool
+  │   Agent 的 tool_names 决定是否可用
+  └─ 存储路径: workspace/users/{user_id}/memory/{type}/
+
 UserProfile (per user)
   ├─ id: String
   ├─ name, timezone, language
@@ -262,12 +309,24 @@ delete_session(routing_key, session_id)
 ## 删除的组件
 
 ```
-❌ AgentLoop          → Agent.run() 是无状态方法，不需要 struct
-❌ SessionHandle      → SessionContext 直接提供 process_turn()
-❌ LoopRegistry       → 职责回归 SessionManager
-❌ run_session_actor  → mutex 替代 channel + actor
+❌ AgentLoop           → Agent.run() 是无状态方法，不需要 struct
+❌ SessionHandle       → SessionContext 直接提供 process_turn()
+❌ LoopRegistry        → 职责回归 SessionManager
+❌ run_session_actor   → mutex 替代 channel + actor
 ❌ TurnMessage/TurnInput → process_turn() 直接接收参数
-❌ get_or_create()    → 拆散到 SessionManager 和 SessionContext 构造
+❌ get_or_create()     → 拆散到 SessionManager 和 SessionContext 构造
+❌ SchedulerContext    → 统一走 SessionManager，不再独立持有 Agent/sessions
+❌ WebhookContext      → 大幅简化，只持有 SessionManager 引用
+❌ SubAgentDelegator   → 子代理变成 AgentRegistry 中的实例，委派走统一路径
+❌ IDENTITY.md/SOUL.md → 内容写入 AGENT.md body
+❌ USER.md (全局)       → per-user profile
+
+保留不变的：
+✅ McpManager          → 启动时注册 MCP tools 到 ToolRegistry，逻辑不变
+✅ ToolRegistry        → 全局 tool 实现池，Agent 按 tool_names 选用
+✅ Memory tools        → 4 个 tool 不变，存储路径改为 per-user
+✅ FileWatcher         → 监听 skills/agents 变更，change_rx 全局共享
+✅ Scheduler           → jobs.json + event_tx，触发方式不变
 
 保留但瘦身的：
 🔧 Orchestrator     → 只做路由：收消息 → 找 context → 投递
@@ -302,6 +361,47 @@ WebUI API ──WebSocket JSON──→ ClientChannel
 Scheduler ──SchedulerEvent──→ Orchestrator.run()
               └── session_manager.get_context(scheduled_sk)
                   → 同一条路径，绑定 agent: "main", config.run_mode = Background
+
+Webhook ──HTTP request──→ WebhookHandler
+            └── session_manager.get_context(webhook_sk)
+                → 绑定 agent: "main", channel: last_channel
+                → process_turn(webhook_payload)
+                → 和用户消息走同一条路径
+
+FileWatcher ──文件变更──→ change_rx (watch::Receiver, 全局共享)
+                Agent.run() 内部读取，检测 skill/agent 配置变更
+
+Memory ──tool 调用──→ MemoryManage/Search/List/View
+          读写 workspace/users/{user_id}/memory/{type}/
+          user_id 从 SessionContext.user_profile 获取
+
+McpManager ──启动时──→ connect(config.mcp_servers)
+             ├─ 注册 MCP tools 到 ToolRegistry（全局）
+             └─ Agent 的 tool_names 决定哪些 MCP tool 可用
+```
+
+## 统一入口路径
+
+```
+现在（四条独立路径）：
+  用户消息  → Orchestrator → LoopRegistry → AgentLoop             ← 路径 A
+  Cron触发  → SchedulerContext → 临时构建 AgentLoop               ← 路径 B（绕过 LoopRegistry）
+  Webhook   → WebhookContext → 临时构建 AgentLoop                 ← 路径 C（又绕过）
+  子代理    → SubAgentDelegator → 临时构建 AgentLoop              ← 路径 D（再绕过）
+
+重构后（一条统一路径）：
+  全部 → SessionManager.get_context(routing_key) → SessionContext.process_turn()
+  
+  区别只是绑定的参数不同：
+  ┌──────────┬──────────────┬───────────┬───────────────────┐
+  │ 来源      │ agent        │ channel   │ run_mode          │
+  ├──────────┼──────────────┼───────────┼───────────────────┤
+  │ 用户消息  │ "main"       │ 来源通道  │ Interactive       │
+  │ Cron     │ "main"       │ last_chan │ Background        │
+  │ Webhook  │ "main"       │ last_chan │ Background        │
+  │ 子代理    │ "coder" 等   │ 同父session│ Interactive      │
+  │ Heartbeat│ "main"       │ 指定通道  │ Background        │
+  └──────────┴──────────────┴───────────┴───────────────────┘
 ```
 
 ## Agent 配置
