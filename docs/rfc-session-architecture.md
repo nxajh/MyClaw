@@ -306,24 +306,53 @@ impl Session {
 
 ### SessionManager
 
+单表 `sessions: routing_key → Arc<SessionContext>`。受 **1:1 不变量**约束：表里所有 SessionContext 的 `session.id` 互不重复——一个 session 同时只被一个 routing_key 指向。
+
 ```rust
 struct SessionManager {
     backend: Arc<dyn SessionBackend>,
     agents: Arc<AgentRegistry>,
-    active: HashMap<String, String>,        // routing_key → session_id
-    contexts: HashMap<String, Arc<SessionContext>>,  // session_id → context
+    resolver: Arc<UserResolver>,
+    sessions: RwLock<HashMap<String, Arc<SessionContext>>>,  // routing_key → ctx
 }
 
 impl SessionManager {
-    fn switch_session(&self, routing_key: &str, session_id: &str) {
-        self.active.insert(routing_key, session_id);
-        // 天然一致 — context 是 session_id 的函数，与 routing_key 无关
-    }
-
+    /// 命中返回，否则从 backend 加载并缓存
     fn get_context(&self, routing_key: &str) -> Arc<SessionContext>;
-    fn create_session(&self, routing_key: &str, agent_name: &str, ...) -> Arc<SessionContext>;
+
+    /// 切换。冲突检查：target_sid 是否被别的 rk 占着
+    fn switch_session(&self, routing_key: &str, target_sid: &str) -> Result<(), SessionInUse>;
+
+    /// 显式创建并切换到新 session
+    fn create_session(&self, routing_key: &str, agent_name: &str, name: Option<&str>) -> Result<Arc<SessionContext>>;
+
+    /// 子代理 session（不进 sessions 表，调用方持 Arc 管生命周期）
+    fn create_sub_session(&self, parent_sid: &str, agent_name: &str) -> Result<Arc<SessionContext>>;
+
+    /// 删除（清空对应 rk 的条目 + backend 删除）
+    fn delete_session(&self, routing_key: &str, sid: &str) -> Result<()>;
+
+    /// 列出某 user 的所有 session（含别的 rk 占着的、未加载的）
+    fn list_sessions_for_user(&self, user_id: &str) -> Vec<SessionInfo>;
+}
+
+#[derive(Debug)]
+pub struct SessionInUse {
+    pub session_id: String,
+    pub held_by: String,    // routing_key
 }
 ```
+
+**为什么单表够用**：
+- DelegationCoordinator 拿 parent ctx 信息从 `&Session` 直接取（channel / last_reply_target）
+- AskRouter 内部用 session_id 索引 pending oneshot，跟 SessionManager 无关
+- 启动恢复从 backend 直接扫，临时构造 ctx 跑完即弃
+- 唯一的 sid → rk 反查是 switch_session 的冲突检查，O(n) on 活跃 session 数，低频可接受
+
+**1:1 不变量带来的简化**：
+- 不需要 channel.send 的"广播 fallback"——同 sender 多 tab 仍然只走单 listener
+- session.channel / session.last_reply_target 不会被并发覆盖
+- ask_user 知道发哪个 channel：当前 turn 的发起方 rk 唯一
 
 ### SessionOverride
 
@@ -432,6 +461,33 @@ impl UserResolver {
 ```
 
 未配置映射时 user_id = routing_key，行为等价现状。
+
+**与 1:1 不变量的关系**：UserResolver **不打通"多端共享同一 active session"**——同一 user 的 rk_telegram 和 rk_webui 仍然各有各的 active session。user_id 只用于：
+- 列 session 列表（`list_sessions_for_user(uid)` 返回 owner = uid 的全部 session，跨 rk 可见）
+- Memory 路径（`workspace/users/{uid}/memory/`）
+- UserProfile 加载
+- 不用于 active 表的 key——active 仍然按 rk
+
+跨端"接管同一 session"是显式动作：用户在 webui 看到的 session 列表里点"接管"，触发 `switch_session(rk_webui, sid)`——这一步会强制清掉 rk_telegram 的 active（如果它正占着 sid），然后切到 sid。
+
+### WebUI sender 要求
+
+WebUI 必须和其他 channel 一样有**稳定的 sender 身份**——sender 就是 auth token：
+
+```
+WebSocket auth 消息：
+  { "type": "auth", "token": "..." }
+
+verify_token(token) 通过后：
+  sender = "web:{token}"  // 或 hash(token) 避免日志泄漏
+  routing_key = "client:default:{sender}"
+```
+
+- **同一用户的多 tab 共享 token** → 共享 routing_key → 共享 SessionContext → turn_lock 串行保护
+- **不同用户用不同 token** → 不同 routing_key → 不同 session 视图
+- 不再支持"匿名连接 / per-conn id"——auth message 缺 token 直接拒绝
+
+实现层面 `ClientChannel` 内部仍然维护 `connections: DashMap<conn_id, ws_sender>` 用于具体 WS 投递，但**对外（向 Orchestrator）只暴露 sender 这一层**。多 tab 同 sender → 多个 conn_id → channel.send 找最近活跃 conn 投递；turn 流式事件由发起 turn 的 conn 接收（基于 pending_streams: sender → (conn_id, StreamContext)）。
 
 ### UserProfile (阶段 4)
 
@@ -634,8 +690,12 @@ fn build_prompt(
             → agent.run(&mut session, input, &turn_ctx, rt)
 
 子代理委派（特例）：
-  agent.run() 内 → DelegateTool.execute() → DelegationCoordinator.delegate()
-    → session_manager.get_or_create_sub(...).process_turn(...)
+  agent.run() 内 → DelegateTool.execute(args, &session)
+    → DelegationCoordinator.delegate(name, task, &session)
+      ├─ 从 &session 取 channel / last_reply_target
+      ├─ session_manager.create_sub_session(parent_sid, agent_name) → Arc<SessionContext>
+      │   （sub ctx 不进 sessions 表，由调用方持 Arc 管生命周期）
+      └─ sub_ctx.process_turn(task, channel, reply_target)
   （DelegationCoordinator 就近调，不绕 Orchestrator）
 ```
 
@@ -679,7 +739,9 @@ enum OrchestratorEvent {
 | `delegate` handler | per-session 闭包 | `DelegateTool` 内部持 `Arc<dyn AgentDelegator>`，Agent 不感知 |
 | `persist_hook` | per-AgentLoop 创建，Agent.run() 手动调用 | Session 内嵌（transient `Option<Arc<dyn PersistHook>>`），通过 `Session::add_*` 方法自动持久化 |
 | `Session.channel` | （不存在） | 新增 transient 字段（`Option<Arc<dyn Channel>>`），process_turn 写入，工具直接读取 |
+| `SessionManager.cache` + `LoopRegistry.sessions` | 双层缓存（rk→sid + sid→AgentLoop），需 evict 同步 | 单表 `sessions: HashMap<rk, Arc<SessionContext>>` + **1:1 不变量**（不允许 rk 共享 sid） |
 | `WebhookContext` | 独立持 SessionManager + sessions 等 | 删除；`WebhookHandler` 退化为协议适配器，发 `WebhookEvent` 给 Orchestrator |
+| WebUI sender | 可选 client_id 或 per-conn id | 必须 = auth token，1:1 对应 user |
 | `CompactionPolicy` + `CompactionExecutor` | per-AgentLoop | 合并为全局 `ContextEngine` |
 | `AttachmentManager` | RequestBuilder 字段 | `SessionContext` 字段 |
 | `change_rx` | 传给每个 AgentLoop | `WorkspaceWatcher` 自维护 RwLock |
@@ -718,7 +780,7 @@ enum OrchestratorEvent {
 2. 引入 `AskRouter`、`AgentDelegator` trait
 3. Session 内嵌 `persist: Option<Arc<dyn PersistHook>>`，加 `add_user_text` / `add_assistant_text` / `add_tool_*` / `save_summary` / `update_token_count` 等方法。`Session.token_tracker` 替代 `last_total_tokens` 单字段
 4. 新建 `SessionContext`（不存 channel；持 `AttachmentManager` 和 `pending_retry`）
-5. `SessionManager` 增 `contexts: HashMap<sid, Arc<SessionContext>>`，去掉 `cache`
+5. `SessionManager` 单表 `sessions: HashMap<routing_key, Arc<SessionContext>>`，去掉 `cache`；加 1:1 不变量（switch_session 时检查目标 sid 未被别的 rk 占着，否则返回 SessionInUse 错误）
 6. `SessionContext.process_turn()` 承担"配置解析层"职责：组装 system_prompt、resolve model/permission_mode/run_mode/thinking、attachment diff，把已解析的标量传入 Agent.run()
 7. 拆解 `RequestBuilder`：
    - `system_prompt` 由 `process_turn` 每轮组装，传 `&str` 给 Agent

@@ -117,9 +117,10 @@
   ┃   │   agents:    Arc<AgentRegistry>          ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌▶     ┃
   ┃   │   resolver:  Arc<UserResolver>           ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌▶     ┃
   ┃   │                                                            │      ┃
-  ┃   │   active:    RwLock<HashMap<routing_key, session_id>>     │      ┃
-  ┃   │   contexts:  RwLock<HashMap<session_id,                   │      ┃
+  ┃   │   sessions:  RwLock<HashMap<routing_key,                  │      ┃
   ┃   │                            Arc<SessionContext>>>          │      ┃
+  ┃   │     ★ 1:1 不变量：表内 session.id 互不重复                │      ┃
+  ┃   │     sub-session 不进此表，调用方持 Arc 管生命周期         │      ┃
   ┃   │                                       ┃                    │      ┃
   ┃   └───────────────────────────────────────╋────────────────────┘      ┃
   ┃                                           ┃ own (HashMap value)        ┃
@@ -313,9 +314,8 @@
        ▼
 ④ session_manager.get_context(routing_key)
        │
-       ├── 查 active[routing_key] → session_id
-       ├── 查 contexts[session_id] → Arc<SessionContext>（命中）
-       │                       或：从 backend 加载 Session → 包成 SessionContext
+       ├── 查 sessions[routing_key] → Arc<SessionContext>（命中）
+       │                       或：从 backend 加载 Session → 包成 SessionContext → 插入
        │
        ▼
 ⑤ session_ctx.process_turn(input, channel, reply_target, rt)

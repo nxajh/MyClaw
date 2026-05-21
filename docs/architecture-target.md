@@ -44,10 +44,12 @@
 │  │                                                                     │    │
 │  │  backend  ────→ SessionBackend (持久化)                              │    │
 │  │  agents   ────→ AgentRegistry                                       │    │
-│  │  active   ────→ HashMap<routing_key, session_id>     ← 仅指针       │    │
-│  │  contexts ───→ HashMap<session_id, Arc<SessionContext>>             │    │
+│  │  resolver ────→ UserResolver                                        │    │
+│  │  sessions ───→ RwLock<HashMap<routing_key, Arc<SessionContext>>>   │    │
+│  │     ★ 不变量：所有 ctx 的 session.id 互不重复（1:1 with rk）        │    │
 │  │                                                                     │    │
-│  │  switch_session() = 改 active 指针，天然一致                         │    │
+│  │  switch_session(rk, sid) = 冲突检查 → 重新加载 ctx                  │    │
+│  │  create_sub_session() = 返回 Arc 但不进表，调用方持引用             │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌──────────────────────────────────────────────────────────────────────┐   │
@@ -275,10 +277,11 @@ AgentRegistry (全局)
        └─ "researcher" → Agent
 
 SessionManager (全局)
-  ├─ backend ────→ Arc<dyn SessionBackend>
-  ├─ agents ─────→ Arc<AgentRegistry>
-  ├─ active ─────→ HashMap<routing_key, session_id>      ← 仅指针
-  └─ contexts ──→ HashMap<session_id, Arc<SessionContext>>
+  ├─ backend  ───→ Arc<dyn SessionBackend>
+  ├─ agents   ───→ Arc<AgentRegistry>
+  ├─ resolver ───→ Arc<UserResolver>
+  └─ sessions ───→ RwLock<HashMap<routing_key, Arc<SessionContext>>>
+        ★ 1:1 不变量：表内 SessionContext 的 session.id 互不重复
                      │
                      └─ SessionContext
                           ├─ session: Mutex<Session>            ← 唯一 owner ✅
@@ -348,39 +351,47 @@ UserProfile (per user)
 ## Session 操作
 
 ```
-switch_session(routing_key, session_id)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  active[routing_key] = session_id      ← 改指针
-  下次 get_context() 自动返回新的 SessionContext
-  不需要 evict，不需要重建 AgentLoop
+switch_session(routing_key, target_sid)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  for (other_rk, ctx) in sessions:           ← 1:1 不变量检查
+    if other_rk != rk && ctx.session.id == target_sid:
+      return Err(SessionInUse { held_by: other_rk })
+  
+  session = backend.load(target_sid)
+  ctx = Arc::new(SessionContext::new(session, ...))
+  sessions[routing_key] = ctx                ← 旧 ctx Arc 引用计数自动 drop
 
 
-create_session(routing_key, agent_name, ...)
+create_session(routing_key, agent_name, name)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   session = backend.create(name)
   agent   = agents.get(agent_name)
-  profile = UserProfile::load(user_resolver.resolve(routing_key), ...)
-  context = SessionContext::new(session, agent, profile)
-  contexts[session.id] = context
-  active[routing_key] = session.id
+  profile = UserProfile::load(resolver.resolve(routing_key), ...)
+  ctx = Arc::new(SessionContext::new(session, agent, profile))
+  sessions[routing_key] = ctx
 
 
-delete_session(routing_key, session_id)
+delete_session(routing_key, target_sid)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  contexts.remove(session_id)            ← drop SessionContext
-  if active[routing_key] == session_id:
-    active.remove(routing_key)           ← 或切到默认 session
+  if sessions[routing_key].session.id == target_sid:
+    sessions.remove(routing_key)
+  backend.delete(target_sid)
+  // 其他 rk 持有相同 sid 的情况不存在（1:1 不变量）
 
 
 子代理委派
 ━━━━━━━━━━━
-  delegation_coord.delegate(agent_name, task, parent_sk, ...)
-    ├─ 解析 SessionOverride.isolation
-    ├─ 如果 worktree: 创建 git worktree
-    ├─ sub_sk = "sub:{parent_sk}:{agent_name}:{uuid}"
-    ├─ sub_ctx = session_manager.create_session(sub_sk, agent_name, ...)
-    ├─ sub_ctx.process_turn(task, parent_channel, ...)
-    └─ 如果 worktree: merge + cleanup
+  DelegateTool.execute(args, &parent_session)
+    └─ DelegationCoordinator.delegate(agent_name, task, &parent_session)
+        ├─ channel        = parent_session.channel.clone()
+        ├─ reply_target   = parent_session.last_reply_target.clone()
+        ├─ 解析 agent.config.isolation
+        ├─ 如果 worktree: 创建 git worktree
+        ├─ sub_ctx = session_manager.create_sub_session(parent_session.id, agent_name)
+        │             ↑ 返回 Arc<SessionContext>，不进 sessions 表
+        ├─ sub_ctx.process_turn(task, channel, reply_target)
+        ├─ 如果 worktree: merge + cleanup
+        └─ sub_ctx Arc drop（refcount=0 → SessionContext 释放）
 ```
 
 ## 删除的组件
