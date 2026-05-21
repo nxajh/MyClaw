@@ -6,6 +6,40 @@ import { ErrorBanner, LoadingRow, EmptyState } from '../components/PageLayout'
 
 interface Tool {
   name: string
+  description?: string
+  parameters?: {
+    type: string
+    properties?: Record<string, {
+      type: string
+      description: string
+      required?: boolean
+      enum?: string[]
+    }>
+    required?: string[]
+  }
+}
+
+function generateExampleJson(parameters: any): string {
+  if (!parameters || !parameters.properties || Object.keys(parameters.properties).length === 0) {
+    return '{}';
+  }
+  const obj: Record<string, any> = {};
+  for (const [key, val] of Object.entries<any>(parameters.properties)) {
+    if (val.type === 'string') {
+      obj[key] = val.enum && val.enum.length > 0 ? val.enum[0] : 'string';
+    } else if (val.type === 'integer' || val.type === 'number') {
+      obj[key] = 0;
+    } else if (val.type === 'boolean') {
+      obj[key] = false;
+    } else if (val.type === 'array') {
+      obj[key] = [];
+    } else if (val.type === 'object') {
+      obj[key] = {};
+    } else {
+      obj[key] = null;
+    }
+  }
+  return JSON.stringify(obj, null, 2);
 }
 
 // ── Builtin Tool Registry Database ───────────────────────────────────────────
@@ -264,13 +298,39 @@ export default function Tools() {
   const activeToolSpec = useMemo<ToolSpec | null>(() => {
     if (!selectedToolName) return null
     
+    // Find from dynamic tools
+    const found = tools.find(t => t.name === selectedToolName)
+    if (found && found.description && found.parameters) {
+      // Standardize the properties' required status from standard JSON Schema required array
+      const requiredSet = new Set(found.parameters.required || [])
+      const properties: Record<string, any> = {}
+      
+      if (found.parameters.properties) {
+        for (const [key, val] of Object.entries<any>(found.parameters.properties)) {
+          properties[key] = {
+            ...val,
+            required: val.required || requiredSet.has(key)
+          }
+        }
+      }
+      
+      return {
+        description: found.description,
+        parameters: {
+          type: found.parameters.type || 'object',
+          properties
+        },
+        example: generateExampleJson(found.parameters)
+      }
+    }
+    
     // Check local registry (handles both raw names and minimax__ prefixed ones)
     const cleanName = selectedToolName.includes('__') 
       ? selectedToolName.split('__')[1] 
       : selectedToolName
       
     return toolRegistry[cleanName] || null
-  }, [selectedToolName])
+  }, [tools, selectedToolName])
 
   const handleCopyExample = (exampleText: string) => {
     navigator.clipboard.writeText(exampleText)

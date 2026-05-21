@@ -60,8 +60,8 @@ pub struct ClientChannel {
     session_owners: Arc<RwLock<HashMap<String, String>>>,
     /// Session manager for management API (set after construction).
     session_manager: Arc<RwLock<Option<Arc<crate::agents::SessionManager>>>>,
-    /// Tool names for management API (set after construction).
-    tool_names: Arc<RwLock<Vec<String>>>,
+    /// Tool specs for management API (set after construction).
+    tool_specs: Arc<RwLock<Vec<crate::providers::capability_tool::ToolSpec>>>,
     /// Workspace directory for memory API (set after construction).
     workspace_dir: Arc<RwLock<Option<std::path::PathBuf>>>,
     /// Config file path for config read/write API (set after construction).
@@ -84,7 +84,7 @@ impl ClientChannel {
             connections: Arc::new(RwLock::new(HashMap::new())),
             session_owners: Arc::new(RwLock::new(HashMap::new())),
             session_manager: Arc::new(RwLock::new(None)),
-            tool_names: Arc::new(RwLock::new(Vec::new())),
+            tool_specs: Arc::new(RwLock::new(Vec::new())),
             workspace_dir: Arc::new(RwLock::new(None)),
             config_path: Arc::new(RwLock::new(None)),
             skill_manager: Arc::new(RwLock::new(None)),
@@ -103,9 +103,9 @@ impl ClientChannel {
         *self.session_manager.write() = Some(sm);
     }
 
-    /// Set the tool names list (called from daemon.rs after construction).
-    pub fn set_tool_names(&self, names: Vec<String>) {
-        *self.tool_names.write() = names;
+    /// Set the tool specs list (called from daemon.rs after construction).
+    pub fn set_tool_specs(&self, specs: Vec<crate::providers::capability_tool::ToolSpec>) {
+        *self.tool_specs.write() = specs;
     }
 
     /// Set the workspace directory (called from daemon.rs after construction).
@@ -159,7 +159,7 @@ impl ClientChannel {
         let connections = self.connections.clone();
         let session_owners = self.session_owners.clone();
         let session_manager = self.session_manager.clone();
-        let tool_names = self.tool_names.clone();
+        let tool_specs = self.tool_specs.clone();
         let workspace_dir = self.workspace_dir.clone();
         let config_path = self.config_path.clone();
         let skill_manager = self.skill_manager.clone();
@@ -233,7 +233,7 @@ impl ClientChannel {
                         let connections_clone = connections.clone();
                         let session_owners_clone = session_owners.clone();
                         let session_manager_clone = session_manager.clone();
-                        let tool_names_clone = tool_names.clone();
+                        let tool_specs_clone = tool_specs.clone();
                         let workspace_dir_clone = workspace_dir.clone();
                         let config_path_clone = config_path.clone();
                         let skill_manager_clone = skill_manager.clone();
@@ -453,7 +453,7 @@ impl ClientChannel {
                                                 &ApiContext {
                                                     user_id: &api_user_id,
                                                     session_manager: &session_manager_clone,
-                                                    tool_names: &tool_names_clone,
+                                                    tool_specs: &tool_specs_clone,
                                                     workspace_dir: &workspace_dir_clone,
                                                     config_path: &config_path_clone,
                                                     skill_manager: &skill_manager_clone,
@@ -608,7 +608,7 @@ struct ApiContext<'a> {
     /// Session-manager scope key (channel:account:sender), stable across reconnects.
     user_id: &'a str,
     session_manager: &'a Arc<RwLock<Option<Arc<crate::agents::SessionManager>>>>,
-    tool_names: &'a Arc<RwLock<Vec<String>>>,
+    tool_specs: &'a Arc<RwLock<Vec<crate::providers::capability_tool::ToolSpec>>>,
     workspace_dir: &'a Arc<RwLock<Option<std::path::PathBuf>>>,
     config_path: &'a Arc<RwLock<Option<std::path::PathBuf>>>,
     skill_manager: &'a Arc<RwLock<Option<Arc<RwLock<crate::agents::SkillManager>>>>>,
@@ -764,14 +764,11 @@ fn handle_api_request(
         }
 
         "tools.list" => {
-            let names = ctx.tool_names.read();
-            let result: Vec<serde_json::Value> = names.iter().map(|n| {
-                serde_json::json!({ "name": n })
-            }).collect();
+            let specs = ctx.tool_specs.read();
             serde_json::json!({
                 "type": "api_response",
                 "id": id,
-                "result": result,
+                "result": &*specs,
             }).to_string()
         }
 
@@ -904,14 +901,14 @@ fn handle_api_request(
         }
 
         "config.get" => {
-            let tools = ctx.tool_names.read();
+            let specs = ctx.tool_specs.read();
             let ws_dir = ctx.workspace_dir.read();
             let cfg_path = ctx.config_path.read();
             serde_json::json!({
                 "type": "api_response",
                 "id": id,
                 "result": {
-                    "tool_count": tools.len(),
+                    "tool_count": specs.len(),
                     "workspace_dir": ws_dir.as_ref().map(|p| p.to_string_lossy().to_string()),
                     "config_path": cfg_path.as_ref().map(|p| p.to_string_lossy().to_string()),
                 }

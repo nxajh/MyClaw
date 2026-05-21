@@ -3,8 +3,7 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig({
-  // Relative paths so assets resolve correctly via the <base href> tag.
-  base: './',
+  base: '/myclaw-ui/',
   plugins: [react(), tailwindcss()],
   server: {
     proxy: {
