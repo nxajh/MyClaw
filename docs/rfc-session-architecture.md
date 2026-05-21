@@ -179,21 +179,29 @@ impl SessionContext {
 
 ### TurnContext / TurnInput / TurnResult
 
+边界：`SessionContext.process_turn()` 是"配置解析层"，把 SessionOverride / GlobalConfig / Agent.config / UserProfile 解析为标量，组装 system_prompt；`Agent.run()` 是纯执行层，收到的全是已解析值。
+
 ```rust
 struct TurnContext<'a> {
-    channel: &'a dyn Channel,
-    reply_target: &'a str,
-    user_profile: &'a UserProfile,
-    attachments: &'a mut AttachmentManager,
+    // ── 已 resolve 的运行参数 ──
+    system_prompt: &'a str,          // 含 builtin + body + profile + runtime + skills
+    model_id: &'a str,
+    thinking: Option<&'a ThinkingConfig>,
+    permission_mode: PermissionMode,
+    run_mode: RunMode,
+    max_tool_calls: usize,
+    tool_timeout_secs: u64,
+    stream_first_chunk_timeout_secs: u64,
+    max_output_bytes: usize,
 
+    // ── 工具的回弹路径 ──
+    channel: &'a dyn Channel,        // ask_user 透传
+    reply_target: &'a str,
     ask_router: &'a AskRouter,
     delegator: &'a dyn AgentDelegator,
-    persist: &'a dyn PersistHook,
 
-    global: &'a GlobalConfig,           // 运行限制、默认值
-    session_override: &'a SessionOverride,
-
-    stream: Option<TurnStream<'a>>,     // None = Collect 模式
+    // ── 流式（None = Collect 模式）──
+    stream: Option<TurnStream<'a>>,
 }
 
 struct TurnStream<'a> {
@@ -213,6 +221,53 @@ struct TurnResult {
     pending_retry: Option<String>,
 }
 ```
+
+注意 TurnContext **没有 persist**——持久化由 Session 自己负责（见下节）。也没有 `user_profile` / `GlobalConfig` / `SessionOverride` 引用——所有需要的值在 process_turn 解析后以标量传入。
+
+### Session 自负责持久化
+
+Session 内嵌 `Option<Arc<dyn PersistHook>>`，对外只暴露 `add_*` 方法。Agent.run() 不再关心持久化——写 history 即落盘。
+
+```rust
+struct Session {
+    id: String,
+    owner: String,
+    history: Vec<ChatMessage>,
+    message_ids: Vec<i64>,
+    compact_version: u32,
+    summary_metadata: Option<SummaryMetadata>,
+    session_override: SessionOverride,
+    token_tracker: TokenTracker,
+    incomplete_turn: bool,
+    last_reply_target: Option<String>,
+
+    #[serde(skip)]
+    persist: Option<Arc<dyn PersistHook>>,    // None = ephemeral（CLI 模式）
+}
+
+impl Session {
+    pub fn add_user_text(&mut self, text: String) {
+        let msg = ChatMessage::user_text(&text);
+        let id = self.persist.as_ref()
+            .and_then(|h| h.persist_message(&self.id, &msg).ok())
+            .unwrap_or(0);
+        self.history.push(msg);
+        self.message_ids.push(id);
+    }
+    pub fn add_assistant_text(&mut self, text: String) { /* 同 pattern */ }
+    pub fn add_tool_call(&mut self, ...) { /* 同 */ }
+    pub fn add_tool_result(&mut self, ...) { /* 同 */ }
+    pub fn save_summary(&mut self, ...) { /* 同 */ }
+    pub fn save_override(&mut self) { /* 同 */ }
+    pub fn update_token_count(&mut self) { /* 持久化 token_tracker.total */ }
+}
+```
+
+**收益**：
+- Agent.run() 内不可能写了 history 忘记 persist（编译保证）
+- TurnContext 不需要 `persist: &'a dyn PersistHook` 字段
+- 持久化关注点完全封装在 Session 内部
+- CLI / 测试场景 `persist = None`，零成本退化
 
 ### SessionManager
 
@@ -487,7 +542,7 @@ fn build_prompt(
 | `run_session_actor` | channel + actor | 删除（turn_lock 替代） |
 | `ask_user` handler | per-session 闭包 | `AskRouter` 全局共享 |
 | `delegate` handler | per-session 闭包 | `DelegationCoordinator` 全局共享 |
-| `persist_hook` | per-AgentLoop 创建 | 全局共享单例 |
+| `persist_hook` | per-AgentLoop 创建，Agent.run() 手动调用 | Session 内嵌（Option<Arc<dyn PersistHook>>），通过 `Session::add_*` 方法自动持久化 |
 | `CompactionPolicy` + `CompactionExecutor` | per-AgentLoop | 合并为全局 `ContextEngine` |
 | `AttachmentManager` | RequestBuilder 字段 | `SessionContext` 字段 |
 | `change_rx` | 传给每个 AgentLoop | `WorkspaceWatcher` 自维护 RwLock |
@@ -514,22 +569,24 @@ fn build_prompt(
 
 ### 阶段 2：SessionContext + 去间接层 + 拆解 RequestBuilder
 
-1. 定义 `TurnContext` / `TurnInput` / `TurnResult` / `TurnStream` / `TurnEnv`
+1. 定义 `TurnContext` / `TurnInput` / `TurnResult` / `TurnStream`
 2. 引入 `AskRouter`、`AgentDelegator` trait
-3. 新建 `SessionContext`（不存 channel；持 `AttachmentManager` 和 `pending_retry`）
-4. `SessionManager` 增 `contexts: HashMap<sid, Arc<SessionContext>>`，去掉 `cache`
-5. 拆解 `RequestBuilder`：
-   - `system_prompt` 挪进 `Agent.cached_prompt`
+3. Session 内嵌 `persist: Option<Arc<dyn PersistHook>>`，加 `add_user_text` / `add_assistant_text` / `add_tool_*` / `save_summary` / `update_token_count` 等方法。`Session.token_tracker` 替代 `last_total_tokens` 单字段
+4. 新建 `SessionContext`（不存 channel；持 `AttachmentManager` 和 `pending_retry`）
+5. `SessionManager` 增 `contexts: HashMap<sid, Arc<SessionContext>>`，去掉 `cache`
+6. `SessionContext.process_turn()` 承担"配置解析层"职责：组装 system_prompt、resolve model/permission_mode/run_mode/thinking、attachment diff，把已解析的标量传入 Agent.run()
+7. 拆解 `RequestBuilder`：
+   - `system_prompt` 由 `process_turn` 每轮组装，传 `&str` 给 Agent
    - `AttachmentManager` 挪进 `SessionContext.attachments`
    - `change_rx` 删除（WorkspaceWatcher 自维护）
    - pending images 改为 `TurnInput` 字段
    - `build()` / `merge_attachments()` 改为无状态函数
-6. 合并 `CompactionPolicy` + `CompactionExecutor` → `ContextEngine`（全局单例）
-7. 删 `AgentLoop`、`SessionHandle`、`LoopRegistry`、`run_session_actor`
-8. `DelegationCoordinator` 接管 worktree / merge / cleanup；`SubAgentDelegator` 删除
-9. ClientChannel 删 `loop_registry`、`evict_loop`
-10. WorkspaceWatcher 改为自维护（own RwLock，文件变更直接更新）
-11. Scheduler / Webhook 路径收编：删 `SchedulerContext` / `WebhookContext`，全走 `session_manager.get_context()`
+8. 拆 `CompactionPolicy` → 全局 `ContextEngine`（仅持无状态部分）+ `Session.token_tracker`（per-session 状态）
+9. 删 `AgentLoop`、`SessionHandle`、`LoopRegistry`、`run_session_actor`
+10. `DelegationCoordinator` 接管 worktree / merge / cleanup；`SubAgentDelegator` 删除
+11. ClientChannel 删 `loop_registry`、`evict_loop`
+12. WorkspaceWatcher 改为自维护（own RwLock，文件变更直接更新）
+13. Scheduler / Webhook 路径收编：删 `SchedulerContext` / `WebhookContext`，全走 `session_manager.get_context()`
 
 ### 阶段 3：Agent 配置统一
 

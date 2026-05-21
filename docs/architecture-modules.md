@@ -113,7 +113,11 @@
   ┃   │   │  ├─ message_ids, compact_version    │                │      ┃
   ┃   │   │  ├─ session_override                 │                │      ┃
   ┃   │   │  ├─ token_tracker                    │                │      ┃
-  ┃   │   │  └─ incomplete_turn, last_reply_targ │                │      ┃
+  ┃   │   │  ├─ incomplete_turn, last_reply_targ │                │      ┃
+  ┃   │   │  └─ persist: Option<Arc<PersistHook>>│ ← 自己负责落盘 │      ┃
+  ┃   │   │     methods: add_user_text(),        │                │      ┃
+  ┃   │   │              add_assistant_text(),   │                │      ┃
+  ┃   │   │              add_tool_*(), ...       │                │      ┃
   ┃   │   └──────────────────────────────────────┘                │      ┃
   ┃   │                                                            │      ┃
   ┃   │   agent: Arc<Agent>           ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌▶ (Registry) │      ┃
@@ -129,19 +133,27 @@
   ┃                                          调用时构造 ┃              ┃
   ┃                                                         ▼              ┃
   ┃   ┌──────────────────────────────────────────────────────────┐       ┃
-  ┃   │            TurnContext<'a> (per turn，全部借用)            │       ┃
+  ┃   │    TurnContext<'a> (per turn 借用 — 已 resolve 的执行入参)  │       ┃
   ┃   │                                                            │       ┃
-  ┃   │  channel: &'a dyn Channel        ← process_turn 参数      │       ┃
+  ┃   │  ── 运行参数（process_turn 解析后传入标量/借用）──            │       ┃
+  ┃   │  system_prompt: &'a str       ← 已含 profile/runtime/skill │       ┃
+  ┃   │  model_id: &'a str            ← override > defaults 已解析 │       ┃
+  ┃   │  thinking: Option<&ThinkingConfig>                         │       ┃
+  ┃   │  permission_mode, run_mode (枚举值)                         │       ┃
+  ┃   │  max_tool_calls, tool_timeout_secs, ... (limits 抽出)      │       ┃
+  ┃   │                                                            │       ┃
+  ┃   │  ── 工具回弹路径 ──                                          │       ┃
+  ┃   │  channel: &'a dyn Channel     ← process_turn 参数          │       ┃
   ┃   │  reply_target: &'a str                                    │       ┃
-  ┃   │  user_profile: &'a UserProfile   ← borrow                 │       ┃
-  ┃   │  attachments: &'a mut AttachmentManager  ← borrow         │       ┃
-  ┃   │  session_override: &'a SessionOverride                    │       ┃
+  ┃   │  ask_router: &'a AskRouter      ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌▶         │       ┃
+  ┃   │  delegator: &'a dyn AgentDelegator  ╌╌╌╌╌╌╌╌╌╌╌╌▶         │       ┃
   ┃   │                                                            │       ┃
-  ┃   │  ask_router: &'a AskRouter       ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌▶ (env)  │       ┃
-  ┃   │  delegator: &'a dyn AgentDelegator  ╌╌╌╌╌╌╌╌╌╌╌╌▶ (env)  │       ┃
-  ┃   │  persist: &'a dyn PersistHook    ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌▶ (env)  │       ┃
-  ┃   │  global: &'a GlobalConfig                                 │       ┃
-  ┃   │  stream: Option<TurnStream<'a>>  ← 仅 Streamed 模式        │       ┃
+  ┃   │  ── 流式 ──                                                  │       ┃
+  ┃   │  stream: Option<TurnStream<'a>>   ← 仅 Streamed 模式       │       ┃
+  ┃   │                                                            │       ┃
+  ┃   │  注意：不传 persist（Session 自负责），不传 user_profile     │       ┃
+  ┃   │       / GlobalConfig / SessionOverride / AttachmentManager │       ┃
+  ┃   │       ——这些在 process_turn 边界全部消化掉                  │       ┃
   ┃   └──────────────────────────────────────────────────────────┘       ┃
   ┃                                                                       ┃
   ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
@@ -210,7 +222,8 @@
 | **SessionContext** | Arc<Agent>, Arc<UserProfile> |
 | **DelegationCoordinator** | SessionManager, AgentRegistry |
 | **Orchestrator** | SessionManager, AskRouter, UserResolver, DelegationCoordinator, Scheduler, WebhookHandler, channels DashMap |
-| **TurnContext (借用)** | &Channel, &UserProfile, &mut AttachmentManager, &AskRouter, &AgentDelegator, &PersistHook, &GlobalConfig, &SessionOverride |
+| **Session** | Option<Arc<dyn PersistHook>>（自负责持久化） |
+| **TurnContext (借用)** | &str system_prompt, &str model_id, &Channel, &AskRouter, &AgentDelegator, Option<TurnStream> |
 
 ---
 
