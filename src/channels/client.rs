@@ -17,6 +17,9 @@ use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
+/// Shared loop registry: session_key → cached AgentLoop handle.
+type LoopRegistryMap = Arc<DashMap<String, Arc<crate::agents::SessionHandle>>>;
+
 use crate::agents::TurnEvent;
 use crate::channels::message::{Channel, ChannelMessage, SendMessage};
 use crate::config::channel::ClientConfig;
@@ -72,7 +75,7 @@ pub struct ClientChannel {
     /// Service registry for models API (set after construction).
     service_registry: Arc<RwLock<Option<Arc<dyn crate::providers::ServiceRegistry>>>>,
     /// Loop registry for evicting cached AgentLoop on session switch (set after construction).
-    loop_registry: Arc<RwLock<Option<Arc<DashMap<String, Arc<crate::agents::SessionHandle>>>>>>,
+    loop_registry: Arc<RwLock<Option<LoopRegistryMap>>>,
 }
 
 impl ClientChannel {
@@ -133,7 +136,7 @@ impl ClientChannel {
     }
 
     /// Set the loop registry for evicting cached AgentLoop on session switch.
-    pub fn set_loop_registry(&self, lr: Arc<DashMap<String, Arc<crate::agents::SessionHandle>>>) {
+    pub fn set_loop_registry(&self, lr: LoopRegistryMap) {
         *self.loop_registry.write() = Some(lr);
     }
 
@@ -625,7 +628,7 @@ struct ApiContext<'a> {
     config_path: &'a Arc<RwLock<Option<std::path::PathBuf>>>,
     skill_manager: &'a Arc<RwLock<Option<Arc<RwLock<crate::agents::SkillManager>>>>>,
     service_registry: &'a Arc<RwLock<Option<Arc<dyn crate::providers::ServiceRegistry>>>>,
-    loop_registry: &'a Arc<RwLock<Option<Arc<DashMap<String, Arc<crate::agents::SessionHandle>>>>>>,
+    loop_registry: &'a Arc<RwLock<Option<LoopRegistryMap>>>,
 }
 
 /// Evict the cached AgentLoop for `user_id` so the next message creates a fresh one
