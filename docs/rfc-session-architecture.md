@@ -121,6 +121,27 @@ enum ToolFilter {
 }
 // SkillFilter / McpFilter 同形
 
+impl ToolFilter {
+    fn allows(&self, name: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Allow(list) => list.iter().any(|n| n == name),
+            Self::Deny(list) => list.iter().all(|n| n != name),
+        }
+    }
+}
+
+impl AgentConfig {
+    /// 三维独立过滤：按来源决定查哪个 filter
+    fn allows_tool(&self, tool: &dyn Tool) -> bool {
+        match tool.source() {
+            ToolSource::Builtin => self.tools.allows(tool.name()),
+            ToolSource::McpServer(server) => self.mcp.allows(&server),
+            ToolSource::Skill(skill) => self.skills.allows(&skill),
+        }
+    }
+}
+
 // Agent 退化为"纯身份"——无 Arc 字段
 struct Agent {
     config: AgentConfig,
@@ -129,9 +150,10 @@ struct Agent {
 
 // 全局基础设施 bundle，daemon 启动时构造，run 时传入
 struct AgentRuntime {
-    registry: Arc<dyn ServiceRegistry>,
+    registry: Arc<dyn ServiceRegistry>,    // LLM 调用
+    tool_registry: Arc<ToolRegistry>,      // 全局工具池（含 builtin + MCP + skill tools）
     context_engine: Arc<ContextEngine>,
-    tool_executor: Arc<ToolExecutor>,    // 内部 ToolRegistry 含所有自带 Arc 的 tool
+    tool_executor: Arc<ToolExecutor>,      // 仅 timeout 包装器
     loop_breaker: Arc<LoopBreaker>,
 }
 
@@ -146,10 +168,81 @@ impl Agent {
 }
 ```
 
+**Agent.run() turn 起手做一次工具过滤**：从全局 ToolRegistry 过出当前 agent 允许的子集，转 spec 传给 LLM，turn 内全程用同一份子集：
+
+```rust
+async fn run(...) {
+    let allowed_tools: Vec<Arc<dyn Tool>> = rt.tool_registry.all()
+        .into_iter()
+        .filter(|t| self.config.allows_tool(t.as_ref()))
+        .collect();
+    let tool_specs: Vec<ToolSpec> = allowed_tools.iter().map(|t| t.spec()).collect();
+    
+    loop {
+        // LLM 只看到 tool_specs（agent 的允许子集）
+        let response = call_llm(messages, &tool_specs).await?;
+        for call in response.tool_calls {
+            let result = rt.tool_executor
+                .execute(&call, &session, &allowed_tools)
+                .await?;
+        }
+    }
+}
+```
+
+**双层防御**：
+- 第一层：tool_specs 只含允许工具，LLM 不知道有别的
+- 第二层：ToolExecutor 在 `allowed_tools` 子集内查名，越权调用直接报错
+
 **Agent 不持有 ask_router / delegator / skills**——这些是工具的内部依赖：
 - `AskUserTool` 持 `Arc<AskRouter>`
 - `DelegateTool` 持 `Arc<dyn AgentDelegator>`
-- daemon 构造 tool 时注入这些 Arc，tool 进 ToolRegistry，Agent 通过 ToolExecutor 间接访问
+- daemon 构造 tool 时注入这些 Arc，tool 进 ToolRegistry
+
+### Tool trait
+
+```rust
+#[async_trait]
+trait Tool: Send + Sync {
+    fn name(&self) -> &str;
+    fn spec(&self) -> ToolSpec;
+    fn source(&self) -> ToolSource;        // 让 filter 知道按哪类规则过滤
+    async fn execute(&self, args: Value, session: &Session) -> Result<ToolResult>;
+}
+
+enum ToolSource {
+    Builtin,
+    McpServer(String),    // server name，e.g., "github"
+    Skill(String),        // skill name
+}
+```
+
+`&Session`（不可变）就够——工具不直接 mutate session，结果以 `ToolResult` 返回，由 Agent 调 `session.add_tool_result(...)` 写进 history。
+
+### ToolExecutor 退化为 timeout 包装器
+
+```rust
+struct ToolExecutor {
+    timeout: Duration,
+    // 不持 ToolRegistry — 工具池由 Agent 传入
+}
+
+impl ToolExecutor {
+    async fn execute(
+        &self,
+        call: &ToolCall,
+        session: &Session,
+        allowed: &[Arc<dyn Tool>],
+    ) -> Result<ToolResult> {
+        let tool = allowed.iter()
+            .find(|t| t.name() == call.name)
+            .ok_or_else(|| anyhow!("tool '{}' not in agent's allowed set", call.name))?;
+        tokio::time::timeout(self.timeout, tool.execute(call.args.clone(), session))
+            .await
+            .map_err(|_| anyhow!("tool '{}' timed out", call.name))?
+    }
+}
+```
 
 "主 agent"和"子代理"是同一个类型的不同实例。
 
@@ -388,14 +481,20 @@ impl ContextEngine {
     async fn compact(&self, session: &mut Session, ...) -> Result<()>;
 }
 
-// DefaultToolExecutor 重命名 + 简化
+// DefaultToolExecutor 重命名 + 退化为 timeout 包装器
+// 不持 ToolRegistry — 工具池由 Agent.run() turn 起手过滤后传入
 struct ToolExecutor {
-    tools: Arc<ToolRegistry>,
     timeout: Duration,                  // from [tool_executor].timeout_secs
 }
 
 impl ToolExecutor {
-    async fn execute(&self, call: &ToolCall, session: &mut Session, ...) -> Result<ToolResult>;
+    /// allowed 是 Agent 按其 filter 从全局 ToolRegistry 过滤后的子集
+    async fn execute(
+        &self,
+        call: &ToolCall,
+        session: &Session,
+        allowed: &[Arc<dyn Tool>],
+    ) -> Result<ToolResult>;
 }
 
 // LoopBreaker 拆为全局 policy + per-turn counter
@@ -750,6 +849,10 @@ enum OrchestratorEvent {
 | `SubAgentConfig` | 与主 agent 配置不同 | 统一为 `AgentConfig` |
 | `SubAgentDelegator` | 持 agent 配置 + 临时构建 AgentLoop | `DelegationCoordinator` 编排 worktree，agent 通过 SessionManager 统一执行 |
 | `max_tool_calls` 等 limits | AgentConfig + SessionOverride | 仅 `GlobalConfig.limits` |
+| Tool trait | 仅 `name` / `spec` / `execute(args)` | 新增 `source() -> ToolSource`（Builtin / McpServer / Skill），`execute(args, &Session)` |
+| Tool 过滤维度 | `tools: Vec<String>` 一维白名单 | 三维独立：`tools` (内置) / `mcp` (server) / `skills`；ToolFilter 支持 All/Allow/Deny |
+| Tool 过滤应用点 | SubAgentDelegator 临时 build_filtered_tools | Agent.run() turn 起手 snapshot allowed_tools；spec 过滤 + executor 查找双层防御 |
+| `ToolExecutor` | 持 ToolRegistry + ask_handler/delegate_handler/sub_delegator | 退化为 timeout 包装器，工具池每次执行由 Agent 传入 |
 | `tool_timeout_secs` | `AgentConfig.tool_timeout_secs` | `ToolExecutor` 字段（来自 `[tool_executor]`） |
 | `max_tool_calls` / `loop_breaker_threshold` | `AgentConfig` + SessionOverride | `LoopBreaker` 字段（来自 `[loop_breaker]`） |
 | `compact_threshold` / `retain_work_units` | `AgentConfig.context` + SessionOverride | `ContextEngine` 字段（来自 `[context_engine]`） |
@@ -802,12 +905,16 @@ enum OrchestratorEvent {
 ### 阶段 3：Agent 配置统一
 
 1. `AgentConfig` 简化：仅 `name` / `description` / `tools` / `skills` / `mcp` / `isolation` / `system_prompt`
-2. 实现 `ToolFilter` / `SkillFilter` / `McpFilter` enum
-3. `GlobalConfig` 按模块拆段：`[locale]` / `[prompt]` / `[agent]` / `[tool_executor]` / `[loop_breaker]` / `[context_engine]` / `[providers]` / `[channels]` / `[mcp_servers]` / `[scheduler]` / `[users]`
-4. `AgentRegistry` 加载所有 `workspace/agents/*/AGENT.md`（含 main）
-5. `prompt.rs` 删 IDENTITY/SOUL/USER.md 读取；prompt 组合改为参数化（`build_prompt(...)` 函数）
-6. 启动校验：`workspace/agents/main/AGENT.md` 缺失则报错退出
-7. 提供 `scripts/migrate_main_agent.sh` 一次性脚本
+2. 实现 `ToolFilter` / `SkillFilter` / `McpFilter` enum (All/Allow/Deny)
+3. `Tool` trait 加 `source() -> ToolSource`（Builtin / McpServer / Skill），`execute` 加 `&Session` 参数
+4. MCP / skill tool 注册时填正确的 source
+5. `AgentConfig::allows_tool(&dyn Tool) -> bool` 按 source 分支三维独立过滤
+6. `Agent.run()` turn 起手 snapshot allowed_tools 子集，转 spec 传 LLM；`ToolExecutor.execute(call, session, &allowed_tools)` 在子集内查找
+7. `GlobalConfig` 按模块拆段：`[locale]` / `[prompt]` / `[agent]` / `[tool_executor]` / `[loop_breaker]` / `[context_engine]` / `[providers]` / `[channels]` / `[mcp_servers]` / `[scheduler]` / `[users]`
+8. `AgentRegistry` 加载所有 `workspace/agents/*/AGENT.md`（含 main）
+9. `prompt.rs` 删 IDENTITY/SOUL/USER.md 读取；prompt 组合改为参数化（`build_prompt(...)` 函数）
+10. 启动校验：`workspace/agents/main/AGENT.md` 缺失则报错退出
+11. 提供 `scripts/migrate_main_agent.sh` 一次性脚本
 
 ### 阶段 4：用户信息 per-user
 

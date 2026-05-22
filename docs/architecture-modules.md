@@ -94,8 +94,11 @@
   ┃                                                                       ┃
   ┃  ┌──────────────────────────────────────────────────────────┐        ┃
   ┃  │           AgentRuntime (启动时构造的全局 bundle)           │        ┃
-  ┃  │   registry / context_engine / tool_executor / loop_breaker│        ┃
+  ┃  │   registry / tool_registry / context_engine /             │        ┃
+  ┃  │   tool_executor / loop_breaker                            │        ┃
   ┃  │   Agent.run(session, input, ctx, rt) 时传入                │        ┃
+  ┃  │   turn 起手按 agent.config 过滤 tool_registry → allowed   │        ┃
+  ┃  │   spec 进 LLM；tool_executor 在 allowed 内查找            │        ┃
   ┃  └──────────────────────────────────────────────────────────┘        ┃
   ┃                                                                       ┃
   ┃  ┌─────────────────────────────────────────────────────┐             ┃
@@ -236,11 +239,11 @@
 | 组件 | 持有的引用 |
 |------|-----------|
 | **Agent** | （无 Arc 字段，仅 config + cached_prompt） |
-| **AgentRuntime** | ServiceRegistry, ContextEngine, ToolExecutor, LoopBreaker |
+| **AgentRuntime** | ServiceRegistry, ToolRegistry, ContextEngine, ToolExecutor, LoopBreaker |
 | **AskUserTool** | AskRouter（在 ToolRegistry 内部，Agent 不感知） |
 | **DelegateTool** | AgentDelegator（DelegationCoordinator impl，Agent 不感知） |
 | **ContextEngine** | ServiceRegistry, ToolRegistry |
-| **ToolExecutor** | ToolRegistry（own timeout 字段） |
+| **ToolExecutor** | （仅 own timeout 字段；工具池 Agent 传入） |
 | **LoopBreaker** | (own max_tool_calls + threshold) |
 | **AgentRegistry** | HashMap<name, Arc<Agent>>（拥有） |
 | **WorkspaceWatcher** | Arc<RwLock<SkillManager>>, Arc<RwLock<Vec<AgentConfig>>>（拥有 RwLock） |
