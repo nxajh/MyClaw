@@ -93,7 +93,7 @@
   ┃   Agent Agent Agent        ▼                                        ┃
   ┃   "main" "coder" "..."   AskUserTool ─→ 进 ToolRegistry            ┃
   ┃     ┃                                                                ┃
-  ┃     ┗━ Agent 退化为"纯身份"：config + cached_prompt，无 Arc 字段     ┃
+  ┃     ┗━ Agent 退化为"纯身份"：仅 config 一个字段，无 Arc 字段          ┃
   ┃                                                                       ┃
   ┃  ┌──────────────────────────────────────────────────────────┐        ┃
   ┃  │           AgentRuntime (启动时构造的全局 bundle)           │        ┃
@@ -244,7 +244,7 @@
 
 | 组件 | 持有的引用 |
 |------|-----------|
-| **Agent** | （无 Arc 字段，仅 config + cached_prompt） |
+| **Agent** | （无 Arc 字段，仅 config 一个字段） |
 | **AgentRuntime** | ServiceRegistry, ToolRegistry, ContextEngine, ToolExecutor, LoopBreaker |
 | **AskUserTool** | AskRouter（在 ToolRegistry 内部，Agent 不感知） |
 | **DelegateTool** | AgentDelegator（DelegationCoordinator impl，Agent 不感知） |
@@ -277,8 +277,8 @@
 ├─────────────┤  ├──────────────┤  ├──────────────┤  ├────────────┤
 │ GlobalConfig│  │ Agent        │  │ Session      │  │ TurnContext│
 │ Service-    │  │   .config    │  │   .history   │  │ TurnResult │
-│   Registry  │  │   .cached_   │  │   .token_    │  │ TurnResult │
-│ ToolRegistry│  │     prompt   │  │     tracker  │  │            │
+│   Registry  │  │ （仅一个字段）│  │   .token_    │  │            │
+│ ToolRegistry│  │              │  │     tracker  │  │            │
 │ SkillManager│  │              │  │ Session-     │  │            │
 │ McpManager  │  │              │  │   Context    │  │ LoopBreaker│
 │ Context-    │  │              │  │   .attach-   │  │   (run() 内│
@@ -336,7 +336,7 @@
        ├── attachments.diff_and_render(...)  → <system-reminder> 文本
        ├── session.add_user_text(reminder + msg.content)   ← 写 history（自动 persist）
        ├── resolve permission_mode/model/run_mode/thinking
-       ├── 组装 system_prompt（agent.cached_prompt + profile + runtime + skills）
+       ├── 组装 system_prompt（builtin + agent.config.system_prompt + profile + runtime + skills）
        ├── 构造 TurnContext { system_prompt, model_id, thinking, perm, run_mode }
        │
        ▼

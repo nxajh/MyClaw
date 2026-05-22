@@ -125,10 +125,9 @@ Agent（同类型，不同配置的实例）
 │    ├─ isolation: AgentIsolation  │ ← 作为 sub-agent 时是否要 worktree
 │    └─ system_prompt              │ ← AGENT.md body
 │                                  │
-│  cached_prompt: String           │ ← AGENT.md body 部分（builtin/profile 等
-│                                  │   由 process_turn 每轮拼上去）
-│                                  │
+│  // 仅 config 一个字段           │
 │  // 无 Arc 字段 — 全部进 AgentRuntime  │
+│  // AGENT.md body 直接读 config.system_prompt
 │                                  │
 │  run(&mut session, ctx, rt) {   │ ← 无状态执行一轮 turn
 │    let mut counter =             │
@@ -281,9 +280,8 @@ AgentRegistry (全局，可变)
        │  WorkspaceWatcher 文件变更时直接 reload swap
        │  hot-reload 只影响新建 SessionContext，活跃 ctx 不受影响
        │
-       ├─ "main" ────→ Agent (纯身份)
-       │                ├─ config: AgentConfig (name/desc/tools/skills/mcp/isolation/system_prompt)
-       │                └─ cached_prompt: String
+       ├─ "main" ────→ Agent (纯身份，仅 config 一个字段)
+       │                └─ config: AgentConfig (name/desc/tools/skills/mcp/isolation/system_prompt)
        │                ★ 无 Arc 字段；run() 通过 rt: &AgentRuntime 拿基础设施
        │
        ├─ "coder" ──→ Agent (同结构，不同配置)
@@ -428,7 +426,7 @@ delete_session(routing_key, target_sid)
 ❌ SchedulerContext    → 统一走 SessionManager
 ❌ WebhookContext      → WebhookHandler 退化为协议适配器，发 WebhookEvent 给 Orchestrator
 ❌ SubAgentDelegator   → DelegationCoordinator + AgentRegistry
-❌ RequestBuilder      → 拆为 Agent.cached_prompt / SessionContext.attachments /
+❌ RequestBuilder      → 拆为 process_turn 内的无状态 build_prompt / SessionContext.attachments /
                          WorkspaceWatcher / 无状态函数
 ❌ CompactionPolicy    → 并入 ContextEngine（TokenTracker 挪进 Session）
 ❌ CompactionExecutor  → 并入 ContextEngine

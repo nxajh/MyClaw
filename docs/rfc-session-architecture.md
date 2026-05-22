@@ -147,10 +147,9 @@ impl AgentConfig {
     }
 }
 
-// Agent 退化为"纯身份"——无 Arc 字段
+// Agent 退化为"纯身份"——仅一个 config 字段
 struct Agent {
     config: AgentConfig,
-    cached_prompt: String,             // AGENT.md body 部分
 }
 
 // 全局基础设施 bundle，daemon 启动时构造，run 时传入
@@ -673,6 +672,29 @@ impl AskRouter {
 
 `wait_for_reply` 返回完整 ChannelMessage（不是裸 String）——LLM 拿到的 tool_result 可以包含用户回复的图片附件。
 
+### AgentDelegator trait
+
+```rust
+#[async_trait]
+trait AgentDelegator: Send + Sync {
+    /// 委派任务给指定 sub-agent，返回结果摘要
+    async fn delegate(
+        &self,
+        agent_name: &str,
+        task: &str,
+        parent_session: &Session,
+    ) -> Result<String>;
+    
+    /// 返回可用 sub-agent 列表
+    /// DelegateTool.spec() 调此构造工具 schema（agent 参数的枚举值）
+    fn list_available(&self) -> Vec<(String, Option<String>)>;
+}
+```
+
+`DelegationCoordinator` 实现这个 trait（含 worktree 编排 + create_sub_session + sub_ctx.process_turn）。`DelegateTool` 持 `Arc<dyn AgentDelegator>`，`execute()` 时调 `delegate`，`spec()` 时调 `list_available`。
+
+Agent 启动后 hot-reload 增减 AGENT.md → AgentRegistry 更新 → 下轮 turn 的 DelegateTool.spec() 自动反映最新可委派列表。
+
 ### AgentRegistry（可变，hot-reload）
 
 ```rust
@@ -920,7 +942,7 @@ fn build_prompt(
 }
 ```
 
-- Agent 启动时算一次"半成品"（仅 `agent.system_prompt` 部分），缓存在 `Agent.cached_prompt`
+- Agent 不预算 prompt——AGENT.md body 已经是字符串字段 `agent.config.system_prompt`，每轮 turn 在 `build_prompt()` 里跟其他段拼装
 - 每轮 turn 由 process_turn 把 profile + builtin（按当前 perm/run mode）+ runtime 拼上
 - 完全去掉 IDENTITY.md / SOUL.md / USER.md / RULES.md 的硬编码读取
 
@@ -1072,7 +1094,7 @@ async fn handle_delegation_event(&self, ev: DelegationEvent) {
 
 | 组件 | 现在 | 重构后 |
 |------|------|--------|
-| `Agent` | AgentLoop 工厂 + 大量 Arc 字段 | 纯身份（config + cached_prompt），无 Arc 字段 |
+| `Agent` | AgentLoop 工厂 + 大量 Arc 字段 + 预算的 system_prompt 字段 | 纯身份，仅 config 一个字段；prompt 每轮在 process_turn 内拼装 |
 | `AgentLoop` | 持有 Session ownership | 删除 |
 | `AgentRuntime` | （不存在） | 新增，bundle 全局基础设施（registry/context_engine/tool_executor/loop_breaker），Agent.run() 参数 |
 | `RequestBuilder` | 五职责混杂 struct | 删除（system_prompt 入 process_turn，AttachmentManager 入 SessionContext，change_rx 入 WorkspaceWatcher，images 入 TurnInput，build() 改无状态函数） |
@@ -1169,10 +1191,14 @@ async fn handle_delegation_event(&self, ev: DelegationEvent) {
 16. 删 `AgentLoop`、`SessionHandle`、`LoopRegistry`、`run_session_actor`、`TurnStream`
 17. 引入 `AskUserTool` / `DelegateTool`：各持自己的 Arc 依赖，注册进 ToolRegistry
 18. `DelegationCoordinator` 接管 worktree / merge / cleanup；`SubAgentDelegator` 删除；实现 AgentDelegator trait
-19. Orchestrator 主循环：解析 rk → ask_router.fulfill 先于 process_turn；session_manager.get_context → process_turn
+19. Orchestrator 主循环：
+    - 解析 routing_key
+    - `let sid = session_manager.session_id_for_routing_key(rk);`
+    - 若 sid 存在且 `ask_router.fulfill(sid, msg)` 命中 → 消费 return
+    - 否则 `session_manager.get_context(rk).process_turn(msg, channel, rt).await`
 20. WorkspaceWatcher 改为自维护（own SkillManager + AgentRegistry，文件变更直接调 reload）
 21. Scheduler / Webhook 路径收编：删 `SchedulerContext` / `WebhookContext`，全走 OrchestratorEvent 进 Orchestrator
-22. 启动恢复：从 `session.last_message` 重建 ChannelMessage，临时构 ctx 跑 `recover_pending_turn`，跑完即弃
+22. 启动恢复：从 `session.last_message` 直接读出已持久化的 ChannelMessage（无需重建），临时构 ctx 跑 `recover_pending_turn(channel, rt)`，跑完 Arc drop 即弃
 23. 删 `AgentConfig.max_history`（死代码）
 
 ### 阶段 3：Agent 配置统一
@@ -1184,7 +1210,7 @@ async fn handle_delegation_event(&self, ev: DelegationEvent) {
 5. `AgentConfig::allows_tool(&dyn Tool) -> bool` 按 source 分支三维独立过滤
 6. `Agent.run()` turn 起手 snapshot allowed_tools 子集，转 spec 传 LLM；`ToolExecutor.execute(call, session, &allowed_tools)` 在子集内查找
 7. `GlobalConfig` 按模块拆段：`[locale]` / `[prompt]` / `[agent]` / `[tool_executor]` / `[loop_breaker]` / `[context_engine]` / `[providers]` / `[channels]` / `[mcp_servers]` / `[scheduler]` / `[users]`
-8. `AgentRegistry` 加载所有 `workspace/agents/*/AGENT.md`（含 main）
+8. `AgentRegistry` 实际为 `Arc<RwLock<HashMap<String, Arc<Agent>>>>`，启动时加载所有 `workspace/agents/*/AGENT.md`（含 main）；WorkspaceWatcher 文件变更时通过 `reload_from_dir(agents_dir)` 重建 Arc<Agent> 并 swap 进 inner（hot-reload 只影响新 SessionContext）
 9. `prompt.rs` 删 IDENTITY/SOUL/USER.md 读取；prompt 组合改为参数化（`build_prompt(...)` 函数）
 10. 启动校验：`workspace/agents/main/AGENT.md` 缺失则报错退出
 11. 提供 `scripts/migrate_main_agent.sh` 一次性脚本
