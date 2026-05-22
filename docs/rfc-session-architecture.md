@@ -33,7 +33,7 @@ orchestrator → handle.tx.send(msg) → run_session_actor 从 rx 取出
 | `request_builder`, `compactor` | registry/tools 的包装 | 见下文：拆掉 |
 | `session` | 对话数据 | SessionContext |
 | `loop_breaker`, `policy` | per-turn 计数器 | `run()` 的局部变量 |
-| `persist_hook` | 持久化回调 | 全局共享 |
+| `persist_hook` | 持久化回调 | Session 内部 transient 字段 + `add_*` 方法 |
 
 真正 per-turn 的 `LoopBreaker`（tool call 计数）和 `CompactionPolicy`（token 追踪）不需要持久化，作为 `Agent.run()` 的局部变量就行。AgentLoop 整个 struct 不需要存在。
 
@@ -163,10 +163,12 @@ struct AgentRuntime {
 }
 
 impl Agent {
+    /// Agent.run() 不接收单独的 input 参数——
+    /// 本轮 user message 已经被 process_turn push 进 session.history，
+    /// channel/reply_target/images 等都在 session.last_message 与 session.channel
     async fn run(
         &self,
         session: &mut Session,
-        input: TurnInput,
         ctx: &TurnContext<'_>,
         rt: &AgentRuntime,
     ) -> Result<TurnResult>;
@@ -281,18 +283,73 @@ impl SessionContext {
         msg: ChannelMessage,                   // 整个 ChannelMessage 进来
         channel: Arc<dyn Channel>,
         rt: &AgentRuntime,
-    ) -> Result<String> {
+    ) -> Result<TurnResult> {
         let _guard = self.turn_lock.lock().await;
+        
+        // 1. 写 transient 状态：channel + 持久化 last_message
         {
-            let mut session = self.session.lock();
-            session.channel = Some(channel.clone());
-            session.last_message = Some(msg.clone());          // 整条消息持久化
+            let mut s = self.session.lock();
+            s.channel = Some(channel.clone());
+            s.last_message = Some(msg.clone());     // 也会随 session 持久化
         }
-        // attachment diff → merge reminder → build prompt → agent.run
-        ...
+        
+        // 2. attachment diff（按 turn 起手 snapshot）
+        let skills = rt.workspace.skills.read().snapshot();
+        let agents = rt.workspace.agents.list();
+        let reminder = self.attachments.lock()
+            .diff_and_render(&skills, &agents, &self.session.lock().history);
+        
+        // 3. 拼 user 消息（reminder + 原文本）写进 history（自动持久化）
+        let user_text = match reminder {
+            Some(r) => format!("{r}\n\n{}", msg.content),
+            None => msg.content.clone(),
+        };
+        self.session.lock().add_user_text(user_text);
+        
+        // 4. resolve 配置参数（SessionOverride > [agent] / providers default / 内置）
+        let s = self.session.lock();
+        let permission_mode = s.session_override.permission_mode
+            .unwrap_or(rt.global.agent.permission_mode);
+        let model_id = s.session_override.model.clone()
+            .unwrap_or_else(|| rt.registry.default_chat_model());
+        let run_mode = s.session_override.run_mode.unwrap_or(RunMode::Interactive);
+        let thinking = s.session_override.thinking.as_ref();
+        drop(s);
+        
+        // 5. build system prompt（每轮拼装）
+        let system_prompt = build_prompt(
+            &self.agent.config,
+            &self.user_profile,
+            permission_mode,
+            run_mode,
+            &rt.global.prompt,
+        );
+        
+        // 6. 调 Agent
+        let ctx = TurnContext { 
+            system_prompt: &system_prompt, 
+            model_id: &model_id,
+            thinking,
+            permission_mode,
+            run_mode,
+        };
+        let result = self.agent.run(&mut *self.session.lock(), &ctx, rt).await?;
+        
+        // 7. 处理 pending_retry（跨 turn 保留）
+        if let Some(ref retry) = result.pending_retry {
+            *self.pending_retry.lock() = Some(retry.clone());
+        }
+        
+        // 8. 把最终文本发回用户（流式 turn 已 push_event 过，这条是 fallback / 总结）
+        if !result.text.is_empty() {
+            let target = &msg.reply_target;
+            let _ = channel.send(SendMessage::new(&result.text, target)).await;
+        }
+        
+        Ok(result)
     }
     
-    async fn recover_pending_turn(&self, rt: &AgentRuntime, ...) -> Result<()>;
+    async fn recover_pending_turn(&self, channel: Arc<dyn Channel>, rt: &AgentRuntime) -> Result<()>;
 }
 ```
 
@@ -415,6 +472,10 @@ impl SessionManager {
     
     /// rk → session_id 反查（Orchestrator 处理 ask 反馈时用）
     fn session_id_for_routing_key(&self, rk: &str) -> Option<String>;
+    
+    /// session_id → ctx 反查（DelegationEvent 回填、跨 rk 查询时用）
+    /// 扫描 sessions.values() O(n)，用户 session 用；sub-session 调用方持引用不用查
+    fn get_by_id(&self, session_id: &str) -> Option<Arc<SessionContext>>;
 
     /// 切换到本 rk 拥有的 session
     /// 不属于本 rk 时返回 SessionNotOwned 错误
@@ -660,13 +721,15 @@ impl UserResolver {
 
 未配置映射时 user_id = routing_key，行为等价现状。
 
-**与 1:1 不变量的关系**：UserResolver **不打通"多端共享同一 active session"**——同一 user 的 rk_telegram 和 rk_webui 仍然各有各的 active session。user_id 只用于：
+**UserResolver 的边界**：**只是只读视图层**——同一 user 的 rk_telegram 和 rk_webui 各有各的 active session，互不打通。user_id 只用于：
 - 列 session 列表（`list_sessions_for_user(uid)` 返回 owner = uid 的全部 session，跨 rk 可见）
 - Memory 路径（`workspace/users/{uid}/memory/`）
 - UserProfile 加载
-- 不用于 active 表的 key——active 仍然按 rk
+- 不用于 SessionManager.sessions 表的 key——仍然按 rk
 
-跨端"接管同一 session"是显式动作：用户在 webui 看到的 session 列表里点"接管"，触发 `switch_session(rk_webui, sid)`——这一步会强制清掉 rk_telegram 的 active（如果它正占着 sid），然后切到 sid。
+**暂不支持跨 channel 接管 session**：在 webui 看到 telegram 创建的 session 时只能浏览历史，不能 switch 进去继续聊。`switch_session(rk_webui, sid)` 仅接受本 rk 拥有的 session，否则返回 `SessionNotOwned`。
+
+未来若引入"接管"功能，作为独立的显式 API（force_takeover）补，不混入 switch_session。
 
 ### WebUI sender 要求
 
@@ -685,7 +748,11 @@ verify_token(token) 通过后：
 - **不同用户用不同 token** → 不同 routing_key → 不同 session 视图
 - 不再支持"匿名连接 / per-conn id"——auth message 缺 token 直接拒绝
 
-实现层面 `ClientChannel` 内部仍然维护 `connections: DashMap<conn_id, ws_sender>` 用于具体 WS 投递，但**对外（向 Orchestrator）只暴露 sender 这一层**。多 tab 同 sender → 多个 conn_id → channel.send 找最近活跃 conn 投递；turn 流式事件由发起 turn 的 conn 接收（基于 pending_streams: sender → (conn_id, StreamContext)）。
+实现层面 `ClientChannel` 内部维护：
+- `connections: DashMap<conn_id, ws_sender>`——具体 WS 投递通道
+- `streams: DashMap<String, ClientStream>`——按 `reply_target` (= sender = token) 索引当前流式 turn 的 event_tx + cancel
+
+多 tab 同 sender → 多个 conn_id → channel.send 找最近活跃 conn 投递；turn 流式事件由发起 turn 的 conn 接收（最近一次注册的覆盖前者，参考"单 listener 胜出"原则——同 sender 多 tab 同时发 turn 不可能，turn_lock 保证串行）。
 
 ### UserProfile (阶段 4)
 
@@ -944,16 +1011,60 @@ for sinfo in backend.list_all_sessions() {
     // 2. ChannelMessage 已经在 session.last_message 持久化了，直接拿
     let last_msg = s.last_message.clone()?;
     
-    // 3. 临时构造 ctx，跑恢复
+    // 3. 临时构造 ctx，跑恢复（channel 显式传入）
     let ctx = build_temp_context(s, agent_runtime);
     tokio::spawn(async move {
-        ctx.recover_pending_turn(&runtime).await;
+        ctx.recover_pending_turn(channel, &runtime).await;
         // 完成后 ctx 自然 drop
     });
 }
 ```
 
 Sub-session 恢复（含 marker 文件中断的子代理）走类似流程，恢复后通过 `DelegationEvent` 通知父 session。
+
+### Sub-agent 完成回填到父 session
+
+子代理跑完后，DelegationCoordinator 把结果作为 `DelegationEvent` 发给 Orchestrator。Orchestrator 构造"合成 ChannelMessage"调父 session 的 `process_turn`，让 LLM 看到一条系统通知并决定如何回应：
+
+```rust
+// Orchestrator.handle_delegation_event
+async fn handle_delegation_event(&self, ev: DelegationEvent) {
+    let (parent_sid, summary_text, task_id) = match ev {
+        DelegationEvent::Completed { parent_session_id, summary, task_id, duration_secs } => (
+            parent_session_id,
+            format!("[系统通知] 子代理已完成 (task_id: {}, {}s):\n{}", task_id, duration_secs, summary),
+            task_id,
+        ),
+        DelegationEvent::Failed { parent_session_id, error, task_id, .. } => (
+            parent_session_id,
+            format!("[系统通知] 子代理失败 (task_id: {}): {}", task_id, error),
+            task_id,
+        ),
+    };
+    
+    let parent_ctx = self.session_manager.get_by_id(&parent_sid)?;
+    let parent_session = parent_ctx.session.lock();
+    let parent_msg = parent_session.last_message.clone()?;
+    let channel = parent_session.channel.clone()?;
+    drop(parent_session);
+    
+    // 合成 ChannelMessage：sender/reply_target 沿用父 session 的最近 incoming
+    let synthetic = ChannelMessage {
+        sender: parent_msg.sender,
+        content: summary_text,
+        reply_target: parent_msg.reply_target,
+        image_urls: None,
+        image_base64: None,
+        id: format!("delegation:{}", task_id),
+    };
+    
+    tokio::spawn(async move {
+        parent_ctx.process_turn(synthetic, channel, &self.agent_runtime).await
+    });
+}
+```
+
+`SessionManager.get_by_id(sid)` 是给这种"我有 session_id 想找 ctx"场景用的辅助方法（sub-session 不在 sessions 表，要从那里找。如果是用户 session，可以扫 sessions.values() 找匹配的）。
 
 ---
 
@@ -981,6 +1092,11 @@ Sub-session 恢复（含 marker 文件中断的子代理）走类似流程，恢
 | WebUI sender | 可选 client_id 或 per-conn id | 必须 = auth token |
 | `Channel` trait | listen / send | 加 `push_event(target, event)` + `cancel_signal(target)` 两个默认 no-op 方法；流式与取消的能力内化 |
 | `TurnStream` | 独立类型 | 删除（Channel trait 内化） |
+| `TurnInput` | 独立类型（content + images） | 删除（替代为 `ChannelMessage`，整条进 session.last_message） |
+| `Agent.run()` 入参 | session + input + ctx + rt | session + ctx + rt（input 来自 session.last_message / history） |
+| `process_turn` 入参 | input/channel/reply_target/rt | msg(ChannelMessage) / channel / rt |
+| `recover_pending_turn` | （新增） | session + channel + rt — channel 必须由调用方注入（transient 字段丢失） |
+| `SessionManager.get_by_id` | （新增） | session_id → Arc<SessionContext>，给 DelegationEvent 回填等场景用 |
 | `AskRouter.wait_for_reply` | 返回 `String`（仅文本） | 返回 `ChannelMessage`（含图片等完整信息） |
 | `AgentRegistry` | （现在散落） | `Arc<RwLock<HashMap<name, Arc<Agent>>>>`，WorkspaceWatcher 直接调 reload，hot-reload 只影响新 session |
 | `Vec<AgentConfig>` 中间结构 | RequestBuilder.resources 持有 | 删除，AgentRegistry 直接持 Arc<Agent> |
@@ -1015,14 +1131,14 @@ Sub-session 恢复（含 marker 文件中断的子代理）走类似流程，恢
 
 1. `Agent.run()` / `AgentLoop.run()` 接收 `&mut Session` 参数，不再从 `self.session` 读取
 2. ~57 处 `self.session` → `session` 机械替换（run.rs 22 处，compaction.rs 32 处，tools.rs 3 处）
-3. `persist_hook` 改为 `run()` 参数
+3. `persist_hook` 暂时改为 `run()` 参数（阶段 2 再挪到 Session 内部）
 4. `AgentLoop.session` 字段删除
 
 可独立部署，顺带消除 `evict_loop` workaround 的根因。
 
 ### 阶段 2：SessionContext + 去间接层 + 拆解 RequestBuilder
 
-1. 定义 `TurnContext`（5 字段）/ `TurnResult`
+1. 定义 `TurnContext`（5 字段）/ `TurnResult`；删除 `TurnInput` 类型（信息全在 `ChannelMessage`）
 2. Session 改造：
    - 内嵌 transient `persist: Option<Arc<dyn PersistHook>>` 和 `channel: Option<Arc<dyn Channel>>`
    - 持久化字段加 `last_message: Option<ChannelMessage>`，替代 last_reply_target

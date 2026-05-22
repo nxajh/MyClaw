@@ -99,7 +99,7 @@
   ┃  │           AgentRuntime (启动时构造的全局 bundle)           │        ┃
   ┃  │   registry / tool_registry / context_engine /             │        ┃
   ┃  │   tool_executor / loop_breaker                            │        ┃
-  ┃  │   Agent.run(session, input, ctx, rt) 时传入                │        ┃
+  ┃  │   Agent.run(session, ctx, rt) 时传入                       │        ┃
   ┃  │   turn 起手按 agent.config 过滤 tool_registry → allowed   │        ┃
   ┃  │   spec 进 LLM；tool_executor 在 allowed 内查找            │        ┃
   ┃  └──────────────────────────────────────────────────────────┘        ┃
@@ -161,7 +161,7 @@
   ┃   │   pending_retry: Mutex<Option<String>>                    │      ┃
   ┃   │   turn_lock: tokio::Mutex<()>            ← turn 串行化     │      ┃
   ┃   │                                                            │      ┃
-  ┃   │   process_turn(input, channel, reply_target, env) ........▶ Agent│      ┃
+  ┃   │   process_turn(msg: ChannelMessage, channel, rt) .......▶ Agent  │      ┃
   ┃   └────────────────────────────────────────────────────┬───────┘      ┃
   ┃                                                         ┃              ┃
   ┃                                          调用时构造 ┃              ┃
@@ -261,7 +261,7 @@
 | **WebhookHandler** | event_tx 给 Orchestrator（协议适配器） |
 | **Channel trait** | 4 方法：listen / send / push_event(target,event) / cancel_signal(target)；后两个默认 no-op |
 | **Session** | Option<Arc<dyn PersistHook>>, Option<Arc<dyn Channel>>（transient） |
-| **TurnContext (借用)** | &str system_prompt, &str model_id, Option<&ThinkingConfig>, PermissionMode, RunMode, Option<TurnStream> |
+| **TurnContext (借用)** | &str system_prompt, &str model_id, Option<&ThinkingConfig>, PermissionMode, RunMode（5 字段，无 stream） |
 | `llm_stream::read*()` 模块函数 | 硬编码常量 FIRST_CHUNK_TIMEOUT / MAX_OUTPUT_BYTES |
 
 ---
@@ -276,9 +276,9 @@
 │ (daemon)    │  │              │  │              │  │            │
 ├─────────────┤  ├──────────────┤  ├──────────────┤  ├────────────┤
 │ GlobalConfig│  │ Agent        │  │ Session      │  │ TurnContext│
-│ Service-    │  │   .config    │  │   .history   │  │ TurnInput  │
+│ Service-    │  │   .config    │  │   .history   │  │ TurnResult │
 │   Registry  │  │   .cached_   │  │   .token_    │  │ TurnResult │
-│ ToolRegistry│  │     prompt   │  │     tracker  │  │ TurnStream │
+│ ToolRegistry│  │     prompt   │  │     tracker  │  │            │
 │ SkillManager│  │              │  │ Session-     │  │            │
 │ McpManager  │  │              │  │   Context    │  │ LoopBreaker│
 │ Context-    │  │              │  │   .attach-   │  │   (run() 内│
@@ -328,19 +328,21 @@
        │                       或：从 backend 加载 Session → 包成 SessionContext → 插入
        │
        ▼
-⑤ session_ctx.process_turn(input, channel, reply_target, rt)
+⑤ session_ctx.process_turn(msg: ChannelMessage, channel, rt)
        │
        ├── turn_lock.lock()                  ← 串行化本 session 的 turn
-       ├── session.channel = Some(channel)   ← transient 字段，工具读取
-       ├── session.last_reply_target = Some(reply_target)
-       ├── 在 SessionContext 内 attachments.diff_and_render(...) → <system-reminder>
+       ├── session.channel = Some(channel)   ← transient
+       ├── session.last_message = Some(msg)  ← 整条 ChannelMessage 持久化
+       ├── attachments.diff_and_render(...)  → <system-reminder> 文本
+       ├── session.add_user_text(reminder + msg.content)   ← 写 history（自动 persist）
+       ├── resolve permission_mode/model/run_mode/thinking
        ├── 组装 system_prompt（agent.cached_prompt + profile + runtime + skills）
-       ├── 构造 TurnContext { system_prompt, model_id, thinking, perm, run_mode, stream }
+       ├── 构造 TurnContext { system_prompt, model_id, thinking, perm, run_mode }
        │
        ▼
-⑥ agent.run(&mut session, input, &turn_ctx, rt)
+⑥ agent.run(&mut session, &turn_ctx, rt)
        │
-       ├── session.add_user_text(merged_text)   ← 内部 persist
+       │   注：不传 input — 输入信息已在 session.history.last() / session.last_message
        │
        ├── 循环：
        │     ├── rt.context_engine.should_compact(&session.token_tracker, ctx_window)?
@@ -351,8 +353,8 @@
        │     ├── 解析响应：
        │     │     ├─ tool_call → rt.tool_executor.execute(call, &session)
        │     │     │   ├─ AskUserTool.execute(args, session)
-       │     │     │   │   ├─ session.channel.send(question)        ← 读 transient
-       │     │     │   │   └─ self.ask_router.wait_for_reply(&session.id)
+       │     │     │   │   ├─ session.channel.send(question, target)  ← target = session.last_message.reply_target
+       │     │     │   │   └─ self.ask_router.wait_for_reply(&session.id) → ChannelMessage
        │     │     │   ├─ DelegateTool.execute(args, session)
        │     │     │   │   └─ self.delegator.delegate(agent, task, &session.id)
        │     │     │   │       └─ DelegationCoordinator 编排 worktree + sub_ctx.process_turn

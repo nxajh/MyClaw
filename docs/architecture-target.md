@@ -269,8 +269,8 @@ struct TurnResult {
 对比现在的四层间接：
 ```
 现在：  orchestrator → tx.send() → actor(rx) → mutex.lock(AgentLoop) → run()
-重构后：orchestrator → session_ctx.process_turn(input, channel, ...)
-                                           └→ agent.run(&mut session, ...)
+重构后：orchestrator → session_ctx.process_turn(msg: ChannelMessage, channel, rt)
+                                           └→ agent.run(&mut session, &turn_ctx, rt)
 ```
 
 ## 数据持有关系
@@ -402,12 +402,15 @@ delete_session(routing_key, target_sid)
   DelegateTool.execute(args, &parent_session)
     └─ DelegationCoordinator.delegate(agent_name, task, &parent_session)
         ├─ channel        = parent_session.channel.clone()
-        ├─ reply_target   = parent_session.last_reply_target.clone()
+        ├─ parent_msg     = parent_session.last_message.clone()
         ├─ 解析 agent.config.isolation
         ├─ 如果 worktree: 创建 git worktree
         ├─ sub_ctx = session_manager.create_sub_session(parent_session.id, agent_name)
         │             ↑ 返回 Arc<SessionContext>，不进 sessions 表
-        ├─ sub_ctx.process_turn(task, channel, reply_target)
+        ├─ synthetic = ChannelMessage { sender: parent_msg.sender,
+        │                               content: task,
+        │                               reply_target: parent_msg.reply_target, ... }
+        ├─ sub_ctx.process_turn(synthetic, channel, rt)
         ├─ 如果 worktree: merge + cleanup
         └─ sub_ctx Arc drop（refcount=0 → SessionContext 释放）
 ```
@@ -462,18 +465,22 @@ delete_session(routing_key, target_sid)
 ```
 Channel ──ChannelMessage──→ mpsc ──→ Orchestrator.run()
                                           │
-                                          └── session_ctx.process_turn(
-                                                  input, channel, reply_target, env)
+                                          ├── ask_router.fulfill(sid, msg) ── 命中则 return
+                                          │
+                                          └── session_ctx.process_turn(msg, channel, rt)
+                                                  │ (内部 write transient + push history + build prompt)
                                                   │
-                                                  ├── agent.run(&mut session, input, &turn_ctx)
+                                                  ├── agent.run(&mut session, &turn_ctx, rt)
+                                                  │       │
+                                                  │       ├── 流式：channel.push_event(target, event)
                                                   │       │
                                                   │       └── tool 需要问用户时：
-                                                  │           ask_router.ask(sk, channel, ...)
-                                                  │            ├─ channel.send(question)
-                                                  │            ├─ pending_asks.insert(sk, tx)
-                                                  │            └─ oneshot_rx.await → answer
+                                                  │           AskUserTool.execute(args, &session)
+                                                  │            ├─ session.channel.send(question, target)
+                                                  │            └─ ask_router.wait_for_reply(&session.id)
+                                                  │                → 返回 ChannelMessage
                                                   │
-                                                  └── channel.send(response) → 用户
+                                                  └── channel.send(final_text) → 用户
 
 WebUI API ──WebSocket JSON──→ ClientChannel
               ├── sessions.switch → session_manager.switch_session()  ← 天然一致
@@ -493,8 +500,10 @@ Webhook ──HTTP request──→ WebhookHandler （协议适配器）
                     └── session_manager.get_context(webhook_sk)
                         → 走统一路径，SessionOverride.run_mode = Background
 
-WorkspaceWatcher ──文件变更──→ 直接更新 skills/sub_agents RwLock
-                Agent.run 读 RwLock，AttachmentManager 在 turn 内 diff 出变化
+WorkspaceWatcher ──文件变更──→ 调 SkillManager / AgentRegistry 的 reload 方法
+                  ├─ SkillManager 内部 swap
+                  └─ AgentRegistry 重建 Arc<Agent> swap
+                  hot-reload 只影响新 SessionContext，活跃 ctx 不受影响
 
 Memory ──tool 调用──→ MemoryManage/Search/List/View
           读写 workspace/users/{user_id}/memory/{type}/
@@ -516,8 +525,8 @@ McpManager ──启动时──→ connect(config.mcp_servers)
 
 重构后（一条统一路径）：
   全部 → SessionManager.get_context(routing_key)
-       → SessionContext.process_turn(input, channel, reply_target, env)
-       → agent.run(&mut session, input, &turn_ctx)
+       → SessionContext.process_turn(msg: ChannelMessage, channel, rt: &AgentRuntime)
+       → agent.run(&mut session, &turn_ctx, rt)
 
   区别只是 sk 生成规则和 SessionOverride：
   ┌──────────┬──────────────┬───────────┬─────────────┬────────────┐
