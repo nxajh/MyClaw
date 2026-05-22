@@ -81,7 +81,13 @@ SessionContext（per session，唯一 owner）
 │    ├─ history: Vec<ChatMessage>      │
 │    ├─ message_ids: Vec<i64>          │
 │    ├─ compact_version: u32           │
-│    └─ session_override: SessionOverride
+│    ├─ session_override               │
+│    ├─ token_tracker                  │
+│    ├─ incomplete_turn                │
+│    ├─ last_message: Option<           │ ← 整条 ChannelMessage 持久化
+│    │   ChannelMessage>               │   含 sender/reply_target/content/images
+│    ├─ persist: Option<...>           │ ← transient
+│    └─ channel: Option<Arc<dyn ...>>  │ ← transient，process_turn 写入
 │                                      │
 │  agent: Arc<Agent>                   │ ← 绑定 agent（创建时选定）
 │  user_profile: Arc<UserProfile>      │ ← 用户信息
@@ -92,24 +98,23 @@ SessionContext（per session，唯一 owner）
 │                                      │
 │  turn_lock: tokio::Mutex<()>         │ ← turn 串行化
 │                                      │
-│  process_turn(input, channel,        │
-│               reply_target, env) {   │
+│  process_turn(msg, channel, rt) {    │  ← msg 是 ChannelMessage
 │    turn_lock.lock()                  │
-│    channel.on_status(Thinking)       │
-│    agent.run(&mut session, input,    │
-│              &turn_ctx)              │
-│    channel.on_status(Done)           │
+│    session.channel = channel         │
+│    session.last_message = msg        │
+│    agent.run(&mut session, &ctx, rt) │
 │  }                                   │
 └──────────────────────────────────────┘
 
-注意：channel 不存储，每轮注入 — 同一 session 可跨通道访问。
+注意：channel 是 transient（process_turn 每次写入）；ChannelMessage 持久化在
+session.last_message，供工具/恢复/sub-agent 继承使用。
 
 
 Agent（同类型，不同配置的实例）
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ┌──────────────────────────────────┐
-│           Agent                  │
+│           Agent (纯身份)          │
 │                                  │
 │  config: AgentConfig             │
 │    ├─ name                       │
@@ -123,28 +128,36 @@ Agent（同类型，不同配置的实例）
 │  cached_prompt: String           │ ← AGENT.md body 部分（builtin/profile 等
 │                                  │   由 process_turn 每轮拼上去）
 │                                  │
-│  // 共享基础设施引用（不拥有）     │
-│  registry: Arc<dyn ServiceRegistry>
-│  skills: Arc<RwLock<SkillManager>>
-│  context_engine: Arc<ContextEngine>
-│  ask_router: Arc<AskRouter>
-│  delegator: Arc<dyn AgentDelegator>
-│  tool_executor: Arc<ToolExecutor>
-│  loop_breaker: Arc<LoopBreaker>
+│  // 无 Arc 字段 — 全部进 AgentRuntime  │
 │                                  │
-│  run(&mut session, input, ctx) { │ ← 无状态执行一轮 turn
-│    let mut counter =             │   counter 从 self.loop_breaker.new_counter()
-│      self.loop_breaker.new_counter();
-│    let stream = self.registry    │
+│  run(&mut session, ctx, rt) {   │ ← 无状态执行一轮 turn
+│    let mut counter =             │
+│      rt.loop_breaker.new_counter();
+│    let allowed = rt.tool_registry.all()  │ ← turn 起手过滤
+│      .filter(|t| self.config.allows_tool(t)).collect();
+│    let stream = rt.registry      │
 │      .chat_stream(...).await?;   │
-│    let resp = llm_stream::read(  │ ← 模块级函数，硬编码 timeout/byte limit
+│    let resp = llm_stream::read(  │ ← 模块级函数，硬编码 timeout/byte
 │      stream).await?;             │
 │    for call in resp.tool_calls { │
 │      counter.tick(&call)?;       │
-│      self.tool_executor.execute( │ ← 内部用自己的 tool_timeout
-│        &call, session, ...).await?;
+│      rt.tool_executor.execute(   │
+│        &call, session, &allowed).await?;
 │    }                             │
 │  }                               │
+└──────────────────────────────────┘
+
+┌──────────────────────────────────┐
+│      AgentRuntime (全局 bundle)   │
+│                                  │
+│  registry:     Arc<dyn ServiceRegistry>
+│  tool_registry: Arc<ToolRegistry>
+│  context_engine: Arc<ContextEngine>
+│  tool_executor: Arc<ToolExecutor>
+│  loop_breaker:  Arc<LoopBreaker>
+│                                  │
+│  daemon 启动时构造一次            │
+│  Orchestrator / DelegationCoord 各持一份引用
 └──────────────────────────────────┘
 
 "主 agent" vs "子代理" = 同一个 struct，不同实例：
@@ -169,7 +182,7 @@ Agent（同类型，不同配置的实例）
 └──────────┘  └──────────┘  └──────────────┘
 ```
 
-## TurnContext / TurnInput / TurnResult
+## TurnContext / TurnResult
 
 ```rust
 struct TurnContext<'a> {
@@ -179,20 +192,6 @@ struct TurnContext<'a> {
     thinking: Option<&'a ThinkingConfig>,
     permission_mode: PermissionMode,
     run_mode: RunMode,
-
-    // 流式（None = Collect 模式）
-    stream: Option<TurnStream<'a>>,
-}
-
-// 注：persist 由 Session 自己负责，channel/reply_target 不再传入
-// （channel 由 AskRouter 内部解析，reply_target 存于 session.last_reply_target）
-// ask_router / delegator / tool_executor / loop_breaker / context_engine
-// 都是 Agent 字段（全局 Arc），不在 TurnContext 里
-
-struct TurnInput {
-    text: String,
-    image_urls: Option<Vec<String>>,
-    image_base64: Option<Vec<String>>,
 }
 
 struct TurnResult {
@@ -201,6 +200,17 @@ struct TurnResult {
     pending_retry: Option<String>,
 }
 ```
+
+不在 TurnContext 里的东西：
+- `persist` → Session 自负责
+- `channel` → session.channel (transient)
+- ChannelMessage 的所有字段（content/reply_target/images/sender）→ session.last_message (持久化)
+- stream / cancel → Channel trait 的 push_event / cancel_signal 方法（不需要单独 TurnStream 类型）
+- ask_router / delegator → AskUserTool / DelegateTool 内部 Arc
+- tool_executor / loop_breaker / context_engine / tool_registry → AgentRuntime（run() 参数 rt）
+- limits 各值 → 各执行器自己持有
+- user_profile / AttachmentManager → process_turn 边界已经消化进 system_prompt 与 user message 文本
+- session_key / routing_key → 不进 session；只在 SessionManager 层流转
 
 ## 消息流转
 
@@ -219,32 +229,36 @@ struct TurnResult {
                       └───────┬────────┘
                               │
                    ① 解析 routing_key
-                   ② session_manager.get_context(routing_key)
+                   ② ask_router.fulfill(sid, msg)? → 命中则 return
+                   ③ session_manager.get_context(routing_key)
                               │
                               ▼
                       ┌──────────────────┐
                       │  SessionContext  │
                       │                  │
                       │  process_turn(   │
-                      │    input,        │
-                      │    channel,      │ ← 每轮注入
-                      │    reply_target, │
-                      │    env)          │
+                      │    msg,          │ ← ChannelMessage
+                      │    channel,      │ ← 每轮注入到 session.channel
+                      │    rt            │ ← AgentRuntime
+                      │  )               │
                       │    │             │
                       │    ├ turn_lock   │
+                      │    ├ session.channel = channel
+                      │    ├ session.last_message = msg
+                      │    ├ build system_prompt
                       │    │             │
                       │    ▼             │
                       │  agent.run(      │
                       │    &mut session, │
-                      │    input,        │
-                      │    &turn_ctx     │
+                      │    &turn_ctx,    │
+                      │    rt            │
                       │  )               │
                       │    │             │
-                      │    ├─ 构建 LLM request
-                      │    ├─ 调 ServiceRegistry → LLM API
-                      │    ├─ tool_call → tool_executor.execute()
-                      │    ├─ 写 session.history
-                      │    ├─ persist_message()
+                      │    ├─ snapshot allowed_tools
+                      │    ├─ 调 ServiceRegistry → LLM stream
+                      │    ├─ 边读边 channel.push_event(target, ...)
+                      │    ├─ tool_call → rt.tool_executor.execute()
+                      │    ├─ session.add_*() 自动持久化
                       │    └─ 返回 TurnResult
                       └───────┬──────────┘
                               │
@@ -262,16 +276,15 @@ struct TurnResult {
 ## 数据持有关系
 
 ```
-AgentRegistry (全局)
-  └─ HashMap<String, Arc<Agent>>
+AgentRegistry (全局，可变)
+  └─ inner: RwLock<HashMap<String, Arc<Agent>>>
+       │  WorkspaceWatcher 文件变更时直接 reload swap
+       │  hot-reload 只影响新建 SessionContext，活跃 ctx 不受影响
        │
-       ├─ "main" ────→ Agent
+       ├─ "main" ────→ Agent (纯身份)
        │                ├─ config: AgentConfig (name/desc/tools/skills/mcp/isolation/system_prompt)
-       │                ├─ cached_prompt: String
-       │                └─ Arc 引用：
-       │                   registry, skills, context_engine,
-       │                   ask_router, delegator,
-       │                   tool_executor, loop_breaker
+       │                └─ cached_prompt: String
+       │                ★ 无 Arc 字段；run() 通过 rt: &AgentRuntime 拿基础设施
        │
        ├─ "coder" ──→ Agent (同结构，不同配置)
        └─ "researcher" → Agent
@@ -293,8 +306,13 @@ SessionManager (全局)
 
 Orchestrator (全局，瘦身后)
   ├─ session_manager: Arc<SessionManager>
+  ├─ agent_runtime: Arc<AgentRuntime>       ← 必备：调 process_turn 时透传
   ├─ channels: HashMap<(type, account), Arc<dyn Channel>>
   ├─ ask_router: Arc<AskRouter>
+  ├─ user_resolver: Arc<UserResolver>
+  ├─ delegation: Arc<DelegationCoordinator>
+  ├─ scheduler: Arc<Scheduler>
+  ├─ webhook: Arc<WebhookHandler>
   └─ listener_handles: Vec<JoinHandle<()>>
 
 ContextEngine (全局单例)
@@ -304,9 +322,9 @@ ContextEngine (全局单例)
   对外接口：should_compact / compact
 
 ToolExecutor (全局单例)
-  ├─ timeout: Duration                         ← from [tool_executor].timeout_secs
-  └─ tools: Arc<ToolRegistry>
-  对外接口：execute(call, &mut session, ...)
+  └─ timeout: Duration                         ← from [tool_executor].timeout_secs
+  对外接口：execute(call, &session, allowed: &[Arc<dyn Tool>])
+  无 ToolRegistry 字段——工具池由 Agent.run() turn 起手过滤后传入
 
 LoopBreaker (全局单例，发放 per-turn counter)
   ├─ max_tool_calls                            ← from [loop_breaker].max_tool_calls
@@ -401,24 +419,29 @@ delete_session(routing_key, target_sid)
 ❌ SessionHandle       → SessionContext 直接提供 process_turn()
 ❌ LoopRegistry        → 职责回归 SessionManager
 ❌ run_session_actor   → turn_lock 替代 channel + actor
-❌ TurnMessage/TurnInput → process_turn() 直接接收参数
+❌ TurnMessage/TurnInput → process_turn() 接收 ChannelMessage
+❌ TurnStream / TurnContext.stream → Channel trait 内化 push_event / cancel_signal
 ❌ get_or_create()     → 拆散到 SessionManager.create_session
 ❌ SchedulerContext    → 统一走 SessionManager
 ❌ WebhookContext      → WebhookHandler 退化为协议适配器，发 WebhookEvent 给 Orchestrator
 ❌ SubAgentDelegator   → DelegationCoordinator + AgentRegistry
 ❌ RequestBuilder      → 拆为 Agent.cached_prompt / SessionContext.attachments /
-                         WorkspaceWatcher / TurnInput / 无状态函数
+                         WorkspaceWatcher / 无状态函数
 ❌ CompactionPolicy    → 并入 ContextEngine（TokenTracker 挪进 Session）
 ❌ CompactionExecutor  → 并入 ContextEngine
-❌ AskUserHandler      → AskRouter (struct + 方法)
+❌ AskUserHandler      → AskRouter (返回 ChannelMessage)
 ❌ DelegateHandler     → AgentDelegator trait
-❌ DefaultToolExecutor → 重命名为 ToolExecutor，timeout 内化为字段
+❌ DefaultToolExecutor → 重命名为 ToolExecutor，timeout 内化，不持 ToolRegistry
 ❌ LlmResponseReader   → llm_stream::read 模块函数 + 硬编码常量
 ❌ AgentConfig.max_history → 死代码，删除
+❌ AgentConfig 大量 Arc 字段 → 全进 AgentRuntime（5 个 Arc）
+❌ Session.last_reply_target → 合进 Session.last_message: Option<ChannelMessage>
+❌ Vec<AgentConfig> 中间层 → 删除，AgentRegistry 直接持 Arc<Agent>
 ❌ stream_first_chunk_timeout_secs / max_output_bytes 配置 → 改硬编码安全网
 ❌ [defaults] / [limits] / [context] 段 → 拆为按模块的多个段
 ❌ IDENTITY.md/SOUL.md/RULES.md → 内容写入 main/AGENT.md body
 ❌ USER.md (全局)       → per-user UserProfile
+❌ 跨 channel session 接管 / SessionInUse / force_takeover → 暂不支持
 
 保留不变的：
 ✅ McpManager          → 启动时注册 MCP tools，逻辑不变

@@ -73,29 +73,34 @@ orchestrator → handle.tx.send(msg) → run_session_actor 从 rx 取出
 ### 整体结构
 
 ```
-config.toml (全局配置)
-  ├─ [runtime]   timezone
-  ├─ [limits]    max_tool_calls, max_history, max_output_bytes,
-  │              tool_timeout_secs, stream_first_chunk_timeout_secs,
-  │              loop_breaker_threshold
-  ├─ [context]   compact_threshold, retain_work_units
-  ├─ [defaults]  permission_mode, model
-  ├─ [prompt]    max_chars, bootstrap_max_chars, native_tools
+config.toml (全局配置 — 按模块分段)
+  ├─ [locale]   timezone
+  ├─ [prompt]   max_chars / bootstrap_max_chars / native_tools
+  ├─ [agent]    permission_mode (全局默认)
+  ├─ [tool_executor]   timeout_secs
+  ├─ [loop_breaker]    max_tool_calls / threshold
+  ├─ [context_engine]  compact_threshold / retain_work_units
   └─ [providers] [channels] [mcp_servers] [scheduler] [users]
 
 daemon.rs (Composition Root)
   │
-  ├─ ServiceRegistry        ← 全局共享
-  ├─ ToolRegistry           ← 全局共享
+  ├─ ServiceRegistry        ← 全局共享（LLM providers）
+  ├─ ToolRegistry           ← 全局工具池（注入各种 Arc 后注册的 tools）
   ├─ SkillManager           ← Arc<RwLock>，WorkspaceWatcher 自动更新
   ├─ McpManager             ← 全局共享
-  ├─ ContextEngine          ← 全局共享（compaction 引擎）
-  ├─ WorkspaceWatcher       ← 自维护，own skills/sub_agents RwLock
-  ├─ AskRouter              ← 全局共享（pending_asks 注册器）
-  ├─ DelegationCoordinator  ← 全局共享（子代理编排）
-  ├─ UserResolver           ← 全局共享（routing_key → user_id）
+  ├─ ContextEngine          ← 全局（compaction）
+  ├─ ToolExecutor           ← 全局（timeout 包装器）
+  ├─ LoopBreaker            ← 全局（max_tool_calls / threshold）
+  ├─ AskRouter              ← 全局（pending oneshot 注册器，注入给 AskUserTool）
+  ├─ DelegationCoordinator  ← 全局（实现 AgentDelegator，注入给 DelegateTool）
+  ├─ UserResolver           ← 全局（routing_key → user_id）
+  ├─ WorkspaceWatcher       ← 全局，自维护 SkillManager + AgentRegistry
   │
-  ├─ AgentRegistry          ← 加载 workspace/agents/*/AGENT.md
+  ├─ AgentRegistry          ← Arc<RwLock<HashMap<name, Arc<Agent>>>>
+  │                           加载 workspace/agents/*/AGENT.md
+  │                           WorkspaceWatcher 文件变更时重建并 swap
+  │
+  ├─ AgentRuntime           ← bundle 上面的全局执行器，给 Agent.run() 用
   │
   └─ SessionManager
        └─ SessionContext    ← per session
@@ -273,18 +278,17 @@ struct SessionContext {
 impl SessionContext {
     async fn process_turn(
         &self,
-        input: TurnInput,
+        msg: ChannelMessage,                   // 整个 ChannelMessage 进来
         channel: Arc<dyn Channel>,
-        reply_target: String,
         rt: &AgentRuntime,
     ) -> Result<String> {
         let _guard = self.turn_lock.lock().await;
         {
             let mut session = self.session.lock();
-            session.channel = Some(channel.clone());           // 透传给工具
-            session.last_reply_target = Some(reply_target.clone());
+            session.channel = Some(channel.clone());
+            session.last_message = Some(msg.clone());          // 整条消息持久化
         }
-        // attachment diff → merge reminder → agent.run
+        // attachment diff → merge reminder → build prompt → agent.run
         ...
     }
     
@@ -295,35 +299,19 @@ impl SessionContext {
 **职责**：
 - 拥有 per-session 的对话数据 + attachment 状态
 - 保证 turn 串行化（turn_lock）
-- 把 channel/reply_target 透传到 Session.channel / Session.last_reply_target，工具直接从 session 读
-- 不持有 channel 字段（每轮注入到 session）
+- 把 channel 写进 session.channel，整条 ChannelMessage 写进 session.last_message，工具 / 后续 turn / 恢复都从 session 读取
 
-### TurnContext / TurnInput / TurnResult
+### TurnContext / TurnResult
 
-边界：`SessionContext.process_turn()` 是"配置解析层"——组装 system_prompt、resolve model/permission_mode/run_mode/thinking、算 attachment reminder；`Agent.run()` 是纯执行层，收到的全是已解析的标量与少量借用。
+边界：`SessionContext.process_turn()` 是"配置解析层"——组装 system_prompt、resolve model/permission_mode/run_mode/thinking、算 attachment reminder；`Agent.run()` 是纯执行层，收到的全是已解析的标量。
 
 ```rust
 struct TurnContext<'a> {
-    // ── 本轮决策（process_turn 解析后传入）──
     system_prompt: &'a str,           // 含 builtin + body + profile + runtime + skills
     model_id: &'a str,
     thinking: Option<&'a ThinkingConfig>,
     permission_mode: PermissionMode,
     run_mode: RunMode,
-
-    // ── 流式（None = Collect 模式）──
-    stream: Option<TurnStream<'a>>,
-}
-
-struct TurnStream<'a> {
-    event_tx: &'a mpsc::Sender<TurnEvent>,
-    cancel: &'a CancellationToken,
-}
-
-struct TurnInput {
-    text: String,
-    image_urls: Option<Vec<String>>,
-    image_base64: Option<Vec<String>>,
 }
 
 struct TurnResult {
@@ -333,31 +321,28 @@ struct TurnResult {
 }
 ```
 
-**TurnContext 极简的原因**——所有需要的能力都已收敛到合适的归属：
+**TurnContext 极简**——5 个字段，纯"本轮决策"。其他东西去哪：
 
 | 不在 TurnContext 的东西 | 去处 |
 |------------------------|------|
 | `persist` | Session 内部（transient 字段 + `add_*` 方法） |
-| `channel` | Session.channel（transient，process_turn 写入） |
-| `reply_target` | Session.last_reply_target（process_turn 写入） |
+| `channel` | `session.channel`（transient） |
+| `reply_target` / `sender` / 输入文本 / 图片 | `session.last_message`（持久化整条 ChannelMessage） |
+| `stream` / `cancel` | Channel trait 内化（`push_event` / `cancel_signal`，target 用 `session.last_message.reply_target`） |
 | `ask_router` | `AskUserTool` 内部 Arc 字段（Agent 不感知） |
 | `delegator` | `DelegateTool` 内部 Arc 字段（Agent 不感知） |
-| `tool_executor` / `loop_breaker` / `context_engine` | `AgentRuntime` 字段，run() 参数 |
+| `tool_executor` / `loop_breaker` / `context_engine` / `tool_registry` | `AgentRuntime` 字段，run() 参数 |
 | `tool_timeout` / `max_tool_calls` 等 limit | 各执行器内部 |
 | `user_profile` / `AttachmentManager` | process_turn 边界消化（profile 拼进 system_prompt，attachment 算成 reminder） |
-| `session_key` | `session.id` |
+| `session_key` / `routing_key` | `session.id`；routing_key 只在 SessionManager 层流转，不进 session |
 
-TurnContext 只保留"本轮 LLM 调用需要的决策 + 流式控制"。
-
-### Session 自负责持久化 + 持有 transient channel
-
-Session 内嵌 `Option<Arc<dyn PersistHook>>` 和 `Option<Arc<dyn Channel>>`（都 `#[serde(skip)]`），对外暴露 `add_*` 方法。Agent.run() 不再关心持久化——写 history 即落盘。工具读 `session.channel` 自己发送。
+### Session 数据 + 自负责持久化
 
 ```rust
 struct Session {
-    // ── 持久化字段 ──
+    // ── 持久化字段（9 个）──
     id: String,
-    owner: String,
+    owner: String,                              // routing_key（或 phase 4 后改 user_id）
     history: Vec<ChatMessage>,
     message_ids: Vec<i64>,
     compact_version: u32,
@@ -365,13 +350,14 @@ struct Session {
     session_override: SessionOverride,
     token_tracker: TokenTracker,
     incomplete_turn: bool,
-    last_reply_target: Option<String>,
+    last_message: Option<ChannelMessage>,       // 整条进来的消息，含 sender/reply_target/content/images
 
-    // ── transient 运行时 backing（不持久化）──
+    // ── transient 运行时 backing（2 个，不持久化）──
     #[serde(skip)]
-    persist: Option<Arc<dyn PersistHook>>,    // None = ephemeral（CLI 模式）
+    persist: Option<Arc<dyn PersistHook>>,      // None = ephemeral（CLI 模式）
     #[serde(skip)]
-    channel: Option<Arc<dyn Channel>>,        // process_turn 每次写入
+    channel: Option<Arc<dyn Channel>>,          // process_turn 每次写入
+}
 
 impl Session {
     pub fn add_user_text(&mut self, text: String) {
@@ -388,18 +374,32 @@ impl Session {
     pub fn save_summary(&mut self, ...) { /* 同 */ }
     pub fn save_override(&mut self) { /* 同 */ }
     pub fn update_token_count(&mut self) { /* 持久化 token_tracker.total */ }
+    
+    /// 启动加载时调
+    pub fn restore_token_count(&mut self, total: u64);
+    /// 首次跑 turn 时如果 tracker fresh 调
+    pub fn estimate_tokens_from_history(&mut self, system_prompt: &str);
 }
 ```
 
+**`last_message: ChannelMessage` 的作用**：
+- 工具读取：ask_user 拿 `session.last_message.reply_target` 作为目标
+- 流式 push：Agent.run 用 `session.last_message.reply_target` 作为 `channel.push_event` 的 target
+- 启动恢复：完整 ChannelMessage 已持久化，恢复时直接重建无需拼接
+- Sub-agent 继承：`sub.last_message = parent.last_message.clone()`，cancel/push 自然继承父 turn
+
+`ChannelMessage` 需要 `#[derive(Serialize, Deserialize)]`。
+
 **收益**：
 - Agent.run() 内不可能写了 history 忘记 persist（编译保证）
-- TurnContext 不需要 `persist: &'a dyn PersistHook` 字段
-- 持久化关注点完全封装在 Session 内部
-- CLI / 测试场景 `persist = None`，零成本退化
+- TurnContext 不需要 `persist` 字段
+- 持久化关注点封装在 Session
+- CLI / 测试场景 `persist = None` 零成本退化
+- ask_user 反射式接收 ChannelMessage 时整条信息自然流入
 
 ### SessionManager
 
-单表 `sessions: routing_key → Arc<SessionContext>`。受 **1:1 不变量**约束：表里所有 SessionContext 的 `session.id` 互不重复——一个 session 同时只被一个 routing_key 指向。
+单表 `sessions: routing_key → Arc<SessionContext>`。**每个 rk 自己的 session 池，跨 rk 不共享**（暂不支持跨 channel 接管 session）——这个约束让 1:1 关系自然成立，不需要主动校验。
 
 ```rust
 struct SessionManager {
@@ -412,9 +412,13 @@ struct SessionManager {
 impl SessionManager {
     /// 命中返回，否则从 backend 加载并缓存
     fn get_context(&self, routing_key: &str) -> Arc<SessionContext>;
+    
+    /// rk → session_id 反查（Orchestrator 处理 ask 反馈时用）
+    fn session_id_for_routing_key(&self, rk: &str) -> Option<String>;
 
-    /// 切换。冲突检查：target_sid 是否被别的 rk 占着
-    fn switch_session(&self, routing_key: &str, target_sid: &str) -> Result<(), SessionInUse>;
+    /// 切换到本 rk 拥有的 session
+    /// 不属于本 rk 时返回 SessionNotOwned 错误
+    fn switch_session(&self, routing_key: &str, target_sid: &str) -> Result<(), SessionNotOwned>;
 
     /// 显式创建并切换到新 session
     fn create_session(&self, routing_key: &str, agent_name: &str, name: Option<&str>) -> Result<Arc<SessionContext>>;
@@ -422,30 +426,34 @@ impl SessionManager {
     /// 子代理 session（不进 sessions 表，调用方持 Arc 管生命周期）
     fn create_sub_session(&self, parent_sid: &str, agent_name: &str) -> Result<Arc<SessionContext>>;
 
-    /// 删除（清空对应 rk 的条目 + backend 删除）
+    /// 删除
     fn delete_session(&self, routing_key: &str, sid: &str) -> Result<()>;
 
-    /// 列出某 user 的所有 session（含别的 rk 占着的、未加载的）
+    /// 列出本 rk 的 session（phase 2 起的默认 API）
+    fn list_sessions(&self, routing_key: &str) -> Vec<SessionInfo>;
+    
+    /// 列出某 user 的所有 session（phase 4 后启用，只读视图，不能 switch 进去）
     fn list_sessions_for_user(&self, user_id: &str) -> Vec<SessionInfo>;
 }
 
 #[derive(Debug)]
-pub struct SessionInUse {
+pub struct SessionNotOwned {
     pub session_id: String,
-    pub held_by: String,    // routing_key
+    pub routing_key: String,
 }
 ```
 
 **为什么单表够用**：
-- DelegationCoordinator 拿 parent ctx 信息从 `&Session` 直接取（channel / last_reply_target）
+- DelegationCoordinator 拿 parent 信息从 `&Session` 直接取（channel / last_message）
 - AskRouter 内部用 session_id 索引 pending oneshot，跟 SessionManager 无关
 - 启动恢复从 backend 直接扫，临时构造 ctx 跑完即弃
-- 唯一的 sid → rk 反查是 switch_session 的冲突检查，O(n) on 活跃 session 数，低频可接受
+- `session_id_for_routing_key` 反查只在 Orchestrator 处理用户回复时使用
 
-**1:1 不变量带来的简化**：
-- 不需要 channel.send 的"广播 fallback"——同 sender 多 tab 仍然只走单 listener
-- session.channel / session.last_reply_target 不会被并发覆盖
-- ask_user 知道发哪个 channel：当前 turn 的发起方 rk 唯一
+**跨 channel 不共享 session 带来的简化**：
+- 没有"接管"语义，没有 force_takeover API
+- 没有 1:1 不变量的主动校验（自然成立）
+- 没有 channel.send 的"广播 fallback"
+- ask_user / push_event 知道发哪：本 turn 的 session.channel + session.last_message.reply_target 唯一
 
 ### SessionOverride
 
@@ -477,8 +485,17 @@ struct ContextEngine {
 }
 
 impl ContextEngine {
-    fn should_compact(&self, session: &Session, last_total_tokens: u64) -> bool;
-    async fn compact(&self, session: &mut Session, ...) -> Result<()>;
+    fn should_compact(&self, session: &Session, context_window: u64) -> bool;
+    
+    /// 调 LLM 做 summary，需要保持 prefix cache 一致：
+    /// system_prompt 和 tool_specs 跟主调 LLM 一样
+    async fn compact(
+        &self,
+        session: &mut Session,
+        system_prompt: &str,
+        tool_specs: &[ToolSpec],
+        model_id: &str,
+    ) -> Result<()>;
 }
 
 // DefaultToolExecutor 重命名 + 退化为 timeout 包装器
@@ -531,18 +548,100 @@ pub async fn read_streamed(
 
 `first_chunk_timeout` 和 `max_output_bytes` 是安全网（防 LLM 卡死/无限输出），不暴露为配置。
 
+### Channel trait（内化流式与取消）
+
+流式输出与取消能力**作为 Channel 自身能力**，不再用单独的 TurnStream 类型。非流式 channel 用默认实现（no-op / None）。
+
+```rust
+#[async_trait]
+trait Channel: Send + Sync {
+    async fn listen(&self) -> ChannelMessage;
+    async fn send(&self, msg: SendMessage) -> Result<()>;
+    
+    /// 推流式事件给 target 对应的监听者
+    /// 默认 no-op：非流式 channel（Telegram/QQBot/cron/webhook）
+    async fn push_event(&self, target: &str, event: TurnEvent) { }
+    
+    /// 取本轮取消信号
+    /// 默认 None
+    fn cancel_signal(&self, target: &str) -> Option<CancellationToken> { None }
+}
+```
+
+`target` 来自 `session.last_message.reply_target`——对 ClientChannel 就是 WS auth token。
+
+ClientChannel 实现：
+
+```rust
+struct ClientChannel {
+    connections: DashMap<u64, ClientConnection>,
+    streams: DashMap<String, ClientStream>,    // target (reply_target) → (event_tx, cancel)
+    // ...
+}
+
+#[async_trait]
+impl Channel for ClientChannel {
+    async fn push_event(&self, target: &str, event: TurnEvent) {
+        if let Some(s) = self.streams.get(target) {
+            let _ = s.event_tx.try_send(event);
+        }
+    }
+    fn cancel_signal(&self, target: &str) -> Option<CancellationToken> {
+        self.streams.get(target).map(|s| s.cancel.clone())
+    }
+}
+```
+
+WS 收到用户消息时注册 streams[target]，turn 结束时清除。`TurnStream` 类型整体消失。
+
+### AskRouter
+
+```rust
+struct AskRouter {
+    pending: DashMap<String, oneshot::Sender<ChannelMessage>>,    // session_id → sender
+}
+
+impl AskRouter {
+    /// AskUserTool 调用，注册并等待用户的下一条 ChannelMessage
+    async fn wait_for_reply(&self, session_id: &str) -> Result<ChannelMessage>;
+    
+    /// Orchestrator 收到用户消息时先调，命中则消费这条消息
+    fn fulfill(&self, session_id: &str, msg: ChannelMessage) -> bool;
+}
+```
+
+`wait_for_reply` 返回完整 ChannelMessage（不是裸 String）——LLM 拿到的 tool_result 可以包含用户回复的图片附件。
+
+### AgentRegistry（可变，hot-reload）
+
+```rust
+struct AgentRegistry {
+    inner: RwLock<HashMap<String, Arc<Agent>>>,
+}
+
+impl AgentRegistry {
+    fn get(&self, name: &str) -> Option<Arc<Agent>>;
+    fn list(&self) -> Vec<(String, Option<String>)>;   // (name, description)
+    fn reload_from_dir(&self, agents_dir: &Path);      // WorkspaceWatcher 调用
+}
+```
+
+WorkspaceWatcher 文件变更时直接 `reload_from_dir`——重建 Arc<Agent> 并 swap 进 inner。
+
+**Hot-reload 影响范围**：只影响**新建** SessionContext。已经持着 `Arc<Agent>` 的活跃 SessionContext 继续用旧版本，下次 SessionContext 重新创建时拿到新版本。**在跑的 turn 不会被打断**。
+
 ### WorkspaceWatcher（自维护）
 
 ```rust
 struct WorkspaceWatcher {
     skills: Arc<RwLock<SkillManager>>,
-    sub_agents: Arc<RwLock<Vec<AgentConfig>>>,
+    agents: Arc<AgentRegistry>,
     // 内部 spawn task 监听 workspace/skills/ 和 workspace/agents/ 变化，
-    // 直接更新 RwLock
+    // 直接调 manager / registry 的 reload 方法
 }
 ```
 
-不再让每个 AgentLoop 各持一份 `change_rx`。Agent.run 读 RwLock 时自动看到最新值。AttachmentManager 在下一轮 turn 算 diff 时自然处理"通告变化"。
+不再让每个 AgentLoop 各持一份 `change_rx`，也不再有 `Vec<AgentConfig>` 中间层。文件变化时 WorkspaceWatcher 直接更新对应的全局结构。
 
 ### UserResolver (阶段 4)
 
@@ -780,21 +879,26 @@ fn build_prompt(
 
 ```
 用户消息 / cron / heartbeat / webhook
-    → Channel/Scheduler/WebhookHandler （仅做协议解码）
+    → Channel/Scheduler/WebhookHandler （仅做协议解码 → ChannelMessage）
     → mpsc::send(OrchestratorEvent)
     → Orchestrator.run() 主循环
-        → session_manager.get_context(routing_key)
-        → ctx.process_turn(input, channel, reply_target, rt)
-            → turn_lock.lock()
-            → agent.run(&mut session, input, &turn_ctx, rt)
+        ├─ 解析 routing_key
+        ├─ session_id = session_manager.session_id_for_routing_key(rk)
+        ├─ 先 ask_router.fulfill(session_id, msg.clone())：命中则消费消息，return
+        ├─ session_manager.get_context(routing_key)
+        └─ ctx.process_turn(msg, channel, rt)
+              → turn_lock.lock()
+              → session.channel = channel; session.last_message = msg
+              → build system_prompt; compute attachment reminder
+              → agent.run(&mut session, &turn_ctx, rt)
 
 子代理委派（特例）：
   agent.run() 内 → DelegateTool.execute(args, &session)
     → DelegationCoordinator.delegate(name, task, &session)
-      ├─ 从 &session 取 channel / last_reply_target
+      ├─ 从 &session 拿 channel / last_message
       ├─ session_manager.create_sub_session(parent_sid, agent_name) → Arc<SessionContext>
       │   （sub ctx 不进 sessions 表，由调用方持 Arc 管生命周期）
-      └─ sub_ctx.process_turn(task, channel, reply_target)
+      └─ sub_ctx.process_turn(synthetic_msg, channel, rt)
   （DelegationCoordinator 就近调，不绕 Orchestrator）
 ```
 
@@ -817,9 +921,39 @@ enum OrchestratorEvent {
 | Heartbeat | `Scheduler` | `_heartbeat:{uuid}` (ephemeral) | last_channel | Background |
 | Cron | `Scheduler` | `cron:{job_id}` | job 配置 target | Background |
 | Webhook | `Webhook` | `webhook:{job_id}` | job 配置 target | Background |
-| 子代理 | （不进 Orchestrator） | `sub:{parent_sk}:{agent}:{uuid}` | 父 session 同 channel | Interactive |
+| 子代理 | （不进 Orchestrator） | `sub:{parent_sid}:{agent}:{uuid}` | 父 session 同 channel | Interactive |
 
 **WebhookHandler 退化为协议适配器**：跟 TelegramChannel 同位，只负责签名校验 + 模板渲染 + 把 `WebhookEvent` 发给 Orchestrator。原来直接持 `Arc<SessionManager>` 的旁路删除。
+
+**Orchestrator 持有 `Arc<AgentRuntime>`**，调 process_turn 时透传。
+**DelegationCoordinator 也持有 `Arc<AgentRuntime>`**，sub_ctx.process_turn 同样需要。
+
+### 启动恢复流程
+
+Daemon 重启后，扫 backend 找 `incomplete_turn = true` 的 session：
+
+```rust
+for sinfo in backend.list_all_sessions() {
+    let s = backend.load(&sinfo.id);
+    if !s.incomplete_turn { continue; }
+    
+    // 1. 重建 channel：从 session.owner 解析 routing_key → channel_key
+    let (ch_type, account, _) = parse_routing_key(&s.owner)?;
+    let channel = channels.get(&(ch_type, account))?;
+    
+    // 2. ChannelMessage 已经在 session.last_message 持久化了，直接拿
+    let last_msg = s.last_message.clone()?;
+    
+    // 3. 临时构造 ctx，跑恢复
+    let ctx = build_temp_context(s, agent_runtime);
+    tokio::spawn(async move {
+        ctx.recover_pending_turn(&runtime).await;
+        // 完成后 ctx 自然 drop
+    });
+}
+```
+
+Sub-session 恢复（含 marker 文件中断的子代理）走类似流程，恢复后通过 `DelegationEvent` 通知父 session。
 
 ---
 
@@ -837,10 +971,19 @@ enum OrchestratorEvent {
 | `ask_user` handler | per-session 闭包 | `AskUserTool` 内部持 `Arc<AskRouter>`，Agent 不感知 |
 | `delegate` handler | per-session 闭包 | `DelegateTool` 内部持 `Arc<dyn AgentDelegator>`，Agent 不感知 |
 | `persist_hook` | per-AgentLoop 创建，Agent.run() 手动调用 | Session 内嵌（transient `Option<Arc<dyn PersistHook>>`），通过 `Session::add_*` 方法自动持久化 |
-| `Session.channel` | （不存在） | 新增 transient 字段（`Option<Arc<dyn Channel>>`），process_turn 写入，工具直接读取 |
-| `SessionManager.cache` + `LoopRegistry.sessions` | 双层缓存（rk→sid + sid→AgentLoop），需 evict 同步 | 单表 `sessions: HashMap<rk, Arc<SessionContext>>` + **1:1 不变量**（不允许 rk 共享 sid） |
-| `WebhookContext` | 独立持 SessionManager + sessions 等 | 删除；`WebhookHandler` 退化为协议适配器，发 `WebhookEvent` 给 Orchestrator |
-| WebUI sender | 可选 client_id 或 per-conn id | 必须 = auth token，1:1 对应 user |
+| `Session.channel` | （不存在） | 新增 transient 字段（`Option<Arc<dyn Channel>>`），process_turn 写入 |
+| `Session.last_message` | （不存在） | 新增持久化字段（`Option<ChannelMessage>`），替代 last_reply_target；含 sender/reply_target/content/images，供工具/恢复/sub-agent 继承使用 |
+| `Session.last_reply_target` | 持久化字段 | 删除（合进 last_message） |
+| `Session.routing_key` | （不存在） | **不加**——routing_key 只在 SessionManager 层流转 |
+| `SessionManager.cache` + `LoopRegistry.sessions` | 双层缓存（rk→sid + sid→AgentLoop），需 evict 同步 | 单表 `sessions: HashMap<rk, Arc<SessionContext>>` |
+| 跨 channel session 共享 | 暗中支持 | 不支持（暂时）；switch_session 仅接受本 rk 拥有的 session，返回 SessionNotOwned 错误 |
+| `WebhookContext` | 独立持 SessionManager + sessions 等 | 删除；`WebhookHandler` 退化为协议适配器 |
+| WebUI sender | 可选 client_id 或 per-conn id | 必须 = auth token |
+| `Channel` trait | listen / send | 加 `push_event(target, event)` + `cancel_signal(target)` 两个默认 no-op 方法；流式与取消的能力内化 |
+| `TurnStream` | 独立类型 | 删除（Channel trait 内化） |
+| `AskRouter.wait_for_reply` | 返回 `String`（仅文本） | 返回 `ChannelMessage`（含图片等完整信息） |
+| `AgentRegistry` | （现在散落） | `Arc<RwLock<HashMap<name, Arc<Agent>>>>`，WorkspaceWatcher 直接调 reload，hot-reload 只影响新 session |
+| `Vec<AgentConfig>` 中间结构 | RequestBuilder.resources 持有 | 删除，AgentRegistry 直接持 Arc<Agent> |
 | `CompactionPolicy` + `CompactionExecutor` | per-AgentLoop | 合并为全局 `ContextEngine` |
 | `AttachmentManager` | RequestBuilder 字段 | `SessionContext` 字段 |
 | `change_rx` | 传给每个 AgentLoop | `WorkspaceWatcher` 自维护 RwLock |
@@ -879,28 +1022,42 @@ enum OrchestratorEvent {
 
 ### 阶段 2：SessionContext + 去间接层 + 拆解 RequestBuilder
 
-1. 定义 `TurnContext` / `TurnInput` / `TurnResult` / `TurnStream`
-2. 引入 `AskRouter`、`AgentDelegator` trait
-3. Session 内嵌 `persist: Option<Arc<dyn PersistHook>>`，加 `add_user_text` / `add_assistant_text` / `add_tool_*` / `save_summary` / `update_token_count` 等方法。`Session.token_tracker` 替代 `last_total_tokens` 单字段
-4. 新建 `SessionContext`（不存 channel；持 `AttachmentManager` 和 `pending_retry`）
-5. `SessionManager` 单表 `sessions: HashMap<routing_key, Arc<SessionContext>>`，去掉 `cache`；加 1:1 不变量（switch_session 时检查目标 sid 未被别的 rk 占着，否则返回 SessionInUse 错误）
-6. `SessionContext.process_turn()` 承担"配置解析层"职责：组装 system_prompt、resolve model/permission_mode/run_mode/thinking、attachment diff，把已解析的标量传入 Agent.run()
-7. 拆解 `RequestBuilder`：
-   - `system_prompt` 由 `process_turn` 每轮组装，传 `&str` 给 Agent
-   - `AttachmentManager` 挪进 `SessionContext.attachments`
-   - `change_rx` 删除（WorkspaceWatcher 自维护）
-   - pending images 改为 `TurnInput` 字段
-   - `build()` / `merge_attachments()` 改为无状态函数
-8. 拆 `CompactionPolicy` + `CompactionExecutor` → 全局 `ContextEngine`（持 compact_threshold/retain_work_units）+ `Session.token_tracker`（per-session 状态）
-9. `DefaultToolExecutor` 重命名为 `ToolExecutor`，timeout 内化为字段
-10. 拆 `LoopBreaker` 为全局 policy + per-turn counter，配置从 `[loop_breaker]` 读
-11. `LlmResponseReader` 退化为 `llm_stream::read` 模块函数 + 硬编码常量
-12. 删 `AgentLoop`、`SessionHandle`、`LoopRegistry`、`run_session_actor`
-13. `DelegationCoordinator` 接管 worktree / merge / cleanup；`SubAgentDelegator` 删除
-14. ClientChannel 删 `loop_registry`、`evict_loop`
-15. WorkspaceWatcher 改为自维护（own RwLock，文件变更直接更新）
-16. Scheduler / Webhook 路径收编：删 `SchedulerContext` / `WebhookContext`，全走 `session_manager.get_context()`
-17. 删 `AgentConfig.max_history`（死代码）
+1. 定义 `TurnContext`（5 字段）/ `TurnResult`
+2. Session 改造：
+   - 内嵌 transient `persist: Option<Arc<dyn PersistHook>>` 和 `channel: Option<Arc<dyn Channel>>`
+   - 持久化字段加 `last_message: Option<ChannelMessage>`，替代 last_reply_target
+   - `Session.token_tracker` 替代 `last_total_tokens` 单字段；加 `restore_token_count` / `estimate_tokens_from_history` 方法
+   - 暴露 `add_user_text` / `add_assistant_text` / `add_tool_*` / `save_summary` / `update_token_count` 方法（内部调 persist）
+3. `ChannelMessage` 加 `#[derive(Serialize, Deserialize)]`
+4. Channel trait 加默认 no-op 方法 `push_event(target, event)` 和 `cancel_signal(target)`；TurnStream 类型删除
+5. ClientChannel：
+   - `streams: DashMap<String, ClientStream>` 用 reply_target 做 key
+   - 实现 push_event / cancel_signal
+   - 删 `loop_registry`、`evict_loop`
+   - sender = auth token，匿名连接拒绝
+6. `AskRouter`：`pending: DashMap<sid, oneshot::Sender<ChannelMessage>>`；`wait_for_reply` 返回 ChannelMessage
+7. 新建 `SessionContext`（不存 channel；持 `AttachmentManager` 和 `pending_retry`）
+8. `SessionManager` 单表 `sessions: HashMap<rk, Arc<SessionContext>>`；删 `cache`；加 `session_id_for_routing_key` 方法；`switch_session` 仅接受本 rk 拥有的 session
+9. `SessionContext.process_turn(msg, channel, rt)` 承担"配置解析层"职责：写 session.channel / session.last_message → 组装 system_prompt（含 attachment reminder）→ Agent.run
+10. 拆解 `RequestBuilder`：
+    - `system_prompt` 由 `process_turn` 每轮组装
+    - `AttachmentManager` 挪进 `SessionContext.attachments`
+    - `change_rx` 删除（WorkspaceWatcher 自维护）
+    - pending images 改为 ChannelMessage 自带字段
+    - `build()` / `merge_attachments()` 改为无状态函数
+11. 拆 `CompactionPolicy` + `CompactionExecutor` → 全局 `ContextEngine`（持 compact_threshold/retain_work_units，方法签名 `compact(session, system_prompt, tool_specs, model_id)`）+ `Session.token_tracker`（per-session 状态）
+12. `DefaultToolExecutor` 重命名为 `ToolExecutor`，timeout 内化为字段，不持 ToolRegistry
+13. 拆 `LoopBreaker` 为全局 policy + per-turn counter，配置从 `[loop_breaker]` 读
+14. `LlmResponseReader` 退化为 `llm_stream::read` 模块函数 + 硬编码常量
+15. 引入 `AgentRuntime` bundle（5 个 Arc 字段）；Orchestrator / DelegationCoordinator 各持一份
+16. 删 `AgentLoop`、`SessionHandle`、`LoopRegistry`、`run_session_actor`、`TurnStream`
+17. 引入 `AskUserTool` / `DelegateTool`：各持自己的 Arc 依赖，注册进 ToolRegistry
+18. `DelegationCoordinator` 接管 worktree / merge / cleanup；`SubAgentDelegator` 删除；实现 AgentDelegator trait
+19. Orchestrator 主循环：解析 rk → ask_router.fulfill 先于 process_turn；session_manager.get_context → process_turn
+20. WorkspaceWatcher 改为自维护（own SkillManager + AgentRegistry，文件变更直接调 reload）
+21. Scheduler / Webhook 路径收编：删 `SchedulerContext` / `WebhookContext`，全走 OrchestratorEvent 进 Orchestrator
+22. 启动恢复：从 `session.last_message` 重建 ChannelMessage，临时构 ctx 跑 `recover_pending_turn`，跑完即弃
+23. 删 `AgentConfig.max_history`（死代码）
 
 ### 阶段 3：Agent 配置统一
 

@@ -65,11 +65,14 @@
   ┃                                                     ┃                ┃
   ┃  ┌─────────────────┐   ┌──────────────┐   ┌─────────────────┐       ┃
   ┃  │  ContextEngine  │   │SessionBackend│   │  ToolExecutor   │       ┃
-  ┃  │ (compact_thresh,│   │ (JSONL 持久化)│   │ (timeout,       │       ┃
-  ┃  │  retain_units,  │   │              │   │  ToolRegistry   │       ┃
-  ┃  │  registry ref)  │   │              │   │  ref)           │       ┃
-  ┃  │ from [context_  │   │              │   │ from [tool_     │       ┃
-  ┃  │   engine]       │   │              │   │   executor]     │       ┃
+  ┃  │ (compact_thresh,│   │ (JSONL 持久化)│   │ (timeout)       │       ┃
+  ┃  │  retain_units,  │   │              │   │ 不持 Registry   │       ┃
+  ┃  │  registry/tools)│   │              │   │ 工具池由 Agent  │       ┃
+  ┃  │ from [context_  │   │              │   │ turn 起手过滤   │       ┃
+  ┃  │   engine]       │   │              │   │ 后传入          │       ┃
+  ┃  │ compact(session,│   │              │   │ from [tool_     │       ┃
+  ┃  │  prompt, specs, │   │              │   │   executor]     │       ┃
+  ┃  │  model_id)      │   │              │   │                 │       ┃
   ┃  └─────────────────┘   └──────────────┘   └─────────────────┘       ┃
   ┃                                                                       ┃
   ┃  ┌─────────────────┐   ┌──────────────────────────────────────┐      ┃
@@ -133,16 +136,22 @@
   ┃   │                                                            │      ┃
   ┃   │   ┌──────────────────────────────────────┐                │      ┃
   ┃   │   │ session: Mutex<Session>              │                │      ┃
-  ┃   │   │  ├─ history: Vec<ChatMessage>        │ ← 唯一 owner   │      ┃
-  ┃   │   │  ├─ message_ids, compact_version    │                │      ┃
-  ┃   │   │  ├─ session_override                 │                │      ┃
-  ┃   │   │  ├─ token_tracker                    │                │      ┃
-  ┃   │   │  ├─ incomplete_turn, last_reply_targ │                │      ┃
+  ┃   │   │  持久化字段：                          │                │      ┃
+  ┃   │   │  ├─ id, owner                        │                │      ┃
+  ┃   │   │  ├─ history: Vec<ChatMessage>        │                │      ┃
+  ┃   │   │  ├─ message_ids                      │                │      ┃
+  ┃   │   │  ├─ compact_version, summary_meta    │                │      ┃
+  ┃   │   │  ├─ session_override, token_tracker  │                │      ┃
+  ┃   │   │  ├─ incomplete_turn                  │                │      ┃
+  ┃   │   │  └─ last_message: Option<            │ ← 整条 incoming│      ┃
+  ┃   │   │      ChannelMessage>                 │   持久化       │      ┃
+  ┃   │   │  transient 字段：                     │                │      ┃
   ┃   │   │  ├─ persist: Option<Arc<PersistHook>>│ ← serde(skip)  │      ┃
   ┃   │   │  └─ channel: Option<Arc<dyn Channel>>│ ← serde(skip)  │      ┃
-  ┃   │   │     methods: add_user_text(),        │   process_turn │      ┃
-  ┃   │   │              add_assistant_text(),   │                │      ┃
-  ┃   │   │              add_tool_*(), ...       │                │      ┃
+  ┃   │   │  methods: add_user_text(),           │                │      ┃
+  ┃   │   │           add_assistant_text(),      │                │      ┃
+  ┃   │   │           add_tool_*(),              │                │      ┃
+  ┃   │   │           restore_token_count()      │                │      ┃
   ┃   │   └──────────────────────────────────────┘                │      ┃
   ┃   │                                                            │      ┃
   ┃   │   agent: Arc<Agent>           ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌▶ (Registry) │      ┃
@@ -158,27 +167,23 @@
   ┃                                          调用时构造 ┃              ┃
   ┃                                                         ▼              ┃
   ┃   ┌──────────────────────────────────────────────────────────┐       ┃
-  ┃   │    TurnContext<'a> (per turn 借用 — 已 resolve 的执行入参)  │       ┃
+  ┃   │    TurnContext<'a> (5 字段，纯本轮决策)                    │       ┃
   ┃   │                                                            │       ┃
-  ┃   │  ── 运行参数（process_turn 解析后传入标量/借用）──            │       ┃
   ┃   │  system_prompt: &'a str       ← 已含 profile/runtime/skill │       ┃
   ┃   │  model_id: &'a str            ← override > defaults 已解析 │       ┃
   ┃   │  thinking: Option<&ThinkingConfig>                         │       ┃
-  ┃   │  permission_mode, run_mode (枚举值)                         │       ┃
-  ┃   │  max_tool_calls, tool_timeout_secs, ... (limits 抽出)      │       ┃
+  ┃   │  permission_mode (PermissionMode)                          │       ┃
+  ┃   │  run_mode (RunMode)                                        │       ┃
   ┃   │                                                            │       ┃
-  ┃   │  ── 工具回弹路径 ──                                          │       ┃
-  ┃   │  channel: &'a dyn Channel     ← process_turn 参数          │       ┃
-  ┃   │  reply_target: &'a str                                    │       ┃
-  ┃   │  ask_router: &'a AskRouter      ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌▶         │       ┃
-  ┃   │  delegator: &'a dyn AgentDelegator  ╌╌╌╌╌╌╌╌╌╌╌╌▶         │       ┃
-  ┃   │                                                            │       ┃
-  ┃   │  ── 流式 ──                                                  │       ┃
-  ┃   │  stream: Option<TurnStream<'a>>   ← 仅 Streamed 模式       │       ┃
-  ┃   │                                                            │       ┃
-  ┃   │  注意：不传 persist（Session 自负责），不传 user_profile     │       ┃
-  ┃   │       / GlobalConfig / SessionOverride / AttachmentManager │       ┃
-  ┃   │       ——这些在 process_turn 边界全部消化掉                  │       ┃
+  ┃   │  注意：                                                     │       ┃
+  ┃   │  - channel / last_message → session 字段                   │       ┃
+  ┃   │  - stream / cancel → Channel trait 内化方法                 │       ┃
+  ┃   │  - ask_router / delegator → AskUserTool / DelegateTool     │       ┃
+  ┃   │  - tool_executor / loop_breaker / context_engine /         │       ┃
+  ┃   │    tool_registry → AgentRuntime (run() 入参)               │       ┃
+  ┃   │  - limits → 各执行器内部                                    │       ┃
+  ┃   │  - user_profile / attachments → process_turn 边界消化       │       ┃
+  ┃   │  - routing_key → 只在 SessionManager 层流转                 │       ┃
   ┃   └──────────────────────────────────────────────────────────┘       ┃
   ┃                                                                       ┃
   ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
@@ -192,6 +197,7 @@
   ┃   │                                                           │       ┃
   ┃   │   channels: DashMap<(type, account), Arc<dyn Channel>>    │       ┃
   ┃   │   session_manager: Arc<SessionManager>      ╌╌╌╌╌╌╌╌╌╌╌▶ │       ┃
+  ┃   │   agent_runtime:   Arc<AgentRuntime>        ╌╌╌╌╌╌╌╌╌╌╌▶ │       ┃
   ┃   │   ask_router:      Arc<AskRouter>           ╌╌╌╌╌╌╌╌╌╌╌▶ │       ┃
   ┃   │   user_resolver:   Arc<UserResolver>        ╌╌╌╌╌╌╌╌╌╌╌▶ │       ┃
   ┃   │   delegation:      Arc<DelegationCoordinator> ╌╌╌╌╌╌╌╌╌▶ │       ┃
@@ -251,8 +257,9 @@
 | **SessionManager** | SessionBackend, AgentRegistry, UserResolver |
 | **SessionContext** | Arc<Agent>, Arc<UserProfile>；own Mutex<Session> |
 | **DelegationCoordinator** | SessionManager, AgentRegistry |
-| **Orchestrator** | SessionManager, AskRouter, UserResolver, Scheduler, WebhookHandler, channels DashMap |
+| **Orchestrator** | SessionManager, AgentRuntime, AskRouter, UserResolver, DelegationCoordinator, Scheduler, WebhookHandler, channels DashMap |
 | **WebhookHandler** | event_tx 给 Orchestrator（协议适配器） |
+| **Channel trait** | 4 方法：listen / send / push_event(target,event) / cancel_signal(target)；后两个默认 no-op |
 | **Session** | Option<Arc<dyn PersistHook>>, Option<Arc<dyn Channel>>（transient） |
 | **TurnContext (借用)** | &str system_prompt, &str model_id, Option<&ThinkingConfig>, PermissionMode, RunMode, Option<TurnStream> |
 | `llm_stream::read*()` 模块函数 | 硬编码常量 FIRST_CHUNK_TIMEOUT / MAX_OUTPUT_BYTES |
