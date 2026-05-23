@@ -1218,91 +1218,146 @@ async fn handle_delegation_event(&self, ev: DelegationEvent) {
 
 ---
 
-## 七、实施策略
+## 七、实施清单（完整重构，不分阶段发布）
 
-### 阶段 1：AgentLoop 解耦 Session
+按依赖顺序的工作模块。**完整跑完一遍上线，不做渐进式中间发布**——中间状态没有意义（"AgentLoop 持 &mut Session 但 SessionContext 还没引入"会引入一堆 workaround 代码）。
 
-1. `Agent.run()` / `AgentLoop.run()` 接收 `&mut Session` 参数，不再从 `self.session` 读取
-2. ~57 处 `self.session` → `session` 机械替换（run.rs 22 处，compaction.rs 32 处，tools.rs 3 处）
-3. `persist_hook` 暂时改为 `run()` 参数（阶段 2 再挪到 Session 内部）
-4. `AgentLoop.session` 字段删除
+### 模块 A：类型基础
 
-可独立部署，顺带消除 `evict_loop` workaround 的根因。
+新增 trait / struct 定义，不动现有代码：
 
-### 阶段 2：SessionContext + 去间接层 + 拆解 RequestBuilder
+1. `TurnContext`（5 字段）/ `TurnResult`
+2. `AgentRuntime` struct（8 字段）+ `RuntimeDefaults` struct（permission_mode + PromptConfig）
+3. `Tool` trait 新增 `source() -> ToolSource`；execute 加 `&Session` 参数；`ToolSource` enum
+4. `ToolFilter` / `SkillFilter` / `McpFilter` enum（All/Allow/Deny）
+5. `Channel` trait 加默认 no-op 方法 `push_event(target, event)` / `cancel_signal(target)`
+6. `ChannelMessage` 加 `#[derive(Serialize, Deserialize)]`
+7. `AgentDelegator` trait（`delegate` + `list_available`）
+8. `DelegationEvent` enum（Completed / Failed）
+9. `SessionNotOwned` 错误类型
+10. `llm_stream` 模块（常量 + read/read_streamed 函数）
+11. `ProviderRegistry` trait — `ServiceRegistry` 重命名
 
-1. 定义 `TurnContext`（5 字段）/ `TurnResult`；删除 `TurnInput` 类型（信息全在 `ChannelMessage`）
-2. Session 改造：
-   - 内嵌 transient `persist: Option<Arc<dyn PersistHook>>` 和 `channel: Option<Arc<dyn Channel>>`
-   - 持久化字段加 `last_message: Option<ChannelMessage>`，替代 last_reply_target
-   - `Session.token_tracker` 替代 `last_total_tokens` 单字段；加 `restore_token_count` / `estimate_tokens_from_history` 方法
-   - 暴露 `add_user_text` / `add_assistant_text` / `add_tool_*` / `save_summary` / `update_token_count` 方法（内部调 persist）
-3. `ChannelMessage` 加 `#[derive(Serialize, Deserialize)]`
-4. Channel trait 加默认 no-op 方法 `push_event(target, event)` 和 `cancel_signal(target)`；TurnStream 类型删除
-5. ClientChannel：
-   - `streams: DashMap<String, ClientStream>` 用 reply_target 做 key
-   - 实现 push_event / cancel_signal
-   - 删 `loop_registry`、`evict_loop`
-   - sender = auth token，匿名连接拒绝
-6. `AskRouter`：`pending: DashMap<sid, oneshot::Sender<ChannelMessage>>`；`wait_for_reply` 返回 ChannelMessage
-7. 新建 `SessionContext`（不存 channel；持 `AttachmentManager` 和 `pending_retry`）
-8. `SessionManager` 单表 `sessions: HashMap<rk, Arc<SessionContext>>`；删 `cache`；加 `session_id_for_routing_key` 方法；`switch_session` 仅接受本 rk 拥有的 session
-9. `SessionContext.process_turn(msg, channel, rt)` 承担"配置解析层"职责：写 session.channel / session.last_message → 组装 system_prompt（含 attachment reminder）→ Agent.run
-10. 拆解 `RequestBuilder`：
-    - `system_prompt` 由 `process_turn` 每轮组装
-    - `AttachmentManager` 挪进 `SessionContext.attachments`
-    - `change_rx` 删除（WorkspaceWatcher 自维护）
-    - pending images 改为 ChannelMessage 自带字段
-    - `build()` / `merge_attachments()` 改为无状态函数
-11. 拆 `CompactionPolicy` + `CompactionExecutor` → 全局 `ContextEngine`（持 compact_threshold/retain_work_units，方法签名 `compact(session, system_prompt, tool_specs, model_id)`）+ `Session.token_tracker`（per-session 状态）
-12. `DefaultToolExecutor` 重命名为 `ToolExecutor`，timeout 内化为字段，不持 ToolRegistry
-13. 拆 `LoopBreaker` 为全局 policy + per-turn counter，配置从 `[loop_breaker]` 读
-14. `LlmResponseReader` 退化为 `llm_stream::read` 模块函数 + 硬编码常量
-15. `ServiceRegistry` 重命名为 `ProviderRegistry`（trait + 文件 + 引用全替换）；同时为 trait 加 `default_chat_model_id() -> String` 之类的辅助方法（如已存在 get_chat_provider(Capability) 路径可复用）
-16. 引入 `AgentRuntime` bundle（8 字段：provider_registry / tool_registry / skills / agents / context_engine / tool_executor / loop_breaker / defaults）+ `RuntimeDefaults` struct（含 permission_mode + PromptConfig）；Orchestrator / DelegationCoordinator 各持一份
-17. 删 `AgentLoop`、`SessionHandle`、`LoopRegistry`、`run_session_actor`、`TurnStream`
-18. 引入 `AskUserTool` / `DelegateTool`：各持自己的 Arc 依赖，注册进 ToolRegistry
-19. `DelegationCoordinator` 接管 worktree / merge / cleanup；`SubAgentDelegator` 删除；实现 AgentDelegator trait（含 `delegate` + `list_available`）；引入 `DelegationEvent` enum
-20. Orchestrator 主循环：
+### 模块 B：Session / SessionContext / SessionManager
+
+12. Session 改造：
+    - 持久化字段加 `last_message: Option<ChannelMessage>` / `parent_session_id: Option<String>` / `agent_name: Option<String>` / `token_tracker: TokenTracker`
+    - 删除 `last_reply_target` / `max_history` 字段
+    - 加 transient `persist` / `channel` 字段
+    - 暴露 `add_user_text` / `add_assistant_text` / `add_tool_*` / `save_summary` / `update_token_count` / `restore_token_count` / `estimate_tokens_from_history` 方法
+13. 新建 `SessionContext`（持 session/agent/attachments/pending_retry/turn_lock；user_profile 在模块 G 加入）
+14. `SessionManager` 改造：
+    - 单表 `sessions: RwLock<HashMap<rk, Arc<SessionContext>>>`
+    - 删 `cache`、`active` 两层
+    - 加 `session_id_for_routing_key` / `get_by_id` 方法
+    - `switch_session` 仅接受本 rk 拥有的 session（返回 `SessionNotOwned`）
+    - `create_sub_session(parent_sid, agent_name)` 不进 sessions 表
+    - `list_sessions(rk)` filter `parent_session_id IS NULL`
+    - `delete_session(rk, sid)` cascade 删 sub-session
+15. Sub-session 存储改为扁平：跟 user session 同位 `sessions/{sid}/`；删除嵌套结构与 marker 文件
+
+### 模块 C：Agent / AgentRuntime / 执行器
+
+16. `AgentConfig` 简化：仅 `name` / `description` / `tools` / `skills` / `mcp` / `isolation` / `system_prompt` 七个字段；`AgentConfig::allows_tool(&Tool)` 三维过滤
+17. `Agent` 简化为只一个 `config` 字段，无 Arc
+18. `Agent.run(session, ctx, rt)` 实现：
+    - turn 起手 snapshot allowed_tools 子集
+    - 循环：context_engine check & compact → LLM stream → llm_stream::read → tool 执行 → session.add_*
+    - 工具执行通过 `rt.tool_executor.execute(call, &session, &allowed_tools)`
+19. `ToolExecutor`（原 `DefaultToolExecutor` 重命名）退化为 timeout 包装器，不持 ToolRegistry
+20. `LoopBreaker` 拆为全局 policy（max_tool_calls + threshold）+ per-turn `LoopBreakerCounter`
+21. `ContextEngine`（原 `CompactionPolicy` + `CompactionExecutor` 合并）：
+    - 含 compact_threshold / retain_work_units + provider_registry / tools 引用
+    - 方法 `should_compact(session, ctx_window)` / `compact(session, system_prompt, tool_specs, model_id)`
+    - TokenTracker per-session 状态挪进 Session
+22. MCP / skill tool 注册时填正确的 `source()`
+
+### 模块 D：配置与 Prompt
+
+23. `GlobalConfig` 按模块拆段：`[locale]` / `[prompt]` / `[agent]` / `[tool_executor]` / `[loop_breaker]` / `[context_engine]` / `[providers]` / `[channels]` / `[mcp_servers]` / `[scheduler]` / `[users]`
+24. `AgentRegistry` 实现为 `Arc<RwLock<HashMap<String, Arc<Agent>>>>`，加载 `workspace/agents/*/AGENT.md`（含 main）；WorkspaceWatcher 文件变更时通过 `reload_from_dir` 重建并 swap
+25. `WorkspaceWatcher` 改为自维护（own SkillManager + AgentRegistry，文件变更直接调 reload）
+26. `prompt.rs` 删 IDENTITY/SOUL/USER.md 硬编码读取；改为参数化 `build_prompt(agent, profile, perm, run, prompt_cfg)`
+27. 启动校验：`workspace/agents/main/AGENT.md` 缺失则报错退出
+
+### 模块 E：路由（Orchestrator / Channel）
+
+28. `OrchestratorEvent` enum（UserMessage / Scheduler / Webhook / Delegation）
+29. Orchestrator 主循环：
     - 解析 routing_key
     - `let sid = session_manager.session_id_for_routing_key(rk);`
     - 若 sid 存在且 `ask_router.fulfill(sid, msg)` 命中 → 消费 return
     - 否则 `session_manager.get_context(rk).process_turn(msg, channel, rt).await`
-21. WorkspaceWatcher 改为自维护（own SkillManager + AgentRegistry，文件变更直接调 reload）
-22. Scheduler / Webhook 路径收编：删 `SchedulerContext` / `WebhookContext`，全走 OrchestratorEvent 进 Orchestrator
-23. Sub-session 存储改为扁平：跟 user session 同位 `sessions/{sid}/`；Session 加 `parent_session_id: Option<String>` 和 `agent_name: Option<String>` 字段；`list_sessions` 时 filter parent IS NULL；删 user session 时 cascade 删其 sub
-24. 启动恢复统一路径：`backend.list_all_sessions()` 扫所有 incomplete_turn；`parent_session_id` 区分 user/sub；user → channel.send 结果；sub → emit DelegationEvent 给父；删除 marker 文件机制
-25. 删 `AgentConfig.max_history`（死代码）
+30. Orchestrator 字段加 `agent_runtime: Arc<AgentRuntime>`、`ask_router: Arc<AskRouter>` 等
+31. `AskRouter` 实现：`pending: DashMap<sid, oneshot::Sender<ChannelMessage>>`；`wait_for_reply` 返回 ChannelMessage；`fulfill(sid, msg)` 返回 bool
+32. ClientChannel 改造：
+    - `streams: DashMap<reply_target, ClientStream>`
+    - 实现 `push_event` / `cancel_signal`
+    - 删 `loop_registry`、`evict_loop`
+    - 强制 auth token；sender = `web:{token}`；匿名连接拒绝
+33. WebhookHandler 退化为协议适配器：签名校验 + 模板渲染 → 发 `WebhookEvent` 给 Orchestrator；删 `WebhookContext`
+34. Scheduler 路径收编：删 `SchedulerContext`，cron / heartbeat 走 OrchestratorEvent
 
-### 阶段 3：Agent 配置统一
+### 模块 F：委派（Sub-agent）
 
-1. `AgentConfig` 简化：仅 `name` / `description` / `tools` / `skills` / `mcp` / `isolation` / `system_prompt`
-2. 实现 `ToolFilter` / `SkillFilter` / `McpFilter` enum (All/Allow/Deny)
-3. `Tool` trait 加 `source() -> ToolSource`（Builtin / McpServer / Skill），`execute` 加 `&Session` 参数
-4. MCP / skill tool 注册时填正确的 source
-5. `AgentConfig::allows_tool(&dyn Tool) -> bool` 按 source 分支三维独立过滤
-6. `Agent.run()` turn 起手 snapshot allowed_tools 子集，转 spec 传 LLM；`ToolExecutor.execute(call, session, &allowed_tools)` 在子集内查找
-7. `GlobalConfig` 按模块拆段：`[locale]` / `[prompt]` / `[agent]` / `[tool_executor]` / `[loop_breaker]` / `[context_engine]` / `[providers]` / `[channels]` / `[mcp_servers]` / `[scheduler]` / `[users]`
-8. `AgentRegistry` 实际为 `Arc<RwLock<HashMap<String, Arc<Agent>>>>`，启动时加载所有 `workspace/agents/*/AGENT.md`（含 main）；WorkspaceWatcher 文件变更时通过 `reload_from_dir(agents_dir)` 重建 Arc<Agent> 并 swap 进 inner（hot-reload 只影响新 SessionContext）
-9. `prompt.rs` 删 IDENTITY/SOUL/USER.md 读取；prompt 组合改为参数化（`build_prompt(...)` 函数）
-10. 启动校验：`workspace/agents/main/AGENT.md` 缺失则报错退出
-11. 提供 `scripts/migrate_main_agent.sh` 一次性脚本
+35. 引入 `AskUserTool` / `DelegateTool`：各持自己的 Arc 依赖（AskRouter / `dyn AgentDelegator`），daemon 启动时注入并注册到 ToolRegistry
+36. `DelegationCoordinator` 实现 `AgentDelegator`：编排 worktree 创建 / merge / cleanup + create_sub_session + sub_ctx.process_turn
+37. 启动恢复统一路径：`backend.list_all_sessions()` 扫所有 incomplete_turn；`parent_session_id` 区分 user / sub；user → channel.send 结果；sub → emit DelegationEvent 给父
+38. Sub-agent 完成回填：Orchestrator 构造合成 ChannelMessage（content = summary，sender / reply_target = parent.last_message），调父 `ctx.process_turn`
 
-### 阶段 4：用户信息 per-user
+### 模块 G：per-user
 
-1. `UserResolver`：routing_key → user_id 映射（默认透传）
-2. `UserProfile` 加载/序列化/`to_prompt_section`
-3. `SessionContext` 加 `user_profile: Arc<UserProfile>`
-4. `build_prompt` 补齐 profile section
-5. Memory tools 读写 `workspace/users/{id}/memory/`
-6. `SessionManager.list_sessions_for_user(uid)` 实现：通过 UserResolver **反向** map 找出 uid 对应的所有 routing_keys，再 filter backend.list_all_sessions() 中 owner ∈ rks 的（**Session.owner 保持 routing_key 不变**，不做数据迁移）
-7. 提供 `scripts/migrate_memory.sh`（默认目标 `users/_default/memory/`）
-8. 提供 `scripts/migrate_user_profile.sh`（USER.md → `users/_default/profile.md`）
+39. `UserResolver`：routing_key → user_id 映射（默认透传）
+40. `UserProfile` 加载 / 序列化 / `to_prompt_section`
+41. `SessionContext` 加 `user_profile: Arc<UserProfile>` 字段
+42. `build_prompt` 补齐 profile section
+43. Memory tools 读写 `workspace/users/{id}/memory/`
+44. `SessionManager.list_sessions_for_user(uid)` 实现：通过 UserResolver 反向 map 找出 uid 对应的所有 rks，filter sessions
 
-**Session.owner 字段语义不变**：始终是 routing_key（"消息从哪来"的端点标识）。user_id 是查询层衍生概念，不污染存储 schema，也不需要 owner 字段迁移脚本。
+**Session.owner 字段语义不变**：始终是 routing_key。user_id 是查询层衍生概念，不污染存储 schema，无需 owner 字段迁移脚本。
 
-阶段 3 和 4 可并行。
+### 模块 H：删除
 
+45. 删 `AgentLoop` / `SessionHandle` / `LoopRegistry` / `run_session_actor` / `TurnStream` / `TurnInput`
+46. 删 `RequestBuilder`（system_prompt 入 process_turn，AttachmentManager 入 SessionContext，change_rx 入 WorkspaceWatcher，images 入 ChannelMessage 字段，build 改无状态函数）
+47. 删 `SubAgentDelegator`
+48. 删 `SchedulerContext` / `WebhookContext`
+49. 删 `AskUserHandler` / `DelegateHandler` 闭包类型
+50. 删 `subagent_running_*.json` marker 文件机制
+51. 删 `AgentConfig.max_history`（死代码）
+52. 删 `Session.last_reply_target`（合进 last_message）
+53. 删 `[defaults]` / `[limits]` / `[context]` config 段（拆为按模块）
+54. 删 `stream_first_chunk_timeout_secs` / `max_output_bytes` 配置项（改硬编码常量）
+55. 删 `IDENTITY.md` / `SOUL.md` / `RULES.md`（内容合并进 main/AGENT.md body）
+56. 删 `USER.md`（per-user UserProfile 替代）
+57. 删 `ClientChannel.loop_registry` / `evict_loop`
+
+### 模块 I：数据迁移
+
+通过 `scripts/migrate_*.sh` 一次性脚本完成（详见 §八）：
+
+58. `scripts/migrate_main_agent.sh` — 转 config.toml 布局 + 生成 main/AGENT.md
+59. `scripts/migrate_memory.sh` — `workspace/memory/` → `workspace/users/_default/memory/`
+60. `scripts/migrate_user_profile.sh` — `workspace/USER.md` → `workspace/users/_default/profile.md`
+61. Sub-session 旧数据：嵌套路径下的 sub-session 数据**直接丢弃**（sub-session 本来就是临时数据）
+
+### 依赖关系
+
+```
+A (类型基础)
+├──→ B (Session 层 — 依赖 Channel trait 加 push/cancel + ChannelMessage Serialize)
+│    ├──→ C (Agent 层 — 依赖 Session 改造)
+│    │    └──→ D (配置 prompt — 依赖 AgentConfig 简化、AgentRegistry)
+│    └──→ E (路由 — 依赖 SessionContext + AskRouter)
+│         └──→ F (委派 — 依赖路由 + DelegationCoordinator)
+│              └──→ G (per-user — 在 SessionContext / build_prompt 已就位后加)
+└──→ H (删除 — 全部新代码就位后)
+└──→ I (数据迁移 — 上线前跑)
+```
+
+实际开发上：A → B / C / D / E 大量并行；F、G 最后串行接入；H 与重构同步进行（边写新代码边删旧的）；I 是上线脚本。
+
+---
 ---
 
 ## 八、迁移脚本
@@ -1344,4 +1399,4 @@ workspace/USER.md  →  workspace/users/_default/profile.md
 
 ## 当前 workaround
 
-在阶段 1 完成前，session switch/create/delete 的 API handler 通过 evict LoopRegistry 保证一致性（commit `a7a31ff`）。阶段 1 落地后这段代码删除。
+重构落地前，session switch/create/delete 的 API handler 通过 evict LoopRegistry 保证一致性（commit `a7a31ff`）。重构后这段 workaround 整体删除（LoopRegistry 自身已不存在）。
