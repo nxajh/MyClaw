@@ -73,30 +73,6 @@ use memory::MemoryConfig;
 use provider::ProviderConfig;
 use routing::RoutingConfig;
 
-// ── Defaults ──────────────────────────────────────────────────────────────────
-
-fn default_defaults_model() -> String {
-    "minimax-m2.7".to_string()
-}
-
-// ── Defaults section ──────────────────────────────────────────────────────────
-
-/// Global default settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Defaults {
-    /// Default model for routing.
-    #[serde(default = "default_defaults_model")]
-    pub model: String,
-}
-
-impl Default for Defaults {
-    fn default() -> Self {
-        Self {
-            model: default_defaults_model(),
-        }
-    }
-}
-
 // ── RawConfig (1:1 mapping of TOML file) ──────────────────────────────────────
 
 /// Raw configuration as parsed from TOML — before env var expansion.
@@ -133,10 +109,6 @@ struct RawConfig {
     /// MCP server configurations.
     #[serde(default)]
     mcp_servers: Vec<McpServerConfig>,
-
-    /// Global defaults.
-    #[serde(default)]
-    defaults: Defaults,
 
     /// Logging configuration.
     #[serde(default)]
@@ -182,8 +154,6 @@ pub struct AppConfig {
     pub memory: MemoryConfig,
     /// MCP server configurations.
     pub mcp_servers: Vec<McpServerConfig>,
-    /// Global defaults.
-    pub defaults: Defaults,
     /// Logging configuration.
     pub logging: LoggingConfig,
 }
@@ -244,7 +214,6 @@ impl ConfigLoader {
             agent: raw.agent,
             memory: raw.memory,
             mcp_servers: raw.mcp_servers,
-            defaults: raw.defaults,
             logging: raw.logging,
         })
     }
@@ -421,9 +390,6 @@ db_path = "test.db"
 name = "filesystem"
 command = "npx"
 args = ["mcp-server-filesystem"]
-
-[defaults]
-model = "gpt-4o"
 
 [logging]
 level = "INFO"

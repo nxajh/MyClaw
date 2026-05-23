@@ -5,9 +5,9 @@
 
 ## 进度统计
 
-- 完成：36 / 61
+- 完成：38 / 61
 - 进行中：B12（部分完成）
-- 待办：25
+- 待办：23
 
 ## 模块 A：类型基础（0/11）
 
@@ -69,7 +69,7 @@
 
 - [x] G39. `UserResolver` routing_key → user_id 映射 → `src/agents/user_profile.rs`
 - [x] G40. `UserProfile` 加载/序列化/to_prompt_section → `src/agents/user_profile.rs`
-- [ ] G41. SessionContext 加 user_profile 字段
+- [x] G41. SessionContext 加 user_profile 字段（含 with_user_profile / reload_user_profile）
 - [x] G42. build_prompt 补齐 profile section（`SystemPromptBuilder::build_with_profile`）
 - [ ] G43. Memory tools 读写 `users/{id}/memory/`
 - [x] G44. `list_sessions_for_user(uid)` 反向 map 实现（SessionManager method）
@@ -84,7 +84,7 @@
 - [ ] H50. 删 subagent_running_*.json marker 文件机制
 - [x] H51. 删 AgentConfig.max_history（死字段）
 - [x] H52. 删 Session.last_reply_target（仅 Session struct；storage 层留字段用于旧元数据 backward read）
-- [ ] H53. 删 [defaults]/[limits]/[context] config 段
+- [x] H53. 删 [defaults] config 段（CLI 改为读 routing.chat.models[0]）；[context] 段在 C21 删，[limits] 不存在
 - [x] H54. 删 stream_first_chunk_timeout_secs / max_output_bytes 配置项；常量内联
 - [x] H55. 删 IDENTITY.md / SOUL.md / RULES.md 读取（代码侧）
 - [x] H56. 删 USER.md 读取（代码侧；G40 补 UserProfile 注入）
@@ -102,6 +102,17 @@
 ## 实施日志
 
 按时间倒序记录每次推进。
+
+### G41 + H53 — SessionContext.user_profile + 删 [defaults]
+
+- G41: SessionContext 加 `user_profile: Arc<Mutex<UserProfile>>` 字段；
+  新增 `with_user_profile(session, workspace_dir, user_id)` 构造函数
+  和 `reload_user_profile()` async 方法。
+- H53: 删 Config::Defaults struct、AppConfig.defaults 字段、RawConfig.defaults
+  字段。4 个 CLI 文件（status / doctor / chat / config）改为从
+  `routing.get(Capability::Chat).models.first()` 取默认模型。config init
+  模板从 `[defaults] model = ...` 改为 `[routing.chat] models = [...]`。
+- 375 lib tests 仍全部通过
 
 ### F36 partial + G44 + H52 — Delegator dual impl + 反向 list + 死字段删除
 

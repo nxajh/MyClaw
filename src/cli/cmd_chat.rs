@@ -61,7 +61,12 @@ pub async fn run(cli: &Cli, prompt: Option<&str>, agent: Option<&str>, model: Op
 
     // Interactive REPL.
     eprintln!("MyClaw Chat — type 'exit' or press Ctrl-D to quit.");
-    eprintln!("Model: {}", cfg.defaults.model);
+    let model = cfg
+        .routing
+        .get(myclaw::providers::Capability::Chat)
+        .and_then(|r| r.models.first().cloned())
+        .unwrap_or_else(|| "(none)".to_string());
+    eprintln!("Model: {}", model);
     eprintln!();
 
     loop {

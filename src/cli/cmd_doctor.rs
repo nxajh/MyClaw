@@ -18,7 +18,12 @@ pub async fn run(_cli: &Cli, fix: bool) -> Result<()> {
             match myclaw::config::ConfigLoader::from_file(path) {
                 Ok(cfg) => {
                     println!("✅ Config file: {}", path.display());
-                    println!("   Default model: {}", cfg.defaults.model);
+                    let default_model = cfg
+                        .routing
+                        .get(myclaw::providers::Capability::Chat)
+                        .and_then(|r| r.models.first().cloned())
+                        .unwrap_or_else(|| "(none)".to_string());
+                    println!("   Default model: {}", default_model);
                     ok_count += 1;
                 }
                 Err(e) => {

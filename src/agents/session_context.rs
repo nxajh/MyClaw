@@ -19,6 +19,7 @@ use tokio::sync::Mutex;
 
 use crate::agents::attachment::AttachmentManager;
 use crate::agents::session::Session;
+use crate::agents::UserProfile;
 
 /// Per-session bundle held by the Orchestrator's session table.
 ///
@@ -29,9 +30,10 @@ use crate::agents::session::Session;
 ///   surfaced as a "retry?" prompt next time the user types
 /// - `turn_lock`: tokio Mutex held for the duration of `process_turn`,
 ///   ensuring two messages on the same session do not race the LLM
-///
-/// `user_profile` is added in G41 once UserProfile lands; left out here
-/// to avoid coupling B13 to G40.
+/// - `user_profile`: snapshot of `workspace/users/{user_id}/profile.toml` at
+///   session load time. Used by SystemPromptBuilder.build_with_profile so
+///   the LLM sees a stable "## User" section. Refreshed via
+///   `reload_user_profile` when the profile file changes mid-session.
 pub struct SessionContext {
     /// Mutable session state. Wrapped in Mutex so the turn lock and the
     /// Session itself share the same critical section.
@@ -45,6 +47,9 @@ pub struct SessionContext {
     /// Mutex because some readers want to peek at session state without
     /// blocking on an in-flight turn.
     pub turn_lock: Arc<Mutex<()>>,
+    /// Loaded UserProfile (G41). Wrapped in Mutex so /memory-style commands
+    /// can rewrite it without taking the session lock.
+    pub user_profile: Arc<Mutex<UserProfile>>,
 }
 
 impl SessionContext {
@@ -54,7 +59,33 @@ impl SessionContext {
             attachments: Arc::new(AttachmentManager::new()),
             pending_retry: Arc::new(Mutex::new(None)),
             turn_lock: Arc::new(Mutex::new(())),
+            user_profile: Arc::new(Mutex::new(UserProfile::default())),
         }
+    }
+
+    /// Build a context with the user profile already loaded.
+    /// `workspace_dir` and `user_id` are the profile lookup coordinates.
+    pub fn with_user_profile(
+        session: Session,
+        workspace_dir: &std::path::Path,
+        user_id: &str,
+    ) -> Self {
+        let profile = UserProfile::load(workspace_dir, user_id);
+        let ctx = Self::new(session);
+        *ctx.user_profile.try_lock().expect("fresh Mutex must be unlocked") = profile;
+        ctx
+    }
+
+    /// Re-read profile.toml from disk and update the held profile.
+    /// Returns the new profile so callers can log it.
+    pub async fn reload_user_profile(
+        &self,
+        workspace_dir: &std::path::Path,
+        user_id: &str,
+    ) -> UserProfile {
+        let p = UserProfile::load(workspace_dir, user_id);
+        *self.user_profile.lock().await = p.clone();
+        p
     }
 
     /// Snapshot the session for read-only consumers (e.g., /status commands).
