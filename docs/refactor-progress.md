@@ -5,9 +5,9 @@
 
 ## 进度统计
 
-- 完成：12 / 61
+- 完成：16 / 61
 - 进行中：0
-- 待办：49
+- 待办：45
 
 ## 模块 A：类型基础（0/11）
 
@@ -92,16 +92,27 @@
 
 ## 模块 I：数据迁移（0/4）
 
-- [ ] I58. scripts/migrate_main_agent.sh
-- [ ] I59. scripts/migrate_memory.sh
-- [ ] I60. scripts/migrate_user_profile.sh
-- [ ] I61. Sub-session 旧数据直接丢弃（无需脚本）
+- [x] I58. scripts/migrate_main_agent.sh（含 IDENTITY/SOUL.md 折叠）
+- [x] I59. scripts/migrate_memory.sh（含 user_id 参数）
+- [x] I60. scripts/migrate_user_profile.sh（USER.md → profile.toml）
+- [x] I61. Sub-session 旧数据直接丢弃（无需脚本）
 
 ---
 
 ## 实施日志
 
 按时间倒序记录每次推进。
+
+### I58 / I59 / I60 / I61 — 数据迁移脚本
+
+- migrate_main_agent.sh：建 agents/main/AGENT.md，把 IDENTITY.md / SOUL.md 折叠
+  进 body；原文件备份到 .migration_backup/
+- migrate_memory.sh：workspace/memory/*.md → workspace/users/{uid}/memory/；
+  原目录留 MIGRATED_TO_USERS.txt 标记
+- migrate_user_profile.sh：workspace/USER.md → workspace/users/{uid}/profile.toml
+  （内容写入 custom_instructions 三引号字符串）；原文件移到 .USER.md.migrated
+- I61：Sub-session 旧嵌套数据不迁移，新代码扫描时直接忽略，符合 RFC 决议
+- 三个脚本在临时 workspace 上端到端 smoke 测试通过
 
 ### H51 / H54 — 删 max_history / max_output_bytes / stream_first_chunk_timeout_secs
 
