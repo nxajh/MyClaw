@@ -5,9 +5,9 @@
 
 ## 进度统计
 
-- 完成：38 / 61
+- 完成：40 / 61
 - 进行中：B12（部分完成）
-- 待办：23
+- 待办：21
 
 ## 模块 A：类型基础（0/11）
 
@@ -18,7 +18,7 @@
 - [x] A5. `Channel` trait 加默认 no-op 方法 `push_event` / `cancel_signal`
 - [x] A6. `ChannelMessage` 加 `#[derive(Serialize, Deserialize)]`（MediaAttachment 同步）
 - [x] A7. `AgentDelegator` trait（`delegate` + `list_available`）→ `src/agents/delegator.rs`
-- [ ] A8. `DelegationEvent` enum（Completed / Failed，含 parent_session_id）
+- [x] A8. `DelegationEvent` 字段重命名 session_key → parent_session_id（值仍是 routing_key，待 E29 真正切到 session_id）
 - [x] A9. `SessionNotOwned` 错误类型 → `src/agents/session/manager.rs`
 - [x] A10. `llm_stream` 模块（常量 + read/read_streamed 函数）→ `src/agents/llm_stream.rs`
 - [x] A11. `ProviderRegistry` trait — `ServiceRegistry` 重命名 ← `ef94853..HEAD`
@@ -32,7 +32,7 @@
 
 ## 模块 C：Agent / AgentRuntime / 执行器（0/7）
 
-- [ ] C16. `AgentConfig` 简化（7 字段 + allows_tool 三维过滤）
+- [~] C16. `SubAgentConfig` 加 skills/mcp 三维过滤 + allows_tool/skill/mcp helper；slim AgentConfig 形态等 C18
 - [ ] C17. `Agent` 简化为只一个 config 字段
 - [ ] C18. `Agent.run(session, ctx, rt)` 实现（含 allowed_tools snapshot + 循环）
 - [x] C19. `ToolExecutor` 重命名（原 `DefaultToolExecutor`）；ask_user/agent_delegate inline 处理待 F35 拆出
@@ -102,6 +102,19 @@
 ## 实施日志
 
 按时间倒序记录每次推进。
+
+### A8 + C16 partial — DelegationEvent 字段重命名 + 三维过滤
+
+- A8: DelegationEvent.session_key → parent_session_id（Completed / Failed
+  两个 variant）；3 个发送点（sub_agent.rs 2 处 + orchestrator 启动恢复 1 处）
+  和 2 个 match arm（handle_delegation_task）同步更新。字段值今天仍是
+  routing_key，真正切到 session_id 等 E29。
+- C16 partial: SubAgentConfig 加两个 NameFilter 字段：
+  - `skills: SkillFilter`（默认 all）
+  - `mcp: McpFilter`（默认 all）
+  并加三个 helper：allows_tool / allows_skill / allows_mcp。agent_loader
+  构造、5 处测试 fixture 同步更新。Agent.run 在 C18 用这些过滤器从全局
+  ToolRegistry / SkillManager 切出 per-agent 视图。
 
 ### G41 + H53 — SessionContext.user_profile + 删 [defaults]
 

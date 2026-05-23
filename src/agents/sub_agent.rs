@@ -427,7 +427,7 @@ impl SubAgentDelegator {
                     tracing::info!(task_id = %task_id_clone, duration_secs, "sub-agent completed successfully");
                     let _ = event_tx.send(DelegationEvent::Completed {
                         task_id: task_id_clone.clone(),
-                        session_key: parent_session_id_owned,
+                        parent_session_id: parent_session_id_owned,
                         reply_target: reply_target_owned,
                         summary,
                         duration_secs,
@@ -437,7 +437,7 @@ impl SubAgentDelegator {
                     tracing::warn!(task_id = %task_id_clone, duration_secs, err = %e, "sub-agent failed");
                     let _ = event_tx.send(DelegationEvent::Failed {
                         task_id: task_id_clone.clone(),
-                        session_key: parent_session_id_owned,
+                        parent_session_id: parent_session_id_owned,
                         reply_target: reply_target_owned,
                         error: e.to_string(),
                     }).await;

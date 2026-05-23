@@ -11,12 +11,17 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 /// Events sent from background sub-agents to the Orchestrator.
+///
+/// RFC v2 §三.C: `parent_session_id` (previously `session_key`) identifies
+/// the parent session that spawned the sub-agent — orchestrator routes the
+/// completion message back into this session's process_turn so the LLM can
+/// react to the sub-agent's result.
 #[derive(Debug, Clone)]
 pub enum DelegationEvent {
     /// Sub-agent completed successfully.
     Completed {
         task_id: String,
-        session_key: String,
+        parent_session_id: String,
         reply_target: String,
         summary: String,
         /// How long the sub-agent ran (in seconds).
@@ -25,7 +30,7 @@ pub enum DelegationEvent {
     /// Sub-agent failed.
     Failed {
         task_id: String,
-        session_key: String,
+        parent_session_id: String,
         reply_target: String,
         error: String,
     },

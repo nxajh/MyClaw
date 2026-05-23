@@ -893,7 +893,7 @@ impl Orchestrator {
                         if let Some(dm) = dm {
                             let _ = dm.event_sender().send(DelegationEvent::Completed {
                                 task_id,
-                                session_key,
+                                parent_session_id: session_key,
                                 reply_target: sa_reply_target,
                                 summary: text,
                                 duration_secs: 0,
@@ -1155,13 +1155,16 @@ async fn handle_delegation_task(
     event: DelegationEvent,
 ) {
     match event {
-        DelegationEvent::Completed { task_id, session_key, reply_target, summary, duration_secs } => {
+        DelegationEvent::Completed { task_id, parent_session_id, reply_target, summary, duration_secs } => {
             tracing::info!(task_id = %task_id, duration_secs, "delegation completed, waking main agent");
 
-            let handle = match sessions.get(&session_key) {
+            // The orchestrator session table is currently keyed by routing_key.
+            // Sub-agents pass the routing_key in parent_session_id today; the
+            // real session_id-keyed lookup arrives with E29.
+            let handle = match sessions.get(&parent_session_id) {
                 Some(h) => h.clone(),
                 None => {
-                    tracing::warn!(session = %session_key, "session not found for delegation event");
+                    tracing::warn!(parent = %parent_session_id, "session not found for delegation event");
                     return;
                 }
             };
@@ -1178,10 +1181,10 @@ async fn handle_delegation_task(
 
             match response {
                 Ok(text) if !text.is_empty() => {
-                    let (ch_type, acc_id, _) = match parse_session_key(&session_key) {
+                    let (ch_type, acc_id, _) = match parse_session_key(&parent_session_id) {
                         Some(triple) => triple,
                         None => {
-                            tracing::warn!(session = %session_key, "invalid session key in delegation event");
+                            tracing::warn!(parent = %parent_session_id, "invalid session key in delegation event");
                             return;
                         }
                     };
@@ -1197,23 +1200,23 @@ async fn handle_delegation_task(
                             inline_buttons: None,
                         };
                         if let Err(e) = channel.send(&send_msg).await {
-                            tracing::error!(session = %session_key, err = %e, "send delegation result failed");
+                            tracing::error!(parent = %parent_session_id, err = %e, "send delegation result failed");
                         }
                     }
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    tracing::error!(session = %session_key, err = %e, "main agent failed to process delegation result");
+                    tracing::error!(parent = %parent_session_id, err = %e, "main agent failed to process delegation result");
                 }
             }
         }
-        DelegationEvent::Failed { task_id, session_key, reply_target, error } => {
+        DelegationEvent::Failed { task_id, parent_session_id, reply_target, error } => {
             tracing::warn!(task_id = %task_id, "delegation failed, waking main agent");
 
-            let handle = match sessions.get(&session_key) {
+            let handle = match sessions.get(&parent_session_id) {
                 Some(h) => h.clone(),
                 None => {
-                    tracing::warn!(session = %session_key, "session not found for delegation event");
+                    tracing::warn!(parent = %parent_session_id, "session not found for delegation event");
                     return;
                 }
             };
@@ -1230,10 +1233,10 @@ async fn handle_delegation_task(
 
             match response {
                 Ok(text) if !text.is_empty() => {
-                    let (ch_type, acc_id, _) = match parse_session_key(&session_key) {
+                    let (ch_type, acc_id, _) = match parse_session_key(&parent_session_id) {
                         Some(triple) => triple,
                         None => {
-                            tracing::warn!(session = %session_key, "invalid session key in delegation event");
+                            tracing::warn!(parent = %parent_session_id, "invalid session key in delegation event");
                             return;
                         }
                     };
@@ -1249,13 +1252,13 @@ async fn handle_delegation_task(
                             inline_buttons: None,
                         };
                         if let Err(e) = channel.send(&send_msg).await {
-                            tracing::error!(session = %session_key, err = %e, "send delegation result failed");
+                            tracing::error!(parent = %parent_session_id, err = %e, "send delegation result failed");
                         }
                     }
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    tracing::error!(session = %session_key, err = %e, "main agent failed to process delegation failure");
+                    tracing::error!(parent = %parent_session_id, err = %e, "main agent failed to process delegation failure");
                 }
             }
         }

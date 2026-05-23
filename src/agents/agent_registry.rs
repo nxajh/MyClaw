@@ -109,6 +109,8 @@ mod tests {
             description: None,
             system_prompt: String::new(),
             tools: Vec::new(),
+            skills: Default::default(),
+            mcp: Default::default(),
             model: None,
             max_tool_calls: None,
             isolation: Default::default(),
