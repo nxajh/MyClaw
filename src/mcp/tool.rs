@@ -53,6 +53,17 @@ impl Tool for McpToolWrapper {
         self.input_schema.clone()
     }
 
+    fn source(&self) -> crate::providers::ToolSource {
+        // prefixed_name is "<server>__<tool>" — strip suffix to recover the
+        // server name for the McpFilter check.
+        let server = self
+            .prefixed_name
+            .split_once("__")
+            .map(|(s, _)| s.to_string())
+            .unwrap_or_else(|| self.prefixed_name.clone());
+        crate::providers::ToolSource::Mcp { server }
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         // Strip the `approved` field before forwarding to the MCP server.
         // ZeroClaw's security model injects `approved: bool` into built-in tool

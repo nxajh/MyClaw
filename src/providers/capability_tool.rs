@@ -3,6 +3,22 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+/// Origin of a registered tool — used by `AgentConfig.tools` / `.skills` /
+/// `.mcp` filters to decide which tools an agent may see.
+///
+/// RFC v2 §三.B: each tool reports its source via `Tool::source()`, and
+/// `Agent.run` filters the global ToolRegistry through the agent's three
+/// filters before passing tool_specs to the LLM.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolSource {
+    /// Hard-coded tools (shell, file_read, memory_*, etc.).
+    Builtin,
+    /// Loaded from `workspace/skills/<name>/SKILL.md`.
+    Skill { name: String },
+    /// Loaded from an MCP server (`mcp_servers` config).
+    Mcp { server: String },
+}
+
 /// Result of executing a tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
@@ -36,6 +52,12 @@ pub trait Tool: Send + Sync {
 
     /// JSON Schema describing the tool's parameters.
     fn parameters_schema(&self) -> serde_json::Value;
+
+    /// Origin of this tool. Default `Builtin` covers hard-coded tools;
+    /// skills / MCP wrappers must override.
+    fn source(&self) -> ToolSource {
+        ToolSource::Builtin
+    }
 
     /// Maximum output tokens before framework-level truncation kicks in.
     /// Override per-tool for tighter/looser limits. Default: 10,000.

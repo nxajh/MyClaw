@@ -29,7 +29,7 @@ pub use error_class::{ClassifiedError, ErrorCategory, FailoverReason, ProviderHt
 pub use capability_embedding::{
     EmbeddingProvider, EmbedRequest, EmbedResponse, EmbeddingUsage, EmbedInput,
 };
-pub use capability_tool::{Tool, ToolResult, ToolSpec};
+pub use capability_tool::{Tool, ToolResult, ToolSource, ToolSpec};
 pub use image::{ImageGenerationProvider, ImageRequest, ImageResponse, ImageFormat, ImageOutput};
 pub use search::{SearchProvider, SearchRequest, SearchResult, SearchResults};
 pub use tts::{TtsProvider, TtsRequest, TtsFormat, TtsVoice};

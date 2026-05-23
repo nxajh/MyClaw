@@ -564,6 +564,20 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         format!("failed to set cwd to workspace_dir '{}'", config.workspace_dir.display())
     })?;
 
+    // D27 — RFC v2 §三.A: workspace/agents/main/AGENT.md is required.
+    // Without it there is no default agent to route inbound messages to.
+    // Run scripts/migrate_main_agent.sh on first boot after upgrade.
+    let main_agent_md = config.workspace_dir.join("agents").join("main").join("AGENT.md");
+    if !main_agent_md.exists() {
+        anyhow::bail!(
+            "missing main agent at {}\n\
+             RFC v2 requires every workspace to define a 'main' agent.\n\
+             Run scripts/migrate_main_agent.sh to fold IDENTITY.md/SOUL.md into it,\n\
+             or create the file manually.",
+            main_agent_md.display()
+        );
+    }
+
     // ── Hot switch: enhanced startup for fork+execv child ─────────────────
     // When the new binary is started via execv (hot switch), it inherits the
     // listen socket fd and needs to: (1) take over the socket, (2) clear the

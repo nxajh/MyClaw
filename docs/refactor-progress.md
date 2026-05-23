@@ -5,15 +5,15 @@
 
 ## 进度统计
 
-- 完成：17 / 61
+- 完成：21 / 61
 - 进行中：B12（部分完成）
-- 待办：44
+- 待办：40
 
 ## 模块 A：类型基础（0/11）
 
 - [x] A1. `TurnContext`（5 字段）/ `TurnResult` → `src/agents/turn.rs`
 - [ ] A2. `AgentRuntime` struct（8 字段）+ `RuntimeDefaults` struct
-- [ ] A3. `Tool` trait 加 `source() -> ToolSource`；execute 加 `&Session`；`ToolSource` enum
+- [~] A3. `Tool` trait 加 `source() -> ToolSource`（默认 Builtin）；`ToolSource` enum 已加。execute 加 `&Session` 参数推迟到 C18
 - [x] A4. `ToolFilter` / `SkillFilter` / `McpFilter` enum (All/Allow/Deny) → `src/config/filters.rs`
 - [x] A5. `Channel` trait 加默认 no-op 方法 `push_event` / `cancel_signal`
 - [x] A6. `ChannelMessage` 加 `#[derive(Serialize, Deserialize)]`（MediaAttachment 同步）
@@ -26,7 +26,7 @@
 ## 模块 B：Session / SessionContext / SessionManager（0/4）
 
 - [~] B12. Session 字段改造（已加 last_message/parent_session_id/agent_name；已加 record_inbound/reply_target helper；token_tracker / transient persist/channel / save_* 方法待 C18）
-- [ ] B13. 新建 `SessionContext`（session/agent/attachments/pending_retry/turn_lock；user_profile 在 G 加）
+- [x] B13. 新建 `SessionContext`（session/attachments/pending_retry/turn_lock；user_profile 待 G41） → `src/agents/session_context.rs`
 - [ ] B14. `SessionManager` 改造（单表 sessions；session_id_for_routing_key/get_by_id；switch SessionNotOwned；create_sub_session；list filter parent；delete cascade）
 - [ ] B15. Sub-session 存储扁平化（删嵌套结构与 marker 文件）
 
@@ -38,7 +38,7 @@
 - [ ] C19. `ToolExecutor` 退化为 timeout 包装器
 - [ ] C20. `LoopBreaker` 拆为 policy + per-turn counter
 - [ ] C21. `ContextEngine` 合并 CompactionPolicy + CompactionExecutor
-- [ ] C22. MCP / skill tool 注册时填正确 source()
+- [x] C22. MCP tool wrapper 填 `ToolSource::Mcp { server }`；skill 单独 wrapper 未来再加
 
 ## 模块 D：配置与 Prompt（0/5）
 
@@ -46,7 +46,7 @@
 - [ ] D24. `AgentRegistry` 实现为 `Arc<RwLock<HashMap>>`，含 reload_from_dir
 - [ ] D25. `WorkspaceWatcher` 改为自维护
 - [x] D26. `prompt.rs` 删 IDENTITY/SOUL/USER.md/RULES.md 读取（部分：build_prompt 参数化在 C18 完成）
-- [ ] D27. 启动校验 main/AGENT.md 缺失则报错
+- [x] D27. 启动校验 main/AGENT.md 缺失则报错（daemon::run 顶部）
 
 ## 模块 E：路由（0/7）
 
@@ -102,6 +102,22 @@
 ## 实施日志
 
 按时间倒序记录每次推进。
+
+### A3 + B13 + C22 + D27 — ToolSource enum + SessionContext + MCP source + main 校验
+
+- A3：`ToolSource { Builtin, Skill { name }, Mcp { server } }` enum；
+  Tool trait 加 `fn source() -> ToolSource` 默认返回 Builtin；从 providers
+  re-export
+- B13：`src/agents/session_context.rs` 新建 SessionContext struct：
+  `session: Arc<Mutex<Session>>`、`attachments: Arc<AttachmentManager>`、
+  `pending_retry: Arc<Mutex<Option<String>>>`、`turn_lock: Arc<Mutex<()>>`；
+  user_profile 字段留到 G41
+- C22：`McpToolWrapper::source()` 从 prefixed_name 解出 server 名返回
+  `ToolSource::Mcp { server }`；skill 单独 wrapper 等真有 per-skill tool
+  注册时再加
+- D27：daemon::run 顶部加 `workspace/agents/main/AGENT.md` 缺失检查，
+  缺失时 bail 并指向 migrate_main_agent.sh
+- 361 lib tests 仍全部通过
 
 ### B12 部分 + B14 部分 — Session struct 加新字段 + SessionNotOwned 接线
 

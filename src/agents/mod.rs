@@ -22,6 +22,7 @@ pub mod turn_event;
 pub mod turn;
 pub mod delegator;
 pub mod llm_stream;
+pub mod session_context;
 
 /// Scheduling: cron jobs, webhooks, heartbeat scheduler.
 pub mod scheduling;
@@ -42,6 +43,7 @@ pub use recovery::UnfinishedSubAgent;
 pub use turn_event::TurnEvent;
 pub use turn::{TurnContext, TurnResult};
 pub use delegator::AgentDelegator;
+pub use session_context::SessionContext;
 pub use attachment::AttachmentManager;
 pub use workspace::watcher::{WorkspaceWatcher, ChangeSet};
 pub use delegation::{DelegationEvent, DelegationManager};
