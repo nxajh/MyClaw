@@ -157,8 +157,6 @@ impl SessionManager {
             (i, m, Vec::new())
         };
 
-        let last_reply_target = self.backend.load_reply_target(&session_id);
-
         let mut session = Session {
             id: session_id.clone(),
             owner: user_id.to_string(),
@@ -174,7 +172,6 @@ impl SessionManager {
             incomplete_turn: false,
             breakpoint_items: breakpoints,
             last_message: self.backend.load_last_message(&session_id),
-            last_reply_target,
         };
 
         // Breakpoint items are kept for diagnostics, but recovery is now handled
@@ -334,6 +331,38 @@ impl SessionManager {
             .into_iter()
             .filter(|info| self.backend.load_parent_session_id(&info.id).is_none())
             .collect()
+    }
+
+    /// G44: list all sessions belonging to a user, resolved across every
+    /// routing_key that maps to `user_id` via the supplied `UserResolver`.
+    ///
+    /// Sessions are deduplicated by id; sub-sessions are filtered out.
+    /// `list_sessions(routing_key)` is the per-channel slice; this method is
+    /// the per-human aggregation needed by the `/sessions` slash command.
+    pub fn list_sessions_for_user(
+        &self,
+        resolver: &crate::agents::UserResolver,
+        user_id: &str,
+    ) -> Vec<SessionInfo> {
+        let mut seen = std::collections::HashSet::<String>::new();
+        let mut out = Vec::new();
+        for rk in resolver.routing_keys_for(user_id) {
+            for info in self.list_sessions(&rk) {
+                if seen.insert(info.id.clone()) {
+                    out.push(info);
+                }
+            }
+        }
+        // If the user_id is itself a routing_key (no override), include
+        // sessions registered directly under it.
+        if !seen.contains(user_id) {
+            for info in self.list_sessions(user_id) {
+                if seen.insert(info.id.clone()) {
+                    out.push(info);
+                }
+            }
+        }
+        out
     }
 
     /// List sub-sessions of a parent (used by recovery / inspection tools).

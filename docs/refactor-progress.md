@@ -5,9 +5,9 @@
 
 ## 进度统计
 
-- 完成：32 / 61
+- 完成：36 / 61
 - 进行中：B12（部分完成）
-- 待办：29
+- 待办：25
 
 ## 模块 A：类型基础（0/11）
 
@@ -61,7 +61,7 @@
 ## 模块 F：委派（0/4）
 
 - [ ] F35. AskUserTool / DelegateTool 实现并注册
-- [ ] F36. `DelegationCoordinator` 实现 AgentDelegator
+- [~] F36. SubAgentDelegator 现在也实现 `AgentDelegator` trait（共存 TaskDelegator 直到 H47 删除）
 - [ ] F37. 启动恢复统一路径（list_all + parent_session_id 区分）
 - [ ] F38. Sub-agent 完成回填合成 ChannelMessage 调父 process_turn
 
@@ -72,7 +72,7 @@
 - [ ] G41. SessionContext 加 user_profile 字段
 - [x] G42. build_prompt 补齐 profile section（`SystemPromptBuilder::build_with_profile`）
 - [ ] G43. Memory tools 读写 `users/{id}/memory/`
-- [ ] G44. `list_sessions_for_user(uid)` 反向 map 实现
+- [x] G44. `list_sessions_for_user(uid)` 反向 map 实现（SessionManager method）
 
 ## 模块 H：删除（0/13）
 
@@ -83,7 +83,7 @@
 - [ ] H49. 删 AskUserHandler / DelegateHandler 闭包类型
 - [ ] H50. 删 subagent_running_*.json marker 文件机制
 - [x] H51. 删 AgentConfig.max_history（死字段）
-- [ ] H52. 删 Session.last_reply_target
+- [x] H52. 删 Session.last_reply_target（仅 Session struct；storage 层留字段用于旧元数据 backward read）
 - [ ] H53. 删 [defaults]/[limits]/[context] config 段
 - [x] H54. 删 stream_first_chunk_timeout_secs / max_output_bytes 配置项；常量内联
 - [x] H55. 删 IDENTITY.md / SOUL.md / RULES.md 读取（代码侧）
@@ -102,6 +102,20 @@
 ## 实施日志
 
 按时间倒序记录每次推进。
+
+### F36 partial + G44 + H52 — Delegator dual impl + 反向 list + 死字段删除
+
+- F36: SubAgentDelegator 实现 `crate::agents::AgentDelegator`（除已有的
+  TaskDelegator）。新 trait 的 delegate 拿 &Session，从 last_message 取
+  reply_target 转给 delegate_with_parent；list_available 返回
+  Vec<(name, Option<description>)>。TaskDelegator 留到 H47 删除。
+- G44: SessionManager.list_sessions_for_user(resolver, user_id) 把
+  UserResolver 反查的所有 routing_key 的 session 列表 dedup 合并。
+- H52: Session.last_reply_target 字段删除。reply_target() 不再有 fallback；
+  record_inbound 不再写。storage 层 meta.last_reply_target 保留用于读取
+  pre-B12 元数据但不再被 Session 自动恢复——next inbound 会重建。
+
+375 lib tests 仍全部通过。
 
 ### A2 + D25 + E28 + E31 + G39 + G40 + G42 — 一波 scaffolding
 

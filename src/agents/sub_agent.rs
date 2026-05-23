@@ -450,6 +450,42 @@ impl SubAgentDelegator {
     }
 }
 
+/// F36: SubAgentDelegator also implements the new `AgentDelegator` trait so
+/// downstream code can target the RFC v2 contract directly. The two trait
+/// impls share `delegate_with_parent` for the actual work; the only
+/// difference is `parent_session` carries richer context (channel /
+/// reply_target via `Session.last_message`).
+#[async_trait::async_trait]
+impl crate::agents::AgentDelegator for SubAgentDelegator {
+    async fn delegate(
+        &self,
+        agent_name: &str,
+        task: &str,
+        parent_session: &super::session::Session,
+    ) -> anyhow::Result<String> {
+        let reply_target = parent_session
+            .reply_target()
+            .map(|s| s.to_string());
+        self.delegate_with_parent(
+            agent_name,
+            task,
+            &parent_session.id,
+            None,
+            None,
+            reply_target.as_deref(),
+        )
+        .await
+    }
+
+    fn list_available(&self) -> Vec<(String, Option<String>)> {
+        self.configs
+            .values_cloned()
+            .into_iter()
+            .map(|c| (c.name.clone(), c.description.clone()))
+            .collect()
+    }
+}
+
 #[async_trait::async_trait]
 impl TaskDelegator for SubAgentDelegator {
     async fn delegate(&self, agent_name: &str, task: &str) -> anyhow::Result<String> {

@@ -64,10 +64,6 @@ pub struct Session {
     /// context and resume an interrupted turn. RFC v2 §三.A replaces the old
     /// `last_reply_target: Option<String>` field with this richer message.
     pub last_message: Option<ChannelMessage>,
-    /// DEPRECATED transitional field — use `last_message.as_ref().map(|m| &m.reply_target)`.
-    /// Kept to avoid churning the orchestrator in this commit; removed once
-    /// callers migrate to `last_message`.
-    pub last_reply_target: Option<String>,
 }
 
 impl Session {
@@ -86,25 +82,17 @@ impl Session {
             incomplete_turn: false,
             breakpoint_items: Vec::new(),
             last_message: None,
-            last_reply_target: None,
         }
     }
 
     /// Return the routing target for the next outbound message, derived from
-    /// the most recently stored ChannelMessage. Falls back to the deprecated
-    /// `last_reply_target` field when migration is mid-flight.
+    /// the most recently stored ChannelMessage.
     pub fn reply_target(&self) -> Option<&str> {
-        self.last_message
-            .as_ref()
-            .map(|m| m.reply_target.as_str())
-            .or(self.last_reply_target.as_deref())
+        self.last_message.as_ref().map(|m| m.reply_target.as_str())
     }
 
-    /// Store the incoming message context. Updates both the new
-    /// `last_message` field and (transitionally) the legacy `last_reply_target`
-    /// so existing readers continue to work until migrated.
+    /// Store the incoming message context.
     pub fn record_inbound(&mut self, msg: ChannelMessage) {
-        self.last_reply_target = Some(msg.reply_target.clone());
         self.last_message = Some(msg);
     }
 
