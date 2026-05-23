@@ -5,14 +5,14 @@
 
 ## 进度统计
 
-- 完成：25 / 61
+- 完成：32 / 61
 - 进行中：B12（部分完成）
-- 待办：36
+- 待办：29
 
 ## 模块 A：类型基础（0/11）
 
 - [x] A1. `TurnContext`（5 字段）/ `TurnResult` → `src/agents/turn.rs`
-- [ ] A2. `AgentRuntime` struct（8 字段）+ `RuntimeDefaults` struct
+- [x] A2. `AgentRuntime` struct（9 字段）→ `src/agents/runtime.rs`；RuntimeDefaults 合入
 - [~] A3. `Tool` trait 加 `source() -> ToolSource`（默认 Builtin）；`ToolSource` enum 已加。execute 加 `&Session` 参数推迟到 C18
 - [x] A4. `ToolFilter` / `SkillFilter` / `McpFilter` enum (All/Allow/Deny) → `src/config/filters.rs`
 - [x] A5. `Channel` trait 加默认 no-op 方法 `push_event` / `cancel_signal`
@@ -44,16 +44,16 @@
 
 - [ ] D23. `GlobalConfig` 按模块拆段
 - [x] D24. `AgentRegistry` 实现为 `Arc<RwLock<HashMap>>`，含 reload_from_dir → `src/agents/agent_registry.rs`
-- [ ] D25. `WorkspaceWatcher` 改为自维护
+- [x] D25. `WorkspaceWatcher` 加 `spawn_managed`：自持 AgentRegistry/SkillManager 并自动 reload
 - [x] D26. `prompt.rs` 删 IDENTITY/SOUL/USER.md/RULES.md 读取（部分：build_prompt 参数化在 C18 完成）
 - [x] D27. 启动校验 main/AGENT.md 缺失则报错（daemon::run 顶部）
 
 ## 模块 E：路由（0/7）
 
-- [ ] E28. `OrchestratorEvent` enum
+- [x] E28. `OrchestratorEvent` enum → `src/agents/orchestrator_event.rs`
 - [ ] E29. Orchestrator 主循环（ask_router.fulfill 先于 process_turn）
 - [ ] E30. Orchestrator 字段加 agent_runtime / ask_router
-- [ ] E31. `AskRouter` 实现（wait_for_reply 返回 ChannelMessage）
+- [x] E31. `AskRouter` 实现（register/fulfill/cancel；indexed by session_id）→ `src/agents/ask_router.rs`
 - [ ] E32. ClientChannel 改造（streams 按 reply_target 索引；push_event/cancel_signal；强制 auth token）
 - [ ] E33. WebhookHandler 退化为协议适配器
 - [ ] E34. Scheduler 路径收编（删 SchedulerContext）
@@ -67,10 +67,10 @@
 
 ## 模块 G：per-user（0/6）
 
-- [ ] G39. `UserResolver` routing_key → user_id 映射
-- [ ] G40. `UserProfile` 加载/序列化/to_prompt_section
+- [x] G39. `UserResolver` routing_key → user_id 映射 → `src/agents/user_profile.rs`
+- [x] G40. `UserProfile` 加载/序列化/to_prompt_section → `src/agents/user_profile.rs`
 - [ ] G41. SessionContext 加 user_profile 字段
-- [ ] G42. build_prompt 补齐 profile section
+- [x] G42. build_prompt 补齐 profile section（`SystemPromptBuilder::build_with_profile`）
 - [ ] G43. Memory tools 读写 `users/{id}/memory/`
 - [ ] G44. `list_sessions_for_user(uid)` 反向 map 实现
 
@@ -102,6 +102,25 @@
 ## 实施日志
 
 按时间倒序记录每次推进。
+
+### A2 + D25 + E28 + E31 + G39 + G40 + G42 — 一波 scaffolding
+
+- A2 AgentRuntime: `src/agents/runtime.rs` 新建。9 字段：providers / tools /
+  skills / agents (AgentRegistry) / loop_breaker_defaults / tool_timeout_secs /
+  persist / workspace_dir / knowledge_dir。with_persist/with_dirs builder。
+- D25 WorkspaceWatcher::spawn_managed: 新方法，spawns 一个 tokio 任务持有
+  AgentRegistry + SkillManager；目录变化时直接 reload，不需要外部 polling。
+  返回 ManagedWatcherGuard，drop 时取消任务。
+- E28 OrchestratorEvent enum: 新文件 orchestrator_event.rs 定义统一事件枚举
+  Inbound/Scheduled/Delegation/AskReply/Shutdown，主循环切换待 E29 落地。
+- E31 AskRouter: `src/agents/ask_router.rs` 实现 register/fulfill/cancel；
+  按 session_id 索引（支持子会话跨频道 ask_user）；带 4 个单元测试。
+- G39 UserResolver: routing_key → user_id 默认恒等映射，可 override。
+- G40 UserProfile: workspace/users/{uid}/profile.toml 加载 + 序列化 +
+  is_empty + to_prompt_section（None when empty）。
+- G42 SystemPromptBuilder.build_with_profile: 把 profile.to_prompt_section()
+  插在 Runtime section 之前；build() 保持向后兼容（profile=None）。
+- 全部 +13 测试通过
 
 ### C19 + C20 + B14 partial + D24 — ToolExecutor 重命名 + LoopBreaker 确认 + SessionManager 子会话 + AgentRegistry
 

@@ -82,7 +82,19 @@ impl SystemPromptBuilder {
     }
 
     /// Build the full system prompt string.
-    pub fn build(&self, _skills: &SkillManager) -> String {
+    pub fn build(&self, skills: &SkillManager) -> String {
+        self.build_with_profile(skills, None)
+    }
+
+    /// Build with an optional `UserProfile` section appended after the
+    /// behavioral rules. RFC v2 §三.D: per-user data lives in profile.toml,
+    /// not in workspace/USER.md, so the builder no longer reads from disk.
+    /// `SessionContext.process_turn` loads the profile and passes it in.
+    pub fn build_with_profile(
+        &self,
+        _skills: &SkillManager,
+        profile: Option<&super::UserProfile>,
+    ) -> String {
         let mut sections = Vec::new();
 
         if let Some(ref header) = self.config.identity_header {
@@ -99,6 +111,11 @@ impl SystemPromptBuilder {
 
         sections.push(SECTION_READ_BEFORE_EDIT.to_string());
         sections.push(SECTION_SYSTEM_REMINDERS.to_string());
+
+        if let Some(user_section) = profile.and_then(|p| p.to_prompt_section()) {
+            sections.push(user_section);
+        }
+
         sections.push(self.build_runtime());
 
         let prompt = sections
@@ -358,5 +375,30 @@ mod tests {
         let prompt = build(SystemPromptConfig::default());
         assert!(!prompt.contains("Available Tools"));
         assert!(!prompt.contains("Tool Calling"));
+    }
+
+    #[test]
+    fn test_profile_section_appended() {
+        let skills = SkillManager::new();
+        let profile = crate::agents::UserProfile {
+            name: Some("Wilf".into()),
+            timezone: None,
+            preferred_language: Some("zh-CN".into()),
+            custom_instructions: None,
+        };
+        let builder = SystemPromptBuilder::new(SystemPromptConfig::default());
+        let prompt = builder.build_with_profile(&skills, Some(&profile));
+        assert!(prompt.contains("## User"));
+        assert!(prompt.contains("Wilf"));
+        assert!(prompt.contains("zh-CN"));
+    }
+
+    #[test]
+    fn test_no_profile_section_when_empty() {
+        let skills = SkillManager::new();
+        let profile = crate::agents::UserProfile::default();
+        let builder = SystemPromptBuilder::new(SystemPromptConfig::default());
+        let prompt = builder.build_with_profile(&skills, Some(&profile));
+        assert!(!prompt.contains("## User\n"));
     }
 }
