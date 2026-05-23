@@ -1,8 +1,12 @@
 //! System Prompt Builder
 //!
-//! Assembles the system prompt from ordered sections.
+//! Assembles the system prompt from ordered sections. Per RFC v2 the
+//! builder no longer reads workspace bootstrap files (IDENTITY/SOUL/
+//! USER.md, RULES.md). AGENT.md body is the single source of agent
+//! prose; user-specific identity comes from `UserProfile` (G40-G42)
+//! and is appended at `SessionContext.process_turn` time.
 //!
-//! ## Section order (main agent)
+//! ## Section order
 //!
 //!  0. Identity header    (optional, for sub-agents)
 //!  1. Anti-Narration     (static)
@@ -10,13 +14,10 @@
 //!  3. Actions            (by PermissionMode + native_tools)
 //!  4. Safety             (by PermissionMode)
 //!  5. RunMode Rules      (Interactive or Background)
-//!  6. Behavioral Rules   (RULES.md if present, else five hardcoded defaults — sections 6–10)
+//!  6-10. Behavioral Rules (five hardcoded sections)
 //!  11. Read Before Edit  (static)
 //!  12. System Reminders  (static)
-//!  13. Workspace Files   (IDENTITY.md, SOUL.md, USER.md)
-//!  14. Runtime           (OS version, arch, shell)
-
-use std::path::Path;
+//!  13. Runtime           (OS version, arch, shell)
 
 use crate::agents::SkillManager;
 use crate::str_utils;
@@ -33,7 +34,9 @@ pub use crate::config::agent::{PermissionMode, RunMode};
 /// Runtime concerns (timezone, model selection) live in `AgentConfig`.
 #[derive(Debug, Clone)]
 pub struct SystemPromptConfig {
-    /// Workspace directory (contains IDENTITY.md, SOUL.md, USER.md, RULES.md).
+    /// Workspace directory (for AGENT.md lookup at the caller).
+    /// Not read by the builder itself — kept here as runtime info that
+    /// `build_runtime` exposes to the LLM as part of the working environment.
     pub workspace_dir: String,
     /// Knowledge directory (contains memory/*.md files).
     pub knowledge_dir: String,
@@ -47,8 +50,6 @@ pub struct SystemPromptConfig {
     pub identity_header: Option<String>,
     /// Total character limit for the system prompt (0 = unlimited).
     pub max_chars: usize,
-    /// Per-bootstrap-file character limit.
-    pub bootstrap_max_chars: usize,
     /// Whether the provider supports native tool calling.
     pub native_tools: bool,
 }
@@ -62,7 +63,6 @@ impl Default for SystemPromptConfig {
             run_mode: RunMode::Interactive,
             identity_header: None,
             max_chars: 0,
-            bootstrap_max_chars: 20_000,
             native_tools: true,
         }
     }
@@ -95,13 +95,10 @@ impl SystemPromptBuilder {
         sections.push(self.build_safety());
         sections.push(self.build_run_mode_rules());
 
-        // Sections 6–10: from RULES.md if present, else individual defaults.
-        sections.extend(self.build_behavioral_rules());
+        sections.extend(Self::behavioral_rules());
 
         sections.push(SECTION_READ_BEFORE_EDIT.to_string());
         sections.push(SECTION_SYSTEM_REMINDERS.to_string());
-        sections.push(self.build_workspace());
-        sections.push(self.build_bootstrap_files());
         sections.push(self.build_runtime());
 
         let prompt = sections
@@ -146,18 +143,10 @@ impl SystemPromptBuilder {
         }
     }
 
-    /// Sections 6–10: loads RULES.md if present; otherwise returns five
-    /// individual hardcoded defaults.
-    fn build_behavioral_rules(&self) -> Vec<String> {
-        if !self.config.workspace_dir.is_empty() {
-            let path = Path::new(&self.config.workspace_dir).join("RULES.md");
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                let trimmed = content.trim();
-                if !trimmed.is_empty() {
-                    return vec![Self::truncate_str(trimmed, self.config.bootstrap_max_chars)];
-                }
-            }
-        }
+    /// Sections 6–10: five hardcoded behavioral rule sections.
+    /// RFC v2 removes the RULES.md override—AGENT.md is the place to
+    /// customize behavior, and global rules are non-negotiable.
+    fn behavioral_rules() -> Vec<String> {
         vec![
             SECTION_TASK_PERSISTENCE.to_string(),
             SECTION_NO_OVER_ENGINEERING.to_string(),
@@ -167,43 +156,16 @@ impl SystemPromptBuilder {
         ]
     }
 
-    fn build_workspace(&self) -> String {
-        if self.config.workspace_dir.is_empty() {
-            return String::new();
-        }
-        format!(
-            "## Workspace\n\nWorking directory: {}\n\nYour workspace files are pre-loaded below.",
-            self.config.workspace_dir
-        )
-    }
-
-    fn build_bootstrap_files(&self) -> String {
-        if self.config.workspace_dir.is_empty() {
-            return String::new();
-        }
-        let dir = Path::new(&self.config.workspace_dir);
-        let files = ["IDENTITY.md", "SOUL.md", "USER.md"];
-        let mut sections = Vec::new();
-        for filename in files {
-            let path = dir.join(filename);
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                let trimmed = content.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let truncated = Self::truncate_str(trimmed, self.config.bootstrap_max_chars);
-                sections.push(format!("### {}\n\n{}", filename, truncated));
-            }
-        }
-        if sections.is_empty() {
-            String::new()
-        } else {
-            format!("## Workspace Files\n\n{}", sections.join("\n\n"))
-        }
-    }
-
     fn build_runtime(&self) -> String {
-        format!("## Runtime\n\nOS: {}", crate::sys_info::runtime_info())
+        if self.config.workspace_dir.is_empty() {
+            format!("## Runtime\n\nOS: {}", crate::sys_info::runtime_info())
+        } else {
+            format!(
+                "## Runtime\n\nWorking directory: {}\nOS: {}",
+                self.config.workspace_dir,
+                crate::sys_info::runtime_info()
+            )
+        }
     }
 
     // ── Utilities ─────────────────────────────────────────────────────────────
@@ -216,16 +178,6 @@ impl SystemPromptBuilder {
         text.truncate(end_byte);
         text.push_str("\n\n[... system prompt truncated ...]");
         text
-    }
-
-    fn truncate_str(s: &str, max_chars: usize) -> String {
-        if s.chars().count() <= max_chars {
-            s.to_string()
-        } else {
-            let mut r = str_utils::truncate_chars(s, max_chars).to_string();
-            r.push_str("\n\n[... truncated ...]");
-            r
-        }
     }
 }
 

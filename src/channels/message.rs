@@ -140,6 +140,25 @@ pub trait Channel: Send + Sync {
 
     /// Cancel the current turn for a session (ClientChannel only).
     fn cancel_turn(&self, _session_key: &str) {}
+
+    /// Forward a per-turn event to the channel addressed by `reply_target`.
+    ///
+    /// RFC v2 §三.B: replaces the prepare/take_stream_context two-call dance.
+    /// `Agent.run()` calls this whenever it has a `TurnEvent` to surface
+    /// (text chunk, tool call, thinking delta). Non-streaming channels keep
+    /// the default no-op; `ClientChannel` overrides to push into the
+    /// per-reply_target stream.
+    async fn push_event(&self, _reply_target: &str, _event: TurnEvent) {}
+
+    /// Get a cancellation token for the current turn at `reply_target`, if any.
+    ///
+    /// RFC v2 §三.B: `Agent.run()` polls this once per turn to decide whether
+    /// it should abort the LLM call on user request. Non-streaming channels
+    /// keep the default `None`; `ClientChannel` overrides to look up the
+    /// token registered via `cancel_signal_register`.
+    fn cancel_signal(&self, _reply_target: &str) -> Option<CancellationToken> {
+        None
+    }
 }
 
 /// Dedup state for a channel adapter (in-memory).

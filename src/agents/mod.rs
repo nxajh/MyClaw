@@ -21,6 +21,7 @@ pub mod commands;
 pub mod turn_event;
 pub mod turn;
 pub mod delegator;
+pub mod llm_stream;
 
 /// Scheduling: cron jobs, webhooks, heartbeat scheduler.
 pub mod scheduling;

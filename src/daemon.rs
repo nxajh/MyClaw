@@ -587,7 +587,6 @@ fn build_prompt_config(
         permission_mode: cfg.permission_mode,
         run_mode: RunMode::Interactive,
         max_chars: cfg.prompt.max_chars,
-        bootstrap_max_chars: cfg.prompt.bootstrap_max_chars,
         native_tools: cfg.prompt.native_tools,
         identity_header: None,
     }

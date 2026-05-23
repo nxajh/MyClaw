@@ -131,10 +131,6 @@ pub struct PromptConfig {
     #[serde(default)]
     pub max_chars: usize,
 
-    /// Maximum bytes to load from each bootstrap file.
-    #[serde(default = "default_bootstrap_max_chars")]
-    pub bootstrap_max_chars: usize,
-
     /// Use native tool calling (vs XML protocol).
     #[serde(default = "default_true")]
     pub native_tools: bool,
@@ -150,7 +146,6 @@ pub struct PromptConfig {
     pub timezone_offset: i32,
 }
 
-fn default_bootstrap_max_chars() -> usize { 8000 }
 fn default_timezone_offset() -> i32 { 8 }
 
 fn default_true() -> bool { true }
@@ -159,7 +154,6 @@ impl Default for PromptConfig {
     fn default() -> Self {
         Self {
             max_chars: 0,
-            bootstrap_max_chars: default_bootstrap_max_chars(),
             native_tools: true,
             timezone: None,
             timezone_offset: default_timezone_offset(),

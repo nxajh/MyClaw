@@ -5,9 +5,9 @@
 
 ## 进度统计
 
-- 完成：6 / 61
+- 完成：10 / 61
 - 进行中：0
-- 待办：55
+- 待办：51
 
 ## 模块 A：类型基础（0/11）
 
@@ -15,12 +15,12 @@
 - [ ] A2. `AgentRuntime` struct（8 字段）+ `RuntimeDefaults` struct
 - [ ] A3. `Tool` trait 加 `source() -> ToolSource`；execute 加 `&Session`；`ToolSource` enum
 - [x] A4. `ToolFilter` / `SkillFilter` / `McpFilter` enum (All/Allow/Deny) → `src/config/filters.rs`
-- [ ] A5. `Channel` trait 加默认 no-op 方法 `push_event` / `cancel_signal`
+- [x] A5. `Channel` trait 加默认 no-op 方法 `push_event` / `cancel_signal`
 - [x] A6. `ChannelMessage` 加 `#[derive(Serialize, Deserialize)]`（MediaAttachment 同步）
 - [x] A7. `AgentDelegator` trait（`delegate` + `list_available`）→ `src/agents/delegator.rs`
 - [ ] A8. `DelegationEvent` enum（Completed / Failed，含 parent_session_id）
 - [x] A9. `SessionNotOwned` 错误类型 → `src/agents/session/manager.rs`
-- [ ] A10. `llm_stream` 模块（常量 + read/read_streamed 函数）
+- [x] A10. `llm_stream` 模块（常量 + read/read_streamed 函数）→ `src/agents/llm_stream.rs`
 - [x] A11. `ProviderRegistry` trait — `ServiceRegistry` 重命名 ← `ef94853..HEAD`
 
 ## 模块 B：Session / SessionContext / SessionManager（0/4）
@@ -45,7 +45,7 @@
 - [ ] D23. `GlobalConfig` 按模块拆段
 - [ ] D24. `AgentRegistry` 实现为 `Arc<RwLock<HashMap>>`，含 reload_from_dir
 - [ ] D25. `WorkspaceWatcher` 改为自维护
-- [ ] D26. `prompt.rs` 删 IDENTITY/SOUL/USER.md 读取；改参数化 build_prompt
+- [x] D26. `prompt.rs` 删 IDENTITY/SOUL/USER.md/RULES.md 读取（部分：build_prompt 参数化在 C18 完成）
 - [ ] D27. 启动校验 main/AGENT.md 缺失则报错
 
 ## 模块 E：路由（0/7）
@@ -86,8 +86,8 @@
 - [ ] H52. 删 Session.last_reply_target
 - [ ] H53. 删 [defaults]/[limits]/[context] config 段
 - [ ] H54. 删 stream_first_chunk_timeout_secs / max_output_bytes 配置项
-- [ ] H55. 删 IDENTITY.md / SOUL.md / RULES.md
-- [ ] H56. 删 USER.md
+- [x] H55. 删 IDENTITY.md / SOUL.md / RULES.md 读取（代码侧）
+- [x] H56. 删 USER.md 读取（代码侧；G40 补 UserProfile 注入）
 - [ ] H57. 删 ClientChannel.loop_registry / evict_loop
 
 ## 模块 I：数据迁移（0/4）
@@ -102,6 +102,17 @@
 ## 实施日志
 
 按时间倒序记录每次推进。
+
+### A5 / A10 / D26 / H55 / H56 — 通道默认方法 + 流读取常量 + prompt 清理
+
+- A5：Channel trait 加 `push_event(reply_target, event)` 和
+  `cancel_signal(reply_target) -> Option<CancellationToken>` 默认方法
+- A10：`src/agents/llm_stream.rs` 新建，定义 STREAM_FIRST_CHUNK_TIMEOUT
+  (600s) / STREAM_CHUNK_INTERVAL_TIMEOUT (120s)，read_next / read_to_string 辅助
+- D26 + H55 + H56：prompt.rs 删 RULES.md / IDENTITY.md / SOUL.md / USER.md
+  读取代码；behavioral rules 退化为五个硬编码 section；workspace_dir 信息折入
+  Runtime section；删 `bootstrap_max_chars` 配置字段
+- 11 个 prompt 单元测试全部通过
 
 ### A6 / A7 — ChannelMessage 可序列化 + AgentDelegator trait
 
