@@ -20,6 +20,7 @@ mod sub_agent;
 pub mod commands;
 pub mod turn_event;
 pub mod turn;
+pub mod delegator;
 
 /// Scheduling: cron jobs, webhooks, heartbeat scheduler.
 pub mod scheduling;
@@ -39,6 +40,7 @@ pub use agent_impl::{Agent, AgentConfig, AgentLoop, AskUserHandler, DelegateHand
 pub use recovery::UnfinishedSubAgent;
 pub use turn_event::TurnEvent;
 pub use turn::{TurnContext, TurnResult};
+pub use delegator::AgentDelegator;
 pub use attachment::AttachmentManager;
 pub use workspace::watcher::{WorkspaceWatcher, ChangeSet};
 pub use delegation::{DelegationEvent, DelegationManager};

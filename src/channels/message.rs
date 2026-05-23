@@ -2,6 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -10,7 +11,11 @@ use crate::agents::TurnEvent;
 // ── Core message types ─────────────────────────────────────────────────────────
 
 /// A message received from a channel.
-#[derive(Debug, Clone)]
+///
+/// Serializable so it can be persisted on `Session.last_message`—the
+/// orchestrator needs the original incoming message context (sender,
+/// reply_target, attached images) for ask_user, push_event, and recovery.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelMessage {
     pub id: String,
     pub sender: String,
@@ -73,7 +78,7 @@ impl SendMessage {
 }
 
 /// A media attachment.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaAttachment {
     pub file_name: String,
     pub data: Vec<u8>,

@@ -5,9 +5,9 @@
 
 ## 进度统计
 
-- 完成：4 / 61
+- 完成：6 / 61
 - 进行中：0
-- 待办：57
+- 待办：55
 
 ## 模块 A：类型基础（0/11）
 
@@ -16,8 +16,8 @@
 - [ ] A3. `Tool` trait 加 `source() -> ToolSource`；execute 加 `&Session`；`ToolSource` enum
 - [x] A4. `ToolFilter` / `SkillFilter` / `McpFilter` enum (All/Allow/Deny) → `src/config/filters.rs`
 - [ ] A5. `Channel` trait 加默认 no-op 方法 `push_event` / `cancel_signal`
-- [ ] A6. `ChannelMessage` 加 `#[derive(Serialize, Deserialize)]`
-- [ ] A7. `AgentDelegator` trait（`delegate` + `list_available`）
+- [x] A6. `ChannelMessage` 加 `#[derive(Serialize, Deserialize)]`（MediaAttachment 同步）
+- [x] A7. `AgentDelegator` trait（`delegate` + `list_available`）→ `src/agents/delegator.rs`
 - [ ] A8. `DelegationEvent` enum（Completed / Failed，含 parent_session_id）
 - [x] A9. `SessionNotOwned` 错误类型 → `src/agents/session/manager.rs`
 - [ ] A10. `llm_stream` 模块（常量 + read/read_streamed 函数）
@@ -102,6 +102,14 @@
 ## 实施日志
 
 按时间倒序记录每次推进。
+
+### A6 / A7 — ChannelMessage 可序列化 + AgentDelegator trait
+
+- A6：ChannelMessage / MediaAttachment 加 Serialize + Deserialize（为
+  Session.last_message 持久化做准备）
+- A7：src/agents/delegator.rs 定义 AgentDelegator trait（delegate + list_available）；
+  与现有 TaskDelegator 共存，后续 F35 / F36 切换
+- 构建通过
 
 ### A1 / A4 / A9 三个新增类型
 
