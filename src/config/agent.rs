@@ -66,10 +66,6 @@ pub struct AgentConfig {
     #[serde(default = "default_max_tool_calls")]
     pub max_tool_calls: usize,
 
-    /// Maximum conversation history messages to keep. 0 = unlimited.
-    #[serde(default = "default_max_history")]
-    pub max_history: usize,
-
     /// Permission mode — controls tool approval requirements.
     #[serde(default)]
     pub permission_mode: PermissionMode,
@@ -77,12 +73,6 @@ pub struct AgentConfig {
     /// Tool call timeout in seconds.
     #[serde(default = "default_tool_timeout")]
     pub tool_timeout_secs: u64,
-
-    /// Timeout in seconds waiting for the first streaming chunk from the API.
-    /// Covers slow startup on large contexts; after the first chunk arrives,
-    /// TCP keepalive handles dead-connection detection at the OS level.
-    #[serde(default = "default_stream_first_chunk_timeout")]
-    pub stream_first_chunk_timeout_secs: u64,
 
     /// Loop breaker: max consecutive identical tool calls before breaking.
     #[serde(default = "default_loop_breaker_threshold")]
@@ -101,19 +91,15 @@ pub struct AgentConfig {
 }
 
 fn default_max_tool_calls() -> usize { 100 }
-fn default_max_history() -> usize { 200 }
 fn default_tool_timeout() -> u64 { 180 }
-fn default_stream_first_chunk_timeout() -> u64 { 600 }
 fn default_loop_breaker_threshold() -> u32 { 3 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             max_tool_calls: default_max_tool_calls(),
-            max_history: default_max_history(),
             permission_mode: PermissionMode::Default,
             tool_timeout_secs: default_tool_timeout(),
-            stream_first_chunk_timeout_secs: default_stream_first_chunk_timeout(),
             loop_breaker_threshold: default_loop_breaker_threshold(),
             prompt: PromptConfig::default(),
             context: ContextConfig::default(),
@@ -171,7 +157,6 @@ mod tests {
     fn default_agent_config() {
         let config = AgentConfig::default();
         assert_eq!(config.max_tool_calls, 100);
-        assert_eq!(config.max_history, 200);
         assert_eq!(config.permission_mode, PermissionMode::Default);
         assert_eq!(config.tool_timeout_secs, 180);
         assert!(config.prompt.native_tools);

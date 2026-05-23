@@ -66,16 +66,10 @@ use super::request_builder::RequestBuilder;
 pub struct AgentConfig {
     /// Hard cap on tool calls per turn. 0 = unlimited.
     pub max_tool_calls: usize,
-    /// Maximum history messages to keep in memory. 0 = unlimited.
-    pub max_history: usize,
     /// System prompt builder config.
     pub prompt_config: SystemPromptConfig,
     /// Context window management settings.
     pub context: ContextConfig,
-    /// Timeout for the first chunk from the stream (API startup latency on large contexts).
-    pub stream_first_chunk_timeout_secs: u64,
-    /// Max output bytes before forcing stream stop (derived from max_output_tokens).
-    pub max_output_bytes: usize,
     /// Loop breaker exact-repeat threshold: N identical consecutive calls → break.
     pub loop_breaker_threshold: usize,
     /// Per-tool execution timeout in seconds (0 = no timeout).
@@ -93,11 +87,8 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             max_tool_calls: 100,
-            max_history: 200,
             prompt_config: SystemPromptConfig::default(),
             context: ContextConfig::default(),
-            stream_first_chunk_timeout_secs: 600,
-            max_output_bytes: 100 * 1024,
             loop_breaker_threshold: 3,
             tool_timeout_secs: 180,
             model_override: None,
@@ -241,7 +232,6 @@ impl Agent {
                 Arc::clone(&self.registry),
                 Arc::clone(&resources),
                 Arc::clone(&self.tools),
-                config.stream_first_chunk_timeout_secs,
             ),
             tool_executor: DefaultToolExecutor::new(Arc::clone(&self.tools), config.tool_timeout_secs),
             config,

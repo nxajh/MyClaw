@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use futures_util::StreamExt;
 
@@ -35,7 +34,6 @@ pub(crate) struct CompactionExecutor {
     resources: Arc<ResourceProvider>,
     memory_executor: MemoryToolExecutor,
     max_rounds: usize,
-    stream_chunk_timeout_secs: u64,
 }
 
 impl CompactionExecutor {
@@ -43,14 +41,12 @@ impl CompactionExecutor {
         registry: Arc<dyn ProviderRegistry>,
         resources: Arc<ResourceProvider>,
         tools: Arc<ToolRegistry>,
-        stream_chunk_timeout_secs: u64,
     ) -> Self {
         Self {
             registry,
             resources,
             memory_executor: MemoryToolExecutor::new(tools),
             max_rounds: 10,
-            stream_chunk_timeout_secs,
         }
     }
 
@@ -250,7 +246,7 @@ impl CompactionExecutor {
         let mut thinking_signature: Option<String> = None;
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut usage: Option<ChatUsage> = None;
-        let chunk_timeout = Duration::from_secs(self.stream_chunk_timeout_secs);
+        let chunk_timeout = crate::agents::llm_stream::STREAM_FIRST_CHUNK_TIMEOUT;
 
         loop {
             match tokio::time::timeout(chunk_timeout, stream.next()).await {
@@ -305,7 +301,7 @@ impl CompactionExecutor {
                 }
                 Err(_) => anyhow::bail!(
                     "summarizer stream chunk timeout after {}s",
-                    self.stream_chunk_timeout_secs
+                    chunk_timeout.as_secs()
                 ),
             }
         }

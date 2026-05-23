@@ -248,7 +248,6 @@ impl SubAgentDelegator {
 
         let agent_config = crate::agents::AgentConfig {
             max_tool_calls: config.max_tool_calls.unwrap_or(self.default_max_tool_calls),
-            max_history: 100,
             prompt_config: crate::agents::SystemPromptConfig {
                 workspace_dir,
                 permission_mode: crate::agents::PermissionMode::Full,

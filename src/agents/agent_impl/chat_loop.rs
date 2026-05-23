@@ -191,7 +191,7 @@ pub(super) async fn chat_loop(
                             crate::providers::FailoverReason::Timeout => {
                                 tracing::error!("stream timeout, giving up");
                                 return Err(super::super::error::AgentError::StreamTimeout {
-                                    secs: loop_.config.stream_first_chunk_timeout_secs,
+                                    secs: crate::agents::llm_stream::STREAM_FIRST_CHUNK_TIMEOUT.as_secs(),
                                 }.into());
                             }
                             _ => {

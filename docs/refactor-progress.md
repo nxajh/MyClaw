@@ -5,9 +5,9 @@
 
 ## 进度统计
 
-- 完成：10 / 61
+- 完成：12 / 61
 - 进行中：0
-- 待办：51
+- 待办：49
 
 ## 模块 A：类型基础（0/11）
 
@@ -82,10 +82,10 @@
 - [ ] H48. 删 SchedulerContext / WebhookContext
 - [ ] H49. 删 AskUserHandler / DelegateHandler 闭包类型
 - [ ] H50. 删 subagent_running_*.json marker 文件机制
-- [ ] H51. 删 AgentConfig.max_history
+- [x] H51. 删 AgentConfig.max_history（死字段）
 - [ ] H52. 删 Session.last_reply_target
 - [ ] H53. 删 [defaults]/[limits]/[context] config 段
-- [ ] H54. 删 stream_first_chunk_timeout_secs / max_output_bytes 配置项
+- [x] H54. 删 stream_first_chunk_timeout_secs / max_output_bytes 配置项；常量内联
 - [x] H55. 删 IDENTITY.md / SOUL.md / RULES.md 读取（代码侧）
 - [x] H56. 删 USER.md 读取（代码侧；G40 补 UserProfile 注入）
 - [ ] H57. 删 ClientChannel.loop_registry / evict_loop
@@ -102,6 +102,14 @@
 ## 实施日志
 
 按时间倒序记录每次推进。
+
+### H51 / H54 — 删 max_history / max_output_bytes / stream_first_chunk_timeout_secs
+
+- AgentConfig.max_history 是死字段，从未读取，直接删除（config + AgentConfig + sub_agent + daemon）
+- stream_first_chunk_timeout_secs / max_output_bytes 替换为 llm_stream 模块常量
+  + 100 KiB 字面量；CompactionExecutor::new 从 4 参数退化为 3 参数
+- daemon.rs 删 calculate_max_output_bytes 辅助函数（~30 行）
+- 361 个 lib 测试全部通过
 
 ### A5 / A10 / D26 / H55 / H56 — 通道默认方法 + 流读取常量 + prompt 清理
 

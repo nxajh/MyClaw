@@ -1,4 +1,3 @@
-use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -264,8 +263,10 @@ impl AgentLoop {
         let mut stop_reason = StopReason::EndTurn;
         let mut usage: Option<ChatUsage> = None;
 
-        let first_chunk_timeout = Duration::from_secs(self.config.stream_first_chunk_timeout_secs);
-        let max_output_bytes = self.config.max_output_bytes;
+        let first_chunk_timeout = crate::agents::llm_stream::STREAM_FIRST_CHUNK_TIMEOUT;
+        // Output cap derived from chat model's max_output_tokens (defensive only —
+        // providers stop on their own). 100 KiB matches the previous default.
+        let max_output_bytes: usize = 100 * 1024;
         let mut received_first_chunk = false;
 
         loop {
