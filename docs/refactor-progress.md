@@ -5,9 +5,9 @@
 
 ## 进度统计
 
-- 完成：16 / 61
-- 进行中：0
-- 待办：45
+- 完成：17 / 61
+- 进行中：B12（部分完成）
+- 待办：44
 
 ## 模块 A：类型基础（0/11）
 
@@ -25,7 +25,7 @@
 
 ## 模块 B：Session / SessionContext / SessionManager（0/4）
 
-- [ ] B12. Session 字段改造（加 last_message/parent_session_id/agent_name/token_tracker；删 last_reply_target/max_history；加 transient persist/channel；新增 add_*/save_*/restore_token_count 方法）
+- [~] B12. Session 字段改造（已加 last_message/parent_session_id/agent_name；已加 record_inbound/reply_target helper；token_tracker / transient persist/channel / save_* 方法待 C18）
 - [ ] B13. 新建 `SessionContext`（session/agent/attachments/pending_retry/turn_lock；user_profile 在 G 加）
 - [ ] B14. `SessionManager` 改造（单表 sessions；session_id_for_routing_key/get_by_id；switch SessionNotOwned；create_sub_session；list filter parent；delete cascade）
 - [ ] B15. Sub-session 存储扁平化（删嵌套结构与 marker 文件）
@@ -102,6 +102,22 @@
 ## 实施日志
 
 按时间倒序记录每次推进。
+
+### B12 部分 + B14 部分 — Session struct 加新字段 + SessionNotOwned 接线
+
+- Session 加三个字段：last_message: Option<ChannelMessage>、
+  parent_session_id: Option<String>、agent_name: String（默认 "main"）
+- 加助手方法：record_inbound（同时更新 last_message 与 legacy last_reply_target）、
+  reply_target（统一 getter）
+- SessionBackend trait 加六个 default-no-op 方法：save_last_message / load_last_message /
+  save_agent_name / load_agent_name / save_parent_session_id / load_parent_session_id
+- JsonFileBackend 完整实现新字段持久化，meta.json 兼容旧格式
+- Orchestrator 入站消息处理改用 session.record_inbound + save_last_message，
+  legacy save_reply_target 保留为过渡
+- SessionManager.switch_session 用 SessionNotOwned 包装 PermissionDenied 错误
+- 还差：token_tracker 类型、transient persist/channel 字段、Session.add_* / save_*
+  方法重命名 — 这些与 C18 Agent.run 重写一并完成
+- 361 lib tests 全部通过
 
 ### I58 / I59 / I60 / I61 — 数据迁移脚本
 

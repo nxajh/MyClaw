@@ -162,6 +162,9 @@ impl SessionManager {
         let mut session = Session {
             id: session_id.clone(),
             owner: user_id.to_string(),
+            agent_name: self.backend.load_agent_name(&session_id)
+                .unwrap_or_else(|| "main".to_string()),
+            parent_session_id: self.backend.load_parent_session_id(&session_id),
             history: msgs,
             message_ids: ids,
             compact_version: compact_ver,
@@ -170,6 +173,7 @@ impl SessionManager {
             session_override,
             incomplete_turn: false,
             breakpoint_items: breakpoints,
+            last_message: self.backend.load_last_message(&session_id),
             last_reply_target,
         };
 
@@ -246,12 +250,21 @@ impl SessionManager {
     }
 
     /// Switch to an existing session.
+    ///
+    /// Returns `SessionNotOwned` (wrapped in io::Error::Other) when the session
+    /// exists but belongs to a different routing_key. UI should catch this and
+    /// offer to create a new session in the current channel instead of bouncing
+    /// the user to the other channel's session pool.
     pub fn switch_session(&self, user_id: &str, session_id: &str) -> std::io::Result<SessionInfo> {
         let info = self.backend.get_session(session_id)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "session not found"))?;
 
         if info.owner != user_id {
-            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "not your session"));
+            let err = SessionNotOwned {
+                session_id: session_id.to_string(),
+                routing_key: user_id.to_string(),
+            };
+            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, err));
         }
 
         // Invalidate old cached session.

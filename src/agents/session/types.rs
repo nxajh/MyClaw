@@ -1,5 +1,6 @@
 //! Session types — SummaryMetadata and Session struct.
 
+use crate::channels::ChannelMessage;
 use crate::providers::capability_chat::ChatMessage;
 use super::session_override::SessionOverride;
 use super::recovery::BreakpointItem;
@@ -12,13 +13,29 @@ pub struct SummaryMetadata {
     pub up_to_message: i64,
 }
 
-/// Per-session conversation state held by AgentLoop.
+/// Per-session conversation state.
+///
+/// Per RFC v2 §三.A the Session holds:
+/// - The incremental conversation history and its persistence-bookkeeping.
+/// - The last incoming ChannelMessage so retry / recovery / ask_user replies
+///   land back on the same channel + reply_target.
+/// - Optional `parent_session_id` for sub-sessions spawned by `agent_delegate`.
+/// - `agent_name` identifying which agent in `workspace/agents/` owns this
+///   session (defaults to "main").
 #[derive(Debug, Clone)]
 pub struct Session {
     /// Session ID (e.g. "k3jr9px2").
     pub id: String,
-    /// Owner user ID (e.g. "telegram:12345").
+    /// Owner routing key (e.g. "telegram:default:12345").
+    /// RFC v2 renames "owner" semantically to `routing_key`; the field stays
+    /// named `owner` for source-diff churn reasons.
     pub owner: String,
+    /// Agent name that owns this session. References `workspace/agents/{name}/AGENT.md`.
+    /// Defaults to "main"; sub-sessions inherit their delegating agent's name.
+    pub agent_name: String,
+    /// Parent session ID for sub-sessions spawned by `agent_delegate`.
+    /// `None` for top-level user sessions.
+    pub parent_session_id: Option<String>,
     /// Current conversation history (in-memory).
     pub history: Vec<ChatMessage>,
     /// Parallel to `history`: database message IDs, 0 for summary or unpersisted messages.
@@ -42,9 +59,14 @@ pub struct Session {
     /// Detected on session load; used by the orchestrator to inject a
     /// recovery prompt so the model can re-execute the missing tools.
     pub breakpoint_items: Vec<BreakpointItem>,
-    /// Last reply_target used for this session (e.g. "c2c:<openid>", "group:<group_openid>").
-    /// Used by startup recovery to send the response to the correct target.
-    /// Not persisted — set from incoming ChannelMessage.
+    /// Last incoming ChannelMessage. Carries sender, reply_target, attachments,
+    /// images. Persisted so startup recovery can reconstruct the routing
+    /// context and resume an interrupted turn. RFC v2 §三.A replaces the old
+    /// `last_reply_target: Option<String>` field with this richer message.
+    pub last_message: Option<ChannelMessage>,
+    /// DEPRECATED transitional field — use `last_message.as_ref().map(|m| &m.reply_target)`.
+    /// Kept to avoid churning the orchestrator in this commit; removed once
+    /// callers migrate to `last_message`.
     pub last_reply_target: Option<String>,
 }
 
@@ -53,6 +75,8 @@ impl Session {
         Self {
             owner: String::new(),
             id,
+            agent_name: "main".to_string(),
+            parent_session_id: None,
             history: Vec::new(),
             message_ids: Vec::new(),
             compact_version: 0,
@@ -61,8 +85,27 @@ impl Session {
             session_override: SessionOverride::default(),
             incomplete_turn: false,
             breakpoint_items: Vec::new(),
+            last_message: None,
             last_reply_target: None,
         }
+    }
+
+    /// Return the routing target for the next outbound message, derived from
+    /// the most recently stored ChannelMessage. Falls back to the deprecated
+    /// `last_reply_target` field when migration is mid-flight.
+    pub fn reply_target(&self) -> Option<&str> {
+        self.last_message
+            .as_ref()
+            .map(|m| m.reply_target.as_str())
+            .or(self.last_reply_target.as_deref())
+    }
+
+    /// Store the incoming message context. Updates both the new
+    /// `last_message` field and (transitionally) the legacy `last_reply_target`
+    /// so existing readers continue to work until migrated.
+    pub fn record_inbound(&mut self, msg: ChannelMessage) {
+        self.last_reply_target = Some(msg.reply_target.clone());
+        self.last_message = Some(msg);
     }
 
     /// Append a user message to history.

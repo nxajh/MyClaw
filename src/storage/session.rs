@@ -132,6 +132,47 @@ pub trait SessionBackend: Send + Sync {
         None
     }
 
+    /// Persist the last incoming ChannelMessage as JSON.
+    /// RFC v2 §三.A: richer than `save_reply_target` — carries sender +
+    /// attachments + images so startup recovery can replay context.
+    fn save_last_message(
+        &self,
+        _session_id: &str,
+        _msg: &crate::channels::ChannelMessage,
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Load the persisted last ChannelMessage.
+    fn load_last_message(&self, _session_id: &str) -> Option<crate::channels::ChannelMessage> {
+        None
+    }
+
+    /// Persist the agent_name owning this session ("main" for top-level, or
+    /// the sub-agent name for delegate-spawned sessions).
+    fn save_agent_name(&self, _session_id: &str, _name: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Load the agent_name. None → caller uses "main" default.
+    fn load_agent_name(&self, _session_id: &str) -> Option<String> {
+        None
+    }
+
+    /// Persist parent_session_id (sub-sessions only).
+    fn save_parent_session_id(
+        &self,
+        _session_id: &str,
+        _parent: &str,
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Load parent_session_id. None → top-level session.
+    fn load_parent_session_id(&self, _session_id: &str) -> Option<String> {
+        None
+    }
+
     // ── Maintenance ────────────────────────────────────────────────────────
 
     /// Clean up sessions older than ttl_hours.

@@ -659,12 +659,19 @@ impl Orchestrator {
                         }
                     }
 
-                    // Store reply_target on session for startup recovery.
+                    // B12: store full inbound ChannelMessage on session so
+                    // startup recovery can reconstruct the routing context
+                    // (sender + reply_target + attachments). Falls back to
+                    // legacy reply_target field via record_inbound.
                     {
                         let mut session = self.session_manager.get_or_create(&sk);
-                        session.last_reply_target = Some(reply_target.clone());
+                        session.record_inbound(msg.clone());
                     }
-                    // Persist reply_target so it survives restarts.
+                    // Persist: prefer save_last_message (richer); save_reply_target
+                    // is kept until all readers migrate to last_message.
+                    if let Err(e) = self.persist_backend.save_last_message(&sk, &msg) {
+                        tracing::warn!(session = %sk, err = %e, "failed to persist last_message");
+                    }
                     if let Err(e) = self.persist_backend.save_reply_target(&sk, &reply_target) {
                         tracing::warn!(session = %sk, err = %e, "failed to persist reply_target");
                     }
