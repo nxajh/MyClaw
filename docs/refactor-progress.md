@@ -5,21 +5,21 @@
 
 ## 进度统计
 
-- 完成：1 / 61
+- 完成：4 / 61
 - 进行中：0
-- 待办：60
+- 待办：57
 
 ## 模块 A：类型基础（0/11）
 
-- [ ] A1. `TurnContext`（5 字段）/ `TurnResult`
+- [x] A1. `TurnContext`（5 字段）/ `TurnResult` → `src/agents/turn.rs`
 - [ ] A2. `AgentRuntime` struct（8 字段）+ `RuntimeDefaults` struct
 - [ ] A3. `Tool` trait 加 `source() -> ToolSource`；execute 加 `&Session`；`ToolSource` enum
-- [ ] A4. `ToolFilter` / `SkillFilter` / `McpFilter` enum (All/Allow/Deny)
+- [x] A4. `ToolFilter` / `SkillFilter` / `McpFilter` enum (All/Allow/Deny) → `src/config/filters.rs`
 - [ ] A5. `Channel` trait 加默认 no-op 方法 `push_event` / `cancel_signal`
 - [ ] A6. `ChannelMessage` 加 `#[derive(Serialize, Deserialize)]`
 - [ ] A7. `AgentDelegator` trait（`delegate` + `list_available`）
 - [ ] A8. `DelegationEvent` enum（Completed / Failed，含 parent_session_id）
-- [ ] A9. `SessionNotOwned` 错误类型
+- [x] A9. `SessionNotOwned` 错误类型 → `src/agents/session/manager.rs`
 - [ ] A10. `llm_stream` 模块（常量 + read/read_streamed 函数）
 - [x] A11. `ProviderRegistry` trait — `ServiceRegistry` 重命名 ← `ef94853..HEAD`
 
@@ -102,6 +102,13 @@
 ## 实施日志
 
 按时间倒序记录每次推进。
+
+### A1 / A4 / A9 三个新增类型
+
+- A1：`src/agents/turn.rs` 新建，定义 `TurnContext<'a>` (5 字段) + `TurnResult`
+- A4：`src/config/filters.rs` 新建，定义 `NameFilter` (All/Allow/Deny) + 三个别名 `ToolFilter` / `SkillFilter` / `McpFilter`；带 3 个单元测试
+- A9：`src/agents/session/manager.rs` 加 `SessionNotOwned` 错误类型；mod.rs 导出
+- 构建通过，新增的 3 个 filter 测试也通过
 
 ### A11 ServiceRegistry → ProviderRegistry 重命名
 

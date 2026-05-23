@@ -1,7 +1,34 @@
 //! SessionManager — creates, retrieves, and persists sessions.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::Arc;
+
+/// Returned by `switch_session` when the caller tries to point a routing_key
+/// at a session that doesn't belong to it.
+///
+/// Per RFC v2: cross-channel session takeover is not supported — each
+/// routing_key has its own session pool and may only switch among sessions
+/// it owns. UI should display a friendly error and offer to create a new
+/// session in this channel instead.
+#[derive(Debug, Clone)]
+pub struct SessionNotOwned {
+    pub session_id: String,
+    pub routing_key: String,
+}
+
+impl fmt::Display for SessionNotOwned {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "session '{}' is not owned by routing_key '{}'",
+            self.session_id, self.routing_key
+        )
+    }
+}
+
+impl std::error::Error for SessionNotOwned {}
+
 
 use parking_lot::RwLock;
 
