@@ -25,7 +25,7 @@ pub use session::{cmd_new, cmd_compact, cmd_history, cmd_sessions, cmd_switch, c
 /// Context available to all command handlers.
 pub struct CommandContext<'a> {
     pub user_id: &'a str,
-    pub registry: &'a Arc<dyn crate::providers::ServiceRegistry>,
+    pub registry: &'a Arc<dyn crate::providers::ProviderRegistry>,
     pub session_manager: &'a SessionManager,
     pub agent: &'a Agent,
     /// Access to the current session's agent loop (if it exists).

@@ -41,7 +41,7 @@ pub use agents::{
 pub use channels::{Channel, ChannelMessage, SendMessage, DedupState, ProcessingStatus};
 pub use config::{AppConfig, ConfigLoader};
 pub use registry::{Registry};
-pub use providers::ServiceRegistry;
+pub use providers::ProviderRegistry;
 pub use providers::{
     ChatProvider, FallbackChatProvider, ToolResult,
     XiaomiProvider, // Xiaomi MiMo provider

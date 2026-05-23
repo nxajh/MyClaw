@@ -3,7 +3,7 @@
 //! Agent holds shared resources (registry, skills, config) and creates
 //! per-session AgentLoop handles.
 //!
-//! DDD: Agent depends on `dyn ServiceRegistry` (Domain trait), not on
+//! DDD: Agent depends on `dyn ProviderRegistry` (Domain trait), not on
 //! `Registry` (Infrastructure concrete type). This keeps the Application
 //! layer decoupled from Infrastructure.
 
@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use parking_lot::RwLock;
 use tokio::sync::watch;
 
-use crate::providers::ServiceRegistry;
+use crate::providers::ProviderRegistry;
 use crate::config::agent::ContextConfig;
 use crate::agents::session::SessionOverride;
 
@@ -129,7 +129,7 @@ impl AgentConfig {
 /// Agent is the shared factory — call `.loop_for(session)` to get an AgentLoop.
 #[derive(Clone)]
 pub struct Agent {
-    registry: Arc<dyn ServiceRegistry>,
+    registry: Arc<dyn ProviderRegistry>,
     tools: Arc<ToolRegistry>,
     skills: Arc<RwLock<SkillManager>>,
     config: AgentConfig,
@@ -143,7 +143,7 @@ pub struct Agent {
 
 impl Agent {
     pub fn new(
-        registry: Arc<dyn ServiceRegistry>,
+        registry: Arc<dyn ProviderRegistry>,
         tools: Arc<ToolRegistry>,
         skills: Arc<RwLock<SkillManager>>,
         config: AgentConfig,
@@ -162,7 +162,7 @@ impl Agent {
         }
     }
 
-    pub fn registry(&self) -> &Arc<dyn ServiceRegistry> { &self.registry }
+    pub fn registry(&self) -> &Arc<dyn ProviderRegistry> { &self.registry }
     pub fn tools(&self) -> &Arc<super::tool_registry::ToolRegistry> { &self.tools }
     pub fn skills(&self) -> &Arc<RwLock<SkillManager>> { &self.skills }
 
@@ -261,7 +261,7 @@ impl Agent {
 
 /// Per-session agent loop handle. Execute `run(user_message)` to process a message.
 pub struct AgentLoop {
-    pub(crate) registry: Arc<dyn ServiceRegistry>,
+    pub(crate) registry: Arc<dyn ProviderRegistry>,
     pub(crate) config: AgentConfig,
     pub(crate) session: Session,
     // ── Message building + attachments + images + hot-reload ──

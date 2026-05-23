@@ -73,7 +73,7 @@ pub struct ClientChannel {
     /// Skill manager for skills API (set after construction).
     skill_manager: Arc<RwLock<Option<Arc<RwLock<crate::agents::SkillManager>>>>>,
     /// Service registry for models API (set after construction).
-    service_registry: Arc<RwLock<Option<Arc<dyn crate::providers::ServiceRegistry>>>>,
+    provider_registry: Arc<RwLock<Option<Arc<dyn crate::providers::ProviderRegistry>>>>,
     /// Loop registry for evicting cached AgentLoop on session switch (set after construction).
     loop_registry: Arc<RwLock<Option<LoopRegistryMap>>>,
 }
@@ -94,7 +94,7 @@ impl ClientChannel {
             workspace_dir: Arc::new(RwLock::new(None)),
             config_path: Arc::new(RwLock::new(None)),
             skill_manager: Arc::new(RwLock::new(None)),
-            service_registry: Arc::new(RwLock::new(None)),
+            provider_registry: Arc::new(RwLock::new(None)),
             loop_registry: Arc::new(RwLock::new(None)),
         }
     }
@@ -131,8 +131,8 @@ impl ClientChannel {
     }
 
     /// Set the service registry (called from daemon.rs after construction).
-    pub fn set_service_registry(&self, sr: Arc<dyn crate::providers::ServiceRegistry>) {
-        *self.service_registry.write() = Some(sr);
+    pub fn set_provider_registry(&self, sr: Arc<dyn crate::providers::ProviderRegistry>) {
+        *self.provider_registry.write() = Some(sr);
     }
 
     /// Set the loop registry for evicting cached AgentLoop on session switch.
@@ -175,7 +175,7 @@ impl ClientChannel {
         let workspace_dir = self.workspace_dir.clone();
         let config_path = self.config_path.clone();
         let skill_manager = self.skill_manager.clone();
-        let service_registry = self.service_registry.clone();
+        let provider_registry = self.provider_registry.clone();
         let loop_registry = self.loop_registry.clone();
 
         let local_addr = listener.local_addr()?;
@@ -250,7 +250,7 @@ impl ClientChannel {
                         let workspace_dir_clone = workspace_dir.clone();
                         let config_path_clone = config_path.clone();
                         let skill_manager_clone = skill_manager.clone();
-                        let service_registry_clone = service_registry.clone();
+                        let provider_registry_clone = provider_registry.clone();
                         let loop_registry_clone = loop_registry.clone();
                         let auth_token_clone = auth_token.clone();
 
@@ -471,7 +471,7 @@ impl ClientChannel {
                                                     workspace_dir: &workspace_dir_clone,
                                                     config_path: &config_path_clone,
                                                     skill_manager: &skill_manager_clone,
-                                                    service_registry: &service_registry_clone,
+                                                    provider_registry: &provider_registry_clone,
                                                     loop_registry: &loop_registry_clone,
                                                 },
                                             );
@@ -627,7 +627,7 @@ struct ApiContext<'a> {
     workspace_dir: &'a Arc<RwLock<Option<std::path::PathBuf>>>,
     config_path: &'a Arc<RwLock<Option<std::path::PathBuf>>>,
     skill_manager: &'a Arc<RwLock<Option<Arc<RwLock<crate::agents::SkillManager>>>>>,
-    service_registry: &'a Arc<RwLock<Option<Arc<dyn crate::providers::ServiceRegistry>>>>,
+    provider_registry: &'a Arc<RwLock<Option<Arc<dyn crate::providers::ProviderRegistry>>>>,
     loop_registry: &'a Arc<RwLock<Option<LoopRegistryMap>>>,
 }
 
@@ -1036,7 +1036,7 @@ fn handle_api_request(
         }
 
         "models.list" => {
-            let guard = ctx.service_registry.read();
+            let guard = ctx.provider_registry.read();
             match guard.as_ref() {
                 Some(reg) => {
                     let model_ids = reg.get_chat_routing_models();

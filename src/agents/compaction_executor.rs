@@ -4,7 +4,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 
 use crate::providers::{
-    BoxStream, ChatMessage, ChatRequest, ChatUsage, ContentPart, ServiceRegistry,
+    BoxStream, ChatMessage, ChatRequest, ChatUsage, ContentPart, ProviderRegistry,
     StreamEvent, ThinkingConfig, ToolCall,
 };
 use crate::providers::capability_chat::ToolSpec;
@@ -31,7 +31,7 @@ pub(crate) struct CompactionResult {
 /// the result. MemoryToolExecutor restricts the summarizer to file tools only,
 /// preventing accidental session mutation or sub-agent spawning.
 pub(crate) struct CompactionExecutor {
-    registry: Arc<dyn ServiceRegistry>,
+    registry: Arc<dyn ProviderRegistry>,
     resources: Arc<ResourceProvider>,
     memory_executor: MemoryToolExecutor,
     max_rounds: usize,
@@ -40,7 +40,7 @@ pub(crate) struct CompactionExecutor {
 
 impl CompactionExecutor {
     pub(crate) fn new(
-        registry: Arc<dyn ServiceRegistry>,
+        registry: Arc<dyn ProviderRegistry>,
         resources: Arc<ResourceProvider>,
         tools: Arc<ToolRegistry>,
         stream_chunk_timeout_secs: u64,

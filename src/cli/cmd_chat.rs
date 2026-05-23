@@ -11,7 +11,7 @@ pub async fn run(cli: &Cli, prompt: Option<&str>, agent: Option<&str>, model: Op
 
     let registry = myclaw::registry::Registry::from_config(cfg.providers.clone(), &cfg.routing)
         .map_err(|e| anyhow::anyhow!("failed to build registry: {}", e))?;
-    let registry_arc: Arc<dyn myclaw::ServiceRegistry> = Arc::new(registry);
+    let registry_arc: Arc<dyn myclaw::ProviderRegistry> = Arc::new(registry);
 
     let mut tools = myclaw::ToolRegistry::new();
     for t in myclaw::tools::builtin_tools() {

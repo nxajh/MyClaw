@@ -7,18 +7,18 @@
 
 use async_trait::async_trait;
 use std::sync::Arc;
-use crate::providers::{ServiceRegistry, Tool, ToolResult};
+use crate::providers::{ProviderRegistry, Tool, ToolResult};
 use crate::providers::search::SearchRequest;
 use crate::tools::search_cooldown::{SearchProviderCooldown, parse_search_cooldown};
 use serde_json::json;
 
 pub struct WebSearchTool {
-    registry: Arc<dyn ServiceRegistry>,
+    registry: Arc<dyn ProviderRegistry>,
     cooldown: Arc<SearchProviderCooldown>,
 }
 
 impl WebSearchTool {
-    pub fn new(registry: Arc<dyn ServiceRegistry>, cooldown: Arc<SearchProviderCooldown>) -> Self {
+    pub fn new(registry: Arc<dyn ProviderRegistry>, cooldown: Arc<SearchProviderCooldown>) -> Self {
         Self { registry, cooldown }
     }
 }

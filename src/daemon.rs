@@ -126,7 +126,7 @@ pub fn init_tracing(config: &crate::config::AppConfig) {
 /// Approximate: 1 token ≈ 4 bytes, with 100KB minimum as safety floor.
 fn calculate_max_output_bytes(
     config: &crate::config::AppConfig,
-    _registry: &Arc<dyn crate::providers::ServiceRegistry>,
+    _registry: &Arc<dyn crate::providers::ProviderRegistry>,
 ) -> usize {
     // Try to get max_output_tokens from the first chat model
     let default_bytes = 100 * 1024; // 100KB default
@@ -721,15 +721,15 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let sub_agent_configs_arc: Arc<parking_lot::RwLock<Vec<SubAgentConfig>>> =
         Arc::new(parking_lot::RwLock::new(sub_agent_configs));
 
-    let registry_arc: Arc<dyn crate::providers::ServiceRegistry> = Arc::new(registry);
+    let registry_arc: Arc<dyn crate::providers::ProviderRegistry> = Arc::new(registry);
 
-    // Register WebSearchTool — requires ServiceRegistry for search routing.
+    // Register WebSearchTool — requires ProviderRegistry for search routing.
     let search_cooldown = Arc::new(crate::tools::search_cooldown::SearchProviderCooldown::new());
     tools.register(Arc::new(crate::tools::WebSearchTool::new(
         registry_arc.clone(),
         Arc::clone(&search_cooldown),
     )));
-    tracing::debug!("web_search tool registered (connected to ServiceRegistry)");
+    tracing::debug!("web_search tool registered (connected to ProviderRegistry)");
 
     // WorkspaceWatcher for hot-reload.
     let watcher = crate::agents::WorkspaceWatcher::new(&config.workspace_dir, &config.knowledge_dir)?;
@@ -849,7 +849,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             cc.set_workspace_dir(config.workspace_dir.clone());
             cc.set_config_path(config.config_path.clone());
             cc.set_skill_manager(skills_arc.clone());
-            cc.set_service_registry(registry_arc.clone());
+            cc.set_provider_registry(registry_arc.clone());
 
             // ── WebSocket socket: SO_REUSEPORT / fd inheritance ──────────────
             // Hot switch: reuse the inherited fd so the new process can bind the

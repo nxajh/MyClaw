@@ -1,4 +1,4 @@
-//! ServiceRegistry trait: the single routing point for all provider capabilities.
+//! ProviderRegistry trait: the single routing point for all provider capabilities.
 
 use std::sync::Arc;
 use super::capability::{Capability, ChatModelConfig};
@@ -21,8 +21,8 @@ pub struct ProviderSummary {
     pub search_models: Vec<String>,
 }
 
-/// ServiceRegistry — read-only view consumed by Application / Domain layers.
-pub trait ServiceRegistry: Send + Sync {
+/// ProviderRegistry — read-only view consumed by Application / Domain layers.
+pub trait ProviderRegistry: Send + Sync {
     fn get_chat_provider(&self, capability: Capability) -> anyhow::Result<(Arc<dyn ChatProvider>, String)>;
     fn get_chat_provider_with_hint(&self, capability: Capability, provider_hint: Option<&str>) -> anyhow::Result<(Arc<dyn ChatProvider>, String)>;
     fn get_chat_fallback_chain(&self, capability: Capability) -> anyhow::Result<Vec<(Arc<dyn ChatProvider>, String)>>;

@@ -32,7 +32,7 @@ use crate::agents::session::{BackendPersistHook, PersistHook, Session};
 use crate::agents::skills::SkillManager;
 use crate::agents::tool_registry::ToolRegistry;
 use crate::config::sub_agent::{AgentIsolation, SubAgentConfig};
-use crate::providers::ServiceRegistry;
+use crate::providers::ProviderRegistry;
 use crate::storage::SessionBackend as _;
 use crate::tools::TaskDelegator;
 
@@ -42,7 +42,7 @@ pub struct SubAgentDelegator {
     /// Sub-agent configurations, keyed by name.
     configs: Arc<RwLock<Vec<SubAgentConfig>>>,
     /// Shared service registry (for LLM access).
-    registry: Arc<dyn ServiceRegistry>,
+    registry: Arc<dyn ProviderRegistry>,
     /// Parent tool registry (tools are filtered per sub-agent).
     tools: Arc<ToolRegistry>,
     /// Parent skill manager (shared read-only).
@@ -58,7 +58,7 @@ pub struct SubAgentDelegator {
 impl SubAgentDelegator {
     pub fn new(
         configs: Arc<RwLock<Vec<SubAgentConfig>>>,
-        registry: Arc<dyn ServiceRegistry>,
+        registry: Arc<dyn ProviderRegistry>,
         tools: Arc<ToolRegistry>,
         skills: Arc<RwLock<SkillManager>>,
         default_max_tool_calls: usize,
