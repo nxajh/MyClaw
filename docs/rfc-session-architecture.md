@@ -413,9 +413,9 @@ struct TurnResult {
 
 ```rust
 struct Session {
-    // ── 持久化字段（11 个）──
+    // ── 持久化字段（12 个）──
     id: String,
-    owner: String,                              // routing_key（或 phase 4 后改 user_id）；sub-session 用 "sub:{parent_sid}:{agent_name}"
+    owner: String,                              // routing_key（永远是 rk，phase 4 不改）
     history: Vec<ChatMessage>,
     message_ids: Vec<i64>,
     compact_version: u32,
@@ -460,8 +460,8 @@ impl Session {
 **`last_message: ChannelMessage` 的作用**：
 - 工具读取：ask_user 拿 `session.last_message.reply_target` 作为目标
 - 流式 push：Agent.run 用 `session.last_message.reply_target` 作为 `channel.push_event` 的 target
-- 启动恢复：完整 ChannelMessage 已持久化，恢复时直接重建无需拼接
-- Sub-agent 继承：`sub.last_message = parent.last_message.clone()`，cancel/push 自然继承父 turn
+- 启动恢复：完整 ChannelMessage 已持久化，恢复时直接读出，无需重建/拼接
+- Sub-agent 继承：DelegationCoordinator 构造 synthetic ChannelMessage（content = task 内容，sender / reply_target 取自 parent.last_message），sub_ctx.process_turn 写入 sub_session.last_message；cancel/push 用同一个 reply_target，自然继承父 turn 的 stream
 
 `ChannelMessage` 需要 `#[derive(Serialize, Deserialize)]`。
 
@@ -720,6 +720,28 @@ trait AgentDelegator: Send + Sync {
 `DelegationCoordinator` 实现这个 trait（含 worktree 编排 + create_sub_session + sub_ctx.process_turn）。`DelegateTool` 持 `Arc<dyn AgentDelegator>`，`execute()` 时调 `delegate`，`spec()` 时调 `list_available`。
 
 Agent 启动后 hot-reload 增减 AGENT.md → AgentRegistry 更新 → 下轮 turn 的 DelegateTool.spec() 自动反映最新可委派列表。
+
+### DelegationEvent
+
+子代理完成后发回 Orchestrator 的事件类型：
+
+```rust
+pub enum DelegationEvent {
+    Completed {
+        parent_session_id: String,
+        task_id: String,
+        summary: String,
+        duration_secs: u64,
+    },
+    Failed {
+        parent_session_id: String,
+        task_id: String,
+        error: String,
+    },
+}
+```
+
+Orchestrator 处理后通过合成 ChannelMessage 调父 `ctx.process_turn`，详见 §五 启动恢复流程 / Sub-agent 完成回填到父 session。
 
 ### AgentRegistry（可变，hot-reload）
 
@@ -1236,20 +1258,21 @@ async fn handle_delegation_event(&self, ev: DelegationEvent) {
 12. `DefaultToolExecutor` 重命名为 `ToolExecutor`，timeout 内化为字段，不持 ToolRegistry
 13. 拆 `LoopBreaker` 为全局 policy + per-turn counter，配置从 `[loop_breaker]` 读
 14. `LlmResponseReader` 退化为 `llm_stream::read` 模块函数 + 硬编码常量
-15. 引入 `AgentRuntime` bundle（5 个 Arc 字段）；Orchestrator / DelegationCoordinator 各持一份
-16. 删 `AgentLoop`、`SessionHandle`、`LoopRegistry`、`run_session_actor`、`TurnStream`
-17. 引入 `AskUserTool` / `DelegateTool`：各持自己的 Arc 依赖，注册进 ToolRegistry
-18. `DelegationCoordinator` 接管 worktree / merge / cleanup；`SubAgentDelegator` 删除；实现 AgentDelegator trait
-19. Orchestrator 主循环：
+15. `ServiceRegistry` 重命名为 `ProviderRegistry`（trait + 文件 + 引用全替换）；同时为 trait 加 `default_chat_model_id() -> String` 之类的辅助方法（如已存在 get_chat_provider(Capability) 路径可复用）
+16. 引入 `AgentRuntime` bundle（8 字段：provider_registry / tool_registry / skills / agents / context_engine / tool_executor / loop_breaker / defaults）+ `RuntimeDefaults` struct（含 permission_mode + PromptConfig）；Orchestrator / DelegationCoordinator 各持一份
+17. 删 `AgentLoop`、`SessionHandle`、`LoopRegistry`、`run_session_actor`、`TurnStream`
+18. 引入 `AskUserTool` / `DelegateTool`：各持自己的 Arc 依赖，注册进 ToolRegistry
+19. `DelegationCoordinator` 接管 worktree / merge / cleanup；`SubAgentDelegator` 删除；实现 AgentDelegator trait（含 `delegate` + `list_available`）；引入 `DelegationEvent` enum
+20. Orchestrator 主循环：
     - 解析 routing_key
     - `let sid = session_manager.session_id_for_routing_key(rk);`
     - 若 sid 存在且 `ask_router.fulfill(sid, msg)` 命中 → 消费 return
     - 否则 `session_manager.get_context(rk).process_turn(msg, channel, rt).await`
-20. WorkspaceWatcher 改为自维护（own SkillManager + AgentRegistry，文件变更直接调 reload）
-21. Scheduler / Webhook 路径收编：删 `SchedulerContext` / `WebhookContext`，全走 OrchestratorEvent 进 Orchestrator
-22. Sub-session 存储改为扁平：跟 user session 同位 `sessions/{sid}/`；Session 加 `parent_session_id: Option<String>` 和 `agent_name: Option<String>` 字段；`list_sessions` 时 filter parent IS NULL；删 user session 时 cascade 删其 sub
-23. 启动恢复统一路径：`backend.list_all_sessions()` 扫所有 incomplete_turn；`parent_session_id` 区分 user/sub；user → channel.send 结果；sub → emit DelegationEvent 给父；删除 marker 文件机制
-24. 删 `AgentConfig.max_history`（死代码）
+21. WorkspaceWatcher 改为自维护（own SkillManager + AgentRegistry，文件变更直接调 reload）
+22. Scheduler / Webhook 路径收编：删 `SchedulerContext` / `WebhookContext`，全走 OrchestratorEvent 进 Orchestrator
+23. Sub-session 存储改为扁平：跟 user session 同位 `sessions/{sid}/`；Session 加 `parent_session_id: Option<String>` 和 `agent_name: Option<String>` 字段；`list_sessions` 时 filter parent IS NULL；删 user session 时 cascade 删其 sub
+24. 启动恢复统一路径：`backend.list_all_sessions()` 扫所有 incomplete_turn；`parent_session_id` 区分 user/sub；user → channel.send 结果；sub → emit DelegationEvent 给父；删除 marker 文件机制
+25. 删 `AgentConfig.max_history`（死代码）
 
 ### 阶段 3：Agent 配置统一
 
@@ -1272,8 +1295,11 @@ async fn handle_delegation_event(&self, ev: DelegationEvent) {
 3. `SessionContext` 加 `user_profile: Arc<UserProfile>`
 4. `build_prompt` 补齐 profile section
 5. Memory tools 读写 `workspace/users/{id}/memory/`
-6. 提供 `scripts/migrate_memory.sh`（默认目标 `users/_default/memory/`）
-7. 提供 `scripts/migrate_user_profile.sh`（USER.md → `users/_default/profile.md`）
+6. `SessionManager.list_sessions_for_user(uid)` 实现：通过 UserResolver **反向** map 找出 uid 对应的所有 routing_keys，再 filter backend.list_all_sessions() 中 owner ∈ rks 的（**Session.owner 保持 routing_key 不变**，不做数据迁移）
+7. 提供 `scripts/migrate_memory.sh`（默认目标 `users/_default/memory/`）
+8. 提供 `scripts/migrate_user_profile.sh`（USER.md → `users/_default/profile.md`）
+
+**Session.owner 字段语义不变**：始终是 routing_key（"消息从哪来"的端点标识）。user_id 是查询层衍生概念，不污染存储 schema，也不需要 owner 字段迁移脚本。
 
 阶段 3 和 4 可并行。
 

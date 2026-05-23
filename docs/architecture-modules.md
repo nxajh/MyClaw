@@ -137,15 +137,18 @@
   ┃   │                                                            │      ┃
   ┃   │   ┌──────────────────────────────────────┐                │      ┃
   ┃   │   │ session: Mutex<Session>              │                │      ┃
-  ┃   │   │  持久化字段：                          │                │      ┃
-  ┃   │   │  ├─ id, owner                        │                │      ┃
+  ┃   │   │  持久化字段（12 个）：                  │                │      ┃
+  ┃   │   │  ├─ id, owner (routing_key)          │                │      ┃
   ┃   │   │  ├─ history: Vec<ChatMessage>        │                │      ┃
   ┃   │   │  ├─ message_ids                      │                │      ┃
   ┃   │   │  ├─ compact_version, summary_meta    │                │      ┃
   ┃   │   │  ├─ session_override, token_tracker  │                │      ┃
   ┃   │   │  ├─ incomplete_turn                  │                │      ┃
-  ┃   │   │  └─ last_message: Option<            │ ← 整条 incoming│      ┃
-  ┃   │   │      ChannelMessage>                 │   持久化       │      ┃
+  ┃   │   │  ├─ last_message: Option<            │ ← 整条 incoming│      ┃
+  ┃   │   │  │   ChannelMessage>                 │   持久化       │      ┃
+  ┃   │   │  ├─ parent_session_id: Option<      │ ← Some=sub     │      ┃
+  ┃   │   │  │   String>                        │                │      ┃
+  ┃   │   │  └─ agent_name: Option<String>      │ ← sub 的 agent │      ┃
   ┃   │   │  transient 字段：                     │                │      ┃
   ┃   │   │  ├─ persist: Option<Arc<PersistHook>>│ ← serde(skip)  │      ┃
   ┃   │   │  └─ channel: Option<Arc<dyn Channel>>│ ← serde(skip)  │      ┃

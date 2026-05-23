@@ -86,6 +86,9 @@ SessionContext（per session，唯一 owner）
 │    ├─ incomplete_turn                │
 │    ├─ last_message: Option<           │ ← 整条 ChannelMessage 持久化
 │    │   ChannelMessage>               │   含 sender/reply_target/content/images
+│    ├─ parent_session_id: Option<    │ ← Some = sub-session
+│    │   String>                       │
+│    ├─ agent_name: Option<String>    │ ← sub-session 用的 agent
 │    ├─ persist: Option<...>           │ ← transient
 │    └─ channel: Option<Arc<dyn ...>>  │ ← transient，process_turn 写入
 │                                      │
@@ -446,6 +449,8 @@ delete_session(routing_key, target_sid)
 ❌ IDENTITY.md/SOUL.md/RULES.md → 内容写入 main/AGENT.md body
 ❌ USER.md (全局)       → per-user UserProfile
 ❌ 跨 channel session 接管 / SessionInUse / force_takeover → 暂不支持
+❌ Sub-session 嵌套存储 sessions/{parent}/subagents/{sub}/ → 改扁平 sessions/{sid}/
+❌ subagent_running_*.json marker 文件 → 删除（恢复走 incomplete_turn 统一路径）
 
 保留不变的：
 ✅ McpManager          → 启动时注册 MCP tools，逻辑不变
