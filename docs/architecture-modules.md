@@ -47,7 +47,7 @@
   ┃                   全局基础设施单例（Arc 共享）                       ┃
   ┃                                                                       ┃
   ┃  ┌─────────────────┐   ┌──────────────┐   ┌─────────────────┐       ┃
-  ┃  │ ServiceRegistry │   │ ToolRegistry │   │  SkillManager   │       ┃
+  ┃  │ ProviderRegistry │   │ ToolRegistry │   │  SkillManager   │       ┃
   ┃  │ (LLM providers) │   │ (tool 实现池) │   │ Arc<RwLock<...>>│       ┃
   ┃  └─────────────────┘   └──────▲───────┘   └────────▲────────┘       ┃
   ┃                                ┃                    ┃                ┃
@@ -96,9 +96,10 @@
   ┃     ┗━ Agent 退化为"纯身份"：仅 config 一个字段，无 Arc 字段          ┃
   ┃                                                                       ┃
   ┃  ┌──────────────────────────────────────────────────────────┐        ┃
-  ┃  │           AgentRuntime (启动时构造的全局 bundle)           │        ┃
-  ┃  │   registry / tool_registry / context_engine /             │        ┃
-  ┃  │   tool_executor / loop_breaker                            │        ┃
+  ┃  │           AgentRuntime (启动时构造的全局 bundle，8 字段)   │        ┃
+  ┃  │   provider_registry / tool_registry / skills / agents /   │        ┃
+  ┃  │   context_engine / tool_executor / loop_breaker /         │        ┃
+  ┃  │   defaults (RuntimeDefaults: permission_mode + PromptConfig)│      ┃
   ┃  │   Agent.run(session, ctx, rt) 时传入                       │        ┃
   ┃  │   turn 起手按 agent.config 过滤 tool_registry → allowed   │        ┃
   ┃  │   spec 进 LLM；tool_executor 在 allowed 内查找            │        ┃
@@ -232,7 +233,7 @@
                               外部（用户、LLM、MCP server）                 ┃
                                                                             ┃
    用户 ─── Telegram / WebUI / QQ ─── Channel.listen() ──────────────────────┛
-   LLM ─── HTTPS ─── ServiceRegistry.chat()
+   LLM ─── HTTPS ─── ProviderRegistry.chat()
    MCP ─── stdio/HTTP ─── McpManager.connect()
 ```
 
@@ -245,10 +246,10 @@
 | 组件 | 持有的引用 |
 |------|-----------|
 | **Agent** | （无 Arc 字段，仅 config 一个字段） |
-| **AgentRuntime** | ServiceRegistry, ToolRegistry, ContextEngine, ToolExecutor, LoopBreaker |
+| **AgentRuntime** | provider_registry + tool_registry + skills + agents + context_engine + tool_executor + loop_breaker + defaults (8 字段) |
 | **AskUserTool** | AskRouter（在 ToolRegistry 内部，Agent 不感知） |
 | **DelegateTool** | AgentDelegator（DelegationCoordinator impl，Agent 不感知） |
-| **ContextEngine** | ServiceRegistry, ToolRegistry |
+| **ContextEngine** | ProviderRegistry, ToolRegistry |
 | **ToolExecutor** | （仅 own timeout 字段；工具池 Agent 传入） |
 | **LoopBreaker** | (own max_tool_calls + threshold) |
 | **AgentRegistry** | HashMap<name, Arc<Agent>>（拥有） |
@@ -348,7 +349,7 @@
        │     ├── rt.context_engine.should_compact(&session.token_tracker, ctx_window)?
        │     │      └─ true → rt.context_engine.execute(...) 调 LLM 做 summary
        │     ├── 构建 ChatRequest（system_prompt + history + tool_specs）
-       │     ├── service_registry.chat(req) → LLM 响应
+       │     ├── provider_registry.chat(req) → LLM 响应
        │     ├── 更新 session.token_tracker
        │     ├── 解析响应：
        │     │     ├─ tool_call → rt.tool_executor.execute(call, &session)

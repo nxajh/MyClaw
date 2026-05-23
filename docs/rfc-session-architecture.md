@@ -84,7 +84,7 @@ config.toml (全局配置 — 按模块分段)
 
 daemon.rs (Composition Root)
   │
-  ├─ ServiceRegistry        ← 全局共享（LLM providers）
+  ├─ ProviderRegistry       ← 全局共享（LLM providers，原 ServiceRegistry 改名）
   ├─ ToolRegistry           ← 全局工具池（注入各种 Arc 后注册的 tools）
   ├─ SkillManager           ← Arc<RwLock>，WorkspaceWatcher 自动更新
   ├─ McpManager             ← 全局共享
@@ -154,11 +154,28 @@ struct Agent {
 
 // 全局基础设施 bundle，daemon 启动时构造，run 时传入
 struct AgentRuntime {
-    registry: Arc<dyn ServiceRegistry>,    // LLM 调用
-    tool_registry: Arc<ToolRegistry>,      // 全局工具池（含 builtin + MCP + skill tools）
+    provider_registry: Arc<dyn ProviderRegistry>,    // LLM 调用（原 ServiceRegistry 改名）
+    tool_registry: Arc<ToolRegistry>,                // 全局工具池（含 builtin + MCP + skill tools）
+    skills: Arc<RwLock<SkillManager>>,               // 给 build_prompt 与 attachment diff
+    agents: Arc<AgentRegistry>,                      // 给 attachment diff 与 DelegationCoordinator
     context_engine: Arc<ContextEngine>,
-    tool_executor: Arc<ToolExecutor>,      // 仅 timeout 包装器
+    tool_executor: Arc<ToolExecutor>,                // 仅 timeout 包装器
     loop_breaker: Arc<LoopBreaker>,
+    defaults: RuntimeDefaults,                       // runtime 还需要的 GlobalConfig 子集
+}
+
+/// 从 config.toml 的 [agent] / [prompt] 段抽出的"运行时还要读"的值
+#[derive(Clone)]
+struct RuntimeDefaults {
+    permission_mode: PermissionMode,                 // [agent].permission_mode (SessionOverride fallback)
+    prompt: PromptConfig,                            // [prompt] 段
+}
+
+#[derive(Clone)]
+struct PromptConfig {
+    max_chars: usize,
+    bootstrap_max_chars: usize,
+    native_tools: bool,
 }
 
 impl Agent {
@@ -293,8 +310,8 @@ impl SessionContext {
         }
         
         // 2. attachment diff（按 turn 起手 snapshot）
-        let skills = rt.workspace.skills.read().snapshot();
-        let agents = rt.workspace.agents.list();
+        let skills = rt.skills.read().snapshot();
+        let agents = rt.agents.list();
         let reminder = self.attachments.lock()
             .diff_and_render(&skills, &agents, &self.session.lock().history);
         
@@ -305,12 +322,12 @@ impl SessionContext {
         };
         self.session.lock().add_user_text(user_text);
         
-        // 4. resolve 配置参数（SessionOverride > [agent] / providers default / 内置）
+        // 4. resolve 配置参数（SessionOverride > [agent] 默认 > 内置）
+        //    model 不在这里 resolve — None 时 Agent.run 内部走 ProviderRegistry fallback
         let s = self.session.lock();
         let permission_mode = s.session_override.permission_mode
-            .unwrap_or(rt.global.agent.permission_mode);
-        let model_id = s.session_override.model.clone()
-            .unwrap_or_else(|| rt.registry.default_chat_model());
+            .unwrap_or(rt.defaults.permission_mode);
+        let model_id_owned = s.session_override.model.clone();   // Option<String>
         let run_mode = s.session_override.run_mode.unwrap_or(RunMode::Interactive);
         let thinking = s.session_override.thinking.as_ref();
         drop(s);
@@ -318,16 +335,16 @@ impl SessionContext {
         // 5. build system prompt（每轮拼装）
         let system_prompt = build_prompt(
             &self.agent.config,
-            &self.user_profile,
+            &self.user_profile,           // Phase 4 引入
             permission_mode,
             run_mode,
-            &rt.global.prompt,
+            &rt.defaults.prompt,
         );
         
         // 6. 调 Agent
         let ctx = TurnContext { 
             system_prompt: &system_prompt, 
-            model_id: &model_id,
+            model_id: model_id_owned.as_deref(),      // Option<&str>
             thinking,
             permission_mode,
             run_mode,
@@ -363,8 +380,8 @@ impl SessionContext {
 
 ```rust
 struct TurnContext<'a> {
-    system_prompt: &'a str,           // 含 builtin + body + profile + runtime + skills
-    model_id: &'a str,
+    system_prompt: &'a str,                // 含 builtin + body + profile + runtime + skills
+    model_id: Option<&'a str>,             // None = Agent.run 内部走 ProviderRegistry 注册顺序 fallback
     thinking: Option<&'a ThinkingConfig>,
     permission_mode: PermissionMode,
     run_mode: RunMode,
@@ -396,9 +413,9 @@ struct TurnResult {
 
 ```rust
 struct Session {
-    // ── 持久化字段（9 个）──
+    // ── 持久化字段（11 个）──
     id: String,
-    owner: String,                              // routing_key（或 phase 4 后改 user_id）
+    owner: String,                              // routing_key（或 phase 4 后改 user_id）；sub-session 用 "sub:{parent_sid}:{agent_name}"
     history: Vec<ChatMessage>,
     message_ids: Vec<i64>,
     compact_version: u32,
@@ -407,6 +424,8 @@ struct Session {
     token_tracker: TokenTracker,
     incomplete_turn: bool,
     last_message: Option<ChannelMessage>,       // 整条进来的消息，含 sender/reply_target/content/images
+    parent_session_id: Option<String>,          // Some = sub-session，None = user session
+    agent_name: Option<String>,                 // sub-session 用哪个 agent（user session 默认 "main"）
 
     // ── transient 运行时 backing（2 个，不持久化）──
     #[serde(skip)]
@@ -472,8 +491,9 @@ impl SessionManager {
     /// rk → session_id 反查（Orchestrator 处理 ask 反馈时用）
     fn session_id_for_routing_key(&self, rk: &str) -> Option<String>;
     
-    /// session_id → ctx 反查（DelegationEvent 回填、跨 rk 查询时用）
-    /// 扫描 sessions.values() O(n)，用户 session 用；sub-session 调用方持引用不用查
+    /// session_id → ctx 反查（DelegationEvent 回填等场景用）
+    /// 扫描 sessions.values() O(n)，仅 in-memory 的 ctx
+    /// （sub-session 不在 sessions 表，调用方持 Arc 不需要反查）
     fn get_by_id(&self, session_id: &str) -> Option<Arc<SessionContext>>;
 
     /// 切换到本 rk 拥有的 session
@@ -484,16 +504,22 @@ impl SessionManager {
     fn create_session(&self, routing_key: &str, agent_name: &str, name: Option<&str>) -> Result<Arc<SessionContext>>;
 
     /// 子代理 session（不进 sessions 表，调用方持 Arc 管生命周期）
+    /// 内部走同一个 backend.create_session，meta 设置 parent_session_id + agent_name
+    /// 存储路径与 user session 同位：sessions/{sid}/（扁平）
     fn create_sub_session(&self, parent_sid: &str, agent_name: &str) -> Result<Arc<SessionContext>>;
 
     /// 删除
     fn delete_session(&self, routing_key: &str, sid: &str) -> Result<()>;
 
-    /// 列出本 rk 的 session（phase 2 起的默认 API）
+    /// 列出本 rk 的 session（仅 user session，filter parent_session_id IS NULL）
     fn list_sessions(&self, routing_key: &str) -> Vec<SessionInfo>;
     
     /// 列出某 user 的所有 session（phase 4 后启用，只读视图，不能 switch 进去）
     fn list_sessions_for_user(&self, user_id: &str) -> Vec<SessionInfo>;
+    
+    /// 删除一个 user session 时，级联删该 session 的所有 sub-session
+    /// （扫 backend 找 parent_session_id == sid 的）
+    fn delete_session_cascade(&self, sid: &str) -> Result<()>;
 }
 
 #[derive(Debug)]
@@ -539,7 +565,7 @@ struct SessionOverride {
 struct ContextEngine {
     compact_threshold: f64,
     retain_work_units: usize,
-    registry: Arc<dyn ServiceRegistry>,
+    provider_registry: Arc<dyn ProviderRegistry>,
     tools: Arc<ToolRegistry>,
     // ...
 }
@@ -906,7 +932,9 @@ permission_mode:
     SessionOverride > [agent].permission_mode > 内置 PermissionMode::Default
 
 model:
-    SessionOverride > providers 注册顺序的第一个 chat-capable
+    Some(SessionOverride.model) → ProviderRegistry.get_chat_provider_by_model(m)
+    None → ProviderRegistry.get_chat_provider(Capability::Chat) — 即 providers 注册顺序的第一个 chat-capable
+    （TurnContext.model_id 是 Option<&str>，None 时 Agent.run 内部 fallback）
 
 thinking / run_mode:
     SessionOverride > 内置默认
@@ -1019,30 +1047,48 @@ enum OrchestratorEvent {
 
 ### 启动恢复流程
 
-Daemon 重启后，扫 backend 找 `incomplete_turn = true` 的 session：
+**Sub-session 改为扁平存储**（跟 user session 同位 `sessions/{sid}/`），通过 `Session.parent_session_id: Option<String>` 字段区分类型。启动恢复**一套统一路径**，删除原有的 marker 文件机制。
 
 ```rust
-for sinfo in backend.list_all_sessions() {
+for sinfo in backend.list_all_sessions() {     // 扫所有 session，含 sub-session
     let s = backend.load(&sinfo.id);
     if !s.incomplete_turn { continue; }
     
-    // 1. 重建 channel：从 session.owner 解析 routing_key → channel_key
-    let (ch_type, account, _) = parse_routing_key(&s.owner)?;
-    let channel = channels.get(&(ch_type, account))?;
+    let channel = match s.parent_session_id {
+        None => {
+            // user session：从 owner (routing_key) 解析 channel
+            let (ch_type, account, _) = parse_routing_key(&s.owner)?;
+            channels.get(&(ch_type, account))?.clone()
+        }
+        Some(ref parent_sid) => {
+            // sub-session：通过 parent session 拿 channel
+            let parent_s = backend.load(parent_sid);
+            let (ch_type, account, _) = parse_routing_key(&parent_s.owner)?;
+            channels.get(&(ch_type, account))?.clone()
+        }
+    };
     
-    // 2. ChannelMessage 已经在 session.last_message 持久化了，直接拿
-    let last_msg = s.last_message.clone()?;
-    
-    // 3. 临时构造 ctx，跑恢复（channel 显式传入）
+    // s.last_message 已经持久化了完整 ChannelMessage，直接读
     let ctx = build_temp_context(s, agent_runtime);
     tokio::spawn(async move {
-        ctx.recover_pending_turn(channel, &runtime).await;
-        // 完成后 ctx 自然 drop
+        let result = ctx.recover_pending_turn(channel, &runtime).await;
+        // sub-session 恢复完成后 emit DelegationEvent 给父 session
+        if let Some(parent_sid) = ctx.session.lock().parent_session_id.clone() {
+            if let Ok(text) = result {
+                orchestrator.send_delegation_event(DelegationEvent::Completed {
+                    parent_session_id: parent_sid,
+                    summary: text,
+                    task_id: ctx.session.lock().id.clone(),
+                    duration_secs: 0,
+                }).await;
+            }
+        }
+        // ctx Arc drop
     });
 }
 ```
 
-Sub-session 恢复（含 marker 文件中断的子代理）走类似流程，恢复后通过 `DelegationEvent` 通知父 session。
+不再需要 `subagent_running_*.json` marker 文件——sub-session 的存在性由 backend 持久化保证，incomplete 状态由 `session.incomplete_turn` 标记。
 
 ### Sub-agent 完成回填到父 session
 
@@ -1129,6 +1175,8 @@ async fn handle_delegation_event(&self, ev: DelegationEvent) {
 | `USER.md` | workspace 根目录全局 | per-user UserProfile（阶段 4） |
 | `SubAgentConfig` | 与主 agent 配置不同 | 统一为 `AgentConfig` |
 | `SubAgentDelegator` | 持 agent 配置 + 临时构建 AgentLoop | `DelegationCoordinator` 编排 worktree，agent 通过 SessionManager 统一执行 |
+| Sub-session 存储 | `sessions/{parent}/subagents/{sub}/` 嵌套 + `subagent_running_*.json` marker | 扁平 `sessions/{sid}/` + `Session.parent_session_id` 字段；删除 marker 文件 |
+| 启动恢复路径 | user 走 list_all + marker 走子代理 | 一套统一路径：list_all + parent_session_id 区分 |
 | `max_tool_calls` 等 limits | AgentConfig + SessionOverride | 仅 `GlobalConfig.limits` |
 | Tool trait | 仅 `name` / `spec` / `execute(args)` | 新增 `source() -> ToolSource`（Builtin / McpServer / Skill），`execute(args, &Session)` |
 | Tool 过滤维度 | `tools: Vec<String>` 一维白名单 | 三维独立：`tools` (内置) / `mcp` (server) / `skills`；ToolFilter 支持 All/Allow/Deny |
@@ -1140,7 +1188,8 @@ async fn handle_delegation_event(&self, ev: DelegationEvent) {
 | `stream_first_chunk_timeout_secs` / `max_output_bytes` | `AgentConfig` | **硬编码常量**（`llm_stream` 模块） |
 | `max_history` | `AgentConfig` | **删除**（死代码） |
 | `permission_mode` | `AgentConfig` + SessionOverride | `[agent].permission_mode` + SessionOverride 覆盖 |
-| `model` | `AgentConfig` + SessionOverride | SessionOverride + providers 隐式默认（无全局 [defaults]） |
+| `model` | `AgentConfig` + SessionOverride | TurnContext.model_id: `Option<&str>`；None 时 Agent.run fallback 到 `ProviderRegistry.get_chat_provider(Chat)`（providers 注册顺序的第一个） |
+| `ServiceRegistry` | trait 名 | 改名为 `ProviderRegistry`（更准确） |
 | `thinking` | `AgentConfig` + SessionOverride | 仅 `SessionOverride` |
 | `run_mode` | SessionOverride | 仅 `SessionOverride`（触发源决定） |
 | `isolation` | SessionOverride | 仅 `AgentConfig`（agent 身份） |
@@ -1198,8 +1247,9 @@ async fn handle_delegation_event(&self, ev: DelegationEvent) {
     - 否则 `session_manager.get_context(rk).process_turn(msg, channel, rt).await`
 20. WorkspaceWatcher 改为自维护（own SkillManager + AgentRegistry，文件变更直接调 reload）
 21. Scheduler / Webhook 路径收编：删 `SchedulerContext` / `WebhookContext`，全走 OrchestratorEvent 进 Orchestrator
-22. 启动恢复：从 `session.last_message` 直接读出已持久化的 ChannelMessage（无需重建），临时构 ctx 跑 `recover_pending_turn(channel, rt)`，跑完 Arc drop 即弃
-23. 删 `AgentConfig.max_history`（死代码）
+22. Sub-session 存储改为扁平：跟 user session 同位 `sessions/{sid}/`；Session 加 `parent_session_id: Option<String>` 和 `agent_name: Option<String>` 字段；`list_sessions` 时 filter parent IS NULL；删 user session 时 cascade 删其 sub
+23. 启动恢复统一路径：`backend.list_all_sessions()` 扫所有 incomplete_turn；`parent_session_id` 区分 user/sub；user → channel.send 结果；sub → emit DelegationEvent 给父；删除 marker 文件机制
+24. 删 `AgentConfig.max_history`（死代码）
 
 ### 阶段 3：Agent 配置统一
 

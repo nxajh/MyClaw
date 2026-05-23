@@ -23,7 +23,7 @@
 │                          daemon.rs (Composition Root)                        │
 │                                                                              │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐    │
-│  │ServiceRegistry│  │ ToolRegistry │  │ SkillManager │  │  McpManager  │    │
+│  │ProviderRegistry│  │ ToolRegistry │  │ SkillManager │  │  McpManager  │    │
 │  │(LLM providers)│  │ (tool impls) │  │  Arc<RwLock> │  │  (MCP 连接)  │    │
 │  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘    │
 │                                            ▲                                 │
@@ -134,7 +134,7 @@ Agent（同类型，不同配置的实例）
 │      rt.loop_breaker.new_counter();
 │    let allowed = rt.tool_registry.all()  │ ← turn 起手过滤
 │      .filter(|t| self.config.allows_tool(t)).collect();
-│    let stream = rt.registry      │
+│    let stream = rt.provider_registry
 │      .chat_stream(...).await?;   │
 │    let resp = llm_stream::read(  │ ← 模块级函数，硬编码 timeout/byte
 │      stream).await?;             │
@@ -147,13 +147,16 @@ Agent（同类型，不同配置的实例）
 └──────────────────────────────────┘
 
 ┌──────────────────────────────────┐
-│      AgentRuntime (全局 bundle)   │
+│      AgentRuntime (8 字段 bundle) │
 │                                  │
-│  registry:     Arc<dyn ServiceRegistry>
-│  tool_registry: Arc<ToolRegistry>
-│  context_engine: Arc<ContextEngine>
-│  tool_executor: Arc<ToolExecutor>
-│  loop_breaker:  Arc<LoopBreaker>
+│  provider_registry: Arc<dyn ProviderRegistry>
+│  tool_registry:     Arc<ToolRegistry>
+│  skills:            Arc<RwLock<SkillManager>>
+│  agents:            Arc<AgentRegistry>
+│  context_engine:    Arc<ContextEngine>
+│  tool_executor:     Arc<ToolExecutor>
+│  loop_breaker:      Arc<LoopBreaker>
+│  defaults:          RuntimeDefaults    ← {permission_mode, prompt: PromptConfig}
 │                                  │
 │  daemon 启动时构造一次            │
 │  Orchestrator / DelegationCoord 各持一份引用
@@ -254,7 +257,7 @@ struct TurnResult {
                       │  )               │
                       │    │             │
                       │    ├─ snapshot allowed_tools
-                      │    ├─ 调 ServiceRegistry → LLM stream
+                      │    ├─ 调 ProviderRegistry → LLM stream
                       │    ├─ 边读边 channel.push_event(target, ...)
                       │    ├─ tool_call → rt.tool_executor.execute()
                       │    ├─ session.add_*() 自动持久化
