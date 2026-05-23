@@ -5,9 +5,9 @@
 
 ## 进度统计
 
-- 完成：40 / 61
+- 完成：42 / 61
 - 进行中：B12（部分完成）
-- 待办：21
+- 待办：19
 
 ## 模块 A：类型基础（0/11）
 
@@ -42,7 +42,7 @@
 
 ## 模块 D：配置与 Prompt（0/5）
 
-- [ ] D23. `GlobalConfig` 按模块拆段
+- [x] D23. `GlobalConfig` 按模块拆段（已是模块化结构：providers/routing/channels/agent/memory/mcp/logging 各自独立 struct）
 - [x] D24. `AgentRegistry` 实现为 `Arc<RwLock<HashMap>>`，含 reload_from_dir → `src/agents/agent_registry.rs`
 - [x] D25. `WorkspaceWatcher` 加 `spawn_managed`：自持 AgentRegistry/SkillManager 并自动 reload
 - [x] D26. `prompt.rs` 删 IDENTITY/SOUL/USER.md/RULES.md 读取（部分：build_prompt 参数化在 C18 完成）
@@ -55,7 +55,7 @@
 - [ ] E30. Orchestrator 字段加 agent_runtime / ask_router
 - [x] E31. `AskRouter` 实现（register/fulfill/cancel；indexed by session_id）→ `src/agents/ask_router.rs`
 - [ ] E32. ClientChannel 改造（streams 按 reply_target 索引；push_event/cancel_signal；强制 auth token）
-- [ ] E33. WebhookHandler 退化为协议适配器
+- [x] E33. WebhookHandler 已是协议适配器（接 HTTP → ChannelMessage → Channel.send；无业务逻辑）
 - [ ] E34. Scheduler 路径收编（删 SchedulerContext）
 
 ## 模块 F：委派（0/4）
@@ -102,6 +102,13 @@
 ## 实施日志
 
 按时间倒序记录每次推进。
+
+### D23 + E33 — 确认已实现项
+
+- D23: AppConfig 早已是模块化结构 (providers / routing / channels / agent /
+  memory / mcp_servers / logging 各自独立 sub-struct)，无需进一步拆段
+- E33: WebhookHandler 早已是纯协议适配器 (HTTP → ChannelMessage → Channel.send)
+  无业务逻辑
 
 ### A8 + C16 partial — DelegationEvent 字段重命名 + 三维过滤
 
