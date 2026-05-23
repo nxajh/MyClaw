@@ -5,9 +5,9 @@
 
 ## 进度统计
 
-- 完成：21 / 61
+- 完成：25 / 61
 - 进行中：B12（部分完成）
-- 待办：40
+- 待办：36
 
 ## 模块 A：类型基础（0/11）
 
@@ -26,8 +26,8 @@
 ## 模块 B：Session / SessionContext / SessionManager（0/4）
 
 - [~] B12. Session 字段改造（已加 last_message/parent_session_id/agent_name；已加 record_inbound/reply_target helper；token_tracker / transient persist/channel / save_* 方法待 C18）
+- [~] B14. SessionManager 改造（已加 SessionNotOwned 接线 / list_sub_sessions / session_id_for_routing_key / get_by_id / create_sub_session / delete cascade；list_sessions 过滤 parent）
 - [x] B13. 新建 `SessionContext`（session/attachments/pending_retry/turn_lock；user_profile 待 G41） → `src/agents/session_context.rs`
-- [ ] B14. `SessionManager` 改造（单表 sessions；session_id_for_routing_key/get_by_id；switch SessionNotOwned；create_sub_session；list filter parent；delete cascade）
 - [ ] B15. Sub-session 存储扁平化（删嵌套结构与 marker 文件）
 
 ## 模块 C：Agent / AgentRuntime / 执行器（0/7）
@@ -35,15 +35,15 @@
 - [ ] C16. `AgentConfig` 简化（7 字段 + allows_tool 三维过滤）
 - [ ] C17. `Agent` 简化为只一个 config 字段
 - [ ] C18. `Agent.run(session, ctx, rt)` 实现（含 allowed_tools snapshot + 循环）
-- [ ] C19. `ToolExecutor` 退化为 timeout 包装器
-- [ ] C20. `LoopBreaker` 拆为 policy + per-turn counter
+- [x] C19. `ToolExecutor` 重命名（原 `DefaultToolExecutor`）；ask_user/agent_delegate inline 处理待 F35 拆出
+- [x] C20. `LoopBreaker` policy + per-turn counter（已有 LoopBreakerConfig 分离 + reset() 每轮重置）
 - [ ] C21. `ContextEngine` 合并 CompactionPolicy + CompactionExecutor
 - [x] C22. MCP tool wrapper 填 `ToolSource::Mcp { server }`；skill 单独 wrapper 未来再加
 
 ## 模块 D：配置与 Prompt（0/5）
 
 - [ ] D23. `GlobalConfig` 按模块拆段
-- [ ] D24. `AgentRegistry` 实现为 `Arc<RwLock<HashMap>>`，含 reload_from_dir
+- [x] D24. `AgentRegistry` 实现为 `Arc<RwLock<HashMap>>`，含 reload_from_dir → `src/agents/agent_registry.rs`
 - [ ] D25. `WorkspaceWatcher` 改为自维护
 - [x] D26. `prompt.rs` 删 IDENTITY/SOUL/USER.md/RULES.md 读取（部分：build_prompt 参数化在 C18 完成）
 - [x] D27. 启动校验 main/AGENT.md 缺失则报错（daemon::run 顶部）
@@ -102,6 +102,25 @@
 ## 实施日志
 
 按时间倒序记录每次推进。
+
+### C19 + C20 + B14 partial + D24 — ToolExecutor 重命名 + LoopBreaker 确认 + SessionManager 子会话 + AgentRegistry
+
+- C19: `DefaultToolExecutor` → `ToolExecutor` 重命名（2 个文件，5 处）
+- C20: 现状 LoopBreaker 已经满足 RFC：LoopBreakerConfig 分离、reset() 每轮在
+  `turn.rs:37` 调用；确认无需重构
+- B14 partial: SessionManager 加 5 个方法：
+  - `list_sub_sessions(parent)` — 按 parent_session_id 过滤
+  - `session_id_for_routing_key(rk)` — 别名（B14 路由键迁移占位）
+  - `get_by_id(session_id)` — 无 routing_key 直查
+  - `create_sub_session(parent, agent)` — 自动写 parent_session_id + agent_name
+  - `list_sessions(user)` 过滤掉子会话；`delete_session` 级联删子会话
+- D24: 新建 `src/agents/agent_registry.rs`：`AgentRegistry` struct 内部
+  `Arc<RwLock<HashMap<String, SubAgentConfig>>>`，提供 get / values_cloned /
+  names / replace_all / reload_from_dir 方法。已迁移所有
+  `Arc<RwLock<Vec<SubAgentConfig>>>` 用法（sub_agent.rs / resource_provider.rs /
+  agent_impl/mod.rs / daemon.rs / commands/reload.rs / request_builder.rs）。
+  `commands/reload` 的 agent 重载从手写 swap 改为 `reload_from_dir` 一行。
+- 363 lib tests 全部通过（+2 来自新 registry 测试）
 
 ### A3 + B13 + C22 + D27 — ToolSource enum + SessionContext + MCP source + main 校验
 

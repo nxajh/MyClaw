@@ -44,8 +44,7 @@ use super::loop_breaker::{LoopBreaker, LoopBreakerConfig};
 use super::session::{Session, PersistHook};
 use crate::agents::prompt::{SystemPromptBuilder, SystemPromptConfig};
 use crate::agents::attachment::AttachmentManager;
-use crate::config::sub_agent::SubAgentConfig;
-use super::tool_executor::DefaultToolExecutor;
+use super::tool_executor::ToolExecutor;
 use super::compaction_executor::CompactionExecutor;
 
 pub(crate) mod types;
@@ -127,7 +126,7 @@ pub struct Agent {
     system_prompt: String,
     model_override: Option<String>,
     mcp_instructions: Vec<(String, String)>,
-    sub_agent_configs: Arc<RwLock<Vec<SubAgentConfig>>>,
+    sub_agent_configs: super::AgentRegistry,
     skills_dir: PathBuf,
     agents_dir: PathBuf,
 }
@@ -147,7 +146,7 @@ impl Agent {
             system_prompt: String::new(),
             model_override: None,
             mcp_instructions: Vec::new(),
-            sub_agent_configs: Arc::new(RwLock::new(Vec::new())),
+            sub_agent_configs: super::AgentRegistry::new(),
             skills_dir: PathBuf::new(),
             agents_dir: PathBuf::new(),
         }
@@ -157,7 +156,7 @@ impl Agent {
     pub fn tools(&self) -> &Arc<super::tool_registry::ToolRegistry> { &self.tools }
     pub fn skills(&self) -> &Arc<RwLock<SkillManager>> { &self.skills }
 
-    pub fn sub_agent_configs(&self) -> &Arc<RwLock<Vec<SubAgentConfig>>> { &self.sub_agent_configs }
+    pub fn sub_agent_configs(&self) -> &super::AgentRegistry { &self.sub_agent_configs }
     pub fn workspace_dir(&self) -> &str { &self.config.prompt_config.workspace_dir }
     pub fn compact_threshold(&self) -> f64 { self.config.context.compact_threshold }
 
@@ -176,7 +175,7 @@ impl Agent {
         self
     }
 
-    pub fn with_sub_agent_configs(mut self, configs: Arc<RwLock<Vec<SubAgentConfig>>>) -> Self {
+    pub fn with_sub_agent_configs(mut self, configs: super::AgentRegistry) -> Self {
         self.sub_agent_configs = configs;
         self
     }
@@ -217,7 +216,7 @@ impl Agent {
 
         let resources = ResourceProvider::new(
             Arc::clone(&self.skills),
-            Arc::clone(&self.sub_agent_configs),
+            self.sub_agent_configs.clone(),
             self.mcp_instructions.clone(),
             self.skills_dir.clone(),
             self.agents_dir.clone(),
@@ -233,7 +232,7 @@ impl Agent {
                 Arc::clone(&resources),
                 Arc::clone(&self.tools),
             ),
-            tool_executor: DefaultToolExecutor::new(Arc::clone(&self.tools), config.tool_timeout_secs),
+            tool_executor: ToolExecutor::new(Arc::clone(&self.tools), config.tool_timeout_secs),
             config,
             session,
             request_builder,
@@ -259,7 +258,7 @@ pub struct AgentLoop {
     // ── Token tracking + compaction strategy ──
     pub(crate) policy: CompactionPolicy,
     // ── Tool execution ──
-    pub(crate) tool_executor: DefaultToolExecutor,
+    pub(crate) tool_executor: ToolExecutor,
     // ── Compaction summarizer ──
     pub(crate) compactor: CompactionExecutor,
     // ── Infrastructure ──

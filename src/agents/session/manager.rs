@@ -278,7 +278,12 @@ impl SessionManager {
         Ok(info)
     }
 
-    /// Delete a session. Cannot delete the active session.
+    /// Delete a session and all its sub-sessions. Cannot delete the active session.
+    ///
+    /// B14: cascades into sub-sessions (sessions whose `parent_session_id`
+    /// matches `session_id`). A sub-session's history is meaningless once
+    /// its parent is gone, so we drop them together rather than leaving
+    /// orphaned data on disk.
     pub fn delete_session(&self, user_id: &str, session_id: &str) -> std::io::Result<()> {
         // Check not active.
         if self.active.read().get(user_id).map(|s| s.as_str()) == Some(session_id) {
@@ -292,9 +297,24 @@ impl SessionManager {
             return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "not your session"));
         }
 
+        // Cascade: drop sub-sessions first so an interrupted delete leaves
+        // sub-sessions still reachable through their (now orphaned) parent,
+        // rather than the other way around.
+        for sub in self.list_sub_sessions(session_id) {
+            self.cache.write().remove(&sub.id);
+            if let Err(e) = self.backend.delete_session(&sub.id) {
+                tracing::warn!(
+                    parent = %session_id,
+                    sub = %sub.id,
+                    err = %e,
+                    "failed to delete sub-session during cascade; continuing"
+                );
+            }
+        }
+
         self.cache.write().remove(session_id);
         self.backend.delete_session(session_id)?;
-        tracing::info!(user = %user_id, session = %session_id, "session deleted");
+        tracing::info!(user = %user_id, session = %session_id, "session deleted (cascade)");
         Ok(())
     }
 
@@ -303,9 +323,90 @@ impl SessionManager {
         self.backend.rename_session(session_id, name)
     }
 
-    /// List all sessions for a user.
+    /// List all sessions for a user. Excludes sub-sessions (sessions with
+    /// `parent_session_id != None`).
+    /// RFC v2 §三.A: UI session pickers should only show top-level sessions;
+    /// sub-sessions are addressed via `agent_delegate` outputs and live in
+    /// their parent's context.
     pub fn list_sessions(&self, user_id: &str) -> Vec<SessionInfo> {
-        self.backend.list_sessions(user_id)
+        self.backend
+            .list_sessions(user_id)
+            .into_iter()
+            .filter(|info| self.backend.load_parent_session_id(&info.id).is_none())
+            .collect()
+    }
+
+    /// List sub-sessions of a parent (used by recovery / inspection tools).
+    pub fn list_sub_sessions(&self, parent_session_id: &str) -> Vec<SessionInfo> {
+        self.backend
+            .list_all_sessions()
+            .into_iter()
+            .filter(|info| {
+                self.backend.load_parent_session_id(&info.id).as_deref()
+                    == Some(parent_session_id)
+            })
+            .collect()
+    }
+
+    /// Look up a session by its routing_key (the channel:account:sender triple
+    /// previously called `user_id`). Returns `None` if no session is bound.
+    /// RFC v2 §三.A: alias for `active_session_id` — kept as a B14 placeholder
+    /// for the eventual user_id → routing_key vocabulary migration.
+    pub fn session_id_for_routing_key(&self, routing_key: &str) -> Option<String> {
+        self.active_session_id(routing_key)
+    }
+
+    /// Get a session by ID (caller doesn't need to know the routing_key).
+    /// Used by delegation recovery and PR-review tools.
+    pub fn get_by_id(&self, session_id: &str) -> Option<Session> {
+        if let Some(s) = self.cache.read().get(session_id) {
+            return Some(s.clone());
+        }
+        // Cache miss — fall back to the owner-keyed get_or_create using the
+        // backend's recorded owner. Returns None if the session doesn't exist.
+        let info = self.backend.get_session(session_id)?;
+        Some(self.get_or_create(&info.owner))
+    }
+
+    /// Create a sub-session that delegates work back to its parent for routing
+    /// (replies go through parent.last_message.reply_target).
+    ///
+    /// B14: thin wrapper around backend.create_session that additionally
+    /// persists parent_session_id + agent_name so list_sessions can filter
+    /// it out.
+    pub fn create_sub_session(
+        &self,
+        parent_session_id: &str,
+        agent_name: &str,
+    ) -> std::io::Result<SessionInfo> {
+        // Sub-sessions belong to the parent's owner so recovery scans the same
+        // bucket. The parent's owner is read from the backend rather than the
+        // cache because the parent may have been evicted.
+        let parent = self
+            .backend
+            .get_session(parent_session_id)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "parent session not found",
+                )
+            })?;
+        let info = self.backend.create_session(
+            &parent.owner,
+            Some(&format!("sub:{}:{}", parent_session_id, agent_name)),
+        )?;
+        self.backend
+            .save_parent_session_id(&info.id, parent_session_id)?;
+        self.backend.save_agent_name(&info.id, agent_name)?;
+        // Sub-sessions are NOT made the active session for the parent's
+        // routing_key — that would hijack the user's chat.
+        tracing::info!(
+            parent = %parent_session_id,
+            sub = %info.id,
+            agent = %agent_name,
+            "sub-session created"
+        );
+        Ok(info)
     }
 
     /// List ALL sessions across all owners (for startup recovery).

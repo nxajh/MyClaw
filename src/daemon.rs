@@ -16,7 +16,6 @@ use crate::agents::{
     McpManager, SubAgentDelegator, DelegationManager,
 };
 use crate::tools::TaskDelegator;
-use crate::config::sub_agent::SubAgentConfig;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -695,8 +694,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let sub_agent_configs = build_sub_agents(&config.workspace_dir);
     let sub_agent_count = sub_agent_configs.len();
     let sub_agent_names: Vec<String> = sub_agent_configs.iter().map(|a| a.name.clone()).collect();
-    let sub_agent_configs_arc: Arc<parking_lot::RwLock<Vec<SubAgentConfig>>> =
-        Arc::new(parking_lot::RwLock::new(sub_agent_configs));
+    let sub_agent_registry = crate::agents::AgentRegistry::from_vec(sub_agent_configs);
 
     let registry_arc: Arc<dyn crate::providers::ProviderRegistry> = Arc::new(registry);
 
@@ -732,7 +730,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         let base_tools_arc: Arc<ToolRegistry> = Arc::new(tools);
 
         let delegator = SubAgentDelegator::new(
-            Arc::clone(&sub_agent_configs_arc),
+            sub_agent_registry.clone(),
             registry_arc.clone(),
             Arc::clone(&base_tools_arc),
             Arc::clone(&skills_arc),
@@ -882,7 +880,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
     let agent = Agent::new(registry_arc, tools_arc, skills_arc, agent_config)
         .with_mcp_instructions(mcp_instructions)
-        .with_sub_agent_configs(sub_agent_configs_arc)
+        .with_sub_agent_configs(sub_agent_registry)
         .with_workspace_dirs(
             config.workspace_dir.join("skills"),
             config.workspace_dir.join("agents"),

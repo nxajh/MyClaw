@@ -15,7 +15,7 @@ use super::agent_impl::types::is_write_tool;
 ///
 /// Holds the tool registry and optional handlers for special tools (ask_user, agent_delegate).
 /// Autonomy enforcement happens here: write tools are blocked in ReadOnly mode.
-pub(crate) struct DefaultToolExecutor {
+pub(crate) struct ToolExecutor {
     pub(crate) tools: Arc<ToolRegistry>,
     pub(crate) ask_user_handler: Option<AskUserHandler>,
     pub(crate) delegate_handler: Option<DelegateHandler>,
@@ -23,7 +23,7 @@ pub(crate) struct DefaultToolExecutor {
     pub(crate) timeout_secs: u64,
 }
 
-impl DefaultToolExecutor {
+impl ToolExecutor {
     pub(crate) fn new(tools: Arc<ToolRegistry>, timeout_secs: u64) -> Self {
         Self {
             tools,

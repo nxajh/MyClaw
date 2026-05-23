@@ -39,8 +39,8 @@ use crate::tools::TaskDelegator;
 /// Holds sub-agent configs and creates temporary AgentLoops for delegation.
 #[derive(Clone)]
 pub struct SubAgentDelegator {
-    /// Sub-agent configurations, keyed by name.
-    configs: Arc<RwLock<Vec<SubAgentConfig>>>,
+    /// Sub-agent configurations, indexed by name.
+    configs: super::AgentRegistry,
     /// Shared service registry (for LLM access).
     registry: Arc<dyn ProviderRegistry>,
     /// Parent tool registry (tools are filtered per sub-agent).
@@ -57,7 +57,7 @@ pub struct SubAgentDelegator {
 
 impl SubAgentDelegator {
     pub fn new(
-        configs: Arc<RwLock<Vec<SubAgentConfig>>>,
+        configs: super::AgentRegistry,
         registry: Arc<dyn ProviderRegistry>,
         tools: Arc<ToolRegistry>,
         skills: Arc<RwLock<SkillManager>>,
@@ -77,7 +77,7 @@ impl SubAgentDelegator {
     }
 
     fn find_config(&self, name: &str) -> Option<SubAgentConfig> {
-        self.configs.read().iter().find(|c| c.name == name).cloned()
+        self.configs.get(name)
     }
 
     /// Build a filtered ToolRegistry containing only the allowed tools.
@@ -146,8 +146,7 @@ impl SubAgentDelegator {
         Box::pin(async move {
         let config = self.find_config(agent_name)
             .ok_or_else(|| {
-                let available: Vec<String> = self.configs.read()
-                    .iter().map(|c| c.name.clone()).collect();
+                let available = self.configs.names();
                 anyhow::anyhow!(
                     "Unknown sub-agent '{}'. Available: {}",
                     agent_name, available.join(", ")
@@ -370,8 +369,7 @@ impl SubAgentDelegator {
     ) -> anyhow::Result<String> {
         let config = self.find_config(agent_name)
             .ok_or_else(|| {
-                let available: Vec<String> = self.configs.read()
-                    .iter().map(|c| c.name.clone()).collect();
+                let available = self.configs.names();
                 anyhow::anyhow!(
                     "Unknown sub-agent '{}'. Available: {}",
                     agent_name, available.join(", ")
@@ -460,11 +458,11 @@ impl TaskDelegator for SubAgentDelegator {
 
     fn available_agents(&self) -> Vec<(String, String)> {
         self.configs
-            .read()
-            .iter()
+            .values_cloned()
+            .into_iter()
             .map(|c| {
-                let desc = c.description.as_deref().unwrap_or("");
-                (c.name.clone(), desc.to_string())
+                let desc = c.description.as_deref().unwrap_or("").to_string();
+                (c.name, desc)
             })
             .collect()
     }

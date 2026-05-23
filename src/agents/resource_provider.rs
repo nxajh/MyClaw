@@ -3,16 +3,16 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::config::sub_agent::SubAgentConfig;
 use super::workspace::skills::SkillManager;
+use super::AgentRegistry;
 
 /// Hot-loadable shared resources, held in Arc for sharing between AgentLoop instances.
 ///
-/// Immutable after construction (skills/sub_agents are interior-mutable via RwLock).
+/// Immutable after construction (skills/sub_agents are interior-mutable).
 /// Sub-agents get their own ResourceProvider with no change_rx (no hot-reload).
 pub(crate) struct ResourceProvider {
     pub(crate) skills: Arc<RwLock<SkillManager>>,
-    pub(crate) sub_agents: Arc<RwLock<Vec<SubAgentConfig>>>,
+    pub(crate) sub_agents: AgentRegistry,
     pub(crate) mcp_instructions: Vec<(String, String)>,
     pub(crate) skills_dir: PathBuf,
     pub(crate) agents_dir: PathBuf,
@@ -25,7 +25,7 @@ pub(crate) struct ResourceProvider {
 impl ResourceProvider {
     pub(crate) fn new(
         skills: Arc<RwLock<SkillManager>>,
-        sub_agents: Arc<RwLock<Vec<SubAgentConfig>>>,
+        sub_agents: AgentRegistry,
         mcp_instructions: Vec<(String, String)>,
         skills_dir: PathBuf,
         agents_dir: PathBuf,

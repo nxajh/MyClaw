@@ -21,16 +21,11 @@ pub async fn cmd_reload(ctx: CommandContext<'_>) -> String {
 
     // 2. Re-scan agents
     let agents_dir = std::path::Path::new(workspace_dir).join("agents");
-    let new_agents = crate::agents::agent_loader::load_agents_from_dir(&agents_dir);
-    {
-        let mut configs = ctx.agent.sub_agent_configs().write();
-        *configs = new_agents;
-    }
+    let agent_count = ctx.agent.sub_agent_configs().reload_from_dir(&agents_dir);
 
     // 3. No need to reset attachment manager — next diff rebuilds from history.
 
     let skill_count = ctx.agent.skills().read().skill_count();
-    let agent_count = ctx.agent.sub_agent_configs().read().len();
 
     format!("🔄 已重新加载：{} 个 skills，{} 个 agents", skill_count, agent_count)
 }

@@ -67,15 +67,14 @@ impl RequestBuilder {
             }
 
             if changes.agents_changed {
-                let new_agents = super::workspace::agent_loader::load_agents_from_dir(&self.resources.agents_dir);
-                let agent_list: Vec<(String, String)> = new_agents
-                    .iter()
+                self.resources.sub_agents.reload_from_dir(&self.resources.agents_dir);
+                let agent_list: Vec<(String, String)> = self
+                    .resources
+                    .sub_agents
+                    .values_cloned()
+                    .into_iter()
                     .map(|a| (a.name.clone(), a.description.clone().unwrap_or_default()))
                     .collect();
-                {
-                    let mut configs = self.resources.sub_agents.write();
-                    *configs = new_agents;
-                }
                 self.attachments.diff_agents(&agent_list, &session.history);
                 tracing::info!(agent_count = agent_list.len(), "agents hot-reloaded");
             }
@@ -98,9 +97,11 @@ impl RequestBuilder {
             self.attachments.diff_skills(&skills, history);
         }
         {
-            let configs = self.resources.sub_agents.read();
-            let agent_list: Vec<(String, String)> = configs
-                .iter()
+            let agent_list: Vec<(String, String)> = self
+                .resources
+                .sub_agents
+                .values_cloned()
+                .into_iter()
                 .map(|a| (a.name.clone(), a.description.clone().unwrap_or_default()))
                 .collect();
             if !agent_list.is_empty() {
