@@ -14,7 +14,7 @@
 //!  3. Actions            (by PermissionMode + native_tools)
 //!  4. Safety             (by PermissionMode)
 //!  5. RunMode Rules      (Interactive or Background)
-//!    6-10. Behavioral Rules (five hardcoded sections)
+//!     6-10: Behavioral Rules (five hardcoded sections)
 //!
 //!  11. Read Before Edit  (static)
 //!  12. System Reminders  (static)
