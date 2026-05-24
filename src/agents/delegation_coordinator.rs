@@ -63,12 +63,6 @@ pub struct DelegationCoordinator {
     /// Replaces the old per-parent `JsonFileBackend` rooted at
     /// `{sessions_root}/{parent}/subagents/`.
     session_manager: Arc<SessionManager>,
-    /// Sessions directory — only used to write `subagent_running_*.json`
-    /// marker files for hot-switch recovery. H50 will delete the marker
-    /// mechanism (recovery.rs scans `SessionManager.list_all_sessions`
-    /// + `parent_session_id` directly), at which point this field goes
-    /// away too.
-    sessions_root: PathBuf,
     /// Root directory for git worktrees (when isolation = worktree).
     worktrees_root: PathBuf,
 }
@@ -81,7 +75,6 @@ impl DelegationCoordinator {
         skills: Arc<RwLock<SkillManager>>,
         default_max_tool_calls: usize,
         session_manager: Arc<SessionManager>,
-        sessions_root: PathBuf,
         worktrees_root: PathBuf,
     ) -> Self {
         Self {
@@ -91,7 +84,6 @@ impl DelegationCoordinator {
             skills,
             default_max_tool_calls,
             session_manager,
-            sessions_root,
             worktrees_root,
         }
     }
@@ -173,13 +165,11 @@ impl DelegationCoordinator {
                 )
             })?;
 
-        // Generate a unique task_id and create a running-state marker file so the
-        // daemon can detect interrupted sub-agents after a hot-switch restart.
+        // H50: no marker file. Recovery scans SessionManager for sub-sessions
+        // (by `meta.parent_session_id`) and checks their history shape —
+        // see `agents::recovery::scan_unfinished_subagents`.
         let task_id = task_id_override.map(|s| s.to_string())
             .unwrap_or_else(|| format!("del_{}", uuid::Uuid::new_v4()));
-        // We'll write the marker after we know the sub_session_id.
-        // For now, save the path.
-        let marker_path = self.sessions_root.join(format!("subagent_running_{}.json", task_id));
 
         tracing::info!(
             agent = %config.name,
@@ -247,21 +237,12 @@ impl DelegationCoordinator {
         };
 
         let (session_id, persist_hook) = self.open_sub_session(parent_session_id, &config.name);
-
-        // Write the marker file now that we know the sub_session_id.
-        let marker_state = serde_json::json!({
-            "agent_name": config.name,
-            "task_id": task_id,
-            "task_preview": task.chars().take(200).collect::<String>(),
-            "started_at": chrono::Utc::now().to_rfc3339(),
-            "parent_session_id": parent_session_id,
-            "sub_session_id": session_id,
-            "session_key": session_key.unwrap_or(""),
-            "reply_target": reply_target.unwrap_or(""),
-        });
-        if let Err(e) = std::fs::write(&marker_path, serde_json::to_string_pretty(&marker_state).unwrap_or_default()) {
-            tracing::warn!(path = %marker_path.display(), err = %e, "failed to write sub-agent marker file");
-        }
+        // session_key + reply_target args are still accepted (delegate_async
+        // passes them) but no longer persisted to a marker file — the
+        // sub-session itself carries enough state to be recovered, and
+        // parent's reply_target is read from `parent.last_message` at
+        // recovery time. Silence unused-param warnings.
+        let _ = (session_key, reply_target);
 
         let session = Session::new(session_id);
 
@@ -368,8 +349,9 @@ impl DelegationCoordinator {
             tracing::debug!(path = %worktree_path.display(), "cleaned up worktree and branch");
         }
 
-        // Cleanup the running-state marker file — sub-agent is done (success or failure).
-        let _ = std::fs::remove_file(&marker_path);
+        // H50: no marker file to clean up. Sub-session completion clears
+        // `incomplete_turn` via the standard turn-end persistence path; the
+        // session is then no longer flagged as needing recovery.
 
         result
         }) // end Box::pin
@@ -411,7 +393,6 @@ impl DelegationCoordinator {
         let skills = self.skills.clone();
         let default_max_tool_calls = self.default_max_tool_calls;
         let session_manager = Arc::clone(&self.session_manager);
-        let sessions_root = self.sessions_root.clone();
         let worktrees_root = self.worktrees_root.clone();
         let task_owned = task.to_string();
         let parent_session_id_owned = parent_session_id.to_string();
@@ -431,7 +412,6 @@ impl DelegationCoordinator {
                 skills,
                 default_max_tool_calls,
                 session_manager,
-                sessions_root,
                 worktrees_root,
             };
 

@@ -5,9 +5,9 @@
 
 ## 进度统计
 
-- 完成：49 / 61
+- 完成：51 / 61
 - 进行中：—
-- 待办：12
+- 待办：10
 
 ## 模块 A：类型基础（0/11）
 
@@ -62,7 +62,7 @@
 
 - [ ] F35. AskUserTool / DelegateTool 实现并注册
 - [x] F36. `SubAgentDelegator` 重命名为 `DelegationCoordinator`（文件 sub_agent.rs → delegation_coordinator.rs），保留 type alias 给残留 import；只剩 AgentDelegator 单实现（H47 同步删 TaskDelegator dual impl）
-- [ ] F37. 启动恢复统一路径（list_all + parent_session_id 区分）
+- [x] F37. 启动恢复统一路径：`recovery::scan_unfinished_subagents` 改用 `SessionManager.list_all_sessions` 扫描，按 `Session.parent_session_id` 区分 sub-session 顶层会话；UnfinishedSubAgent 字段从父 session.owner / last_message.reply_target 反推
 - [ ] F38. Sub-agent 完成回填合成 ChannelMessage 调父 process_turn
 
 ## 模块 G：per-user（0/6）
@@ -81,7 +81,7 @@
 - [x] H47. 删 `TaskDelegator` trait + dual impl on DelegationCoordinator；`AgentDelegateTool` 改持 `Arc<dyn AgentDelegator>` 并把 `&Session` 传给 delegate()；daemon wiring 同步
 - [ ] H48. 删 SchedulerContext / WebhookContext
 - [ ] H49. 删 AskUserHandler / DelegateHandler 闭包类型
-- [ ] H50. 删 subagent_running_*.json marker 文件机制
+- [x] H50. 删 `subagent_running_*.json` marker：DelegationCoordinator 不再写/读 marker；`cleanup_stale_subagent_markers` 函数删除；`sessions_root: PathBuf` 字段也从 DelegationCoordinator 删除（恢复机制 100% 依赖 SessionManager 元数据）
 - [x] H51. 删 AgentConfig.max_history（死字段）
 - [x] H52. 删 Session.last_reply_target（仅 Session struct；storage 层留字段用于旧元数据 backward read）
 - [x] H53. 删 [defaults] config 段（CLI 改为读 routing.chat.models[0]）；[context] 段在 C21 删，[limits] 不存在
@@ -102,6 +102,28 @@
 ## 实施日志
 
 按时间倒序记录每次推进。
+
+### F37 + H50 — 恢复机制收编 + 删 marker 文件
+
+`recovery::scan_unfinished_subagents` no longer reads
+`subagent_running_*.json`. It now takes `&SessionManager`, walks
+`list_all_sessions()`, filters those with `parent_session_id` set and
+a mid-turn history, and reconstructs `UnfinishedSubAgent` records from
+the session graph (parent's `owner` → `session_key`, parent's
+`last_message.reply_target` → `reply_target`, sub-session's first user
+message → `task_preview`, sub_session_id reused as `task_id`).
+
+- `recovery::cleanup_stale_subagent_markers` deleted entirely.
+- `DelegationCoordinator`: marker writes (open + remove) deleted;
+  `sessions_root: PathBuf` field deleted along with the corresponding
+  constructor parameter. The async-spawn rebuild block no longer
+  carries `sessions_root`.
+- `daemon.rs`: calls `scan_unfinished_subagents(&session_manager)`;
+  the standalone `sessions_root` for queue processing is now declared
+  locally only where it's used (queue scanning).
+
+Result: zero on-disk dependency for sub-agent recovery; everything
+flows through `SessionManager`. 377 lib tests pass.
 
 ### B15 — Sub-session 存储扁平化
 
@@ -153,7 +175,7 @@ rewrite to land. Net: -1 trait, -1 dual impl, ~30 references re-routed.
 
 Result: 377 lib tests still passing.
 
-### Stage 2 (剩 12 项) — 待下一会话续作
+### Stage 2 (剩 10 项) — 待下一会话续作
 
 Stage 2 = C17 + C18 + E29 + E30 + E32 + E34 + F35 + F36 (complete) +
 F37 + F38 + B15 + H45 + H46 + H47 + H48 + H49 + H50 + H57.

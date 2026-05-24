@@ -748,7 +748,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             Arc::clone(&skills_arc),
             config.agent.max_tool_calls,
             Arc::clone(&session_manager),
-            config.workspace_dir.join("sessions"),
             config.workspace_dir.join("worktrees"),
         );
         let delegator_arc = Arc::new(delegator);
@@ -786,8 +785,12 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let mut channels = build_channel_accounts(&config);
 
     // ── Sub-agent recovery: detect interrupted sub-agents from a previous run ──
-    let sessions_root = config.workspace_dir.join("sessions");
-    let unfinished_subagents = crate::agents::recovery::scan_unfinished_subagents(&sessions_root);
+    // F37 + H50: scan SessionManager for sub-sessions with mid-turn history
+    // instead of reading `subagent_running_*.json` marker files (the marker
+    // mechanism has been deleted along with the corresponding writes in
+    // DelegationCoordinator).
+    let unfinished_subagents =
+        crate::agents::recovery::scan_unfinished_subagents(&session_manager);
     if !unfinished_subagents.is_empty() {
         tracing::warn!(
             count = unfinished_subagents.len(),
@@ -801,12 +804,11 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             );
         }
     }
-    // Clean up stale marker files — they belong to the old process.
-    crate::agents::recovery::cleanup_stale_subagent_markers(&sessions_root);
 
     // ── Queue processing: drain any queued messages ────────────────────────
     // Messages may have been queued to queue.jsonl files during a hot switch
     // or if the process was killed mid-turn. Always scan on startup.
+    let sessions_root = config.workspace_dir.join("sessions");
     match crate::agents::process_all_queues(&sessions_root) {
         Ok(queues) => {
             for (sid, msgs) in &queues {
