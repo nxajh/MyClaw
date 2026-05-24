@@ -27,9 +27,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use futures_util::StreamExt;
+
 use crate::agents::context_engine::ContextEngine;
 use crate::agents::error::AgentError;
-use crate::agents::llm_stream;
 use crate::agents::loop_breaker::{LoopBreak, LoopBreaker};
 use crate::agents::session::Session;
 use crate::agents::tool_executor::ToolExecutor;
@@ -37,7 +38,7 @@ use crate::agents::turn::{TurnContext, TurnResult};
 use crate::agents::AgentRuntime;
 use crate::config::sub_agent::SubAgentConfig;
 use crate::providers::capability_chat::{ChatMessage, ChatRequest, StopReason, ToolSpec};
-use crate::providers::Capability;
+use crate::providers::{BoxStream, Capability, ContentPart, StreamEvent, ToolCall};
 
 /// "An agent" — just its config (name, system prompt fragment, three
 /// capability filters, optional model override). Everything else lives
@@ -130,6 +131,7 @@ impl Agent2 {
 
         let mut tool_calls_count: usize = 0;
         let max_tool_calls = self.config.max_tool_calls.unwrap_or(100);
+        let permission_mode = turn_ctx.permission_mode;
 
         loop {
             // Shutdown checkpoint between LLM calls (mirrors AgentLoop chat_loop).
@@ -155,33 +157,109 @@ impl Agent2 {
             };
 
             let stream = provider.chat(req)?;
-            // MVP: collect full text non-incrementally. Streaming wiring
-            // arrives once Session.channel is in production use.
-            let text = llm_stream::read_to_string(stream).await?;
+            let response = collect_stream(stream).await?;
 
-            // Re-parse from raw text isn't enough — we need tool_calls
-            // structure too. Today the LLM stream gives us a richer
-            // collected response via the AgentLoop helpers; until those
-            // helpers move out of agent_impl, the MVP just supports the
-            // no-tool-calls fast path.
-            //
-            // If the LLM emitted tool_calls in this turn, the MVP path
-            // cannot continue (we don't see them). Fall back to bailing
-            // out with the partial text and a clear error so the caller
-            // knows to use the legacy AgentLoop until C18 (full) lands.
-            //
-            // This is the documented MVP limitation: text-only turns
-            // succeed end-to-end through Agent.run; tool-call turns still
-            // need AgentLoop.
-            let _ = tool_calls_count;
-            let _ = max_tool_calls;
-            let _ = loop_breaker;
-            let _ = tool_executor;
-            let _ = &mut context;
+            // Update token tracker from API response.
+            if let Some(ref usage) = response.usage {
+                context.update_usage(
+                    usage.input_tokens.unwrap_or(0),
+                    usage.output_tokens.unwrap_or(0),
+                    usage.cached_input_tokens.unwrap_or(0),
+                );
+                if let Some(ref hook) = session.persist {
+                    hook.save_token_count(&session.id, context.token_total());
+                }
+            }
 
-            // Persist + return.
-            if !text.trim().is_empty() {
-                session.add_assistant(text.clone());
+            // No tool calls → final response. Persist + return.
+            if response.tool_calls.is_empty() {
+                if !response.text.trim().is_empty() {
+                    session.add_assistant(response.text.clone());
+                    if let Some(ref hook) = session.persist {
+                        if let Some(msg) = session.history.last() {
+                            let _ = hook.persist_message(&session.id, msg);
+                        }
+                    }
+                }
+                return Ok(TurnResult {
+                    text: response.text,
+                    stop_reason: response.stop_reason,
+                    pending_retry: None,
+                });
+            }
+
+            // Tool calls present — append assistant message with the calls
+            // (preserving thinking content for re-send), execute each tool,
+            // append tool_result messages, then loop for the next LLM call.
+            let mut assistant_msg = ChatMessage::assistant_text(&response.text);
+            assistant_msg.tool_calls = Some(response.tool_calls.clone());
+            if let Some(ref thinking_text) = response.reasoning_content {
+                assistant_msg.parts.insert(
+                    0,
+                    ContentPart::Thinking {
+                        thinking: thinking_text.clone(),
+                        signature: response.thinking_signature.clone(),
+                    },
+                );
+            }
+            messages.push(assistant_msg);
+            session.add_assistant_with_tools(
+                response.text.clone(),
+                response.tool_calls.clone(),
+                response.reasoning_content.clone(),
+                response.thinking_signature.clone(),
+            );
+            if let Some(ref hook) = session.persist {
+                if let Some(msg) = session.history.last() {
+                    let _ = hook.persist_message(&session.id, msg);
+                }
+            }
+
+            for call in &response.tool_calls {
+                tool_calls_count += 1;
+                if max_tool_calls > 0 && tool_calls_count > max_tool_calls {
+                    return Err(anyhow::anyhow!(
+                        "tool call limit reached ({}), loop broken",
+                        max_tool_calls
+                    ));
+                }
+
+                let result = tool_executor
+                    .execute(call, session, Some(&permission_mode))
+                    .await;
+                let (result_content, is_error) = match &result {
+                    Ok(r) => {
+                        let mut out = r.output.clone();
+                        if let Some(ref err) = r.error {
+                            if out.is_empty() {
+                                out = format!("error: {}", err);
+                            }
+                        }
+                        (out, !r.success)
+                    }
+                    Err(e) => (format!("error: {}", e), true),
+                };
+
+                match loop_breaker.record_and_check(
+                    &call.name,
+                    &call.arguments,
+                    &result_content,
+                ) {
+                    LoopBreak::Detected(reason) => {
+                        return Err(AgentError::LoopBreak {
+                            reason: format!("{:?}", reason),
+                        }
+                        .into());
+                    }
+                    LoopBreak::None => {}
+                }
+
+                let mut tool_msg = ChatMessage::text("tool", &result_content);
+                tool_msg.tool_call_id = Some(call.id.clone());
+                tool_msg.is_error = Some(is_error);
+                messages.push(tool_msg);
+
+                session.add_tool_result(call.id.clone(), result_content, is_error);
                 if let Some(ref hook) = session.persist {
                     if let Some(msg) = session.history.last() {
                         let _ = hook.persist_message(&session.id, msg);
@@ -189,11 +267,7 @@ impl Agent2 {
                 }
             }
 
-            return Ok(TurnResult {
-                text,
-                stop_reason: StopReason::EndTurn,
-                pending_retry: None,
-            });
+            // Loop back to the next LLM call with the appended tool_result messages.
         }
     }
 
@@ -251,9 +325,127 @@ fn placeholder_resources(
     )
 }
 
-// MVP keepalives for symbols that the C18-full body will use.
-#[allow(unused_imports)]
-use {AgentError as _AgentErrorKeepalive, LoopBreak as _LoopBreakKeepalive};
+/// Bundle of fields extracted from one streaming LLM response. Mirrors
+/// the shape of `agent_impl::types::CollectedResponse` but is defined
+/// here so `agent.rs` doesn't reach into `agent_impl/` internals.
+struct CollectedResponse {
+    text: String,
+    reasoning_content: Option<String>,
+    thinking_signature: Option<String>,
+    tool_calls: Vec<ToolCall>,
+    stop_reason: StopReason,
+    usage: Option<crate::providers::ChatUsage>,
+}
+
+/// Read a full stream into a [`CollectedResponse`]. Simplified compared
+/// to `AgentLoop::collect_stream_inner` — no max_output_bytes guard, no
+/// cancellation token, no `channel.push_event` per-chunk forwarding.
+/// Those refinements move in once `Session.channel` is wired by E29.
+async fn collect_stream(stream: BoxStream<StreamEvent>) -> anyhow::Result<CollectedResponse> {
+    let mut stream = stream;
+    let mut text = String::new();
+    let mut reasoning_content: Option<String> = None;
+    let mut thinking_signature: Option<String> = None;
+    let mut tool_calls: Vec<ToolCall> = Vec::new();
+    let mut stop_reason = StopReason::EndTurn;
+    let mut usage: Option<crate::providers::ChatUsage> = None;
+    let mut received_first_chunk = false;
+
+    loop {
+        let event_opt = if !received_first_chunk {
+            match tokio::time::timeout(
+                crate::agents::llm_stream::STREAM_FIRST_CHUNK_TIMEOUT,
+                stream.next(),
+            )
+            .await
+            {
+                Ok(ev) => ev,
+                Err(_) => anyhow::bail!(
+                    "stream chunk timeout after {}s, no data received",
+                    crate::agents::llm_stream::STREAM_FIRST_CHUNK_TIMEOUT.as_secs()
+                ),
+            }
+        } else {
+            stream.next().await
+        };
+
+        let event = match event_opt {
+            Some(e) => {
+                received_first_chunk = true;
+                e
+            }
+            None => break, // stream ended without explicit Done
+        };
+
+        match event {
+            StreamEvent::Delta { text: delta } => text.push_str(&delta),
+            StreamEvent::Thinking { text: delta } => {
+                if !delta.is_empty() {
+                    if let Some(rc) = &mut reasoning_content {
+                        rc.push_str(&delta);
+                    } else {
+                        reasoning_content = Some(delta);
+                    }
+                }
+            }
+            StreamEvent::ThinkingSignature { signature } => {
+                thinking_signature = Some(signature);
+            }
+            StreamEvent::ToolCallStart { id, name, initial_arguments } => {
+                tool_calls.push(ToolCall { id, name, arguments: initial_arguments });
+            }
+            StreamEvent::ToolCallDelta { id, delta } => {
+                if !id.is_empty() {
+                    if let Some(call) = tool_calls.iter_mut().find(|c| c.id == id) {
+                        call.arguments.push_str(&delta);
+                    } else {
+                        tool_calls.push(ToolCall { id, name: String::new(), arguments: delta });
+                    }
+                } else if let Some(last) = tool_calls.last_mut() {
+                    last.arguments.push_str(&delta);
+                }
+            }
+            StreamEvent::ToolCallEnd { id, name, arguments } => {
+                if let Some(call) = tool_calls.iter_mut().find(|c| c.id == id) {
+                    call.name = name;
+                    call.arguments = arguments;
+                }
+            }
+            StreamEvent::Usage(u) => {
+                if let Some(ref mut existing) = usage {
+                    if u.input_tokens.is_some() {
+                        existing.input_tokens = u.input_tokens;
+                    }
+                    if u.output_tokens.is_some() {
+                        existing.output_tokens = u.output_tokens;
+                    }
+                    if u.cached_input_tokens.is_some() {
+                        existing.cached_input_tokens = u.cached_input_tokens;
+                    }
+                } else {
+                    usage = Some(u);
+                }
+            }
+            StreamEvent::Done { reason } => {
+                stop_reason = reason;
+                break;
+            }
+            StreamEvent::HttpError { status, message } => {
+                return Err(crate::providers::ProviderHttpError { status, message }.into());
+            }
+            StreamEvent::Error(e) => anyhow::bail!("stream error: {}", e),
+        }
+    }
+
+    Ok(CollectedResponse {
+        text,
+        reasoning_content,
+        thinking_signature,
+        tool_calls,
+        stop_reason,
+        usage,
+    })
+}
 
 #[cfg(test)]
 mod tests {

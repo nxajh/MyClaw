@@ -34,7 +34,7 @@
 
 - [~] C16. `SubAgentConfig` 加 skills/mcp 三维过滤 + allows_tool/skill/mcp helper；slim AgentConfig 形态等 C18
 - [x] C17. `Agent` (实际命名 `Agent2`，待 H45 删旧 Agent 后再 rename) 只持 `pub config: SubAgentConfig`
-- [~] C18. `Agent2::run(&mut Session, TurnContext, &AgentRuntime) -> Result<TurnResult>` MVP 实现：allowed_tools snapshot（含 MCP source 过滤）+ ContextEngine 初始化 + 单轮 LLM 调用 + assistant 持久化。**未实现：tool-call 迭代循环、compaction 触发、streaming via channel.push_event、loop_breaker 集成、retry/empty-response 处理**——这些需 C18 完整 port from agent_impl/{chat_loop,compaction,tools,images}.rs（约 300-500 行）。AgentLoop 仍并行存活；正交切换由 H45 配合 E29 完成
+- [~] C18. `Agent2::run(&mut Session, TurnContext, &AgentRuntime) -> Result<TurnResult>` 实现：allowed_tools snapshot（含 MCP source 过滤）+ ContextEngine 初始化 + LLM 调用 + **完整 tool-call 迭代循环**（stream 收集、ToolExecutor 调用、permission_mode 强制、LoopBreaker 集成、max_tool_calls、thinking content 保留）+ token 跟踪 + 每步持久化。**未实现：compaction 触发（should_compact 检查与 execute_compaction 调用）、streaming via channel.push_event、empty-response retry、image attachment、fallback chain、interrupt recovery**——这些是 C18 完整版增量，每个都可独立 patch in。AgentLoop 仍并行存活；orchestrator 切换由 H45 配合 E29 完成
 - [x] C19. `ToolExecutor` 重命名（原 `DefaultToolExecutor`）；ask_user/agent_delegate inline 处理待 F35 拆出
 - [x] C20. `LoopBreaker` policy + per-turn counter（已有 LoopBreakerConfig 分离 + reset() 每轮重置）
 - [x] C21. `ContextEngine` 合并 CompactionPolicy + CompactionExecutor → `src/agents/context_engine.rs` 作为 façade，内部 struct 不变；C18 Agent.run 改用 ContextEngine
@@ -102,6 +102,44 @@
 ## 实施日志
 
 按时间倒序记录每次推进。
+
+### C17 + C18 (扩展 MVP) — 新 Agent + tool-call 迭代循环
+
+Extended the C18 MVP with a real iterative chat loop, modeled after
+`agent_impl/chat_loop.rs` but condensed and using the new field shapes:
+
+- New `collect_stream(BoxStream<StreamEvent>) -> CollectedResponse`
+  helper inline in agent.rs (≈100 lines). Handles Delta / Thinking /
+  ThinkingSignature / ToolCallStart / ToolCallDelta / ToolCallEnd /
+  Usage / Done / HttpError / Error variants. Uses
+  `STREAM_FIRST_CHUNK_TIMEOUT` from `llm_stream`. No max_output_bytes,
+  no cancellation, no per-chunk channel.push_event — those are C18
+  refinements once Session.channel is wired.
+- `Agent2::run` loop body:
+  1. Build ChatRequest, stream → collect_stream.
+  2. Update `ContextEngine.update_usage` + persist token total via
+     session.persist.
+  3. If `response.tool_calls.is_empty()` → persist assistant text,
+     return TurnResult.
+  4. Else: append assistant_msg with tool_calls + thinking parts,
+     execute each tool via `ToolExecutor.execute(call, session,
+     Some(&permission_mode))`, check loop_breaker, append tool_result,
+     enforce max_tool_calls. Loop.
+- Permission mode resolved from `turn_ctx.permission_mode` and passed
+  to ToolExecutor on every tool call.
+
+Still TODO (each independently patch-able):
+- Compaction trigger (`if context.should_compact(window) { context.execute_compaction(...) }`).
+- Streaming via `session.channel.push_event` per delta / per tool call.
+- Empty-response retry + rollback (currently any empty turn returns
+  empty TurnResult; AgentLoop's tighter retry policy isn't replicated).
+- Image attachment to last user message (skipped — Session.last_message
+  carries the URLs/base64, but the LLM call doesn't yet attach them).
+- Fallback chain detection (CHAIN_EXHAUSTED_TAG / CHAIN_ALL_COOLING_TAG).
+- Pre-fallback compaction (maybe_compact_for_fallback).
+- Pending_retry / recovery — orchestrator owns this still.
+
+379 lib tests pass (no regressions, includes the 2 new agent.rs tests).
 
 ### C17 + C18 (MVP) — 新 Agent 类型 + 最小可工作 run()
 
