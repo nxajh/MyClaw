@@ -171,6 +171,101 @@ impl Agent2 {
                 }
             }
 
+            // Compaction trigger. Read context_window for the active model
+            // and ask ContextEngine if we should compact. The actual
+            // summarizer call is deferred — execute_compaction needs the
+            // tool_specs slice + the session's full state, which agent.rs
+            // already has. Failures are logged and the turn continues
+            // (AgentLoop has the same forgive-and-proceed policy).
+            if let Ok(cfg) = runtime.providers.get_chat_model_config(&model_id) {
+                if let Some(window) = cfg.context_window {
+                    if context.should_compact(window) {
+                        tracing::info!(
+                            session = %session.id,
+                            total = context.token_total(),
+                            window,
+                            "context threshold crossed, attempting compaction"
+                        );
+                        let sys_prompt_tokens = estimate_tokens(turn_ctx.system_prompt);
+                        let tool_spec_tokens: u64 = tool_specs
+                            .iter()
+                            .map(|s| {
+                                estimate_tokens(&s.name)
+                                    + s.description.as_deref().map_or(0, estimate_tokens)
+                                    + estimate_tokens(&s.input_schema.to_string())
+                                    + 8
+                            })
+                            .sum();
+                        if let Some(boundary) = context.compaction_boundary(
+                            &session.history,
+                            window,
+                            sys_prompt_tokens,
+                            tool_spec_tokens,
+                        ) {
+                            // Snapshot history for the summarizer (which reads
+                            // a slice). We pass the *current* session to the
+                            // memory tools inside the summarizer.
+                            let history_snap: Vec<ChatMessage> =
+                                session.history.iter().cloned().collect();
+                            match context
+                                .execute_compaction(
+                                    &history_snap,
+                                    turn_ctx.system_prompt,
+                                    &tool_specs,
+                                    boundary,
+                                    &model_id,
+                                    session,
+                                )
+                                .await
+                            {
+                                Ok(result) => {
+                                    let version = session.compact_version + 1;
+                                    let summary_prefix = "[CONTEXT COMPACTION — REFERENCE ONLY] ";
+                                    let summary_msg = ChatMessage::user_text(format!(
+                                        "{}{}",
+                                        summary_prefix, result.summary
+                                    ));
+                                    let last_compacted_id = session
+                                        .message_ids
+                                        .get(boundary.saturating_sub(1))
+                                        .copied()
+                                        .unwrap_or(0);
+                                    session.apply_compaction(
+                                        result.compact_start,
+                                        result.compact_end,
+                                        summary_msg,
+                                        version,
+                                        last_compacted_id,
+                                        result.summary_tokens,
+                                    );
+                                    context.adjust_for_compaction(
+                                        result.removed_tokens,
+                                        result.summary_tokens,
+                                    );
+                                    // Rebuild the in-flight `messages` slice
+                                    // so the next LLM call sees the compacted
+                                    // history.
+                                    messages = std::iter::once(ChatMessage::system_text(
+                                        turn_ctx.system_prompt,
+                                    ))
+                                    .chain(session.history.iter().cloned())
+                                    .collect();
+                                    crate::agents::session::sanitize_history(&mut messages);
+                                    tracing::info!(
+                                        summary_tokens = result.summary_tokens,
+                                        removed_tokens = result.removed_tokens,
+                                        "compaction completed"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(err = %e, "compaction failed, continuing");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // No tool calls → final response. Persist + return.
             if response.tool_calls.is_empty() {
                 if !response.text.trim().is_empty() {
@@ -323,6 +418,13 @@ fn placeholder_resources(
         runtime.knowledge_dir.to_string_lossy().to_string(),
         0,
     )
+}
+
+/// Char-count → token estimate. Matches `agent_impl::types::estimate_tokens`
+/// (~4 bytes/token), kept here so `agent.rs` doesn't pull
+/// `agent_impl/` internals.
+fn estimate_tokens(text: &str) -> u64 {
+    (text.len() as u64).div_ceil(4)
 }
 
 /// Bundle of fields extracted from one streaming LLM response. Mirrors
