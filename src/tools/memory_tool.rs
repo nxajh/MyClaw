@@ -35,25 +35,37 @@ fn validate_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Resolve the per-user memory directory from the workspace root and session.
+fn resolve_memory_dir(workspace_dir: &str, session: &crate::agents::session::Session) -> Result<PathBuf, String> {
+    // Use session.owner as routing_key, resolve to user_id.
+    // Default: identity mapping (owner IS the user_id).
+    let user_id = session.owner.replace([':', '/', '\\'], "_");
+    let dir = PathBuf::from(workspace_dir)
+        .join("users")
+        .join(&user_id)
+        .join(crate::memory::MEMORY_DIR_NAME);
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("Failed to create user memory dir: {}", e))?;
+    }
+    Ok(dir)
+}
+
 /// Scan memory directory and return parsed entries.
 fn scan_entries(memory_dir: &Path) -> Vec<crate::memory::IndexEntry> {
     let files = crate::memory::scan_memory_files(memory_dir);
     files.iter().map(crate::memory::IndexEntry::from).collect()
 }
 
-/// Resolve memory directory from the tool's knowledge_dir.
+/// Resolve memory directory from the tool's workspace_dir and session context.
 struct MemoryPaths {
     memory_dir: PathBuf,
 }
 
 impl MemoryPaths {
-    fn new(knowledge_dir: &str) -> Result<Self, String> {
-        let dir = PathBuf::from(knowledge_dir).join(crate::memory::MEMORY_DIR_NAME);
-        if !dir.exists() {
-            std::fs::create_dir_all(&dir)
-                .map_err(|e| format!("Failed to create memory dir: {}", e))?;
-        }
-        Ok(Self { memory_dir: dir })
+    fn from_session(workspace_dir: &str, session: &crate::agents::session::Session) -> Result<Self, String> {
+        let memory_dir = resolve_memory_dir(workspace_dir, session)?;
+        Ok(Self { memory_dir })
     }
 }
 
@@ -114,12 +126,12 @@ fn build_frontmatter(name: &str, summary: &str, tags: &[String], mem_type: &crat
 // ══════════════════════════════════════════════════════════════════════════
 
 pub struct MemoryListTool {
-    knowledge_dir: String,
+    workspace_dir: String,
 }
 
 impl MemoryListTool {
-    pub fn new(knowledge_dir: String) -> Self {
-        Self { knowledge_dir }
+    pub fn new(workspace_dir: String) -> Self {
+        Self { workspace_dir }
     }
 }
 
@@ -142,7 +154,7 @@ impl Tool for MemoryListTool {
     }
 
     async fn execute(&self, _args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
-        let paths = match MemoryPaths::new(&self.knowledge_dir) {
+        let paths = match MemoryPaths::from_session(&self.workspace_dir, _session) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult {
                 success: false,
@@ -196,12 +208,12 @@ impl Tool for MemoryListTool {
 // ══════════════════════════════════════════════════════════════════════════
 
 pub struct MemoryViewTool {
-    knowledge_dir: String,
+    workspace_dir: String,
 }
 
 impl MemoryViewTool {
-    pub fn new(knowledge_dir: String) -> Self {
-        Self { knowledge_dir }
+    pub fn new(workspace_dir: String) -> Self {
+        Self { workspace_dir }
     }
 }
 
@@ -238,7 +250,7 @@ impl Tool for MemoryViewTool {
             }),
         };
 
-        let paths = match MemoryPaths::new(&self.knowledge_dir) {
+        let paths = match MemoryPaths::from_session(&self.workspace_dir, _session) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult {
                 success: false,
@@ -291,12 +303,12 @@ impl Tool for MemoryViewTool {
 // ══════════════════════════════════════════════════════════════════════════
 
 pub struct MemorySearchTool {
-    knowledge_dir: String,
+    workspace_dir: String,
 }
 
 impl MemorySearchTool {
-    pub fn new(knowledge_dir: String) -> Self {
-        Self { knowledge_dir }
+    pub fn new(workspace_dir: String) -> Self {
+        Self { workspace_dir }
     }
 }
 
@@ -334,7 +346,7 @@ impl Tool for MemorySearchTool {
             }),
         };
 
-        let paths = match MemoryPaths::new(&self.knowledge_dir) {
+        let paths = match MemoryPaths::from_session(&self.workspace_dir, _session) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult {
                 success: false,
@@ -427,12 +439,12 @@ impl Tool for MemorySearchTool {
 // ══════════════════════════════════════════════════════════════════════════
 
 pub struct MemoryManageTool {
-    knowledge_dir: String,
+    workspace_dir: String,
 }
 
 impl MemoryManageTool {
-    pub fn new(knowledge_dir: String) -> Self {
-        Self { knowledge_dir }
+    pub fn new(workspace_dir: String) -> Self {
+        Self { workspace_dir }
     }
 }
 
@@ -492,10 +504,19 @@ impl Tool for MemoryManageTool {
         let action = args["action"].as_str().unwrap_or("");
         let name = args["name"].as_str().unwrap_or("");
 
+        let paths = match MemoryPaths::from_session(&self.workspace_dir, _session) {
+            Ok(p) => p,
+            Err(e) => return Ok(ToolResult {
+                success: false,
+                output: json!({"success": false, "error": e}).to_string(),
+                error: None,
+            }),
+        };
+
         let result = match action {
-            "add" => self.action_add(name, &args),
-            "replace" => self.action_replace(name, &args),
-            "remove" => self.action_remove(name),
+            "add" => self.action_add(name, &args, &paths),
+            "replace" => self.action_replace(name, &args, &paths),
+            "remove" => self.action_remove(name, &paths),
             _ => Err(format!(
                 "Unknown action '{}'. Use: add, replace, remove", action
             )),
@@ -513,7 +534,7 @@ impl Tool for MemoryManageTool {
 }
 
 impl MemoryManageTool {
-    fn action_add(&self, name: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
+    fn action_add(&self, name: &str, args: &serde_json::Value, paths: &MemoryPaths) -> Result<serde_json::Value, String> {
         validate_name(name)?;
 
         let content = args["content"].as_str()
@@ -526,8 +547,6 @@ impl MemoryManageTool {
         }
 
         scan_memory_content_opt(content)?;
-
-        let paths = MemoryPaths::new(&self.knowledge_dir)?;
 
         let files = crate::memory::scan_memory_files(&paths.memory_dir);
         if files.iter().any(|f| f.name == name) {
@@ -559,10 +578,9 @@ impl MemoryManageTool {
         }))
     }
 
-    fn action_replace(&self, name: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
+    fn action_replace(&self, name: &str, args: &serde_json::Value, paths: &MemoryPaths) -> Result<serde_json::Value, String> {
         validate_name(name)?;
 
-        let paths = MemoryPaths::new(&self.knowledge_dir)?;
         let files = crate::memory::scan_memory_files(&paths.memory_dir);
         let existing = files.iter().find(|f| f.name == name)
             .ok_or_else(|| format!("Memory '{}' not found.", name))?;
@@ -614,10 +632,9 @@ impl MemoryManageTool {
         }))
     }
 
-    fn action_remove(&self, name: &str) -> Result<serde_json::Value, String> {
+    fn action_remove(&self, name: &str, paths: &MemoryPaths) -> Result<serde_json::Value, String> {
         validate_name(name)?;
 
-        let paths = MemoryPaths::new(&self.knowledge_dir)?;
         let files = crate::memory::scan_memory_files(&paths.memory_dir);
         let existing = files.iter().find(|f| f.name == name)
             .ok_or_else(|| format!("Memory '{}' not found.", name))?;

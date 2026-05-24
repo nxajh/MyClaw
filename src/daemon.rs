@@ -423,12 +423,12 @@ async fn build_tools(
     // CronJobTool — manage scheduled cron jobs.
     tools.register(Arc::new(crate::tools::CronJobTool::new(Arc::clone(shared_scheduler))));
 
-    // Memory tools — persistent memory management.
-    let kd = knowledge_dir.to_string();
-    tools.register(Arc::new(crate::tools::MemoryListTool::new(kd.clone())));
-    tools.register(Arc::new(crate::tools::MemoryViewTool::new(kd.clone())));
-    tools.register(Arc::new(crate::tools::MemorySearchTool::new(kd.clone())));
-    tools.register(Arc::new(crate::tools::MemoryManageTool::new(kd)));
+    // Memory tools — persistent memory management (per-user, G43).
+    let wd = workspace_dir.to_string_lossy().to_string();
+    tools.register(Arc::new(crate::tools::MemoryListTool::new(wd.clone())));
+    tools.register(Arc::new(crate::tools::MemoryViewTool::new(wd.clone())));
+    tools.register(Arc::new(crate::tools::MemorySearchTool::new(wd.clone())));
+    tools.register(Arc::new(crate::tools::MemoryManageTool::new(wd)));
 
     // Inject MCP tools (if any servers are configured and connected).
     if mcp_manager.is_connected().await {
