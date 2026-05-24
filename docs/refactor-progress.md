@@ -5,9 +5,9 @@
 
 ## 进度统计
 
-- 完成：53.5 / 61
-- 进行中：C18（MVP 已落，tool-call loop / compaction / streaming 待补）
-- 待办：7.5
+- 完成：54.5 / 61
+- 进行中：C18（核心循环 + compaction 已落，streaming / retry / image / fallback 待补）；F35（real AskUserTool 已写，待 E29 wire 到 daemon）
+- 待办：6.5
 
 ## 模块 A：类型基础（0/11）
 
@@ -60,7 +60,7 @@
 
 ## 模块 F：委派（0/4）
 
-- [ ] F35. AskUserTool / DelegateTool 实现并注册
+- [~] F35. AskUserTool 真实现：双构造器 `new()`（fallback）+ `with_router(AskRouter, ChannelMap)`（real）；执行时按 session.reply_target / owner 找 channel，send 问题 + router.register + await receiver + 5min timeout。AgentDelegateTool 已在 H47 完成（持 Arc<dyn AgentDelegator>）。**待 E29**：daemon 切换到 with_router 构造、orchestrator inbound 先 `ask_router.fulfill(session.id, content)`、删 ToolExecutor 的 inline ask_user/agent_delegate 分支
 - [x] F36. `SubAgentDelegator` 重命名为 `DelegationCoordinator`（文件 sub_agent.rs → delegation_coordinator.rs），保留 type alias 给残留 import；只剩 AgentDelegator 单实现（H47 同步删 TaskDelegator dual impl）
 - [x] F37. 启动恢复统一路径：`recovery::scan_unfinished_subagents` 改用 `SessionManager.list_all_sessions` 扫描，按 `Session.parent_session_id` 区分 sub-session 顶层会话；UnfinishedSubAgent 字段从父 session.owner / last_message.reply_target 反推
 - [x] F38. Sub-agent 完成回填合成完整 `ChannelMessage`（id `delegation:{task_id}` / sender `system` / 真 reply_target / 等等），不再裸字符串；E29 之后 process_turn 直接吃 ChannelMessage
