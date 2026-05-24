@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use crate::agents::{
     Agent, AgentConfig, InMemoryBackend, Orchestrator, OrchestratorParts, SessionManager,
     ToolRegistry, SkillManager, Skill, SystemPromptConfig, RunMode,
-    McpManager, SubAgentDelegator, DelegationManager,
+    McpManager, DelegationCoordinator, DelegationManager,
 };
 use crate::tools::TaskDelegator;
 use std::path::PathBuf;
@@ -729,7 +729,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
         let base_tools_arc: Arc<ToolRegistry> = Arc::new(tools);
 
-        let delegator = SubAgentDelegator::new(
+        let delegator = DelegationCoordinator::new(
             sub_agent_registry.clone(),
             registry_arc.clone(),
             Arc::clone(&base_tools_arc),
@@ -772,8 +772,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let mut channels = build_channel_accounts(&config);
 
     // ── Sub-agent recovery: detect interrupted sub-agents from a previous run ──
-    let sessions_root = config.workspace_dir.join("sessions");
-    let unfinished_subagents = crate::agents::recovery::scan_unfinished_subagents(&sessions_root);
+    let unfinished_subagents = crate::agents::recovery::scan_unfinished_subagents(session_backend.as_ref());
     if !unfinished_subagents.is_empty() {
         tracing::warn!(
             count = unfinished_subagents.len(),
@@ -782,12 +781,14 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         for sa in &unfinished_subagents {
             tracing::warn!(
                 agent = %sa.agent_name,
-                task_id = %sa.task_id,
+                sub_session = %sa.sub_session_id,
+                parent = %sa.parent_session_id,
                 "unfinished sub-agent"
             );
         }
     }
-    // Clean up stale marker files — they belong to the old process.
+    // Clean up stale marker files (legacy).
+    let sessions_root = config.workspace_dir.join("sessions");
     crate::agents::recovery::cleanup_stale_subagent_markers(&sessions_root);
 
     // ── Queue processing: drain any queued messages ────────────────────────

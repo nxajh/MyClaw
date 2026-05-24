@@ -8,7 +8,7 @@ use crate::providers::capability_chat::ToolSpec;
 use super::tool_registry::ToolRegistry;
 use super::session::Session;
 use super::agent_impl::{AskUserHandler, DelegateHandler};
-use super::sub_agent::SubAgentDelegator;
+use super::sub_agent::DelegationCoordinator;
 use super::agent_impl::types::is_write_tool;
 
 /// Executes tool calls on behalf of the main conversation loop.
@@ -19,7 +19,7 @@ pub(crate) struct ToolExecutor {
     pub(crate) tools: Arc<ToolRegistry>,
     pub(crate) ask_user_handler: Option<AskUserHandler>,
     pub(crate) delegate_handler: Option<DelegateHandler>,
-    pub(crate) sub_delegator: Option<Arc<SubAgentDelegator>>,
+    pub(crate) sub_delegator: Option<Arc<DelegationCoordinator>>,
     pub(crate) timeout_secs: u64,
 }
 

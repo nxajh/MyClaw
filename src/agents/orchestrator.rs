@@ -11,7 +11,7 @@
 
 use anyhow::Context;
 use crate::agents::delegation::{DelegationEvent, DelegationManager};
-use crate::agents::sub_agent::SubAgentDelegator;
+use crate::agents::sub_agent::DelegationCoordinator;
 use crate::channels::{Channel, ChannelMessage, SendMessage, ProcessingStatus, InlineButton};
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -92,7 +92,7 @@ pub struct Orchestrator {
     /// Pending ask_user replies: session_key → (oneshot sender, reply_target).
     pending_asks: Arc<DashMap<String, (oneshot::Sender<String>, String)>>,
     /// Sub-agent delegator (for async delegation).
-    sub_delegator: Option<Arc<SubAgentDelegator>>,
+    sub_delegator: Option<Arc<DelegationCoordinator>>,
     /// Delegation manager (shared with DelegateTaskTool via handler).
     delegation_manager: Option<Arc<DelegationManager>>,
     /// Delegation event receiver.
@@ -187,7 +187,7 @@ pub struct OrchestratorParts {
     /// Pre-built channels: (channel_type, account_id, channel_instance).
     pub channels: Vec<(String, String, Arc<dyn Channel>)>,
     /// Sub-agent delegator (conditional — only when sub-agents are configured).
-    pub sub_delegator: Option<Arc<SubAgentDelegator>>,
+    pub sub_delegator: Option<Arc<DelegationCoordinator>>,
     /// Delegation manager (conditional — only when sub-agents are configured).
     pub delegation_manager: Option<Arc<DelegationManager>>,
     /// Delegation event receiver (conditional).
@@ -939,7 +939,7 @@ struct LoopRegistry {
     session_manager: Arc<SessionManager>,
     channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
     pending_asks: Arc<DashMap<String, (oneshot::Sender<String>, String)>>,
-    sub_delegator: Option<Arc<SubAgentDelegator>>,
+    sub_delegator: Option<Arc<DelegationCoordinator>>,
     delegation_manager: Option<Arc<DelegationManager>>,
     persist_backend: Arc<dyn crate::storage::SessionBackend>,
     change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,

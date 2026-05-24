@@ -1,14 +1,11 @@
 //! Startup recovery types and helpers.
 //!
-//! Extracted from `daemon.rs` (the Composition Root) so that Application-layer
-//! types such as `Orchestrator` can reference `UnfinishedSubAgent` without
-//! importing the Composition Root — which would violate the DDD layering rule
-//! that Application must not depend on Infrastructure / Composition Root.
+//! F37: unified recovery — uses SessionManager.list_all_sessions() + parent_session_id
+//! instead of subagent_running_*.json marker files.
 
 /// Info about a sub-agent that was still running when the daemon was killed.
 ///
-/// Populated on startup by scanning the session directory for
-/// `subagent_running_*.json` marker files left by a previous process.
+/// Populated on startup by scanning sessions with parent_session_id set.
 #[derive(Debug, Clone)]
 pub struct UnfinishedSubAgent {
     pub agent_name: String,
@@ -16,16 +13,36 @@ pub struct UnfinishedSubAgent {
     pub task_preview: String,
     pub parent_session_id: String,
     pub sub_session_id: String,
-    /// The parent session key (e.g. "telegram:12345") used to look up the
-    /// main agent's session and emit a DelegationEvent when recovery completes.
+    /// The parent session key (e.g. "telegram:12345").
     pub session_key: String,
     /// The reply_target stored when the parent session last received a message.
     pub reply_target: String,
 }
 
-/// Scan `sessions_root` for `subagent_running_*.json` marker files left behind
-/// by a previous daemon that was killed while sub-agents were executing.
-pub fn scan_unfinished_subagents(sessions_root: &std::path::Path) -> Vec<UnfinishedSubAgent> {
+/// Scan for sub-sessions that have a parent_session_id.
+///
+/// F37: uses backend.list_all_sessions() + parent_session_id filter
+/// instead of subagent_running_*.json marker files.
+pub fn scan_unfinished_subagents(backend: &dyn crate::storage::SessionBackend) -> Vec<UnfinishedSubAgent> {
+    let all = backend.list_all_sessions();
+    all.into_iter()
+        .filter_map(|s| {
+            let parent = backend.load_parent_session_id(&s.id)?;
+            Some(UnfinishedSubAgent {
+                agent_name: s.display_name.unwrap_or_else(|| s.owner.clone()),
+                task_id: String::new(),
+                task_preview: String::new(),
+                parent_session_id: parent,
+                sub_session_id: s.id.clone(),
+                session_key: String::new(),
+                reply_target: String::new(),
+            })
+        })
+        .collect()
+}
+
+/// Legacy: scan marker files. Kept for backward compatibility during migration.
+pub fn scan_unfinished_subagents_from_markers(sessions_root: &std::path::Path) -> Vec<UnfinishedSubAgent> {
     let mut unfinished = Vec::new();
     let entries = match std::fs::read_dir(sessions_root) {
         Ok(e) => e,
@@ -52,9 +69,7 @@ pub fn scan_unfinished_subagents(sessions_root: &std::path::Path) -> Vec<Unfinis
     unfinished
 }
 
-/// Remove all stale `subagent_running_*.json` marker files so they do not
-/// accumulate across restarts.  Called once after the Orchestrator has been
-/// informed about unfinished sub-agents.
+/// Remove all stale `subagent_running_*.json` marker files.
 pub fn cleanup_stale_subagent_markers(sessions_root: &std::path::Path) {
     let entries = match std::fs::read_dir(sessions_root) {
         Ok(e) => e,

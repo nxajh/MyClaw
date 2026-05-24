@@ -298,7 +298,7 @@ impl AgentLoop {
         self
     }
 
-    pub fn with_sub_delegator(mut self, delegator: Arc<super::sub_agent::SubAgentDelegator>) -> Self {
+    pub fn with_sub_delegator(mut self, delegator: Arc<super::sub_agent::DelegationCoordinator>) -> Self {
         self.tool_executor.sub_delegator = Some(delegator);
         self
     }

@@ -37,8 +37,10 @@ use crate::storage::SessionBackend as _;
 use crate::tools::TaskDelegator;
 
 /// Holds sub-agent configs and creates temporary AgentLoops for delegation.
+///
+/// F36: aliased as `DelegationCoordinator` for RFC v2 naming.
 #[derive(Clone)]
-pub struct SubAgentDelegator {
+pub struct DelegationCoordinator {
     /// Sub-agent configurations, indexed by name.
     configs: super::AgentRegistry,
     /// Shared service registry (for LLM access).
@@ -55,7 +57,7 @@ pub struct SubAgentDelegator {
     worktrees_root: PathBuf,
 }
 
-impl SubAgentDelegator {
+impl DelegationCoordinator {
     pub fn new(
         configs: super::AgentRegistry,
         registry: Arc<dyn ProviderRegistry>,
@@ -405,7 +407,7 @@ impl SubAgentDelegator {
         let handle = tokio::spawn(async move {
             let start_time = std::time::Instant::now();
 
-            let sub_delegator = SubAgentDelegator {
+            let sub_delegator = DelegationCoordinator {
                 configs,
                 registry,
                 tools,
@@ -452,13 +454,13 @@ impl SubAgentDelegator {
     }
 }
 
-/// F36: SubAgentDelegator also implements the new `AgentDelegator` trait so
+/// F36: DelegationCoordinator also implements the new `AgentDelegator` trait so
 /// downstream code can target the RFC v2 contract directly. The two trait
 /// impls share `delegate_with_parent` for the actual work; the only
 /// difference is `parent_session` carries richer context (channel /
 /// reply_target via `Session.last_message`).
 #[async_trait::async_trait]
-impl crate::agents::AgentDelegator for SubAgentDelegator {
+impl crate::agents::AgentDelegator for DelegationCoordinator {
     async fn delegate(
         &self,
         agent_name: &str,
@@ -489,7 +491,7 @@ impl crate::agents::AgentDelegator for SubAgentDelegator {
 }
 
 #[async_trait::async_trait]
-impl TaskDelegator for SubAgentDelegator {
+impl TaskDelegator for DelegationCoordinator {
     async fn delegate(&self, agent_name: &str, task: &str) -> anyhow::Result<String> {
         self.delegate_with_parent(agent_name, task, "", None, None, None).await
     }
