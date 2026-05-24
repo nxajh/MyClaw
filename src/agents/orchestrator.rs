@@ -121,6 +121,8 @@ pub struct Orchestrator {
     unfinished_subagents: parking_lot::Mutex<Vec<crate::agents::UnfinishedSubAgent>>,
     /// Shared scheduler for run result tracking from cron tasks.
     scheduler: Option<crate::agents::SharedScheduler>,
+    /// E30: AskRouter for F35 AskUserTool integration.
+    ask_router: Arc<crate::agents::ask_router::AskRouter>,
 }
 
 /// Resources shared between Orchestrator and scheduler tasks.
@@ -275,6 +277,7 @@ impl Orchestrator {
             search_cooldown: parts.search_cooldown,
             unfinished_subagents: parking_lot::Mutex::new(parts.unfinished_subagents),
             scheduler: parts.scheduler,
+            ask_router: Arc::new(crate::agents::ask_router::AskRouter::new()),
         };
 
         info!(channels = orchestrator.channels.len(), "orchestrator initialized");

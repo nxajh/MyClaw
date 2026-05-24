@@ -3,16 +3,8 @@
 //!
 //! RFC v2 §三.A: separates *what the agent is* (`Agent { config }`) from
 //! *what it has access to* (`AgentRuntime { tools, mcp, skills, ... }`).
-//! Today AgentLoop conflates both — every per-session AgentLoop holds its
-//! own copy of tools/skills/mcp Arc<...> chains. Switching to one shared
-//! AgentRuntime drops the per-session Arc churn and gives a single
-//! reload-on-disk-change touchpoint.
-//!
-//! This module currently defines the type and a minimal builder. The
-//! orchestrator and Agent.run still reach into the old AgentLoop fields;
-//! C18 atomic rewrite will switch them onto AgentRuntime.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -26,36 +18,33 @@ use super::session::PersistHook;
 use super::tool_registry::ToolRegistry;
 
 /// Per-process runtime resources shared by every `Agent.run` invocation.
-///
-/// All fields are `Arc<...>` or `Clone` so passing `AgentRuntime` by value
-/// (or by `&self`) is cheap and Send-safe.
 #[derive(Clone)]
 pub struct AgentRuntime {
-    /// LLM provider registry — used to resolve `model_id` to a ChatProvider.
+    /// LLM provider registry.
     pub providers: Arc<dyn ProviderRegistry>,
     /// All registered tools (built-in + MCP wrappers + skill tools).
-    /// `Agent.run` filters this through `AgentConfig.tools` per turn.
     pub tools: Arc<ToolRegistry>,
     /// Skill metadata for system-prompt injection and the `skill_view` tool.
     pub skills: Arc<RwLock<SkillManager>>,
     /// Sub-agents available for `agent_delegate`.
     pub agents: AgentRegistry,
-    /// Default loop-breaker policy. Per-turn instances are spawned in
-    /// `Agent.run` and reset between turns.
+    /// Default loop-breaker policy.
     pub loop_breaker_defaults: LoopBreakerConfig,
-    /// Default tool timeout (seconds) applied to non-special tools.
+    /// Default tool timeout (seconds).
     pub tool_timeout_secs: u64,
-    /// Optional persist hook — None for tests; Some for production.
+    /// Optional persist hook.
     pub persist: Option<Arc<dyn PersistHook>>,
-    /// Workspace root for resolving `${SKILL_DIR}` and file-tool relative paths.
+    /// Workspace root.
     pub workspace_dir: PathBuf,
     /// Knowledge root (memory/ directory).
     pub knowledge_dir: PathBuf,
+    /// E30: AskRouter for F35 AskUserTool integration.
+    pub ask_router: Option<Arc<crate::agents::ask_router::AskRouter>>,
+    /// F35: Channels map for ask_user delivery.
+    pub channels: Arc<RwLock<std::collections::HashMap<(String, String), Arc<dyn crate::channels::Channel>>>>,
 }
 
 impl AgentRuntime {
-    /// Minimal constructor — fills in defaults for everything optional.
-    /// Production wiring uses `AgentRuntime::builder()`.
     pub fn new(
         providers: Arc<dyn ProviderRegistry>,
         tools: Arc<ToolRegistry>,
@@ -72,6 +61,8 @@ impl AgentRuntime {
             persist: None,
             workspace_dir: PathBuf::new(),
             knowledge_dir: PathBuf::new(),
+            ask_router: None,
+            channels: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -94,5 +85,40 @@ impl AgentRuntime {
     pub fn with_loop_breaker(mut self, cfg: LoopBreakerConfig) -> Self {
         self.loop_breaker_defaults = cfg;
         self
+    }
+
+    pub fn with_ask_router(mut self, router: Arc<crate::agents::ask_router::AskRouter>) -> Self {
+        self.ask_router = Some(router);
+        self
+    }
+
+    // ── Accessors ───────────────────────────────────────────────────────
+
+    pub fn registry(&self) -> &Arc<dyn ProviderRegistry> {
+        &self.providers
+    }
+
+    pub fn tools(&self) -> &Arc<ToolRegistry> {
+        &self.tools
+    }
+
+    pub fn skills(&self) -> &Arc<RwLock<SkillManager>> {
+        &self.skills
+    }
+
+    pub fn sub_agent_configs(&self) -> AgentRegistry {
+        self.agents.clone()
+    }
+
+    pub fn mcp_instructions(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    pub fn skills_dir(&self) -> PathBuf {
+        self.workspace_dir.join("skills")
+    }
+
+    pub fn agents_dir(&self) -> PathBuf {
+        self.workspace_dir.join("agents")
     }
 }

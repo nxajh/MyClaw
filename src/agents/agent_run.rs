@@ -9,30 +9,25 @@
 
 use std::sync::Arc;
 
-use parking_lot::RwLock;
-
 use crate::config::sub_agent::SubAgentConfig;
 use crate::agents::session::Session;
 use crate::agents::session::PersistHook;
 use crate::agents::tool_registry::ToolRegistry;
 use crate::agents::workspace::skills::SkillManager;
 use crate::agents::loop_breaker::LoopBreakerConfig;
-use crate::agents::context_engine::ContextEngine;
+use crate::agents::compaction_policy::CompactionPolicy;
+use crate::agents::compaction_executor::CompactionExecutor;
 use crate::agents::tool_executor::ToolExecutor;
 use crate::agents::resource_provider::ResourceProvider;
 use crate::agents::request_builder::RequestBuilder;
-use crate::agents::prompt::{SystemPromptBuilder, SystemPromptConfig};
-use crate::agents::attachment::AttachmentManager;
+use crate::agents::prompt::SystemPromptBuilder;
 use crate::providers::ProviderRegistry;
-use crate::config::agent::ContextConfig;
 
-use super::turn::{TurnContext, TurnResult};
 use super::runtime::AgentRuntime;
+use super::agent_impl::{AgentConfig, AgentLoop};
+use super::loop_breaker::LoopBreaker;
 
 /// RFC v2 Agent — identity is just its configuration.
-///
-/// All runtime resources (tools, skills, providers) live in `AgentRuntime`
-/// and are passed to `run()` at invocation time.
 #[derive(Debug, Clone)]
 pub struct Agent {
     pub config: SubAgentConfig,
@@ -45,35 +40,79 @@ impl Agent {
 
     /// Execute a single turn: user message → LLM → tool calls → response.
     ///
-    /// This is the main entry point per RFC v2 §三.C.
-    /// Currently bridges to AgentLoop; will be inlined after H45.
+    /// C18: bridges to AgentLoop. Will be inlined after H45.
     pub async fn run(
         &self,
-        session: &mut Session,
-        _ctx: TurnContext<'_>,
-        _runtime: &AgentRuntime,
-    ) -> anyhow::Result<TurnResult> {
-        // Bridge: create a temporary AgentLoop and delegate.
-        // This will be replaced with direct implementation in H45.
-        let agent_config = self.build_agent_config();
-        let system_prompt = self.config.system_prompt.clone();
+        session: Session,
+        user_message: &str,
+        image_urls: Option<Vec<String>>,
+        image_base64: Option<Vec<String>>,
+        runtime: &AgentRuntime,
+        persist_hook: Option<Arc<dyn PersistHook>>,
+    ) -> anyhow::Result<(Session, String)> {
+        let agent_config = self.build_agent_config(runtime);
+        let system_prompt = self.build_system_prompt(runtime, &agent_config);
 
-        // Build the loop using the old factory pattern.
-        // Note: runtime resources are wired through the Agent struct's
-        // existing factory methods. Full runtime integration is C18 final.
-        todo!("Bridge to AgentLoop pending E29+F36 integration")
+        let resources = ResourceProvider::new(
+            Arc::clone(runtime.skills()),
+            runtime.sub_agent_configs(),
+            runtime.mcp_instructions(),
+            runtime.skills_dir(),
+            runtime.agents_dir(),
+            runtime.knowledge_dir.to_string_lossy().to_string(),
+            agent_config.timezone_offset,
+        );
+        let request_builder = RequestBuilder::new(system_prompt, Arc::clone(&resources));
+
+        let mut loop_ = AgentLoop {
+            registry: Arc::clone(runtime.registry()),
+            compactor: CompactionExecutor::new(
+                Arc::clone(runtime.registry()),
+                Arc::clone(&resources),
+                Arc::clone(runtime.tools()),
+            ),
+            tool_executor: ToolExecutor::new(Arc::clone(runtime.tools()), agent_config.tool_timeout_secs),
+            config: agent_config,
+            session,
+            request_builder,
+            loop_breaker: LoopBreaker::new(LoopBreakerConfig {
+                max_tool_calls: self.config.max_tool_calls.unwrap_or(50),
+                exact_repeat_threshold: 3,
+                ..LoopBreakerConfig::default()
+            }),
+            policy: CompactionPolicy::from_context_config(&crate::config::agent::ContextConfig::default()),
+            persist_hook,
+            pending_retry_message: None,
+        };
+
+        let result = loop_.run(user_message, image_urls, image_base64).await;
+
+        match result {
+            Ok(text) => Ok((loop_.session, text)),
+            Err(e) => Err(e),
+        }
     }
 
-    /// Build an AgentConfig from the SubAgentConfig + runtime defaults.
-    fn build_agent_config(&self) -> crate::agents::agent_impl::AgentConfig {
-        let mut config = crate::agents::agent_impl::AgentConfig::default();
+    fn build_agent_config(&self, runtime: &AgentRuntime) -> AgentConfig {
+        let mut config = AgentConfig::default();
         if let Some(max) = self.config.max_tool_calls {
             config.max_tool_calls = max;
         }
         if let Some(ref model) = self.config.model {
             config.model_override = Some(model.clone());
         }
+        config.tool_timeout_secs = runtime.tool_timeout_secs;
         config
+    }
+
+    fn build_system_prompt(&self, runtime: &AgentRuntime, agent_config: &AgentConfig) -> String {
+        if !self.config.system_prompt.is_empty() {
+            self.config.system_prompt.clone()
+        } else {
+            let skills = runtime.skills().read();
+            let builder = SystemPromptBuilder::new(agent_config.prompt_config.clone());
+            builder.build(&skills)
+        }
     }
 
     /// Build tool specs filtered by this agent's config.
@@ -81,14 +120,13 @@ impl Agent {
         &self,
         runtime: &AgentRuntime,
     ) -> Vec<crate::providers::capability_chat::ToolSpec> {
-        runtime.tools
+        runtime.tools()
             .all_tools()
             .iter()
             .filter(|t| {
                 let source = t.source();
                 match &source {
                     crate::providers::capability_tool::ToolSource::Builtin => {
-                        // Legacy filter: tools list is a whitelist; empty = none.
                         self.config.allows_tool(t.name())
                     }
                     crate::providers::capability_tool::ToolSource::Skill { name } => {
