@@ -168,7 +168,7 @@ impl AgentLoop {
             let text = chat_loop::chat_loop(self, messages, stream_mode.clone()).await?;
             // Persist the recovered assistant response so the turn is no longer incomplete.
             if !text.is_empty() {
-                self.session.add_assistant_text(text.clone());
+                self.session.add_assistant(text.clone());
                 if let Some(ref hook) = self.persist_hook {
                     if let Some(msg) = self.session.history.last() {
                         if let Some(id) = hook.persist_message(&self.session.id, msg) {
@@ -190,7 +190,7 @@ impl AgentLoop {
             let text = chat_loop::chat_loop(self, messages, stream_mode.clone()).await?;
             // Persist the recovered assistant response so the turn is no longer incomplete.
             if !text.is_empty() {
-                self.session.add_assistant_text(text.clone());
+                self.session.add_assistant(text.clone());
                 if let Some(ref hook) = self.persist_hook {
                     if let Some(msg) = self.session.history.last() {
                         if let Some(id) = hook.persist_message(&self.session.id, msg) {
@@ -211,7 +211,7 @@ impl AgentLoop {
             let messages = self.request_builder.build(&self.session);
             let text = chat_loop::chat_loop(self, messages, stream_mode.clone()).await?;
             if !text.is_empty() {
-                self.session.add_assistant_text(text.clone());
+                self.session.add_assistant(text.clone());
                 if let Some(ref hook) = self.persist_hook {
                     if let Some(msg) = self.session.history.last() {
                         if let Some(id) = hook.persist_message(&self.session.id, msg) {

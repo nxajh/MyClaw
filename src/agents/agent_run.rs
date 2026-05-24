@@ -15,9 +15,16 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use crate::config::sub_agent::SubAgentConfig;
-use crate::agents::session::Session;
+use crate::agents::session::{Session, PersistHook};
+use crate::agents::loop_breaker::{LoopBreaker, LoopBreakerConfig};
+use crate::agents::compaction_policy::CompactionPolicy;
+use crate::agents::compaction_executor::CompactionExecutor;
+use crate::agents::tool_executor::ToolExecutor;
+use crate::agents::resource_provider::ResourceProvider;
+use crate::agents::request_builder::RequestBuilder;
 use crate::agents::prompt::SystemPromptBuilder;
 use crate::agents::attachment::AttachmentManager;
+use crate::agents::sub_agent::DelegationCoordinator;
 
 use super::runtime::AgentRuntime;
 use super::agent_impl::{AgentConfig, AgentLoop, AgentSession, AskUserHandler, DelegateHandler};

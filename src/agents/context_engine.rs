@@ -18,11 +18,13 @@ use super::compaction_executor::{CompactionExecutor, CompactionResult};
 ///
 /// Replaces the separate `CompactionPolicy` + `CompactionExecutor` fields
 /// that were held by `AgentLoop`.
+#[allow(dead_code)]
 pub(crate) struct ContextEngine {
     policy: CompactionPolicy,
     executor: CompactionExecutor,
 }
 
+#[allow(dead_code)]
 impl ContextEngine {
     pub(crate) fn new(
         config: &ContextConfig,

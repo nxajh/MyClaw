@@ -65,7 +65,7 @@ pub(super) async fn run_turn_core(
     // ★ Record snapshot length BEFORE adding user message, so rollback can
     //   undo everything added during this turn (user + assistant/tool_calls/tool_results).
     let turn_snapshot_len = agent.session.history.len();
-    agent.session.add_user_text(combined_user.clone());
+    agent.session.add_user(combined_user.clone());
 
     if let Some(ref hook) = agent.persist_hook {
         if let Some(msg) = agent.session.history.last() {
@@ -163,7 +163,7 @@ pub(super) async fn run_turn_core(
     }
 
     // 5. Persist assistant response.
-    agent.session.add_assistant_text(text.clone());
+    agent.session.add_assistant(text.clone());
 
     // Persist assistant message via hook; capture the assigned DB id.
     if let Some(ref hook) = agent.persist_hook {

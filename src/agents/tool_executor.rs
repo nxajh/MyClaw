@@ -82,9 +82,9 @@ impl ToolExecutor {
                 let question = args["question"]
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("'question' is required"))?;
-                session.add_assistant_text(question.to_string());
+                session.add_assistant(question.to_string());
                 let answer = handler(session.id.clone(), question.to_string()).await?;
-                session.add_user_text(answer.clone());
+                session.add_user(answer.clone());
                 return Ok(ToolResult { success: true, output: answer, error: None });
             }
         }

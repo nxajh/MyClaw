@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use crate::providers::ProviderRegistry;
+use crate::config::agent::ContextConfig;
 
 use super::session::SessionOverride;
 
