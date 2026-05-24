@@ -102,12 +102,13 @@ impl SubAgentDelegator {
         parent_session_id: &str,
         agent_name: &str,
     ) -> (String, Option<Arc<dyn PersistHook>>) {
-        if parent_session_id.is_empty() || self.sessions_root.as_os_str().is_empty() {
+        if self.sessions_root.as_os_str().is_empty() {
             return (format!("{:016x}", rand::random::<u64>()), None);
         }
 
-        let sub_root = self.sessions_root.join(parent_session_id).join("subagents");
-        let backend = match crate::storage::JsonFileBackend::open(&sub_root) {
+        // B15: sub-sessions stored at same level as top-level sessions.
+        // Parent-child relationship tracked via meta.json parent_session_id field.
+        let backend = match crate::storage::JsonFileBackend::open(&self.sessions_root) {
             Ok(b) => Arc::new(b),
             Err(e) => {
                 tracing::warn!(parent = %parent_session_id, err = %e,
@@ -118,6 +119,7 @@ impl SubAgentDelegator {
 
         match backend.create_session(agent_name, None) {
             Ok(info) => {
+                backend.save_parent_session_id(&info.id, parent_session_id).ok();
                 let hook = BackendPersistHook::new(backend.clone() as Arc<dyn crate::storage::SessionBackend>);
                 (info.id, Some(Arc::new(hook) as Arc<dyn PersistHook>))
             }
