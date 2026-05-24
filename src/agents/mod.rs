@@ -7,6 +7,7 @@ pub(crate) mod request_builder;
 pub(crate) mod tool_executor;
 pub(crate) mod compaction_executor;
 pub(crate) mod context_engine;
+pub mod agent;
 pub mod error;
 pub mod attachment;
 pub mod recovery;
@@ -48,6 +49,7 @@ pub use agent_impl::{Agent, AgentConfig, AgentLoop, AskUserHandler, DelegateHand
 pub use recovery::UnfinishedSubAgent;
 pub use turn_event::TurnEvent;
 pub use turn::{TurnContext, TurnResult};
+pub use agent::Agent2;
 pub use delegator::AgentDelegator;
 pub use session_context::SessionContext;
 pub use agent_registry::AgentRegistry;

@@ -5,9 +5,9 @@
 
 ## 进度统计
 
-- 完成：52 / 61
-- 进行中：—
-- 待办：9（全在 C18 keystone 之后）
+- 完成：53.5 / 61
+- 进行中：C18（MVP 已落，tool-call loop / compaction / streaming 待补）
+- 待办：7.5
 
 ## 模块 A：类型基础（0/11）
 
@@ -33,8 +33,8 @@
 ## 模块 C：Agent / AgentRuntime / 执行器（0/7）
 
 - [~] C16. `SubAgentConfig` 加 skills/mcp 三维过滤 + allows_tool/skill/mcp helper；slim AgentConfig 形态等 C18
-- [ ] C17. `Agent` 简化为只一个 config 字段
-- [ ] C18. `Agent.run(session, ctx, rt)` 实现（含 allowed_tools snapshot + 循环）
+- [x] C17. `Agent` (实际命名 `Agent2`，待 H45 删旧 Agent 后再 rename) 只持 `pub config: SubAgentConfig`
+- [~] C18. `Agent2::run(&mut Session, TurnContext, &AgentRuntime) -> Result<TurnResult>` MVP 实现：allowed_tools snapshot（含 MCP source 过滤）+ ContextEngine 初始化 + 单轮 LLM 调用 + assistant 持久化。**未实现：tool-call 迭代循环、compaction 触发、streaming via channel.push_event、loop_breaker 集成、retry/empty-response 处理**——这些需 C18 完整 port from agent_impl/{chat_loop,compaction,tools,images}.rs（约 300-500 行）。AgentLoop 仍并行存活；正交切换由 H45 配合 E29 完成
 - [x] C19. `ToolExecutor` 重命名（原 `DefaultToolExecutor`）；ask_user/agent_delegate inline 处理待 F35 拆出
 - [x] C20. `LoopBreaker` policy + per-turn counter（已有 LoopBreakerConfig 分离 + reset() 每轮重置）
 - [x] C21. `ContextEngine` 合并 CompactionPolicy + CompactionExecutor → `src/agents/context_engine.rs` 作为 façade，内部 struct 不变；C18 Agent.run 改用 ContextEngine
@@ -102,6 +102,45 @@
 ## 实施日志
 
 按时间倒序记录每次推进。
+
+### C17 + C18 (MVP) — 新 Agent 类型 + 最小可工作 run()
+
+Wrote `src/agents/agent.rs` with `pub struct Agent2 { pub config: SubAgentConfig }`
+and `async fn run(&self, &mut Session, TurnContext<'_>, &AgentRuntime) ->
+Result<TurnResult>`.
+
+MVP semantics — text-only happy path works end-to-end:
+- `allowed_tools()` filters `runtime.tools` via `config.allows_tool` plus
+  `ToolSource::Mcp { server }` → `config.allows_mcp`.
+- `ToolSpec` (capability_tool flavor) → `ToolSpec` (capability_chat flavor)
+  conversion done inline.
+- Provider resolved via `turn_ctx.model_id` (specific) or
+  `Capability::Chat` (default).
+- `ContextEngine` instantiated per turn; `init_from_history` seeds the
+  token tracker.
+- Single LLM call via `llm_stream::read_to_string`, assistant message
+  persisted to `session.history` + `session.persist`.
+
+Documented MVP limitations (TODO in body):
+- No tool-call iteration — the LLM response is treated as final text.
+  When tool_calls are emitted, they're silently dropped. Tool-call turns
+  still need the legacy `AgentLoop.run` path.
+- No streaming — uses `read_to_string`, not `channel.push_event`.
+- No compaction trigger — `ContextEngine.should_compact` never checked.
+- No loop breaker per-call (placeholder field present).
+- No empty-response retry / rollback / pending_retry.
+
+Why the MVP-only shape: a full port = ~300-500 lines of careful porting
+from `agent_impl/{chat_loop,compaction,tools,images,turn,run}.rs` with
+the new ContextEngine + Session.persist/.channel transient field wiring.
+The MVP unblocks scaffolding for E29 / F35 / H45 without that risk;
+the next session does the full port.
+
+Renamed `Agent` → `Agent2` because `agent_impl::Agent` (the legacy
+factory for AgentLoop) still occupies the name. H45 (delete AgentLoop)
+flips it back. `pub use agent::Agent2;` in `src/agents/mod.rs`.
+
+Result: 379 lib tests pass (+2 new tests).
 
 ### F37 + H50 — 恢复机制收编 + 删 marker 文件
 
