@@ -5,9 +5,9 @@
 
 ## 进度统计
 
-- 完成：51 / 61
+- 完成：52 / 61
 - 进行中：—
-- 待办：10
+- 待办：9
 
 ## 模块 A：类型基础（0/11）
 
@@ -63,7 +63,7 @@
 - [ ] F35. AskUserTool / DelegateTool 实现并注册
 - [x] F36. `SubAgentDelegator` 重命名为 `DelegationCoordinator`（文件 sub_agent.rs → delegation_coordinator.rs），保留 type alias 给残留 import；只剩 AgentDelegator 单实现（H47 同步删 TaskDelegator dual impl）
 - [x] F37. 启动恢复统一路径：`recovery::scan_unfinished_subagents` 改用 `SessionManager.list_all_sessions` 扫描，按 `Session.parent_session_id` 区分 sub-session 顶层会话；UnfinishedSubAgent 字段从父 session.owner / last_message.reply_target 反推
-- [ ] F38. Sub-agent 完成回填合成 ChannelMessage 调父 process_turn
+- [x] F38. Sub-agent 完成回填合成完整 `ChannelMessage`（id `delegation:{task_id}` / sender `system` / 真 reply_target / 等等），不再裸字符串；E29 之后 process_turn 直接吃 ChannelMessage
 
 ## 模块 G：per-user（0/6）
 

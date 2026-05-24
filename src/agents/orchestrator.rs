@@ -1169,14 +1169,31 @@ async fn handle_delegation_task(
                 }
             };
 
-            let synthetic_msg = format!(
-                "[系统通知] 子代理已完成后台任务 (task_id: {}, 耗时: {}s)，结果如下：\n{}",
-                task_id, duration_secs, summary
-            );
+            // F38: build a full ChannelMessage instead of a bare string so the
+            // downstream path (post-E29: process_turn) has the same shape as a
+            // real inbound message. Today we still call `guard.run` directly
+            // because Agent.run / process_turn don't exist yet; the .content is
+            // extracted at the call site. After E29 lands the entire
+            // ChannelMessage will be routed through process_turn instead.
+            let synthetic = ChannelMessage {
+                id: format!("delegation:{}", task_id),
+                sender: "system".to_string(),
+                reply_target: reply_target.clone(),
+                content: format!(
+                    "[系统通知] 子代理已完成后台任务 (task_id: {}, 耗时: {}s)，结果如下：\n{}",
+                    task_id, duration_secs, summary
+                ),
+                timestamp: chrono::Utc::now().timestamp() as u64,
+                thread_ts: None,
+                interruption_scope_id: None,
+                attachments: Vec::new(),
+                image_urls: None,
+                image_base64: None,
+            };
 
             let response = {
                 let mut guard = handle.loop_.lock().await;
-                guard.run(&synthetic_msg, None, None).await
+                guard.run(&synthetic.content, synthetic.image_urls.clone(), synthetic.image_base64.clone()).await
             };
 
             match response {
@@ -1221,14 +1238,27 @@ async fn handle_delegation_task(
                 }
             };
 
-            let synthetic_msg = format!(
-                "[系统通知] 子代理后台任务失败 (task_id: {})，错误：\n{}",
-                task_id, error
-            );
+            // F38: wrap as ChannelMessage so the post-E29 process_turn path
+            // receives the same shape it gets for real inbound messages.
+            let synthetic = ChannelMessage {
+                id: format!("delegation:{}", task_id),
+                sender: "system".to_string(),
+                reply_target: reply_target.clone(),
+                content: format!(
+                    "[系统通知] 子代理后台任务失败 (task_id: {})，错误：\n{}",
+                    task_id, error
+                ),
+                timestamp: chrono::Utc::now().timestamp() as u64,
+                thread_ts: None,
+                interruption_scope_id: None,
+                attachments: Vec::new(),
+                image_urls: None,
+                image_base64: None,
+            };
 
             let response = {
                 let mut guard = handle.loop_.lock().await;
-                guard.run(&synthetic_msg, None, None).await
+                guard.run(&synthetic.content, synthetic.image_urls.clone(), synthetic.image_base64.clone()).await
             };
 
             match response {
