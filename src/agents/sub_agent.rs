@@ -494,6 +494,23 @@ impl TaskDelegator for SubAgentDelegator {
         self.delegate_with_parent(agent_name, task, "", None, None, None).await
     }
 
+    async fn delegate_async(&self, agent_name: &str, task: &str) -> anyhow::Result<String> {
+        // F35: async delegation — spawn in background, return task_id.
+        let agent_name = agent_name.to_string();
+        let task = task.to_string();
+        let this = self.clone();
+        let task_id = format!("{:016x}", rand::random::<u64>());
+        let tid = task_id.clone();
+        tokio::spawn(async move {
+            let result = this.delegate_with_parent(&agent_name, &task, "", None, None, None).await;
+            match result {
+                Ok(text) => tracing::info!(task_id = %tid, agent = %agent_name, len = text.len(), "async delegation completed"),
+                Err(e) => tracing::warn!(task_id = %tid, agent = %agent_name, err = %e, "async delegation failed"),
+            }
+        });
+        Ok(task_id)
+    }
+
     fn available_agents(&self) -> Vec<(String, String)> {
         self.configs
             .values_cloned()

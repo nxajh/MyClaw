@@ -1,11 +1,7 @@
 //! Agent delegate tool — allows the main agent to delegate tasks to sub-agents.
 //!
-//! This tool is the core of the multi-agent orchestration pattern.
-//! The main agent calls `agent_delegate(agent="coder", task="...", mode="sync")` and the tool:
-//! 1. Looks up the sub-agent by name
-//! 2. Creates a temporary AgentLoop with the sub-agent's system prompt and tools
-//! 3. Runs the sub-agent to completion (sync) or in background (async)
-//! 4. Returns the result (sync) or task_id (async) to the main agent
+//! F35: upgraded to handle both sync and async delegation modes.
+//! The `TaskDelegator` trait is injected at construction time.
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -18,6 +14,9 @@ use crate::providers::{Tool, ToolResult};
 pub trait TaskDelegator: Send + Sync {
     /// Delegate a task to a named sub-agent and return its text response.
     async fn delegate(&self, agent_name: &str, task: &str) -> anyhow::Result<String>;
+
+    /// Delegate asynchronously — returns a task_id immediately.
+    async fn delegate_async(&self, agent_name: &str, task: &str) -> anyhow::Result<String>;
 
     /// List available sub-agent names and their descriptions.
     fn available_agents(&self) -> Vec<(String, String)>;
@@ -80,20 +79,36 @@ impl Tool for AgentDelegateTool {
         let task = args["task"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'task' is required"))?;
+        let mode = args["mode"].as_str().unwrap_or("sync");
 
-        tracing::info!(agent = %agent_name, task_len = task.len(), "delegating task to sub-agent");
+        tracing::info!(agent = %agent_name, mode, task_len = task.len(), "delegating task to sub-agent");
 
-        match self.delegator.delegate(agent_name, task).await {
-            Ok(result) => Ok(ToolResult {
-                success: true,
-                output: result,
-                error: None,
-            }),
-            Err(e) => Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!("Sub-agent '{}' failed: {}", agent_name, e)),
-            }),
+        if mode == "async" {
+            match self.delegator.delegate_async(agent_name, task).await {
+                Ok(task_id) => Ok(ToolResult {
+                    success: true,
+                    output: format!("Task delegated asynchronously. task_id: {}", task_id),
+                    error: None,
+                }),
+                Err(e) => Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Sub-agent '{}' async delegation failed: {}", agent_name, e)),
+                }),
+            }
+        } else {
+            match self.delegator.delegate(agent_name, task).await {
+                Ok(result) => Ok(ToolResult {
+                    success: true,
+                    output: result,
+                    error: None,
+                }),
+                Err(e) => Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Sub-agent '{}' failed: {}", agent_name, e)),
+                }),
+            }
         }
     }
 }
