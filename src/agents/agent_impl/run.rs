@@ -413,7 +413,7 @@ impl AgentLoop {
         let context_window = model_config.context_window?;
         let max_output = model_config.max_output_tokens.unwrap_or(4096) as u64;
 
-        let total_tokens = self.policy.token_total();
+        let total_tokens = self.context.token_total();
         let available = context_window.saturating_sub(total_tokens);
         let max = max_output.min(available).min(u32::MAX as u64);
 
@@ -439,7 +439,7 @@ impl AgentLoop {
         // Double the output budget.
         let boosted = (default_max * 2).min(context_window);
 
-        let total_tokens = self.policy.token_total();
+        let total_tokens = self.context.token_total();
         let available = context_window.saturating_sub(total_tokens);
         let max = boosted.min(available).min(u32::MAX as u64);
 

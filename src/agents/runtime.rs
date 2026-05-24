@@ -16,8 +16,7 @@ use crate::providers::ProviderRegistry;
 use super::loop_breaker::{LoopBreaker, LoopBreakerConfig};
 use super::session::PersistHook;
 use super::tool_registry::ToolRegistry;
-use super::compaction_policy::CompactionPolicy;
-use super::compaction_executor::CompactionExecutor;
+use super::context_engine::ContextEngine;
 use super::tool_executor::ToolExecutor;
 use super::resource_provider::ResourceProvider;
 use super::request_builder::RequestBuilder;
@@ -193,7 +192,6 @@ impl AgentRuntime {
         };
 
         let max_tool_calls = config.max_tool_calls;
-        let policy = CompactionPolicy::from_context_config(&config.context);
 
         let resources = ResourceProvider::new(
             Arc::clone(&self.skills),
@@ -208,7 +206,8 @@ impl AgentRuntime {
 
         AgentSession { loop_: AgentLoop {
             registry: Arc::clone(&self.providers),
-            compactor: CompactionExecutor::new(
+            context: ContextEngine::new(
+                &config.context,
                 Arc::clone(&self.providers),
                 Arc::clone(&resources),
                 Arc::clone(&self.tools),
@@ -222,7 +221,6 @@ impl AgentRuntime {
                 exact_repeat_threshold: self.loop_breaker_defaults.exact_repeat_threshold,
                 ..LoopBreakerConfig::default()
             }),
-            policy,
             persist_hook,
             pending_retry_message: None,
         }}

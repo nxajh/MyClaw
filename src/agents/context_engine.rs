@@ -18,13 +18,11 @@ use super::compaction_executor::{CompactionExecutor, CompactionResult};
 ///
 /// Replaces the separate `CompactionPolicy` + `CompactionExecutor` fields
 /// that were held by `AgentLoop`.
-#[allow(dead_code)]
 pub(crate) struct ContextEngine {
     policy: CompactionPolicy,
     executor: CompactionExecutor,
 }
 
-#[allow(dead_code)]
 impl ContextEngine {
     pub(crate) fn new(
         config: &ContextConfig,
@@ -84,10 +82,6 @@ impl ContextEngine {
 
     pub(crate) fn is_fresh(&self) -> bool {
         self.policy.is_fresh()
-    }
-
-    pub(crate) fn compact_threshold(&self) -> f64 {
-        self.policy.compact_threshold
     }
 
     // ── Executor delegates ────────────────────────────────────────────────

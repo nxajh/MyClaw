@@ -19,7 +19,7 @@ impl AgentLoop {
         }
 
         tracing::info!(
-            total_tokens = self.policy.token_total(),
+            total_tokens = self.context.token_total(),
             "starting manual compaction (/compact)"
         );
 
@@ -33,12 +33,12 @@ impl AgentLoop {
             None => return Ok(()),
         };
 
-        if !self.policy.should_compact(context_window) {
+        if !self.context.should_compact(context_window) {
             return Ok(());
         }
 
         tracing::info!(
-            total_tokens = self.policy.token_total(),
+            total_tokens = self.context.token_total(),
             context_window,
             "starting context compaction"
         );
@@ -54,7 +54,7 @@ impl AgentLoop {
             return Ok(());
         }
 
-        let conservative_total = (self.policy.token_total() as f64 * 1.25) as u64;
+        let conservative_total = (self.context.token_total() as f64 * 1.25) as u64;
 
         let target: Option<(String, u64)> = routing_models
             .iter()
@@ -96,7 +96,7 @@ impl AgentLoop {
                 + 8
         }).sum();
 
-        let boundary = match self.policy.compaction_boundary(
+        let boundary = match self.context.compaction_boundary(
             &self.session.history,
             target_window,
             system_prompt_tokens,
@@ -171,7 +171,7 @@ impl AgentLoop {
 
         let system_prompt = self.request_builder.system_prompt().to_string();
 
-        let result = self.compactor.execute(
+        let result = self.context.execute_compaction(
             &self.session.history,
             &system_prompt,
             tool_specs,
@@ -248,9 +248,9 @@ Respond ONLY to the latest user message that appears AFTER this summary.\n\n";
             }
         }
 
-        self.policy.adjust_for_compaction(result.removed_tokens, result.summary_tokens);
+        self.context.adjust_for_compaction(result.removed_tokens, result.summary_tokens);
 
-        let new_total = self.policy.token_total();
+        let new_total = self.context.token_total();
         tracing::info!(
             compacted_messages = result.compacted_count,
             summary_tokens = result.summary_tokens,
@@ -282,7 +282,7 @@ Respond ONLY to the latest user message that appears AFTER this summary.\n\n";
 
         let version = self.session.compact_version + 1;
         self.session.drop_pre_boundary(boundary, version);
-        self.policy.adjust_for_compaction(removed_tokens, 0);
+        self.context.adjust_for_compaction(removed_tokens, 0);
 
         if let Some(ref hook) = self.persist_hook {
             hook.save_compaction(&self.session.id, &SummaryRecord {
@@ -324,7 +324,7 @@ Respond ONLY to the latest user message that appears AFTER this summary.\n\n";
 
                 let old_est = est;
                 let new_est = estimate_tokens(&self.session.history[i].text_content());
-                self.policy.adjust_for_compaction(old_est, new_est);
+                self.context.adjust_for_compaction(old_est, new_est);
 
                 tracing::warn!(
                     idx = i,
@@ -340,7 +340,7 @@ Respond ONLY to the latest user message that appears AFTER this summary.\n\n";
             .and_then(|cfg| cfg.context_window)
             .map(|cw| (cw as f64 * self.config.context.compact_threshold) as u64)
             .unwrap_or(u64::MAX);
-        if self.policy.token_total() > threshold {
+        if self.context.token_total() > threshold {
             self.drop_oldest_retained_work_unit(boundary);
         }
     }
@@ -367,7 +367,7 @@ Respond ONLY to the latest user message that appears AFTER this summary.\n\n";
 
         self.session.history.drain(boundary..drop_end);
         self.session.message_ids.drain(boundary..drop_end);
-        self.policy.adjust_for_compaction(removed_tokens, 0);
+        self.context.adjust_for_compaction(removed_tokens, 0);
 
         tracing::warn!(
             dropped_start = boundary,

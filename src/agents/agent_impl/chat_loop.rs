@@ -231,7 +231,7 @@ pub(super) async fn chat_loop(
         // Real context = input_tokens (new) + cached_input_tokens + output_tokens.
         if let Some(ref usage) = response.usage {
             let cached = usage.cached_input_tokens.unwrap_or(0);
-            loop_.policy.update_usage(
+            loop_.context.update_usage(
                 usage.input_tokens.unwrap_or(0),
                 usage.output_tokens.unwrap_or(0),
                 cached,
@@ -240,13 +240,13 @@ pub(super) async fn chat_loop(
                 input_tokens = usage.input_tokens.unwrap_or(0),
                 cached_tokens = cached,
                 output_tokens = usage.output_tokens.unwrap_or(0),
-                total_tracked = loop_.policy.token_total(),
+                total_tracked = loop_.context.token_total(),
                 "token usage recorded"
             );
 
             // Persist the precise total so it survives restarts.
             if let Some(ref hook) = loop_.persist_hook {
-                hook.save_token_count(&loop_.session.id, loop_.policy.token_total());
+                hook.save_token_count(&loop_.session.id, loop_.context.token_total());
             }
         }
 
@@ -413,7 +413,7 @@ pub(super) async fn chat_loop(
             messages.push(tool_msg);
 
             // Record estimated tokens for the tool result message.
-            loop_.policy.record_pending(
+            loop_.context.record_pending(
                 estimate_message_tokens(messages.last().unwrap())
             );
 

@@ -37,11 +37,11 @@ pub(super) async fn run_turn_core(
     agent.loop_breaker.reset();
 
     // Initialize token tracker for fresh session / recovery.
-    if agent.policy.is_fresh() {
+    if agent.context.is_fresh() {
         if let Some(stored) = agent.session.last_total_tokens {
-            agent.policy.init_from_stored(stored);
+            agent.context.init_from_stored(stored);
         } else {
-            agent.policy.init_from_history(
+            agent.context.init_from_history(
                 agent.request_builder.system_prompt(),
                 &agent.session.history,
             );
@@ -61,7 +61,7 @@ pub(super) async fn run_turn_core(
 
     // 4. Add combined user message to history and persist.
     let user_msg = ChatMessage::user_text(combined_user.clone());
-    agent.policy.record_pending(estimate_message_tokens(&user_msg));
+    agent.context.record_pending(estimate_message_tokens(&user_msg));
     // ★ Record snapshot length BEFORE adding user message, so rollback can
     //   undo everything added during this turn (user + assistant/tool_calls/tool_results).
     let turn_snapshot_len = agent.session.history.len();

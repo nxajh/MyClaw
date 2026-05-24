@@ -37,7 +37,7 @@ use super::session::{Session, PersistHook};
 use crate::agents::prompt::SystemPromptConfig;
 use crate::agents::attachment::AttachmentManager;
 use super::tool_executor::ToolExecutor;
-use super::compaction_executor::CompactionExecutor;
+use super::context_engine::ContextEngine;
 
 pub(crate) mod types;
 mod run;
@@ -47,7 +47,6 @@ mod tools;
 mod compaction;
 mod images;
 
-use super::compaction_policy::CompactionPolicy;
 use super::request_builder::RequestBuilder;
 
 /// AgentConfig controls loop breaker thresholds and tool call limits.
@@ -113,12 +112,10 @@ pub struct AgentLoop {
     pub(crate) session: Session,
     // ── Message building + attachments + images + hot-reload ──
     pub(crate) request_builder: RequestBuilder,
-    // ── Token tracking + compaction strategy ──
-    pub(crate) policy: CompactionPolicy,
+    // ── Token tracking + compaction policy + execution (C21) ──
+    pub(crate) context: ContextEngine,
     // ── Tool execution ──
     pub(crate) tool_executor: ToolExecutor,
-    // ── Compaction summarizer ──
-    pub(crate) compactor: CompactionExecutor,
     // ── Infrastructure ──
     pub(crate) loop_breaker: LoopBreaker,
     pub(crate) persist_hook: Option<Arc<dyn PersistHook>>,
@@ -144,11 +141,11 @@ impl AgentLoop {
     }
 
     pub fn token_total(&self) -> u64 {
-        self.policy.token_total()
+        self.context.token_total()
     }
 
     pub fn last_usage(&self) -> (u64, u64, u64) {
-        self.policy.last_usage()
+        self.context.last_usage()
     }
 
     pub fn compact_threshold(&self) -> f64 {

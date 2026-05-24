@@ -17,8 +17,7 @@ use tokio::sync::watch;
 use crate::config::sub_agent::SubAgentConfig;
 use crate::agents::session::{Session, PersistHook};
 use crate::agents::loop_breaker::{LoopBreaker, LoopBreakerConfig};
-use crate::agents::compaction_policy::CompactionPolicy;
-use crate::agents::compaction_executor::CompactionExecutor;
+use crate::agents::context_engine::ContextEngine;
 use crate::agents::tool_executor::ToolExecutor;
 use crate::agents::resource_provider::ResourceProvider;
 use crate::agents::request_builder::RequestBuilder;
@@ -66,7 +65,8 @@ impl Agent {
 
         let loop_ = AgentLoop {
             registry: Arc::clone(runtime.registry()),
-            compactor: CompactionExecutor::new(
+            context: ContextEngine::new(
+                &crate::config::agent::ContextConfig::default(),
                 Arc::clone(runtime.registry()),
                 Arc::clone(&resources),
                 Arc::clone(runtime.tools()),
@@ -80,7 +80,6 @@ impl Agent {
                 exact_repeat_threshold: runtime.loop_breaker_defaults.exact_repeat_threshold,
                 ..LoopBreakerConfig::default()
             }),
-            policy: CompactionPolicy::from_context_config(&crate::config::agent::ContextConfig::default()),
             persist_hook,
             pending_retry_message: None,
         };
