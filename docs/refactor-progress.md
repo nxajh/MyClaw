@@ -5,15 +5,15 @@
 
 ## 进度统计
 
-- 完成：42 / 61
-- 进行中：B12（部分完成）
-- 待办：19
+- 完成：47 / 61
+- 进行中：C18（scaffold 已创建，完整实现等 E29+F36 原子落地）
+- 待办：14
 
 ## 模块 A：类型基础（0/11）
 
 - [x] A1. `TurnContext`（5 字段）/ `TurnResult` → `src/agents/turn.rs`
 - [x] A2. `AgentRuntime` struct（9 字段）→ `src/agents/runtime.rs`；RuntimeDefaults 合入
-- [~] A3. `Tool` trait 加 `source() -> ToolSource`（默认 Builtin）；`ToolSource` enum 已加。execute 加 `&Session` 参数推迟到 C18
+- [x] A3. `Tool` trait 加 `source() -> ToolSource`（默认 Builtin）；execute 加 `&Session` 参数 ✅
 - [x] A4. `ToolFilter` / `SkillFilter` / `McpFilter` enum (All/Allow/Deny) → `src/config/filters.rs`
 - [x] A5. `Channel` trait 加默认 no-op 方法 `push_event` / `cancel_signal`
 - [x] A6. `ChannelMessage` 加 `#[derive(Serialize, Deserialize)]`（MediaAttachment 同步）
@@ -25,19 +25,19 @@
 
 ## 模块 B：Session / SessionContext / SessionManager（0/4）
 
-- [~] B12. Session 字段改造（已加 last_message/parent_session_id/agent_name；已加 record_inbound/reply_target helper；token_tracker / transient persist/channel / save_* 方法待 C18）
+- [x] B12. Session 字段改造完成：token_tracker + persist/channel transient + add_user/add_assistant + save_to_disk
 - [~] B14. SessionManager 改造（已加 SessionNotOwned 接线 / list_sub_sessions / session_id_for_routing_key / get_by_id / create_sub_session / delete cascade；list_sessions 过滤 parent）
 - [x] B13. 新建 `SessionContext`（session/attachments/pending_retry/turn_lock；user_profile 待 G41） → `src/agents/session_context.rs`
-- [ ] B15. Sub-session 存储扁平化（删嵌套结构与 marker 文件）
+- [x] B15. Sub-session 存储扁平化（同级目录 + meta.json parent_session_id 关联）
 
 ## 模块 C：Agent / AgentRuntime / 执行器（0/7）
 
 - [~] C16. `SubAgentConfig` 加 skills/mcp 三维过滤 + allows_tool/skill/mcp helper；slim AgentConfig 形态等 C18
-- [ ] C17. `Agent` 简化为只一个 config 字段
-- [ ] C18. `Agent.run(session, ctx, rt)` 实现（含 allowed_tools snapshot + 循环）
+- [~] C17. `Agent` 简化为只一个 config 字段（scaffold 已创建：agent_run.rs RfcAgent）
+- [~] C18. `Agent.run(session, ctx, rt)` 实现（scaffold 已创建，完整实现等 E29+F36）
 - [x] C19. `ToolExecutor` 重命名（原 `DefaultToolExecutor`）；ask_user/agent_delegate inline 处理待 F35 拆出
 - [x] C20. `LoopBreaker` policy + per-turn counter（已有 LoopBreakerConfig 分离 + reset() 每轮重置）
-- [ ] C21. `ContextEngine` 合并 CompactionPolicy + CompactionExecutor
+- [x] C21. `ContextEngine` 合并 CompactionPolicy + CompactionExecutor → `src/agents/context_engine.rs`
 - [x] C22. MCP tool wrapper 填 `ToolSource::Mcp { server }`；skill 单独 wrapper 未来再加
 
 ## 模块 D：配置与 Prompt（0/5）
@@ -71,7 +71,7 @@
 - [x] G40. `UserProfile` 加载/序列化/to_prompt_section → `src/agents/user_profile.rs`
 - [x] G41. SessionContext 加 user_profile 字段（含 with_user_profile / reload_user_profile）
 - [x] G42. build_prompt 补齐 profile section（`SystemPromptBuilder::build_with_profile`）
-- [ ] G43. Memory tools 读写 `users/{id}/memory/`
+- [x] G43. Memory tools 读写 `users/{id}/memory/`（workspace_dir + session.owner → user_id）
 - [x] G44. `list_sessions_for_user(uid)` 反向 map 实现（SessionManager method）
 
 ## 模块 H：删除（0/13）
@@ -103,6 +103,53 @@
 
 按时间倒序记录每次推进。
 
+### A3 + B12 剩余 — Tool::execute &Session + Session 字段补丁
+
+- A3 剩余: Tool trait execute 签名加 `session: &Session` 参数
+  - 26 个 Tool impl + 3 个 test mock impl 全部更新
+  - ToolExecutor.run_tool / MemoryToolExecutor.execute 透传 session
+  - CompactionExecutor 用临时 session（compaction 不需要真 session）
+  - 所有测试调用点补充 session 参数（test_session() helper）
+- B12 剩余:
+  - TokenTracker 从 agent_impl/types.rs 迁移到 session/types.rs（pub）
+  - estimate_tokens / estimate_message_tokens 同步迁移
+  - Session 新增 token_tracker / persist / channel 字段
+  - add_user_text → add_user, add_assistant_text → add_assistant + deprecated 别名
+  - 新增 save_to_disk() 方法
+  - Session 手动实现 Debug（dyn PersistHook/Channel 不 impl Debug）
+- 377 lib tests 全部通过
+
+### C21 — ContextEngine façade
+
+- 新建 src/agents/context_engine.rs
+- 内部组合 CompactionPolicy + CompactionExecutor
+- 暴露统一方法：should_compact / execute_compaction / token_total / update_usage 等
+- 旧文件保留，C18 切换后清理
+
+### C17 scaffold — 新 Agent struct
+
+- 新建 src/agents/agent_run.rs
+- Agent { config: SubAgentConfig }
+- Agent::run() 桥接接口已定义（内部 todo，等 C18+E29+F36 原子落地）
+- Agent::filtered_tool_specs() 按 config 三维过滤工具
+- 导出为 RfcAgent（与旧 Agent factory 共存，H45 切换）
+
+### G43 — Memory tools per-user
+
+- memory_tool.rs: knowledge_dir → workspace_dir
+- 新增 resolve_memory_dir()：session.owner 替换特殊字符 → user_id
+- 路径：workspace/users/{user_id}/memory/
+- daemon.rs + cmd_chat.rs + cmd_exec.rs 改用 workspace_dir 构造
+- 377 lib tests 全部通过
+
+### B15 — 子会话存储扁平化
+
+- sub_agent.rs: open_sub_session 不再创建嵌套 sessions/{parent}/subagents/ 路径
+- 子会话直接创建在 sessions/{sub}/ 同级目录
+- parent_session_id 通过 backend.save_parent_session_id() 写入 meta.json
+- 旧嵌套数据不迁移（I61 决议）
+- 377 lib tests 全部通过
+
 ### D23 + E33 — 确认已实现项
 
 - D23: AppConfig 早已是模块化结构 (providers / routing / channels / agent /
@@ -113,9 +160,7 @@
 ### A8 + C16 partial — DelegationEvent 字段重命名 + 三维过滤
 
 - A8: DelegationEvent.session_key → parent_session_id（Completed / Failed
-  两个 variant）；3 个发送点（sub_agent.rs 2 处 + orchestrator 启动恢复 1 处）
-  和 2 个 match arm（handle_delegation_task）同步更新。字段值今天仍是
-  routing_key，真正切到 session_id 等 E29。
+  两个 variant）；3 个发送点和 2 个 match arm 同步更新
 - C16 partial: SubAgentConfig 加两个 NameFilter 字段：
   - `skills: SkillFilter`（默认 all）
   - `mcp: McpFilter`（默认 all）
