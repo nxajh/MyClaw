@@ -386,7 +386,8 @@ impl Orchestrator {
             agent: agent.clone(),
             session_manager: self.session_manager.clone(),
             channels: channels.clone(),
-            pending_asks: self.pending_asks.clone(),
+            pending_asks: self.pending_asks.clone(), // kept for get_or_create_session compat
+            ask_router: self.ask_router.clone(),
             sub_delegator: sub_delegator.clone(),
             delegation_manager: delegation_manager.clone(),
             persist_backend: self.persist_backend.clone(),
@@ -507,13 +508,9 @@ impl Orchestrator {
                     let sk = Self::session_key(&channel_type, &account_id, &msg.sender);
                     let channel_key = (channel_type.clone(), account_id.clone());
 
-                    // Check if this is a reply to a pending ask_user.
-                    if let Some((_, (tx, _))) = self.pending_asks.remove(&sk) {
-                        // Deliver the user's answer to the waiting ask_user handler.
-                        if tx.send(msg.content.clone()).is_err() {
-                            warn!(session = %sk, "ask_user oneshot already closed");
-                        }
-                        // Do NOT spawn a new agent loop — the existing one is waiting.
+                    // E29: Check if this is a reply to a pending ask_user (via AskRouter).
+                    if self.ask_router.fulfill(&sk, msg.content.clone()) {
+                        // The message was consumed by the ask_user handler — don't start a new turn.
                         continue;
                     }
 
@@ -939,6 +936,8 @@ struct LoopRegistry {
     session_manager: Arc<SessionManager>,
     channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
     pending_asks: Arc<DashMap<String, (oneshot::Sender<String>, String)>>,
+    /// E29: AskRouter replaces pending_asks for ask_user resolution.
+    ask_router: Arc<crate::agents::ask_router::AskRouter>,
     sub_delegator: Option<Arc<DelegationCoordinator>>,
     delegation_manager: Option<Arc<DelegationManager>>,
     persist_backend: Arc<dyn crate::storage::SessionBackend>,
@@ -972,16 +971,16 @@ impl LoopRegistry {
         );
         let loop_ = self.agent.loop_for_with_persist(session, Some(persist_hook));
 
-        // Wire ask_user handler — captures an Arc clone of channels (O(1)).
+        // E29: Wire ask_user handler via AskRouter instead of raw pending_asks.
+        let ask_router = Arc::clone(&self.ask_router);
         let channels_arc = Arc::clone(&self.channels);
-        let pending_asks = Arc::clone(&self.pending_asks);
         let reply_target_owned = reply_target.to_string();
-        let user_facing_key = sk.to_string();
+        let sk_owned = sk.to_string();
         let ask_handler: AskUserHandler = Arc::new(move |session_key: String, question: String| {
             let channels = Arc::clone(&channels_arc);
-            let pending_asks = pending_asks.clone();
+            let ask_router = ask_router.clone();
             let reply_target = reply_target_owned.clone();
-            let user_facing_key = user_facing_key.clone();
+            let sk = sk_owned.clone();
             Box::pin(async move {
                 let (ch_type, acc_id, _) = parse_session_key(&session_key)
                     .ok_or_else(|| anyhow::anyhow!("invalid session key: {}", session_key))?;
@@ -992,8 +991,7 @@ impl LoopRegistry {
                 let send_msg = SendMessage::new(&question, &reply_target);
                 channel.send(&send_msg).await?;
 
-                let (tx, rx) = oneshot::channel();
-                pending_asks.insert(user_facing_key, (tx, reply_target.clone()));
+                let rx = ask_router.register(&sk, reply_target.clone());
 
                 let answer = tokio::time::timeout(ASK_USER_TIMEOUT, rx)
                     .await
