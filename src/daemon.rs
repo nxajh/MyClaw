@@ -715,6 +715,13 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let watcher = crate::agents::WorkspaceWatcher::new(&config.workspace_dir, &config.knowledge_dir)?;
     let change_rx = watcher.rx.clone();
 
+    // Build session backend + manager early — B15: the DelegationCoordinator
+    // needs SessionManager (shared backend) to create sub-sessions as
+    // top-level peers instead of opening a per-parent JsonFileBackend at
+    // `{sessions_root}/{parent}/subagents/`.
+    let session_backend = build_session_backend(&config);
+    let session_manager = Arc::new(SessionManager::new(Arc::clone(&session_backend)));
+
     // ── Sub-agent delegator (conditional) ──────────────────────────────────────
 
     let (tools_arc, sub_agent_delegator_arc) = if sub_agent_count == 0 {
@@ -740,6 +747,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             Arc::clone(&base_tools_arc),
             Arc::clone(&skills_arc),
             config.agent.max_tool_calls,
+            Arc::clone(&session_manager),
             config.workspace_dir.join("sessions"),
             config.workspace_dir.join("worktrees"),
         );
@@ -773,8 +781,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         (None, None)
     };
 
-    let session_backend = build_session_backend(&config);
-    let session_manager = Arc::new(SessionManager::new(Arc::clone(&session_backend)));
+    // session_backend / session_manager are constructed earlier (above the
+    // DelegationCoordinator block — see B15 note) so they can be shared.
     let mut channels = build_channel_accounts(&config);
 
     // ── Sub-agent recovery: detect interrupted sub-agents from a previous run ──

@@ -63,6 +63,13 @@ impl SessionManager {
         Self::new(Arc::new(InMemoryBackend::new()))
     }
 
+    /// Shared reference to the underlying backend. Used by callers
+    /// (DelegationCoordinator post-B15) that need to construct
+    /// `PersistHook`s pointing at the same storage layer as the manager.
+    pub fn backend(&self) -> &Arc<dyn SessionBackend> {
+        &self.backend
+    }
+
     /// Get the active session for a user. Auto-creates if none exists.
     /// Attempts summary-based recovery first, then falls back to full load.
     pub fn get_or_create(&self, user_id: &str) -> Session {

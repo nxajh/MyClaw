@@ -28,12 +28,11 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::agents::delegation::{DelegationEvent, DelegationManager};
-use crate::agents::session::{BackendPersistHook, PersistHook, Session};
+use crate::agents::session::{BackendPersistHook, PersistHook, Session, SessionManager};
 use crate::agents::skills::SkillManager;
 use crate::agents::tool_registry::ToolRegistry;
 use crate::config::sub_agent::{AgentIsolation, SubAgentConfig};
 use crate::providers::ProviderRegistry;
-use crate::storage::SessionBackend as _;
 
 /// F36: prefer this name. `SubAgentDelegator` remains as a type alias to
 /// keep external callers compiling while H47's removal of `TaskDelegator`
@@ -59,7 +58,16 @@ pub struct DelegationCoordinator {
     skills: Arc<RwLock<SkillManager>>,
     /// Default max_tool_calls from parent agent config.
     default_max_tool_calls: usize,
-    /// Root of the sessions directory — used to open per-invocation sub-backends.
+    /// Shared SessionManager — B15: sub-sessions are top-level peers of
+    /// regular sessions, distinguished by `meta.parent_session_id`.
+    /// Replaces the old per-parent `JsonFileBackend` rooted at
+    /// `{sessions_root}/{parent}/subagents/`.
+    session_manager: Arc<SessionManager>,
+    /// Sessions directory — only used to write `subagent_running_*.json`
+    /// marker files for hot-switch recovery. H50 will delete the marker
+    /// mechanism (recovery.rs scans `SessionManager.list_all_sessions`
+    /// + `parent_session_id` directly), at which point this field goes
+    /// away too.
     sessions_root: PathBuf,
     /// Root directory for git worktrees (when isolation = worktree).
     worktrees_root: PathBuf,
@@ -72,6 +80,7 @@ impl DelegationCoordinator {
         tools: Arc<ToolRegistry>,
         skills: Arc<RwLock<SkillManager>>,
         default_max_tool_calls: usize,
+        session_manager: Arc<SessionManager>,
         sessions_root: PathBuf,
         worktrees_root: PathBuf,
     ) -> Self {
@@ -81,6 +90,7 @@ impl DelegationCoordinator {
             tools,
             skills,
             default_max_tool_calls,
+            session_manager,
             sessions_root,
             worktrees_root,
         }
@@ -103,32 +113,32 @@ impl DelegationCoordinator {
         filtered
     }
 
-    /// Open (or create) a persisted session for a sub-agent invocation.
+    /// Create a persisted sub-session for a sub-agent invocation.
     ///
-    /// Returns `(session_id, Some(hook))` on success, or `(random_id, None)` if
-    /// storage is unavailable — allowing the sub-agent to run ephemerally.
+    /// B15: sub-sessions are top-level peers of regular sessions, sharing
+    /// the same backend. `SessionManager.create_sub_session` writes
+    /// `meta.parent_session_id` and `meta.agent_name` so recovery can
+    /// link sub-sessions back to their parent without per-parent
+    /// subdirectories. The returned `PersistHook` points at the shared
+    /// backend.
+    ///
+    /// Returns `(session_id, Some(hook))` on success, or `(random_id, None)`
+    /// if the parent is unknown or storage is unavailable — letting the
+    /// sub-agent run ephemerally.
     fn open_sub_session(
         &self,
         parent_session_id: &str,
         agent_name: &str,
     ) -> (String, Option<Arc<dyn PersistHook>>) {
-        if parent_session_id.is_empty() || self.sessions_root.as_os_str().is_empty() {
+        if parent_session_id.is_empty() {
             return (format!("{:016x}", rand::random::<u64>()), None);
         }
-
-        let sub_root = self.sessions_root.join(parent_session_id).join("subagents");
-        let backend = match crate::storage::JsonFileBackend::open(&sub_root) {
-            Ok(b) => Arc::new(b),
-            Err(e) => {
-                tracing::warn!(parent = %parent_session_id, err = %e,
-                    "sub-agent storage unavailable, running ephemeral");
-                return (format!("{:016x}", rand::random::<u64>()), None);
-            }
-        };
-
-        match backend.create_session(agent_name, None) {
+        match self
+            .session_manager
+            .create_sub_session(parent_session_id, agent_name)
+        {
             Ok(info) => {
-                let hook = BackendPersistHook::new(backend.clone() as Arc<dyn crate::storage::SessionBackend>);
+                let hook = BackendPersistHook::new(Arc::clone(self.session_manager.backend()));
                 (info.id, Some(Arc::new(hook) as Arc<dyn PersistHook>))
             }
             Err(e) => {
@@ -400,6 +410,7 @@ impl DelegationCoordinator {
         let tools = self.tools.clone();
         let skills = self.skills.clone();
         let default_max_tool_calls = self.default_max_tool_calls;
+        let session_manager = Arc::clone(&self.session_manager);
         let sessions_root = self.sessions_root.clone();
         let worktrees_root = self.worktrees_root.clone();
         let task_owned = task.to_string();
@@ -419,6 +430,7 @@ impl DelegationCoordinator {
                 tools,
                 skills,
                 default_max_tool_calls,
+                session_manager,
                 sessions_root,
                 worktrees_root,
             };

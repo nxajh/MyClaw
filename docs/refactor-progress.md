@@ -5,9 +5,9 @@
 
 ## 进度统计
 
-- 完成：48 / 61
+- 完成：49 / 61
 - 进行中：—
-- 待办：13
+- 待办：12
 
 ## 模块 A：类型基础（0/11）
 
@@ -28,7 +28,7 @@
 - [x] B12. Session 字段改造（last_message/parent_session_id/agent_name + record_inbound/reply_target + token_tracker + transient persist/channel + save_to_disk + add_user/add_assistant 重命名带 #[deprecated] 别名）
 - [~] B14. SessionManager 改造（已加 SessionNotOwned 接线 / list_sub_sessions / session_id_for_routing_key / get_by_id / create_sub_session / delete cascade；list_sessions 过滤 parent）
 - [x] B13. 新建 `SessionContext`（session/attachments/pending_retry/turn_lock；user_profile 待 G41） → `src/agents/session_context.rs`
-- [ ] B15. Sub-session 存储扁平化（删嵌套结构与 marker 文件）
+- [x] B15. Sub-session 存储扁平化：`DelegationCoordinator.open_sub_session` 改用 `SessionManager.create_sub_session`（写 `meta.parent_session_id` + `meta.agent_name` 到同层 `sessions/{sub_id}/`），不再开 per-parent `JsonFileBackend`。Marker 文件机制留给 H50 删
 
 ## 模块 C：Agent / AgentRuntime / 执行器（0/7）
 
@@ -103,6 +103,34 @@
 
 按时间倒序记录每次推进。
 
+### B15 — Sub-session 存储扁平化
+
+DelegationCoordinator now uses the shared `SessionManager` to create
+sub-sessions as top-level peers of regular sessions, instead of opening a
+nested `JsonFileBackend` rooted at `{sessions_root}/{parent}/subagents/`.
+
+- `SessionManager.backend()` accessor added (returns
+  `&Arc<dyn SessionBackend>`) so `BackendPersistHook` can be wired to
+  the same storage.
+- `DelegationCoordinator` gained `session_manager: Arc<SessionManager>`
+  field; `open_sub_session` now calls
+  `session_manager.create_sub_session(parent, agent_name)` which
+  internally writes `meta.parent_session_id` and `meta.agent_name`.
+- `sessions_root: PathBuf` field kept (only used by the
+  `subagent_running_*.json` marker writes — H50 will delete that
+  mechanism and the field with it).
+- `daemon.rs` reordered: `session_backend` + `session_manager` are now
+  built upstream of the multi-agent block so the coordinator can hold
+  an `Arc<SessionManager>`. The duplicate construction further down
+  was removed.
+
+Old nested data layout (`sessions/{parent}/subagents/{sub}/`) is left
+in place and ignored by the new code path — per RFC I61 we do not
+migrate, and recovery scans the flat layout via
+`SessionManager.list_all_sessions`.
+
+377 lib tests pass.
+
 ### F36 + H47 — Delegation rename + TaskDelegator removal
 
 Two of the Stage-2 cleanup items that don't require the Agent.run / orchestrator
@@ -125,7 +153,7 @@ rewrite to land. Net: -1 trait, -1 dual impl, ~30 references re-routed.
 
 Result: 377 lib tests still passing.
 
-### Stage 2 (剩 13 项) — 待下一会话续作
+### Stage 2 (剩 12 项) — 待下一会话续作
 
 Stage 2 = C17 + C18 + E29 + E30 + E32 + E34 + F35 + F36 (complete) +
 F37 + F38 + B15 + H45 + H46 + H47 + H48 + H49 + H50 + H57.
