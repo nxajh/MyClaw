@@ -34,7 +34,7 @@
 
 - [~] C16. `SubAgentConfig` 加 skills/mcp 三维过滤 + allows_tool/skill/mcp helper；slim AgentConfig 形态等 C18
 - [x] C17. `Agent` (实际命名 `Agent2`，待 H45 删旧 Agent 后再 rename) 只持 `pub config: SubAgentConfig`
-- [~] C18. `Agent2::run(&mut Session, TurnContext, &AgentRuntime) -> Result<TurnResult>` 实现：allowed_tools snapshot（含 MCP source 过滤）+ ContextEngine 初始化 + LLM 调用 + **完整 tool-call 迭代循环**（stream 收集、ToolExecutor 调用、permission_mode 强制、LoopBreaker 集成、max_tool_calls、thinking content 保留）+ token 跟踪 + 每步持久化 + **compaction 触发（should_compact + compaction_boundary + execute_compaction + apply_compaction + adjust_for_compaction + 重建 messages slice）**。**仍未实现：streaming via channel.push_event、empty-response retry、image attachment、fallback chain、interrupt recovery**——这些是剩余增量，每个都可独立 patch in。AgentLoop 仍并行存活；orchestrator 切换由 H45 配合 E29 完成
+- [~] C18. `Agent2::run(&mut Session, TurnContext, &AgentRuntime) -> Result<TurnResult>` 实现：allowed_tools snapshot（含 MCP source 过滤）+ ContextEngine 初始化 + LLM 调用 + **完整 tool-call 迭代循环**（stream 收集、ToolExecutor 调用、permission_mode 强制、LoopBreaker 集成、max_tool_calls、thinking content 保留）+ token 跟踪 + 每步持久化 + **compaction 触发** + **empty-response retry (3 次) + pending_retry 回填**。**仍未实现：streaming via channel.push_event、image attachment、fallback chain (CHAIN_EXHAUSTED_TAG)、interrupt recovery**——剩余增量，每个独立 patch-able。AgentLoop 仍并行存活；orchestrator 切换由 H45 配合 E29 完成
 - [x] C19. `ToolExecutor` 重命名（原 `DefaultToolExecutor`）；ask_user/agent_delegate inline 处理待 F35 拆出
 - [x] C20. `LoopBreaker` policy + per-turn counter（已有 LoopBreakerConfig 分离 + reset() 每轮重置）
 - [x] C21. `ContextEngine` 合并 CompactionPolicy + CompactionExecutor → `src/agents/context_engine.rs` 作为 façade，内部 struct 不变；C18 Agent.run 改用 ContextEngine

@@ -132,6 +132,8 @@ impl Agent2 {
         let mut tool_calls_count: usize = 0;
         let max_tool_calls = self.config.max_tool_calls.unwrap_or(100);
         let permission_mode = turn_ctx.permission_mode;
+        let mut empty_response_retries: usize = 0;
+        const MAX_EMPTY_RETRIES: usize = 3;
 
         loop {
             // Shutdown checkpoint between LLM calls (mirrors AgentLoop chat_loop).
@@ -268,12 +270,35 @@ impl Agent2 {
 
             // No tool calls → final response. Persist + return.
             if response.tool_calls.is_empty() {
-                if !response.text.trim().is_empty() {
-                    session.add_assistant(response.text.clone());
-                    if let Some(ref hook) = session.persist {
-                        if let Some(msg) = session.history.last() {
-                            let _ = hook.persist_message(&session.id, msg);
-                        }
+                if response.text.trim().is_empty() {
+                    // Empty response: retry up to MAX_EMPTY_RETRIES like
+                    // AgentLoop's chat_loop does. The provider sometimes
+                    // returns empty on EndTurn / StopSequence (transient)
+                    // or MaxTokens (output budget exhausted). We don't yet
+                    // do the boosted-max_tokens retry; we just re-call.
+                    empty_response_retries += 1;
+                    if empty_response_retries > MAX_EMPTY_RETRIES {
+                        tracing::warn!(
+                            "empty response after {} retries, giving up",
+                            MAX_EMPTY_RETRIES
+                        );
+                        return Ok(TurnResult {
+                            text: String::new(),
+                            stop_reason: response.stop_reason,
+                            pending_retry: Some(last_user_text(session)),
+                        });
+                    }
+                    tracing::warn!(
+                        attempt = empty_response_retries,
+                        stop = ?response.stop_reason,
+                        "empty response, retrying"
+                    );
+                    continue;
+                }
+                session.add_assistant(response.text.clone());
+                if let Some(ref hook) = session.persist {
+                    if let Some(msg) = session.history.last() {
+                        let _ = hook.persist_message(&session.id, msg);
                     }
                 }
                 return Ok(TurnResult {
@@ -425,6 +450,19 @@ fn placeholder_resources(
 /// `agent_impl/` internals.
 fn estimate_tokens(text: &str) -> u64 {
     (text.len() as u64).div_ceil(4)
+}
+
+/// Pull the text of the most recent user message from history, if any.
+/// Used for `TurnResult.pending_retry` so the orchestrator can surface
+/// a "retry?" prompt without re-asking the user for their input.
+fn last_user_text(session: &Session) -> String {
+    session
+        .history
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| m.text_content())
+        .unwrap_or_default()
 }
 
 /// Bundle of fields extracted from one streaming LLM response. Mirrors
