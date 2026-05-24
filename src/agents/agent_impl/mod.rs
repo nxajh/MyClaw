@@ -1,24 +1,15 @@
-//! Agent — shared factory for AgentLoop instances.
+//! AgentLoop + AgentSession — per-session turn execution engine.
 //!
-//! Agent holds shared resources (registry, skills, config) and creates
-//! per-session AgentLoop handles.
-//!
-//! DDD: Agent depends on `dyn ProviderRegistry` (Domain trait), not on
-//! `Registry` (Infrastructure concrete type). This keeps the Application
-//! layer decoupled from Infrastructure.
+//! AgentLoop holds per-session mutable state; AgentSession wraps it as the
+//! public API surface. Session creation is done via AgentRuntime.
 
 use std::sync::Arc;
-use std::path::PathBuf;
 
-use parking_lot::RwLock;
 use tokio::sync::watch;
 
 use crate::providers::ProviderRegistry;
-use crate::config::agent::ContextConfig;
-use crate::agents::session::SessionOverride;
 
-use super::skills::SkillManager;
-use super::tool_registry::ToolRegistry;
+use super::session::SessionOverride;
 
 /// Callback for ask_user tool: (session_key, question) → user_answer.
 ///
@@ -40,9 +31,9 @@ pub type DelegateHandler = Arc<
     dyn Fn(String, String) -> anyhow::Result<String> + Send + Sync,
 >;
 
-use super::loop_breaker::{LoopBreaker, LoopBreakerConfig};
+use super::loop_breaker::LoopBreaker;
 use super::session::{Session, PersistHook};
-use crate::agents::prompt::{SystemPromptBuilder, SystemPromptConfig};
+use crate::agents::prompt::SystemPromptConfig;
 use crate::agents::attachment::AttachmentManager;
 use super::tool_executor::ToolExecutor;
 use super::compaction_executor::CompactionExecutor;
@@ -55,9 +46,7 @@ mod tools;
 mod compaction;
 mod images;
 
-pub(crate) use types::is_write_tool;
 use super::compaction_policy::CompactionPolicy;
-use super::resource_provider::ResourceProvider;
 use super::request_builder::RequestBuilder;
 
 /// AgentConfig controls loop breaker thresholds and tool call limits.

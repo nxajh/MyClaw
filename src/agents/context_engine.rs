@@ -11,10 +11,8 @@ use crate::providers::{ChatMessage, ProviderRegistry};
 use crate::providers::capability_chat::ToolSpec;
 use crate::agents::resource_provider::ResourceProvider;
 use crate::agents::tool_registry::ToolRegistry;
-use crate::agents::session::{TokenTracker, estimate_tokens, estimate_message_tokens};
 use super::compaction_policy::CompactionPolicy;
 use super::compaction_executor::{CompactionExecutor, CompactionResult};
-use super::scheduling::work_unit;
 
 /// Unified context management: token tracking + compaction policy + execution.
 ///

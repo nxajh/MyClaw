@@ -1,7 +1,7 @@
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::providers::{ChatMessage, ChatUsage, ContentPart, StopReason, ToolCall};
+use crate::providers::{ChatMessage, ChatUsage, StopReason, ToolCall};
 use super::super::TurnEvent;
 
 // Re-export token tracking types from session module.

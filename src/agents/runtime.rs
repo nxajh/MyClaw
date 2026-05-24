@@ -25,6 +25,9 @@ use super::prompt::SystemPromptBuilder;
 use super::agent_impl::{AgentConfig, AgentLoop, AgentSession};
 use super::session::Session;
 
+/// Channel map type alias (avoids clippy type_complexity).
+pub type ChannelMap = Arc<RwLock<std::collections::HashMap<(String, String), Arc<dyn crate::channels::Channel>>>>;
+
 /// Per-process runtime resources shared by every `Agent.run` invocation.
 #[derive(Clone)]
 pub struct AgentRuntime {
@@ -49,7 +52,7 @@ pub struct AgentRuntime {
     /// E30: AskRouter for F35 AskUserTool integration.
     pub ask_router: Option<Arc<crate::agents::ask_router::AskRouter>>,
     /// F35: Channels map for ask_user delivery.
-    pub channels: Arc<RwLock<std::collections::HashMap<(String, String), Arc<dyn crate::channels::Channel>>>>,
+    pub channels: ChannelMap,
     /// MCP server instructions (server_name → instructions text).
     pub mcp_instructions: Vec<(String, String)>,
     /// Default agent config (prompt, context, model, tool limits).

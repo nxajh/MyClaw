@@ -91,6 +91,7 @@ pub struct Orchestrator {
     /// Listener task handles — taken and awaited on shutdown.
     listener_handles: Vec<JoinHandle<()>>,
     /// Pending ask_user replies: session_key → (oneshot sender, reply_target).
+    #[allow(dead_code)]
     pending_asks: Arc<DashMap<String, (oneshot::Sender<String>, String)>>,
     /// Sub-agent delegator (for async delegation).
     sub_delegator: Option<Arc<DelegationCoordinator>>,
@@ -936,6 +937,7 @@ struct LoopRegistry {
     runtime: AgentRuntime,
     session_manager: Arc<SessionManager>,
     channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
+    #[allow(dead_code)]
     pending_asks: Arc<DashMap<String, (oneshot::Sender<String>, String)>>,
     /// E29: AskRouter replaces pending_asks for ask_user resolution.
     ask_router: Arc<crate::agents::ask_router::AskRouter>,

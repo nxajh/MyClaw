@@ -20,7 +20,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::Mutex;
 
-use crate::agents::Agent;
 use crate::agents::runtime::AgentRuntime;
 use crate::agents::agent_impl::AgentSession;
 use crate::agents::orchestrator::SchedulerEvent;

@@ -394,8 +394,7 @@ async fn build_tools(
     skills: &Arc<parking_lot::RwLock<SkillManager>>,
     shared_scheduler: &crate::agents::SharedScheduler,
     workspace_dir: &std::path::Path,
-    knowledge_dir: &str,
-) -> ToolRegistry {
+    _knowledge_dir: &str,) -> ToolRegistry {
     let mut tools = ToolRegistry::new();
     let builtin = crate::tools::builtin_tools();
     for tool in builtin {
