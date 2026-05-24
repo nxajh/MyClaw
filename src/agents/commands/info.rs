@@ -143,7 +143,7 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
 
         // Estimate actual context size from current history (system prompt + all messages).
         let estimated_total: u64 = session.history.iter()
-            .map(crate::agents::agent_impl::estimate_message_tokens)
+            .map(crate::agents::session::estimate_message_tokens)
             .sum();
 
         // Use the larger of tracker and estimate for display.

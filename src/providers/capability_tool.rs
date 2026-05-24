@@ -3,6 +3,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::agents::session::Session;
+
 /// Origin of a registered tool — used by `AgentConfig.tools` / `.skills` /
 /// `.mcp` filters to decide which tools an agent may see.
 ///
@@ -65,8 +67,8 @@ pub trait Tool: Send + Sync {
         10_000
     }
 
-    /// Execute the tool with the given arguments.
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult>;
+    /// Execute the tool with the given arguments and session context.
+    async fn execute(&self, args: serde_json::Value, _session: &Session) -> anyhow::Result<ToolResult>;
 
     /// Build a [`ToolSpec`] from this tool's metadata.
     fn spec(&self) -> ToolSpec {

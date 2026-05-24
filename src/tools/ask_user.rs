@@ -57,7 +57,7 @@ impl Tool for AskUserTool {
     /// When the Orchestrator is active, this code path is NOT reached —
     /// the `AgentLoop` intercepts `ask_user` and uses the `AskUserHandler`
     /// to send the question through the channel and wait for a real reply.
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
         let question = args["question"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'question' is required"))?;

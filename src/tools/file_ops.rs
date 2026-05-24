@@ -86,7 +86,7 @@ impl Tool for FileReadTool {
         10_000
     }
 
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
         let path = args["path"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'path' is required"))?;
@@ -168,7 +168,7 @@ impl Tool for FileWriteTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
         let path = args["path"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'path' is required"))?;
@@ -252,7 +252,7 @@ impl Tool for FileEditTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
         let path = args["path"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'path' is required"))?;

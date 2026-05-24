@@ -8,7 +8,7 @@ use super::attachment::AttachmentManager;
 use super::resource_provider::ResourceProvider;
 use super::session::Session;
 use super::workspace::watcher::ChangeSet;
-use super::agent_impl::types::estimate_tokens;
+use super::session::estimate_tokens;
 
 /// Owns message construction, attachment management, image state, and hot-reload polling.
 ///

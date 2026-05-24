@@ -58,7 +58,7 @@ pub use attachment::AttachmentManager;
 pub use workspace::watcher::{WorkspaceWatcher, ChangeSet};
 pub use delegation::{DelegationEvent, DelegationManager};
 pub use loop_breaker::{LoopBreak, LoopBreakReason, LoopBreaker, LoopBreakerConfig};
-pub use session::{InMemoryBackend, PersistHook, BackendPersistHook, Session, BreakpointItem};
+pub use session::{InMemoryBackend, PersistHook, BackendPersistHook, Session, BreakpointItem, TokenTracker, estimate_tokens, estimate_message_tokens};
 pub use session::{identify_breakpoint, detect_incomplete_turn, process_all_queues};
 pub use orchestrator::{Orchestrator, OrchestratorParts, SharedSessions, SchedulerEvent, SessionHandle};
 pub use prompt::{PermissionMode, RunMode, SystemPromptBuilder, SystemPromptConfig};

@@ -141,7 +141,7 @@ impl Tool for MemoryListTool {
         })
     }
 
-    async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, _args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
         let paths = match MemoryPaths::new(&self.knowledge_dir) {
             Ok(p) => p,
             Err(e) => return Ok(ToolResult {
@@ -228,7 +228,7 @@ impl Tool for MemoryViewTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
         let name = match args["name"].as_str() {
             Some(n) => n,
             None => return Ok(ToolResult {
@@ -324,7 +324,7 @@ impl Tool for MemorySearchTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
         let query = match args["query"].as_str() {
             Some(q) => q.to_lowercase(),
             None => return Ok(ToolResult {
@@ -488,7 +488,7 @@ impl Tool for MemoryManageTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
         let action = args["action"].as_str().unwrap_or("");
         let name = args["name"].as_str().unwrap_or("");
 

@@ -55,7 +55,7 @@ mod tools;
 mod compaction;
 mod images;
 
-pub(crate) use types::estimate_message_tokens;
+pub(crate) use types::is_write_tool;
 use super::compaction_policy::CompactionPolicy;
 use super::resource_provider::ResourceProvider;
 use super::request_builder::RequestBuilder;

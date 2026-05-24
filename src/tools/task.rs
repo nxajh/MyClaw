@@ -129,7 +129,7 @@ impl Tool for TaskManagerTool {
         5_000
     }
 
-    async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, args: Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
         let action = args["action"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing 'action'"))?;
@@ -426,6 +426,9 @@ impl TaskManagerTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::session::Session;
+
+    fn test_session() -> Session { Session::new("_test".into()) }
 
     #[tokio::test]
     async fn test_batch_create() {
@@ -436,7 +439,7 @@ mod tests {
             .execute(json!({
                 "action": "create",
                 "subject": ["Goal A", "Goal B", "Goal C"]
-            }))
+            }), &test_session())
             .await
             .unwrap();
 
@@ -456,7 +459,7 @@ mod tests {
             .execute(json!({
                 "action": "create",
                 "subject": "My Goal"
-            }))
+            }), &test_session())
             .await
             .unwrap();
         let goal_output: Value = serde_json::from_str(&goal.output).unwrap();
@@ -468,7 +471,7 @@ mod tests {
                 "action": "create",
                 "subject": ["Task 1", "Task 2"],
                 "parent": goal_id
-            }))
+            }), &test_session())
             .await
             .unwrap();
 

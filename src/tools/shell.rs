@@ -50,7 +50,7 @@ impl Tool for ShellTool {
         3_000
     }
 
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
         let command = args["command"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'command' is required"))?;

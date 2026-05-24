@@ -38,7 +38,7 @@ use crate::storage::{SessionBackend, SessionInfo};
 use super::backend::InMemoryBackend;
 use super::recovery::{identify_breakpoint, BreakpointItem};
 use super::session_override::sanitize_paired;
-use super::types::{Session, SummaryMetadata};
+use super::types::{Session, SummaryMetadata, TokenTracker};
 use super::session_override::SessionOverride;
 
 /// Manages session lifecycle — creates, retrieves, and persists sessions.
@@ -172,6 +172,9 @@ impl SessionManager {
             incomplete_turn: false,
             breakpoint_items: breakpoints,
             last_message: self.backend.load_last_message(&session_id),
+            token_tracker: TokenTracker::default(),
+            persist: None,
+            channel: None,
         };
 
         // Breakpoint items are kept for diagnostics, but recovery is now handled

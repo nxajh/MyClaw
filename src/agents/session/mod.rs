@@ -14,4 +14,4 @@ pub use manager::{SessionManager, SessionNotOwned};
 pub use queue::{enqueue_message, process_all_queues, process_queue};
 pub use recovery::{detect_incomplete_turn, identify_breakpoint, BreakpointItem};
 pub use session_override::{sanitize_history, SessionOverride};
-pub use types::{Session, SummaryMetadata};
+pub use types::{Session, SummaryMetadata, TokenTracker, estimate_tokens, estimate_message_tokens};

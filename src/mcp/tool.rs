@@ -64,7 +64,7 @@ impl Tool for McpToolWrapper {
         crate::providers::ToolSource::Mcp { server }
     }
 
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
         // Strip the `approved` field before forwarding to the MCP server.
         // ZeroClaw's security model injects `approved: bool` into built-in tool
         // calls for supervised-mode confirmation. MCP servers have no knowledge
@@ -96,6 +96,9 @@ impl Tool for McpToolWrapper {
 mod tests {
     use super::*;
     use serde_json::json;
+    use crate::agents::session::Session;
+
+    fn test_session() -> Session { Session::new("_test".into()) }
 
     fn make_def(name: &str, description: Option<&str>, schema: serde_json::Value) -> McpToolDef {
         McpToolDef {
@@ -174,7 +177,7 @@ mod tests {
         let def = make_def("ghost", Some("Ghost tool"), json!({}));
         let wrapper = McpToolWrapper::new("nowhere__ghost".to_string(), def, registry);
         let result = wrapper
-            .execute(json!({}))
+            .execute(json!({}), &test_session())
             .await
             .expect("execute should be non-fatal");
         assert!(!result.success);
@@ -212,7 +215,7 @@ mod tests {
         let wrapper = McpToolWrapper::new("srv__do_thing".to_string(), def, registry);
         // With `approved` present the call must not propagate an Err — non-fatal.
         let result = wrapper
-            .execute(json!({ "approved": true, "param": "value" }))
+            .execute(json!({ "approved": true, "param": "value" }), &test_session())
             .await
             .expect("execute must be non-fatal even with approved field");
         // The registry returns a non-fatal error (unknown tool), not a panic/Err.
@@ -234,7 +237,7 @@ mod tests {
         let wrapper = McpToolWrapper::new("srv__noop".to_string(), def, registry);
         for non_obj in [json!(null), json!("a string"), json!([1, 2, 3])] {
             let result = wrapper
-                .execute(non_obj.clone())
+                .execute(non_obj.clone(), &test_session())
                 .await
                 .expect("non-object args must not propagate Err");
             assert!(!result.success, "expected non-fatal failure for {non_obj}");

@@ -53,7 +53,7 @@ impl Tool for SkillTool {
         20_000
     }
 
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
         let name = args["name"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'name' is required"))?;
@@ -284,6 +284,11 @@ fn substitute_template_vars(content: &str, skill_dir: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::session::Session;
+
+    fn test_session() -> Session {
+        Session::new("_test".into())
+    }
     use crate::agents::Skill;
 
     fn make_skill(name: &str, agent_invocable: bool) -> Skill {
@@ -317,7 +322,7 @@ mod tests {
         mgr.register(make_skill("test", true));
         let tool = SkillTool::new(Arc::new(RwLock::new(mgr)));
 
-        let result = tool.execute(json!({"name": "test"})).await.unwrap();
+        let result = tool.execute(json!({"name": "test"}), &test_session()).await.unwrap();
         assert!(result.success);
         let v: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         assert_eq!(v["success"], true);
@@ -327,7 +332,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_unknown_skill() {
         let tool = SkillTool::new(Arc::new(RwLock::new(SkillManager::new())));
-        let result = tool.execute(json!({"name": "nonexistent"})).await.unwrap();
+        let result = tool.execute(json!({"name": "nonexistent"}), &test_session()).await.unwrap();
         assert!(!result.success);
         let v: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         assert_eq!(v["success"], false);
@@ -339,7 +344,7 @@ mod tests {
         mgr.register(make_skill("private", false));
         let tool = SkillTool::new(Arc::new(RwLock::new(mgr)));
 
-        let result = tool.execute(json!({"name": "private"})).await.unwrap();
+        let result = tool.execute(json!({"name": "private"}), &test_session()).await.unwrap();
         assert!(!result.success);
         let v: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         assert!(v["error"].as_str().unwrap().contains("not agent-invocable"));
@@ -351,7 +356,7 @@ mod tests {
         mgr.register(make_skill("test", true));
         let tool = SkillTool::new(Arc::new(RwLock::new(mgr)));
 
-        let result = tool.execute(json!({"name": "test", "file_path": "../../etc/passwd"})).await.unwrap();
+        let result = tool.execute(json!({"name": "test", "file_path": "../../etc/passwd"}), &test_session()).await.unwrap();
         assert!(!result.success);
         let v: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         assert!(v["error"].as_str().unwrap().contains("traversal"));

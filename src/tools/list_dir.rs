@@ -54,7 +54,7 @@ impl Tool for ListDirTool {
         5_000
     }
 
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
         let path_str = args["path"].as_str().unwrap_or(".");
         let show_hidden = args["show_hidden"].as_bool().unwrap_or(false);
 
