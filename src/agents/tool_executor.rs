@@ -8,7 +8,7 @@ use crate::providers::capability_chat::ToolSpec;
 use super::tool_registry::ToolRegistry;
 use super::session::Session;
 use super::agent_impl::{AskUserHandler, DelegateHandler};
-use super::sub_agent::SubAgentDelegator;
+use super::delegation_coordinator::DelegationCoordinator as SubAgentDelegator;
 use super::agent_impl::types::is_write_tool;
 
 /// Executes tool calls on behalf of the main conversation loop.

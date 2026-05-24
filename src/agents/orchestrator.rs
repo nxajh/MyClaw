@@ -11,7 +11,7 @@
 
 use anyhow::Context;
 use crate::agents::delegation::{DelegationEvent, DelegationManager};
-use crate::agents::sub_agent::SubAgentDelegator;
+use crate::agents::delegation_coordinator::DelegationCoordinator as SubAgentDelegator;
 use crate::channels::{Channel, ChannelMessage, SendMessage, ProcessingStatus, InlineButton};
 use dashmap::DashMap;
 use std::sync::Arc;

@@ -13,9 +13,9 @@ use anyhow::{Context, Result};
 use crate::agents::{
     Agent, AgentConfig, InMemoryBackend, Orchestrator, OrchestratorParts, SessionManager,
     ToolRegistry, SkillManager, Skill, SystemPromptConfig, RunMode,
-    McpManager, SubAgentDelegator, DelegationManager,
+    McpManager, DelegationCoordinator, DelegationManager,
 };
-use crate::tools::TaskDelegator;
+use crate::agents::AgentDelegator;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -734,7 +734,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
         let base_tools_arc: Arc<ToolRegistry> = Arc::new(tools);
 
-        let delegator = SubAgentDelegator::new(
+        let delegator = DelegationCoordinator::new(
             sub_agent_registry.clone(),
             registry_arc.clone(),
             Arc::clone(&base_tools_arc),
@@ -745,9 +745,10 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         );
         let delegator_arc = Arc::new(delegator);
 
-        // Build agent_delegate tool.
+        // Build agent_delegate tool. H47: now wired through `AgentDelegator`
+        // (the legacy `TaskDelegator` trait has been removed).
         let delegate_tool = crate::tools::AgentDelegateTool::new(
-            Arc::clone(&delegator_arc) as Arc<dyn TaskDelegator>,
+            Arc::clone(&delegator_arc) as Arc<dyn AgentDelegator>,
         );
 
         // Build parent tool registry: same tools + agent_delegate + tool_search.

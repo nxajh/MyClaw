@@ -5,9 +5,9 @@
 
 ## 进度统计
 
-- 完成：46 / 61
+- 完成：48 / 61
 - 进行中：—
-- 待办：15
+- 待办：13
 
 ## 模块 A：类型基础（0/11）
 
@@ -61,7 +61,7 @@
 ## 模块 F：委派（0/4）
 
 - [ ] F35. AskUserTool / DelegateTool 实现并注册
-- [~] F36. SubAgentDelegator 现在也实现 `AgentDelegator` trait（共存 TaskDelegator 直到 H47 删除）
+- [x] F36. `SubAgentDelegator` 重命名为 `DelegationCoordinator`（文件 sub_agent.rs → delegation_coordinator.rs），保留 type alias 给残留 import；只剩 AgentDelegator 单实现（H47 同步删 TaskDelegator dual impl）
 - [ ] F37. 启动恢复统一路径（list_all + parent_session_id 区分）
 - [ ] F38. Sub-agent 完成回填合成 ChannelMessage 调父 process_turn
 
@@ -78,7 +78,7 @@
 
 - [ ] H45. 删 AgentLoop / SessionHandle / LoopRegistry / run_session_actor / TurnStream / TurnInput
 - [ ] H46. 删 RequestBuilder
-- [ ] H47. 删 SubAgentDelegator
+- [x] H47. 删 `TaskDelegator` trait + dual impl on DelegationCoordinator；`AgentDelegateTool` 改持 `Arc<dyn AgentDelegator>` 并把 `&Session` 传给 delegate()；daemon wiring 同步
 - [ ] H48. 删 SchedulerContext / WebhookContext
 - [ ] H49. 删 AskUserHandler / DelegateHandler 闭包类型
 - [ ] H50. 删 subagent_running_*.json marker 文件机制
@@ -103,7 +103,29 @@
 
 按时间倒序记录每次推进。
 
-### Stage 2 (剩 15 项) — 待下一会话续作
+### F36 + H47 — Delegation rename + TaskDelegator removal
+
+Two of the Stage-2 cleanup items that don't require the Agent.run / orchestrator
+rewrite to land. Net: -1 trait, -1 dual impl, ~30 references re-routed.
+
+- **F36 rename**: `src/agents/sub_agent.rs` → `src/agents/delegation_coordinator.rs`
+  (git mv); `pub struct SubAgentDelegator` → `pub struct DelegationCoordinator`;
+  added `pub type SubAgentDelegator = DelegationCoordinator;` so the few
+  remaining `SubAgentDelegator` import sites (tool_executor.rs, orchestrator.rs)
+  keep compiling under their existing local aliases until the Agent.run /
+  orchestrator rewrite removes them. `lib.rs` exports both names; `daemon.rs`
+  switched to `DelegationCoordinator` directly.
+- **H47 (full)**: Deleted `crate::tools::TaskDelegator` trait + the
+  `impl TaskDelegator for SubAgentDelegator` block at the bottom of the
+  delegation file. `AgentDelegateTool` now holds `Arc<dyn AgentDelegator>`
+  and forwards `&Session` into `delegator.delegate(name, task, session)`.
+  Updated `tools::mod.rs` / `tools::lib.rs` re-exports and the daemon's
+  `delegate_tool` construction. The `AgentDelegator` impl on
+  `DelegationCoordinator` is now the only delegation entry point.
+
+Result: 377 lib tests still passing.
+
+### Stage 2 (剩 13 项) — 待下一会话续作
 
 Stage 2 = C17 + C18 + E29 + E30 + E32 + E34 + F35 + F36 (complete) +
 F37 + F38 + B15 + H45 + H46 + H47 + H48 + H49 + H50 + H57.

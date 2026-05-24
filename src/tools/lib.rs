@@ -32,7 +32,7 @@ pub use agent_kill::AgentKillTool;
 pub use agent_list::AgentListTool;
 pub use ask_user::AskUserTool;
 pub use calculator::CalculatorTool;
-pub use delegate::{AgentDelegateTool, TaskDelegator};
+pub use delegate::AgentDelegateTool;
 pub use file_ops::{FileEditTool, FileReadTool, FileWriteTool};
 pub use http::HttpRequestTool;
 pub use list_dir::ListDirTool;

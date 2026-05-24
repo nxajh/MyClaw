@@ -1,9 +1,9 @@
-//! Sub-agent delegator — creates and runs specialized sub-agents on demand.
+//! `DelegationCoordinator` — creates and runs specialized sub-agents on demand.
 //!
-//! Implements `TaskDelegator` by creating temporary `AgentLoop` instances
-//! with restricted tool sets and specialized system prompts.
-//!
-//! Also provides `delegate_async` for non-blocking background execution.
+//! RFC v2 §三.D: implements [`AgentDelegator`](crate::agents::AgentDelegator) by
+//! creating temporary `AgentLoop` instances with restricted tool sets and
+//! specialized system prompts. Also provides `delegate_async` for non-blocking
+//! background execution.
 //!
 //! ## History persistence
 //!
@@ -34,11 +34,21 @@ use crate::agents::tool_registry::ToolRegistry;
 use crate::config::sub_agent::{AgentIsolation, SubAgentConfig};
 use crate::providers::ProviderRegistry;
 use crate::storage::SessionBackend as _;
-use crate::tools::TaskDelegator;
+
+/// F36: prefer this name. `SubAgentDelegator` remains as a type alias to
+/// keep external callers compiling while H47's removal of `TaskDelegator`
+/// propagates; the alias will be deleted once every reference reads
+/// `DelegationCoordinator`.
+pub type SubAgentDelegator = DelegationCoordinator;
 
 /// Holds sub-agent configs and creates temporary AgentLoops for delegation.
+///
+/// Implements [`AgentDelegator`](crate::agents::AgentDelegator); the legacy
+/// `TaskDelegator` dual-impl was removed in H47 (callers now go through
+/// `AgentDelegator`, which carries `&Session` so per-user context is
+/// available end-to-end).
 #[derive(Clone)]
-pub struct SubAgentDelegator {
+pub struct DelegationCoordinator {
     /// Sub-agent configurations, indexed by name.
     configs: super::AgentRegistry,
     /// Shared service registry (for LLM access).
@@ -55,7 +65,7 @@ pub struct SubAgentDelegator {
     worktrees_root: PathBuf,
 }
 
-impl SubAgentDelegator {
+impl DelegationCoordinator {
     pub fn new(
         configs: super::AgentRegistry,
         registry: Arc<dyn ProviderRegistry>,
@@ -403,7 +413,7 @@ impl SubAgentDelegator {
         let handle = tokio::spawn(async move {
             let start_time = std::time::Instant::now();
 
-            let sub_delegator = SubAgentDelegator {
+            let sub_delegator = DelegationCoordinator {
                 configs,
                 registry,
                 tools,
@@ -450,13 +460,13 @@ impl SubAgentDelegator {
     }
 }
 
-/// F36: SubAgentDelegator also implements the new `AgentDelegator` trait so
-/// downstream code can target the RFC v2 contract directly. The two trait
-/// impls share `delegate_with_parent` for the actual work; the only
-/// difference is `parent_session` carries richer context (channel /
-/// reply_target via `Session.last_message`).
+/// `DelegationCoordinator` implements the canonical [`AgentDelegator`] trait
+/// (the legacy `TaskDelegator` dual-impl was removed in H47). The `delegate`
+/// method here carries the parent `&Session` so callees can read
+/// `reply_target`, `owner` (for per-user scoping), and `last_message` from
+/// the same value.
 #[async_trait::async_trait]
-impl crate::agents::AgentDelegator for SubAgentDelegator {
+impl crate::agents::AgentDelegator for DelegationCoordinator {
     async fn delegate(
         &self,
         agent_name: &str,
@@ -482,24 +492,6 @@ impl crate::agents::AgentDelegator for SubAgentDelegator {
             .values_cloned()
             .into_iter()
             .map(|c| (c.name.clone(), c.description.clone()))
-            .collect()
-    }
-}
-
-#[async_trait::async_trait]
-impl TaskDelegator for SubAgentDelegator {
-    async fn delegate(&self, agent_name: &str, task: &str) -> anyhow::Result<String> {
-        self.delegate_with_parent(agent_name, task, "", None, None, None).await
-    }
-
-    fn available_agents(&self) -> Vec<(String, String)> {
-        self.configs
-            .values_cloned()
-            .into_iter()
-            .map(|c| {
-                let desc = c.description.as_deref().unwrap_or("").to_string();
-                (c.name, desc)
-            })
             .collect()
     }
 }
