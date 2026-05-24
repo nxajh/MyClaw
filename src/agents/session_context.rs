@@ -8,7 +8,7 @@
 //! the Orchestrator actually holds in its session table.
 //!
 //! This struct is intentionally additive in this commit — it is not yet
-//! wired into the Orchestrator or AgentLoop. C18 (Agent.run rewrite) and
+//! wired into the Orchestrator or AgentSession. C18 (Agent.run rewrite) and
 //! E29 (Orchestrator main loop) will start consuming it. Keeping the
 //! scaffold here so downstream commits don't have to introduce both the
 //! type and its callers in one go.

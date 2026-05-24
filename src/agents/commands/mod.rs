@@ -3,11 +3,13 @@
 //! Commands are parsed and dispatched before reaching the agent loop.
 //! Each command returns a text response sent directly through the channel.
 
-use crate::agents::agent_impl::{Agent, AgentLoop};
+use std::sync::Arc;
+
+use crate::agents::agent_impl::AgentSession;
+use crate::agents::runtime::AgentRuntime;
 use crate::agents::mcp_manager::McpManager;
 use crate::agents::session::{SessionManager, SessionOverride};
 use dashmap::DashMap;
-use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 
 mod config;
@@ -27,9 +29,9 @@ pub struct CommandContext<'a> {
     pub user_id: &'a str,
     pub registry: &'a Arc<dyn crate::providers::ProviderRegistry>,
     pub session_manager: &'a SessionManager,
-    pub agent: &'a Agent,
+    pub runtime: &'a AgentRuntime,
     /// Access to the current session's agent loop (if it exists).
-    pub agent_loop: Option<&'a Arc<TokioMutex<AgentLoop>>>,
+    pub agent_loop: Option<&'a Arc<TokioMutex<AgentSession>>>,
     /// MCP manager (for /mcp command).
     pub mcp_manager: Option<&'a Arc<McpManager>>,
     /// Sessions cache — needed by /new to evict stale agent loops.

@@ -25,7 +25,7 @@ pub async fn run(cli: &Cli, prompt: Option<&str>, agent: Option<&str>, model: Op
     tools.register(Arc::new(myclaw::tools::SkillsListTool::new(Arc::clone(&skills_arc))));
     tools.register(Arc::new(myclaw::tools::SkillManageTool::new(
         Arc::clone(&skills_arc),
-        workspace_dir,
+        workspace_dir.clone(),
     )));
     // Memory tools
     let kd = cfg.workspace_dir.to_string_lossy().to_string();
@@ -35,26 +35,26 @@ pub async fn run(cli: &Cli, prompt: Option<&str>, agent: Option<&str>, model: Op
     tools.register(Arc::new(myclaw::tools::MemoryManageTool::new(kd)));
     let tools_arc = Arc::new(tools);
 
-    let agent_config = myclaw::AgentConfig::default();
-    let mut agent_factory = myclaw::Agent::new(
-        Arc::clone(&registry_arc),
+    let mut runtime = myclaw::AgentRuntime::new(
+        registry_arc,
         tools_arc,
         skills_arc,
-        agent_config,
-    );
+        myclaw::AgentRegistry::new(),
+    )
+    .with_dirs(workspace_dir.clone(), std::path::PathBuf::from(&cfg.knowledge_dir));
 
     if let Some(m) = model {
-        agent_factory = agent_factory.with_model(m.to_string());
+        runtime.agent_config.model_override = Some(m.to_string());
     }
 
     let session_key = agent.unwrap_or("cli");
     let session = myclaw::Session::new(session_key.to_string());
-    let mut agent_loop = agent_factory.loop_for(session);
+    let mut session_wrap = runtime.create_session(session, None);
 
     // Non-interactive (--print) or single prompt mode.
     if print || prompt.is_some() {
         let input = prompt.unwrap_or("Hello");
-        let response = agent_loop.run(input, None, None).await?;
+        let response = session_wrap.run(input, None, None).await?;
         println!("{}", response);
         return Ok(());
     }
@@ -86,7 +86,7 @@ pub async fn run(cli: &Cli, prompt: Option<&str>, agent: Option<&str>, model: Op
             break;
         }
 
-        match agent_loop.run(input, None, None).await {
+        match session_wrap.run(input, None, None).await {
             Ok(response) => println!("{}\n", response),
             Err(e) => eprintln!("error: {}\n", e),
         }

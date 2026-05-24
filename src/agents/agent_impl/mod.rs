@@ -116,138 +116,6 @@ impl AgentConfig {
 
 }
 
-/// Agent is the shared factory — call `.loop_for(session)` to get an AgentLoop.
-#[derive(Clone)]
-pub struct Agent {
-    registry: Arc<dyn ProviderRegistry>,
-    tools: Arc<ToolRegistry>,
-    skills: Arc<RwLock<SkillManager>>,
-    config: AgentConfig,
-    system_prompt: String,
-    model_override: Option<String>,
-    mcp_instructions: Vec<(String, String)>,
-    sub_agent_configs: super::AgentRegistry,
-    skills_dir: PathBuf,
-    agents_dir: PathBuf,
-}
-
-impl Agent {
-    pub fn new(
-        registry: Arc<dyn ProviderRegistry>,
-        tools: Arc<ToolRegistry>,
-        skills: Arc<RwLock<SkillManager>>,
-        config: AgentConfig,
-    ) -> Self {
-        Self {
-            registry,
-            tools,
-            skills,
-            config,
-            system_prompt: String::new(),
-            model_override: None,
-            mcp_instructions: Vec::new(),
-            sub_agent_configs: super::AgentRegistry::new(),
-            skills_dir: PathBuf::new(),
-            agents_dir: PathBuf::new(),
-        }
-    }
-
-    pub fn registry(&self) -> &Arc<dyn ProviderRegistry> { &self.registry }
-    pub fn tools(&self) -> &Arc<super::tool_registry::ToolRegistry> { &self.tools }
-    pub fn skills(&self) -> &Arc<RwLock<SkillManager>> { &self.skills }
-
-    pub fn sub_agent_configs(&self) -> &super::AgentRegistry { &self.sub_agent_configs }
-    pub fn workspace_dir(&self) -> &str { &self.config.prompt_config.workspace_dir }
-    pub fn compact_threshold(&self) -> f64 { self.config.context.compact_threshold }
-
-    pub fn with_system_prompt(mut self, prompt: String) -> Self {
-        self.system_prompt = prompt;
-        self
-    }
-
-    pub fn with_model(mut self, model: String) -> Self {
-        self.model_override = Some(model);
-        self
-    }
-
-    pub fn with_mcp_instructions(mut self, instructions: Vec<(String, String)>) -> Self {
-        self.mcp_instructions = instructions;
-        self
-    }
-
-    pub fn with_sub_agent_configs(mut self, configs: super::AgentRegistry) -> Self {
-        self.sub_agent_configs = configs;
-        self
-    }
-
-    pub fn with_workspace_dirs(mut self, skills_dir: PathBuf, agents_dir: PathBuf) -> Self {
-        self.skills_dir = skills_dir;
-        self.agents_dir = agents_dir;
-        self
-    }
-
-    pub fn loop_for(&self, session: Session) -> AgentLoop {
-        self.loop_for_with_persist(session, None)
-    }
-
-    pub fn loop_for_with_persist(
-        &self,
-        session: Session,
-        persist_hook: Option<Arc<dyn PersistHook>>,
-    ) -> AgentLoop {
-        let ov = &session.session_override;
-        let config = self.config.with_override(ov);
-
-        let prompt = if !self.system_prompt.is_empty() {
-            self.system_prompt.clone()
-        } else {
-            let skills = self.skills.read();
-            let builder = SystemPromptBuilder::new(config.prompt_config.clone());
-            builder.build(&skills)
-        };
-
-        // Apply Agent-level model_override as fallback if session didn't specify one.
-        let mut config = config;
-        if config.model_override.is_none() {
-            config.model_override = self.model_override.clone();
-        }
-        let max_tool_calls = config.max_tool_calls;
-        let policy = CompactionPolicy::from_context_config(&config.context);
-
-        let resources = ResourceProvider::new(
-            Arc::clone(&self.skills),
-            self.sub_agent_configs.clone(),
-            self.mcp_instructions.clone(),
-            self.skills_dir.clone(),
-            self.agents_dir.clone(),
-            config.prompt_config.knowledge_dir.clone(),
-            config.timezone_offset,
-        );
-        let request_builder = RequestBuilder::new(prompt, Arc::clone(&resources));
-
-        AgentLoop {
-            registry: Arc::clone(&self.registry),
-            compactor: CompactionExecutor::new(
-                Arc::clone(&self.registry),
-                Arc::clone(&resources),
-                Arc::clone(&self.tools),
-            ),
-            tool_executor: ToolExecutor::new(Arc::clone(&self.tools), config.tool_timeout_secs),
-            config,
-            session,
-            request_builder,
-            loop_breaker: LoopBreaker::new(LoopBreakerConfig {
-                max_tool_calls,
-                exact_repeat_threshold: self.config.loop_breaker_threshold,
-                ..LoopBreakerConfig::default()
-            }),
-            policy,
-            persist_hook,
-            pending_retry_message: None,
-        }
-    }
-}
-
 /// Per-session agent loop handle. Execute `run(user_message)` to process a message.
 pub struct AgentLoop {
     pub(crate) registry: Arc<dyn ProviderRegistry>,
@@ -265,6 +133,14 @@ pub struct AgentLoop {
     pub(crate) loop_breaker: LoopBreaker,
     pub(crate) persist_hook: Option<Arc<dyn PersistHook>>,
     pub(crate) pending_retry_message: Option<String>,
+}
+
+/// Per-session mutable state wrapper.
+///
+/// Thin wrapper around `AgentLoop` that provides the public API surface.
+/// All methods delegate to the inner `AgentLoop`.
+pub struct AgentSession {
+    pub(crate) loop_: AgentLoop,
 }
 
 impl AgentLoop {
@@ -311,6 +187,14 @@ impl AgentLoop {
     /// Access the attachment manager (for /reload command).
     pub fn attachments(&mut self) -> &mut AttachmentManager {
         &mut self.request_builder.attachments
+    }
+
+    pub fn session_mut(&mut self) -> &mut super::session::Session {
+        &mut self.session
+    }
+
+    pub fn set_model_override(&mut self, model: Option<String>) {
+        self.config.model_override = model;
     }
 
     pub fn set_pending_retry(&mut self, msg: String) {

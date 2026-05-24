@@ -20,7 +20,8 @@ use tokio::sync::{mpsc, Mutex as TokioMutex, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::agents::agent_impl::{Agent, AgentLoop, AskUserHandler, DelegateHandler};
+use crate::agents::agent_impl::{AgentSession, AskUserHandler, DelegateHandler};
+use crate::agents::runtime::AgentRuntime;
 use crate::agents::session::{SessionManager, PersistHook, BackendPersistHook};
 
 const CHANNEL_QUEUE_SIZE: usize = 100;
@@ -75,14 +76,14 @@ pub type ChannelMsgSender = mpsc::Sender<((String, String), ChannelMessage)>;
 
 /// Orchestrator — Application Service for message routing and session lifecycle.
 ///
-/// Coordinates the flow: Channel → Session → AgentLoop → Channel.
+/// Coordinates the flow: Channel → Session → AgentSession → Channel.
 /// Does NOT depend on any Infrastructure concrete types.
 pub struct Orchestrator {
     /// Channels, keyed by (channel_type, account_id).
     channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
     /// Per-session actor handles: "channel:account:sender" → Arc<SessionHandle>.
     sessions: Arc<DashMap<String, Arc<SessionHandle>>>,
-    agent: Agent,
+    runtime: AgentRuntime,
     session_manager: Arc<SessionManager>,
     /// The message receiver, owned and consumed by run().
     #[allow(clippy::type_complexity)]
@@ -182,7 +183,7 @@ fn history_has_incomplete_turn(history: &[crate::providers::capability_chat::Cha
 /// Built by the Composition Root (daemon.rs).  This struct is the seam that
 /// decouples the Application layer from Infrastructure assembly logic.
 pub struct OrchestratorParts {
-    pub agent: Agent,
+    pub runtime: AgentRuntime,
     pub session_manager: Arc<SessionManager>,
     /// Pre-built channels: (channel_type, account_id, channel_instance).
     pub channels: Vec<(String, String, Arc<dyn Channel>)>,
@@ -196,7 +197,7 @@ pub struct OrchestratorParts {
     pub persist_backend: Arc<dyn crate::storage::SessionBackend>,
     /// MCP manager (conditional — only when MCP servers are configured).
     pub mcp_manager: Option<Arc<crate::agents::McpManager>>,
-    /// File change receiver for hot-reload (shared across all AgentLoops).
+    /// File change receiver for hot-reload (shared across all AgentSessions).
     pub change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
     /// Scheduler event receiver (heartbeat ticks, cron triggers from Scheduler task).
     pub scheduler_rx: Option<mpsc::Receiver<SchedulerEvent>>,
@@ -258,7 +259,7 @@ impl Orchestrator {
         let orchestrator = Orchestrator {
             channels: channels_map,
             sessions: Arc::new(DashMap::new()),
-            agent: parts.agent,
+            runtime: parts.runtime,
             session_manager: parts.session_manager,
             msg_rx: Arc::new(TokioMutex::new(Some(msg_rx))),
             listener_handles,
@@ -365,7 +366,7 @@ impl Orchestrator {
         };
 
         let sessions = self.sessions.clone();
-        let agent = self.agent.clone();
+        let agent = self.runtime.clone();
         let channels = self.channels.clone();
         let sub_delegator = self.sub_delegator.clone();
         let delegation_manager = self.delegation_manager.clone();
@@ -383,7 +384,7 @@ impl Orchestrator {
         // free function, grouping all Arc-owned shared state into one place.
         let registry = LoopRegistry {
             sessions: sessions.clone(),
-            agent: agent.clone(),
+            runtime: agent.clone(),
             session_manager: self.session_manager.clone(),
             channels: channels.clone(),
             pending_asks: self.pending_asks.clone(), // kept for get_or_create_session compat
@@ -567,11 +568,11 @@ impl Orchestrator {
                     {
                         let handle = registry.get_or_create(&sk, &msg.reply_target);
                         if let Ok(mut guard) = handle.loop_.try_lock() {
-                            if guard.session.incomplete_turn {
-                                guard.session.incomplete_turn = false;
+                            if guard.session().incomplete_turn {
+                                guard.session_mut().incomplete_turn = false;
 
                                 // Extract the orphaned user message for retry.
-                                let last_user_msg = guard.session.history.last()
+                                let last_user_msg = guard.session().history.last()
                                     .filter(|m| m.role == "user")
                                     .map(|m| m.text_content().to_string())
                                     .unwrap_or_default();
@@ -604,7 +605,7 @@ impl Orchestrator {
 
                     // Intercept slash commands before reaching agent loop.
                     // Recognised commands are dispatched in a background task so the main
-                    // loop is never blocked waiting for the AgentLoop mutex — that mutex
+                    // loop is never blocked waiting for the AgentSession mutex — that mutex
                     // may already be held by a concurrent run_message_task.  Unknown
                     // "slash-like" inputs fall through to the normal agent-loop path.
                     if let Some((cmd, cmd_args)) = super::commands::parse_command(&content) {
@@ -613,9 +614,9 @@ impl Orchestrator {
                             let cmd_owned     = cmd.to_string();
                             let cmd_args_owned = cmd_args.to_string();
                             let session_loop  = sessions.get(&sk).map(|r| r.loop_.clone());
-                            let registry_cmd  = agent.registry().clone();
+                            let registry_cmd  = self.runtime.registry().clone();
+                            let runtime_cmd    = self.runtime.clone();
                             let sm_cmd        = self.session_manager.clone();
-                            let agent_cmd     = agent.clone();
                             let mcp_cmd       = self.mcp_manager.clone();
                             let sessions_cmd  = sessions.clone();
                             let cooldown_cmd  = self.search_cooldown.clone();
@@ -628,7 +629,7 @@ impl Orchestrator {
                                     user_id:        &sk_cmd,
                                     registry:       &registry_cmd,
                                     session_manager: &sm_cmd,
-                                    agent:          &agent_cmd,
+                                    runtime:        &runtime_cmd,
                                     agent_loop:     session_loop.as_ref(),
                                     mcp_manager:    mcp_cmd.as_ref(),
                                     sessions:       &sessions_cmd,
@@ -755,7 +756,7 @@ impl Orchestrator {
                     sessions: self.sessions.clone(),
                     session_manager: self.session_manager.clone(),
                     persist_backend: self.persist_backend.clone(),
-                    agent: self.agent.clone(),
+                    runtime: self.runtime.clone(),
                     change_rx: self.change_rx.clone(),
                     channels: self.channels.clone(),
                     last_channel: self.last_channel.clone(),
@@ -778,7 +779,7 @@ impl Orchestrator {
                     sessions: self.sessions.clone(),
                     session_manager: self.session_manager.clone(),
                     persist_backend: self.persist_backend.clone(),
-                    agent: self.agent.clone(),
+                    runtime: self.runtime.clone(),
                     change_rx: self.change_rx.clone(),
                     channels: self.channels.clone(),
                     last_channel: self.last_channel.clone(),
@@ -924,7 +925,7 @@ impl Orchestrator {
 // ── LoopRegistry ──────────────────────────────────────────────────────────────
 
 /// Groups the shared, Arc-owned resources required to create or look up an
-/// `AgentLoop` for a session.
+/// `AgentSession` for a session.
 ///
 /// Replaces the 12-argument `get_or_create_loop` free function.  All fields are
 /// cheap to clone (Arc or small value types) so the registry can be constructed
@@ -932,7 +933,7 @@ impl Orchestrator {
 /// re-borrowing `self`.
 struct LoopRegistry {
     sessions: Arc<DashMap<String, Arc<SessionHandle>>>,
-    agent: Agent,
+    runtime: AgentRuntime,
     session_manager: Arc<SessionManager>,
     channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
     pending_asks: Arc<DashMap<String, (oneshot::Sender<String>, String)>>,
@@ -969,7 +970,7 @@ impl LoopRegistry {
         let persist_hook: Arc<dyn PersistHook> = Arc::new(
             BackendPersistHook::new(Arc::clone(&self.persist_backend))
         );
-        let loop_ = self.agent.loop_for_with_persist(session, Some(persist_hook));
+        let loop_ = self.runtime.create_session(session, Some(persist_hook));
 
         // E29: Wire ask_user handler via AskRouter instead of raw pending_asks.
         let ask_router = Arc::clone(&self.ask_router);
@@ -1031,7 +1032,7 @@ impl LoopRegistry {
             loop_ = loop_.with_change_rx(rx);
         }
 
-        let loop_arc: Arc<TokioMutex<AgentLoop>> = Arc::new(TokioMutex::new(loop_));
+        let loop_arc: Arc<TokioMutex<AgentSession>> = Arc::new(TokioMutex::new(loop_));
 
         // Spawn a per-session actor that processes messages one at a time.
         // The main dispatch loop routes via tx; this task never blocks the main loop.
@@ -1084,7 +1085,7 @@ fn retry_abort_prompt(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Bundles the user message content and optional image payloads that are
-/// forwarded together to `AgentLoop::run` / `AgentLoop::run_streamed`.
+/// forwarded together to `AgentSession::run` / `AgentSession::run_streamed`.
 struct TurnInput {
     content: String,
     image_urls: Option<Vec<String>>,
@@ -1107,7 +1108,7 @@ struct TurnMessage {
 /// waiting on the session mutex.  The background actor task processes them
 /// sequentially, one turn at a time.
 pub struct SessionHandle {
-    pub loop_: Arc<TokioMutex<AgentLoop>>,
+    pub loop_: Arc<TokioMutex<AgentSession>>,
     tx: mpsc::Sender<TurnMessage>,
 }
 
@@ -1117,7 +1118,7 @@ impl SessionHandle {
     /// Scheduled sessions (heartbeat/cron/webhook) call `loop_.lock()` directly
     /// rather than sending via the channel, so they only need the mutex wrapped
     /// in a `SessionHandle` for storage in the shared sessions map.
-    pub fn new_direct(loop_: Arc<TokioMutex<AgentLoop>>) -> Self {
+    pub fn new_direct(loop_: Arc<TokioMutex<AgentSession>>) -> Self {
         let (tx, _rx) = mpsc::channel(1);
         Self { loop_, tx }
     }
@@ -1130,7 +1131,7 @@ impl SessionHandle {
 /// never interleave and the session mutex is contended only here.
 async fn run_session_actor(
     sk: String,
-    loop_: Arc<TokioMutex<AgentLoop>>,
+    loop_: Arc<TokioMutex<AgentSession>>,
     mut rx: mpsc::Receiver<TurnMessage>,
 ) {
     while let Some(msg) = rx.recv().await {
@@ -1273,8 +1274,7 @@ async fn handle_delegation_task(
 async fn run_retry_task(
     sk: String,
     channel: Arc<dyn Channel>,
-    loop_: Arc<TokioMutex<AgentLoop>>,
-    user_msg: String,
+    loop_: Arc<TokioMutex<AgentSession>>,    user_msg: String,
     reply_target: String,
     reply_to_id: Option<String>,
 ) {
@@ -1332,7 +1332,7 @@ async fn run_retry_task(
 async fn run_message_task(
     sk: String,
     channel: Arc<dyn Channel>,
-    loop_: Arc<TokioMutex<AgentLoop>>,
+    loop_: Arc<TokioMutex<AgentSession>>,
     input: TurnInput,
     reply_target: String,
     reply_to_id: Option<String>,
@@ -1563,7 +1563,7 @@ struct SchedulerContext {
     sessions: Arc<DashMap<String, Arc<SessionHandle>>>,
     session_manager: Arc<SessionManager>,
     persist_backend: Arc<dyn crate::storage::SessionBackend>,
-    agent: Agent,
+    runtime: AgentRuntime,
     change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
     channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
     last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
@@ -1635,7 +1635,7 @@ async fn run_cron_task(
         let mut guard = loop_.lock().await;
         // Apply per-job model override if specified.
         if let Some(ref m) = model {
-            guard.config.model_override = Some(m.clone());
+            guard.set_model_override(Some(m.clone()));
         }
         guard.run(&prompt, None, None).await
     };
@@ -1684,11 +1684,11 @@ async fn run_cron_task(
     }
 }
 
-/// Get or create an AgentLoop for a scheduler session (heartbeat/cron).
+/// Get or create an AgentSession for a scheduler session (heartbeat/cron).
 fn get_or_create_scheduled_loop(
     ctx: &SchedulerContext,
     session_key: &str,
-) -> Arc<TokioMutex<AgentLoop>> {
+) -> Arc<TokioMutex<AgentSession>> {
     if let Some(existing) = ctx.sessions.get(session_key) {
         return existing.loop_.clone();
     }
@@ -1698,11 +1698,11 @@ fn get_or_create_scheduled_loop(
     let persist_hook: Arc<dyn PersistHook> = Arc::new(
         BackendPersistHook::new(ctx.persist_backend.clone())
     );
-    let mut loop_ = ctx.agent.loop_for_with_persist(session, Some(persist_hook));
+    let mut loop_ = ctx.runtime.create_session(session, Some(persist_hook));
     if let Some(rx) = ctx.change_rx.as_ref() {
         loop_ = loop_.with_change_rx(rx.clone());
     }
-    let loop_arc: Arc<TokioMutex<AgentLoop>> = Arc::new(TokioMutex::new(loop_));
+    let loop_arc: Arc<TokioMutex<AgentSession>> = Arc::new(TokioMutex::new(loop_));
     let handle = Arc::new(SessionHandle::new_direct(loop_arc.clone()));
     ctx.sessions.insert(session_key.to_string(), handle);
     loop_arc

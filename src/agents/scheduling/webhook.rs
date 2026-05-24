@@ -14,8 +14,8 @@ use http_body_util::Full;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::Mutex;
 
-use crate::agents::Agent;
-use crate::agents::AgentLoop;
+use crate::agents::runtime::AgentRuntime;
+use crate::agents::agent_impl::AgentSession;
 use crate::agents::webhook_loader::{WebhookAuth, WebhookJobDef, render_template};
 use crate::channels::{Channel, SendMessage};
 use crate::config::scheduler::WebhookConfig;
@@ -24,7 +24,7 @@ use crate::storage::SessionBackend;
 /// Resources needed by the webhook server to run agent tasks.
 /// Heartbeat and cron use the Orchestrator event path instead.
 pub struct WebhookContext {
-    pub agent: Agent,
+    pub runtime: AgentRuntime,
     pub channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
     pub sessions: Arc<DashMap<String, Arc<crate::agents::SessionHandle>>>,
     /// Shared session manager — avoids creating throwaway instances per request.
@@ -37,7 +37,7 @@ pub struct WebhookContext {
     pub change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
 }
 
-/// Create or get an AgentLoop for a webhook session and run a prompt.
+/// Create or get an AgentSession for a webhook session and run a prompt.
 pub async fn run_scheduled_task(
     ctx: &WebhookContext,
     session_key: &str,
@@ -48,7 +48,7 @@ pub async fn run_scheduled_task(
     guard.run(prompt, None, None).await
 }
 
-fn get_or_create_loop(ctx: &WebhookContext, session_key: &str) -> Arc<TokioMutex<AgentLoop>> {
+fn get_or_create_loop(ctx: &WebhookContext, session_key: &str) -> Arc<TokioMutex<AgentSession>> {
     if let Some(existing) = ctx.sessions.get(session_key) {
         return existing.loop_.clone();
     }
@@ -57,13 +57,13 @@ fn get_or_create_loop(ctx: &WebhookContext, session_key: &str) -> Arc<TokioMutex
     let persist_hook: Arc<dyn crate::agents::PersistHook> = Arc::new(
         crate::agents::BackendPersistHook::new(ctx.session_backend.clone())
     );
-    let mut loop_ = ctx.agent.loop_for_with_persist(session, Some(persist_hook));
+    let mut loop_ = ctx.runtime.create_session(session, Some(persist_hook));
 
     if let Some(rx) = ctx.change_rx.clone() {
         loop_ = loop_.with_change_rx(rx);
     }
 
-    let loop_arc: Arc<TokioMutex<AgentLoop>> = Arc::new(TokioMutex::new(loop_));
+    let loop_arc: Arc<TokioMutex<AgentSession>> = Arc::new(TokioMutex::new(loop_));
     let handle = Arc::new(crate::agents::SessionHandle::new_direct(loop_arc.clone()));
     ctx.sessions.insert(session_key.to_string(), handle);
     loop_arc

@@ -4,7 +4,7 @@
 //! All variants implement `Into<anyhow::Error>` so existing `?` sites
 //! continue to work without change.
 
-/// Errors produced by `AgentLoop::run` / `AgentLoop::run_streamed`.
+/// Errors produced by `AgentSession::run` / `AgentSession::run_streamed`.
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
     /// The loop-breaker aborted the turn due to a repetitive tool pattern.

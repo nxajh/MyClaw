@@ -11,7 +11,7 @@
 
 use anyhow::{Context, Result};
 use crate::agents::{
-    Agent, AgentConfig, InMemoryBackend, Orchestrator, OrchestratorParts, SessionManager,
+    AgentConfig, AgentRuntime, InMemoryBackend, Orchestrator, OrchestratorParts, SessionManager,
     ToolRegistry, SkillManager, Skill, SystemPromptConfig, RunMode,
     McpManager, DelegationCoordinator, DelegationManager,
 };
@@ -879,19 +879,20 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // Scheduler config (used for both parts and webhook launch).
     let scheduler_config = config.agent.scheduler.clone();
 
-    let agent = Agent::new(registry_arc, tools_arc, skills_arc, agent_config)
+    let runtime = AgentRuntime::new(registry_arc, tools_arc, skills_arc, sub_agent_registry)
         .with_mcp_instructions(mcp_instructions)
-        .with_sub_agent_configs(sub_agent_registry)
-        .with_workspace_dirs(
-            config.workspace_dir.join("skills"),
-            config.workspace_dir.join("agents"),
-        );
+        .with_dirs(
+            config.workspace_dir.clone(),
+            config.knowledge_dir.clone(),
+        )
+        .with_tool_timeout(agent_config.tool_timeout_secs)
+        .with_agent_config(agent_config);
 
     // scheduler_tx already created above; scheduler_rx goes to OrchestratorParts.
     let session_manager_for_webhook = Arc::clone(&session_manager);
 
     let parts = OrchestratorParts {
-        agent: agent.clone(),
+        runtime: runtime.clone(),
         session_manager,
         channels,
         sub_delegator: sub_agent_delegator_arc,
@@ -925,7 +926,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         let wh_dir = config.workspace_dir.join("webhooks");
         let wh_jobs = crate::agents::load_webhook_jobs(&wh_dir);
         let wh_ctx = Arc::new(crate::agents::WebhookContext {
-            agent: agent.clone(),
+            runtime: runtime.clone(),
             channels: orchestrator.shared().channels,
             sessions: orchestrator.shared().sessions,
             session_manager: session_manager_for_webhook,

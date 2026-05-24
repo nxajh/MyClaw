@@ -45,8 +45,8 @@ pub use workspace::skill_loader;
 pub use workspace::watcher;
 pub use workspace::skills;
 
-pub use agent_impl::{Agent, AgentConfig, AgentLoop, AskUserHandler, DelegateHandler};
-pub use agent_run::Agent as RfcAgent;
+pub use agent_impl::{AgentConfig, AgentSession, AskUserHandler, DelegateHandler};
+pub use agent_run::Agent;
 pub use recovery::UnfinishedSubAgent;
 pub use turn_event::TurnEvent;
 pub use turn::{TurnContext, TurnResult};

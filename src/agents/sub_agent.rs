@@ -27,7 +27,9 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
+use crate::agents::agent_impl::AgentConfig;
 use crate::agents::delegation::{DelegationEvent, DelegationManager};
+use crate::agents::runtime::AgentRuntime;
 use crate::agents::session::{BackendPersistHook, PersistHook, Session};
 use crate::agents::skills::SkillManager;
 use crate::agents::tool_registry::ToolRegistry;
@@ -249,28 +251,30 @@ impl DelegationCoordinator {
 
         let session = Session::new(session_id);
 
-        let agent_config = crate::agents::AgentConfig {
-            max_tool_calls: config.max_tool_calls.unwrap_or(self.default_max_tool_calls),
-            prompt_config: crate::agents::SystemPromptConfig {
-                workspace_dir,
-                permission_mode: crate::agents::PermissionMode::Full,
-                identity_header: Some(identity),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let agent = crate::agents::Agent::new(
+        let runtime = AgentRuntime::new(
             self.registry.clone(),
             Arc::new(tools),
             Arc::new(RwLock::new(SkillManager::new())),
-            agent_config,
-        );
-        let agent = match &config.model {
-            Some(m) => agent.with_model(m.clone()),
-            None => agent,
-        };
-        let mut loop_ = agent.loop_for_with_persist(session, persist_hook);
+            self.configs.clone(),
+        )
+        .with_tool_timeout(180);
+
+        let mut loop_ = runtime.with_agent_config(AgentConfig {
+            max_tool_calls: config.max_tool_calls.unwrap_or(self.default_max_tool_calls),
+            prompt_config: crate::agents::SystemPromptConfig {
+                workspace_dir: workspace_dir.clone(),
+                permission_mode: crate::agents::PermissionMode::Full,
+                identity_header: Some(identity),
+                knowledge_dir: workspace_dir,
+                ..Default::default()
+            },
+            ..Default::default()
+        }).create_session(session, persist_hook);
+
+        // Apply per-sub-agent model override.
+        if let Some(ref m) = config.model {
+            loop_.set_model_override(Some(m.clone()));
+        }
 
         tracing::debug!(agent = %config.name, "sub-agent started");
         let result = loop_.run(task, None, None).await;
