@@ -7,6 +7,7 @@ pub(crate) mod request_builder;
 pub(crate) mod tool_executor;
 pub(crate) mod compaction_executor;
 pub(crate) mod context_engine;
+mod agent_run;
 pub mod error;
 pub mod attachment;
 pub mod recovery;
@@ -45,6 +46,7 @@ pub use workspace::watcher;
 pub use workspace::skills;
 
 pub use agent_impl::{Agent, AgentConfig, AgentLoop, AskUserHandler, DelegateHandler};
+pub use agent_run::Agent as RfcAgent;
 pub use recovery::UnfinishedSubAgent;
 pub use turn_event::TurnEvent;
 pub use turn::{TurnContext, TurnResult};
