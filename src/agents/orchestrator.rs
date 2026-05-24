@@ -27,7 +27,6 @@ use crate::agents::session::{SessionManager, PersistHook, BackendPersistHook};
 const CHANNEL_QUEUE_SIZE: usize = 100;
 
 /// Timeout for ask_user waiting for user reply (5 minutes).
-
 // ── User-facing message strings ────────────────────────────────────────────────
 const MSG_RETRY_EMPTY: &str = "⚠️ 重试后仍未获得有效回复。";
 const MSG_NO_PENDING_RETRY: &str = "没有待重试的消息，请重新发送。";
