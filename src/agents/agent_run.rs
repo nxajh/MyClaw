@@ -23,10 +23,9 @@ use crate::agents::resource_provider::ResourceProvider;
 use crate::agents::request_builder::RequestBuilder;
 use crate::agents::prompt::SystemPromptBuilder;
 use crate::agents::attachment::AttachmentManager;
-use crate::agents::sub_agent::DelegationCoordinator;
 
 use super::runtime::AgentRuntime;
-use super::agent_impl::{AgentConfig, AgentLoop, AgentSession, AskUserHandler, DelegateHandler};
+use super::agent_impl::{AgentConfig, AgentLoop, AgentSession};
 
 /// RFC v2 Agent — stateless identity = config only.
 #[derive(Debug, Clone)]
@@ -198,24 +197,6 @@ impl AgentSession {
 
     /// Attachments.
     pub fn attachments(&mut self) -> &mut AttachmentManager { self.loop_.attachments() }
-
-    /// Wire ask_user handler.
-    pub fn with_ask_user_handler(mut self, handler: AskUserHandler) -> Self {
-        self.loop_ = self.loop_.with_ask_user_handler(handler);
-        self
-    }
-
-    /// Wire delegate handler.
-    pub fn with_delegate_handler(mut self, handler: DelegateHandler) -> Self {
-        self.loop_ = self.loop_.with_delegate_handler(handler);
-        self
-    }
-
-    /// Wire sub-delegator.
-    pub fn with_sub_delegator(mut self, delegator: Arc<DelegationCoordinator>) -> Self {
-        self.loop_ = self.loop_.with_sub_delegator(delegator);
-        self
-    }
 
     /// Wire change receiver for hot-reload.
     pub fn with_change_rx(mut self, rx: watch::Receiver<crate::agents::watcher::ChangeSet>) -> Self {

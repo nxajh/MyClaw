@@ -16,18 +16,17 @@ use crate::channels::{Channel, ChannelMessage, SendMessage, ProcessingStatus, In
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex as TokioMutex, oneshot};
+use tokio::sync::{mpsc, Mutex as TokioMutex};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::agents::agent_impl::{AgentSession, AskUserHandler, DelegateHandler};
+use crate::agents::agent_impl::AgentSession;
 use crate::agents::runtime::AgentRuntime;
 use crate::agents::session::{SessionManager, PersistHook, BackendPersistHook};
 
 const CHANNEL_QUEUE_SIZE: usize = 100;
 
 /// Timeout for ask_user waiting for user reply (5 minutes).
-const ASK_USER_TIMEOUT: Duration = Duration::from_secs(300);
 
 // ── User-facing message strings ────────────────────────────────────────────────
 const MSG_RETRY_EMPTY: &str = "⚠️ 重试后仍未获得有效回复。";
@@ -90,9 +89,6 @@ pub struct Orchestrator {
     msg_rx: Arc<TokioMutex<Option<mpsc::Receiver<((String, String), ChannelMessage)>>>>,
     /// Listener task handles — taken and awaited on shutdown.
     listener_handles: Vec<JoinHandle<()>>,
-    /// Pending ask_user replies: session_key → (oneshot sender, reply_target).
-    #[allow(dead_code)]
-    pending_asks: Arc<DashMap<String, (oneshot::Sender<String>, String)>>,
     /// Sub-agent delegator (for async delegation).
     sub_delegator: Option<Arc<DelegationCoordinator>>,
     /// Delegation manager (shared with DelegateTaskTool via handler).
@@ -264,7 +260,6 @@ impl Orchestrator {
             session_manager: parts.session_manager,
             msg_rx: Arc::new(TokioMutex::new(Some(msg_rx))),
             listener_handles,
-            pending_asks: Arc::new(DashMap::new()),
             sub_delegator: parts.sub_delegator,
             delegation_manager: parts.delegation_manager,
             delegation_rx: Arc::new(TokioMutex::new(parts.delegation_rx)),
@@ -369,7 +364,7 @@ impl Orchestrator {
         let sessions = self.sessions.clone();
         let agent = self.runtime.clone();
         let channels = self.channels.clone();
-        let sub_delegator = self.sub_delegator.clone();
+        let _sub_delegator = self.sub_delegator.clone();
         let delegation_manager = self.delegation_manager.clone();
 
         let mut rx = rx;
@@ -387,11 +382,6 @@ impl Orchestrator {
             sessions: sessions.clone(),
             runtime: agent.clone(),
             session_manager: self.session_manager.clone(),
-            channels: channels.clone(),
-            pending_asks: self.pending_asks.clone(), // kept for get_or_create_session compat
-            ask_router: self.ask_router.clone(),
-            sub_delegator: sub_delegator.clone(),
-            delegation_manager: delegation_manager.clone(),
             persist_backend: self.persist_backend.clone(),
             change_rx: self.change_rx.clone(),
             unfinished_subagents: unfinished_subagents.clone(),
@@ -936,13 +926,6 @@ struct LoopRegistry {
     sessions: Arc<DashMap<String, Arc<SessionHandle>>>,
     runtime: AgentRuntime,
     session_manager: Arc<SessionManager>,
-    channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
-    #[allow(dead_code)]
-    pending_asks: Arc<DashMap<String, (oneshot::Sender<String>, String)>>,
-    /// E29: AskRouter replaces pending_asks for ask_user resolution.
-    ask_router: Arc<crate::agents::ask_router::AskRouter>,
-    sub_delegator: Option<Arc<DelegationCoordinator>>,
-    delegation_manager: Option<Arc<DelegationManager>>,
     persist_backend: Arc<dyn crate::storage::SessionBackend>,
     change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
     unfinished_subagents: Vec<crate::agents::UnfinishedSubAgent>,
@@ -950,7 +933,7 @@ struct LoopRegistry {
 
 impl LoopRegistry {
     /// Return the existing `SessionHandle` for `sk`, or create and wire a new one.
-    fn get_or_create(&self, sk: &str, reply_target: &str) -> Arc<SessionHandle> {
+    fn get_or_create(&self, sk: &str, _reply_target: &str) -> Arc<SessionHandle> {
         if let Some(existing) = self.sessions.get(sk) {
             return existing.clone();
         }
@@ -972,62 +955,7 @@ impl LoopRegistry {
         let persist_hook: Arc<dyn PersistHook> = Arc::new(
             BackendPersistHook::new(Arc::clone(&self.persist_backend))
         );
-        let loop_ = self.runtime.create_session(session, Some(persist_hook));
-
-        // E29: Wire ask_user handler via AskRouter instead of raw pending_asks.
-        let ask_router = Arc::clone(&self.ask_router);
-        let channels_arc = Arc::clone(&self.channels);
-        let reply_target_owned = reply_target.to_string();
-        let sk_owned = sk.to_string();
-        let ask_handler: AskUserHandler = Arc::new(move |session_key: String, question: String| {
-            let channels = Arc::clone(&channels_arc);
-            let ask_router = ask_router.clone();
-            let reply_target = reply_target_owned.clone();
-            let sk = sk_owned.clone();
-            Box::pin(async move {
-                let (ch_type, acc_id, _) = parse_session_key(&session_key)
-                    .ok_or_else(|| anyhow::anyhow!("invalid session key: {}", session_key))?;
-                let channel: Arc<dyn Channel> = channels
-                    .get(&(ch_type.to_string(), acc_id.to_string()))
-                    .map(|r| r.clone())
-                    .ok_or_else(|| anyhow::anyhow!("channel '{}:{}' not found", ch_type, acc_id))?;
-                let send_msg = SendMessage::new(&question, &reply_target);
-                channel.send(&send_msg).await?;
-
-                let rx = ask_router.register(&sk, reply_target.clone());
-
-                let answer = tokio::time::timeout(ASK_USER_TIMEOUT, rx)
-                    .await
-                    .map_err(|_| anyhow::anyhow!("ask_user timed out waiting for user reply"))?
-                    .map_err(|_| anyhow::anyhow!("ask_user cancelled (dropped)"))?;
-                Ok(answer)
-            })
-        });
-
-        let mut loop_ = loop_.with_ask_user_handler(ask_handler);
-
-        // Wire delegate handler.
-        if let (Some(delegator), Some(manager)) = (self.sub_delegator.clone(), self.delegation_manager.clone()) {
-            let session_key_for_delegate = sk.to_string();
-            let reply_target_for_delegate = reply_target.to_string();
-            let delegate_handler: DelegateHandler = Arc::new(
-                move |agent_name: String, task: String| {
-                    delegator.delegate_async(
-                        &agent_name,
-                        &task,
-                        &session_key_for_delegate,
-                        &reply_target_for_delegate,
-                        &manager,
-                    )
-                }
-            );
-            loop_ = loop_.with_delegate_handler(delegate_handler);
-        }
-
-        // Wire sub-agent delegator for compaction summarisation.
-        if let Some(delegator) = self.sub_delegator.clone() {
-            loop_ = loop_.with_sub_delegator(delegator);
-        }
+        let mut loop_ = self.runtime.create_session(session, Some(persist_hook));
 
         // Wire file-change receiver for hot-reload.
         if let Some(rx) = self.change_rx.clone() {

@@ -12,26 +12,6 @@ use crate::config::agent::ContextConfig;
 
 use super::session::SessionOverride;
 
-/// Callback for ask_user tool: (session_key, question) → user_answer.
-///
-/// The handler sends the question through the channel and waits for the
-/// user's next message, which is delivered via a oneshot channel managed
-/// by the Orchestrator.
-pub type AskUserHandler = Arc<
-    dyn Fn(String, String) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>>
-        + Send
-        + Sync,
->;
-
-/// Callback for async delegation: (agent_name, task) → task_id.
-///
-/// The handler spawns the sub-agent in a background tokio task and returns
-/// the task_id immediately. When the sub-agent completes, the Orchestrator
-/// receives a DelegationEvent and wakes the main agent.
-pub type DelegateHandler = Arc<
-    dyn Fn(String, String) -> anyhow::Result<String> + Send + Sync,
->;
-
 use super::loop_breaker::LoopBreaker;
 use super::session::{Session, PersistHook};
 use crate::agents::prompt::SystemPromptConfig;
@@ -131,11 +111,6 @@ pub struct AgentSession {
 }
 
 impl AgentLoop {
-    pub fn with_ask_user_handler(mut self, handler: AskUserHandler) -> Self {
-        self.tool_executor.ask_user_handler = Some(handler);
-        self
-    }
-
     pub fn session(&self) -> &super::session::Session {
         &self.session
     }
@@ -154,16 +129,6 @@ impl AgentLoop {
 
     pub fn session_override(&self) -> &SessionOverride {
         &self.session.session_override
-    }
-
-    pub fn with_delegate_handler(mut self, handler: DelegateHandler) -> Self {
-        self.tool_executor.delegate_handler = Some(handler);
-        self
-    }
-
-    pub fn with_sub_delegator(mut self, delegator: Arc<super::sub_agent::DelegationCoordinator>) -> Self {
-        self.tool_executor.sub_delegator = Some(delegator);
-        self
     }
 
     pub fn with_change_rx(mut self, rx: watch::Receiver<super::watcher::ChangeSet>) -> Self {

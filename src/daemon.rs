@@ -705,6 +705,15 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     )));
     tracing::debug!("web_search tool registered (connected to ProviderRegistry)");
 
+    // Register AskUserTool — requires AskRouter + channel map (F35).
+    let ask_router = Arc::new(crate::agents::ask_router::AskRouter::new());
+    let channel_map: crate::agents::runtime::ChannelMap = Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
+    tools.register(Arc::new(crate::tools::AskUserTool::with_router(
+        ask_router.clone(),
+        channel_map,
+    )));
+    tracing::debug!("ask_user tool registered (F35 with AskRouter)");
+
     // WorkspaceWatcher for hot-reload.
     let watcher = crate::agents::WorkspaceWatcher::new(&config.workspace_dir, &config.knowledge_dir)?;
     let change_rx = watcher.rx.clone();
@@ -880,6 +889,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
     let runtime = AgentRuntime::new(registry_arc, tools_arc, skills_arc, sub_agent_registry)
         .with_mcp_instructions(mcp_instructions)
+        .with_ask_router(ask_router)
         .with_dirs(
             config.workspace_dir.clone(),
             config.knowledge_dir.clone(),

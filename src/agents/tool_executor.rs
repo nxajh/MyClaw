@@ -7,19 +7,15 @@ use crate::providers::capability_tool::ToolResult;
 use crate::providers::capability_chat::ToolSpec;
 use super::tool_registry::ToolRegistry;
 use super::session::Session;
-use super::agent_impl::{AskUserHandler, DelegateHandler};
-use super::sub_agent::DelegationCoordinator;
 use super::agent_impl::types::is_write_tool;
 
 /// Executes tool calls on behalf of the main conversation loop.
 ///
-/// Holds the tool registry and optional handlers for special tools (ask_user, agent_delegate).
-/// Autonomy enforcement happens here: write tools are blocked in ReadOnly mode.
+/// Holds the tool registry and autonomy enforcement. Special tools
+/// (ask_user, agent_delegate) are handled by their own Tool impls
+/// registered in the tool registry — no closure wiring needed (F35).
 pub(crate) struct ToolExecutor {
     pub(crate) tools: Arc<ToolRegistry>,
-    pub(crate) ask_user_handler: Option<AskUserHandler>,
-    pub(crate) delegate_handler: Option<DelegateHandler>,
-    pub(crate) sub_delegator: Option<Arc<DelegationCoordinator>>,
     pub(crate) timeout_secs: u64,
 }
 
@@ -27,9 +23,6 @@ impl ToolExecutor {
     pub(crate) fn new(tools: Arc<ToolRegistry>, timeout_secs: u64) -> Self {
         Self {
             tools,
-            ask_user_handler: None,
-            delegate_handler: None,
-            sub_delegator: None,
             timeout_secs,
         }
     }
@@ -52,8 +45,9 @@ impl ToolExecutor {
 
     /// Execute a single tool call.
     ///
-    /// `autonomy` controls write-tool blocking. Special tools (ask_user, agent_delegate)
-    /// are handled before reaching the generic tool dispatch.
+    /// `autonomy` controls write-tool blocking. All tools (including
+    /// ask_user, agent_delegate) go through the generic dispatch — their
+    /// Tool impls handle the logic internally (F35).
     pub(crate) async fn execute(
         &self,
         call: &ToolCall,
@@ -75,69 +69,7 @@ impl ToolExecutor {
             }
         }
 
-        // ask_user: records Q&A in session history and waits for user reply.
-        if call.name == "ask_user" {
-            if let Some(ref handler) = self.ask_user_handler {
-                let args = parse_tool_args(&call.arguments);
-                let question = args["question"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("'question' is required"))?;
-                session.add_assistant(question.to_string());
-                let answer = handler(session.id.clone(), question.to_string()).await?;
-                session.add_user(answer.clone());
-                return Ok(ToolResult { success: true, output: answer, error: None });
-            }
-        }
-
-        // agent_delegate: async (background) or sync (blocking) sub-agent.
-        if call.name == "agent_delegate" {
-            let args = parse_tool_args(&call.arguments);
-            let agent_name = args["agent"]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("'agent' is required"))?;
-            let task = args["task"]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("'task' is required"))?;
-            let mode = args["mode"].as_str().unwrap_or("sync");
-
-            if mode == "async" {
-                if let Some(ref handler) = self.delegate_handler {
-                    let task_id = handler(agent_name.to_string(), task.to_string())?;
-                    return Ok(ToolResult {
-                        success: true,
-                        output: format!(
-                            "Task delegated to sub-agent '{}' (task_id: {}). \
-                             The sub-agent is now running in the background. \
-                             You will be notified when it completes.",
-                            agent_name, task_id
-                        ),
-                        error: None,
-                    });
-                } else {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some("async mode not available: no delegate handler configured".to_string()),
-                    });
-                }
-            }
-
-            // sync mode (default)
-            if let Some(ref delegator) = self.sub_delegator {
-                let parent_id = session.id.clone();
-                let result = delegator.delegate_with_parent(agent_name, task, &parent_id, None, None, None).await;
-                return Ok(match result {
-                    Ok(output) => ToolResult { success: true, output, error: None },
-                    Err(e) => ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some(format!("Sub-agent '{}' failed: {}", agent_name, e)),
-                    },
-                });
-            }
-        }
-
-        // Generic tool dispatch.
+        // Generic tool dispatch — all tools including ask_user, agent_delegate.
         let tool = self.tools.get(&call.name).ok_or_else(|| {
             anyhow::anyhow!("Unknown tool: '{}'", call.name)
         })?;

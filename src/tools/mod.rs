@@ -72,6 +72,5 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         // WebSearchTool requires a ProviderRegistry — registered separately in daemon.rs
         // Utility tools
         Arc::new(CalculatorTool::new()),
-        Arc::new(AskUserTool::new()),
     ]
 }

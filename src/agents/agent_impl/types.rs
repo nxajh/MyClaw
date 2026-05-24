@@ -1,7 +1,7 @@
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::providers::{ChatMessage, ChatUsage, StopReason, ToolCall};
+use crate::providers::{ChatUsage, StopReason, ToolCall};
 use super::super::TurnEvent;
 
 // Re-export token tracking types from session module.
@@ -30,7 +30,6 @@ pub(crate) struct CollectedResponse {
     /// echoing the block back in subsequent turns.
     pub(crate) thinking_signature: Option<String>,
     pub(crate) tool_calls: Vec<ToolCall>,
-    #[allow(dead_code)]
     pub(crate) stop_reason: StopReason,
     pub(crate) usage: Option<ChatUsage>,
 }
@@ -52,21 +51,3 @@ pub(crate) fn is_write_tool(name: &str) -> bool {
 
 // ── Extension trait for ChatMessage ──────────────────────────────────────────
 
-/// Extension methods for ChatMessage.
-#[allow(dead_code)]
-pub(super) trait ChatMessageExt {
-    fn with_name(self, name: String) -> ChatMessage;
-}
-
-impl ChatMessageExt for ChatMessage {
-    fn with_name(self, name: String) -> ChatMessage {
-        ChatMessage {
-            role: self.role,
-            parts: self.parts,
-            name: Some(name),
-            tool_call_id: None,
-            tool_calls: None,
-            is_error: None,
-        }
-    }
-}

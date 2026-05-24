@@ -36,7 +36,7 @@ pub use agents::{
     ToolRegistry, SkillManager, Orchestrator, OrchestratorParts,
     SystemPromptBuilder, SystemPromptConfig,
     PermissionMode, RunMode,
-    McpManager, AskUserHandler, DelegateHandler, DelegationCoordinator,
+    McpManager, DelegationCoordinator,
     DelegationEvent, DelegationManager,
 };
 pub use channels::{Channel, ChannelMessage, SendMessage, DedupState, ProcessingStatus};
