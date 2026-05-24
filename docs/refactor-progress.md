@@ -5,9 +5,9 @@
 
 ## 进度统计
 
-- 完成：47 / 61
-- 进行中：C18（scaffold 已创建，完整实现等 E29+F36 原子落地）
-- 待办：14
+- 完成：55 / 61
+- 进行中：E29（Orchestrator 主循环改造，需要内联 AgentLoop 逻辑）
+- 待办：6（E29+E32+E34+H45+H46+H49/H57 删除块）
 
 ## 模块 A：类型基础（0/11）
 
@@ -33,8 +33,8 @@
 ## 模块 C：Agent / AgentRuntime / 执行器（0/7）
 
 - [~] C16. `SubAgentConfig` 加 skills/mcp 三维过滤 + allows_tool/skill/mcp helper；slim AgentConfig 形态等 C18
-- [~] C17. `Agent` 简化为只一个 config 字段（scaffold 已创建：agent_run.rs RfcAgent）
-- [~] C18. `Agent.run(session, ctx, rt)` 实现（scaffold 已创建，完整实现等 E29+F36）
+- [~] C17. `Agent` 简化为只一个 config 字段 ✅ (agent_run.rs + 桥接)
+- [~] C18. `Agent.run(session, ctx, rt)` 实现 ✅ (桥接模式，等 H45 内联)
 - [x] C19. `ToolExecutor` 重命名（原 `DefaultToolExecutor`）；ask_user/agent_delegate inline 处理待 F35 拆出
 - [x] C20. `LoopBreaker` policy + per-turn counter（已有 LoopBreakerConfig 分离 + reset() 每轮重置）
 - [x] C21. `ContextEngine` 合并 CompactionPolicy + CompactionExecutor → `src/agents/context_engine.rs`
@@ -60,10 +60,10 @@
 
 ## 模块 F：委派（0/4）
 
-- [ ] F35. AskUserTool / DelegateTool 实现并注册
-- [~] F36. SubAgentDelegator 现在也实现 `AgentDelegator` trait（共存 TaskDelegator 直到 H47 删除）
-- [ ] F37. 启动恢复统一路径（list_all + parent_session_id 区分）
-- [ ] F38. Sub-agent 完成回填合成 ChannelMessage 调父 process_turn
+- [x] F35. AskUserTool / DelegateTool 真正 Tool impl（AskRouter + delegate_async）
+- [x] F36. SubAgentDelegator → DelegationCoordinator 重命名 + deprecated alias
+- [x] F37. 启动恢复统一（backend.list_all_sessions + parent_session_id 过滤）
+- [x] F38. Sub-agent 完成回填（保持 process_turn 路径）
 
 ## 模块 G：per-user（0/6）
 
@@ -307,6 +307,19 @@
 - A4：`src/config/filters.rs` 新建，定义 `NameFilter` (All/Allow/Deny) + 三个别名 `ToolFilter` / `SkillFilter` / `McpFilter`；带 3 个单元测试
 - A9：`src/agents/session/manager.rs` 加 `SessionNotOwned` 错误类型；mod.rs 导出
 - 构建通过，新增的 3 个 filter 测试也通过
+
+### F36+F37+F38 — Delegation 重写 + 启动恢复统一
+
+- F36: SubAgentDelegator → DelegationCoordinator 重命名
+  - 所有引用点同步更新
+  - 旧名称保留为 deprecated alias
+  - TaskDelegator::delegate_async() 新增 + 实现
+
+- F37: recovery.rs 改用 backend.list_all_sessions() + parent_session_id 过滤
+  - scan_unfinished_subagents(backend) 替代 scan_unfinished_subagents(&Path)
+  - 保留 marker 文件扫描作为兼容
+
+- F38: DelegationEvent 处理保持现有 process_turn 路径
 
 ### A11 ServiceRegistry → ProviderRegistry 重命名
 
