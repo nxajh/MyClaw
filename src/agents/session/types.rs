@@ -1,7 +1,11 @@
 //! Session types — SummaryMetadata and Session struct.
 
-use crate::channels::ChannelMessage;
+use std::sync::Arc;
+
+use crate::agents::agent_impl::types::TokenTracker;
+use crate::channels::{Channel, ChannelMessage};
 use crate::providers::capability_chat::ChatMessage;
+use super::backend::PersistHook;
 use super::session_override::SessionOverride;
 use super::recovery::BreakpointItem;
 
@@ -22,7 +26,13 @@ pub struct SummaryMetadata {
 /// - Optional `parent_session_id` for sub-sessions spawned by `agent_delegate`.
 /// - `agent_name` identifying which agent in `workspace/agents/` owns this
 ///   session (defaults to "main").
-#[derive(Debug, Clone)]
+/// - Token usage tracker — moved from CompactionPolicy so the session owns
+///   its own context budget (C18 will rewire CompactionPolicy/ContextEngine
+///   to read through `&Session.token_tracker`).
+/// - Transient persist / channel handles — `Option<Arc<dyn …>>` so they
+///   survive `Clone` cheaply, default to `None` for tests and ephemeral
+///   sessions.
+#[derive(Clone)]
 pub struct Session {
     /// Session ID (e.g. "k3jr9px2").
     pub id: String,
@@ -64,6 +74,41 @@ pub struct Session {
     /// context and resume an interrupted turn. RFC v2 §三.A replaces the old
     /// `last_reply_target: Option<String>` field with this richer message.
     pub last_message: Option<ChannelMessage>,
+    /// Token usage tracker. Owned by the session so `Agent.run` /
+    /// `ContextEngine` can read budgets without needing a parallel struct.
+    /// Not persisted (rebuilt from API usage on next turn / from
+    /// `last_total_tokens` on session reload).
+    pub token_tracker: TokenTracker,
+    /// Transient persistence hook installed by the Orchestrator at session
+    /// load time. `None` for tests and the in-memory CLI mode. C18's
+    /// `Agent.run` reaches through this to persist per-turn state.
+    pub persist: Option<Arc<dyn PersistHook>>,
+    /// Transient channel handle installed by the Orchestrator. `None` for
+    /// sub-sessions that piggyback on the parent, and for tests.
+    /// `Agent.run` uses `channel.push_event(reply_target, …)` to stream
+    /// turn events to the originating UI.
+    pub channel: Option<Arc<dyn Channel>>,
+}
+
+// `Arc<dyn PersistHook>` and `Arc<dyn Channel>` don't carry `Debug`, so a
+// derived Debug fails. Hand-roll one that elides the transient handles.
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("id", &self.id)
+            .field("owner", &self.owner)
+            .field("agent_name", &self.agent_name)
+            .field("parent_session_id", &self.parent_session_id)
+            .field("history_len", &self.history.len())
+            .field("compact_version", &self.compact_version)
+            .field("last_total_tokens", &self.last_total_tokens)
+            .field("incomplete_turn", &self.incomplete_turn)
+            .field("breakpoint_items", &self.breakpoint_items.len())
+            .field("has_last_message", &self.last_message.is_some())
+            .field("has_persist", &self.persist.is_some())
+            .field("has_channel", &self.channel.is_some())
+            .finish()
+    }
 }
 
 impl Session {
@@ -82,6 +127,45 @@ impl Session {
             incomplete_turn: false,
             breakpoint_items: Vec::new(),
             last_message: None,
+            token_tracker: TokenTracker::new(),
+            persist: None,
+            channel: None,
+        }
+    }
+
+    /// Install a persistence hook on this session. Returns `self` for chaining.
+    pub fn with_persist(mut self, persist: Arc<dyn PersistHook>) -> Self {
+        self.persist = Some(persist);
+        self
+    }
+
+    /// Install a channel handle on this session. Returns `self` for chaining.
+    pub fn with_channel(mut self, channel: Arc<dyn Channel>) -> Self {
+        self.channel = Some(channel);
+        self
+    }
+
+    /// Persist the session's per-turn metadata to disk via the installed
+    /// `PersistHook`. Currently flushes `last_message.reply_target`, the
+    /// session override JSON, and the most recent total token count. Per-
+    /// message persistence is handled inline by `Agent.run`; this is the
+    /// "after-turn settle" call for snapshot fields.
+    ///
+    /// No-op when no persist hook is installed.
+    pub fn save_to_disk(&self) {
+        let hook = match self.persist.as_ref() {
+            Some(h) => h,
+            None => return,
+        };
+        if let Some(ref msg) = self.last_message {
+            hook.save_reply_target(&self.id, &msg.reply_target);
+        }
+        if let Ok(s) = serde_json::to_string(&self.session_override) {
+            hook.save_session_override(&self.id, &s);
+        }
+        let total = self.token_tracker.total_tokens();
+        if total > 0 {
+            hook.save_token_count(&self.id, total);
         }
     }
 
@@ -97,19 +181,34 @@ impl Session {
     }
 
     /// Append a user message to history.
-    pub fn add_user_text(&mut self, text: String) {
+    pub fn add_user(&mut self, text: String) {
         self.history.push(ChatMessage::user_text(text));
         self.message_ids.push(0);
     }
 
+    /// Deprecated alias for [`Session::add_user`]. Kept so 40+ existing call
+    /// sites compile during the C18 migration window; new code should call
+    /// `add_user`.
+    #[deprecated(note = "use Session::add_user")]
+    pub fn add_user_text(&mut self, text: String) {
+        self.add_user(text);
+    }
+
     /// Append an assistant text message to history.
     /// Skips empty messages to avoid API format errors on reload.
-    pub fn add_assistant_text(&mut self, text: String) {
+    pub fn add_assistant(&mut self, text: String) {
         if text.trim().is_empty() {
             return;
         }
         self.history.push(ChatMessage::assistant_text(text));
         self.message_ids.push(0);
+    }
+
+    /// Deprecated alias for [`Session::add_assistant`]. Kept so existing
+    /// call sites compile during the C18 migration window.
+    #[deprecated(note = "use Session::add_assistant")]
+    pub fn add_assistant_text(&mut self, text: String) {
+        self.add_assistant(text);
     }
 
     /// Append an assistant message with tool_calls to history.

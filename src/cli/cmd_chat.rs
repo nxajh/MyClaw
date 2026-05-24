@@ -25,14 +25,14 @@ pub async fn run(cli: &Cli, prompt: Option<&str>, agent: Option<&str>, model: Op
     tools.register(Arc::new(myclaw::tools::SkillsListTool::new(Arc::clone(&skills_arc))));
     tools.register(Arc::new(myclaw::tools::SkillManageTool::new(
         Arc::clone(&skills_arc),
-        workspace_dir,
+        workspace_dir.clone(),
     )));
-    // Memory tools
-    let kd = cfg.knowledge_dir.to_str().unwrap_or(".").to_string();
-    tools.register(Arc::new(myclaw::tools::MemoryListTool::new(kd.clone())));
-    tools.register(Arc::new(myclaw::tools::MemoryViewTool::new(kd.clone())));
-    tools.register(Arc::new(myclaw::tools::MemorySearchTool::new(kd.clone())));
-    tools.register(Arc::new(myclaw::tools::MemoryManageTool::new(kd)));
+    // Memory tools (G43: workspace/users/{uid}/memory/, identity resolver in CLI mode)
+    let resolver = Arc::new(myclaw::UserResolver::new());
+    tools.register(Arc::new(myclaw::tools::MemoryListTool::new(workspace_dir.clone(), Arc::clone(&resolver))));
+    tools.register(Arc::new(myclaw::tools::MemoryViewTool::new(workspace_dir.clone(), Arc::clone(&resolver))));
+    tools.register(Arc::new(myclaw::tools::MemorySearchTool::new(workspace_dir.clone(), Arc::clone(&resolver))));
+    tools.register(Arc::new(myclaw::tools::MemoryManageTool::new(workspace_dir, resolver)));
     let tools_arc = Arc::new(tools);
 
     let agent_config = myclaw::AgentConfig::default();

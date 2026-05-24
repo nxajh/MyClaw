@@ -177,6 +177,7 @@ impl AgentLoop {
             tool_specs,
             boundary,
             model_id,
+            &self.session,
         ).await;
 
         let result = match result {

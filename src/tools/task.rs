@@ -129,7 +129,7 @@ impl Tool for TaskManagerTool {
         5_000
     }
 
-    async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, args: Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
         let action = args["action"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing 'action'"))?;
@@ -436,7 +436,7 @@ mod tests {
             .execute(json!({
                 "action": "create",
                 "subject": ["Goal A", "Goal B", "Goal C"]
-            }))
+            }), &crate::agents::session::Session::new("test".to_string()))
             .await
             .unwrap();
 
@@ -456,7 +456,7 @@ mod tests {
             .execute(json!({
                 "action": "create",
                 "subject": "My Goal"
-            }))
+            }), &crate::agents::session::Session::new("test".to_string()))
             .await
             .unwrap();
         let goal_output: Value = serde_json::from_str(&goal.output).unwrap();
@@ -468,7 +468,7 @@ mod tests {
                 "action": "create",
                 "subject": ["Task 1", "Task 2"],
                 "parent": goal_id
-            }))
+            }), &crate::agents::session::Session::new("test".to_string()))
             .await
             .unwrap();
 

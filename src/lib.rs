@@ -37,6 +37,7 @@ pub use agents::{
     PermissionMode, RunMode,
     McpManager, AskUserHandler, DelegateHandler, SubAgentDelegator,
     DelegationEvent, DelegationManager,
+    UserResolver, UserProfile,
 };
 pub use channels::{Channel, ChannelMessage, SendMessage, DedupState, ProcessingStatus};
 pub use config::{AppConfig, ConfigLoader};

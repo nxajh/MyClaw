@@ -303,7 +303,7 @@ mod tests {
             fn parameters_schema(&self) -> serde_json::Value {
                 serde_json::json!({})
             }
-            async fn execute(&self, _: serde_json::Value) -> anyhow::Result<ToolResult> {
+            async fn execute(&self, _: serde_json::Value, _: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
                 Ok(ToolResult {
                     success: true,
                     output: String::new(),
@@ -337,7 +337,7 @@ mod tests {
             fn parameters_schema(&self) -> serde_json::Value {
                 serde_json::json!({})
             }
-            async fn execute(&self, _: serde_json::Value) -> anyhow::Result<ToolResult> {
+            async fn execute(&self, _: serde_json::Value, _: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
                 Ok(ToolResult {
                     success: true,
                     output: String::new(),
@@ -368,7 +368,7 @@ mod tests {
             fn parameters_schema(&self) -> serde_json::Value {
                 serde_json::json!({})
             }
-            async fn execute(&self, _: serde_json::Value) -> anyhow::Result<ToolResult> {
+            async fn execute(&self, _: serde_json::Value, _: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
                 Ok(ToolResult {
                     success: true,
                     output: String::new(),

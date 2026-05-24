@@ -142,7 +142,7 @@ impl ToolExecutor {
             anyhow::anyhow!("Unknown tool: '{}'", call.name)
         })?;
         let args = parse_tool_args(&call.arguments);
-        self.run_tool(tool.as_ref(), &call.name, args).await
+        self.run_tool(tool.as_ref(), &call.name, args, session).await
     }
 
     /// Execute a tool with timeout and framework-level output truncation.
@@ -151,10 +151,11 @@ impl ToolExecutor {
         tool: &dyn crate::providers::Tool,
         name: &str,
         args: serde_json::Value,
+        session: &Session,
     ) -> anyhow::Result<ToolResult> {
         let raw = if self.timeout_secs > 0 {
             let timeout = Duration::from_secs(self.timeout_secs);
-            tokio::time::timeout(timeout, tool.execute(args))
+            tokio::time::timeout(timeout, tool.execute(args, session))
                 .await
                 .unwrap_or_else(|_| Ok(ToolResult {
                     success: false,
@@ -162,7 +163,7 @@ impl ToolExecutor {
                     error: Some("timeout".to_string()),
                 }))?
         } else {
-            tool.execute(args).await?
+            tool.execute(args, session).await?
         };
 
         let max_tokens = tool.max_output_tokens();
@@ -206,7 +207,7 @@ impl MemoryToolExecutor {
         Self { tools }
     }
 
-    pub(crate) async fn execute(&self, call: &ToolCall) -> anyhow::Result<ToolResult> {
+    pub(crate) async fn execute(&self, call: &ToolCall, session: &Session) -> anyhow::Result<ToolResult> {
         if !Self::ALLOWED.contains(&call.name.as_str()) {
             tracing::warn!(tool = %call.name, "summarizer tried to call restricted tool, blocking");
             return Ok(ToolResult {
@@ -219,6 +220,6 @@ impl MemoryToolExecutor {
             anyhow::anyhow!("tool '{}' not found in registry", call.name)
         })?;
         let args = parse_tool_args(&call.arguments);
-        tool.execute(args).await
+        tool.execute(args, session).await
     }
 }

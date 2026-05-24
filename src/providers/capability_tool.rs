@@ -3,6 +3,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::agents::session::Session;
+
 /// Origin of a registered tool — used by `AgentConfig.tools` / `.skills` /
 /// `.mcp` filters to decide which tools an agent may see.
 ///
@@ -66,7 +68,11 @@ pub trait Tool: Send + Sync {
     }
 
     /// Execute the tool with the given arguments.
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult>;
+    ///
+    /// `session` carries the calling session's identity, owner (routing_key),
+    /// reply_target, and last_message. Most tools ignore it; per-user tools
+    /// (memory_*, ask_user) read `session.owner` to scope their behavior.
+    async fn execute(&self, args: serde_json::Value, session: &Session) -> anyhow::Result<ToolResult>;
 
     /// Build a [`ToolSpec`] from this tool's metadata.
     fn spec(&self) -> ToolSpec {

@@ -5,15 +5,15 @@
 
 ## 进度统计
 
-- 完成：42 / 61
-- 进行中：B12（部分完成）
-- 待办：19
+- 完成：46 / 61
+- 进行中：—
+- 待办：15
 
 ## 模块 A：类型基础（0/11）
 
 - [x] A1. `TurnContext`（5 字段）/ `TurnResult` → `src/agents/turn.rs`
 - [x] A2. `AgentRuntime` struct（9 字段）→ `src/agents/runtime.rs`；RuntimeDefaults 合入
-- [~] A3. `Tool` trait 加 `source() -> ToolSource`（默认 Builtin）；`ToolSource` enum 已加。execute 加 `&Session` 参数推迟到 C18
+- [x] A3. `Tool` trait 加 `source() -> ToolSource`（默认 Builtin）+ `execute(&Session)` 参数（26 处 Tool 实现 + 4 处调用点同步）
 - [x] A4. `ToolFilter` / `SkillFilter` / `McpFilter` enum (All/Allow/Deny) → `src/config/filters.rs`
 - [x] A5. `Channel` trait 加默认 no-op 方法 `push_event` / `cancel_signal`
 - [x] A6. `ChannelMessage` 加 `#[derive(Serialize, Deserialize)]`（MediaAttachment 同步）
@@ -25,7 +25,7 @@
 
 ## 模块 B：Session / SessionContext / SessionManager（0/4）
 
-- [~] B12. Session 字段改造（已加 last_message/parent_session_id/agent_name；已加 record_inbound/reply_target helper；token_tracker / transient persist/channel / save_* 方法待 C18）
+- [x] B12. Session 字段改造（last_message/parent_session_id/agent_name + record_inbound/reply_target + token_tracker + transient persist/channel + save_to_disk + add_user/add_assistant 重命名带 #[deprecated] 别名）
 - [~] B14. SessionManager 改造（已加 SessionNotOwned 接线 / list_sub_sessions / session_id_for_routing_key / get_by_id / create_sub_session / delete cascade；list_sessions 过滤 parent）
 - [x] B13. 新建 `SessionContext`（session/attachments/pending_retry/turn_lock；user_profile 待 G41） → `src/agents/session_context.rs`
 - [ ] B15. Sub-session 存储扁平化（删嵌套结构与 marker 文件）
@@ -37,7 +37,7 @@
 - [ ] C18. `Agent.run(session, ctx, rt)` 实现（含 allowed_tools snapshot + 循环）
 - [x] C19. `ToolExecutor` 重命名（原 `DefaultToolExecutor`）；ask_user/agent_delegate inline 处理待 F35 拆出
 - [x] C20. `LoopBreaker` policy + per-turn counter（已有 LoopBreakerConfig 分离 + reset() 每轮重置）
-- [ ] C21. `ContextEngine` 合并 CompactionPolicy + CompactionExecutor
+- [x] C21. `ContextEngine` 合并 CompactionPolicy + CompactionExecutor → `src/agents/context_engine.rs` 作为 façade，内部 struct 不变；C18 Agent.run 改用 ContextEngine
 - [x] C22. MCP tool wrapper 填 `ToolSource::Mcp { server }`；skill 单独 wrapper 未来再加
 
 ## 模块 D：配置与 Prompt（0/5）
@@ -71,7 +71,7 @@
 - [x] G40. `UserProfile` 加载/序列化/to_prompt_section → `src/agents/user_profile.rs`
 - [x] G41. SessionContext 加 user_profile 字段（含 with_user_profile / reload_user_profile）
 - [x] G42. build_prompt 补齐 profile section（`SystemPromptBuilder::build_with_profile`）
-- [ ] G43. Memory tools 读写 `users/{id}/memory/`
+- [x] G43. Memory tools 读写 `users/{id}/memory/`（MemoryListTool/ViewTool/SearchTool/ManageTool 改持 workspace_dir + Arc<UserResolver>；execute 用 session.owner → resolver.resolve → user_id 构 path；daemon + cmd_chat + cmd_exec wiring 同步）
 - [x] G44. `list_sessions_for_user(uid)` 反向 map 实现（SessionManager method）
 
 ## 模块 H：删除（0/13）
@@ -102,6 +102,54 @@
 ## 实施日志
 
 按时间倒序记录每次推进。
+
+### A3 + B12 + C21 + G43 — 类型契约收尾 + ContextEngine 门面
+
+Stage 1 of the 19-item atomic block: independent "type contract" changes
+that compile + verify on their own, before the big Agent / Orchestrator
+rewrite (C17+C18+E29+F35+F36+...).
+
+- **A3 final**: `Tool::execute(args, &Session)` — added `&Session` as second
+  parameter; 26 Tool impls updated (mechanical `_session` ignore for 22 of
+  them; memory tools + ask_user actually use it). MCP wrapper, deferred
+  shim, and 22 test call sites updated to pass `&Session::new("test"...)`.
+  `ToolExecutor::run_tool` and `MemoryToolExecutor::execute` forward
+  `session` through; `CompactionExecutor::execute/summarize/do_summarize`
+  threaded `session` so memory tools called by the summarizer remain
+  user-scoped.
+- **B12 final**: Session gained `token_tracker: TokenTracker` (moved to
+  `pub` from `pub(crate)` in `agent_impl::types`), plus transient
+  `persist: Option<Arc<dyn PersistHook>>` and `channel: Option<Arc<dyn Channel>>`
+  (Default None, survive Clone via Arc). `derive(Debug)` swapped for a
+  hand-rolled impl that elides the transient handles. Added
+  `with_persist` / `with_channel` builder helpers and `save_to_disk`
+  (flushes last_message reply_target, override JSON, token count via
+  PersistHook). `add_user_text` → `add_user`, `add_assistant_text` →
+  `add_assistant`; old names kept as `#[deprecated]` aliases.
+- **C21**: New `src/agents/context_engine.rs` — `ContextEngine` struct
+  wraps `CompactionPolicy` + `CompactionExecutor` as a single facade.
+  Surfaces `token_total`, `update_usage`, `record_pending`, `should_compact`,
+  `compaction_boundary`, `execute_compaction`. Internal structs untouched —
+  C18 Agent.run will swap from two fields to one.
+- **G43**: Memory tools (`MemoryListTool` / `ViewTool` / `SearchTool` /
+  `ManageTool`) now hold `workspace_dir: PathBuf` + `Arc<UserResolver>`
+  instead of `knowledge_dir: String`. `MemoryPaths::for_user` builds
+  `{workspace_dir}/users/{user_id}/{MEMORY_DIR_NAME}/`. Daemon's
+  `build_tools` creates a shared `Arc<UserResolver>` and threads it in;
+  `cli/cmd_chat.rs` + `cli/cmd_exec.rs` do the same. `Action_*` helpers on
+  `MemoryManageTool` take an explicit `user_id` parameter now.
+
+Notes / known regressions for Stage 2 to mop up:
+- `CompactionExecutor::build_memory_prompt` still cites the legacy
+  `knowledge_dir` in its instruction text. The summarizer writes memory
+  via `file_write` (allow-list), not `memory_manage`, so the path it
+  reaches for will be the pre-G43 location. Low-impact because the
+  summarizer rarely writes memory; clean fix is to add `memory_*` to
+  `MemoryToolExecutor::ALLOWED` during C18.
+- The Channel trait's `prepare_stream` / `take_stream_context` / etc.
+  still exist; H57 deletion stays in Stage 2.
+
+Result: 377 lib tests pass (same baseline as pre-stage-1).
 
 ### D23 + E33 — 确认已实现项
 

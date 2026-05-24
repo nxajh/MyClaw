@@ -40,7 +40,7 @@ impl Tool for AgentListTool {
         2000
     }
 
-    async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, _args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
         let running = self.delegation_manager.running_snapshot();
 
         let items: Vec<serde_json::Value> = running

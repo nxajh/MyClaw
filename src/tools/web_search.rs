@@ -54,7 +54,7 @@ impl Tool for WebSearchTool {
         5_000
     }
 
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
         let query = args["query"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'query' is required"))?;

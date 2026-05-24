@@ -146,7 +146,7 @@ impl Tool for CronJobTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
         let action = args.get("action")
             .and_then(|v| v.as_str())
             .unwrap_or("");

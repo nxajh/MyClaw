@@ -63,7 +63,7 @@ pub(crate) fn estimate_message_tokens(msg: &ChatMessage) -> u64 {
 
 /// Token usage tracker — combines precise API-reported usage with estimated pending tokens.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct TokenTracker {
+pub struct TokenTracker {
     /// Last API response's input_tokens (new, non-cached).
     last_input_tokens: u64,
     /// Last API response's cached_input_tokens.
@@ -75,6 +75,9 @@ pub(crate) struct TokenTracker {
 }
 
 impl TokenTracker {
+    /// Construct a fresh tracker (all counters zero).
+    pub fn new() -> Self { Self::default() }
+
     /// Update with precise usage from API response. Resets pending estimates.
     /// `input_tokens` = new (non-cached) tokens, `cached_tokens` = cache-hit tokens.
     pub fn update_from_usage(&mut self, input_tokens: u64, output_tokens: u64, cached_tokens: u64) {

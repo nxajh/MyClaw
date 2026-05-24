@@ -394,7 +394,8 @@ async fn build_tools(
     skills: &Arc<parking_lot::RwLock<SkillManager>>,
     shared_scheduler: &crate::agents::SharedScheduler,
     workspace_dir: &std::path::Path,
-    knowledge_dir: &str,
+    _knowledge_dir: &str,
+    user_resolver: &Arc<crate::agents::UserResolver>,
 ) -> ToolRegistry {
     let mut tools = ToolRegistry::new();
     let builtin = crate::tools::builtin_tools();
@@ -423,12 +424,13 @@ async fn build_tools(
     // CronJobTool — manage scheduled cron jobs.
     tools.register(Arc::new(crate::tools::CronJobTool::new(Arc::clone(shared_scheduler))));
 
-    // Memory tools — persistent memory management.
-    let kd = knowledge_dir.to_string();
-    tools.register(Arc::new(crate::tools::MemoryListTool::new(kd.clone())));
-    tools.register(Arc::new(crate::tools::MemoryViewTool::new(kd.clone())));
-    tools.register(Arc::new(crate::tools::MemorySearchTool::new(kd.clone())));
-    tools.register(Arc::new(crate::tools::MemoryManageTool::new(kd)));
+    // Memory tools — persistent per-user memory (G43: workspace/users/{uid}/memory/).
+    let wd = workspace_dir.to_path_buf();
+    let r = Arc::clone(user_resolver);
+    tools.register(Arc::new(crate::tools::MemoryListTool::new(wd.clone(), Arc::clone(&r))));
+    tools.register(Arc::new(crate::tools::MemoryViewTool::new(wd.clone(), Arc::clone(&r))));
+    tools.register(Arc::new(crate::tools::MemorySearchTool::new(wd.clone(), Arc::clone(&r))));
+    tools.register(Arc::new(crate::tools::MemoryManageTool::new(wd, r)));
 
     // Inject MCP tools (if any servers are configured and connected).
     if mcp_manager.is_connected().await {
@@ -687,8 +689,11 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         jobs_json_path.clone(), tz_name.clone(), heartbeat_config, scheduler_tx.clone(),
     );
 
+    // G39: shared user resolver — defaults to identity (user_id == routing_key).
+    let user_resolver = Arc::new(crate::agents::UserResolver::new());
+
     // Build tool registry (all built-in + MCP + skill tools).
-    let mut tools = build_tools(&mcp_manager, &skills_arc, &shared_scheduler, &config.workspace_dir, config.knowledge_dir.to_str().unwrap_or(".")).await;
+    let mut tools = build_tools(&mcp_manager, &skills_arc, &shared_scheduler, &config.workspace_dir, config.knowledge_dir.to_str().unwrap_or("."), &user_resolver).await;
 
     // Build sub-agent configs (AGENT.md files from workspace/agents/).
     let sub_agent_configs = build_sub_agents(&config.workspace_dir);

@@ -62,6 +62,7 @@ impl CompactionExecutor {
         tool_specs: &[ToolSpec],
         boundary: usize,
         model_id: &str,
+        session: &crate::agents::session::Session,
     ) -> anyhow::Result<CompactionResult> {
         let (compact_start, compact_end, existing_summary) =
             find_incremental_range(history, boundary);
@@ -83,7 +84,7 @@ impl CompactionExecutor {
         );
 
         let summary = self
-            .summarize(&to_compact, existing_summary.as_deref(), system_prompt, tool_specs, model_id)
+            .summarize(&to_compact, existing_summary.as_deref(), system_prompt, tool_specs, model_id, session)
             .await?;
 
         let (ok, reasons) = audit_summary_quality(&to_compact, &summary);
@@ -110,8 +111,9 @@ impl CompactionExecutor {
         system_prompt: &str,
         tool_specs: &[ToolSpec],
         model_id: &str,
+        session: &crate::agents::session::Session,
     ) -> anyhow::Result<String> {
-        match self.do_summarize(to_compact, existing_summary, system_prompt, tool_specs, model_id).await {
+        match self.do_summarize(to_compact, existing_summary, system_prompt, tool_specs, model_id, session).await {
             Ok(s) if !s.trim().is_empty() => Ok(s),
             Ok(_) => {
                 tracing::warn!("summarize returned empty text");
@@ -131,6 +133,7 @@ impl CompactionExecutor {
         system_prompt: &str,
         tool_specs: &[ToolSpec],
         model_id: &str,
+        session: &crate::agents::session::Session,
     ) -> anyhow::Result<String> {
         let provider = match self.registry.get_chat_provider_by_model(model_id) {
             Some((p, _)) => p,
@@ -219,7 +222,7 @@ impl CompactionExecutor {
 
             for call in &response.tool_calls {
                 tracing::info!(tool = %call.name, id = %call.id, "summarize: executing tool");
-                let result = self.memory_executor.execute(call).await;
+                let result = self.memory_executor.execute(call, session).await;
                 let (result_content, is_error) = match &result {
                     Ok(r) => {
                         let mut out = r.output.clone();
