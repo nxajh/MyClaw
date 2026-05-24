@@ -103,6 +103,81 @@
 
 按时间倒序记录每次推进。
 
+### Stage 2 (剩 15 项) — 待下一会话续作
+
+Stage 2 = C17 + C18 + E29 + E30 + E32 + E34 + F35 + F36 (complete) +
+F37 + F38 + B15 + H45 + H46 + H47 + H48 + H49 + H50 + H57.
+
+This is the truly interlocked "must compile only at end" cluster: the
+Agent.run rewrite (C17/C18) cascades into orchestrator main loop
+(E29/E30), per-tool Ask/Delegate wiring (F35), delegation rewrite (F36
+final + F37 + F38), ClientChannel changes (E32), scheduler path (E34),
+storage layout (B15), and ~7 cleanup deletions (H45-H50 + H57).
+
+Realistic scope: ~30 files touched, ~2500 lines net, ~6-10 hours of
+focused engineering with the codebase fully in cache. Not feasible to
+land safely in a single session that also did Stage 1.
+
+Concrete starting points for next session (in dependency order):
+1. **C17+C18**: New `src/agents/agent.rs` with
+   `pub struct Agent { pub config: SubAgentConfig }` and
+   `async fn run(&self, &mut Session, TurnContext<'_>, &AgentRuntime) -> TurnResult`.
+   Use ContextEngine (already created Stage 1) as the single context field.
+   Build helpers via `AgentRuntime.tools` + `AgentConfig.allows_tool/skill/mcp`
+   to derive per-turn ToolSpec list. Use `Session.persist` /
+   `Session.channel` transient fields for hook + event emission. Initial
+   `run()` body can be a near-1:1 port of `agent_impl/{run,turn,chat_loop,compaction,tools,images}.rs`
+   methods, just with the new ContextEngine field and the new `&Session`
+   tool execute signature already in place.
+2. **E29+E30+H45**: Rewrite orchestrator main loop to consume
+   `OrchestratorEvent` (already exists). Replace `pending_asks` DashMap
+   with the existing `AskRouter`. Replace `LoopRegistry::get_or_create`
+   AgentLoop construction with `Agent.run(session, ctx, runtime)`
+   per-turn invocation. Delete `LoopRegistry`, `SessionHandle`,
+   `run_session_actor`, `TurnInput`, `TurnMessage`. Spawn per-channel
+   adapters that convert mpsc messages → `OrchestratorEvent` upstream of
+   the main loop.
+3. **F35**: Implement `AskUserTool` / `DelegateTool` as real `Tool` impls
+   holding `Arc<AskRouter>` + channel map / `Arc<dyn AgentDelegator>`.
+   `Tool::execute` uses `session.id` + `session.reply_target()` directly.
+   Remove inline ask_user / agent_delegate branches from
+   `ToolExecutor::execute`. Daemon registers both with the right deps.
+4. **F36 final + H47**: Rename `SubAgentDelegator` → `DelegationCoordinator`,
+   delete the dual `TaskDelegator` impl, delete the `TaskDelegator` trait
+   if no other callers remain.
+5. **F37 + H50**: `recovery.rs` switches to
+   `SessionManager.list_all_sessions` + `parent_session_id` to detect
+   unfinished sub-agents; delete `subagent_running_*.json` marker file
+   logic.
+6. **F38**: Sub-agent completion event in orchestrator wraps the
+   summary into a full `ChannelMessage` (not raw string) and routes
+   through the same `process_turn` path as a regular inbound message.
+7. **E32 + H57**: `channels/client.rs` index streams by `reply_target`
+   (not `session_key`), implement the new `Channel::push_event` /
+   `Channel::cancel_signal`, delete `prepare_stream` / `take_stream_context`
+   / `loop_registry` / `evict_loop`.
+8. **E34 + H48**: Inline `SchedulerContext` into orchestrator; pass
+   orchestrator references directly to scheduler tasks.
+9. **B15**: Sub-session storage flat: `SubAgentDelegator.open_sub_session`
+   uses the shared top-level backend (via `SessionManager.create_sub_session`,
+   which already records `parent_session_id`) instead of opening a
+   per-parent `JsonFileBackend` under `{parent}/subagents/`.
+10. **H46 + H49**: Delete `request_builder.rs` (folded into Agent.run
+    inline), delete `AskUserHandler` / `DelegateHandler` closure type
+    aliases.
+
+Risk hotspots:
+- The deprecated `add_user_text` / `add_assistant_text` calls in
+  agent_impl/ + orchestrator.rs + tool_executor.rs will emit ~7
+  warnings until Stage 2 deletes those callers — already verified
+  non-blocking in Stage 1.
+- `CompactionExecutor::build_memory_prompt` still cites the legacy
+  `knowledge_dir`; Agent.run rewrite should either rewrite the prompt
+  to use `memory_manage` or thread the per-user path through.
+- `agent_impl::types::TokenTracker` is now `pub` (Stage 1 made it
+  visible so Session could hold it); C18 should pick a canonical
+  location (suggest moving into the `context_engine` module).
+
 ### A3 + B12 + C21 + G43 — 类型契约收尾 + ContextEngine 门面
 
 Stage 1 of the 19-item atomic block: independent "type contract" changes
