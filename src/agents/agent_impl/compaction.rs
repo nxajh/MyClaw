@@ -86,7 +86,7 @@ impl AgentLoop {
         model_id: &str,
         target_window: u64,
     ) -> anyhow::Result<()> {
-        let system_prompt_tokens = self.request_builder.system_prompt_tokens();
+        let system_prompt_tokens = self.system_prompt_tokens();
         let tool_specs = self.build_tool_specs();
         let tool_spec_tokens: u64 = tool_specs.iter().map(|spec| {
             let schema = spec.input_schema.to_string();
@@ -169,7 +169,7 @@ impl AgentLoop {
             .copied()
             .unwrap_or(0);
 
-        let system_prompt = self.request_builder.system_prompt().to_string();
+        let system_prompt = self.system_prompt.clone();
 
         let result = self.context.execute_compaction(
             &self.session.history,
@@ -196,12 +196,12 @@ impl AgentLoop {
 
         // Refresh memory index (summarizer may have written memory files via tools).
         {
-            let memory_dir = std::path::Path::new(&self.request_builder.resources.knowledge_dir);
+            let memory_dir = std::path::Path::new(&self.resources.knowledge_dir);
             let files = crate::memory::scan_memory_files(memory_dir);
             let entries: Vec<crate::memory::IndexEntry> =
                 files.iter().map(crate::memory::IndexEntry::from).collect();
             let history = self.session.history.clone();
-            self.request_builder.attachments.diff_memory(&entries, &history);
+            self.attachments.diff_memory(&entries, &history);
             tracing::info!(memory_count = entries.len(), "memory index refreshed after compaction");
         }
 

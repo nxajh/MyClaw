@@ -19,7 +19,7 @@ impl AgentLoop {
         // Autonomy change: inject a system-reminder so the model learns the new policy
         // on the next turn. The actual hard enforcement is in execute_tool regardless.
         if let Some(ref permission_mode) = ov.permission_mode {
-            self.request_builder.diff_autonomy(permission_mode);
+            self.diff_autonomy(permission_mode);
         }
 
         // Apply all config fields via the shared helper (also sets model_override and thinking_override).
@@ -128,7 +128,7 @@ impl AgentLoop {
                 "detected incomplete turn (missing tool results), resuming"
             );
 
-            let mut messages = self.request_builder.build(&self.session);
+            let mut messages = self.build_messages();
 
             for call in &pending_calls {
                 tracing::info!(tool = %call.name, id = %call.id, "re-executing interrupted tool call");
@@ -186,7 +186,7 @@ impl AgentLoop {
         // Case B: all tool results present but no final assistant response → call LLM.
         if has_trailing_tool_results && pending_calls.is_empty() {
             tracing::info!("detected incomplete turn (missing LLM continuation), resuming");
-            let messages = self.request_builder.build(&self.session);
+            let messages = self.build_messages();
             let text = chat_loop::chat_loop(self, messages, stream_mode.clone()).await?;
             // Persist the recovered assistant response so the turn is no longer incomplete.
             if !text.is_empty() {
@@ -208,7 +208,7 @@ impl AgentLoop {
         // Case C: last message is user — daemon was killed before model responded.
         if history.last().is_some_and(|m| m.role == "user") {
             tracing::info!("detected incomplete turn (user message with no assistant response), resuming");
-            let messages = self.request_builder.build(&self.session);
+            let messages = self.build_messages();
             let text = chat_loop::chat_loop(self, messages, stream_mode.clone()).await?;
             if !text.is_empty() {
                 self.session.add_assistant(text.clone());

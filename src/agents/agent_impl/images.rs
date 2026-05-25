@@ -7,7 +7,7 @@ use super::AgentLoop;
 impl AgentLoop {
     /// Attach pending image URLs and base64 data to the last user message if model supports it.
     pub(crate) fn attach_images_if_supported(&self, messages: &mut [crate::providers::ChatMessage], model_id: &str) {
-        if !self.request_builder.has_images() {
+        if !self.has_images() {
             return;
         }
 
@@ -26,7 +26,7 @@ impl AgentLoop {
         }
 
         if let Some(last_user) = messages.iter_mut().rev().find(|m| m.role == "user") {
-            if let Some(urls) = self.request_builder.image_urls() {
+            if let Some(urls) = self.image_urls() {
                 for url in urls {
                     last_user.parts.push(crate::providers::ContentPart::ImageUrl {
                         url: url.clone(),
@@ -34,7 +34,7 @@ impl AgentLoop {
                     });
                 }
             }
-            if let Some(b64s) = self.request_builder.image_b64() {
+            if let Some(b64s) = self.image_b64() {
                 for b64 in b64s {
                     last_user.parts.push(crate::providers::ContentPart::ImageB64 {
                         b64_json: b64.clone(),
@@ -43,8 +43,8 @@ impl AgentLoop {
                     });
                 }
             }
-            let total = self.request_builder.image_urls().map_or(0, |v| v.len())
-                + self.request_builder.image_b64().map_or(0, |v| v.len());
+            let total = self.image_urls().map_or(0, |v| v.len())
+                + self.image_b64().map_or(0, |v| v.len());
             tracing::info!("attached {} image(s) to user message", total);
         }
     }

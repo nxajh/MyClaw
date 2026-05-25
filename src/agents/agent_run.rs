@@ -20,7 +20,6 @@ use crate::agents::loop_breaker::{LoopBreaker, LoopBreakerConfig};
 use crate::agents::context_engine::ContextEngine;
 use crate::agents::tool_executor::ToolExecutor;
 use crate::agents::resource_provider::ResourceProvider;
-use crate::agents::request_builder::RequestBuilder;
 use crate::agents::prompt::SystemPromptBuilder;
 use crate::agents::attachment::AttachmentManager;
 
@@ -60,10 +59,14 @@ impl Agent {
             runtime.knowledge_dir.to_string_lossy().to_string(),
             agent_config.timezone_offset,
         );
-        let request_builder = RequestBuilder::new(system_prompt, Arc::clone(&resources));
-
         let loop_ = AgentLoop {
             registry: Arc::clone(runtime.registry()),
+            system_prompt,
+            attachments: AttachmentManager::new(),
+            resources: Arc::clone(&resources),
+            pending_image_urls: None,
+            pending_image_base64: None,
+            change_rx: None,
             context: ContextEngine::new(
                 &crate::config::agent::ContextConfig::default(),
                 Arc::clone(runtime.registry()),
@@ -73,7 +76,6 @@ impl Agent {
             tool_executor: ToolExecutor::new(Arc::clone(runtime.tools()), agent_config.tool_timeout_secs),
             config: agent_config,
             session,
-            request_builder,
             loop_breaker: LoopBreaker::new(LoopBreakerConfig {
                 max_tool_calls: self.config.max_tool_calls.unwrap_or(50),
                 exact_repeat_threshold: runtime.loop_breaker_defaults.exact_repeat_threshold,

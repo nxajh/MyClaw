@@ -42,22 +42,22 @@ pub(super) async fn run_turn_core(
             agent.context.init_from_stored(stored);
         } else {
             agent.context.init_from_history(
-                agent.request_builder.system_prompt(),
+                &agent.system_prompt,
                 &agent.session.history,
             );
         }
     }
 
     // 1+2. Hot-reload check + attachment diffs (before adding the user message).
-    agent.request_builder.refresh(&agent.session);
+    agent.refresh_attachments();
     tracing::debug!(
-        pending_keys = ?agent.request_builder.pending_keys(),
+        pending_keys = ?agent.pending_keys(),
         "run: diff complete"
     );
 
     // 3. Merge attachment text into the user message.
-    let combined_user = agent.request_builder.merge_attachments(user_message);
-    agent.request_builder.clear_pending();
+    let combined_user = agent.merge_attachments(user_message);
+    agent.clear_pending_attachments();
 
     // 4. Add combined user message to history and persist.
     let user_msg = ChatMessage::user_text(combined_user.clone());
@@ -77,10 +77,10 @@ pub(super) async fn run_turn_core(
         }
     }
 
-    agent.request_builder.set_images(image_urls, image_base64);
+    agent.set_images(image_urls, image_base64);
 
     // 5. Build the full message list for this turn (pure: no side effects).
-    let messages = agent.request_builder.build(&agent.session);
+    let messages = agent.build_messages();
 
     // 3. Run the chat loop (handles tool calls iteratively).
     let text = match super::chat_loop::chat_loop(agent, messages, stream_mode).await {

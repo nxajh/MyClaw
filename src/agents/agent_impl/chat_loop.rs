@@ -24,7 +24,7 @@ pub(super) async fn chat_loop(
     let mut images_attached = false;
 
     // Check if we have pending images that need a vision-capable model.
-    let has_images = loop_.request_builder.has_images();
+    let has_images = loop_.has_images();
 
     // Pre-emptive compaction for fallback models: when the primary model is unavailable
     // (rate-limit or server error) the FallbackChatProvider routes to a smaller model
@@ -98,7 +98,7 @@ pub(super) async fn chat_loop(
             }
             initial_messages.clone()
         } else {
-            loop_.request_builder.build(&loop_.session)
+            loop_.build_messages()
         };
 
         // Attach pending images to the last user message only on the first iteration.

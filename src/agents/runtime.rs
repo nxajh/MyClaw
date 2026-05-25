@@ -19,7 +19,7 @@ use super::tool_registry::ToolRegistry;
 use super::context_engine::ContextEngine;
 use super::tool_executor::ToolExecutor;
 use super::resource_provider::ResourceProvider;
-use super::request_builder::RequestBuilder;
+use super::attachment::AttachmentManager;
 use super::prompt::SystemPromptBuilder;
 use super::agent_impl::{AgentConfig, AgentLoop, AgentSession};
 use super::session::Session;
@@ -202,10 +202,14 @@ impl AgentRuntime {
             config.prompt_config.knowledge_dir.clone(),
             config.timezone_offset,
         );
-        let request_builder = RequestBuilder::new(prompt, Arc::clone(&resources));
-
         AgentSession { loop_: AgentLoop {
             registry: Arc::clone(&self.providers),
+            system_prompt: prompt,
+            attachments: AttachmentManager::new(),
+            resources: Arc::clone(&resources),
+            pending_image_urls: None,
+            pending_image_base64: None,
+            change_rx: None,
             context: ContextEngine::new(
                 &config.context,
                 Arc::clone(&self.providers),
@@ -215,7 +219,6 @@ impl AgentRuntime {
             tool_executor: ToolExecutor::new(Arc::clone(&self.tools), config.tool_timeout_secs),
             config,
             session,
-            request_builder,
             loop_breaker: LoopBreaker::new(LoopBreakerConfig {
                 max_tool_calls,
                 exact_repeat_threshold: self.loop_breaker_defaults.exact_repeat_threshold,

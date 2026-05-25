@@ -3,7 +3,6 @@
 mod agent_impl;
 pub(crate) mod compaction_policy;
 pub(crate) mod resource_provider;
-pub(crate) mod request_builder;
 pub(crate) mod tool_executor;
 pub(crate) mod compaction_executor;
 pub(crate) mod context_engine;

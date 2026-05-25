@@ -26,8 +26,8 @@ mod chat_loop;
 mod tools;
 mod compaction;
 mod images;
+mod prompt_refresh;
 
-use super::request_builder::RequestBuilder;
 
 /// AgentConfig controls loop breaker thresholds and tool call limits.
 #[derive(Debug, Clone)]
@@ -90,8 +90,13 @@ pub struct AgentLoop {
     pub(crate) registry: Arc<dyn ProviderRegistry>,
     pub(crate) config: AgentConfig,
     pub(crate) session: Session,
-    // ── Message building + attachments + images + hot-reload ──
-    pub(crate) request_builder: RequestBuilder,
+    // ── System prompt + attachments + images + hot-reload (H46: was RequestBuilder) ──
+    pub(crate) system_prompt: String,
+    pub(crate) attachments: AttachmentManager,
+    pub(crate) resources: Arc<super::resource_provider::ResourceProvider>,
+    pub(crate) pending_image_urls: Option<Vec<String>>,
+    pub(crate) pending_image_base64: Option<Vec<String>>,
+    pub(crate) change_rx: Option<watch::Receiver<super::watcher::ChangeSet>>,
     // ── Token tracking + compaction policy + execution (C21) ──
     pub(crate) context: ContextEngine,
     // ── Tool execution ──
@@ -132,13 +137,13 @@ impl AgentLoop {
     }
 
     pub fn with_change_rx(mut self, rx: watch::Receiver<super::watcher::ChangeSet>) -> Self {
-        self.request_builder.set_change_rx(rx);
+        self.change_rx = Some(rx);
         self
     }
 
     /// Access the attachment manager (for /reload command).
     pub fn attachments(&mut self) -> &mut AttachmentManager {
-        &mut self.request_builder.attachments
+        &mut self.attachments
     }
 
     pub fn session_mut(&mut self) -> &mut super::session::Session {
