@@ -63,7 +63,6 @@ impl DelegationManager {
     }
 
     /// Cancel a running task.
-    #[allow(dead_code)]
     pub fn cancel(&self, task_id: &str) -> bool {
         if let Some((_, handle)) = self.running.remove(task_id) {
             handle.abort();

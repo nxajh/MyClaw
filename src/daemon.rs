@@ -718,6 +718,15 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let watcher = crate::agents::WorkspaceWatcher::new(&config.workspace_dir, &config.knowledge_dir)?;
     let change_rx = watcher.rx.clone();
 
+    // ── Delegation channel (always create — agent_list/agent_kill tools need it) ──
+    let (delegation_tx, delegation_rx) = tokio::sync::mpsc::channel::<crate::agents::DelegationEvent>(100);
+    let delegation_manager = Arc::new(DelegationManager::new(delegation_tx));
+
+    // ── Delegation tools (agent_list, agent_kill) ─────────────────────────────────
+    tools.register(Arc::new(crate::tools::AgentListTool::new(Arc::clone(&delegation_manager))));
+    tools.register(Arc::new(crate::tools::AgentKillTool::new(Arc::clone(&delegation_manager))));
+    tracing::debug!("agent_list + agent_kill tools registered");
+
     // ── Sub-agent delegator (conditional) ──────────────────────────────────────
 
     let (tools_arc, sub_agent_delegator_arc) = if sub_agent_count == 0 {
@@ -765,14 +774,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         parent_tools.register(Arc::new(tool_search));
 
         (Arc::new(parent_tools), Some(delegator_arc))
-    };
-
-    // ── Delegation channel (conditional — only when sub-agents configured) ─────
-    let (delegation_manager, delegation_rx) = if sub_agent_delegator_arc.is_some() {
-        let (tx, rx) = tokio::sync::mpsc::channel::<crate::agents::DelegationEvent>(100);
-        (Some(Arc::new(DelegationManager::new(tx))), Some(rx))
-    } else {
-        (None, None)
     };
 
     let session_backend = build_session_backend(&config);
@@ -904,9 +905,9 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         runtime: runtime.clone(),
         session_manager,
         channels,
-        sub_delegator: sub_agent_delegator_arc,
-        delegation_manager,
-        delegation_rx,
+        sub_delegator: sub_agent_delegator_arc.clone(),
+        delegation_manager: Some(delegation_manager),
+        delegation_rx: if sub_agent_delegator_arc.is_some() { Some(delegation_rx) } else { None },
         persist_backend: session_backend.clone(),
         mcp_manager: Some(Arc::clone(&mcp_manager_arc)),
         change_rx: Some(change_rx.clone()),
@@ -1071,6 +1072,10 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // Graceful shutdown.
     tracing::debug!("dispatch loop ended, shutting down listeners");
     orchestrator.shutdown_listeners().await;
+
+    // Drain any buffered messages to queue files for hot-switch recovery.
+    let sessions_dir = config.workspace_dir.join("sessions");
+    orchestrator.drain_pending_to_queue(&sessions_dir);
 
     // ── Hot switch: fork+execv new binary, inherit listen socket ──────────
     // When SIGUSR1 set the shutdown flag (triggered by `myclaw update`), the

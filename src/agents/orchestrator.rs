@@ -909,6 +909,38 @@ impl Orchestrator {
         }
         tracing::debug!("all listener tasks aborted");
     }
+
+    /// Drain pending messages from session actor channels and persist them
+    /// to queue files for hot-switch recovery.
+    ///
+    /// Call after `shutdown_listeners()` — the dispatch loop has stopped
+    /// and no new messages will arrive.  Buffered messages in each session
+    /// actor's channel are written to `sessions/{id}/queue.jsonl`.
+    pub fn drain_pending_to_queue(&self, sessions_dir: &std::path::Path) {
+        let mut total = 0usize;
+        for entry in self.shared().sessions.iter() {
+            let sk = entry.key().to_string();
+            let session_id = sk.rsplit(':').next().unwrap_or(&sk).to_string();
+            let handle = entry.value();
+
+            // Try to drain buffered messages from the actor channel.
+            if let Ok(mut guard) = handle.rx.try_lock() {
+                while let Ok(msg) = guard.try_recv() {
+                    let chat_msg = crate::providers::ChatMessage::user_text(&msg.content);
+                    if let Err(e) = crate::agents::session::queue::enqueue_message(
+                        sessions_dir, &session_id, &chat_msg,
+                    ) {
+                        tracing::warn!(session = %session_id, err = %e, "failed to enqueue buffered message");
+                    } else {
+                        total += 1;
+                    }
+                }
+            }
+        }
+        if total > 0 {
+            tracing::info!(messages = total, "drained buffered messages to queue files for hot-switch recovery");
+        }
+    }
 }
 
 // ── LoopRegistry ──────────────────────────────────────────────────────────────
@@ -965,9 +997,10 @@ impl LoopRegistry {
         // Spawn a per-session actor that processes messages one at a time.
         // The main dispatch loop routes via tx; this task never blocks the main loop.
         let (tx, rx) = mpsc::channel::<TurnMessage>(32);
-        tokio::spawn(run_session_actor(sk.to_string(), loop_arc.clone(), rx));
+        let rx_arc = Arc::new(TokioMutex::new(rx));
+        tokio::spawn(run_session_actor(sk.to_string(), loop_arc.clone(), Arc::clone(&rx_arc)));
 
-        let handle = Arc::new(SessionHandle { loop_: loop_arc, tx });
+        let handle = Arc::new(SessionHandle { loop_: loop_arc, tx, rx: rx_arc });
         self.sessions.insert(sk.into(), handle.clone());
         handle
     }
@@ -1038,6 +1071,8 @@ struct TurnMessage {
 pub struct SessionHandle {
     pub loop_: Arc<TokioMutex<AgentSession>>,
     tx: mpsc::Sender<TurnMessage>,
+    /// Receiver clone for drain-on-shutdown (only the actor task calls recv).
+    rx: Arc<TokioMutex<mpsc::Receiver<TurnMessage>>>,
 }
 
 impl SessionHandle {
@@ -1047,8 +1082,8 @@ impl SessionHandle {
     /// rather than sending via the channel, so they only need the mutex wrapped
     /// in a `SessionHandle` for storage in the shared sessions map.
     pub fn new_direct(loop_: Arc<TokioMutex<AgentSession>>) -> Self {
-        let (tx, _rx) = mpsc::channel(1);
-        Self { loop_, tx }
+        let (tx, rx) = mpsc::channel(1);
+        Self { loop_, tx, rx: Arc::new(TokioMutex::new(rx)) }
     }
 }
 
@@ -1060,17 +1095,26 @@ impl SessionHandle {
 async fn run_session_actor(
     sk: String,
     loop_: Arc<TokioMutex<AgentSession>>,
-    mut rx: mpsc::Receiver<TurnMessage>,
+    rx: Arc<TokioMutex<mpsc::Receiver<TurnMessage>>>,
 ) {
-    while let Some(msg) = rx.recv().await {
-        run_message_task(
-            sk.clone(),
-            msg.channel,
-            loop_.clone(),
-            TurnInput { content: msg.content, image_urls: msg.image_urls, image_base64: msg.image_base64 },
-            msg.reply_target,
-            msg.reply_to_id,
-        ).await;
+    loop {
+        let msg = {
+            let mut guard = rx.lock().await;
+            guard.recv().await
+        };
+        match msg {
+            Some(msg) => {
+                run_message_task(
+                    sk.clone(),
+                    msg.channel,
+                    loop_.clone(),
+                    TurnInput { content: msg.content, image_urls: msg.image_urls, image_base64: msg.image_base64 },
+                    msg.reply_target,
+                    msg.reply_to_id,
+                ).await;
+            }
+            None => break,
+        }
     }
 }
 
