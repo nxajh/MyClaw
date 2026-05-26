@@ -54,7 +54,6 @@ pub mod agent;
 pub mod channel;
 pub mod filters;
 pub mod mcp;
-pub mod memory;
 pub mod provider;
 pub mod routing;
 pub mod scheduler;
@@ -69,7 +68,6 @@ use serde::{Deserialize, Serialize};
 use agent::AgentConfig;
 use channel::ChannelConfigs;
 use mcp::McpServerConfig;
-use memory::MemoryConfig;
 use provider::ProviderConfig;
 use routing::RoutingConfig;
 
@@ -101,10 +99,6 @@ struct RawConfig {
     /// Agent configuration.
     #[serde(default)]
     agent: AgentConfig,
-
-    /// Memory configuration.
-    #[serde(default)]
-    memory: MemoryConfig,
 
     /// MCP server configurations.
     #[serde(default)]
@@ -150,8 +144,6 @@ pub struct AppConfig {
     pub channels: ChannelConfigs,
     /// Agent configuration.
     pub agent: AgentConfig,
-    /// Memory configuration.
-    pub memory: MemoryConfig,
     /// MCP server configurations.
     pub mcp_servers: Vec<McpServerConfig>,
     /// Logging configuration.
@@ -219,7 +211,6 @@ impl ConfigLoader {
             routing: raw.routing,
             channels: raw.channels,
             agent: raw.agent,
-            memory: raw.memory,
             mcp_servers: raw.mcp_servers,
             logging: raw.logging,
         })
@@ -389,10 +380,6 @@ permission_mode = "full"
 
 [agent.prompt]
 
-[memory]
-storage = "sqlite"
-db_path = "test.db"
-
 [[mcp_servers]]
 name = "filesystem"
 command = "npx"
@@ -425,8 +412,6 @@ level = "INFO"
         assert_eq!(config.agent.max_tool_calls, 50);
 
         // Memory
-        assert_eq!(config.memory.db_path, "test.db");
-
         // MCP
         assert_eq!(config.mcp_servers.len(), 1);
         assert_eq!(config.mcp_servers[0].name, "filesystem");
