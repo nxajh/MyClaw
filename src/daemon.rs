@@ -909,6 +909,16 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // orchestrator (fulfill side) and AskUserTool::with_router (register
     // side). Stored as a top-level binding so future tool constructions
     // (DelegateTool etc.) can share it too.
+    //
+    // The matching `AskUserTool::with_router(ask_router, channels_map)`
+    // registration belongs alongside the rest of `build_tools()`. That
+    // function runs before `channels` is built in this function, so a
+    // clean swap requires either threading `Arc<AskRouter>` into
+    // build_tools earlier or constructing the real tool here and
+    // overwrite-registering it after build_tools returns. Doing the
+    // latter would need a `tools_mut()` accessor on the Arc<ToolRegistry>
+    // we don't yet have. Left as the immediate F35 wire-up the next
+    // session can finish in ~10 lines.
     let ask_router = Arc::new(crate::agents::AskRouter::new());
 
     let parts = OrchestratorParts {
