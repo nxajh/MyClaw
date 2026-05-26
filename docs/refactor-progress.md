@@ -252,67 +252,92 @@ rewrite to land. Net: -1 trait, -1 dual impl, ~30 references re-routed.
 
 Result: 377 lib tests still passing.
 
-### Stage 2 (剩 9 项) — 待下一会话续作
+### Stage 2 — 剩余项 ("继续" 第二轮收尾)
 
-Done this session beyond Stage 1: F36 + H47 (rename + TaskDelegator
-deletion), B15 (sub-session storage flatten), F37 + H50 (recovery
-unification + marker deletion), F38 (delegation completion as full
-ChannelMessage).
+Done this round (incremental progress on top of Stage 1):
+- F36 + H47 — `SubAgentDelegator` → `DelegationCoordinator` rename
+  (git mv); `TaskDelegator` trait + dual impl deleted; AgentDelegateTool
+  holds `Arc<dyn AgentDelegator>`.
+- B15 — sub-session storage flatten via SessionManager.create_sub_session.
+- F37 + H50 — recovery scans SessionManager (parent_session_id) instead
+  of marker files; marker mechanism deleted entirely.
+- F38 — handle_delegation_task synthesizes full ChannelMessage.
+- C17 — `Agent2` struct in `src/agents/agent.rs` with the RFC v2 shape
+  (`pub config: SubAgentConfig`). Named `Agent2` until H45 deletes
+  legacy `agent_impl::Agent`.
+- C18 (~85% done) — `Agent2::run`:
+  - allowed_tools snapshot (incl. MCP source filter)
+  - ContextEngine init from history
+  - LLM call via custom `collect_stream` helper
+  - Full tool-call iteration (assistant msg with thinking, ToolExecutor
+    with permission_mode, LoopBreaker, max_tool_calls, every-step
+    persistence)
+  - Token tracking via ContextEngine.update_usage + persist
+  - Compaction trigger (should_compact + compaction_boundary +
+    execute_compaction + apply_compaction + adjust + rebuild messages)
+  - Empty-response retry (3 attempts) with pending_retry fallback
+- F35 (~70% done) — real `AskUserTool` with dual constructors
+  (`new()` fallback, `with_router(AskRouter, ChannelMap)` real). The
+  real path: send via channel, register with router by session.id,
+  await reply with 5min timeout. Wire-up (daemon swap +
+  orchestrator.fulfill on inbound) is the E29 follow-on.
 
-Remaining (truly interlocked — all hang off the C18 Agent.run keystone):
-- **C17 + C18**: new `Agent { config: SubAgentConfig }` in
-  `src/agents/agent.rs` with `async fn run(&self, &mut Session,
-  TurnContext<'_>, &AgentRuntime) -> Result<TurnResult>`. Port
-  `agent_impl/{run,turn,chat_loop,compaction,tools,images}.rs` into
-  this single struct, using `ContextEngine` (Stage 1) as the single
-  context field, `Session.persist`/`Session.channel` transient handles
-  for persistence + event emission, and `AgentRuntime.tools` filtered
-  via `AgentConfig.allows_tool/skill/mcp` for the per-turn ToolSpec list.
-- **E29 + E30**: orchestrator main loop consumes the existing
-  `OrchestratorEvent` enum. Replace `pending_asks` DashMap with the
-  existing `AskRouter`. Replace the `LoopRegistry::get_or_create`
-  AgentLoop construction with `Agent.run(session, ctx, runtime)`
-  per-turn invocation. Spawn per-channel adapters that convert
-  per-source mpsc receivers → `OrchestratorEvent` upstream of the
-  main loop.
-- **F35**: implement `AskUserTool` / `DelegateTool` as real `Tool`
-  impls holding `Arc<AskRouter>` + channel map / `Arc<dyn AgentDelegator>`.
-  `Tool::execute(args, session)` uses `session.id` + `session.reply_target()`
-  directly. Remove the inline `ask_user` / `agent_delegate` branches
-  from `ToolExecutor::execute`. Daemon registers both tools with the
-  right deps.
-- **E32 + H57**: `channels/client.rs` indexes streams by `reply_target`
-  (not session_key), implements the new `Channel::push_event` /
-  `Channel::cancel_signal`, deletes `prepare_stream` /
-  `take_stream_context` / `loop_registry` / `evict_loop`.
-- **E34 + H48**: inline `SchedulerContext` into the orchestrator;
-  pass orchestrator references directly to scheduler tasks.
-- **H45**: delete `AgentLoop`, `SessionHandle`, `LoopRegistry`,
-  `run_session_actor`, `TurnStream`, `TurnInput` — only feasible
-  once C18 + E29 are in.
-- **H46**: delete `request_builder.rs` (functionality folded inline
-  into `Agent.run`).
+Remaining work — all really do depend on the E29 orchestrator
+main-loop rewrite, which is itself ~1300 lines of change:
+- **E29 + E30**: rewrite orchestrator's `run()` to consume
+  `OrchestratorEvent` (already scaffolded). Replace `pending_asks`
+  DashMap with `AskRouter.fulfill` upfront. Replace `LoopRegistry`
+  AgentLoop construction with `Agent2::run(session, ctx, runtime)`
+  per-turn invocation. Per-channel adapters convert mpsc → OrchestratorEvent.
+- **E32 + H57**: `channels/client.rs` — index streams by reply_target;
+  implement `Channel::push_event` / `Channel::cancel_signal`; delete
+  `prepare_stream` / `take_stream_context` / `loop_registry` / `evict_loop`.
+- **E34 + H48**: inline SchedulerContext / WebhookContext.
+- **H45**: delete AgentLoop + SessionHandle + LoopRegistry +
+  run_session_actor + TurnStream + TurnInput. Rename `Agent2` → `Agent`
+  (and update the `pub use agent::Agent2` re-export). Update all
+  callers (orchestrator, commands/, daemon, hot_switch, cli) to use
+  Agent + Agent2::run.
+- **H46**: delete `request_builder.rs` — fold its hot-reload /
+  attachment merge / image set logic into Agent2.run (or a small
+  pre-turn step on SessionContext).
 - **H49**: delete `AskUserHandler` / `DelegateHandler` closure type
-  aliases — only feasible once F35 has replaced the wiring.
+  aliases — only after E29 stops using them.
 
-Risk hotspots:
-- The deprecated `add_user_text` / `add_assistant_text` calls in
-  agent_impl/ + orchestrator.rs + tool_executor.rs emit ~7 warnings
-  until Stage 2 deletes those callers — non-blocking, verified.
+C18 finish (low priority, in tandem with E29):
+- Streaming via `session.channel.push_event` per delta / tool call /
+  thinking — needs Session.channel populated by orchestrator on
+  session creation.
+- Image attachment to last user message — read URLs/base64 from
+  Session.last_message; attach if model supports vision.
+- Fallback chain detection (`CHAIN_EXHAUSTED_TAG` / `CHAIN_ALL_COOLING_TAG`)
+  → return AgentError::ProviderChain* properly.
+- Boosted-max_tokens retry for the MaxTokens stop_reason case.
+- Pre-fallback compaction (`maybe_compact_for_fallback`).
+
+Risk hotspots / sharp edges discovered this round:
+- ~9 deprecated warnings remain (add_user_text / add_assistant_text
+  in agent_impl/, orchestrator.rs, tool_executor.rs). Cleared by H45.
+- `agent_impl::types::TokenTracker` made `pub` so Session can hold it.
+  Canonical home should be `context_engine` post-H45.
+- `DelegationCoordinator.open_sub_session` uses `Session::new(id)` —
+  the new Session won't have `parent_session_id` / `agent_name` set
+  in memory (the backend has them via `create_sub_session`). Either
+  re-read from backend or set them inline at delegate time.
 - `CompactionExecutor::build_memory_prompt` still cites the legacy
-  `knowledge_dir` in instruction text. Either rewrite the prompt to
-  use `memory_manage` or thread the per-user path through when
-  Agent.run rewrites the summarizer wiring.
-- `agent_impl::types::TokenTracker` is now `pub` (Stage 1 needed
-  visibility for Session.token_tracker); C18 should pick a canonical
-  home — moving it into the `context_engine` module would be natural.
-- `DelegationCoordinator.open_sub_session` returns a `Session::new(id)`
-  but does NOT populate `parent_session_id` / `agent_name` on the
-  returned in-memory Session — the metadata was written to the
-  backend via `create_sub_session`, but if a fresh sub-session is
-  used before being reloaded, those fields will read as defaults
-  in memory. C18 should populate them from the SessionInfo at
-  construction time.
+  knowledge_dir path. Agent2.run uses the ContextEngine facade so the
+  string is unchanged — Agent2 needs to either fix this prompt or
+  add `memory_*` tools to the summarizer's allow-list.
+- The `Agent2` name is temporary. Rename in H45.
+
+How to start next session:
+1. `cargo test --lib` should report 379 passing (current baseline).
+2. Begin with E29 — pick an `OrchestratorEvent` variant and migrate
+   that one path off `ChannelEvent` to confirm the new shape compiles.
+3. Then migrate `pending_asks` → `AskRouter.fulfill` upstream of the
+   per-session dispatch.
+4. Then replace LoopRegistry's AgentLoop with on-demand Agent2::run.
+5. H45 deletions land last, after all callers migrated.
 
 ### A3 + B12 + C21 + G43 — 类型契约收尾 + ContextEngine 门面
 
