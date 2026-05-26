@@ -190,6 +190,13 @@ impl ConfigLoader {
         // Expand environment variables in all string fields.
         Self::expand_env_vars(&mut raw);
 
+        // Canonicalize config_path to absolute (daemon may chdir later).
+        let config_path = if config_path.is_relative() {
+            std::env::current_dir().unwrap_or_default().join(config_path)
+        } else {
+            config_path
+        };
+
         // Resolve workspace_dir.
         let workspace_dir = raw.workspace_dir
             .map(|dir| Self::expand_path(&dir))
