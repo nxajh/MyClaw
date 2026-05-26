@@ -252,6 +252,38 @@ rewrite to land. Net: -1 trait, -1 dual impl, ~30 references re-routed.
 
 Result: 377 lib tests still passing.
 
+### "继续" 第三轮收尾 — C18 完整 + E30 + E29 前置
+
+This round's increment on top of "继续" round 2:
+- **C18 streaming** — collect_stream gains
+  `(Option<&Arc<dyn Channel>>, Option<&str>)` params; when both set,
+  emits `TurnEvent::Chunk` per Delta and `TurnEvent::Thinking` per
+  Thinking via `channel.push_event(reply_target, …)`. Agent2.run
+  emits ToolCall pre-execution, ToolResult post-execution, Done
+  before persist. Borrow-management snapshots channel + reply_target
+  into owned locals outside &mut session windows.
+- **C18 image attachment** — snapshot
+  `session.last_message.image_urls/image_base64` at turn start; on
+  the first LLM call only, append ContentPart::ImageUrl /
+  ContentPart::ImageB64 to the last user message. Gated on
+  `chat_model_config.supports_image_input()`. Attached before
+  ChatRequest construction to avoid a &messages immutable / &mut
+  messages conflict.
+- **E29 + E30 partial / final** — `agent_runtime: AgentRuntime` field
+  added to Orchestrator + OrchestratorParts. Daemon builds it from
+  the existing Agent's plumbing (registry/tools/skills/agents) +
+  BackendPersistHook + workspace/knowledge dirs. AskRouter wiring
+  from round 2 stays — inbound dispatch calls
+  `ask_router.fulfill(session.id, content)` ahead of legacy
+  `pending_asks.remove(&sk)`.
+
+After this round: 57 / 61 done; C18 main body complete and on disk;
+Orchestrator owns both the legacy `agent` (AgentLoop factory) and the
+new `agent_runtime` (Agent2 runtime). E29 main-loop swap, H45
+deletion, and the remaining cleanup deletions are the focused
+next-session work — none of them are blocked on missing scaffolding
+any more.
+
 ### Stage 2 — 剩余项 ("继续" 第二轮收尾)
 
 Done this round (incremental progress on top of Stage 1):
