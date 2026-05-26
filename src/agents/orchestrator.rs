@@ -100,6 +100,12 @@ pub struct Orchestrator {
     /// AgentLoop is deleted (H45). Shared with daemon-side AskUserTool
     /// construction.
     ask_router: Arc<crate::agents::AskRouter>,
+    /// AgentRuntime for `Agent2::run` (RFC v2 §三.A). Held alongside
+    /// the legacy `agent` field — E29 will eventually swap the main-
+    /// loop dispatch onto Agent2 + agent_runtime, then H45 deletes the
+    /// legacy fields.
+    #[allow(dead_code)]
+    agent_runtime: crate::agents::AgentRuntime,
     /// Sub-agent delegator (for async delegation).
     sub_delegator: Option<Arc<SubAgentDelegator>>,
     /// Delegation manager (shared with DelegateTaskTool via handler).
@@ -214,6 +220,11 @@ pub struct OrchestratorParts {
     /// `ask_router.fulfill(session.id, msg.content)` ahead of the legacy
     /// `pending_asks` check so both paths work during the transition.
     pub ask_router: Arc<crate::agents::AskRouter>,
+    /// AgentRuntime for the new `Agent2::run` per-turn path. Coexists
+    /// with `agent` (legacy AgentLoop factory) until E29 swaps the
+    /// orchestrator's main-loop dispatch over to Agent2::run and H45
+    /// deletes AgentLoop.
+    pub agent_runtime: crate::agents::AgentRuntime,
     /// Sub-agents that were still running when the previous daemon was killed.
     /// Injected as a recovery hint into the first session interaction.
     pub unfinished_subagents: Vec<crate::agents::UnfinishedSubAgent>,
@@ -276,6 +287,7 @@ impl Orchestrator {
             listener_handles,
             pending_asks: Arc::new(DashMap::new()),
             ask_router: parts.ask_router,
+            agent_runtime: parts.agent_runtime,
             sub_delegator: parts.sub_delegator,
             delegation_manager: parts.delegation_manager,
             delegation_rx: Arc::new(TokioMutex::new(parts.delegation_rx)),

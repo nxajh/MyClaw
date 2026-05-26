@@ -921,6 +921,25 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // session can finish in ~10 lines.
     let ask_router = Arc::new(crate::agents::AskRouter::new());
 
+    // E30 final: build AgentRuntime to hand to the orchestrator. Today
+    // the orchestrator's main loop still constructs AgentLoop per
+    // session via `agent.loop_for_with_persist`; the AgentRuntime field
+    // sits in parallel so E29 can flip the dispatch over without
+    // having to re-thread plumbing first.
+    let agent_runtime = {
+        let persist_hook: Arc<dyn crate::agents::PersistHook> = Arc::new(
+            crate::agents::session::BackendPersistHook::new(Arc::clone(&session_backend)),
+        );
+        crate::agents::AgentRuntime::new(
+            Arc::clone(agent.registry()),
+            Arc::clone(agent.tools()),
+            Arc::clone(agent.skills()),
+            agent.sub_agent_configs().clone(),
+        )
+        .with_persist(persist_hook)
+        .with_dirs(config.workspace_dir.clone(), config.knowledge_dir.clone())
+    };
+
     let parts = OrchestratorParts {
         agent: agent.clone(),
         session_manager,
@@ -937,6 +956,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         workspace_dir: config.workspace_dir.clone(),
         scheduler: Some(shared_scheduler.clone()),
         ask_router: Arc::clone(&ask_router),
+        agent_runtime,
     };
 
     // ── Launch ─────────────────────────────────────────────────────────────

@@ -5,9 +5,9 @@
 
 ## 进度统计
 
-- 完成：56 / 61
-- 进行中：C18 主体完成（流式 + 图片 + compaction + retry 已落，编辑性减项 fallback/interrupt/boosted 留待 H45 前补）；F35（real AskUserTool + AskRouter 双路并存，daemon 注册待 E29）；E29 前置（ask_router.fulfill 先于 pending_asks）
-- 待办：5
+- 完成：57 / 61
+- 进行中：C18 主体完成；F35 双路并存；E29 前置 + E30 完成
+- 待办：4
 
 ## 模块 A：类型基础（0/11）
 
@@ -52,7 +52,7 @@
 
 - [x] E28. `OrchestratorEvent` enum → `src/agents/orchestrator_event.rs`
 - [~] E29. Orchestrator 主循环：`ask_router.fulfill(session.id, content)` 已在 inbound 调度先于 `pending_asks` legacy 检查（dual-mode 过渡）。**待补**：OrchestratorEvent 单一接收路径替换三路 select、per-channel adapter mpsc → event 转换、LoopRegistry → 每轮 Agent2::run 调用、删 LoopRegistry/SessionHandle/run_session_actor/TurnStream/TurnInput（H45 联动）
-- [~] E30. Orchestrator 字段：`ask_router: Arc<AskRouter>` 已加（连入 inbound dispatch）；`agent_runtime: AgentRuntime` 待 E29 完成切换时一起加
+- [x] E30. Orchestrator 字段：`ask_router: Arc<AskRouter>` 已加（连入 inbound dispatch），`agent_runtime: AgentRuntime` 已加（daemon 构造时 with_persist + with_dirs，dead_code 直到 E29 切换调用）
 - [x] E31. `AskRouter` 实现（register/fulfill/cancel；indexed by session_id）→ `src/agents/ask_router.rs`
 - [ ] E32. ClientChannel 改造（streams 按 reply_target 索引；push_event/cancel_signal；强制 auth token）
 - [x] E33. WebhookHandler 已是协议适配器（接 HTTP → ChannelMessage → Channel.send；无业务逻辑）
