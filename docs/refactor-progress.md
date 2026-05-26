@@ -51,7 +51,7 @@
 ## 模块 E：路由（0/7）
 
 - [x] E28. `OrchestratorEvent` enum → `src/agents/orchestrator_event.rs`
-- [~] E29. Orchestrator 主循环：`ask_router.fulfill(session.id, content)` 已在 inbound 调度先于 `pending_asks` legacy 检查（dual-mode 过渡）。**待补**：OrchestratorEvent 单一接收路径替换三路 select、per-channel adapter mpsc → event 转换、LoopRegistry → 每轮 Agent2::run 调用、删 LoopRegistry/SessionHandle/run_session_actor/TurnStream/TurnInput（H45 联动）
+- [~] E29. Orchestrator 主循环：**已迁移到 OrchestratorEvent 单源**（3 个 mpsc 适配器任务 pump 到统一 channel；主循环 select(event_rx, shutdown)；match Inbound/Delegation/Scheduled/AskReply/Shutdown）；`handle_channel_event` 私有助手保留 400 行原 inbound dispatch；ask_router.fulfill 在 inbound dispatch 内先于 pending_asks legacy。**待补**：LoopRegistry → 每轮 Agent2::run 调用、删 LoopRegistry/SessionHandle/run_session_actor/TurnStream/TurnInput（H45 联动）
 - [x] E30. Orchestrator 字段：`ask_router: Arc<AskRouter>` 已加（连入 inbound dispatch），`agent_runtime: AgentRuntime` 已加（daemon 构造时 with_persist + with_dirs，dead_code 直到 E29 切换调用）
 - [x] E31. `AskRouter` 实现（register/fulfill/cancel；indexed by session_id）→ `src/agents/ask_router.rs`
 - [ ] E32. ClientChannel 改造（streams 按 reply_target 索引；push_event/cancel_signal；强制 auth token）

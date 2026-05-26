@@ -12,6 +12,7 @@
 use anyhow::Context;
 use crate::agents::delegation::{DelegationEvent, DelegationManager};
 use crate::agents::delegation_coordinator::DelegationCoordinator as SubAgentDelegator;
+use crate::agents::OrchestratorEvent;
 use crate::channels::{Channel, ChannelMessage, SendMessage, ProcessingStatus, InlineButton};
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -424,6 +425,74 @@ impl Orchestrator {
         self.startup_recover_sessions(&registry);
         self.startup_recover_subagents(&registry, &unfinished_subagents, &delegation_manager);
 
+        // E29: unify the three event sources (user messages / delegation /
+        // scheduler) onto a single mpsc<OrchestratorEvent>. Adapter tasks
+        // pump from each source channel; the main loop selects on the
+        // unified channel + shutdown. AskReply variant is reserved for
+        // future ask_router wiring inside Agent2.run.
+        let (event_tx, mut event_rx) = mpsc::channel::<OrchestratorEvent>(CHANNEL_QUEUE_SIZE);
+
+        // Adapter: user messages → Inbound
+        let inbound_handle = {
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                while let Some(((ct, ac), msg)) = rx.recv().await {
+                    if event_tx
+                        .send(OrchestratorEvent::Inbound {
+                            channel_type: ct,
+                            account_id: ac,
+                            message: msg,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+        };
+
+        // Adapter: delegation events → Delegation
+        let delegation_handle = if let Some(mut drx) = delegation_rx.take() {
+            let event_tx = event_tx.clone();
+            Some(tokio::spawn(async move {
+                while let Some(e) = drx.recv().await {
+                    if event_tx
+                        .send(OrchestratorEvent::Delegation(e))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
+        // Adapter: scheduler events → Scheduled
+        let scheduler_handle = if let Some(mut srx) = scheduler_rx.take() {
+            let event_tx = event_tx.clone();
+            Some(tokio::spawn(async move {
+                while let Some(e) = srx.recv().await {
+                    if event_tx
+                        .send(OrchestratorEvent::Scheduled(e))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
+        // Drop our local copy of the sender; the three adapters hold clones.
+        // When all adapters exit (all source channels closed), event_rx.recv()
+        // returns None and the main loop breaks.
+        drop(event_tx);
+
         loop {
             if *shutdown_rx.borrow() {
                 tracing::debug!("shutdown requested, exiting message loop");
@@ -437,322 +506,288 @@ impl Orchestrator {
                 break;
             }
 
-            let event = if delegation_rx.is_some() {
-                // select over user messages + delegation events + scheduler events + shutdown
-                tokio::select! {
-                    msg = rx.recv() => match msg {
-                        Some(m) => ChannelEvent::UserMessage(m),
-                        None => break,
-                    },
-                    event = delegation_rx.as_mut().unwrap().recv() => {
-                        match event {
-                            Some(e) => ChannelEvent::Delegation(e),
-                            None => {
-                                // Delegation channel closed, stop listening for it.
-                                delegation_rx = None;
-                                continue;
-                            }
-                        }
-                    },
-                    // Scheduler events (heartbeat ticks, cron triggers) from Scheduler task.
-                    event = async {
-                        if let Some(rx) = scheduler_rx.as_mut() {
-                            rx.recv().await
-                        } else {
-                            std::future::pending().await
-                        }
-                    }, if scheduler_rx.is_some() => {
-                        match event {
-                            Some(e) => self.handle_scheduler_event(e).await,
-                            None => {
-                                tracing::warn!("scheduler channel closed, disabling scheduler");
-                                scheduler_rx = None;
-                            }
-                        }
-                        continue;
-                    },
-                    _ = shutdown_rx.changed() => {
-                        tracing::info!("shutdown signal received");
-                        break;
-                    }
-                }
-            } else {
-                // No delegation events — user messages + scheduler events + shutdown
-                tokio::select! {
-                    msg = rx.recv() => match msg {
-                        Some(m) => ChannelEvent::UserMessage(m),
-                        None => break,
-                    },
-                    // Scheduler events (heartbeat ticks, cron triggers) from Scheduler task.
-                    event = async {
-                        if let Some(rx) = scheduler_rx.as_mut() {
-                            rx.recv().await
-                        } else {
-                            std::future::pending().await
-                        }
-                    }, if scheduler_rx.is_some() => {
-                        match event {
-                            Some(e) => self.handle_scheduler_event(e).await,
-                            None => {
-                                tracing::warn!("scheduler channel closed, disabling scheduler");
-                                scheduler_rx = None;
-                            }
-                        }
-                        continue;
-                    },
-                    _ = shutdown_rx.changed() => {
-                        tracing::info!("shutdown signal received");
-                        break;
-                    }
+            let event = tokio::select! {
+                ev = event_rx.recv() => match ev {
+                    Some(e) => e,
+                    None => break, // all adapters exited
+                },
+                _ = shutdown_rx.changed() => {
+                    tracing::info!("shutdown signal received");
+                    break;
                 }
             };
 
             match event {
-                ChannelEvent::UserMessage(((channel_type, account_id), msg)) => {
-                    // Track last channel for scheduler target resolution.
-                    let lc_val = format!("{}:{}", channel_type, account_id);
-                    {
-                        let mut lc = self.last_channel.lock().await;
-                        if lc.as_deref() != Some(&lc_val) {
-                            *lc = Some(lc_val.clone());
-                            let _ = std::fs::write(&self.last_channel_file, &lc_val);
-                        }
-                    }
-                    // Track last recipient for heartbeat/cron target resolution.
-                    let recipient = msg.reply_target.clone();
-                    {
-                        let mut lr = self.last_recipient.lock().await;
-                        if lr.as_deref() != Some(&recipient) {
-                            *lr = Some(recipient.clone());
-                            let _ = std::fs::write(&self.last_recipient_file, &recipient);
-                        }
-                    }
-
-                    let sk = Self::session_key(&channel_type, &account_id, &msg.sender);
-                    let channel_key = (channel_type.clone(), account_id.clone());
-
-                    // RFC v2 §三.B: check the new `AskRouter` first (indexed
-                    // by session.id, used by AskUserTool::with_router). If
-                    // it fulfilled an outstanding ask, the inbound message
-                    // is consumed and no fresh turn is spawned. Falls
-                    // through to the legacy `pending_asks` path below when
-                    // no router-side ask was pending — both paths coexist
-                    // during the C18 / E29 transition window.
-                    {
-                        let session_id = self
-                            .session_manager
-                            .get_or_create(&sk)
-                            .id
-                            .clone();
-                        if self.ask_router.fulfill(&session_id, msg.content.clone()) {
-                            tracing::debug!(
-                                session = %session_id,
-                                "ask_router fulfilled pending ask, consuming inbound"
-                            );
-                            continue;
-                        }
-                    }
-
-                    // Check if this is a reply to a pending ask_user.
-                    if let Some((_, (tx, _))) = self.pending_asks.remove(&sk) {
-                        // Deliver the user's answer to the waiting ask_user handler.
-                        if tx.send(msg.content.clone()).is_err() {
-                            warn!(session = %sk, "ask_user oneshot already closed");
-                        }
-                        // Do NOT spawn a new agent loop — the existing one is waiting.
-                        continue;
-                    }
-
-                    // Check if this is a retry/abort callback from an EmptyResponse prompt.
-                    if msg.content.starts_with("__retry:") || msg.content.starts_with("__abort:") {
-                        let is_retry = msg.content.starts_with("__retry:");
-                        let reply_target = msg.reply_target.clone();
-
-                        let channel: Option<Arc<dyn Channel>> = {
-                            channels.get(&channel_key).map(|r| r.clone())
-                        };
-                        let channel = match channel {
-                            Some(c) => c,
-                            None => continue,
-                        };
-
-                        if is_retry {
-                            // Take the pending retry message from the agent loop.
-                            // pending_retry is only set after a turn finishes (lock released),
-                            // so try_lock is safe and never blocks the main dispatch loop.
-                            let handle = registry.get_or_create(&sk, &reply_target);
-                            let pending = handle.loop_.try_lock().ok()
-                                .and_then(|mut g| g.take_pending_retry());
-
-                            if let Some(user_msg) = pending {
-                                let reply_to_id = Some(msg.id.clone());
-                                tokio::spawn(run_retry_task(
-                                    sk.clone(), channel, handle.loop_.clone(),
-                                    user_msg, reply_target.clone(), reply_to_id,
-                                ));
-                            } else {
-                                let send_msg = SendMessage::new(
-                                    MSG_NO_PENDING_RETRY,
-                                    reply_target.clone(),
-                                );
-                                let _ = channel.send(&send_msg).await;
-                            }
-                        } else {
-                            // Abort — clear pending retry and acknowledge.
-                            // pending_retry only exists after a turn ends; try_lock is safe.
-                            let handle = registry.get_or_create(&sk, &reply_target);
-                            if let Ok(mut guard) = handle.loop_.try_lock() {
-                                guard.take_pending_retry();
-                            }
-                            let send_msg = SendMessage::new(MSG_ABORT_ACK, reply_target.clone());
-                            let _ = channel.send(&send_msg).await;
-                        }
-                        continue;
-                    }
-
-                    // Check for an incomplete turn loaded from a previous crash/SIGKILL.
-                    // A session that is incomplete is idle (actor is waiting); try_lock succeeds.
-                    // If it fails the session is busy — skip and let the actor queue the message.
-                    {
-                        let handle = registry.get_or_create(&sk, &msg.reply_target);
-                        if let Ok(mut guard) = handle.loop_.try_lock() {
-                            if guard.session.incomplete_turn {
-                                guard.session.incomplete_turn = false;
-
-                                // Extract the orphaned user message for retry.
-                                let last_user_msg = guard.session.history.last()
-                                    .filter(|m| m.role == "user")
-                                    .map(|m| m.text_content().to_string())
-                                    .unwrap_or_default();
-                                guard.set_pending_retry(last_user_msg.clone());
-                                drop(guard);
-
-                                let channel = match channels.get(&channel_key).map(|r| r.clone()) {
-                                    Some(c) => c,
-                                    None => continue,
-                                };
-                                let send_msg = retry_abort_prompt(
-                                    MSG_INCOMPLETE_TURN,
-                                    &sk,
-                                    msg.reply_target.clone(),
-                                    Some(msg.id.clone()),
-                                );
-                                if let Err(e) = channel.send(&send_msg).await {
-                                    error!(session = %sk, err = %e, "failed to send incomplete-turn prompt");
-                                }
-                                continue;
-                            }
-                        }
-                    }
-
-                    let content = msg.content.clone();
-                    let image_urls = msg.image_urls.clone();
-                    let image_base64 = msg.image_base64.clone();
-                    let reply_target = msg.reply_target.clone();
-                    let reply_to_id = Some(msg.id.clone());
-
-                    // Intercept slash commands before reaching agent loop.
-                    // Recognised commands are dispatched in a background task so the main
-                    // loop is never blocked waiting for the AgentLoop mutex — that mutex
-                    // may already be held by a concurrent run_message_task.  Unknown
-                    // "slash-like" inputs fall through to the normal agent-loop path.
-                    if let Some((cmd, cmd_args)) = super::commands::parse_command(&content) {
-                        if super::commands::is_known_command(cmd) {
-                            let sk_cmd        = sk.clone();
-                            let cmd_owned     = cmd.to_string();
-                            let cmd_args_owned = cmd_args.to_string();
-                            let session_loop  = sessions.get(&sk).map(|r| r.loop_.clone());
-                            let registry_cmd  = agent.registry().clone();
-                            let sm_cmd        = self.session_manager.clone();
-                            let agent_cmd     = agent.clone();
-                            let mcp_cmd       = self.mcp_manager.clone();
-                            let sessions_cmd  = sessions.clone();
-                            let cooldown_cmd  = self.search_cooldown.clone();
-                            let channel_cmd   = channels.get(&channel_key).map(|r| r.clone());
-                            let rt_cmd        = reply_target.clone();
-                            let rid_cmd       = reply_to_id.clone();
-
-                            tokio::spawn(async move {
-                                let cmd_ctx = super::commands::CommandContext {
-                                    user_id:        &sk_cmd,
-                                    registry:       &registry_cmd,
-                                    session_manager: &sm_cmd,
-                                    agent:          &agent_cmd,
-                                    agent_loop:     session_loop.as_ref(),
-                                    mcp_manager:    mcp_cmd.as_ref(),
-                                    sessions:       &sessions_cmd,
-                                    search_cooldown: cooldown_cmd.as_ref(),
-                                };
-                                if let Some(response) = super::commands::dispatch(
-                                    &cmd_owned, &cmd_args_owned, cmd_ctx,
-                                ).await {
-                                    if let Some(channel) = channel_cmd {
-                                        let send_msg = SendMessage {
-                                            recipient:          rt_cmd,
-                                            content:            response,
-                                            subject:            None,
-                                            thread_ts:          rid_cmd,
-                                            cancellation_token: None,
-                                            attachments:        vec![],
-                                            image_urls:         None,
-                                            inline_buttons:     None,
-                                        };
-                                        if let Err(e) = channel.send(&send_msg).await {
-                                            error!(session = %sk_cmd, err = %e,
-                                                "command response send failed");
-                                        }
-                                    }
-                                }
-                            });
-                            continue;
-                        }
-                    }
-
-                    // B12: store full inbound ChannelMessage on session so
-                    // startup recovery can reconstruct the routing context
-                    // (sender + reply_target + attachments). Falls back to
-                    // legacy reply_target field via record_inbound.
-                    {
-                        let mut session = self.session_manager.get_or_create(&sk);
-                        session.record_inbound(msg.clone());
-                    }
-                    // Persist: prefer save_last_message (richer); save_reply_target
-                    // is kept until all readers migrate to last_message.
-                    if let Err(e) = self.persist_backend.save_last_message(&sk, &msg) {
-                        tracing::warn!(session = %sk, err = %e, "failed to persist last_message");
-                    }
-                    if let Err(e) = self.persist_backend.save_reply_target(&sk, &reply_target) {
-                        tracing::warn!(session = %sk, err = %e, "failed to persist reply_target");
-                    }
-
-                    let channel = match channels.get(&channel_key).map(|r| r.clone()) {
-                        Some(c) => c,
-                        None => continue,
-                    };
-                    let handle = registry.get_or_create(&sk, &reply_target);
-                    if let Err(e) = handle.tx.send(TurnMessage {
-                        content,
-                        image_urls,
-                        image_base64,
-                        channel,
-                        reply_target,
-                        reply_to_id,
-                    }).await {
-                        error!(session = %sk, err = %e, "session actor inbox closed");
+                OrchestratorEvent::Scheduled(e) => {
+                    self.handle_scheduler_event(e).await;
+                }
+                OrchestratorEvent::Shutdown => {
+                    tracing::info!("OrchestratorEvent::Shutdown received");
+                    break;
+                }
+                OrchestratorEvent::AskReply { session_id, answer } => {
+                    // F35 forward path: AskRouter.fulfill on inbound is the
+                    // normal mechanism; the AskReply variant exists for
+                    // future explicit routing (e.g. webhook-delivered
+                    // replies). For now log and discard if unfulfilled.
+                    if !self.ask_router.fulfill(&session_id, answer) {
+                        tracing::warn!(session = %session_id, "AskReply for unknown session");
                     }
                 }
-                ChannelEvent::Delegation(event) => {
-                    let sessions = self.sessions.clone();
-                    let channels = self.channels.clone();
-                    tokio::spawn(async move {
-                        handle_delegation_task(sessions, channels, event).await;
-                    });
+                OrchestratorEvent::Inbound { channel_type, account_id, message: msg } => {
+                    let event = ChannelEvent::UserMessage(((channel_type, account_id), msg));
+                    self.handle_channel_event(event, &registry).await;
+                }
+                OrchestratorEvent::Delegation(event) => {
+                    let event = ChannelEvent::Delegation(event);
+                    self.handle_channel_event(event, &registry).await;
                 }
             }
         }
 
+        // Abort adapter tasks so they don't outlive the orchestrator.
+        inbound_handle.abort();
+        if let Some(h) = delegation_handle {
+            h.abort();
+        }
+        if let Some(h) = scheduler_handle {
+            h.abort();
+        }
+
         info!("all listeners stopped, exiting");
         Ok(())
+    }
+
+    /// Dispatch for the existing `ChannelEvent` variants. Kept as a private
+    /// helper so the E29 main-loop migration to `OrchestratorEvent` can
+    /// reuse the well-tested 400-line inbound dispatch logic verbatim
+    /// rather than rewriting it inline.
+    async fn handle_channel_event(&self, event: ChannelEvent, registry: &LoopRegistry) {
+        let sessions = self.sessions.clone();
+        let channels = self.channels.clone();
+        match event {
+            ChannelEvent::UserMessage(((channel_type, account_id), msg)) => {
+                // Track last channel for scheduler target resolution.
+                let lc_val = format!("{}:{}", channel_type, account_id);
+                {
+                    let mut lc = self.last_channel.lock().await;
+                    if lc.as_deref() != Some(&lc_val) {
+                        *lc = Some(lc_val.clone());
+                        let _ = std::fs::write(&self.last_channel_file, &lc_val);
+                    }
+                }
+                // Track last recipient for heartbeat/cron target resolution.
+                let recipient = msg.reply_target.clone();
+                {
+                    let mut lr = self.last_recipient.lock().await;
+                    if lr.as_deref() != Some(&recipient) {
+                        *lr = Some(recipient.clone());
+                        let _ = std::fs::write(&self.last_recipient_file, &recipient);
+                    }
+                }
+
+                let sk = Self::session_key(&channel_type, &account_id, &msg.sender);
+                let channel_key = (channel_type.clone(), account_id.clone());
+
+                // RFC v2 §三.B: check the new `AskRouter` first (indexed
+                // by session.id, used by AskUserTool::with_router). If
+                // it fulfilled an outstanding ask, the inbound message
+                // is consumed and no fresh turn is spawned. Falls
+                // through to the legacy `pending_asks` path below when
+                // no router-side ask was pending — both paths coexist
+                // during the C18 / E29 transition window.
+                {
+                    let session_id = self
+                        .session_manager
+                        .get_or_create(&sk)
+                        .id
+                        .clone();
+                    if self.ask_router.fulfill(&session_id, msg.content.clone()) {
+                        tracing::debug!(
+                            session = %session_id,
+                            "ask_router fulfilled pending ask, consuming inbound"
+                        );
+                        return;
+                    }
+                }
+
+                // Check if this is a reply to a pending ask_user.
+                if let Some((_, (tx, _))) = self.pending_asks.remove(&sk) {
+                    // Deliver the user's answer to the waiting ask_user handler.
+                    if tx.send(msg.content.clone()).is_err() {
+                        warn!(session = %sk, "ask_user oneshot already closed");
+                    }
+                    // Do NOT spawn a new agent loop — the existing one is waiting.
+                    return;
+                }
+
+                // Check if this is a retry/abort callback from an EmptyResponse prompt.
+                if msg.content.starts_with("__retry:") || msg.content.starts_with("__abort:") {
+                    let is_retry = msg.content.starts_with("__retry:");
+                    let reply_target = msg.reply_target.clone();
+
+                    let channel: Option<Arc<dyn Channel>> = {
+                        channels.get(&channel_key).map(|r| r.clone())
+                    };
+                    let channel = match channel {
+                        Some(c) => c,
+                        None => return,
+                    };
+
+                    if is_retry {
+                        let handle = registry.get_or_create(&sk, &reply_target);
+                        let pending = handle.loop_.try_lock().ok()
+                            .and_then(|mut g| g.take_pending_retry());
+
+                        if let Some(user_msg) = pending {
+                            let reply_to_id = Some(msg.id.clone());
+                            tokio::spawn(run_retry_task(
+                                sk.clone(), channel, handle.loop_.clone(),
+                                user_msg, reply_target.clone(), reply_to_id,
+                            ));
+                        } else {
+                            let send_msg = SendMessage::new(
+                                MSG_NO_PENDING_RETRY,
+                                reply_target.clone(),
+                            );
+                            let _ = channel.send(&send_msg).await;
+                        }
+                    } else {
+                        let handle = registry.get_or_create(&sk, &reply_target);
+                        if let Ok(mut guard) = handle.loop_.try_lock() {
+                            guard.take_pending_retry();
+                        }
+                        let send_msg = SendMessage::new(MSG_ABORT_ACK, reply_target.clone());
+                        let _ = channel.send(&send_msg).await;
+                    }
+                    return;
+                }
+
+                // Check for an incomplete turn loaded from a previous crash/SIGKILL.
+                {
+                    let handle = registry.get_or_create(&sk, &msg.reply_target);
+                    if let Ok(mut guard) = handle.loop_.try_lock() {
+                        if guard.session.incomplete_turn {
+                            guard.session.incomplete_turn = false;
+
+                            let last_user_msg = guard.session.history.last()
+                                .filter(|m| m.role == "user")
+                                .map(|m| m.text_content().to_string())
+                                .unwrap_or_default();
+                            guard.set_pending_retry(last_user_msg.clone());
+                            drop(guard);
+
+                            let channel = match channels.get(&channel_key).map(|r| r.clone()) {
+                                Some(c) => c,
+                                None => return,
+                            };
+                            let send_msg = retry_abort_prompt(
+                                MSG_INCOMPLETE_TURN,
+                                &sk,
+                                msg.reply_target.clone(),
+                                Some(msg.id.clone()),
+                            );
+                            if let Err(e) = channel.send(&send_msg).await {
+                                error!(session = %sk, err = %e, "failed to send incomplete-turn prompt");
+                            }
+                            return;
+                        }
+                    }
+                }
+
+                let content = msg.content.clone();
+                let image_urls = msg.image_urls.clone();
+                let image_base64 = msg.image_base64.clone();
+                let reply_target = msg.reply_target.clone();
+                let reply_to_id = Some(msg.id.clone());
+
+                // Intercept slash commands before reaching agent loop.
+                if let Some((cmd, cmd_args)) = super::commands::parse_command(&content) {
+                    if super::commands::is_known_command(cmd) {
+                        let sk_cmd        = sk.clone();
+                        let cmd_owned     = cmd.to_string();
+                        let cmd_args_owned = cmd_args.to_string();
+                        let session_loop  = sessions.get(&sk).map(|r| r.loop_.clone());
+                        let registry_cmd  = self.agent.registry().clone();
+                        let sm_cmd        = self.session_manager.clone();
+                        let agent_cmd     = self.agent.clone();
+                        let mcp_cmd       = self.mcp_manager.clone();
+                        let sessions_cmd  = sessions.clone();
+                        let cooldown_cmd  = self.search_cooldown.clone();
+                        let channel_cmd   = channels.get(&channel_key).map(|r| r.clone());
+                        let rt_cmd        = reply_target.clone();
+                        let rid_cmd       = reply_to_id.clone();
+
+                        tokio::spawn(async move {
+                            let cmd_ctx = super::commands::CommandContext {
+                                user_id:        &sk_cmd,
+                                registry:       &registry_cmd,
+                                session_manager: &sm_cmd,
+                                agent:          &agent_cmd,
+                                agent_loop:     session_loop.as_ref(),
+                                mcp_manager:    mcp_cmd.as_ref(),
+                                sessions:       &sessions_cmd,
+                                search_cooldown: cooldown_cmd.as_ref(),
+                            };
+                            if let Some(response) = super::commands::dispatch(
+                                &cmd_owned, &cmd_args_owned, cmd_ctx,
+                            ).await {
+                                if let Some(channel) = channel_cmd {
+                                    let send_msg = SendMessage {
+                                        recipient:          rt_cmd,
+                                        content:            response,
+                                        subject:            None,
+                                        thread_ts:          rid_cmd,
+                                        cancellation_token: None,
+                                        attachments:        vec![],
+                                        image_urls:         None,
+                                        inline_buttons:     None,
+                                    };
+                                    if let Err(e) = channel.send(&send_msg).await {
+                                        error!(session = %sk_cmd, err = %e,
+                                            "command response send failed");
+                                    }
+                                }
+                            }
+                        });
+                        return;
+                    }
+                }
+
+                // B12: store full inbound ChannelMessage on session.
+                {
+                    let mut session = self.session_manager.get_or_create(&sk);
+                    session.record_inbound(msg.clone());
+                }
+                if let Err(e) = self.persist_backend.save_last_message(&sk, &msg) {
+                    tracing::warn!(session = %sk, err = %e, "failed to persist last_message");
+                }
+                if let Err(e) = self.persist_backend.save_reply_target(&sk, &reply_target) {
+                    tracing::warn!(session = %sk, err = %e, "failed to persist reply_target");
+                }
+
+                let channel = match channels.get(&channel_key).map(|r| r.clone()) {
+                    Some(c) => c,
+                    None => return,
+                };
+                let handle = registry.get_or_create(&sk, &reply_target);
+                if let Err(e) = handle.tx.send(TurnMessage {
+                    content,
+                    image_urls,
+                    image_base64,
+                    channel,
+                    reply_target,
+                    reply_to_id,
+                }).await {
+                    error!(session = %sk, err = %e, "session actor inbox closed");
+                }
+            }
+            ChannelEvent::Delegation(event) => {
+                tokio::spawn(async move {
+                    handle_delegation_task(sessions, channels, event).await;
+                });
+            }
+        }
     }
 
     /// Handle a scheduler event (from the Scheduler task via mpsc).
