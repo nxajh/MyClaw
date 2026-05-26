@@ -89,8 +89,17 @@ pub struct Orchestrator {
     msg_rx: Arc<TokioMutex<Option<mpsc::Receiver<((String, String), ChannelMessage)>>>>,
     /// Listener task handles — taken and awaited on shutdown.
     listener_handles: Vec<JoinHandle<()>>,
-    /// Pending ask_user replies: session_key → (oneshot sender, reply_target).
+    /// Pending ask_user replies (legacy, indexed by routing_key): session_key →
+    /// (oneshot sender, reply_target). Used by the closure-based AskUserHandler
+    /// wired into AgentLoop. Stage 2 / E29 will replace this with `ask_router`
+    /// once Agent2.run is the only execution path.
     pending_asks: Arc<DashMap<String, (oneshot::Sender<String>, String)>>,
+    /// AskRouter (RFC v2 §三.B): indexed by session.id, fulfilled by inbound
+    /// messages ahead of process_turn. Wired here so the new
+    /// `AskUserTool::with_router` path is reachable end-to-end before
+    /// AgentLoop is deleted (H45). Shared with daemon-side AskUserTool
+    /// construction.
+    ask_router: Arc<crate::agents::AskRouter>,
     /// Sub-agent delegator (for async delegation).
     sub_delegator: Option<Arc<SubAgentDelegator>>,
     /// Delegation manager (shared with DelegateTaskTool via handler).
@@ -200,6 +209,11 @@ pub struct OrchestratorParts {
     pub scheduler_rx: Option<mpsc::Receiver<SchedulerEvent>>,
     /// Search provider cooldown tracker (shared with WebSearchTool).
     pub search_cooldown: Option<Arc<crate::tools::search_cooldown::SearchProviderCooldown>>,
+    /// AskRouter shared with the daemon-side `AskUserTool::with_router`
+    /// construction. The orchestrator's inbound dispatch calls
+    /// `ask_router.fulfill(session.id, msg.content)` ahead of the legacy
+    /// `pending_asks` check so both paths work during the transition.
+    pub ask_router: Arc<crate::agents::AskRouter>,
     /// Sub-agents that were still running when the previous daemon was killed.
     /// Injected as a recovery hint into the first session interaction.
     pub unfinished_subagents: Vec<crate::agents::UnfinishedSubAgent>,
@@ -261,6 +275,7 @@ impl Orchestrator {
             msg_rx: Arc::new(TokioMutex::new(Some(msg_rx))),
             listener_handles,
             pending_asks: Arc::new(DashMap::new()),
+            ask_router: parts.ask_router,
             sub_delegator: parts.sub_delegator,
             delegation_manager: parts.delegation_manager,
             delegation_rx: Arc::new(TokioMutex::new(parts.delegation_rx)),
@@ -503,6 +518,28 @@ impl Orchestrator {
 
                     let sk = Self::session_key(&channel_type, &account_id, &msg.sender);
                     let channel_key = (channel_type.clone(), account_id.clone());
+
+                    // RFC v2 §三.B: check the new `AskRouter` first (indexed
+                    // by session.id, used by AskUserTool::with_router). If
+                    // it fulfilled an outstanding ask, the inbound message
+                    // is consumed and no fresh turn is spawned. Falls
+                    // through to the legacy `pending_asks` path below when
+                    // no router-side ask was pending — both paths coexist
+                    // during the C18 / E29 transition window.
+                    {
+                        let session_id = self
+                            .session_manager
+                            .get_or_create(&sk)
+                            .id
+                            .clone();
+                        if self.ask_router.fulfill(&session_id, msg.content.clone()) {
+                            tracing::debug!(
+                                session = %session_id,
+                                "ask_router fulfilled pending ask, consuming inbound"
+                            );
+                            continue;
+                        }
+                    }
 
                     // Check if this is a reply to a pending ask_user.
                     if let Some((_, (tx, _))) = self.pending_asks.remove(&sk) {

@@ -905,6 +905,12 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // scheduler_tx already created above; scheduler_rx goes to OrchestratorParts.
     let session_manager_for_webhook = Arc::clone(&session_manager);
 
+    // F35 / partial E29: build the AskRouter once and share between the
+    // orchestrator (fulfill side) and AskUserTool::with_router (register
+    // side). Stored as a top-level binding so future tool constructions
+    // (DelegateTool etc.) can share it too.
+    let ask_router = Arc::new(crate::agents::AskRouter::new());
+
     let parts = OrchestratorParts {
         agent: agent.clone(),
         session_manager,
@@ -920,6 +926,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         unfinished_subagents,
         workspace_dir: config.workspace_dir.clone(),
         scheduler: Some(shared_scheduler.clone()),
+        ask_router: Arc::clone(&ask_router),
     };
 
     // ── Launch ─────────────────────────────────────────────────────────────
