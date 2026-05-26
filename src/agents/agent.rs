@@ -35,7 +35,9 @@ use crate::agents::loop_breaker::{LoopBreak, LoopBreaker};
 use crate::agents::session::Session;
 use crate::agents::tool_executor::ToolExecutor;
 use crate::agents::turn::{TurnContext, TurnResult};
+use crate::agents::turn_event::TurnEvent;
 use crate::agents::AgentRuntime;
+use crate::channels::Channel;
 use crate::config::sub_agent::SubAgentConfig;
 use crate::providers::capability_chat::{ChatMessage, ChatRequest, StopReason, ToolSpec};
 use crate::providers::{BoxStream, Capability, ContentPart, StreamEvent, ToolCall};
@@ -159,7 +161,12 @@ impl Agent2 {
             };
 
             let stream = provider.chat(req)?;
-            let response = collect_stream(stream).await?;
+            let response = collect_stream(
+                stream,
+                session.channel.as_ref(),
+                session.reply_target(),
+            )
+            .await?;
 
             // Update token tracker from API response.
             if let Some(ref usage) = response.usage {
@@ -270,6 +277,14 @@ impl Agent2 {
 
             // No tool calls → final response. Persist + return.
             if response.tool_calls.is_empty() {
+                // Emit Done event before persisting so the streaming UI gets
+                // the final-text signal in the canonical order.
+                if let (Some(ref ch), Some(rt)) = (session.channel.as_ref(), session.reply_target()) {
+                    let rt = rt.to_string();
+                    let ch = Arc::clone(ch);
+                    ch.push_event(&rt, TurnEvent::Done { text: response.text.clone() })
+                        .await;
+                }
                 if response.text.trim().is_empty() {
                     // Empty response: retry up to MAX_EMPTY_RETRIES like
                     // AgentLoop's chat_loop does. The provider sometimes
@@ -344,6 +359,27 @@ impl Agent2 {
                     ));
                 }
 
+                // Emit ToolCall event before execution (streaming UIs show
+                // the call spinner) — snapshot the channel + reply_target
+                // outside the &mut session borrow that follows.
+                if let (Some(ref ch), Some(rt)) =
+                    (session.channel.as_ref(), session.reply_target())
+                {
+                    let rt = rt.to_string();
+                    let ch = Arc::clone(ch);
+                    let args: serde_json::Value = serde_json::from_str(&call.arguments)
+                        .unwrap_or(serde_json::Value::Null);
+                    ch.push_event(
+                        &rt,
+                        TurnEvent::ToolCall {
+                            id: call.id.clone(),
+                            name: call.name.clone(),
+                            args,
+                        },
+                    )
+                    .await;
+                }
+
                 let result = tool_executor
                     .execute(call, session, Some(&permission_mode))
                     .await;
@@ -378,6 +414,25 @@ impl Agent2 {
                 tool_msg.tool_call_id = Some(call.id.clone());
                 tool_msg.is_error = Some(is_error);
                 messages.push(tool_msg);
+
+                // Emit ToolResult event after execution, before persisting,
+                // so the UI updates the call status without waiting for
+                // disk I/O.
+                if let (Some(ref ch), Some(rt)) =
+                    (session.channel.as_ref(), session.reply_target())
+                {
+                    let rt = rt.to_string();
+                    let ch = Arc::clone(ch);
+                    ch.push_event(
+                        &rt,
+                        TurnEvent::ToolResult {
+                            id: call.id.clone(),
+                            name: call.name.clone(),
+                            output: result_content.clone(),
+                        },
+                    )
+                    .await;
+                }
 
                 session.add_tool_result(call.id.clone(), result_content, is_error);
                 if let Some(ref hook) = session.persist {
@@ -477,11 +532,17 @@ struct CollectedResponse {
     usage: Option<crate::providers::ChatUsage>,
 }
 
-/// Read a full stream into a [`CollectedResponse`]. Simplified compared
-/// to `AgentLoop::collect_stream_inner` — no max_output_bytes guard, no
-/// cancellation token, no `channel.push_event` per-chunk forwarding.
-/// Those refinements move in once `Session.channel` is wired by E29.
-async fn collect_stream(stream: BoxStream<StreamEvent>) -> anyhow::Result<CollectedResponse> {
+/// Read a full stream into a [`CollectedResponse`]. When `channel`
+/// and `reply_target` are supplied (Session.channel is Some), per-chunk
+/// `TurnEvent::Chunk` / `Thinking` events are pushed via
+/// `channel.push_event(reply_target, …)` as text streams in.
+/// Simplified compared to `AgentLoop::collect_stream_inner` — no
+/// max_output_bytes guard, no cancellation token.
+async fn collect_stream(
+    stream: BoxStream<StreamEvent>,
+    channel: Option<&Arc<dyn Channel>>,
+    reply_target: Option<&str>,
+) -> anyhow::Result<CollectedResponse> {
     let mut stream = stream;
     let mut text = String::new();
     let mut reasoning_content: Option<String> = None;
@@ -518,9 +579,18 @@ async fn collect_stream(stream: BoxStream<StreamEvent>) -> anyhow::Result<Collec
         };
 
         match event {
-            StreamEvent::Delta { text: delta } => text.push_str(&delta),
+            StreamEvent::Delta { text: delta } => {
+                text.push_str(&delta);
+                if let (Some(ch), Some(rt)) = (channel, reply_target) {
+                    ch.push_event(rt, TurnEvent::Chunk { delta: delta.clone() }).await;
+                }
+            }
             StreamEvent::Thinking { text: delta } => {
                 if !delta.is_empty() {
+                    if let (Some(ch), Some(rt)) = (channel, reply_target) {
+                        ch.push_event(rt, TurnEvent::Thinking { delta: delta.clone() })
+                            .await;
+                    }
                     if let Some(rc) = &mut reasoning_content {
                         rc.push_str(&delta);
                     } else {
