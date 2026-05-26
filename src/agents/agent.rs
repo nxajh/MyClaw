@@ -136,6 +136,24 @@ impl Agent2 {
         let permission_mode = turn_ctx.permission_mode;
         let mut empty_response_retries: usize = 0;
         const MAX_EMPTY_RETRIES: usize = 3;
+        // Image attachment: snapshot URLs / base64 from session.last_message
+        // and only attach on the *first* LLM call of the turn — subsequent
+        // iterations rebuild `messages` from history which already carries
+        // the attached parts.
+        let pending_image_urls: Option<Vec<String>> = session
+            .last_message
+            .as_ref()
+            .and_then(|m| m.image_urls.clone());
+        let pending_image_b64: Option<Vec<String>> = session
+            .last_message
+            .as_ref()
+            .and_then(|m| m.image_base64.clone());
+        let mut images_attached = false;
+        let model_supports_images = runtime
+            .providers
+            .get_chat_model_config(&model_id)
+            .map(|cfg| cfg.supports_image_input())
+            .unwrap_or(false);
 
         loop {
             // Shutdown checkpoint between LLM calls (mirrors AgentLoop chat_loop).
@@ -146,6 +164,34 @@ impl Agent2 {
                     pending_retry: None,
                 });
             }
+
+            // Attach pending images to the last user message on the
+            // first iteration only. Skipped silently for non-vision
+            // models so the LLM doesn't see unsupported parts.
+            if !images_attached && model_supports_images {
+                if let Some(last_user) =
+                    messages.iter_mut().rev().find(|m| m.role == "user")
+                {
+                    if let Some(urls) = pending_image_urls.as_ref() {
+                        for url in urls {
+                            last_user.parts.push(ContentPart::ImageUrl {
+                                url: url.clone(),
+                                detail: crate::providers::ImageDetail::Auto,
+                            });
+                        }
+                    }
+                    if let Some(b64s) = pending_image_b64.as_ref() {
+                        for b64 in b64s {
+                            last_user.parts.push(ContentPart::ImageB64 {
+                                b64_json: b64.clone(),
+                                media_type: None,
+                                detail: crate::providers::ImageDetail::Auto,
+                            });
+                        }
+                    }
+                }
+            }
+            images_attached = true;
 
             let thinking = turn_ctx.thinking.cloned();
             let req = ChatRequest {
