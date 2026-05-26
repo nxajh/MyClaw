@@ -5,9 +5,9 @@
 
 ## 进度统计
 
-- 完成：57 / 61
-- 进行中：C18 主体完成；F35 双路并存；E29 前置 + E30 完成
-- 待办：4
+- 完成：58 / 61
+- 进行中：E29 主循环已迁移到 OrchestratorEvent（inbound dispatch 通过 handle_channel_event 助手保留原 400 行；LoopRegistry → Agent2::run 留待下一会话）
+- 待办：3
 
 ## 模块 A：类型基础（0/11）
 
@@ -251,6 +251,41 @@ rewrite to land. Net: -1 trait, -1 dual impl, ~30 references re-routed.
   `DelegationCoordinator` is now the only delegation entry point.
 
 Result: 377 lib tests still passing.
+
+### "继续" 第四轮收尾 — E29 主循环统一
+
+Migrated the orchestrator's main loop from a three-receiver
+`tokio::select!` to a single `mpsc<OrchestratorEvent>` driven by
+three adapter tasks. The 400-line user-message dispatch is preserved
+verbatim — pulled out into a private `handle_channel_event` helper
+that the new Inbound and Delegation match arms invoke. AskReply
+variant is wired through to `ask_router.fulfill` for future webhook
+or admin-side reply routing. Adapter tasks are aborted on loop exit.
+
+This is the structural E29 step. The remaining piece (LoopRegistry
+→ Agent2::run dispatch swap inside the Inbound arm) is what unlocks
+H45's AgentLoop deletion. Concrete sequence for next session:
+
+1. Replace `let handle = registry.get_or_create(&sk, &reply_target)`
+   followed by `handle.tx.send(TurnMessage { ... })` with an
+   `Agent2::run(session, turn_ctx, &self.agent_runtime)` invocation.
+   `turn_ctx` is built per-call from `session.session_override` and
+   the resolved system prompt.
+2. Once no callers reference `agent.loop_for_with_persist`,
+   `AgentLoop`, `SessionHandle`, `LoopRegistry`, `run_session_actor`,
+   `TurnStream`, `TurnInput`, `TurnMessage` — H45 deletes the lot.
+3. `request_builder.rs` deletion (H46) — its hot-reload + attachment
+   logic moves into a small pre-turn step on SessionContext (or into
+   Agent2.run pre-loop).
+4. ClientChannel (E32 + H57): index streams by reply_target;
+   implement `Channel::push_event` / `Channel::cancel_signal`; delete
+   `prepare_stream` / `take_stream_context` / `loop_registry` /
+   `evict_loop` after AgentLoop is gone.
+5. Scheduler (E34 + H48): inline `SchedulerContext` / `WebhookContext`
+   bundles — likely as part of a broader scheduler-tasks-call-
+   orchestrator-directly restructure.
+6. H49: delete `AskUserHandler` / `DelegateHandler` closure type
+   aliases once LoopRegistry no longer wires them.
 
 ### "继续" 第三轮收尾 — C18 完整 + E30 + E29 前置
 
