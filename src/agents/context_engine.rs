@@ -33,6 +33,9 @@ pub(crate) struct ContextEngine {
     executor: CompactionExecutor,
 }
 
+#[allow(dead_code)] // facade exposes the full surface; not every method
+                    // is used by Agent::run today — kept for /compact and
+                    // future Session.token_tracker direct callers.
 impl ContextEngine {
     /// Build from the same inputs the old AgentLoop used to construct
     /// `CompactionPolicy` + `CompactionExecutor` separately.

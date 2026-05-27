@@ -6,10 +6,12 @@ use parking_lot::RwLock;
 use super::workspace::skills::SkillManager;
 use super::AgentRegistry;
 
-/// Hot-loadable shared resources, held in Arc for sharing between AgentLoop instances.
-///
-/// Immutable after construction (skills/sub_agents are interior-mutable).
-/// Sub-agents get their own ResourceProvider with no change_rx (no hot-reload).
+/// Hot-loadable shared resources, held in Arc for sharing between
+/// CompactionExecutor instances. Most fields are kept for future
+/// summarizer features (hot-reload of skills/agents during compaction,
+/// memory dir lookups) — `knowledge_dir` is the only one actively read
+/// today by `build_memory_prompt`.
+#[allow(dead_code)]
 pub(crate) struct ResourceProvider {
     pub(crate) skills: Arc<RwLock<SkillManager>>,
     pub(crate) sub_agents: AgentRegistry,

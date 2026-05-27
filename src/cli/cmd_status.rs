@@ -44,7 +44,7 @@ fn print_text_status(cfg: &Option<myclaw::config::AppConfig>) {
     match cfg {
         Some(cfg) => {
             println!("  Config: ✅ loaded ({})", cfg.config_path.display());
-            println!("  Default model: {}", default_model(&cfg).unwrap_or("(none)"));
+            println!("  Default model: {}", default_model(cfg).unwrap_or("(none)"));
             println!("  Workspace: {}", cfg.workspace_dir.display());
 
             let providers: Vec<_> = cfg.providers.keys().collect();
@@ -88,7 +88,7 @@ fn print_json_status(cfg: &Option<myclaw::config::AppConfig>) -> Result<()> {
 
     if let Some(c) = cfg {
         status["config_path"] = serde_json::json!(c.config_path.to_string_lossy().as_ref());
-        status["default_model"] = serde_json::json!(default_model(&c).unwrap_or(""));
+        status["default_model"] = serde_json::json!(default_model(c).unwrap_or(""));
         status["workspace"] = serde_json::json!(c.workspace_dir.to_string_lossy().as_ref());
         status["providers"] = serde_json::json!(c.providers.keys().collect::<Vec<_>>());
         let agents = myclaw::agents::agent_loader::load_agents_from_dir(&c.workspace_dir.join("agents"));

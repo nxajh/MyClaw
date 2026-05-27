@@ -29,7 +29,10 @@ impl ToolExecutor {
         }
     }
 
-    /// Build tool specs from the registry.
+    /// Build tool specs from the registry. Currently unused (Agent::run
+    /// builds the spec list inline since it already iterates the
+    /// filtered tool view). Kept available for future callers.
+    #[allow(dead_code)]
     pub(crate) fn build_tool_specs(&self) -> Vec<ToolSpec> {
         self.tools
             .all_tools()

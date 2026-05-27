@@ -3,12 +3,16 @@ use crate::providers::ChatMessage;
 use super::tokens::{TokenTracker, estimate_tokens, estimate_message_tokens};
 use super::scheduling::work_unit;
 
+#[allow(dead_code)] // surface used through ContextEngine facade; some
+                    // accessors retained for future Session.token_tracker
+                    // integration.
 pub(crate) struct CompactionPolicy {
     tracker: TokenTracker,
     pub(crate) compact_threshold: f64,
     pub(crate) retain_work_units: usize,
 }
 
+#[allow(dead_code)]
 impl CompactionPolicy {
     pub(crate) fn from_context_config(cfg: &ContextConfig) -> Self {
         Self {

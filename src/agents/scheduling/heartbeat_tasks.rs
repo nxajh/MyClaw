@@ -337,14 +337,12 @@ mod tests {
 
     #[test]
     fn build_prompt_includes_context_and_tasks() {
-        let tasks = vec![
-            HeartbeatTask {
-                name: "email".into(),
-                interval: Duration::from_secs(1800),
-                description: "Check email".into(),
-                is_paused: false,
-            },
-        ];
+        let tasks = [HeartbeatTask {
+            name: "email".into(),
+            interval: Duration::from_secs(1800),
+            description: "Check email".into(),
+            is_paused: false,
+        }];
         let due: Vec<&HeartbeatTask> = tasks.iter().collect();
         let prompt = build_heartbeat_prompt("Be concise.", &due);
         assert!(prompt.contains("Be concise."));

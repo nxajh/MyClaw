@@ -21,6 +21,7 @@ pub(crate) struct CompactionResult {
     pub summary: String,
     pub summary_tokens: u64,
     pub removed_tokens: u64,
+    #[allow(dead_code)] // surfaced for future logging / metrics
     pub compacted_count: usize,
 }
 

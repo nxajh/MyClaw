@@ -169,7 +169,7 @@ impl Agent {
             // CancellationToken for this reply_target (ClientChannel does),
             // honor it. Without this poll the WebSocket "cancel" message
             // signals the token but Agent::run never sees the cancel.
-            if let (Some(ref ch), Some(rt)) = (session.channel.as_ref(), session.reply_target()) {
+            if let (Some(ch), Some(rt)) = (session.channel.as_ref(), session.reply_target()) {
                 if let Some(token) = ch.cancel_signal(rt) {
                     if token.is_cancelled() {
                         return Ok(TurnResult {
@@ -276,8 +276,7 @@ impl Agent {
                             // Snapshot history for the summarizer (which reads
                             // a slice). We pass the *current* session to the
                             // memory tools inside the summarizer.
-                            let history_snap: Vec<ChatMessage> =
-                                session.history.iter().cloned().collect();
+                            let history_snap: Vec<ChatMessage> = session.history.to_vec();
                             match context
                                 .execute_compaction(
                                     &history_snap,
@@ -341,7 +340,7 @@ impl Agent {
             if response.tool_calls.is_empty() {
                 // Emit Done event before persisting so the streaming UI gets
                 // the final-text signal in the canonical order.
-                if let (Some(ref ch), Some(rt)) = (session.channel.as_ref(), session.reply_target()) {
+                if let (Some(ch), Some(rt)) = (session.channel.as_ref(), session.reply_target()) {
                     let rt = rt.to_string();
                     let ch = Arc::clone(ch);
                     ch.push_event(&rt, TurnEvent::Done { text: response.text.clone() })
@@ -416,7 +415,7 @@ impl Agent {
                 // Emit ToolCall event before execution (streaming UIs show
                 // the call spinner) — snapshot the channel + reply_target
                 // outside the &mut session borrow that follows.
-                if let (Some(ref ch), Some(rt)) =
+                if let (Some(ch), Some(rt)) =
                     (session.channel.as_ref(), session.reply_target())
                 {
                     let rt = rt.to_string();
@@ -472,7 +471,7 @@ impl Agent {
                 // Emit ToolResult event after execution, before persisting,
                 // so the UI updates the call status without waiting for
                 // disk I/O.
-                if let (Some(ref ch), Some(rt)) =
+                if let (Some(ch), Some(rt)) =
                     (session.channel.as_ref(), session.reply_target())
                 {
                     let rt = rt.to_string();

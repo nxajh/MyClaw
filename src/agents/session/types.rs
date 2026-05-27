@@ -292,6 +292,7 @@ impl Session {
 
     /// Drop history[..boundary] with no summary (fallback when summarizer fails).
     /// Bumps compact_version so the backend can record the event.
+    #[allow(dead_code)] // restored summarizer-failure fallback path
     pub(crate) fn drop_pre_boundary(&mut self, boundary: usize, version: u32) {
         self.history.drain(..boundary);
         self.message_ids.drain(..boundary);
