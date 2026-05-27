@@ -488,26 +488,43 @@ impl ClientChannel {
                                 _ = incoming => {},
                             }
 
-                            // Clean up on disconnect.
-                            {
+                            // Clean up on disconnect. Collect the
+                            // connection's owned session_keys first, then
+                            // drop the connections read-lock before taking
+                            // writes on session_owners + stream_contexts.
+                            // Also cancel any in-flight turns BEFORE the
+                            // stream_contexts removal so the cancel signal
+                            // actually reaches Agent::run.
+                            let owned_keys: Vec<String> = {
                                 let conns = connections_clone.read();
-                                if let Some(conn) = conns.get(&conn_id_clone) {
-                                    let mut owners = session_owners_clone.write();
-                                    for sk in &conn.sessions {
-                                        owners.remove(sk);
+                                conns
+                                    .get(&conn_id_clone)
+                                    .map(|conn| conn.sessions.iter().cloned().collect())
+                                    .unwrap_or_default()
+                            };
+                            // F7: cancel + remove stream_contexts entries
+                            // for every session this connection owned —
+                            // without this, the StreamContext lingers in
+                            // the map forever (per-disconnect leak) and
+                            // any in-flight Agent::run keeps streaming
+                            // into a dead channel.
+                            {
+                                let mut contexts = stream_contexts_clone.write();
+                                for sk in &owned_keys {
+                                    if let Some(ctx) = contexts.remove(sk) {
+                                        ctx.cancel.cancel();
                                     }
                                 }
-                                drop(conns);
+                            }
+                            {
+                                let mut owners = session_owners_clone.write();
+                                for sk in &owned_keys {
+                                    owners.remove(sk);
+                                }
+                            }
+                            {
                                 let mut conns = connections_clone.write();
                                 conns.remove(&conn_id_clone);
-                            }
-
-                            // Cancel any pending turn.
-                            {
-                                let contexts = stream_contexts_clone.read();
-                                if let Some(ctx) = contexts.get(&session_key_clone) {
-                                    ctx.cancel.cancel();
-                                }
                             }
 
                             tracing::debug!(conn_id = %conn_id_clone, "WebSocket client disconnected");

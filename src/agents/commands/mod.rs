@@ -169,25 +169,45 @@ pub async fn dispatch(cmd: &str, args: &str, ctx: CommandContext<'_>) -> Option<
 
 /// Persist a session override through both the session manager and the
 /// live SessionContext (so the next turn picks up the change immediately).
+///
+/// If the session is locked by a running turn, the in-memory update is
+/// queued in a background task instead of blocking the command — the
+/// SessionManager.save_session_override above has already written to
+/// the backend, and the next turn (after the in-flight one finishes)
+/// reads the updated override from `session.session_override` once the
+/// queued task acquires the lock.
 pub(super) async fn apply_and_persist_override(ov: SessionOverride, ctx: &CommandContext<'_>) {
     // Persist via session_manager (updates cache + disk).
     ctx.session_manager.save_session_override(ctx.user_id, ov.clone());
 
     // Also update the live SessionContext if one is active.
     if let Some(session_ctx) = ctx.session_ctx {
-        let mut session = session_ctx.session.lock().await;
-        session.session_override = ov;
+        if let Ok(mut session) = session_ctx.session.try_lock() {
+            session.session_override = ov;
+        } else {
+            // Session is locked by a running turn — queue the update so
+            // it lands once the lock releases.
+            let session_ctx = session_ctx.clone();
+            tokio::spawn(async move {
+                let mut session = session_ctx.session.lock().await;
+                session.session_override = ov;
+            });
+        }
     }
 }
 
-/// Get session history: from active SessionContext if available, otherwise
-/// from session_manager cache.
+/// Get session history. Tries the active SessionContext first (canonical
+/// live state); if the session lock is held by a running turn, falls
+/// through to the SessionManager cache (slightly stale, but never
+/// blocks the command for the LLM-call duration).
 pub(super) async fn get_history(ctx: &CommandContext<'_>) -> Option<Vec<crate::providers::ChatMessage>> {
     if let Some(session_ctx) = ctx.session_ctx {
-        let session = session_ctx.session.lock().await;
-        if !session.history.is_empty() {
-            return Some(session.history.clone());
+        if let Ok(session) = session_ctx.session.try_lock() {
+            if !session.history.is_empty() {
+                return Some(session.history.clone());
+            }
         }
+        // try_lock failed → session busy; fall through to cache snapshot.
     }
     let session = ctx.session_manager.get_or_create(ctx.user_id);
     if session.history.is_empty() {

@@ -107,9 +107,15 @@ pub fn cmd_tools(ctx: CommandContext<'_>) -> String {
 }
 
 pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
-    // Resolve model from session override (live SessionContext) or fall back to registry default.
-    let (model_id, context_window) = if let Some(session_ctx) = ctx.session_ctx {
-        let session = session_ctx.session.lock().await;
+    // Try-lock pattern: a turn in flight holds session for the LLM call
+    // duration (~minutes). Block-waiting here would hang the command for
+    // that long; instead surface a friendly "busy" message and let the
+    // user re-issue /context after the response lands.
+    if let Some(session_ctx) = ctx.session_ctx {
+        let session = match session_ctx.session.try_lock() {
+            Ok(s) => s,
+            Err(_) => return "⏳ 会话正在响应中，请稍后再试 /context。".to_string(),
+        };
         let model = session.session_override.model.clone()
             .unwrap_or_else(|| {
                 ctx.registry.get_chat_provider(crate::providers::Capability::Chat)
@@ -117,26 +123,12 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
                     .map(|(_, id)| id)
                     .unwrap_or_default()
             });
-        let cw = ctx.registry.get_chat_model_config(&model)
+        let context_window = ctx.registry.get_chat_model_config(&model)
             .ok()
             .and_then(|cfg| cfg.context_window)
             .unwrap_or(0);
-        (model, cw)
-    } else {
-        match ctx.registry.get_chat_provider(crate::providers::Capability::Chat) {
-            Ok((_, id)) => {
-                let cw = ctx.registry.get_chat_model_config(&id)
-                    .ok()
-                    .and_then(|cfg| cfg.context_window)
-                    .unwrap_or(0);
-                (id, cw)
-            }
-            Err(_) => return "❌ 无法获取模型信息。".to_string(),
-        }
-    };
+        let model_id = model;
 
-    if let Some(session_ctx) = ctx.session_ctx {
-        let session = session_ctx.session.lock().await;
         let tracker_total = session.token_tracker.total_tokens();
         let history_len = session.history.len();
 
@@ -202,7 +194,19 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
             model_id, context_window, window_kb, total, usage_detail, used_kb, usage_pct, threshold, history_len, summary_info
         )
     } else {
-        // agent_loop is None: restart or session switch before first message.
+        // No active SessionContext (post-restart, post-/new, post-/switch).
+        // Resolve model from registry default and read history from
+        // SessionManager cache (cheap, doesn't block on a running turn).
+        let (model_id, context_window) = match ctx.registry.get_chat_provider(crate::providers::Capability::Chat) {
+            Ok((_, id)) => {
+                let cw = ctx.registry.get_chat_model_config(&id)
+                    .ok()
+                    .and_then(|cfg| cfg.context_window)
+                    .unwrap_or(0);
+                (id, cw)
+            }
+            Err(_) => return "❌ 无法获取模型信息。".to_string(),
+        };
         let session = ctx.session_manager.get_or_create(ctx.user_id);
         if session.history.is_empty() {
             format!(
