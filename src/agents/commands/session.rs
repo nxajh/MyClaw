@@ -5,8 +5,10 @@ use super::get_history;
 
 pub async fn cmd_new(args: &str, ctx: CommandContext<'_>) -> String {
     let name = if args.trim().is_empty() { None } else { Some(args.trim()) };
-    // Evict cached agent loop so next message creates a fresh one.
+    // Evict cached agent loop AND SessionContext so the next message
+    // creates fresh state for the new session.
     ctx.sessions.remove(ctx.user_id);
+    ctx.session_contexts.remove(ctx.user_id);
     match ctx.session_manager.new_session(ctx.user_id, name) {
         Ok(info) => {
             let display = info.display_name.as_deref().unwrap_or("(未命名)");
@@ -17,21 +19,100 @@ pub async fn cmd_new(args: &str, ctx: CommandContext<'_>) -> String {
 }
 
 pub async fn cmd_compact(ctx: CommandContext<'_>) -> String {
-    if let Some(loop_arc) = ctx.agent_loop {
-        let mut guard = loop_arc.lock().await;
-        let model_id = match ctx.registry.get_chat_provider(crate::providers::Capability::Chat) {
-            Ok((_, id)) => id,
-            Err(e) => return format!("❌ 无法获取当前模型: {}", e),
-        };
-        match guard.compact_now(&model_id).await {
-            Ok(()) => {
-                let tokens = guard.token_total();
-                format!("✅ 上下文压缩完成，当前 token: {}", tokens)
+    let session_ctx = match ctx.session_ctx {
+        Some(c) => c,
+        None => return "ℹ️ 当前没有活跃会话，无需压缩。".to_string(),
+    };
+    let model_id = match ctx.registry.get_chat_provider(crate::providers::Capability::Chat) {
+        Ok((_, id)) => id,
+        Err(e) => return format!("❌ 无法获取当前模型: {}", e),
+    };
+    // /compact runs an unconditional compaction. We mirror Agent2.run's
+    // compaction trigger but skip the should_compact gate. The
+    // ContextEngine is constructed per-call here (matches Agent2.run's
+    // per-turn pattern).
+    let mut session = session_ctx.session.lock().await;
+    let runtime_resources = crate::agents::resource_provider::ResourceProvider::new(
+        std::sync::Arc::clone(ctx.agent.skills()),
+        ctx.agent.sub_agent_configs().clone(),
+        Vec::new(),
+        std::path::PathBuf::new(),
+        std::path::PathBuf::new(),
+        String::new(),
+        0,
+    );
+    let mut engine = crate::agents::context_engine::ContextEngine::new(
+        &Default::default(),
+        std::sync::Arc::clone(ctx.agent.registry()),
+        runtime_resources,
+        std::sync::Arc::clone(ctx.agent.tools()),
+    );
+    engine.init_from_history(ctx.agent.cached_system_prompt(), &session.history);
+
+    let cfg = match ctx.registry.get_chat_model_config(&model_id) {
+        Ok(c) => c,
+        Err(e) => return format!("❌ 无法获取模型配置: {}", e),
+    };
+    let window = match cfg.context_window {
+        Some(w) => w,
+        None => return "❌ 模型未配置 context_window".to_string(),
+    };
+
+    let sys_tokens = (ctx.agent.cached_system_prompt().len() as u64).div_ceil(4);
+    let tool_tokens: u64 = ctx.agent.tools().all_tools().iter().map(|t| {
+        let spec = t.spec();
+        let schema = spec.parameters.to_string();
+        (spec.name.len() as u64).div_ceil(4)
+            + (spec.description.len() as u64).div_ceil(4)
+            + (schema.len() as u64).div_ceil(4)
+            + 8
+    }).sum();
+
+    let boundary = match engine.compaction_boundary(&session.history, window, sys_tokens, tool_tokens) {
+        Some(b) => b,
+        None => return "ℹ️ 历史不足以压缩。".to_string(),
+    };
+
+    let history_snap: Vec<crate::providers::ChatMessage> = session.history.clone();
+    match engine.execute_compaction(
+        &history_snap,
+        ctx.agent.cached_system_prompt(),
+        &ctx.agent.tools().all_tools().iter().map(|t| {
+            let s = t.spec();
+            crate::providers::capability_chat::ToolSpec {
+                name: s.name,
+                description: Some(s.description),
+                input_schema: s.parameters,
             }
-            Err(e) => format!("❌ 压缩失败: {}", e),
+        }).collect::<Vec<_>>(),
+        boundary,
+        &model_id,
+        &session,
+    ).await {
+        Ok(result) => {
+            let version = session.compact_version + 1;
+            let summary_prefix = "[CONTEXT COMPACTION — REFERENCE ONLY] ";
+            let summary_msg = crate::providers::ChatMessage::user_text(
+                format!("{}{}", summary_prefix, result.summary)
+            );
+            let last_compacted_id = session.message_ids
+                .get(boundary.saturating_sub(1))
+                .copied()
+                .unwrap_or(0);
+            session.apply_compaction(
+                result.compact_start,
+                result.compact_end,
+                summary_msg,
+                version,
+                last_compacted_id,
+                result.summary_tokens,
+            );
+            engine.adjust_for_compaction(result.removed_tokens, result.summary_tokens);
+            session.token_tracker = Default::default();
+            session.token_tracker.update_from_usage(engine.token_total(), 0, 0);
+            format!("✅ 上下文压缩完成，当前 token: {}", engine.token_total())
         }
-    } else {
-        "ℹ️ 当前没有活跃会话，无需压缩。".to_string()
+        Err(e) => format!("❌ 压缩失败: {}", e),
     }
 }
 
@@ -127,8 +208,9 @@ pub async fn cmd_switch(args: &str, ctx: CommandContext<'_>) -> String {
         None => return format!("⚠️ 序号 {} 无效，当前共 {} 个会话。", n + 1, sessions.len()),
     };
 
-    // Evict cached agent loop.
+    // Evict cached agent loop AND SessionContext.
     ctx.sessions.remove(ctx.user_id);
+    ctx.session_contexts.remove(ctx.user_id);
 
     match ctx.session_manager.switch_session(ctx.user_id, &target.id) {
         Ok(info) => {

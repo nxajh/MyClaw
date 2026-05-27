@@ -107,10 +107,10 @@ pub fn cmd_tools(ctx: CommandContext<'_>) -> String {
 }
 
 pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
-    // Prefer session-level model_override if available, otherwise fall back to registry default.
-    let (model_id, context_window) = if let Some(loop_arc) = ctx.agent_loop {
-        let guard = loop_arc.lock().await;
-        let model = guard.session_override().model.clone()
+    // Resolve model from session override (live SessionContext) or fall back to registry default.
+    let (model_id, context_window) = if let Some(session_ctx) = ctx.session_ctx {
+        let session = session_ctx.session.lock().await;
+        let model = session.session_override.model.clone()
             .unwrap_or_else(|| {
                 ctx.registry.get_chat_provider(crate::providers::Capability::Chat)
                     .ok()
@@ -135,18 +135,16 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
         }
     };
 
-    if let Some(loop_arc) = ctx.agent_loop {
-        let guard = loop_arc.lock().await;
-        let tracker_total = guard.token_total();
-        let history_len = guard.session().history.len();
-        let session = guard.session();
+    if let Some(session_ctx) = ctx.session_ctx {
+        let session = session_ctx.session.lock().await;
+        let tracker_total = session.token_tracker.total_tokens();
+        let history_len = session.history.len();
 
         // Estimate actual context size from current history (system prompt + all messages).
         let estimated_total: u64 = session.history.iter()
             .map(crate::agents::agent_impl::estimate_message_tokens)
             .sum();
 
-        // Use the larger of tracker and estimate for display.
         let total = std::cmp::max(tracker_total, estimated_total);
 
         let summary_info = if let Some(ref meta) = session.summary_metadata {
@@ -164,8 +162,8 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
             "未知".to_string()
         };
 
-        // Use actual config threshold instead of hardcoded 0.7.
-        let compact_threshold = guard.compact_threshold();
+        // Use Agent's configured compact_threshold (ContextConfig is per-Agent today).
+        let compact_threshold = ctx.agent.compact_threshold();
         let threshold = if context_window > 0 {
             let t = (context_window as f64 * compact_threshold) as u64;
             format!("{} token ({:.0}%)", t, compact_threshold * 100.0)
@@ -173,7 +171,11 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
             "未知".to_string()
         };
 
-        let (input, cached, output) = guard.last_usage();
+        let (input, cached, output) = (
+            session.token_tracker.last_input(),
+            session.token_tracker.last_cached(),
+            session.token_tracker.last_output(),
+        );
         let used_kb = total * 4 / 1024;
         let window_kb = context_window * 4 / 1024;
 

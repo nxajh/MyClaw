@@ -764,12 +764,13 @@ impl Orchestrator {
                         let sk_cmd        = sk.clone();
                         let cmd_owned     = cmd.to_string();
                         let cmd_args_owned = cmd_args.to_string();
-                        let session_loop  = sessions.get(&sk).map(|r| r.loop_.clone());
+                        let session_ctx_cmd = self.session_contexts.get(&sk).map(|r| r.clone());
                         let registry_cmd  = self.agent.registry().clone();
                         let sm_cmd        = self.session_manager.clone();
                         let agent_cmd     = self.agent.clone();
                         let mcp_cmd       = self.mcp_manager.clone();
                         let sessions_cmd  = sessions.clone();
+                        let session_contexts_cmd = self.session_contexts.clone();
                         let cooldown_cmd  = self.search_cooldown.clone();
                         let channel_cmd   = channels.get(&channel_key).map(|r| r.clone());
                         let rt_cmd        = reply_target.clone();
@@ -781,9 +782,10 @@ impl Orchestrator {
                                 registry:       &registry_cmd,
                                 session_manager: &sm_cmd,
                                 agent:          &agent_cmd,
-                                agent_loop:     session_loop.as_ref(),
+                                session_ctx:    session_ctx_cmd.as_ref(),
                                 mcp_manager:    mcp_cmd.as_ref(),
                                 sessions:       &sessions_cmd,
+                                session_contexts: &session_contexts_cmd,
                                 search_cooldown: cooldown_cmd.as_ref(),
                             };
                             if let Some(response) = super::commands::dispatch(

@@ -28,12 +28,19 @@ pub struct CommandContext<'a> {
     pub registry: &'a Arc<dyn crate::providers::ProviderRegistry>,
     pub session_manager: &'a SessionManager,
     pub agent: &'a Agent,
-    /// Access to the current session's agent loop (if it exists).
-    pub agent_loop: Option<&'a Arc<TokioMutex<AgentLoop>>>,
+    /// Active SessionContext for this user (the canonical Arc<Mutex<Session>>
+    /// the inbound Agent2 dispatch is using). Commands acquire
+    /// `session_ctx.session.lock().await` for read/write access to live
+    /// state — same Mutex used by Agent2.run, so reads see the latest
+    /// turn's state without stale-cache surprises.
+    pub session_ctx: Option<&'a Arc<crate::agents::SessionContext>>,
     /// MCP manager (for /mcp command).
     pub mcp_manager: Option<&'a Arc<McpManager>>,
     /// Sessions cache — needed by /new to evict stale agent loops.
     pub sessions: &'a DashMap<String, Arc<crate::agents::SessionHandle>>,
+    /// SessionContext cache — needed by /new to evict the cached
+    /// SessionContext when the active session changes.
+    pub session_contexts: &'a DashMap<String, Arc<crate::agents::SessionContext>>,
     /// Search provider cooldown tracker (for /status command).
     pub search_cooldown: Option<&'a Arc<crate::tools::search_cooldown::SearchProviderCooldown>>,
 }
@@ -163,27 +170,26 @@ pub async fn dispatch(cmd: &str, args: &str, ctx: CommandContext<'_>) -> Option<
     }
 }
 
-/// Persist a session override through both the session manager and the live agent loop.
-///
-/// Calling this ensures the override takes effect immediately (live loop) AND
-/// survives a restart (persisted to meta.json via session_manager).
+/// Persist a session override through both the session manager and the
+/// live SessionContext (so the next turn picks up the change immediately).
 pub(super) async fn apply_and_persist_override(ov: SessionOverride, ctx: &CommandContext<'_>) {
     // Persist via session_manager (updates cache + disk).
     ctx.session_manager.save_session_override(ctx.user_id, ov.clone());
 
-    // Also update the live agent loop if one exists.
-    if let Some(loop_arc) = ctx.agent_loop {
-        let mut guard = loop_arc.lock().await;
-        guard.apply_session_override(ov);
+    // Also update the live SessionContext if one is active.
+    if let Some(session_ctx) = ctx.session_ctx {
+        let mut session = session_ctx.session.lock().await;
+        session.session_override = ov;
     }
 }
 
-/// Get session history: from active agent loop if available, otherwise from session_manager.
+/// Get session history: from active SessionContext if available, otherwise
+/// from session_manager cache.
 pub(super) async fn get_history(ctx: &CommandContext<'_>) -> Option<Vec<crate::providers::ChatMessage>> {
-    if let Some(loop_arc) = ctx.agent_loop {
-        let guard = loop_arc.lock().await;
-        if !guard.session().history.is_empty() {
-            return Some(guard.session().history.clone());
+    if let Some(session_ctx) = ctx.session_ctx {
+        let session = session_ctx.session.lock().await;
+        if !session.history.is_empty() {
+            return Some(session.history.clone());
         }
     }
     let session = ctx.session_manager.get_or_create(ctx.user_id);
