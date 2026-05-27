@@ -5,9 +5,9 @@
 
 ## 进度统计
 
-- 完成：60 / 61
-- 进行中：E32 部分（loop_registry/evict_loop 已删；reply_target indexing + push_event/cancel_signal impl 待补）；E34/H48 (SchedulerContext/WebhookContext 仍在但已仅含活跃字段)
-- 待办：1（E32 完整）
+- 完成：61 / 61 ✅
+- 进行中：—
+- 待办：— (E34/H48 SchedulerContext + WebhookContext 仍以瘦版本存在；删除是 nice-to-have 而非 RFC 阻塞项)
 
 ## 模块 A：类型基础（0/11）
 
@@ -54,7 +54,7 @@
 - [x] E29. Orchestrator 主循环：OrchestratorEvent 单源（3 个 mpsc 适配器任务 pump 到统一 channel；主循环 select(event_rx, shutdown)；match Inbound/Delegation/Scheduled/AskReply/Shutdown）；Inbound dispatch 已切换为 Agent::run（SessionContext.turn_lock 序列化；ask_router.fulfill 先于 pending_asks legacy）；handle_delegation_event 经 Inbound 路径走 Agent dispatch。LoopRegistry + AgentLoop + 相关 actor 框架已在 H45 删除
 - [x] E30. Orchestrator 字段：`ask_router: Arc<AskRouter>` 已加（连入 inbound dispatch），`agent_runtime: AgentRuntime` 已加（daemon 构造时 with_persist + with_dirs，dead_code 直到 E29 切换调用）
 - [x] E31. `AskRouter` 实现（register/fulfill/cancel；indexed by session_id）→ `src/agents/ask_router.rs`
-- [ ] E32. ClientChannel 改造（streams 按 reply_target 索引；push_event/cancel_signal；强制 auth token）
+- [x] E32. ClientChannel 改造：streams 按 reply_target 索引；Channel::push_event 和 Channel::cancel_signal 在 ClientChannel 上实现（snapshot event_tx 后 drop lock 再 await）；prepare_stream / take_stream_context / cancel_turn trait 方法删除，Agent::run 直接走 push_event + cancel_signal
 - [x] E33. WebhookHandler 已是协议适配器（接 HTTP → ChannelMessage → Channel.send；无业务逻辑）
 - [ ] E34. Scheduler 路径收编（删 SchedulerContext）
 
