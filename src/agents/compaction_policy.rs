@@ -1,6 +1,6 @@
 use crate::config::agent::ContextConfig;
 use crate::providers::ChatMessage;
-use super::agent_impl::types::{TokenTracker, estimate_tokens, estimate_message_tokens};
+use super::tokens::{TokenTracker, estimate_tokens, estimate_message_tokens};
 use super::scheduling::work_unit;
 
 pub(crate) struct CompactionPolicy {

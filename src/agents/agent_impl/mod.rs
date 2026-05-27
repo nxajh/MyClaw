@@ -1,84 +1,38 @@
-//! Agent — shared factory for AgentLoop instances.
+//! Legacy `Agent` factory + `AgentConfig` — held over from the pre-RFC v2
+//! architecture as a passive bag of construction data the Orchestrator,
+//! daemon, commands, scheduler, and webhook server still read from
+//! (`registry()` / `tools()` / `skills()` / `sub_agent_configs()` /
+//! `cached_system_prompt()` / `config().prompt_config` /
+//! `compact_threshold()`).
 //!
-//! Agent holds shared resources (registry, skills, config) and creates
-//! per-session AgentLoop handles.
-//!
-//! DDD: Agent depends on `dyn ProviderRegistry` (Domain trait), not on
-//! `Registry` (Infrastructure concrete type). This keeps the Application
-//! layer decoupled from Infrastructure.
+//! `Agent2` (`src/agents/agent.rs`) is the RFC v2 per-turn executor;
+//! the legacy `AgentLoop` it replaced has been deleted (H45). This
+//! module is on track for deletion once its accessors are moved onto
+//! `AgentRuntime` and the callers are updated.
 
-use std::sync::Arc;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use parking_lot::RwLock;
-use tokio::sync::watch;
 
 use crate::providers::ProviderRegistry;
 use crate::config::agent::ContextConfig;
-use crate::agents::session::SessionOverride;
 
 use super::skills::SkillManager;
 use super::tool_registry::ToolRegistry;
-
-/// Callback for ask_user tool: (session_key, question) → user_answer.
-///
-/// The handler sends the question through the channel and waits for the
-/// user's next message, which is delivered via a oneshot channel managed
-/// by the Orchestrator.
-pub type AskUserHandler = Arc<
-    dyn Fn(String, String) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>>
-        + Send
-        + Sync,
->;
-
-/// Callback for async delegation: (agent_name, task) → task_id.
-///
-/// The handler spawns the sub-agent in a background tokio task and returns
-/// the task_id immediately. When the sub-agent completes, the Orchestrator
-/// receives a DelegationEvent and wakes the main agent.
-pub type DelegateHandler = Arc<
-    dyn Fn(String, String) -> anyhow::Result<String> + Send + Sync,
->;
-
-use super::loop_breaker::{LoopBreaker, LoopBreakerConfig};
-use super::session::{Session, PersistHook};
 use crate::agents::prompt::{SystemPromptBuilder, SystemPromptConfig};
-use crate::agents::attachment::AttachmentManager;
-use super::tool_executor::ToolExecutor;
-use super::compaction_executor::CompactionExecutor;
 
-pub(crate) mod types;
-mod run;
-mod turn;
-mod chat_loop;
-mod tools;
-mod compaction;
-mod images;
-
-pub(crate) use types::estimate_message_tokens;
-use super::compaction_policy::CompactionPolicy;
-use super::resource_provider::ResourceProvider;
-use super::request_builder::RequestBuilder;
-
-/// AgentConfig controls loop breaker thresholds and tool call limits.
+/// AgentConfig — passive bag of construction data still consumed by
+/// Orchestrator + commands.
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
-    /// Hard cap on tool calls per turn. 0 = unlimited.
     pub max_tool_calls: usize,
-    /// System prompt builder config.
     pub prompt_config: SystemPromptConfig,
-    /// Context window management settings.
     pub context: ContextConfig,
-    /// Loop breaker exact-repeat threshold: N identical consecutive calls → break.
     pub loop_breaker_threshold: usize,
-    /// Per-tool execution timeout in seconds (0 = no timeout).
-    /// Does not apply to ask_user or agent_delegate (those have their own timeouts).
     pub tool_timeout_secs: u64,
-    /// Model override for this session (session override > Agent-level default).
     pub model_override: Option<String>,
-    /// Thinking/reasoning config override for this session.
     pub thinking_override: Option<crate::providers::ThinkingConfig>,
-    /// Timezone offset in hours — passed to ResourceProvider for date injection.
     pub timezone_offset: i32,
 }
 
@@ -97,26 +51,7 @@ impl Default for AgentConfig {
     }
 }
 
-impl AgentConfig {
-    pub fn with_override(&self, ov: &super::session::SessionOverride) -> Self {
-        let mut cfg = self.clone();
-        if let Some(ref permission_mode) = ov.permission_mode {
-            cfg.prompt_config.permission_mode = *permission_mode;
-        }
-        if let Some(run_mode) = ov.run_mode {
-            cfg.prompt_config.run_mode = run_mode;
-        }
-        if let Some(t) = ov.compact_threshold { cfg.context.compact_threshold = t; }
-        if let Some(r) = ov.retain_work_units { cfg.context.retain_work_units = r; }
-        if let Some(mtc) = ov.max_tool_calls   { cfg.max_tool_calls = mtc; }
-        cfg.model_override = ov.model.clone();
-        cfg.thinking_override = ov.to_thinking_config();
-        cfg
-    }
-
-}
-
-/// Agent is the shared factory — call `.loop_for(session)` to get an AgentLoop.
+/// Agent — shared construction data accessor.
 #[derive(Clone)]
 pub struct Agent {
     registry: Arc<dyn ProviderRegistry>,
@@ -155,12 +90,7 @@ impl Agent {
     pub fn registry(&self) -> &Arc<dyn ProviderRegistry> { &self.registry }
     pub fn tools(&self) -> &Arc<super::tool_registry::ToolRegistry> { &self.tools }
     pub fn skills(&self) -> &Arc<RwLock<SkillManager>> { &self.skills }
-    /// Read-only access to the legacy Agent's per-turn config. Used by
-    /// Orchestrator's Agent2 dispatch path to derive `TurnContext` —
-    /// goes away with H45 deletion of legacy Agent.
     pub fn config(&self) -> &AgentConfig { &self.config }
-    /// Pre-baked system prompt (if `with_system_prompt` was called),
-    /// else empty so callers know to build via SystemPromptBuilder.
     pub fn cached_system_prompt(&self) -> &str { &self.system_prompt }
 
     pub fn sub_agent_configs(&self) -> &super::AgentRegistry { &self.sub_agent_configs }
@@ -193,150 +123,15 @@ impl Agent {
         self
     }
 
-    pub fn loop_for(&self, session: Session) -> AgentLoop {
-        self.loop_for_with_persist(session, None)
-    }
-
-    pub fn loop_for_with_persist(
-        &self,
-        session: Session,
-        persist_hook: Option<Arc<dyn PersistHook>>,
-    ) -> AgentLoop {
-        let ov = &session.session_override;
-        let config = self.config.with_override(ov);
-
-        let prompt = if !self.system_prompt.is_empty() {
-            self.system_prompt.clone()
-        } else {
-            let skills = self.skills.read();
-            let builder = SystemPromptBuilder::new(config.prompt_config.clone());
-            builder.build(&skills)
-        };
-
-        // Apply Agent-level model_override as fallback if session didn't specify one.
-        let mut config = config;
-        if config.model_override.is_none() {
-            config.model_override = self.model_override.clone();
+    /// Build the system prompt if one wasn't supplied via
+    /// `with_system_prompt`. Used by callers that need the assembled
+    /// prompt text but didn't pre-build it.
+    #[allow(dead_code)]
+    pub fn build_system_prompt(&self) -> String {
+        if !self.system_prompt.is_empty() {
+            return self.system_prompt.clone();
         }
-        let max_tool_calls = config.max_tool_calls;
-        let policy = CompactionPolicy::from_context_config(&config.context);
-
-        let resources = ResourceProvider::new(
-            Arc::clone(&self.skills),
-            self.sub_agent_configs.clone(),
-            self.mcp_instructions.clone(),
-            self.skills_dir.clone(),
-            self.agents_dir.clone(),
-            config.prompt_config.knowledge_dir.clone(),
-            config.timezone_offset,
-        );
-        let request_builder = RequestBuilder::new(prompt, Arc::clone(&resources));
-
-        AgentLoop {
-            registry: Arc::clone(&self.registry),
-            compactor: CompactionExecutor::new(
-                Arc::clone(&self.registry),
-                Arc::clone(&resources),
-                Arc::clone(&self.tools),
-            ),
-            tool_executor: ToolExecutor::new(Arc::clone(&self.tools), config.tool_timeout_secs),
-            config,
-            session,
-            request_builder,
-            loop_breaker: LoopBreaker::new(LoopBreakerConfig {
-                max_tool_calls,
-                exact_repeat_threshold: self.config.loop_breaker_threshold,
-                ..LoopBreakerConfig::default()
-            }),
-            policy,
-            persist_hook,
-            pending_retry_message: None,
-        }
-    }
-}
-
-/// Per-session agent loop handle. Execute `run(user_message)` to process a message.
-pub struct AgentLoop {
-    pub(crate) registry: Arc<dyn ProviderRegistry>,
-    pub(crate) config: AgentConfig,
-    pub(crate) session: Session,
-    // ── Message building + attachments + images + hot-reload ──
-    pub(crate) request_builder: RequestBuilder,
-    // ── Token tracking + compaction strategy ──
-    pub(crate) policy: CompactionPolicy,
-    // ── Tool execution ──
-    pub(crate) tool_executor: ToolExecutor,
-    // ── Compaction summarizer ──
-    pub(crate) compactor: CompactionExecutor,
-    // ── Infrastructure ──
-    pub(crate) loop_breaker: LoopBreaker,
-    pub(crate) persist_hook: Option<Arc<dyn PersistHook>>,
-    pub(crate) pending_retry_message: Option<String>,
-}
-
-impl AgentLoop {
-    pub fn with_ask_user_handler(mut self, handler: AskUserHandler) -> Self {
-        self.tool_executor.ask_user_handler = Some(handler);
-        self
-    }
-
-    pub fn session(&self) -> &super::session::Session {
-        &self.session
-    }
-
-    pub fn token_total(&self) -> u64 {
-        self.policy.token_total()
-    }
-
-    pub fn last_usage(&self) -> (u64, u64, u64) {
-        self.policy.last_usage()
-    }
-
-    pub fn compact_threshold(&self) -> f64 {
-        self.config.context.compact_threshold
-    }
-
-    pub fn session_override(&self) -> &SessionOverride {
-        &self.session.session_override
-    }
-
-    pub fn with_delegate_handler(mut self, handler: DelegateHandler) -> Self {
-        self.tool_executor.delegate_handler = Some(handler);
-        self
-    }
-
-    pub fn with_sub_delegator(mut self, delegator: Arc<super::delegation_coordinator::DelegationCoordinator>) -> Self {
-        self.tool_executor.sub_delegator = Some(delegator);
-        self
-    }
-
-    pub fn with_change_rx(mut self, rx: watch::Receiver<super::watcher::ChangeSet>) -> Self {
-        self.request_builder.set_change_rx(rx);
-        self
-    }
-
-    /// Access the attachment manager (for /reload command).
-    pub fn attachments(&mut self) -> &mut AttachmentManager {
-        &mut self.request_builder.attachments
-    }
-
-    pub fn set_pending_retry(&mut self, msg: String) {
-        self.pending_retry_message = Some(msg);
-    }
-
-    pub fn take_pending_retry(&mut self) -> Option<String> {
-        self.pending_retry_message.take()
-    }
-
-    pub fn has_pending_retry(&self) -> bool {
-        self.pending_retry_message.is_some()
-    }
-
-    pub async fn recover_interrupted_turn(&mut self) -> anyhow::Result<Option<String>> {
-        // Clear the flag unconditionally: calling this means we are actively
-        // handling whatever incomplete state existed, so the orchestrator must
-        // not treat the session as incomplete again after we return.
-        self.session.incomplete_turn = false;
-        self.recover_incomplete_turn(&crate::agents::agent_impl::types::StreamMode::Collect).await
+        let skills = self.skills.read();
+        SystemPromptBuilder::new(self.config.prompt_config.clone()).build(&skills)
     }
 }

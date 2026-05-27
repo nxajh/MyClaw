@@ -3,11 +3,11 @@
 mod agent_impl;
 pub(crate) mod compaction_policy;
 pub(crate) mod resource_provider;
-pub(crate) mod request_builder;
 pub(crate) mod tool_executor;
 pub(crate) mod compaction_executor;
 pub(crate) mod context_engine;
 pub mod agent;
+pub mod tokens;
 pub mod error;
 pub mod attachment;
 pub mod recovery;
@@ -45,7 +45,7 @@ pub use workspace::skill_loader;
 pub use workspace::watcher;
 pub use workspace::skills;
 
-pub use agent_impl::{Agent, AgentConfig, AgentLoop, AskUserHandler, DelegateHandler};
+pub use agent_impl::{Agent, AgentConfig};
 pub use recovery::UnfinishedSubAgent;
 pub use turn_event::TurnEvent;
 pub use turn::{TurnContext, TurnResult};

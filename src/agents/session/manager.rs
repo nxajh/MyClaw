@@ -179,7 +179,7 @@ impl SessionManager {
             incomplete_turn: false,
             breakpoint_items: breakpoints,
             last_message: self.backend.load_last_message(&session_id),
-            token_tracker: crate::agents::agent_impl::types::TokenTracker::new(),
+            token_tracker: crate::agents::tokens::TokenTracker::new(),
             persist: None,
             channel: None,
         };

@@ -3,12 +3,11 @@
 //! Commands are parsed and dispatched before reaching the agent loop.
 //! Each command returns a text response sent directly through the channel.
 
-use crate::agents::agent_impl::{Agent, AgentLoop};
+use crate::agents::agent_impl::Agent;
 use crate::agents::mcp_manager::McpManager;
 use crate::agents::session::{SessionManager, SessionOverride};
 use dashmap::DashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex as TokioMutex;
 
 mod config;
 mod info;

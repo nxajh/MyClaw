@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::agents::agent_impl::types::TokenTracker;
+use crate::agents::tokens::TokenTracker;
 use crate::channels::{Channel, ChannelMessage};
 use crate::providers::capability_chat::ChatMessage;
 use super::backend::PersistHook;

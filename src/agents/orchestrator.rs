@@ -11,9 +11,8 @@
 
 use anyhow::Context;
 use crate::agents::delegation::{DelegationEvent, DelegationManager};
-use crate::agents::delegation_coordinator::DelegationCoordinator as SubAgentDelegator;
 use crate::agents::{OrchestratorEvent, SessionContext};
-use crate::channels::{Channel, ChannelMessage, SendMessage, ProcessingStatus, InlineButton};
+use crate::channels::{Channel, ChannelMessage, SendMessage, InlineButton};
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,23 +20,16 @@ use tokio::sync::{mpsc, Mutex as TokioMutex, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::agents::agent_impl::{Agent, AgentLoop, AskUserHandler, DelegateHandler};
+use crate::agents::agent_impl::Agent;
 use crate::agents::session::{SessionManager, PersistHook, BackendPersistHook};
 
 const CHANNEL_QUEUE_SIZE: usize = 100;
 
-/// Timeout for ask_user waiting for user reply (5 minutes).
-const ASK_USER_TIMEOUT: Duration = Duration::from_secs(300);
-
 // ── User-facing message strings ────────────────────────────────────────────────
-const MSG_RETRY_EMPTY: &str = "⚠️ 重试后仍未获得有效回复。";
 const MSG_NO_PENDING_RETRY: &str = "没有待重试的消息，请重新发送。";
 const MSG_ABORT_ACK: &str = "已取消";
 const MSG_INCOMPLETE_TURN: &str = "⚠️ 检测到上次请求未处理完成（可能是服务重启）。\n\n请选择重试或放弃。";
 const MSG_TIMEOUT: &str = "⚠️ 处理超时，未收到模型回复。";
-const MSG_EMPTY_RESPONSE: &str = "⚠️ 处理失败，模型未返回有效回复。";
-const MSG_SUBAGENT_RECOVERY_HINT: &str =
-    "⚠️ 以下子代理在上次热切换中断，其 session 已持久化。如果需要，可以重新 delegate 它们继续工作：\n\n";
 const BTN_RETRY: &str = "🔄 重试";
 const BTN_ABORT: &str = "✖ 放弃";
 
@@ -107,10 +99,7 @@ pub struct Orchestrator {
     /// the legacy `agent` field — E29 will eventually swap the main-
     /// loop dispatch onto Agent2 + agent_runtime, then H45 deletes the
     /// legacy fields.
-    #[allow(dead_code)]
     agent_runtime: crate::agents::AgentRuntime,
-    /// Sub-agent delegator (for async delegation).
-    sub_delegator: Option<Arc<SubAgentDelegator>>,
     /// Delegation manager (shared with DelegateTaskTool via handler).
     delegation_manager: Option<Arc<DelegationManager>>,
     /// Delegation event receiver.
@@ -119,8 +108,6 @@ pub struct Orchestrator {
     persist_backend: Arc<dyn crate::storage::SessionBackend>,
     /// MCP manager (for /mcp command).
     mcp_manager: Option<Arc<crate::agents::McpManager>>,
-    /// File change receiver for hot-reload.
-    change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
     /// Last channel that received a user message (shared with schedulers).
     /// Format: "channel_type:account_id"
     pub last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
@@ -206,8 +193,6 @@ pub struct OrchestratorParts {
     pub session_manager: Arc<SessionManager>,
     /// Pre-built channels: (channel_type, account_id, channel_instance).
     pub channels: Vec<(String, String, Arc<dyn Channel>)>,
-    /// Sub-agent delegator (conditional — only when sub-agents are configured).
-    pub sub_delegator: Option<Arc<SubAgentDelegator>>,
     /// Delegation manager (conditional — only when sub-agents are configured).
     pub delegation_manager: Option<Arc<DelegationManager>>,
     /// Delegation event receiver (conditional).
@@ -216,8 +201,6 @@ pub struct OrchestratorParts {
     pub persist_backend: Arc<dyn crate::storage::SessionBackend>,
     /// MCP manager (conditional — only when MCP servers are configured).
     pub mcp_manager: Option<Arc<crate::agents::McpManager>>,
-    /// File change receiver for hot-reload (shared across all AgentLoops).
-    pub change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
     /// Scheduler event receiver (heartbeat ticks, cron triggers from Scheduler task).
     pub scheduler_rx: Option<mpsc::Receiver<SchedulerEvent>>,
     /// Search provider cooldown tracker (shared with WebSearchTool).
@@ -295,12 +278,10 @@ impl Orchestrator {
             pending_asks: Arc::new(DashMap::new()),
             ask_router: parts.ask_router,
             agent_runtime: parts.agent_runtime,
-            sub_delegator: parts.sub_delegator,
             delegation_manager: parts.delegation_manager,
             delegation_rx: Arc::new(TokioMutex::new(parts.delegation_rx)),
             persist_backend: parts.persist_backend,
             mcp_manager: parts.mcp_manager,
-            change_rx: parts.change_rx,
             last_channel: Arc::new(tokio::sync::Mutex::new(last_channel_value)),
             last_channel_file,
             last_recipient: Arc::new(tokio::sync::Mutex::new(last_recipient_value)),

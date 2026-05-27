@@ -17,11 +17,9 @@ use chrono::Timelike;
 use dashmap::DashMap;
 use parking_lot::{Mutex as ParkMutex, RwLock};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::Mutex;
 
 use crate::agents::Agent;
-use crate::agents::AgentLoop;
 use crate::agents::orchestrator::SchedulerEvent;
 use crate::agents::scheduling::cron_types::{DeliveryConfig, RunRecord, RunStatus, ScheduleKind};
 use crate::agents::webhook_loader::{WebhookAuth, WebhookJobDef, render_template};

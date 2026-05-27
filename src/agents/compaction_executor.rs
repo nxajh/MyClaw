@@ -11,7 +11,7 @@ use crate::providers::Capability;
 use crate::agents::resource_provider::ResourceProvider;
 use crate::agents::tool_executor::MemoryToolExecutor;
 use crate::agents::tool_registry::ToolRegistry;
-use crate::agents::agent_impl::types::estimate_message_tokens;
+use crate::agents::tokens::estimate_message_tokens;
 
 /// Result returned by CompactionExecutor::execute.
 /// AgentLoop is responsible for applying it to session (drain/insert history, update metadata).
