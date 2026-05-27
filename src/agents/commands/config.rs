@@ -132,7 +132,7 @@ pub async fn cmd_autonomy(args: &str, ctx: CommandContext<'_>) -> String {
     ov.permission_mode = autonomy;
     apply_and_persist_override(ov, &ctx).await;
 
-    // Evict the cached agent loop so the system prompt is rebuilt with the new autonomy.
-    ctx.sessions.remove(ctx.user_id);
+    // Evict the cached SessionContext so the system prompt is rebuilt with the new autonomy.
+    ctx.session_contexts.remove(ctx.user_id);
     format!("{}\n_系统提示词将在下次请求时重建。_", msg)
 }

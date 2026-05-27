@@ -5,9 +5,8 @@ use super::get_history;
 
 pub async fn cmd_new(args: &str, ctx: CommandContext<'_>) -> String {
     let name = if args.trim().is_empty() { None } else { Some(args.trim()) };
-    // Evict cached agent loop AND SessionContext so the next message
-    // creates fresh state for the new session.
-    ctx.sessions.remove(ctx.user_id);
+    // Evict cached SessionContext so the next message creates fresh
+    // state for the new session.
     ctx.session_contexts.remove(ctx.user_id);
     match ctx.session_manager.new_session(ctx.user_id, name) {
         Ok(info) => {
@@ -208,8 +207,7 @@ pub async fn cmd_switch(args: &str, ctx: CommandContext<'_>) -> String {
         None => return format!("⚠️ 序号 {} 无效，当前共 {} 个会话。", n + 1, sessions.len()),
     };
 
-    // Evict cached agent loop AND SessionContext.
-    ctx.sessions.remove(ctx.user_id);
+    // Evict cached SessionContext.
     ctx.session_contexts.remove(ctx.user_id);
 
     match ctx.session_manager.switch_session(ctx.user_id, &target.id) {

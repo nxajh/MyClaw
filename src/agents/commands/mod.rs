@@ -36,10 +36,8 @@ pub struct CommandContext<'a> {
     pub session_ctx: Option<&'a Arc<crate::agents::SessionContext>>,
     /// MCP manager (for /mcp command).
     pub mcp_manager: Option<&'a Arc<McpManager>>,
-    /// Sessions cache — needed by /new to evict stale agent loops.
-    pub sessions: &'a DashMap<String, Arc<crate::agents::SessionHandle>>,
-    /// SessionContext cache — needed by /new to evict the cached
-    /// SessionContext when the active session changes.
+    /// SessionContext cache — needed by /new and /switch to evict the
+    /// cached SessionContext when the active session changes.
     pub session_contexts: &'a DashMap<String, Arc<crate::agents::SessionContext>>,
     /// Search provider cooldown tracker (for /status command).
     pub search_cooldown: Option<&'a Arc<crate::tools::search_cooldown::SearchProviderCooldown>>,
