@@ -51,6 +51,11 @@ pub struct AgentRuntime {
     pub workspace_dir: PathBuf,
     /// Knowledge root (memory/ directory).
     pub knowledge_dir: PathBuf,
+    /// Context-engine configuration (compact_threshold, retain_work_units).
+    /// `Agent::run` reads this to build its per-turn ContextEngine — without
+    /// it the engine falls back to its hard-coded defaults and the user's
+    /// `[agent.context]` config is silently ignored.
+    pub context: crate::config::agent::ContextConfig,
 }
 
 impl AgentRuntime {
@@ -72,7 +77,13 @@ impl AgentRuntime {
             persist: None,
             workspace_dir: PathBuf::new(),
             knowledge_dir: PathBuf::new(),
+            context: crate::config::agent::ContextConfig::default(),
         }
+    }
+
+    pub fn with_context(mut self, ctx: crate::config::agent::ContextConfig) -> Self {
+        self.context = ctx;
+        self
     }
 
     pub fn with_persist(mut self, persist: Arc<dyn PersistHook>) -> Self {

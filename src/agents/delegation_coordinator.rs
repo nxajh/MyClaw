@@ -279,8 +279,12 @@ impl DelegationCoordinator {
         };
         session.add_user(task.to_string());
         if let Some(hook) = persist_hook.as_ref() {
-            if let Some(last) = session.history.last() {
-                let _ = hook.persist_message(&session.id, last);
+            if let Some(last) = session.history.last().cloned() {
+                if let Some(id) = hook.persist_message(&session.id, &last) {
+                    if let Some(slot) = session.message_ids.last_mut() {
+                        *slot = id;
+                    }
+                }
             }
         }
         let result = agent2

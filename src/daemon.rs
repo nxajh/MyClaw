@@ -940,6 +940,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         )
         .with_persist(persist_hook)
         .with_dirs(config.workspace_dir.clone(), config.knowledge_dir.clone())
+        .with_context(agent.config().context.clone())
     };
 
     let parts = OrchestratorParts {

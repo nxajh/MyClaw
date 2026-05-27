@@ -847,8 +847,12 @@ impl Orchestrator {
 
                     // Append the user message to history before running.
                     session.add_user(content.clone());
-                    if let Some(last) = session.history.last() {
-                        let _ = persist_hook.persist_message(&session.id, last);
+                    if let Some(last) = session.history.last().cloned() {
+                        if let Some(id) = persist_hook.persist_message(&session.id, &last) {
+                            if let Some(slot) = session.message_ids.last_mut() {
+                                *slot = id;
+                            }
+                        }
                     }
 
                     let thinking = session_override.to_thinking_config();
@@ -886,11 +890,12 @@ impl Orchestrator {
                             }
                         }
                         Err(e) => {
+                            // Log the full error context for operators but
+                            // send the user a sanitized notice — anyhow::Error
+                            // strings can leak internal paths, tool arguments,
+                            // and backend stack hints.
                             tracing::error!(session = %session.id, err = %e, "Agent turn failed");
-                            let send_msg = SendMessage::new(
-                                format!("{} {}", MSG_TIMEOUT, e),
-                                reply_target,
-                            );
+                            let send_msg = SendMessage::new(MSG_TIMEOUT, reply_target);
                             let _ = channel.send(&send_msg).await;
                         }
                     }
@@ -1274,27 +1279,31 @@ impl Orchestrator {
             }
         };
 
-        let (ch_type, acc_id, _) = match parse_session_key(&parent_session_id) {
-            Some(triple) => (triple.0.to_string(), triple.1.to_string(), triple.2.to_string()),
+        // Synthesize the delegation message as a full ChannelMessage so the
+        // dispatch path is structurally identical to a real inbound. The
+        // standard handle_channel_event Inbound arm runs Agent.
+        //
+        // handle_channel_event recomputes the session key from `msg.sender`,
+        // so the synthetic.sender must equal the parent's original sender —
+        // otherwise the synthetic message lands on a fresh session
+        // ("channel:account:system") instead of the user's parent session.
+        let (ct, ac, parent_sender) = match parse_session_key(&parent_session_id) {
+            Some(t) => (t.0.to_string(), t.1.to_string(), t.2.to_string()),
             None => {
                 tracing::warn!(parent = %parent_session_id, "invalid session key in delegation event");
                 return;
             }
         };
-        let channel = match self.channels.get(&(ch_type, acc_id)).map(|r| r.clone()) {
-            Some(c) => c,
-            None => {
-                tracing::warn!(parent = %parent_session_id, "channel for delegation event not found");
-                return;
-            }
-        };
-
-        // Synthesize the delegation message as a full ChannelMessage so the
-        // dispatch path is structurally identical to a real inbound. The
-        // standard handle_channel_event Inbound arm runs Agent.
+        // Verify channel exists (warn-and-skip if not) — handle_channel_event
+        // will look it up again from self.channels, but failing fast here gives
+        // a clearer log line.
+        if self.channels.get(&(ct.clone(), ac.clone())).is_none() {
+            tracing::warn!(parent = %parent_session_id, "channel for delegation event not found");
+            return;
+        }
         let synthetic = ChannelMessage {
             id: format!("delegation:{}", task_id),
-            sender: "system".to_string(),
+            sender: parent_sender,
             reply_target,
             content,
             timestamp: chrono::Utc::now().timestamp() as u64,
@@ -1304,14 +1313,6 @@ impl Orchestrator {
             image_urls: None,
             image_base64: None,
         };
-
-        // parent_session_id is a routing_key today; derive channel_type +
-        // account_id by reparsing (we lost the original split above).
-        let (ct, ac, _) = match parse_session_key(&parent_session_id) {
-            Some(t) => (t.0.to_string(), t.1.to_string(), t.2.to_string()),
-            None => return,
-        };
-        let _ = channel; // already validated above; the Inbound arm re-fetches
         self.handle_channel_event(ChannelEvent::UserMessage(((ct, ac), synthetic))).await;
     }
 }
@@ -1416,8 +1417,12 @@ async fn run_scheduled_turn(
     };
 
     session.add_user(prompt.to_string());
-    if let Some(last) = session.history.last() {
-        let _ = persist_hook.persist_message(&session.id, last);
+    if let Some(last) = session.history.last().cloned() {
+        if let Some(id) = persist_hook.persist_message(&session.id, &last) {
+            if let Some(slot) = session.message_ids.last_mut() {
+                *slot = id;
+            }
+        }
     }
 
     let thinking = session_override.to_thinking_config();

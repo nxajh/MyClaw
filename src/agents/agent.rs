@@ -109,11 +109,11 @@ impl Agent {
 
         // ContextEngine instance per turn. C18 (full) should keep this
         // on Session so token tracking persists across turns; for the MVP
-        // we re-seed from history.
+        // we re-seed from history. ContextConfig comes from `runtime.context`
+        // so the user's `[agent.context]` (compact_threshold,
+        // retain_work_units) is actually honored.
         let mut context = ContextEngine::new(
-            // No retention config in TurnContext yet; use defaults via a
-            // shadow ContextConfig until C18 (full) threads it.
-            &Default::default(),
+            &runtime.context,
             Arc::clone(&runtime.providers),
             // ResourceProvider not yet plumbed via AgentRuntime; the
             // memory-tool-during-compaction path is disabled here.
@@ -163,6 +163,22 @@ impl Agent {
                     stop_reason: StopReason::EndTurn,
                     pending_retry: None,
                 });
+            }
+
+            // User-cancel checkpoint: if the session's channel surfaces a
+            // CancellationToken for this reply_target (ClientChannel does),
+            // honor it. Without this poll the WebSocket "cancel" message
+            // signals the token but Agent::run never sees the cancel.
+            if let (Some(ref ch), Some(rt)) = (session.channel.as_ref(), session.reply_target()) {
+                if let Some(token) = ch.cancel_signal(rt) {
+                    if token.is_cancelled() {
+                        return Ok(TurnResult {
+                            text: String::new(),
+                            stop_reason: StopReason::EndTurn,
+                            pending_retry: None,
+                        });
+                    }
+                }
             }
 
             // Attach pending images to the last user message on the
@@ -357,11 +373,7 @@ impl Agent {
                     continue;
                 }
                 session.add_assistant(response.text.clone());
-                if let Some(ref hook) = session.persist {
-                    if let Some(msg) = session.history.last() {
-                        let _ = hook.persist_message(&session.id, msg);
-                    }
-                }
+                persist_last(session);
                 return Ok(TurnResult {
                     text: response.text,
                     stop_reason: response.stop_reason,
@@ -390,11 +402,7 @@ impl Agent {
                 response.reasoning_content.clone(),
                 response.thinking_signature.clone(),
             );
-            if let Some(ref hook) = session.persist {
-                if let Some(msg) = session.history.last() {
-                    let _ = hook.persist_message(&session.id, msg);
-                }
-            }
+            persist_last(session);
 
             for call in &response.tool_calls {
                 tool_calls_count += 1;
@@ -481,11 +489,7 @@ impl Agent {
                 }
 
                 session.add_tool_result(call.id.clone(), result_content, is_error);
-                if let Some(ref hook) = session.persist {
-                    if let Some(msg) = session.history.last() {
-                        let _ = hook.persist_message(&session.id, msg);
-                    }
-                }
+                persist_last(session);
             }
 
             // Loop back to the next LLM call with the appended tool_result messages.
@@ -585,11 +589,7 @@ impl Agent {
                     Err(e) => (format!("error: {}", e), true),
                 };
                 session.add_tool_result(call.id.clone(), result_content, is_error);
-                if let Some(ref hook) = session.persist {
-                    if let Some(last) = session.history.last() {
-                        let _ = hook.persist_message(&session.id, last);
-                    }
-                }
+                persist_last(session);
             }
         }
 
@@ -658,6 +658,27 @@ fn placeholder_resources(
 /// `agent_impl/` internals.
 fn estimate_tokens(text: &str) -> u64 {
     (text.len() as u64).div_ceil(4)
+}
+
+/// Persist `session.history.last()` via `session.persist` and write the
+/// returned backend ID into `session.message_ids.last_mut()`. Mirrors the
+/// legacy `AgentLoop` pattern — without the id-capture, message_ids stays
+/// at the 0 placeholder forever, which breaks compaction's
+/// `last_compacted_id` lookup (it would always be 0).
+fn persist_last(session: &mut Session) {
+    let hook = match session.persist.clone() {
+        Some(h) => h,
+        None => return,
+    };
+    let msg = match session.history.last().cloned() {
+        Some(m) => m,
+        None => return,
+    };
+    if let Some(id) = hook.persist_message(&session.id, &msg) {
+        if let Some(slot) = session.message_ids.last_mut() {
+            *slot = id;
+        }
+    }
 }
 
 /// Pull the text of the most recent user message from history, if any.

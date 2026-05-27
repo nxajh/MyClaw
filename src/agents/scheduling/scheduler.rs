@@ -1019,8 +1019,12 @@ pub async fn run_scheduled_task(
     };
 
     session.add_user(prompt.to_string());
-    if let Some(last) = session.history.last() {
-        let _ = persist_hook.persist_message(&session.id, last);
+    if let Some(last) = session.history.last().cloned() {
+        if let Some(id) = persist_hook.persist_message(&session.id, &last) {
+            if let Some(slot) = session.message_ids.last_mut() {
+                *slot = id;
+            }
+        }
     }
 
     let thinking = session_override.to_thinking_config();
