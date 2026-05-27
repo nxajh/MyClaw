@@ -614,7 +614,7 @@ impl Orchestrator {
         let sessions = self.sessions.clone();
         let channels = self.channels.clone();
         match event {
-            ChannelEvent::UserMessage(((channel_type, account_id), msg)) => {
+            ChannelEvent::UserMessage(((channel_type, account_id), mut msg)) => {
                 // Track last channel for scheduler target resolution.
                 let lc_val = format!("{}:{}", channel_type, account_id);
                 {
@@ -670,6 +670,12 @@ impl Orchestrator {
                 }
 
                 // Check if this is a retry/abort callback from an EmptyResponse prompt.
+                // E29 final: pending_retry lives on SessionContext. For
+                // retry, we extract the saved text and rewrite the
+                // incoming msg.content to it — then fall through to the
+                // standard dispatch below so the regular Agent2 path
+                // handles it. For abort, we clear pending_retry and
+                // ack inline.
                 if msg.content.starts_with("__retry:") || msg.content.starts_with("__abort:") {
                     let is_retry = msg.content.starts_with("__retry:");
                     let reply_target = msg.reply_target.clone();
@@ -682,48 +688,51 @@ impl Orchestrator {
                         None => return,
                     };
 
-                    if is_retry {
-                        let handle = registry.get_or_create(&sk, &reply_target);
-                        let pending = handle.loop_.try_lock().ok()
-                            .and_then(|mut g| g.take_pending_retry());
+                    let session_ctx = self.session_context_for(&sk);
+                    let pending = if is_retry {
+                        session_ctx.pending_retry.lock().await.take()
+                    } else {
+                        *session_ctx.pending_retry.lock().await = None;
+                        None
+                    };
 
-                        if let Some(user_msg) = pending {
-                            let reply_to_id = Some(msg.id.clone());
-                            tokio::spawn(run_retry_task(
-                                sk.clone(), channel, handle.loop_.clone(),
-                                user_msg, reply_target.clone(), reply_to_id,
-                            ));
-                        } else {
-                            let send_msg = SendMessage::new(
-                                MSG_NO_PENDING_RETRY,
-                                reply_target.clone(),
-                            );
-                            let _ = channel.send(&send_msg).await;
+                    if is_retry {
+                        match pending {
+                            Some(user_msg) => {
+                                // Rewrite content and fall through.
+                                msg.content = user_msg;
+                            }
+                            None => {
+                                let send_msg = SendMessage::new(
+                                    MSG_NO_PENDING_RETRY,
+                                    reply_target.clone(),
+                                );
+                                let _ = channel.send(&send_msg).await;
+                                return;
+                            }
                         }
                     } else {
-                        let handle = registry.get_or_create(&sk, &reply_target);
-                        if let Ok(mut guard) = handle.loop_.try_lock() {
-                            guard.take_pending_retry();
-                        }
                         let send_msg = SendMessage::new(MSG_ABORT_ACK, reply_target.clone());
                         let _ = channel.send(&send_msg).await;
+                        return;
                     }
-                    return;
                 }
 
                 // Check for an incomplete turn loaded from a previous crash/SIGKILL.
+                // E29 final: read incomplete_turn from SessionContext.session
+                // and stash the orphaned user message on SessionContext.pending_retry.
                 {
-                    let handle = registry.get_or_create(&sk, &msg.reply_target);
-                    if let Ok(mut guard) = handle.loop_.try_lock() {
-                        if guard.session.incomplete_turn {
-                            guard.session.incomplete_turn = false;
+                    let session_ctx = self.session_context_for(&sk);
+                    if let Ok(mut session) = session_ctx.session.try_lock() {
+                        if session.incomplete_turn {
+                            session.incomplete_turn = false;
 
-                            let last_user_msg = guard.session.history.last()
+                            let last_user_msg = session.history.last()
                                 .filter(|m| m.role == "user")
                                 .map(|m| m.text_content().to_string())
                                 .unwrap_or_default();
-                            guard.set_pending_retry(last_user_msg.clone());
-                            drop(guard);
+                            *session_ctx.pending_retry.lock().await = Some(last_user_msg.clone());
+                            drop(session);
 
                             let channel = match channels.get(&channel_key).map(|r| r.clone()) {
                                 Some(c) => c,
