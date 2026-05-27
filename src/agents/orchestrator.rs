@@ -1004,9 +1004,11 @@ impl Orchestrator {
                 // Spawn: LLM execution runs independently of the main loop.
                 let ctx = SchedulerContext {
                     sessions: self.sessions.clone(),
+                    session_contexts: self.session_contexts.clone(),
                     session_manager: self.session_manager.clone(),
                     persist_backend: self.persist_backend.clone(),
                     agent: self.agent.clone(),
+                    agent_runtime: self.agent_runtime.clone(),
                     change_rx: self.change_rx.clone(),
                     channels: self.channels.clone(),
                     last_channel: self.last_channel.clone(),
@@ -1027,9 +1029,11 @@ impl Orchestrator {
                 tracing::debug!(session_key = %session_key, "cron job triggered (from scheduler)");
                 let ctx = SchedulerContext {
                     sessions: self.sessions.clone(),
+                    session_contexts: self.session_contexts.clone(),
                     session_manager: self.session_manager.clone(),
                     persist_backend: self.persist_backend.clone(),
                     agent: self.agent.clone(),
+                    agent_runtime: self.agent_runtime.clone(),
                     change_rx: self.change_rx.clone(),
                     channels: self.channels.clone(),
                     last_channel: self.last_channel.clone(),
@@ -1839,16 +1843,114 @@ pub(crate) fn is_silent_ok(response: &str, prefix: &str) -> bool {
 }
 
 /// Shared resources for spawned scheduler tasks (heartbeat/cron).
+///
+/// H45 transition: still carries `agent` and `change_rx` for the
+/// legacy paths that haven't migrated yet, plus `agent_runtime` +
+/// `session_contexts` for the new Agent2-driven scheduled-turn path.
+/// `agent` and `sessions` (SessionHandle map) go away with H45.
 struct SchedulerContext {
     sessions: Arc<DashMap<String, Arc<SessionHandle>>>,
+    session_contexts: Arc<DashMap<String, Arc<SessionContext>>>,
     session_manager: Arc<SessionManager>,
     persist_backend: Arc<dyn crate::storage::SessionBackend>,
     agent: Agent,
+    agent_runtime: crate::agents::AgentRuntime,
     change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
     channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
     last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
     last_recipient: Arc<tokio::sync::Mutex<Option<String>>>,
     scheduler: Option<crate::agents::SharedScheduler>,
+}
+
+/// Execute one scheduled turn (heartbeat / cron) via Agent2. Shared
+/// helper extracted from run_heartbeat_task / run_cron_task. Returns
+/// the assistant's text response, or an Err.
+///
+/// `session_key` is a routing_key — synthetic ("_heartbeat_<uuid>") for
+/// heartbeats, real-looking for cron. The SessionContext is created or
+/// reused via the orchestrator's session_contexts map (passed through
+/// SchedulerContext). Session.session_override.run_mode is forced to
+/// Background to inform the prompt builder.
+async fn run_scheduled_turn(
+    ctx: &SchedulerContext,
+    session_key: &str,
+    prompt: &str,
+    model_override: Option<String>,
+) -> anyhow::Result<String> {
+    // Get or create a SessionContext for this scheduled session.
+    let session_ctx = if let Some(existing) = ctx.session_contexts.get(session_key) {
+        existing.clone()
+    } else {
+        let mut session = ctx.session_manager.get_or_create(session_key);
+        session.session_override.run_mode =
+            Some(crate::config::agent::RunMode::Background);
+        if let Some(m) = model_override.clone() {
+            session.session_override.model = Some(m);
+        }
+        let sc = Arc::new(SessionContext::new(session));
+        ctx.session_contexts.insert(session_key.to_string(), sc.clone());
+        sc
+    };
+
+    let runtime = ctx.agent_runtime.clone();
+    let agent2_config = runtime
+        .agents
+        .get("main")
+        .unwrap_or_else(Orchestrator::build_default_main_agent_config);
+    let agent2 = crate::agents::Agent2::new(agent2_config);
+    let prompt_config_base = ctx.agent.config().prompt_config.clone();
+    let skills_arc = Arc::clone(ctx.agent.skills());
+    let cached_prompt = ctx.agent.cached_system_prompt().to_string();
+    let persist_hook: Arc<dyn PersistHook> = Arc::new(
+        BackendPersistHook::new(Arc::clone(&ctx.persist_backend))
+    );
+
+    let _turn_guard = session_ctx.turn_lock.lock().await;
+    let mut session = session_ctx.session.lock().await;
+
+    // Apply per-call model override.
+    if let Some(m) = model_override.as_ref() {
+        session.session_override.model = Some(m.clone());
+    }
+
+    // Wire transient handles for this turn (no channel — scheduled
+    // tasks deliver via send_to_target_internal after the turn).
+    session.persist = Some(persist_hook.clone());
+
+    // Resolve TurnContext.
+    let session_override = session.session_override.clone();
+    let mut prompt_config = prompt_config_base.clone();
+    if let Some(pm) = session_override.permission_mode {
+        prompt_config.permission_mode = pm;
+    }
+    if let Some(rm) = session_override.run_mode {
+        prompt_config.run_mode = rm;
+    }
+    let system_prompt = if !cached_prompt.is_empty() {
+        cached_prompt
+    } else {
+        let s = skills_arc.read();
+        crate::agents::SystemPromptBuilder::new(prompt_config.clone()).build(&s)
+    };
+
+    session.add_user(prompt.to_string());
+    if let Some(last) = session.history.last() {
+        let _ = persist_hook.persist_message(&session.id, last);
+    }
+
+    let thinking = session_override.to_thinking_config();
+    let model_id = session_override.model.as_deref();
+    let turn_ctx = crate::agents::TurnContext {
+        system_prompt: &system_prompt,
+        model_id,
+        thinking: thinking.as_ref(),
+        permission_mode: prompt_config.permission_mode,
+        run_mode: prompt_config.run_mode,
+    };
+
+    let res = agent2.run(&mut session, turn_ctx, &runtime).await;
+    session.persist = None;
+    res.map(|tr| tr.text)
 }
 
 /// Execute a heartbeat turn as an independent spawned task.
@@ -1862,11 +1964,7 @@ async fn run_heartbeat_task(
     state_path: std::path::PathBuf,
 ) {
     let session_key = format!("_heartbeat_{}", uuid::Uuid::new_v4());
-    let result = {
-        let loop_ = get_or_create_scheduled_loop(&ctx, &session_key);
-        let mut guard = loop_.lock().await;
-        guard.run(&prompt, None, None).await
-    };
+    let result = run_scheduled_turn(&ctx, &session_key, &prompt, None).await;
 
     // Update task state on success.
     if result.is_ok() {
@@ -1910,15 +2008,7 @@ async fn run_cron_task(
     _provider: Option<String>,
 ) {
     let start = std::time::Instant::now();
-    let result = {
-        let loop_ = get_or_create_scheduled_loop(&ctx, &session_key);
-        let mut guard = loop_.lock().await;
-        // Apply per-job model override if specified.
-        if let Some(ref m) = model {
-            guard.config.model_override = Some(m.clone());
-        }
-        guard.run(&prompt, None, None).await
-    };
+    let result = run_scheduled_turn(&ctx, &session_key, &prompt, model.clone()).await;
     let duration_ms = start.elapsed().as_millis() as u64;
 
     // Build run record and mark result in scheduler.
