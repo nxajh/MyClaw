@@ -492,6 +492,113 @@ impl Agent2 {
         }
     }
 
+    /// Resume a session whose history ends mid-turn (process crash,
+    /// hot-switch during tool execution). Three cases handled, matching
+    /// the legacy `AgentLoop::recover_interrupted_turn` semantics:
+    ///
+    /// - **Case A** — assistant tool_calls without matching tool_results:
+    ///   re-execute each orphan call via the same ToolExecutor `run()`
+    ///   uses, append the results to history, then fall through to
+    ///   `run()` so the LLM continues.
+    /// - **Case B** — trailing tool_results, no LLM response: just call
+    ///   `run()`. The chat loop sends the current history to the LLM
+    ///   without appending a fresh user message.
+    /// - **Case C** — trailing user message, no LLM response: same as
+    ///   Case B.
+    ///
+    /// Returns `None` if the session's history is empty or not in a
+    /// mid-turn state (no recovery needed).
+    pub async fn run_recovery(
+        &self,
+        session: &mut Session,
+        turn_ctx: TurnContext<'_>,
+        runtime: &AgentRuntime,
+    ) -> Result<Option<TurnResult>> {
+        use std::collections::HashSet;
+
+        if session.history.is_empty() {
+            return Ok(None);
+        }
+
+        // Walk backwards collecting completed tool_call_ids and finding
+        // any orphan tool_calls in the most recent assistant message.
+        let mut completed_ids: HashSet<String> = HashSet::new();
+        let mut pending_calls: Vec<crate::providers::ToolCall> = Vec::new();
+        let mut has_trailing_tool_results = false;
+        let mut last_is_user = false;
+
+        for msg in session.history.iter().rev() {
+            if msg.role == "tool" {
+                if let Some(ref id) = msg.tool_call_id {
+                    completed_ids.insert(id.clone());
+                }
+                has_trailing_tool_results = true;
+            } else if msg.role == "assistant" {
+                if let Some(ref calls) = msg.tool_calls {
+                    for call in calls {
+                        if !completed_ids.contains(&call.id) {
+                            pending_calls.push(call.clone());
+                        }
+                    }
+                }
+                break;
+            } else if msg.role == "user" {
+                last_is_user = true;
+                break;
+            } else {
+                break;
+            }
+        }
+
+        let needs_case_a = !pending_calls.is_empty();
+        let needs_case_b = has_trailing_tool_results && pending_calls.is_empty();
+        let needs_case_c = last_is_user;
+        if !(needs_case_a || needs_case_b || needs_case_c) {
+            return Ok(None);
+        }
+
+        // Case A: re-execute orphan tool_calls so history ends well-formed.
+        if needs_case_a {
+            tracing::info!(
+                session = %session.id,
+                missing_count = pending_calls.len(),
+                "recovery: re-executing interrupted tool calls"
+            );
+            let allowed_tools = self.allowed_tools(runtime);
+            let scoped_tools = Arc::new(build_scoped_registry(&allowed_tools));
+            let tool_executor = ToolExecutor::new(scoped_tools, runtime.tool_timeout_secs);
+
+            for call in &pending_calls {
+                let result = tool_executor
+                    .execute(call, session, Some(&turn_ctx.permission_mode))
+                    .await;
+                let (result_content, is_error) = match &result {
+                    Ok(r) => {
+                        let mut out = r.output.clone();
+                        if let Some(ref err) = r.error {
+                            if out.is_empty() {
+                                out = format!("error: {}", err);
+                            }
+                        }
+                        (out, !r.success)
+                    }
+                    Err(e) => (format!("error: {}", e), true),
+                };
+                session.add_tool_result(call.id.clone(), result_content, is_error);
+                if let Some(ref hook) = session.persist {
+                    if let Some(last) = session.history.last() {
+                        let _ = hook.persist_message(&session.id, last);
+                    }
+                }
+            }
+        }
+
+        // Cases B, C, and tail of A: drive Agent2.run from the now-well-formed
+        // history. The user message (if any) is already in history.
+        let tr = self.run(session, turn_ctx, runtime).await?;
+        Ok(Some(tr))
+    }
+
     /// Filter `runtime.tools` through `self.config.allows_tool/skill/mcp`.
     /// MVP: ignores `source()` distinctions because `allows_tool` is a
     /// flat name check; C18 (full) will switch to per-source dispatch

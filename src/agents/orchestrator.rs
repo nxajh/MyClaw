@@ -1069,30 +1069,66 @@ impl Orchestrator {
     /// Registers each session's actor synchronously (so new messages can be
     /// queued immediately), then spawns the LLM recovery work in background
     /// tasks so the event loop starts without waiting for them to finish.
-    fn startup_recover_sessions(&self, registry: &LoopRegistry) {
+    fn startup_recover_sessions(&self, _registry: &LoopRegistry) {
         let all_sessions = self.session_manager.list_all_sessions();
         for session_info in &all_sessions {
             let sk = &session_info.owner;
-            let session = self.session_manager.get_or_create(sk);
-            let history = &session.history;
+            let session_snap = self.session_manager.get_or_create(sk);
+            let history = &session_snap.history;
             if history.is_empty() || !history_has_incomplete_turn(history) {
                 continue;
             }
             tracing::info!(session = %sk, "startup recovery: found incomplete turn, spawning background task");
-            let reply_target = format!("startup:recovery:{}", sk);
-            // get_or_create registers the session actor synchronously.
-            let handle = registry.get_or_create(sk, &reply_target);
-            let loop_ = handle.loop_.clone();
+            let session_ctx = self.session_context_for(sk);
             let sk_owned = sk.clone();
             let persist_backend = self.persist_backend.clone();
             let channels = self.channels.clone();
+            let runtime = self.agent_runtime.clone();
+            let agent2_config = runtime
+                .agents
+                .get("main")
+                .unwrap_or_else(Self::build_default_main_agent_config);
+            let agent2 = crate::agents::Agent2::new(agent2_config);
+            let prompt_config_base = self.agent.config().prompt_config.clone();
+            let skills_arc = Arc::clone(self.agent.skills());
+            let cached_prompt = self.agent.cached_system_prompt().to_string();
+            let persist_hook: Arc<dyn PersistHook> = Arc::new(
+                BackendPersistHook::new(Arc::clone(&self.persist_backend))
+            );
 
             tokio::spawn(async move {
-                let mut guard = loop_.lock().await;
-                match guard.recover_interrupted_turn().await {
-                    Ok(Some(text)) if !text.is_empty() => {
+                let _turn_guard = session_ctx.turn_lock.lock().await;
+                let mut session = session_ctx.session.lock().await;
+                session.persist = Some(persist_hook.clone());
+
+                let session_override = session.session_override.clone();
+                let mut prompt_config = prompt_config_base.clone();
+                if let Some(pm) = session_override.permission_mode {
+                    prompt_config.permission_mode = pm;
+                }
+                if let Some(rm) = session_override.run_mode {
+                    prompt_config.run_mode = rm;
+                }
+                let system_prompt = if !cached_prompt.is_empty() {
+                    cached_prompt
+                } else {
+                    let s = skills_arc.read();
+                    crate::agents::SystemPromptBuilder::new(prompt_config.clone()).build(&s)
+                };
+
+                let thinking = session_override.to_thinking_config();
+                let model_id = session_override.model.as_deref();
+                let turn_ctx = crate::agents::TurnContext {
+                    system_prompt: &system_prompt,
+                    model_id,
+                    thinking: thinking.as_ref(),
+                    permission_mode: prompt_config.permission_mode,
+                    run_mode: prompt_config.run_mode,
+                };
+
+                match agent2.run_recovery(&mut session, turn_ctx, &runtime).await {
+                    Ok(Some(tr)) if !tr.text.is_empty() => {
                         tracing::info!(session = %sk_owned, "startup recovery: turn completed");
-                        // Use persisted reply_target if available (handles QQ Bot c2c:/group: prefix).
                         let recipient = persist_backend.load_reply_target(&sk_owned)
                             .unwrap_or_else(|| {
                                 parse_session_key(&sk_owned)
@@ -1101,7 +1137,7 @@ impl Orchestrator {
                             });
                         if let Some((ch_type, acc_id, _)) = parse_session_key(&sk_owned) {
                             if let Some(channel) = channels.get(&(ch_type.to_string(), acc_id.to_string())).map(|r| r.clone()) {
-                                let send_msg = SendMessage::new(&text, &recipient);
+                                let send_msg = SendMessage::new(&tr.text, &recipient);
                                 if let Err(e) = channel.send(&send_msg).await {
                                     tracing::warn!(session = %sk_owned, err = %e, "startup recovery: failed to send response");
                                 }
@@ -1113,6 +1149,8 @@ impl Orchestrator {
                         tracing::warn!(session = %sk_owned, err = %e, "startup recovery failed");
                     }
                 }
+
+                session.persist = None;
             });
         }
     }
@@ -1123,7 +1161,7 @@ impl Orchestrator {
     /// recovery work in background tasks (same pattern as startup_recover_sessions).
     fn startup_recover_subagents(
         &self,
-        registry: &LoopRegistry,
+        _registry: &LoopRegistry,
         unfinished: &[crate::agents::UnfinishedSubAgent],
         delegation_manager: &Option<Arc<DelegationManager>>,
     ) {
@@ -1133,31 +1171,69 @@ impl Orchestrator {
                 continue;
             }
             let sub_sk = format!("{}:{}", sa.agent_name, sa.sub_session_id);
-            let session = self.session_manager.get_or_create(&sub_sk);
-            let history = &session.history;
+            let session_snap = self.session_manager.get_or_create(&sub_sk);
+            let history = &session_snap.history;
             if history.is_empty() || !history_has_incomplete_turn(history) {
                 continue;
             }
             tracing::info!(task_id = %sa.task_id, agent = %sa.agent_name, "sub-agent startup recovery: found incomplete turn, spawning background task");
-            let reply_target = format!("startup:recovery:sub:{}", sa.task_id);
-            let handle = registry.get_or_create(&sub_sk, &reply_target);
-            let loop_ = handle.loop_.clone();
+            let session_ctx = self.session_context_for(&sub_sk);
             let task_id = sa.task_id.clone();
             let session_key = sa.session_key.clone();
             let sa_reply_target = sa.reply_target.clone();
             let dm = delegation_manager.clone();
+            let runtime = self.agent_runtime.clone();
+            let agent_name = sa.agent_name.clone();
+            let agent2_config = runtime
+                .agents
+                .get(&agent_name)
+                .unwrap_or_else(Self::build_default_main_agent_config);
+            let agent2 = crate::agents::Agent2::new(agent2_config);
+            let prompt_config_base = self.agent.config().prompt_config.clone();
+            let skills_arc = Arc::clone(self.agent.skills());
+            let cached_prompt = self.agent.cached_system_prompt().to_string();
+            let persist_hook: Arc<dyn PersistHook> = Arc::new(
+                BackendPersistHook::new(Arc::clone(&self.persist_backend))
+            );
 
             tokio::spawn(async move {
-                let mut guard = loop_.lock().await;
-                match guard.recover_interrupted_turn().await {
-                    Ok(Some(text)) if !text.is_empty() => {
+                let _turn_guard = session_ctx.turn_lock.lock().await;
+                let mut session = session_ctx.session.lock().await;
+                session.persist = Some(persist_hook.clone());
+
+                let session_override = session.session_override.clone();
+                let mut prompt_config = prompt_config_base.clone();
+                if let Some(pm) = session_override.permission_mode {
+                    prompt_config.permission_mode = pm;
+                }
+                if let Some(rm) = session_override.run_mode {
+                    prompt_config.run_mode = rm;
+                }
+                let system_prompt = if !cached_prompt.is_empty() {
+                    cached_prompt
+                } else {
+                    let s = skills_arc.read();
+                    crate::agents::SystemPromptBuilder::new(prompt_config.clone()).build(&s)
+                };
+                let thinking = session_override.to_thinking_config();
+                let model_id = session_override.model.as_deref();
+                let turn_ctx = crate::agents::TurnContext {
+                    system_prompt: &system_prompt,
+                    model_id,
+                    thinking: thinking.as_ref(),
+                    permission_mode: prompt_config.permission_mode,
+                    run_mode: prompt_config.run_mode,
+                };
+
+                match agent2.run_recovery(&mut session, turn_ctx, &runtime).await {
+                    Ok(Some(tr)) if !tr.text.is_empty() => {
                         tracing::info!(task_id = %task_id, "sub-agent startup recovery: turn completed");
                         if let Some(dm) = dm {
                             let _ = dm.event_sender().send(DelegationEvent::Completed {
                                 task_id,
                                 parent_session_id: session_key,
                                 reply_target: sa_reply_target,
-                                summary: text,
+                                summary: tr.text,
                                 duration_secs: 0,
                             }).await;
                         }
@@ -1169,6 +1245,7 @@ impl Orchestrator {
                         tracing::warn!(task_id = %task_id, err = %e, "sub-agent startup recovery failed");
                     }
                 }
+                session.persist = None;
             });
         }
     }
