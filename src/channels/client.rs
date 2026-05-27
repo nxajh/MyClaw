@@ -373,14 +373,18 @@ impl ClientChannel {
                                                 continue;
                                             }
 
-                                            // Create streaming context.
+                                            // E32: stream context indexed by reply_target.
+                                            // For ClientChannel today reply_target ==
+                                            // session_key, but using reply_target
+                                            // semantically lets sub-agents push events
+                                            // to the parent's UI when their session
+                                            // inherits the parent's reply_target.
                                             let (event_tx, mut event_rx) = mpsc::channel::<TurnEvent>(64);
                                             let cancel = CancellationToken::new();
-
-                                            // Store in stream_contexts.
+                                            let reply_target_key = session_key_clone.clone();
                                             {
                                                 let mut contexts = stream_contexts_clone.write();
-                                                contexts.insert(session_key_clone.clone(), StreamContext {
+                                                contexts.insert(reply_target_key.clone(), StreamContext {
                                                     event_tx: event_tx.clone(),
                                                     cancel: cancel.clone(),
                                                 });
@@ -572,32 +576,28 @@ impl Channel for ClientChannel {
         true
     }
 
-    fn prepare_stream(
-        &self,
-        _session_key: &str,
-        _ws_sender: mpsc::Sender<String>,
-    ) -> Option<(mpsc::Sender<TurnEvent>, CancellationToken)> {
-        // Not used — context is prepared by WS handler.
-        None
-    }
-
-    fn take_stream_context(
-        &self,
-        session_key: &str,
-    ) -> Option<(mpsc::Sender<TurnEvent>, CancellationToken)> {
-        // Remove the entry so the event_forwarder task (which holds event_rx)
-        // will exit naturally once run_streamed drops the returned event_tx —
-        // no separate cleanup step needed, and no race with the next message's
-        // context insertion.
-        let mut contexts = self.stream_contexts.write();
-        contexts.remove(session_key).map(|ctx| (ctx.event_tx, ctx.cancel))
-    }
-
-    fn cancel_turn(&self, session_key: &str) {
-        let contexts = self.stream_contexts.read();
-        if let Some(ctx) = contexts.get(session_key) {
-            ctx.cancel.cancel();
+    /// E32: push a per-turn event (Chunk, Thinking, ToolCall, …) at
+    /// the stream context indexed by `reply_target`. Agent::run calls
+    /// this via `session.channel.push_event(reply_target, event)`.
+    /// No-op if no stream context is registered for this target —
+    /// non-streaming connections drop events silently.
+    async fn push_event(&self, reply_target: &str, event: TurnEvent) {
+        let sender = {
+            let contexts = self.stream_contexts.read();
+            contexts.get(reply_target).map(|ctx| ctx.event_tx.clone())
+        };
+        if let Some(tx) = sender {
+            if tx.send(event).await.is_err() {
+                tracing::debug!(reply_target = %reply_target, "push_event: client disconnected");
+            }
         }
+    }
+
+    /// E32: return the cancellation token registered for this
+    /// `reply_target` so `Agent::run` can poll for user-initiated cancels.
+    fn cancel_signal(&self, reply_target: &str) -> Option<CancellationToken> {
+        let contexts = self.stream_contexts.read();
+        contexts.get(reply_target).map(|ctx| ctx.cancel.clone())
     }
 }
 

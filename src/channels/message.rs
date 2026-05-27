@@ -109,37 +109,11 @@ pub trait Channel: Send + Sync {
     /// status indicators (e.g. reactions).
     async fn on_status(&self, _recipient: &str, _status: ProcessingStatus) {}
 
-    /// Prepare streaming context for a session (ClientChannel only).
-    /// Called by the Orchestrator before `run_streamed()`.
-    /// Returns `(event_tx, cancel_token)` for the agent to use.
-    fn prepare_stream(
-        &self,
-        _session_key: &str,
-        _ws_sender: mpsc::Sender<String>,
-    ) -> Option<(mpsc::Sender<TurnEvent>, CancellationToken)> {
-        None
-    }
-
-    /// Take the prepared streaming context for a session.
-    /// Called by the Orchestrator to get the event_tx and cancel_token.
-    fn take_stream_context(
-        &self,
-        _session_key: &str,
-    ) -> Option<(mpsc::Sender<TurnEvent>, CancellationToken)> {
-        None
-    }
-
-    /// Whether this channel supports streaming turn events via `run_streamed()`.
-    ///
-    /// Returns `false` by default.  `ClientChannel` overrides this to `true`.
-    /// Replaces the previous `channel_name == "client"` string comparison in
-    /// the Orchestrator, eliminating an OCP violation.
+    /// Whether this channel supports streaming turn events via the
+    /// `push_event` mechanism. ClientChannel overrides this to `true`.
     fn supports_streaming(&self) -> bool {
         false
     }
-
-    /// Cancel the current turn for a session (ClientChannel only).
-    fn cancel_turn(&self, _session_key: &str) {}
 
     /// Forward a per-turn event to the channel addressed by `reply_target`.
     ///
