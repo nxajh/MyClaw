@@ -978,13 +978,13 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         let wh_jobs = crate::agents::load_webhook_jobs(&wh_dir);
         let wh_ctx = Arc::new(crate::agents::WebhookContext {
             agent: agent.clone(),
+            agent_runtime: orchestrator.shared().agent_runtime.clone(),
             channels: orchestrator.shared().channels,
-            sessions: orchestrator.shared().sessions,
+            session_contexts: orchestrator.shared().session_contexts,
             session_manager: session_manager_for_webhook,
             session_backend: session_backend.clone(),
             timezone: tz_name.clone(),
             last_channel: orchestrator.shared().last_channel,
-            change_rx: Some(change_rx.clone()),
         });
         let wh_config = scheduler_config.webhook.clone();
 

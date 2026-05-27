@@ -149,6 +149,11 @@ pub struct Orchestrator {
 /// Resources shared between Orchestrator and scheduler tasks.
 pub struct SharedSessions {
     pub sessions: Arc<DashMap<String, Arc<SessionHandle>>>,
+    /// SessionContext map (Agent2 dispatch path). Shared with webhook
+    /// server + future scheduler tasks.
+    pub session_contexts: Arc<DashMap<String, Arc<SessionContext>>>,
+    /// AgentRuntime for Agent2 dispatch in webhook tasks.
+    pub agent_runtime: crate::agents::AgentRuntime,
     pub channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
     pub last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
     pub last_recipient: Arc<tokio::sync::Mutex<Option<String>>>,
@@ -321,6 +326,8 @@ impl Orchestrator {
     pub fn shared(&self) -> SharedSessions {
         SharedSessions {
             sessions: self.sessions.clone(),
+            session_contexts: self.session_contexts.clone(),
+            agent_runtime: self.agent_runtime.clone(),
             channels: self.channels.clone(),
             last_channel: self.last_channel.clone(),
             last_recipient: self.last_recipient.clone(),

@@ -861,8 +861,12 @@ fn generate_id() -> String {
 /// Heartbeat and cron use the Orchestrator event path instead.
 pub struct WebhookContext {
     pub agent: Agent,
+    /// AgentRuntime for Agent2 dispatch (H45 transition).
+    pub agent_runtime: crate::agents::AgentRuntime,
     pub channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
-    pub sessions: Arc<DashMap<String, Arc<crate::agents::SessionHandle>>>,
+    /// Shared SessionContext map (same Arc as Orchestrator's
+    /// session_contexts) for the Agent2 dispatch path.
+    pub session_contexts: Arc<DashMap<String, Arc<crate::agents::SessionContext>>>,
     /// Shared session manager — avoids creating throwaway instances per request.
     pub session_manager: Arc<crate::agents::session::SessionManager>,
     /// Backend kept separately for persist hooks (BackendPersistHook needs it).
@@ -870,7 +874,6 @@ pub struct WebhookContext {
     pub timezone: String,
     /// Last channel that received a user message (format: "channel_type:account_id").
     pub last_channel: Arc<Mutex<Option<String>>>,
-    pub change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
 }
 
 // ── Interval parsing ───────────────────────────────────────────────────────
@@ -955,37 +958,88 @@ fn parse_hhmm(s: &str) -> Option<u32> {
 
 // ── Webhook execution helpers ──────────────────────────────────────────────
 
-/// Create or get an AgentLoop for a webhook session and run a prompt.
+/// Execute one webhook turn via Agent2 + SessionContext. Mirrors the
+/// orchestrator's run_scheduled_turn but lives here because the webhook
+/// server task doesn't have a direct Orchestrator reference.
 pub async fn run_scheduled_task(
     ctx: &WebhookContext,
     session_key: &str,
     prompt: &str,
 ) -> anyhow::Result<String> {
-    let loop_ = get_or_create_loop(ctx, session_key);
-    let mut guard = loop_.lock().await;
-    guard.run(prompt, None, None).await
-}
+    let session_ctx = if let Some(existing) = ctx.session_contexts.get(session_key) {
+        existing.clone()
+    } else {
+        let mut session = ctx.session_manager.get_or_create(session_key);
+        session.session_override.run_mode =
+            Some(crate::config::agent::RunMode::Background);
+        let sc = Arc::new(crate::agents::SessionContext::new(session));
+        ctx.session_contexts.insert(session_key.to_string(), sc.clone());
+        sc
+    };
 
-fn get_or_create_loop(ctx: &WebhookContext, session_key: &str) -> Arc<TokioMutex<AgentLoop>> {
-    if let Some(existing) = ctx.sessions.get(session_key) {
-        return existing.loop_.clone();
-    }
-
-    let session = ctx.session_manager.get_or_create(session_key);
+    let runtime = ctx.agent_runtime.clone();
+    let agent2_config = runtime
+        .agents
+        .get("main")
+        .unwrap_or_else(|| crate::config::sub_agent::SubAgentConfig {
+            name: "main".to_string(),
+            description: None,
+            system_prompt: String::new(),
+            tools: vec!["all".to_string()],
+            skills: Default::default(),
+            mcp: Default::default(),
+            model: None,
+            max_tool_calls: None,
+            isolation: Default::default(),
+        });
+    let agent2 = crate::agents::Agent2::new(agent2_config);
+    let prompt_config_base = ctx.agent.config().prompt_config.clone();
+    let skills_arc = Arc::clone(ctx.agent.skills());
+    let cached_prompt = ctx.agent.cached_system_prompt().to_string();
     let persist_hook: Arc<dyn crate::agents::PersistHook> = Arc::new(
         crate::agents::BackendPersistHook::new(ctx.session_backend.clone())
     );
-    let mut loop_ = ctx.agent.loop_for_with_persist(session, Some(persist_hook));
 
-    if let Some(rx) = ctx.change_rx.clone() {
-        loop_ = loop_.with_change_rx(rx);
+    let _turn_guard = session_ctx.turn_lock.lock().await;
+    let mut session = session_ctx.session.lock().await;
+
+    session.persist = Some(persist_hook.clone());
+
+    let session_override = session.session_override.clone();
+    let mut prompt_config = prompt_config_base.clone();
+    if let Some(pm) = session_override.permission_mode {
+        prompt_config.permission_mode = pm;
+    }
+    if let Some(rm) = session_override.run_mode {
+        prompt_config.run_mode = rm;
+    }
+    let system_prompt = if !cached_prompt.is_empty() {
+        cached_prompt
+    } else {
+        let s = skills_arc.read();
+        crate::agents::SystemPromptBuilder::new(prompt_config.clone()).build(&s)
+    };
+
+    session.add_user(prompt.to_string());
+    if let Some(last) = session.history.last() {
+        let _ = persist_hook.persist_message(&session.id, last);
     }
 
-    let loop_arc: Arc<TokioMutex<AgentLoop>> = Arc::new(TokioMutex::new(loop_));
-    let handle = Arc::new(crate::agents::SessionHandle::new_direct(loop_arc.clone()));
-    ctx.sessions.insert(session_key.to_string(), handle);
-    loop_arc
+    let thinking = session_override.to_thinking_config();
+    let model_id = session_override.model.as_deref();
+    let turn_ctx = crate::agents::TurnContext {
+        system_prompt: &system_prompt,
+        model_id,
+        thinking: thinking.as_ref(),
+        permission_mode: prompt_config.permission_mode,
+        run_mode: prompt_config.run_mode,
+    };
+
+    let res = agent2.run(&mut session, turn_ctx, &runtime).await;
+    session.persist = None;
+    res.map(|tr| tr.text)
 }
+
 
 /// Send a response to the configured target channel.
 pub async fn send_to_target(ctx: &WebhookContext, target: &str, content: &str) {
