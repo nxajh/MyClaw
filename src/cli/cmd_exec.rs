@@ -35,24 +35,41 @@ pub async fn run(cli: &Cli, prompt: &str, agent: Option<&str>, model: Option<&st
     tools.register(Arc::new(myclaw::tools::MemoryManageTool::new(workspace_dir, resolver)));
     let tools_arc = Arc::new(tools);
 
-    let agent_config = myclaw::AgentConfig::default();
-
-    let mut agent_factory = myclaw::Agent::new(
+    // RFC v2: Agent + AgentRuntime. CLI doesn't need delegation.
+    let agent_runtime = myclaw::AgentRuntime::new(
         Arc::clone(&registry_arc),
-        tools_arc,
-        skills_arc,
-        agent_config,
+        Arc::clone(&tools_arc),
+        Arc::clone(&skills_arc),
+        myclaw::agents::AgentRegistry::new(),
     );
 
-    if let Some(m) = model {
-        agent_factory = agent_factory.with_model(m.to_string());
-    }
+    let main_config = myclaw::config::sub_agent::SubAgentConfig {
+        name: "main".to_string(),
+        description: None,
+        system_prompt: String::new(),
+        tools: vec!["all".to_string()],
+        skills: Default::default(),
+        mcp: Default::default(),
+        model: model.map(|s| s.to_string()),
+        max_tool_calls: None,
+        isolation: Default::default(),
+    };
+    let agent_obj = myclaw::Agent::new(main_config);
 
     let session_key = agent.unwrap_or("cli");
-    let session = myclaw::Session::new(session_key.to_string());
-    let mut agent_loop = agent_factory.loop_for(session);
+    let mut session = myclaw::Session::new(session_key.to_string());
+    let model_owned = model.map(|s| s.to_string());
 
-    let response = agent_loop.run(prompt, None, None).await?;
+    session.add_user(prompt.to_string());
+    let turn_ctx = myclaw::TurnContext {
+        system_prompt: "",
+        model_id: model_owned.as_deref(),
+        thinking: None,
+        permission_mode: myclaw::PermissionMode::default(),
+        run_mode: myclaw::RunMode::default(),
+    };
+    let result = agent_obj.run(&mut session, turn_ctx, &agent_runtime).await?;
+    let response = result.text;
 
     match format {
         "json" => {

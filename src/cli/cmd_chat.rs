@@ -35,38 +35,57 @@ pub async fn run(cli: &Cli, prompt: Option<&str>, agent: Option<&str>, model: Op
     tools.register(Arc::new(myclaw::tools::MemoryManageTool::new(workspace_dir, resolver)));
     let tools_arc = Arc::new(tools);
 
-    let agent_config = myclaw::AgentConfig::default();
-    let mut agent_factory = myclaw::Agent::new(
+    // RFC v2: Agent (executor) + AgentRuntime (resources). CLI doesn't
+    // need per-session caching or sub-agent delegation, so we build a
+    // minimal runtime with an empty AgentRegistry.
+    let agent_runtime = myclaw::AgentRuntime::new(
         Arc::clone(&registry_arc),
-        tools_arc,
-        skills_arc,
-        agent_config,
+        Arc::clone(&tools_arc),
+        Arc::clone(&skills_arc),
+        myclaw::agents::AgentRegistry::new(),
     );
 
-    if let Some(m) = model {
-        agent_factory = agent_factory.with_model(m.to_string());
-    }
+    let main_config = myclaw::config::sub_agent::SubAgentConfig {
+        name: "main".to_string(),
+        description: None,
+        system_prompt: String::new(),
+        tools: vec!["all".to_string()],
+        skills: Default::default(),
+        mcp: Default::default(),
+        model: model.map(|s| s.to_string()),
+        max_tool_calls: None,
+        isolation: Default::default(),
+    };
+    let agent_obj = myclaw::Agent::new(main_config);
 
     let session_key = agent.unwrap_or("cli");
-    let session = myclaw::Session::new(session_key.to_string());
-    let mut agent_loop = agent_factory.loop_for(session);
+    let mut session = myclaw::Session::new(session_key.to_string());
+    let model_owned = model.map(|s| s.to_string());
 
     // Non-interactive (--print) or single prompt mode.
     if print || prompt.is_some() {
         let input = prompt.unwrap_or("Hello");
-        let response = agent_loop.run(input, None, None).await?;
-        println!("{}", response);
+        session.add_user(input.to_string());
+        let turn_ctx = myclaw::TurnContext {
+            system_prompt: "",
+            model_id: model_owned.as_deref(),
+            thinking: None,
+            permission_mode: myclaw::PermissionMode::default(),
+            run_mode: myclaw::RunMode::default(),
+        };
+        let result = agent_obj.run(&mut session, turn_ctx, &agent_runtime).await?;
+        println!("{}", result.text);
         return Ok(());
     }
 
     // Interactive REPL.
     eprintln!("MyClaw Chat — type 'exit' or press Ctrl-D to quit.");
-    let model = cfg
+    let model_display = cfg
         .routing
         .get(myclaw::providers::Capability::Chat)
         .and_then(|r| r.models.first().cloned())
         .unwrap_or_else(|| "(none)".to_string());
-    eprintln!("Model: {}", model);
+    eprintln!("Model: {}", model_display);
     eprintln!();
 
     loop {
@@ -86,8 +105,16 @@ pub async fn run(cli: &Cli, prompt: Option<&str>, agent: Option<&str>, model: Op
             break;
         }
 
-        match agent_loop.run(input, None, None).await {
-            Ok(response) => println!("{}\n", response),
+        session.add_user(input.to_string());
+        let turn_ctx = myclaw::TurnContext {
+            system_prompt: "",
+            model_id: model_owned.as_deref(),
+            thinking: None,
+            permission_mode: myclaw::PermissionMode::default(),
+            run_mode: myclaw::RunMode::default(),
+        };
+        match agent_obj.run(&mut session, turn_ctx, &agent_runtime).await {
+            Ok(result) => println!("{}\n", result.text),
             Err(e) => eprintln!("error: {}\n", e),
         }
     }
