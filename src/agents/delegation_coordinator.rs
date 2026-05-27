@@ -238,39 +238,55 @@ impl DelegationCoordinator {
 
         let (session_id, persist_hook) = self.open_sub_session(parent_session_id, &config.name);
         // session_key + reply_target args are still accepted (delegate_async
-        // passes them) but no longer persisted to a marker file — the
-        // sub-session itself carries enough state to be recovered, and
-        // parent's reply_target is read from `parent.last_message` at
-        // recovery time. Silence unused-param warnings.
+        // passes them) but no longer persisted to a marker file.
         let _ = (session_key, reply_target);
 
-        let session = Session::new(session_id);
+        let mut session = Session::new(session_id);
+        // Sub-sessions inherit the parent's owner for per-user scoping.
+        session.parent_session_id = Some(parent_session_id.to_string());
+        session.agent_name = config.name.clone();
+        if let Some(ref m) = config.model {
+            session.session_override.model = Some(m.clone());
+        }
+        if let Some(hook) = persist_hook.as_ref() {
+            session.persist = Some(Arc::clone(hook));
+        }
 
-        let agent_config = crate::agents::AgentConfig {
-            max_tool_calls: config.max_tool_calls.unwrap_or(self.default_max_tool_calls),
-            prompt_config: crate::agents::SystemPromptConfig {
-                workspace_dir,
-                permission_mode: crate::agents::PermissionMode::Full,
-                identity_header: Some(identity),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let agent = crate::agents::Agent::new(
-            self.registry.clone(),
+        // Build a per-sub-agent AgentRuntime: same provider registry, but a
+        // filtered ToolRegistry containing only the tools this sub-agent is
+        // allowed to call (config.tools). Skills + agents registries are
+        // empty here so the sub-agent can't recursively delegate (matches
+        // the legacy AgentLoop construction at line 263 which passed a
+        // fresh SkillManager).
+        let runtime = crate::agents::AgentRuntime::new(
+            Arc::clone(&self.registry),
             Arc::new(tools),
             Arc::new(RwLock::new(SkillManager::new())),
-            agent_config,
+            crate::agents::AgentRegistry::new(),
         );
-        let agent = match &config.model {
-            Some(m) => agent.with_model(m.clone()),
-            None => agent,
-        };
-        let mut loop_ = agent.loop_for_with_persist(session, persist_hook);
+
+        // Agent2 with the sub-agent's SubAgentConfig (already has tools
+        // filter + max_tool_calls + isolation).
+        let agent2 = crate::agents::Agent2::new(config.clone());
 
         tracing::debug!(agent = %config.name, "sub-agent started");
-        let result = loop_.run(task, None, None).await;
+        let turn_ctx = crate::agents::TurnContext {
+            system_prompt: &identity,
+            model_id: config.model.as_deref(),
+            thinking: None,
+            permission_mode: crate::agents::PermissionMode::Full,
+            run_mode: crate::config::agent::RunMode::Background,
+        };
+        session.add_user(task.to_string());
+        if let Some(hook) = persist_hook.as_ref() {
+            if let Some(last) = session.history.last() {
+                let _ = hook.persist_message(&session.id, last);
+            }
+        }
+        let result = agent2
+            .run(&mut session, turn_ctx, &runtime)
+            .await
+            .map(|tr| tr.text);
         match &result {
             Ok(text) => tracing::debug!(agent = %config.name, text_len = text.len(), "sub-agent completed"),
             Err(e) => tracing::warn!(agent = %config.name, err = %e, "sub-agent failed"),
