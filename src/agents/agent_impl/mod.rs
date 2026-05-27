@@ -155,6 +155,13 @@ impl Agent {
     pub fn registry(&self) -> &Arc<dyn ProviderRegistry> { &self.registry }
     pub fn tools(&self) -> &Arc<super::tool_registry::ToolRegistry> { &self.tools }
     pub fn skills(&self) -> &Arc<RwLock<SkillManager>> { &self.skills }
+    /// Read-only access to the legacy Agent's per-turn config. Used by
+    /// Orchestrator's Agent2 dispatch path to derive `TurnContext` —
+    /// goes away with H45 deletion of legacy Agent.
+    pub fn config(&self) -> &AgentConfig { &self.config }
+    /// Pre-baked system prompt (if `with_system_prompt` was called),
+    /// else empty so callers know to build via SystemPromptBuilder.
+    pub fn cached_system_prompt(&self) -> &str { &self.system_prompt }
 
     pub fn sub_agent_configs(&self) -> &super::AgentRegistry { &self.sub_agent_configs }
     pub fn workspace_dir(&self) -> &str { &self.config.prompt_config.workspace_dir }

@@ -12,7 +12,7 @@
 use anyhow::Context;
 use crate::agents::delegation::{DelegationEvent, DelegationManager};
 use crate::agents::delegation_coordinator::DelegationCoordinator as SubAgentDelegator;
-use crate::agents::OrchestratorEvent;
+use crate::agents::{OrchestratorEvent, SessionContext};
 use crate::channels::{Channel, ChannelMessage, SendMessage, ProcessingStatus, InlineButton};
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -82,7 +82,14 @@ pub struct Orchestrator {
     /// Channels, keyed by (channel_type, account_id).
     channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
     /// Per-session actor handles: "channel:account:sender" → Arc<SessionHandle>.
+    /// Legacy: holds an `AgentLoop` per session. H45 will delete this field
+    /// once `session_contexts` becomes the only per-session storage.
     sessions: Arc<DashMap<String, Arc<SessionHandle>>>,
+    /// RFC v2 §三.A: per-session bundle holding `Arc<Mutex<Session>>` +
+    /// turn_lock + attachments + pending_retry + user_profile. Replaces
+    /// `sessions` once H45 deletes AgentLoop. Initially populated lazily
+    /// from SessionManager on first inbound for a routing_key.
+    session_contexts: Arc<DashMap<String, Arc<SessionContext>>>,
     agent: Agent,
     session_manager: Arc<SessionManager>,
     /// The message receiver, owned and consumed by run().
@@ -282,6 +289,7 @@ impl Orchestrator {
         let orchestrator = Orchestrator {
             channels: channels_map,
             sessions: Arc::new(DashMap::new()),
+            session_contexts: Arc::new(DashMap::new()),
             agent: parts.agent,
             session_manager: parts.session_manager,
             msg_rx: Arc::new(TokioMutex::new(Some(msg_rx))),
@@ -367,6 +375,46 @@ impl Orchestrator {
 
     fn session_key(channel_type: &str, account_id: &str, sender: &str) -> String {
         format!("{}:{}:{}", channel_type, account_id, sender)
+    }
+
+    /// Get or create the `SessionContext` for a routing_key.
+    ///
+    /// First call for a routing_key loads the Session from SessionManager
+    /// (which reads/restores from backend), wraps it in `SessionContext`,
+    /// and caches the result. Subsequent calls return the same `Arc`.
+    ///
+    /// The session's transient `persist` and `channel` fields are NOT
+    /// populated here — callers wire them per-turn before locking the
+    /// session to call `Agent2::run`.
+    /// Build a permissive default `SubAgentConfig` for the main agent
+    /// when `workspace/agents/main/AGENT.md` hasn't been parsed into the
+    /// registry yet. All filters default to "all" so the main agent
+    /// sees every registered tool / skill / MCP server. The system
+    /// prompt is empty because the orchestrator's cached prompt
+    /// (`Agent::with_system_prompt`) is what's actually injected at
+    /// turn start.
+    fn build_default_main_agent_config() -> crate::config::sub_agent::SubAgentConfig {
+        crate::config::sub_agent::SubAgentConfig {
+            name: "main".to_string(),
+            description: None,
+            system_prompt: String::new(),
+            tools: vec!["all".to_string()],
+            skills: Default::default(),
+            mcp: Default::default(),
+            model: None,
+            max_tool_calls: None,
+            isolation: Default::default(),
+        }
+    }
+
+    fn session_context_for(&self, sk: &str) -> Arc<SessionContext> {
+        if let Some(existing) = self.session_contexts.get(sk) {
+            return existing.clone();
+        }
+        let session = self.session_manager.get_or_create(sk);
+        let ctx = Arc::new(SessionContext::new(session));
+        self.session_contexts.insert(sk.to_string(), ctx.clone());
+        ctx
     }
 
     /// Main message loop. Consumes self.msg_rx.
@@ -770,17 +818,125 @@ impl Orchestrator {
                     Some(c) => c,
                     None => return,
                 };
-                let handle = registry.get_or_create(&sk, &reply_target);
-                if let Err(e) = handle.tx.send(TurnMessage {
-                    content,
-                    image_urls,
-                    image_base64,
-                    channel,
-                    reply_target,
-                    reply_to_id,
-                }).await {
-                    error!(session = %sk, err = %e, "session actor inbox closed");
-                }
+
+                // E29 final: dispatch via Agent2 + SessionContext instead of
+                // the AgentLoop session-actor pattern. SessionContext.turn_lock
+                // serializes turns per session; SessionContext.session is the
+                // canonical Arc<Mutex<Session>>. Spawning here keeps the main
+                // dispatch loop unblocked while the turn runs.
+                let session_ctx = self.session_context_for(&sk);
+                let runtime = self.agent_runtime.clone();
+                let agent2_config = runtime
+                    .agents
+                    .get("main")
+                    .unwrap_or_else(Self::build_default_main_agent_config);
+                let agent2 = crate::agents::Agent2::new(agent2_config);
+                let prompt_config_base = self.agent.config().prompt_config.clone();
+                let skills_arc = Arc::clone(self.agent.skills());
+                let cached_prompt = self.agent.cached_system_prompt().to_string();
+                let persist_hook: Arc<dyn PersistHook> = Arc::new(
+                    BackendPersistHook::new(Arc::clone(&self.persist_backend))
+                );
+                let inbound_msg = msg.clone();
+                let _ = (image_urls, image_base64, reply_to_id); // see comment below
+
+                tokio::spawn(async move {
+                    // Note: image_urls / image_base64 are still attached via
+                    // `session.last_message` (which was recorded via
+                    // `record_inbound` upstream). Agent2.run reads them from
+                    // there. reply_to_id is unused under Agent2 — channel
+                    // send replies in-line without thread context for now.
+
+                    // turn_lock: per-session FIFO serialization (replaces the
+                    // session_actor mpsc pattern from H45-deleted code).
+                    let _turn_guard = session_ctx.turn_lock.lock().await;
+                    let mut session = session_ctx.session.lock().await;
+
+                    // Apply inbound msg to the locked session — record_inbound
+                    // happened on the SessionManager cached copy upstream; the
+                    // canonical SessionContext.session needs the same update.
+                    session.record_inbound(inbound_msg.clone());
+
+                    // Wire transient handles for this turn.
+                    session.persist = Some(persist_hook.clone());
+                    session.channel = Some(channel.clone());
+
+                    // Resolve TurnContext from session override + base config.
+                    let session_override = session.session_override.clone();
+                    let mut prompt_config = prompt_config_base.clone();
+                    if let Some(pm) = session_override.permission_mode {
+                        prompt_config.permission_mode = pm;
+                    }
+                    if let Some(rm) = session_override.run_mode {
+                        prompt_config.run_mode = rm;
+                    }
+
+                    let system_prompt = if !cached_prompt.is_empty() {
+                        cached_prompt
+                    } else {
+                        let s = skills_arc.read();
+                        crate::agents::SystemPromptBuilder::new(prompt_config.clone()).build(&s)
+                    };
+
+                    // Append the user message to history before running.
+                    session.add_user(content.clone());
+                    if let Some(last) = session.history.last() {
+                        let _ = persist_hook.persist_message(&session.id, last);
+                    }
+
+                    let thinking = session_override.to_thinking_config();
+                    let model_id = session_override.model.as_deref();
+                    let turn_ctx = crate::agents::TurnContext {
+                        system_prompt: &system_prompt,
+                        model_id,
+                        thinking: thinking.as_ref(),
+                        permission_mode: prompt_config.permission_mode,
+                        run_mode: prompt_config.run_mode,
+                    };
+
+                    let result = agent2.run(&mut session, turn_ctx, &runtime).await;
+                    match result {
+                        Ok(turn_result) => {
+                            if !turn_result.text.trim().is_empty() {
+                                let send_msg = SendMessage {
+                                    content: turn_result.text,
+                                    recipient: reply_target,
+                                    subject: None,
+                                    thread_ts: None,
+                                    cancellation_token: None,
+                                    attachments: vec![],
+                                    image_urls: None,
+                                    inline_buttons: None,
+                                };
+                                if let Err(e) = channel.send(&send_msg).await {
+                                    tracing::error!(session = %session.id, err = %e, "send response failed");
+                                }
+                            }
+                            // Stash pending_retry on SessionContext if the turn
+                            // ended in an empty-response state.
+                            if let Some(retry_msg) = turn_result.pending_retry {
+                                *session_ctx.pending_retry.lock().await = Some(retry_msg);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(session = %session.id, err = %e, "Agent2 turn failed");
+                            let send_msg = SendMessage::new(
+                                format!("{} {}", MSG_TIMEOUT, e),
+                                reply_target,
+                            );
+                            let _ = channel.send(&send_msg).await;
+                        }
+                    }
+
+                    // Clear transient handles (they don't need to live across turns).
+                    session.persist = None;
+                    session.channel = None;
+                });
+
+                // The legacy session_actor path remains for any places not
+                // yet migrated (commands' /compact, scheduler tasks). They
+                // call registry.get_or_create directly.
+                let _ = registry; // suppress unused warning until full removal
             }
             ChannelEvent::Delegation(event) => {
                 tokio::spawn(async move {
