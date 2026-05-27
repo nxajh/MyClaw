@@ -31,7 +31,7 @@ pub mod tui;
 
 // Re-exports
 pub use agents::{
-    Agent, AgentConfig, InMemoryBackend, Session, SessionManager,
+    Agent, AgentBuilder, AgentConfig, InMemoryBackend, Session, SessionManager,
     ToolRegistry, SkillManager, Orchestrator, OrchestratorParts,
     SystemPromptBuilder, SystemPromptConfig,
     PermissionMode, RunMode,

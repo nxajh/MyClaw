@@ -19,7 +19,7 @@ use parking_lot::{Mutex as ParkMutex, RwLock};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::agents::Agent;
+use crate::agents::AgentBuilder;
 use crate::agents::orchestrator::SchedulerEvent;
 use crate::agents::scheduling::cron_types::{DeliveryConfig, RunRecord, RunStatus, ScheduleKind};
 use crate::agents::webhook_loader::{WebhookAuth, WebhookJobDef, render_template};
@@ -858,12 +858,12 @@ fn generate_id() -> String {
 /// Resources needed by the webhook server to run agent tasks.
 /// Heartbeat and cron use the Orchestrator event path instead.
 pub struct WebhookContext {
-    pub agent: Agent,
-    /// AgentRuntime for Agent2 dispatch (H45 transition).
+    pub agent: AgentBuilder,
+    /// AgentRuntime for Agent dispatch (H45 transition).
     pub agent_runtime: crate::agents::AgentRuntime,
     pub channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
     /// Shared SessionContext map (same Arc as Orchestrator's
-    /// session_contexts) for the Agent2 dispatch path.
+    /// session_contexts) for the Agent dispatch path.
     pub session_contexts: Arc<DashMap<String, Arc<crate::agents::SessionContext>>>,
     /// Shared session manager — avoids creating throwaway instances per request.
     pub session_manager: Arc<crate::agents::session::SessionManager>,
@@ -956,7 +956,7 @@ fn parse_hhmm(s: &str) -> Option<u32> {
 
 // ── Webhook execution helpers ──────────────────────────────────────────────
 
-/// Execute one webhook turn via Agent2 + SessionContext. Mirrors the
+/// Execute one webhook turn via Agent + SessionContext. Mirrors the
 /// orchestrator's run_scheduled_turn but lives here because the webhook
 /// server task doesn't have a direct Orchestrator reference.
 pub async fn run_scheduled_task(
@@ -990,7 +990,7 @@ pub async fn run_scheduled_task(
             max_tool_calls: None,
             isolation: Default::default(),
         });
-    let agent2 = crate::agents::Agent2::new(agent2_config);
+    let agent2 = crate::agents::Agent::new(agent2_config);
     let prompt_config_base = ctx.agent.config().prompt_config.clone();
     let skills_arc = Arc::clone(ctx.agent.skills());
     let cached_prompt = ctx.agent.cached_system_prompt().to_string();

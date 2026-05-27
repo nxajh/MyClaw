@@ -11,7 +11,7 @@
 
 use anyhow::{Context, Result};
 use crate::agents::{
-    Agent, AgentConfig, InMemoryBackend, Orchestrator, OrchestratorParts, SessionManager,
+    AgentBuilder, AgentConfig, InMemoryBackend, Orchestrator, OrchestratorParts, SessionManager,
     ToolRegistry, SkillManager, Skill, SystemPromptConfig, RunMode,
     McpManager, DelegationCoordinator, DelegationManager,
 };
@@ -894,7 +894,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // Scheduler config (used for both parts and webhook launch).
     let scheduler_config = config.agent.scheduler.clone();
 
-    let agent = Agent::new(registry_arc, tools_arc, skills_arc, agent_config)
+    let agent = AgentBuilder::new(registry_arc, tools_arc, skills_arc, agent_config)
         .with_mcp_instructions(mcp_instructions)
         .with_sub_agent_configs(sub_agent_registry)
         .with_workspace_dirs(

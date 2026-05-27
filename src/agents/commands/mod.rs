@@ -3,7 +3,7 @@
 //! Commands are parsed and dispatched before reaching the agent loop.
 //! Each command returns a text response sent directly through the channel.
 
-use crate::agents::agent_impl::Agent;
+use crate::agents::agent_impl::AgentBuilder;
 use crate::agents::mcp_manager::McpManager;
 use crate::agents::session::{SessionManager, SessionOverride};
 use dashmap::DashMap;
@@ -26,11 +26,11 @@ pub struct CommandContext<'a> {
     pub user_id: &'a str,
     pub registry: &'a Arc<dyn crate::providers::ProviderRegistry>,
     pub session_manager: &'a SessionManager,
-    pub agent: &'a Agent,
+    pub agent: &'a AgentBuilder,
     /// Active SessionContext for this user (the canonical Arc<Mutex<Session>>
-    /// the inbound Agent2 dispatch is using). Commands acquire
+    /// the inbound Agent dispatch is using). Commands acquire
     /// `session_ctx.session.lock().await` for read/write access to live
-    /// state — same Mutex used by Agent2.run, so reads see the latest
+    /// state — same Mutex used by Agent.run, so reads see the latest
     /// turn's state without stale-cache surprises.
     pub session_ctx: Option<&'a Arc<crate::agents::SessionContext>>,
     /// MCP manager (for /mcp command).

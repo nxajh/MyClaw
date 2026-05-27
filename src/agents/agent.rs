@@ -46,15 +46,15 @@ use crate::providers::{BoxStream, Capability, ContentPart, StreamEvent, ToolCall
 /// capability filters, optional model override). Everything else lives
 /// on `AgentRuntime`.
 ///
-/// Named `Agent2` while the legacy `agent_impl::Agent` (factory for
+/// Named `Agent` while the legacy `agent_impl::Agent` (factory for
 /// `AgentLoop`) still exists. H45 deletes that, at which point this
 /// type takes the `Agent` name per RFC v2.
 #[derive(Clone)]
-pub struct Agent2 {
+pub struct Agent {
     pub config: SubAgentConfig,
 }
 
-impl Agent2 {
+impl Agent {
     pub fn new(config: SubAgentConfig) -> Self {
         Self { config }
     }
@@ -593,7 +593,7 @@ impl Agent2 {
             }
         }
 
-        // Cases B, C, and tail of A: drive Agent2.run from the now-well-formed
+        // Cases B, C, and tail of A: drive Agent.run from the now-well-formed
         // history. The user message (if any) is already in history.
         let tr = self.run(session, turn_ctx, runtime).await?;
         Ok(Some(tr))
@@ -833,7 +833,7 @@ mod tests {
     #[test]
     fn agent_holds_config() {
         let cfg = empty_config();
-        let agent = Agent2::new(cfg);
+        let agent = Agent::new(cfg);
         assert_eq!(agent.config.name, "test");
     }
 

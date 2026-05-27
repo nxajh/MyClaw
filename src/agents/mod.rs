@@ -45,11 +45,11 @@ pub use workspace::skill_loader;
 pub use workspace::watcher;
 pub use workspace::skills;
 
-pub use agent_impl::{Agent, AgentConfig};
+pub use agent_impl::{AgentBuilder, AgentConfig};
 pub use recovery::UnfinishedSubAgent;
 pub use turn_event::TurnEvent;
 pub use turn::{TurnContext, TurnResult};
-pub use agent::Agent2;
+pub use agent::Agent;
 pub use delegator::AgentDelegator;
 pub use session_context::SessionContext;
 pub use agent_registry::AgentRegistry;

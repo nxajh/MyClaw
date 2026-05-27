@@ -9,7 +9,7 @@ use super::tool_registry::ToolRegistry;
 use super::session::Session;
 use super::tokens::is_write_tool;
 
-/// Executes tool calls on behalf of `Agent2::run`.
+/// Executes tool calls on behalf of `Agent::run`.
 ///
 /// Holds the tool registry; autonomy enforcement happens here (write
 /// tools blocked in `PermissionMode::ReadOnly`). Special tools

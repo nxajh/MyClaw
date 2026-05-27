@@ -5,7 +5,7 @@
 //! `cached_system_prompt()` / `config().prompt_config` /
 //! `compact_threshold()`).
 //!
-//! `Agent2` (`src/agents/agent.rs`) is the RFC v2 per-turn executor;
+//! `Agent` (`src/agents/agent.rs`) is the RFC v2 per-turn executor;
 //! the legacy `AgentLoop` it replaced has been deleted (H45). This
 //! module is on track for deletion once its accessors are moved onto
 //! `AgentRuntime` and the callers are updated.
@@ -53,7 +53,7 @@ impl Default for AgentConfig {
 
 /// Agent — shared construction data accessor.
 #[derive(Clone)]
-pub struct Agent {
+pub struct AgentBuilder {
     registry: Arc<dyn ProviderRegistry>,
     tools: Arc<ToolRegistry>,
     skills: Arc<RwLock<SkillManager>>,
@@ -66,7 +66,7 @@ pub struct Agent {
     agents_dir: PathBuf,
 }
 
-impl Agent {
+impl AgentBuilder {
     pub fn new(
         registry: Arc<dyn ProviderRegistry>,
         tools: Arc<ToolRegistry>,

@@ -265,9 +265,9 @@ impl DelegationCoordinator {
             crate::agents::AgentRegistry::new(),
         );
 
-        // Agent2 with the sub-agent's SubAgentConfig (already has tools
+        // Agent with the sub-agent's SubAgentConfig (already has tools
         // filter + max_tool_calls + isolation).
-        let agent2 = crate::agents::Agent2::new(config.clone());
+        let agent2 = crate::agents::Agent::new(config.clone());
 
         tracing::debug!(agent = %config.name, "sub-agent started");
         let turn_ctx = crate::agents::TurnContext {

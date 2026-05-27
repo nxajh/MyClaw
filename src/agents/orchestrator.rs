@@ -20,7 +20,7 @@ use tokio::sync::{mpsc, Mutex as TokioMutex, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::agents::agent_impl::Agent;
+use crate::agents::agent_impl::AgentBuilder;
 use crate::agents::session::{SessionManager, PersistHook, BackendPersistHook};
 
 const CHANNEL_QUEUE_SIZE: usize = 100;
@@ -77,7 +77,7 @@ pub struct Orchestrator {
     /// turn_lock + attachments + pending_retry + user_profile. Populated
     /// lazily from SessionManager on first inbound for a routing_key.
     session_contexts: Arc<DashMap<String, Arc<SessionContext>>>,
-    agent: Agent,
+    agent: AgentBuilder,
     session_manager: Arc<SessionManager>,
     /// The message receiver, owned and consumed by run().
     #[allow(clippy::type_complexity)]
@@ -87,7 +87,7 @@ pub struct Orchestrator {
     /// Pending ask_user replies (legacy, indexed by routing_key): session_key →
     /// (oneshot sender, reply_target). Used by the closure-based AskUserHandler
     /// wired into AgentLoop. Stage 2 / E29 will replace this with `ask_router`
-    /// once Agent2.run is the only execution path.
+    /// once Agent.run is the only execution path.
     pending_asks: Arc<DashMap<String, (oneshot::Sender<String>, String)>>,
     /// AskRouter (RFC v2 §三.B): indexed by session.id, fulfilled by inbound
     /// messages ahead of process_turn. Wired here so the new
@@ -95,9 +95,9 @@ pub struct Orchestrator {
     /// AgentLoop is deleted (H45). Shared with daemon-side AskUserTool
     /// construction.
     ask_router: Arc<crate::agents::AskRouter>,
-    /// AgentRuntime for `Agent2::run` (RFC v2 §三.A). Held alongside
+    /// AgentRuntime for `Agent::run` (RFC v2 §三.A). Held alongside
     /// the legacy `agent` field — E29 will eventually swap the main-
-    /// loop dispatch onto Agent2 + agent_runtime, then H45 deletes the
+    /// loop dispatch onto Agent + agent_runtime, then H45 deletes the
     /// legacy fields.
     agent_runtime: crate::agents::AgentRuntime,
     /// Delegation manager (shared with DelegateTaskTool via handler).
@@ -130,10 +130,10 @@ pub struct Orchestrator {
 
 /// Resources shared between Orchestrator and scheduler tasks.
 pub struct SharedSessions {
-    /// SessionContext map (Agent2 dispatch path). Shared with webhook
+    /// SessionContext map (Agent dispatch path). Shared with webhook
     /// server + future scheduler tasks.
     pub session_contexts: Arc<DashMap<String, Arc<SessionContext>>>,
-    /// AgentRuntime for Agent2 dispatch in webhook tasks.
+    /// AgentRuntime for Agent dispatch in webhook tasks.
     pub agent_runtime: crate::agents::AgentRuntime,
     pub channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
     pub last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
@@ -189,7 +189,7 @@ fn history_has_incomplete_turn(history: &[crate::providers::capability_chat::Cha
 /// Built by the Composition Root (daemon.rs).  This struct is the seam that
 /// decouples the Application layer from Infrastructure assembly logic.
 pub struct OrchestratorParts {
-    pub agent: Agent,
+    pub agent: AgentBuilder,
     pub session_manager: Arc<SessionManager>,
     /// Pre-built channels: (channel_type, account_id, channel_instance).
     pub channels: Vec<(String, String, Arc<dyn Channel>)>,
@@ -210,9 +210,9 @@ pub struct OrchestratorParts {
     /// `ask_router.fulfill(session.id, msg.content)` ahead of the legacy
     /// `pending_asks` check so both paths work during the transition.
     pub ask_router: Arc<crate::agents::AskRouter>,
-    /// AgentRuntime for the new `Agent2::run` per-turn path. Coexists
+    /// AgentRuntime for the new `Agent::run` per-turn path. Coexists
     /// with `agent` (legacy AgentLoop factory) until E29 swaps the
-    /// orchestrator's main-loop dispatch over to Agent2::run and H45
+    /// orchestrator's main-loop dispatch over to Agent::run and H45
     /// deletes AgentLoop.
     pub agent_runtime: crate::agents::AgentRuntime,
     /// Sub-agents that were still running when the previous daemon was killed.
@@ -365,7 +365,7 @@ impl Orchestrator {
     ///
     /// The session's transient `persist` and `channel` fields are NOT
     /// populated here — callers wire them per-turn before locking the
-    /// session to call `Agent2::run`.
+    /// session to call `Agent::run`.
     /// Build a permissive default `SubAgentConfig` for the main agent
     /// when `workspace/agents/main/AGENT.md` hasn't been parsed into the
     /// registry yet. All filters default to "all" so the main agent
@@ -436,7 +436,7 @@ impl Orchestrator {
         // scheduler) onto a single mpsc<OrchestratorEvent>. Adapter tasks
         // pump from each source channel; the main loop selects on the
         // unified channel + shutdown. AskReply variant is reserved for
-        // future ask_router wiring inside Agent2.run.
+        // future ask_router wiring inside Agent.run.
         let (event_tx, mut event_rx) = mpsc::channel::<OrchestratorEvent>(CHANNEL_QUEUE_SIZE);
 
         // Adapter: user messages → Inbound
@@ -631,7 +631,7 @@ impl Orchestrator {
                 // E29 final: pending_retry lives on SessionContext. For
                 // retry, we extract the saved text and rewrite the
                 // incoming msg.content to it — then fall through to the
-                // standard dispatch below so the regular Agent2 path
+                // standard dispatch below so the regular Agent path
                 // handles it. For abort, we clear pending_retry and
                 // ack inline.
                 if msg.content.starts_with("__retry:") || msg.content.starts_with("__abort:") {
@@ -786,7 +786,7 @@ impl Orchestrator {
                     None => return,
                 };
 
-                // E29 final: dispatch via Agent2 + SessionContext instead of
+                // E29 final: dispatch via Agent + SessionContext instead of
                 // the AgentLoop session-actor pattern. SessionContext.turn_lock
                 // serializes turns per session; SessionContext.session is the
                 // canonical Arc<Mutex<Session>>. Spawning here keeps the main
@@ -797,7 +797,7 @@ impl Orchestrator {
                     .agents
                     .get("main")
                     .unwrap_or_else(Self::build_default_main_agent_config);
-                let agent2 = crate::agents::Agent2::new(agent2_config);
+                let agent2 = crate::agents::Agent::new(agent2_config);
                 let prompt_config_base = self.agent.config().prompt_config.clone();
                 let skills_arc = Arc::clone(self.agent.skills());
                 let cached_prompt = self.agent.cached_system_prompt().to_string();
@@ -810,8 +810,8 @@ impl Orchestrator {
                 tokio::spawn(async move {
                     // Note: image_urls / image_base64 are still attached via
                     // `session.last_message` (which was recorded via
-                    // `record_inbound` upstream). Agent2.run reads them from
-                    // there. reply_to_id is unused under Agent2 — channel
+                    // `record_inbound` upstream). Agent.run reads them from
+                    // there. reply_to_id is unused under Agent — channel
                     // send replies in-line without thread context for now.
 
                     // turn_lock: per-session FIFO serialization (replaces the
@@ -886,7 +886,7 @@ impl Orchestrator {
                             }
                         }
                         Err(e) => {
-                            tracing::error!(session = %session.id, err = %e, "Agent2 turn failed");
+                            tracing::error!(session = %session.id, err = %e, "Agent turn failed");
                             let send_msg = SendMessage::new(
                                 format!("{} {}", MSG_TIMEOUT, e),
                                 reply_target,
@@ -903,7 +903,7 @@ impl Orchestrator {
             }
             ChannelEvent::Delegation(event) => {
                 // handle_delegation_event re-enters handle_channel_event with
-                // a synthetic Inbound message; the standard Agent2 dispatch
+                // a synthetic Inbound message; the standard Agent dispatch
                 // (including its own tokio::spawn for the turn) takes it
                 // from there.
                 self.handle_delegation_event(event).await;
@@ -1031,7 +1031,7 @@ impl Orchestrator {
                 .agents
                 .get("main")
                 .unwrap_or_else(Self::build_default_main_agent_config);
-            let agent2 = crate::agents::Agent2::new(agent2_config);
+            let agent2 = crate::agents::Agent::new(agent2_config);
             let prompt_config_base = self.agent.config().prompt_config.clone();
             let skills_arc = Arc::clone(self.agent.skills());
             let cached_prompt = self.agent.cached_system_prompt().to_string();
@@ -1130,7 +1130,7 @@ impl Orchestrator {
                 .agents
                 .get(&agent_name)
                 .unwrap_or_else(Self::build_default_main_agent_config);
-            let agent2 = crate::agents::Agent2::new(agent2_config);
+            let agent2 = crate::agents::Agent::new(agent2_config);
             let prompt_config_base = self.agent.config().prompt_config.clone();
             let skills_arc = Arc::clone(self.agent.skills());
             let cached_prompt = self.agent.cached_system_prompt().to_string();
@@ -1242,7 +1242,7 @@ fn retry_abort_prompt(
 impl Orchestrator {
     /// Wake the parent agent on a `DelegationEvent` (sub-agent completion
     /// or failure). The synthesized system notification becomes a user
-    /// message on the parent session; Agent2.run handles the rest.
+    /// message on the parent session; Agent.run handles the rest.
     ///
     /// Returns a boxed future because this function calls back into
     /// `handle_channel_event`, and Rust requires recursive async fns to
@@ -1291,7 +1291,7 @@ impl Orchestrator {
 
         // Synthesize the delegation message as a full ChannelMessage so the
         // dispatch path is structurally identical to a real inbound. The
-        // standard handle_channel_event Inbound arm runs Agent2.
+        // standard handle_channel_event Inbound arm runs Agent.
         let synthetic = ChannelMessage {
             id: format!("delegation:{}", task_id),
             sender: "system".to_string(),
@@ -1336,7 +1336,7 @@ struct SchedulerContext {
     session_contexts: Arc<DashMap<String, Arc<SessionContext>>>,
     session_manager: Arc<SessionManager>,
     persist_backend: Arc<dyn crate::storage::SessionBackend>,
-    agent: Agent,
+    agent: AgentBuilder,
     agent_runtime: crate::agents::AgentRuntime,
     channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
     last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
@@ -1344,7 +1344,7 @@ struct SchedulerContext {
     scheduler: Option<crate::agents::SharedScheduler>,
 }
 
-/// Execute one scheduled turn (heartbeat / cron) via Agent2. Shared
+/// Execute one scheduled turn (heartbeat / cron) via Agent. Shared
 /// helper extracted from run_heartbeat_task / run_cron_task. Returns
 /// the assistant's text response, or an Err.
 ///
@@ -1379,7 +1379,7 @@ async fn run_scheduled_turn(
         .agents
         .get("main")
         .unwrap_or_else(Orchestrator::build_default_main_agent_config);
-    let agent2 = crate::agents::Agent2::new(agent2_config);
+    let agent2 = crate::agents::Agent::new(agent2_config);
     let prompt_config_base = ctx.agent.config().prompt_config.clone();
     let skills_arc = Arc::clone(ctx.agent.skills());
     let cached_prompt = ctx.agent.cached_system_prompt().to_string();

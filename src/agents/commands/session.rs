@@ -26,9 +26,9 @@ pub async fn cmd_compact(ctx: CommandContext<'_>) -> String {
         Ok((_, id)) => id,
         Err(e) => return format!("❌ 无法获取当前模型: {}", e),
     };
-    // /compact runs an unconditional compaction. We mirror Agent2.run's
+    // /compact runs an unconditional compaction. We mirror Agent.run's
     // compaction trigger but skip the should_compact gate. The
-    // ContextEngine is constructed per-call here (matches Agent2.run's
+    // ContextEngine is constructed per-call here (matches Agent.run's
     // per-turn pattern).
     let mut session = session_ctx.session.lock().await;
     let runtime_resources = crate::agents::resource_provider::ResourceProvider::new(
