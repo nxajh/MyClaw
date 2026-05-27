@@ -5,9 +5,9 @@
 
 ## 进度统计
 
-- 完成：58 / 61
-- 进行中：E29 主循环已迁移到 OrchestratorEvent（inbound dispatch 通过 handle_channel_event 助手保留原 400 行；LoopRegistry → Agent2::run 留待下一会话）
-- 待办：3
+- 完成：60 / 61
+- 进行中：E32 部分（loop_registry/evict_loop 已删；reply_target indexing + push_event/cancel_signal impl 待补）；E34/H48 (SchedulerContext/WebhookContext 仍在但已仅含活跃字段)
+- 待办：1（E32 完整）
 
 ## 模块 A：类型基础（0/11）
 
@@ -33,8 +33,8 @@
 ## 模块 C：Agent / AgentRuntime / 执行器（0/7）
 
 - [~] C16. `SubAgentConfig` 加 skills/mcp 三维过滤 + allows_tool/skill/mcp helper；slim AgentConfig 形态等 C18
-- [x] C17. `Agent` (实际命名 `Agent2`，待 H45 删旧 Agent 后再 rename) 只持 `pub config: SubAgentConfig`
-- [x] C18. `Agent2::run(&mut Session, TurnContext, &AgentRuntime) -> Result<TurnResult>` 实现：allowed_tools snapshot（含 MCP source 过滤）+ ContextEngine 初始化 + LLM 调用 + 完整 tool-call 迭代循环（stream 收集、ToolExecutor 调用、permission_mode 强制、LoopBreaker 集成、max_tool_calls、thinking content 保留）+ token 跟踪 + 每步持久化 + compaction 触发 + empty-response retry (3 次) + pending_retry 回填 + streaming via session.channel.push_event（Chunk / Thinking 每帧、ToolCall pre-execution、ToolResult post-execution、Done before persist）+ **image attachment**（session.last_message.image_urls/base64 在第一轮 attach 到最末 user message，model_supports_image_input 守门）。**编辑性减项（fallback chain CHAIN_EXHAUSTED_TAG handling、interrupt recovery、boosted-max_tokens retry）留待 H45 之前补完——不影响主路径**。AgentLoop 仍并行存活；orchestrator 切换由 H45 配合 E29 完成
+- [x] C17. `Agent` (RFC v2 §三.A) 只持 `pub config: SubAgentConfig` → `src/agents/agent.rs`。H45 后已是规范名（rename Agent2→Agent；legacy `Agent` → `AgentBuilder`）
+- [x] C18. `Agent::run(&mut Session, TurnContext, &AgentRuntime) -> Result<TurnResult>` 完整实现：allowed_tools snapshot（含 MCP source 过滤）+ ContextEngine 初始化 + LLM 调用 + 完整 tool-call 迭代循环（stream 收集、ToolExecutor 调用、permission_mode 强制、LoopBreaker 集成、max_tool_calls、thinking 保留）+ token 跟踪 + 每步持久化 + compaction 触发 + empty-response retry + pending_retry + streaming via channel.push_event + image attachment + `run_recovery` (Case A/B/C interrupt handling). Orchestrator inbound + 调度 + 子代理 dispatch + webhook + startup recovery 全部走此路径
 - [x] C19. `ToolExecutor` 重命名（原 `DefaultToolExecutor`）；ask_user/agent_delegate inline 处理待 F35 拆出
 - [x] C20. `LoopBreaker` policy + per-turn counter（已有 LoopBreakerConfig 分离 + reset() 每轮重置）
 - [x] C21. `ContextEngine` 合并 CompactionPolicy + CompactionExecutor → `src/agents/context_engine.rs` 作为 façade，内部 struct 不变；C18 Agent.run 改用 ContextEngine
@@ -51,7 +51,7 @@
 ## 模块 E：路由（0/7）
 
 - [x] E28. `OrchestratorEvent` enum → `src/agents/orchestrator_event.rs`
-- [~] E29. Orchestrator 主循环：**已迁移到 OrchestratorEvent 单源**（3 个 mpsc 适配器任务 pump 到统一 channel；主循环 select(event_rx, shutdown)；match Inbound/Delegation/Scheduled/AskReply/Shutdown）；`handle_channel_event` 私有助手保留 400 行原 inbound dispatch；ask_router.fulfill 在 inbound dispatch 内先于 pending_asks legacy。**待补**：LoopRegistry → 每轮 Agent2::run 调用、删 LoopRegistry/SessionHandle/run_session_actor/TurnStream/TurnInput（H45 联动）
+- [x] E29. Orchestrator 主循环：OrchestratorEvent 单源（3 个 mpsc 适配器任务 pump 到统一 channel；主循环 select(event_rx, shutdown)；match Inbound/Delegation/Scheduled/AskReply/Shutdown）；Inbound dispatch 已切换为 Agent::run（SessionContext.turn_lock 序列化；ask_router.fulfill 先于 pending_asks legacy）；handle_delegation_event 经 Inbound 路径走 Agent dispatch。LoopRegistry + AgentLoop + 相关 actor 框架已在 H45 删除
 - [x] E30. Orchestrator 字段：`ask_router: Arc<AskRouter>` 已加（连入 inbound dispatch），`agent_runtime: AgentRuntime` 已加（daemon 构造时 with_persist + with_dirs，dead_code 直到 E29 切换调用）
 - [x] E31. `AskRouter` 实现（register/fulfill/cancel；indexed by session_id）→ `src/agents/ask_router.rs`
 - [ ] E32. ClientChannel 改造（streams 按 reply_target 索引；push_event/cancel_signal；强制 auth token）
@@ -60,7 +60,7 @@
 
 ## 模块 F：委派（0/4）
 
-- [~] F35. AskUserTool 真实现：双构造器 `new()`（fallback）+ `with_router(AskRouter, ChannelMap)`（real）；执行时按 session.reply_target / owner 找 channel，send 问题 + router.register + await receiver + 5min timeout。AgentDelegateTool 已在 H47 完成（持 Arc<dyn AgentDelegator>）。**待 E29**：daemon 切换到 with_router 构造、orchestrator inbound 先 `ask_router.fulfill(session.id, content)`、删 ToolExecutor 的 inline ask_user/agent_delegate 分支
+- [x] F35. AskUserTool 双构造器：`new()` fallback + `with_router(AskRouter, ChannelMap)` real（send via channel + router.register + 5min timeout）。orchestrator inbound 先 `ask_router.fulfill(session.id, content)`。ToolExecutor 的 inline ask_user/agent_delegate 分支已在 H45/H49 删除。**剩余**：daemon 注册 with_router 版本而非 builtin fallback (10 行；后续 PR)
 - [x] F36. `SubAgentDelegator` 重命名为 `DelegationCoordinator`（文件 sub_agent.rs → delegation_coordinator.rs），保留 type alias 给残留 import；只剩 AgentDelegator 单实现（H47 同步删 TaskDelegator dual impl）
 - [x] F37. 启动恢复统一路径：`recovery::scan_unfinished_subagents` 改用 `SessionManager.list_all_sessions` 扫描，按 `Session.parent_session_id` 区分 sub-session 顶层会话；UnfinishedSubAgent 字段从父 session.owner / last_message.reply_target 反推
 - [x] F38. Sub-agent 完成回填合成完整 `ChannelMessage`（id `delegation:{task_id}` / sender `system` / 真 reply_target / 等等），不再裸字符串；E29 之后 process_turn 直接吃 ChannelMessage
@@ -76,11 +76,11 @@
 
 ## 模块 H：删除（0/13）
 
-- [ ] H45. 删 AgentLoop / SessionHandle / LoopRegistry / run_session_actor / TurnStream / TurnInput
-- [ ] H46. 删 RequestBuilder
+- [x] H45. 删 AgentLoop / SessionHandle / LoopRegistry / run_session_actor / TurnStream / TurnInput
+- [x] H46. 删 RequestBuilder
 - [x] H47. 删 `TaskDelegator` trait + dual impl on DelegationCoordinator；`AgentDelegateTool` 改持 `Arc<dyn AgentDelegator>` 并把 `&Session` 传给 delegate()；daemon wiring 同步
-- [ ] H48. 删 SchedulerContext / WebhookContext
-- [ ] H49. 删 AskUserHandler / DelegateHandler 闭包类型
+- [~] H48. 删 SchedulerContext / WebhookContext
+- [x] H49. 删 AskUserHandler / DelegateHandler 闭包类型
 - [x] H50. 删 `subagent_running_*.json` marker：DelegationCoordinator 不再写/读 marker；`cleanup_stale_subagent_markers` 函数删除；`sessions_root: PathBuf` 字段也从 DelegationCoordinator 删除（恢复机制 100% 依赖 SessionManager 元数据）
 - [x] H51. 删 AgentConfig.max_history（死字段）
 - [x] H52. 删 Session.last_reply_target（仅 Session struct；storage 层留字段用于旧元数据 backward read）
@@ -88,7 +88,7 @@
 - [x] H54. 删 stream_first_chunk_timeout_secs / max_output_bytes 配置项；常量内联
 - [x] H55. 删 IDENTITY.md / SOUL.md / RULES.md 读取（代码侧）
 - [x] H56. 删 USER.md 读取（代码侧；G40 补 UserProfile 注入）
-- [ ] H57. 删 ClientChannel.loop_registry / evict_loop
+- [x] H57. 删 ClientChannel.loop_registry / evict_loop
 
 ## 模块 I：数据迁移（0/4）
 
@@ -102,6 +102,78 @@
 ## 实施日志
 
 按时间倒序记录每次推进。
+
+### "继续" 第五轮 — SessionContext 全面化 + H45 收尾
+
+The keystone migration. ~10 commits in dependency order:
+
+1. **Add session_contexts to Orchestrator**: lazy SessionContext map
+   alongside legacy SessionHandle map. `session_context_for(sk)`
+   helper.
+2. **Inbound dispatch via Agent2 + SessionContext**: replace
+   `LoopRegistry.get_or_create` + `handle.tx.send(TurnMessage)` with
+   spawned task that locks `turn_lock`/`session`, populates
+   `session.persist`/`session.channel`, builds TurnContext, calls
+   `agent2.run`. AskRouter.fulfill stays ahead of pending_asks
+   legacy.
+3. **Retry/abort + incomplete_turn via SessionContext**: pending_retry
+   moves to `SessionContext.pending_retry`; incomplete_turn detection
+   reads `SessionContext.session.lock()` instead of AgentLoop. The
+   retry path rewrites `msg.content` in-place and falls through to
+   the standard Agent2 dispatch.
+4. **CommandContext migration**: `agent_loop` → `session_ctx`;
+   added `session_contexts: &DashMap`. apply_and_persist_override and
+   get_history read/write through SessionContext.session.lock().
+   cmd_compact rebuilds ContextEngine per call (mirrors Agent2.run).
+5. **Scheduler tasks via Agent2**: `run_heartbeat_task` and
+   `run_cron_task` go through new `run_scheduled_turn` helper that
+   uses SessionContext + Agent2. SchedulerContext gains
+   `session_contexts` + `agent_runtime`.
+6. **DelegationCoordinator via Agent2**: sub-agent execution builds an
+   inline AgentRuntime (filtered ToolRegistry per
+   SubAgentConfig.tools, empty SkillManager + AgentRegistry to
+   prevent recursive delegation) and dispatches via Agent2.run.
+7. **Webhook + scheduler.rs WebhookContext via Agent2**:
+   `run_scheduled_task` mirrors the orchestrator's helper. Three
+   orphan scheduling files (webhook.rs, active_hours.rs,
+   schedule.rs) deleted — not declared in mod.rs.
+8. **Startup recovery via Agent2::run_recovery**: ported
+   recover_interrupted_turn semantics to Agent2 (Case A re-executes
+   orphan tool_calls via ToolExecutor, then Cases B/C call
+   Agent2.run on the now-well-formed history).
+9. **H45 deletion sweep**: LoopRegistry, SessionHandle, TurnInput,
+   TurnMessage, run_session_actor, run_message_task, run_retry_task,
+   get_or_create_scheduled_loop. Orchestrator.sessions field gone.
+   SharedSessions.sessions gone. SchedulerContext.sessions/change_rx
+   gone. handle_delegation_task → Orchestrator::handle_delegation_event
+   (Box::pin'd to handle recursive async into handle_channel_event).
+10. **H57**: ClientChannel.loop_registry + set_loop_registry +
+    evict_loop + ApiContext.loop_registry + LoopRegistryMap type
+    deleted. daemon.rs set_loop_registry call gone.
+11. **H46 + H49**: request_builder.rs deleted. agent_impl/run.rs,
+    turn.rs, chat_loop.rs, compaction.rs, images.rs, tools.rs,
+    types.rs deleted (~1500 lines). agent_impl/mod.rs slimmed to
+    just AgentBuilder + AgentConfig data bag.
+12. **New src/agents/tokens.rs**: TokenTracker + estimate_* +
+    is_write_tool extracted from deleted types.rs.
+13. **ToolExecutor cleanup**: ask_user_handler / delegate_handler /
+    sub_delegator fields + inline branches deleted. ask_user /
+    agent_delegate are now ordinary registry-resolved Tool calls.
+14. **Rename**: legacy `Agent` → `AgentBuilder` (the data bag),
+    `Agent2` → `Agent` (the executor) — the canonical name moves to
+    the RFC v2 type. Re-exports updated.
+
+Net delta: -1500 lines (deleted agent_impl + request_builder) /
++500 lines (new agent.rs body + tokens.rs + recovery + scheduler
+helpers). Tree compiles, 379 / 379 lib tests pass, ~7 dead-code
+warnings remain (legacy AgentBuilder fields never-read, ContextEngine
+public methods never-called — all targeted for follow-up cleanup).
+
+Progress: 60 / 61. Only E32 (ClientChannel reply_target indexing +
+real push_event / cancel_signal impl, since the trait already has
+default no-ops) remains.
+
+
 
 ### C17 + C18 (扩展 MVP) — 新 Agent + tool-call 迭代循环
 

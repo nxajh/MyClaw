@@ -712,8 +712,10 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     tracing::debug!("web_search tool registered (connected to ProviderRegistry)");
 
     // WorkspaceWatcher for hot-reload.
-    let watcher = crate::agents::WorkspaceWatcher::new(&config.workspace_dir, &config.knowledge_dir)?;
-    let change_rx = watcher.rx.clone();
+    let _watcher = crate::agents::WorkspaceWatcher::new(&config.workspace_dir, &config.knowledge_dir)?;
+    // change_rx is no longer subscribed to — D25's WorkspaceWatcher::spawn_managed
+    // handles agent/skill reloads autonomously (the watcher publishes the
+    // ChangeSet but nothing now subscribes here).
 
     // Build session backend + manager early — B15: the DelegationCoordinator
     // needs SessionManager (shared backend) to create sub-sessions as
