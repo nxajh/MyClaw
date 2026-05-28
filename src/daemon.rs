@@ -822,31 +822,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         }
     }
 
-    // ── Queue processing: drain any queued messages ────────────────────────
-    // Messages may have been queued to queue.jsonl files during a hot switch
-    // or if the process was killed mid-turn. Always scan on startup.
-    let sessions_root = config.workspace_dir.join("sessions");
-    match crate::agents::process_all_queues(&sessions_root) {
-        Ok(queues) => {
-            for (sid, msgs) in &queues {
-                for msg in msgs {
-                    session_manager.append_message(sid, msg.clone());
-                }
-            }
-            if !queues.is_empty() {
-                let total: usize = queues.values().map(|v| v.len()).sum();
-                tracing::info!(
-                    sessions = queues.len(),
-                    total_messages = total,
-                    "persisted queued messages from previous run"
-                );
-            }
-        }
-        Err(e) => {
-            tracing::warn!(err = %e, "failed to process session queues");
-        }
-    }
-
     // Create ClientChannel separately (needs session_manager for management API).
     #[cfg(feature = "client")]
     let _client_channel: Option<Arc<crate::channels::ClientChannel>> =

@@ -1,10 +1,11 @@
 //! SessionManager — creates, retrieves, and persists sessions.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 
-use dashmap::DashMap;
+use std::collections::HashMap;
+use parking_lot::RwLock;
 
 use crate::agents::agent_registry::AgentRegistry;
 use crate::agents::session_context::SessionContext;
@@ -38,7 +39,6 @@ impl fmt::Display for SessionNotOwned {
 impl std::error::Error for SessionNotOwned {}
 
 
-use parking_lot::RwLock;
 
 use crate::providers::capability_chat::ChatMessage;
 use crate::storage::{SessionBackend, SessionInfo};
@@ -53,11 +53,10 @@ use super::session_override::SessionOverride;
 pub struct SessionManager {
     backend: Arc<dyn SessionBackend>,
     /// User's active session: user_id → session_id.
-    active: RwLock<HashMap<String, String>>,
     /// Per-routing-key SessionContext. At most one SessionContext per
     /// routing_key (the 1:1 invariant): every active routing_key has a
     /// SessionContext that wraps its active Session.
-    contexts: DashMap<String, Arc<SessionContext>>,
+    contexts: RwLock<HashMap<String, Arc<SessionContext>>>,
     /// AgentRegistry used to resolve `Session.agent_name` to an
     /// `Arc<Agent>` when building SessionContexts. Defaults to an
     /// empty registry for test-only managers; production daemons
@@ -74,8 +73,7 @@ impl SessionManager {
     pub fn new(backend: Arc<dyn SessionBackend>) -> Self {
         Self {
             backend,
-            active: RwLock::new(HashMap::new()),
-            contexts: DashMap::new(),
+            contexts: RwLock::new(HashMap::new()),
             agents: Arc::new(AgentRegistry::new()),
             resolver: Arc::new(UserResolver::new()),
         }
@@ -242,23 +240,17 @@ impl SessionManager {
     }
 
     /// Resolve the active session_id for a user. Creates one if none exists.
+    /// Per the RFC v2 target shape (cache + active layers removed),
+    /// session_id lookup goes straight to the backend.
     fn resolve_active(&self, user_id: &str) -> String {
-        // 1. Check in-memory mapping.
-        if let Some(sid) = self.active.read().get(user_id) {
-            return sid.clone();
-        }
-
-        // 2. Check backend.
         if let Some(sid) = self.backend.get_active_session(user_id) {
-            self.active.write().insert(user_id.to_string(), sid.clone());
             return sid;
         }
 
-        // 3. Auto-create.
+        // Auto-create on first contact.
         match self.backend.create_session(user_id, None) {
             Ok(info) => {
                 let _ = self.backend.set_active_session(user_id, &info.id);
-                self.active.write().insert(user_id.to_string(), info.id.clone());
                 tracing::info!(user = %user_id, session = %info.id, "auto-created first session");
                 info.id
             }
@@ -273,7 +265,6 @@ impl SessionManager {
                     session = %ephemeral,
                     "backend failed to create session; using ephemeral (non-persisted) session"
                 );
-                self.active.write().insert(user_id.to_string(), ephemeral.clone());
                 ephemeral
             }
         }
@@ -283,7 +274,6 @@ impl SessionManager {
     pub fn new_session(&self, user_id: &str, name: Option<&str>) -> std::io::Result<SessionInfo> {
         let info = self.backend.create_session(user_id, name)?;
         self.backend.set_active_session(user_id, &info.id)?;
-        self.active.write().insert(user_id.to_string(), info.id.clone());
         tracing::info!(user = %user_id, session = %info.id, "new session created");
         Ok(info)
     }
@@ -307,7 +297,6 @@ impl SessionManager {
         }
 
         self.backend.set_active_session(user_id, session_id)?;
-        self.active.write().insert(user_id.to_string(), session_id.to_string());
         tracing::info!(user = %user_id, session = %session_id, "switched session");
         Ok(info)
     }
@@ -320,7 +309,7 @@ impl SessionManager {
     /// orphaned data on disk.
     pub fn delete_session(&self, user_id: &str, session_id: &str) -> std::io::Result<()> {
         // Check not active.
-        if self.active.read().get(user_id).map(|s| s.as_str()) == Some(session_id) {
+        if self.backend.get_active_session(user_id).as_deref() == Some(session_id) {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "cannot delete the active session"));
         }
 
@@ -474,8 +463,7 @@ impl SessionManager {
 
     /// Get the active session_id for a user (None if not resolved yet).
     pub fn active_session_id(&self, user_id: &str) -> Option<String> {
-        self.active.read().get(user_id).cloned()
-            .or_else(|| self.backend.get_active_session(user_id))
+        self.backend.get_active_session(user_id)
     }
 
     /// Save a session override for a user's active session.
@@ -528,7 +516,7 @@ impl SessionManager {
     /// Look up an existing SessionContext for a routing_key. Returns
     /// `None` if no turn has materialized one yet.
     pub fn get_context(&self, routing_key: &str) -> Option<Arc<SessionContext>> {
-        self.contexts.get(routing_key).map(|r| r.clone())
+        self.contexts.read().get(routing_key).cloned()
     }
 
     /// Get-or-create the SessionContext for a routing_key. On miss,
@@ -564,7 +552,7 @@ impl SessionManager {
         session.persist = Some(self.build_persist_hook());
         let agent = self.build_agent_for_session(&session);
         let ctx = Arc::new(SessionContext::new(session, agent));
-        self.contexts.insert(routing_key.to_string(), ctx.clone());
+        self.contexts.write().insert(routing_key.to_string(), ctx.clone());
         ctx
     }
 
@@ -590,7 +578,7 @@ impl SessionManager {
     /// scheduler/webhook paths that need to customize
     /// `session_override.run_mode` before wrapping the Session.
     pub fn register_context(&self, routing_key: &str, ctx: Arc<SessionContext>) {
-        self.contexts.insert(routing_key.to_string(), ctx);
+        self.contexts.write().insert(routing_key.to_string(), ctx);
     }
 
     /// Drop the SessionContext for a routing_key. Called by /reset,
@@ -598,7 +586,7 @@ impl SessionManager {
     /// context (and, transitively, the cached system prompt) from
     /// the fresh override.
     pub fn drop_context(&self, routing_key: &str) {
-        self.contexts.remove(routing_key);
+        self.contexts.write().remove(routing_key);
     }
 
     /// Append a message to a session's backend store.
