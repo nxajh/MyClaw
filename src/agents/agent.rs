@@ -29,9 +29,8 @@ use anyhow::Result;
 
 use futures_util::StreamExt;
 
-use crate::agents::context_engine::ContextEngine;
 use crate::agents::error::AgentError;
-use crate::agents::loop_breaker::{LoopBreak, LoopBreaker};
+use crate::agents::loop_breaker::LoopBreak;
 use crate::agents::session::Session;
 use crate::agents::tool_executor::ToolExecutor;
 use crate::agents::turn::{TurnContext, TurnResult};
@@ -98,29 +97,21 @@ impl Agent {
             None => runtime.providers.get_chat_provider(Capability::Chat)?,
         };
 
-        // Build a tool executor scoped to the allowed set so `execute_tool`
-        // can't accidentally call a tool filtered out by the agent config.
+        // Per-turn ToolExecutor scoped to the allowed-tool slice. The
+        // shared `runtime.tool_executor` holds the timeout; we wrap a
+        // scoped tools registry around it so `execute_tool` can't reach
+        // beyond the agent's filter.
         let scoped_tools = Arc::new(build_scoped_registry(&allowed_tools));
-        let tool_executor = ToolExecutor::new(scoped_tools, runtime.tool_timeout_secs);
+        let tool_executor = ToolExecutor::new(scoped_tools, runtime.tool_executor.timeout_secs);
 
-        // Per-turn loop breaker.
-        let mut loop_breaker = LoopBreaker::new(runtime.loop_breaker_defaults.clone());
-        loop_breaker.reset();
+        // Per-turn loop breaker counter — allocated fresh each turn
+        // by the shared `runtime.loop_breaker` singleton.
+        let mut loop_breaker = runtime.loop_breaker.new_counter();
 
-        // ContextEngine instance per turn. C18 (full) should keep this
-        // on Session so token tracking persists across turns; for the MVP
-        // we re-seed from history. ContextConfig comes from `runtime.context`
-        // so the user's `[agent.context]` (compact_threshold,
-        // retain_work_units) is actually honored.
-        let context = ContextEngine::new(
-            &runtime.context,
-            Arc::clone(&runtime.providers),
-            // ResourceProvider not yet plumbed via AgentRuntime; the
-            // memory-tool-during-compaction path is disabled here.
-            // Build a minimal one for type compliance.
-            placeholder_resources(runtime),
-            Arc::clone(&runtime.tools),
-        );
+        // Shared ContextEngine singleton — RFC v2 target shape. Token
+        // tracking lives solely on `Session.token_tracker`; ContextEngine
+        // only carries threshold/retain_units + summarizer state.
+        let context = &runtime.context_engine;
         // Seed Session.token_tracker on fresh sessions / post-restart.
         // After restart `last_total_tokens` carries the persisted total;
         // otherwise we estimate from the loaded history so the
@@ -583,7 +574,7 @@ impl Agent {
             );
             let allowed_tools = self.allowed_tools(runtime);
             let scoped_tools = Arc::new(build_scoped_registry(&allowed_tools));
-            let tool_executor = ToolExecutor::new(scoped_tools, runtime.tool_timeout_secs);
+            let tool_executor = ToolExecutor::new(scoped_tools, runtime.tool_executor.timeout_secs);
 
             for call in &pending_calls {
                 let result = tool_executor
@@ -646,24 +637,6 @@ fn build_scoped_registry(
         reg.register(Arc::clone(t));
     }
     reg
-}
-
-// Build a throwaway `ResourceProvider` for `ContextEngine::new`. The MVP
-// path doesn't actually invoke the compaction summarizer (which is what
-// the resource provider feeds), but the type signature still requires it.
-// C18 (full) will move resources onto `AgentRuntime` and drop this shim.
-fn placeholder_resources(
-    runtime: &AgentRuntime,
-) -> std::sync::Arc<crate::agents::resource_provider::ResourceProvider> {
-    crate::agents::resource_provider::ResourceProvider::new(
-        Arc::clone(&runtime.skills),
-        runtime.agents.clone(),
-        Vec::new(),
-        std::path::PathBuf::new(),
-        std::path::PathBuf::new(),
-        runtime.knowledge_dir.to_string_lossy().to_string(),
-        0,
-    )
 }
 
 /// Char-count → token estimate. Matches `agent_impl::types::estimate_tokens`

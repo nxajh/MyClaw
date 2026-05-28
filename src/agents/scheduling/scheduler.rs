@@ -964,9 +964,9 @@ pub async fn run_scheduled_task(
 
     let agent_runtime = ctx.orchestrator.agent_runtime();
     let runtime = agent_runtime.clone();
-    let prompt_config_base = agent_runtime.prompt_config.clone();
+    let prompt_config_base = agent_runtime.defaults.prompt.clone();
     let skills_arc = Arc::clone(&agent_runtime.skills);
-    let cached_prompt = agent_runtime.system_prompt.clone();
+    let cached_prompt = agent_runtime.defaults.system_prompt.clone();
     let persist_hook: Arc<dyn crate::agents::PersistHook> = Arc::new(
         crate::agents::BackendPersistHook::new(Arc::clone(ctx.orchestrator.persist_backend()))
     );

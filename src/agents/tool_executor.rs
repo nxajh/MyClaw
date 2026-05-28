@@ -16,13 +16,13 @@ use super::tokens::is_write_tool;
 /// (`ask_user`, `agent_delegate`) are real `Tool` impls registered in
 /// the registry by the daemon — they're dispatched through the same
 /// path as any other tool, no special-casing here.
-pub(crate) struct ToolExecutor {
+pub struct ToolExecutor {
     pub(crate) tools: Arc<ToolRegistry>,
-    pub(crate) timeout_secs: u64,
+    pub timeout_secs: u64,
 }
 
 impl ToolExecutor {
-    pub(crate) fn new(tools: Arc<ToolRegistry>, timeout_secs: u64) -> Self {
+    pub fn new(tools: Arc<ToolRegistry>, timeout_secs: u64) -> Self {
         Self {
             tools,
             timeout_secs,

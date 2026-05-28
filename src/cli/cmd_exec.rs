@@ -36,12 +36,40 @@ pub async fn run(cli: &Cli, prompt: &str, agent: Option<&str>, model: Option<&st
     let tools_arc = Arc::new(tools);
 
     // RFC v2: Agent + AgentRuntime. CLI doesn't need delegation.
-    let agent_runtime = myclaw::AgentRuntime::new(
-        Arc::clone(&registry_arc),
-        Arc::clone(&tools_arc),
-        Arc::clone(&skills_arc),
-        Arc::new(myclaw::agents::AgentRegistry::new()),
-    );
+    let agent_runtime = {
+        let sub_agents = Arc::new(myclaw::agents::AgentRegistry::new());
+        let resources = myclaw::agents::resource_provider::ResourceProvider::new(
+            Arc::clone(&skills_arc),
+            Arc::clone(&sub_agents),
+            Vec::new(),
+            std::path::PathBuf::new(),
+            std::path::PathBuf::new(),
+            String::new(),
+            0,
+        );
+        let context_engine = Arc::new(myclaw::agents::context_engine::ContextEngine::new(
+            &Default::default(),
+            Arc::clone(&registry_arc),
+            resources,
+            Arc::clone(&tools_arc),
+        ));
+        let tool_executor = Arc::new(myclaw::agents::tool_executor::ToolExecutor::new(
+            Arc::clone(&tools_arc),
+            180,
+        ));
+        let loop_breaker = Arc::new(myclaw::agents::loop_breaker::LoopBreaker::new(
+            myclaw::agents::loop_breaker::LoopBreakerConfig::default(),
+        ));
+        myclaw::AgentRuntime::new(
+            Arc::clone(&registry_arc),
+            Arc::clone(&tools_arc),
+            Arc::clone(&skills_arc),
+            sub_agents,
+            context_engine,
+            tool_executor,
+            loop_breaker,
+        )
+    };
 
     let main_config = myclaw::config::sub_agent::SubAgentConfig {
         name: "main".to_string(),

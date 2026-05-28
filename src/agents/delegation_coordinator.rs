@@ -254,11 +254,41 @@ impl DelegationCoordinator {
         // empty here so the sub-agent can't recursively delegate (matches
         // the legacy AgentLoop construction at line 263 which passed a
         // fresh SkillManager).
+        // Build a per-sub-agent runtime with fresh executor instances.
+        // ResourceProvider is a placeholder (no memory tools for sub-agents).
+        let sub_tools = Arc::new(tools);
+        let sub_skills = Arc::new(RwLock::new(SkillManager::new()));
+        let sub_agents = Arc::new(crate::agents::AgentRegistry::new());
+        let resources = crate::agents::resource_provider::ResourceProvider::new(
+            Arc::clone(&sub_skills),
+            Arc::clone(&sub_agents),
+            Vec::new(),
+            std::path::PathBuf::new(),
+            std::path::PathBuf::new(),
+            String::new(),
+            0,
+        );
+        let context_engine = Arc::new(crate::agents::context_engine::ContextEngine::new(
+            &Default::default(),
+            Arc::clone(&self.registry),
+            resources,
+            Arc::clone(&sub_tools),
+        ));
+        let tool_executor = Arc::new(crate::agents::tool_executor::ToolExecutor::new(
+            Arc::clone(&sub_tools),
+            180,
+        ));
+        let loop_breaker = Arc::new(crate::agents::loop_breaker::LoopBreaker::new(
+            crate::agents::loop_breaker::LoopBreakerConfig::default(),
+        ));
         let runtime = crate::agents::AgentRuntime::new(
             Arc::clone(&self.registry),
-            Arc::new(tools),
-            Arc::new(RwLock::new(SkillManager::new())),
-            Arc::new(crate::agents::AgentRegistry::new()),
+            sub_tools,
+            sub_skills,
+            sub_agents,
+            context_engine,
+            tool_executor,
+            loop_breaker,
         );
 
         // Use the canonical Arc<Agent> from the registry — the

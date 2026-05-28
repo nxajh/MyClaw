@@ -90,8 +90,31 @@ struct ToolInvocation {
 
 // ── LoopBreaker ───────────────────────────────────────────────────────────────
 
-/// Loop breaker — tracks tool call history and detects repetitive patterns.
+/// Shared singleton holding loop-breaker policy. Lives on
+/// `AgentRuntime.loop_breaker` and hands out per-turn counters via
+/// [`LoopBreaker::new_counter`]. Per the target architecture this is
+/// the only field-bearing instance — the actual per-turn state
+/// (`total_calls`, sliding `window`) lives on `LoopBreakerCounter`.
 pub struct LoopBreaker {
+    config: LoopBreakerConfig,
+}
+
+impl LoopBreaker {
+    pub fn new(config: LoopBreakerConfig) -> Self {
+        Self { config }
+    }
+
+    /// Allocate a fresh counter for one turn. The counter owns a
+    /// clone of the policy so callers can hold it without borrowing
+    /// the shared `LoopBreaker`.
+    pub fn new_counter(&self) -> LoopBreakerCounter {
+        LoopBreakerCounter::new(self.config.clone())
+    }
+}
+
+/// Per-turn loop-breaker state. Built by `LoopBreaker::new_counter` at
+/// the start of `Agent::run` and dropped when the turn ends.
+pub struct LoopBreakerCounter {
     config: LoopBreakerConfig,
     /// Total tool calls in this turn.
     total_calls: usize,
@@ -99,7 +122,7 @@ pub struct LoopBreaker {
     window: VecDeque<ToolInvocation>,
 }
 
-impl LoopBreaker {
+impl LoopBreakerCounter {
     pub fn new(config: LoopBreakerConfig) -> Self {
         let window_capacity = config.window_size;
         Self {
@@ -309,8 +332,8 @@ fn simple_hash(s: &str) -> u64 {
 mod tests {
     use super::*;
 
-    fn default_breaker() -> LoopBreaker {
-        LoopBreaker::new(LoopBreakerConfig::default())
+    fn default_breaker() -> LoopBreakerCounter {
+        LoopBreakerCounter::new(LoopBreakerConfig::default())
     }
 
     // ── Exact repeat ───────────────────────────────────────────────────────
@@ -458,7 +481,7 @@ mod tests {
             ping_pong_rounds: 4,
             ..LoopBreakerConfig::default()
         };
-        let mut lb = LoopBreaker::new(config);
+        let mut lb = LoopBreakerCounter::new(config);
         for i in 0..8 {
             let tool = if i % 2 == 0 { "read_file" } else { "write_file" };
             let result = lb.record_and_check(tool, "{}", "data");
@@ -605,7 +628,7 @@ mod tests {
             max_tool_calls: 5,
             ..LoopBreakerConfig::default()
         };
-        let mut lb = LoopBreaker::new(config);
+        let mut lb = LoopBreakerCounter::new(config);
 
         for i in 0..5 {
             assert_eq!(
@@ -631,7 +654,7 @@ mod tests {
             max_tool_calls: 0,
             ..LoopBreakerConfig::default()
         };
-        let mut lb = LoopBreaker::new(config);
+        let mut lb = LoopBreakerCounter::new(config);
 
         // Make 50 calls — should never trigger MaxCalls.
         for i in 0..50 {
@@ -667,7 +690,7 @@ mod tests {
             window_size: 5,
             ..LoopBreakerConfig::default()
         };
-        let mut lb = LoopBreaker::new(config);
+        let mut lb = LoopBreakerCounter::new(config);
 
         // Make 10 calls with different args — window should cap at 5.
         for i in 0..10 {

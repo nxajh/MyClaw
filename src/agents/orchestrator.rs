@@ -888,9 +888,9 @@ impl Orchestrator {
             let persist_backend = self.persist_backend.clone();
             let channels = self.channels.clone();
             let runtime = self.agent_runtime.clone();
-            let prompt_config_base = self.agent_runtime.prompt_config.clone();
+            let prompt_config_base = self.agent_runtime.defaults.prompt.clone();
             let skills_arc = Arc::clone(&self.agent_runtime.skills);
-            let cached_prompt = self.agent_runtime.system_prompt.clone();
+            let cached_prompt = self.agent_runtime.defaults.system_prompt.clone();
             let persist_hook: Arc<dyn PersistHook> = Arc::new(
                 BackendPersistHook::new(Arc::clone(&self.persist_backend))
             );
@@ -982,9 +982,9 @@ impl Orchestrator {
             let sa_reply_target = sa.reply_target.clone();
             let dm = delegation_manager.clone();
             let runtime = self.agent_runtime.clone();
-            let prompt_config_base = self.agent_runtime.prompt_config.clone();
+            let prompt_config_base = self.agent_runtime.defaults.prompt.clone();
             let skills_arc = Arc::clone(&self.agent_runtime.skills);
-            let cached_prompt = self.agent_runtime.system_prompt.clone();
+            let cached_prompt = self.agent_runtime.defaults.system_prompt.clone();
             let persist_hook: Arc<dyn PersistHook> = Arc::new(
                 BackendPersistHook::new(Arc::clone(&self.persist_backend))
             );
@@ -1201,9 +1201,9 @@ async fn run_scheduled_turn(
     );
 
     let runtime = orch.agent_runtime.clone();
-    let prompt_config_base = orch.agent_runtime.prompt_config.clone();
+    let prompt_config_base = orch.agent_runtime.defaults.prompt.clone();
     let skills_arc = Arc::clone(&orch.agent_runtime.skills);
-    let cached_prompt = orch.agent_runtime.system_prompt.clone();
+    let cached_prompt = orch.agent_runtime.defaults.system_prompt.clone();
     let persist_hook: Arc<dyn PersistHook> = Arc::new(
         BackendPersistHook::new(Arc::clone(&orch.persist_backend))
     );

@@ -925,17 +925,54 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         let persist_hook: Arc<dyn crate::agents::PersistHook> = Arc::new(
             crate::agents::session::BackendPersistHook::new(Arc::clone(&session_backend)),
         );
+
+        // Build the ResourceProvider once so ContextEngine can hold it as
+        // a shared resource (rather than rebuilding per turn).
+        let resources = crate::agents::resource_provider::ResourceProvider::new(
+            Arc::clone(&skills_arc),
+            Arc::clone(&sub_agent_registry),
+            Vec::new(),
+            config.workspace_dir.join("skills"),
+            config.workspace_dir.join("agents"),
+            config.knowledge_dir.to_string_lossy().to_string(),
+            config.agent.prompt.timezone_offset,
+        );
+        let context_engine = Arc::new(crate::agents::context_engine::ContextEngine::new(
+            &config.agent.context,
+            Arc::clone(&registry_arc),
+            resources,
+            Arc::clone(&tools_arc),
+        ));
+        let tool_executor = Arc::new(crate::agents::tool_executor::ToolExecutor::new(
+            Arc::clone(&tools_arc),
+            config.agent.tool_timeout_secs,
+        ));
+        let loop_breaker = Arc::new(crate::agents::loop_breaker::LoopBreaker::new(
+            crate::agents::loop_breaker::LoopBreakerConfig {
+                max_tool_calls: config.agent.max_tool_calls,
+                ..Default::default()
+            },
+        ));
+
+        let defaults = crate::agents::runtime::RuntimeDefaults {
+            permission_mode: config.agent.permission_mode,
+            prompt: prompt_config,
+            system_prompt: cached_system_prompt,
+            workspace_dir: config.workspace_dir.clone(),
+            knowledge_dir: config.knowledge_dir.clone(),
+        };
+
         crate::agents::AgentRuntime::new(
             Arc::clone(&registry_arc),
             Arc::clone(&tools_arc),
             Arc::clone(&skills_arc),
-            sub_agent_registry.clone(),
+            Arc::clone(&sub_agent_registry),
+            context_engine,
+            tool_executor,
+            loop_breaker,
         )
+        .with_defaults(defaults)
         .with_persist(persist_hook)
-        .with_dirs(config.workspace_dir.clone(), config.knowledge_dir.clone())
-        .with_context(config.agent.context.clone())
-        .with_prompt_config(prompt_config)
-        .with_system_prompt(cached_system_prompt)
     };
 
     let parts = OrchestratorParts {

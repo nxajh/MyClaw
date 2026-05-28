@@ -41,7 +41,7 @@ pub(crate) struct CompactionResult {
 /// Unified context-management facade. Holds the compaction threshold
 /// / retain-units policy plus the summarizer plumbing (provider
 /// registry, memory-tool executor) in one struct.
-pub(crate) struct ContextEngine {
+pub struct ContextEngine {
     compact_threshold: f64,
     retain_work_units: usize,
     registry: Arc<dyn ProviderRegistry>,
@@ -52,7 +52,7 @@ pub(crate) struct ContextEngine {
 
 #[allow(dead_code)] // some accessors retained for /compact + future callers
 impl ContextEngine {
-    pub(crate) fn new(
+    pub fn new(
         context: &ContextConfig,
         registry: Arc<dyn ProviderRegistry>,
         resources: Arc<ResourceProvider>,
@@ -69,7 +69,7 @@ impl ContextEngine {
     }
 
     /// Public read of the configured compaction threshold (0.0–1.0).
-    pub(crate) fn compact_threshold(&self) -> f64 {
+    pub fn compact_threshold(&self) -> f64 {
         self.compact_threshold
     }
 
@@ -77,13 +77,13 @@ impl ContextEngine {
     /// threshold for `context_window`. Caller passes
     /// `session.token_tracker.total_tokens()` — the engine is
     /// stateless w.r.t. token tracking.
-    pub(crate) fn should_compact(&self, total_tokens: u64, context_window: u64) -> bool {
+    pub fn should_compact(&self, total_tokens: u64, context_window: u64) -> bool {
         let threshold = (context_window as f64 * self.compact_threshold) as u64;
         total_tokens >= threshold
     }
 
     /// Find the boundary index for compaction, given the context budget.
-    pub(crate) fn compaction_boundary(
+    pub fn compaction_boundary(
         &self,
         history: &[ChatMessage],
         context_window: u64,

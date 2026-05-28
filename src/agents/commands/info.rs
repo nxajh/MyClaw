@@ -155,7 +155,7 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
         };
 
         // Use Agent's configured compact_threshold (ContextConfig is per-Agent today).
-        let compact_threshold = ctx.runtime.context.compact_threshold;
+        let compact_threshold = ctx.runtime.context_engine.compact_threshold();
         let threshold = if context_window > 0 {
             let t = (context_window as f64 * compact_threshold) as u64;
             format!("{} token ({:.0}%)", t, compact_threshold * 100.0)
@@ -222,7 +222,7 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
             } else {
                 "未知".to_string()
             };
-            let compact_threshold = ctx.runtime.context.compact_threshold;
+            let compact_threshold = ctx.runtime.context_engine.compact_threshold();
             let threshold = if context_window > 0 {
                 let t = (context_window as f64 * compact_threshold) as u64;
                 format!("{} token ({:.0}%)", t, compact_threshold * 100.0)

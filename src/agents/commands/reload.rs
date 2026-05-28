@@ -7,7 +7,7 @@ pub fn cmd_stop() -> String {
 }
 
 pub async fn cmd_reload(ctx: CommandContext<'_>) -> String {
-    let workspace_dir = &ctx.runtime.workspace_dir;
+    let workspace_dir = &ctx.runtime.defaults.workspace_dir;
 
     // 1. Re-scan skills
     let skills_dir = workspace_dir.join("skills");

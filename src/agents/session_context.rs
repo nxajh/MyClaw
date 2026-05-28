@@ -124,7 +124,7 @@ impl SessionContext {
         session.channel = Some(channel.clone());
 
         let session_override = session.session_override.clone();
-        let mut prompt_config = runtime.prompt_config.clone();
+        let mut prompt_config = runtime.defaults.prompt.clone();
         if let Some(pm) = session_override.permission_mode {
             prompt_config.permission_mode = pm;
         }
@@ -132,8 +132,8 @@ impl SessionContext {
             prompt_config.run_mode = rm;
         }
 
-        let system_prompt = if !runtime.system_prompt.is_empty() {
-            runtime.system_prompt.clone()
+        let system_prompt = if !runtime.defaults.system_prompt.is_empty() {
+            runtime.defaults.system_prompt.clone()
         } else {
             let s = runtime.skills.read();
             crate::agents::SystemPromptBuilder::new(prompt_config.clone()).build(&s)

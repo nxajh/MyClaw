@@ -12,7 +12,7 @@ use super::AgentRegistry;
 /// memory dir lookups) — `knowledge_dir` is the only one actively read
 /// today by `build_memory_prompt`.
 #[allow(dead_code)]
-pub(crate) struct ResourceProvider {
+pub struct ResourceProvider {
     pub(crate) skills: Arc<RwLock<SkillManager>>,
     pub(crate) sub_agents: Arc<AgentRegistry>,
     pub(crate) mcp_instructions: Vec<(String, String)>,
@@ -25,7 +25,7 @@ pub(crate) struct ResourceProvider {
 }
 
 impl ResourceProvider {
-    pub(crate) fn new(
+    pub fn new(
         skills: Arc<RwLock<SkillManager>>,
         sub_agents: Arc<AgentRegistry>,
         mcp_instructions: Vec<(String, String)>,
