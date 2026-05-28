@@ -99,12 +99,8 @@ pub struct Orchestrator {
     delegation_manager: Option<Arc<DelegationManager>>,
     /// Delegation event receiver.
     delegation_rx: Arc<TokioMutex<Option<mpsc::Receiver<DelegationEvent>>>>,
-    /// MCP manager (for /mcp command).
-    mcp_manager: Option<Arc<crate::agents::McpManager>>,
     /// Scheduler event receiver (heartbeat ticks, cron triggers).
     scheduler_rx: Arc<TokioMutex<Option<mpsc::Receiver<SchedulerEvent>>>>,
-    /// Search provider cooldown tracker (shared with WebSearchTool).
-    search_cooldown: Option<Arc<crate::tools::search_cooldown::SearchProviderCooldown>>,
     /// Shared scheduler for run result tracking from cron tasks.
     scheduler: Option<crate::agents::SharedScheduler>,
 }
@@ -176,12 +172,8 @@ pub struct OrchestratorParts {
     pub delegation_manager: Option<Arc<DelegationManager>>,
     /// Delegation event receiver (conditional).
     pub delegation_rx: Option<mpsc::Receiver<DelegationEvent>>,
-    /// MCP manager (conditional — only when MCP servers are configured).
-    pub mcp_manager: Option<Arc<crate::agents::McpManager>>,
     /// Scheduler event receiver (heartbeat ticks, cron triggers from Scheduler task).
     pub scheduler_rx: Option<mpsc::Receiver<SchedulerEvent>>,
-    /// Search provider cooldown tracker (shared with WebSearchTool).
-    pub search_cooldown: Option<Arc<crate::tools::search_cooldown::SearchProviderCooldown>>,
     /// AskRouter shared with the daemon-side `AskUserTool::with_router`
     /// construction. The orchestrator's inbound dispatch calls
     /// `ask_router.fulfill(session.id, msg.content)` ahead of the legacy
@@ -235,9 +227,7 @@ impl Orchestrator {
             agent_runtime: parts.agent_runtime,
             delegation_manager: parts.delegation_manager,
             delegation_rx: Arc::new(TokioMutex::new(parts.delegation_rx)),
-            mcp_manager: parts.mcp_manager,
             scheduler_rx: Arc::new(TokioMutex::new(parts.scheduler_rx)),
-            search_cooldown: parts.search_cooldown,
             scheduler: parts.scheduler,
         };
 
@@ -658,8 +648,6 @@ impl Orchestrator {
                         let registry_cmd  = Arc::clone(&self.agent_runtime.providers);
                         let sm_cmd        = self.session_manager.clone();
                         let runtime_cmd   = self.agent_runtime.clone();
-                        let mcp_cmd       = self.mcp_manager.clone();
-                        let cooldown_cmd  = self.search_cooldown.clone();
                         let channel_cmd   = channels.get(&channel_key).map(|r| r.clone());
                         let rt_cmd        = reply_target.clone();
                         let rid_cmd       = reply_to_id.clone();
@@ -671,8 +659,6 @@ impl Orchestrator {
                                 session_manager: &sm_cmd,
                                 runtime:        &runtime_cmd,
                                 session_ctx:    session_ctx_cmd.as_ref(),
-                                mcp_manager:    mcp_cmd.as_ref(),
-                                search_cooldown: cooldown_cmd.as_ref(),
                             };
                             if let Some(response) = super::commands::dispatch(
                                 &cmd_owned, &cmd_args_owned, cmd_ctx,

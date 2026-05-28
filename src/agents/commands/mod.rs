@@ -4,7 +4,6 @@
 //! Each command returns a text response sent directly through the channel.
 
 use crate::agents::AgentRuntime;
-use crate::agents::mcp_manager::McpManager;
 use crate::agents::session::{SessionManager, SessionOverride};
 use std::sync::Arc;
 
@@ -32,10 +31,6 @@ pub struct CommandContext<'a> {
     /// state — same Mutex used by Agent.run, so reads see the latest
     /// turn's state without stale-cache surprises.
     pub session_ctx: Option<&'a Arc<crate::agents::SessionContext>>,
-    /// MCP manager (for /mcp command).
-    pub mcp_manager: Option<&'a Arc<McpManager>>,
-    /// Search provider cooldown tracker (for /status command).
-    pub search_cooldown: Option<&'a Arc<crate::tools::search_cooldown::SearchProviderCooldown>>,
 }
 
 /// Parse a slash command from message content.

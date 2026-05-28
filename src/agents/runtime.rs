@@ -14,12 +14,14 @@ use parking_lot::RwLock;
 
 use crate::agents::context_engine::ContextEngine;
 use crate::agents::loop_breaker::LoopBreaker;
+use crate::agents::mcp_manager::McpManager;
 use crate::agents::prompt::SystemPromptConfig;
 use crate::agents::tool_executor::ToolExecutor;
 use crate::agents::workspace::skills::SkillManager;
 use crate::agents::AgentRegistry;
 use crate::config::agent::PermissionMode;
 use crate::providers::ProviderRegistry;
+use crate::tools::search_cooldown::SearchProviderCooldown;
 
 use super::tool_registry::ToolRegistry;
 
@@ -72,6 +74,13 @@ pub struct AgentRuntime {
     /// Defaults — exactly `{ permission_mode, prompt }` per the target
     /// shape; see RFC v2 §三.A.
     pub defaults: RuntimeDefaults,
+    /// MCP server manager (Option because MCP servers are opt-in).
+    /// Read by the `/mcp` slash command to report connection state.
+    pub mcp_manager: Option<Arc<McpManager>>,
+    /// Search-provider rate-limit tracker shared with `WebSearchTool`
+    /// (the tool writes timestamps on rate-limit; `/status` reads them
+    /// to render ⏱️ markers next to cooled-down providers).
+    pub search_cooldown: Option<Arc<SearchProviderCooldown>>,
 }
 
 impl AgentRuntime {
@@ -95,11 +104,23 @@ impl AgentRuntime {
             tool_executor,
             loop_breaker,
             defaults: RuntimeDefaults::default(),
+            mcp_manager: None,
+            search_cooldown: None,
         }
     }
 
     pub fn with_defaults(mut self, defaults: RuntimeDefaults) -> Self {
         self.defaults = defaults;
+        self
+    }
+
+    pub fn with_mcp_manager(mut self, mcp: Arc<McpManager>) -> Self {
+        self.mcp_manager = Some(mcp);
+        self
+    }
+
+    pub fn with_search_cooldown(mut self, cooldown: Arc<SearchProviderCooldown>) -> Self {
+        self.search_cooldown = Some(cooldown);
         self
     }
 

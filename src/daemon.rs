@@ -968,6 +968,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             loop_breaker,
         )
         .with_defaults(defaults)
+        .with_mcp_manager(Arc::clone(&mcp_manager_arc))
+        .with_search_cooldown(Arc::clone(&search_cooldown))
     };
 
     let parts = OrchestratorParts {
@@ -975,9 +977,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         channels,
         delegation_manager,
         delegation_rx,
-        mcp_manager: Some(Arc::clone(&mcp_manager_arc)),
         scheduler_rx: Some(scheduler_rx),
-        search_cooldown: Some(search_cooldown),
         workspace_dir: config.workspace_dir.clone(),
         scheduler: Some(shared_scheduler.clone()),
         ask_router: Arc::clone(&ask_router),

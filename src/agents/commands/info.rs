@@ -56,7 +56,7 @@ pub async fn cmd_status(ctx: CommandContext<'_>) -> String {
         // Determine status.
         let status = if total_models == 0 {
             "❌ 无模型".to_string()
-        } else if let Some(cooldown) = &ctx.search_cooldown {
+        } else if let Some(cooldown) = ctx.runtime.search_cooldown.as_ref() {
             // Check if any search model's provider is in cooldown.
             // SearchProviderCooldown tracks by provider name.
             if cooldown.is_cooled_down(&s.name) {
@@ -363,7 +363,7 @@ pub async fn cmd_export(ctx: CommandContext<'_>) -> String {
 }
 
 pub async fn cmd_mcp(ctx: CommandContext<'_>) -> String {
-    match ctx.mcp_manager {
+    match ctx.runtime.mcp_manager.as_ref() {
         Some(mgr) => {
             let connected = mgr.is_connected().await;
             let servers = mgr.server_count().await;
