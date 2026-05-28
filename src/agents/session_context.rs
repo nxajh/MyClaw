@@ -55,9 +55,11 @@ pub struct SessionContext {
     /// Mutex because some readers want to peek at session state without
     /// blocking on an in-flight turn.
     pub turn_lock: Arc<Mutex<()>>,
-    /// Loaded UserProfile (G41). Wrapped in Mutex so /memory-style commands
-    /// can rewrite it without taking the session lock.
-    pub user_profile: Arc<Mutex<UserProfile>>,
+    /// Loaded UserProfile snapshot taken at SessionContext creation.
+    /// Immutable for the lifetime of the context — per RFC §三.A reload
+    /// semantics drop the SessionContext and let `SessionManager`
+    /// rematerialize it from a fresh profile read.
+    pub user_profile: Arc<UserProfile>,
 }
 
 impl SessionContext {
@@ -68,20 +70,21 @@ impl SessionContext {
             attachments: Arc::new(AttachmentManager::new()),
             pending_retry: Arc::new(Mutex::new(None)),
             turn_lock: Arc::new(Mutex::new(())),
-            user_profile: Arc::new(Mutex::new(UserProfile::default())),
+            user_profile: Arc::new(UserProfile::default()),
         }
     }
 
-    /// Re-read profile.toml from disk and update the held profile.
-    /// Returns the new profile so callers can log it.
-    pub async fn reload_user_profile(
-        &self,
-        workspace_dir: &std::path::Path,
-        user_id: &str,
-    ) -> UserProfile {
-        let p = UserProfile::load(workspace_dir, user_id);
-        *self.user_profile.lock().await = p.clone();
-        p
+    /// Build with a pre-loaded user profile (the path
+    /// `SessionManager::get_or_create_context_with` takes).
+    pub fn with_profile(session: Session, agent: Arc<Agent>, profile: Arc<UserProfile>) -> Self {
+        Self {
+            session: Arc::new(Mutex::new(session)),
+            agent,
+            attachments: Arc::new(AttachmentManager::new()),
+            pending_retry: Arc::new(Mutex::new(None)),
+            turn_lock: Arc::new(Mutex::new(())),
+            user_profile: profile,
+        }
     }
 
     /// Snapshot the session for read-only consumers (e.g., /status commands).
