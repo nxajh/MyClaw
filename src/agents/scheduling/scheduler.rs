@@ -19,7 +19,6 @@ use parking_lot::{Mutex as ParkMutex, RwLock};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::agents::AgentBuilder;
 use crate::agents::orchestrator::SchedulerEvent;
 use crate::agents::scheduling::cron_types::{DeliveryConfig, RunRecord, RunStatus, ScheduleKind};
 use crate::agents::webhook_loader::{WebhookAuth, WebhookJobDef, render_template};
@@ -858,7 +857,6 @@ fn generate_id() -> String {
 /// Resources needed by the webhook server to run agent tasks.
 /// Heartbeat and cron use the Orchestrator event path instead.
 pub struct WebhookContext {
-    pub agent: AgentBuilder,
     /// AgentRuntime for Agent dispatch (H45 transition).
     pub agent_runtime: crate::agents::AgentRuntime,
     pub channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
@@ -991,9 +989,9 @@ pub async fn run_scheduled_task(
             isolation: Default::default(),
         });
     let agent2 = crate::agents::Agent::new(agent2_config);
-    let prompt_config_base = ctx.agent.config().prompt_config.clone();
-    let skills_arc = Arc::clone(ctx.agent.skills());
-    let cached_prompt = ctx.agent.cached_system_prompt().to_string();
+    let prompt_config_base = ctx.agent_runtime.prompt_config.clone();
+    let skills_arc = Arc::clone(&ctx.agent_runtime.skills);
+    let cached_prompt = ctx.agent_runtime.system_prompt.clone();
     let persist_hook: Arc<dyn crate::agents::PersistHook> = Arc::new(
         crate::agents::BackendPersistHook::new(ctx.session_backend.clone())
     );

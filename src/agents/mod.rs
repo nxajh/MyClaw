@@ -1,6 +1,5 @@
 //! agents — Agent loop, session management, and prompt construction.
 
-mod agent_impl;
 pub(crate) mod compaction_policy;
 pub(crate) mod resource_provider;
 pub(crate) mod tool_executor;
@@ -45,7 +44,6 @@ pub use workspace::skill_loader;
 pub use workspace::watcher;
 pub use workspace::skills;
 
-pub use agent_impl::{AgentBuilder, AgentConfig};
 pub use recovery::UnfinishedSubAgent;
 pub use turn_event::TurnEvent;
 pub use turn::{TurnContext, TurnResult};

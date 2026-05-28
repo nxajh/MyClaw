@@ -11,7 +11,7 @@
 
 use anyhow::{Context, Result};
 use crate::agents::{
-    AgentBuilder, AgentConfig, InMemoryBackend, Orchestrator, OrchestratorParts, SessionManager,
+    InMemoryBackend, Orchestrator, OrchestratorParts, SessionManager,
     ToolRegistry, SkillManager, Skill, SystemPromptConfig, RunMode,
     McpManager, DelegationCoordinator, DelegationManager,
 };
@@ -878,31 +878,22 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         channels.push(("client".to_string(), "default".to_string(), cc.clone() as Arc<dyn Channel>));
     }
 
-    let agent_config = AgentConfig {
-        max_tool_calls: config.agent.max_tool_calls,
-        prompt_config: build_prompt_config(&config.agent, &config.workspace_dir, &config.knowledge_dir),
-        context: config.agent.context.clone(),
-        loop_breaker_threshold: config.agent.loop_breaker_threshold as usize,
-        tool_timeout_secs: config.agent.tool_timeout_secs,
-        model_override: None,
-        thinking_override: None,
-        timezone_offset: config.agent.prompt.timezone_offset,
-    };
+    let prompt_config = build_prompt_config(&config.agent, &config.workspace_dir, &config.knowledge_dir);
     let mcp_manager_arc = Arc::new(mcp_manager);
 
     // Get MCP server instructions for attachment injection.
-    let mcp_instructions = mcp_manager_arc.server_instructions().await;
+    let _mcp_instructions = mcp_manager_arc.server_instructions().await;
 
     // Scheduler config (used for both parts and webhook launch).
     let scheduler_config = config.agent.scheduler.clone();
 
-    let agent = AgentBuilder::new(registry_arc, tools_arc, skills_arc, agent_config)
-        .with_mcp_instructions(mcp_instructions)
-        .with_sub_agent_configs(sub_agent_registry)
-        .with_workspace_dirs(
-            config.workspace_dir.join("skills"),
-            config.workspace_dir.join("agents"),
-        );
+    // Build the "main" agent's cached system prompt up front so AgentRuntime
+    // can hold it (callers prefer the cached value over rebuilding on every
+    // turn).
+    let cached_system_prompt = {
+        let skills = skills_arc.read();
+        crate::agents::SystemPromptBuilder::new(prompt_config.clone()).build(&skills)
+    };
 
     // scheduler_tx already created above; scheduler_rx goes to OrchestratorParts.
     let session_manager_for_webhook = Arc::clone(&session_manager);
@@ -933,18 +924,19 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             crate::agents::session::BackendPersistHook::new(Arc::clone(&session_backend)),
         );
         crate::agents::AgentRuntime::new(
-            Arc::clone(agent.registry()),
-            Arc::clone(agent.tools()),
-            Arc::clone(agent.skills()),
-            agent.sub_agent_configs().clone(),
+            Arc::clone(&registry_arc),
+            Arc::clone(&tools_arc),
+            Arc::clone(&skills_arc),
+            sub_agent_registry.clone(),
         )
         .with_persist(persist_hook)
         .with_dirs(config.workspace_dir.clone(), config.knowledge_dir.clone())
-        .with_context(agent.config().context.clone())
+        .with_context(config.agent.context.clone())
+        .with_prompt_config(prompt_config)
+        .with_system_prompt(cached_system_prompt)
     };
 
     let parts = OrchestratorParts {
-        agent: agent.clone(),
         session_manager,
         channels,
         delegation_manager,
@@ -977,7 +969,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         let wh_dir = config.workspace_dir.join("webhooks");
         let wh_jobs = crate::agents::load_webhook_jobs(&wh_dir);
         let wh_ctx = Arc::new(crate::agents::WebhookContext {
-            agent: agent.clone(),
             agent_runtime: orchestrator.shared().agent_runtime.clone(),
             channels: orchestrator.shared().channels,
             session_contexts: orchestrator.shared().session_contexts,

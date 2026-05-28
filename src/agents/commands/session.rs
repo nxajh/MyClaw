@@ -37,8 +37,8 @@ pub async fn cmd_compact(ctx: CommandContext<'_>) -> String {
         Err(_) => return "⏳ 会话正在响应中，请等待响应完成后再执行 /compact。".to_string(),
     };
     let runtime_resources = crate::agents::resource_provider::ResourceProvider::new(
-        std::sync::Arc::clone(ctx.agent.skills()),
-        ctx.agent.sub_agent_configs().clone(),
+        std::sync::Arc::clone(&ctx.runtime.skills),
+        ctx.runtime.agents.clone(),
         Vec::new(),
         std::path::PathBuf::new(),
         std::path::PathBuf::new(),
@@ -47,11 +47,11 @@ pub async fn cmd_compact(ctx: CommandContext<'_>) -> String {
     );
     let mut engine = crate::agents::context_engine::ContextEngine::new(
         &Default::default(),
-        std::sync::Arc::clone(ctx.agent.registry()),
+        std::sync::Arc::clone(&ctx.runtime.providers),
         runtime_resources,
-        std::sync::Arc::clone(ctx.agent.tools()),
+        std::sync::Arc::clone(&ctx.runtime.tools),
     );
-    engine.init_from_history(ctx.agent.cached_system_prompt(), &session.history);
+    engine.init_from_history(ctx.runtime.system_prompt.as_str(), &session.history);
 
     let cfg = match ctx.registry.get_chat_model_config(&model_id) {
         Ok(c) => c,
@@ -62,8 +62,8 @@ pub async fn cmd_compact(ctx: CommandContext<'_>) -> String {
         None => return "❌ 模型未配置 context_window".to_string(),
     };
 
-    let sys_tokens = (ctx.agent.cached_system_prompt().len() as u64).div_ceil(4);
-    let tool_tokens: u64 = ctx.agent.tools().all_tools().iter().map(|t| {
+    let sys_tokens = (ctx.runtime.system_prompt.as_str().len() as u64).div_ceil(4);
+    let tool_tokens: u64 = ctx.runtime.tools.all_tools().iter().map(|t| {
         let spec = t.spec();
         let schema = spec.parameters.to_string();
         (spec.name.len() as u64).div_ceil(4)
@@ -80,8 +80,8 @@ pub async fn cmd_compact(ctx: CommandContext<'_>) -> String {
     let history_snap: Vec<crate::providers::ChatMessage> = session.history.clone();
     match engine.execute_compaction(
         &history_snap,
-        ctx.agent.cached_system_prompt(),
-        &ctx.agent.tools().all_tools().iter().map(|t| {
+        ctx.runtime.system_prompt.as_str(),
+        &ctx.runtime.tools.all_tools().iter().map(|t| {
             let s = t.spec();
             crate::providers::capability_chat::ToolSpec {
                 name: s.name,

@@ -18,8 +18,8 @@ pub fn cmd_config(args: &str, ctx: CommandContext<'_>) -> String {
         }
     };
     if args.is_empty() {
-        let tools = ctx.agent.tools();
-        let skills = ctx.agent.skills();
+        let tools = &ctx.runtime.tools;
+        let skills = &ctx.runtime.skills;
         let skills_count = skills.read().skill_count();
         format!(
             "⚙️ **运行时配置**\n\n\

@@ -56,6 +56,15 @@ pub struct AgentRuntime {
     /// it the engine falls back to its hard-coded defaults and the user's
     /// `[agent.context]` config is silently ignored.
     pub context: crate::config::agent::ContextConfig,
+    /// Base prompt config (permission_mode default, run_mode default,
+    /// workspace_dir, identity_header, native_tools, …). Per-turn
+    /// SessionOverride is applied on top in process_turn.
+    pub prompt_config: crate::agents::prompt::SystemPromptConfig,
+    /// Pre-built system prompt for the "main" agent. Empty string means
+    /// "rebuild via SystemPromptBuilder from skills + prompt_config".
+    /// Per-turn callers prefer this cached value to avoid rebuilding on
+    /// every message.
+    pub system_prompt: String,
 }
 
 impl AgentRuntime {
@@ -78,11 +87,23 @@ impl AgentRuntime {
             workspace_dir: PathBuf::new(),
             knowledge_dir: PathBuf::new(),
             context: crate::config::agent::ContextConfig::default(),
+            prompt_config: crate::agents::prompt::SystemPromptConfig::default(),
+            system_prompt: String::new(),
         }
     }
 
     pub fn with_context(mut self, ctx: crate::config::agent::ContextConfig) -> Self {
         self.context = ctx;
+        self
+    }
+
+    pub fn with_prompt_config(mut self, cfg: crate::agents::prompt::SystemPromptConfig) -> Self {
+        self.prompt_config = cfg;
+        self
+    }
+
+    pub fn with_system_prompt(mut self, prompt: String) -> Self {
+        self.system_prompt = prompt;
         self
     }
 

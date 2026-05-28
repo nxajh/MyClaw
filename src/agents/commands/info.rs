@@ -85,7 +85,7 @@ pub async fn cmd_status(ctx: CommandContext<'_>) -> String {
 }
 
 pub fn cmd_tools(ctx: CommandContext<'_>) -> String {
-    let tools = ctx.agent.tools();
+    let tools = &ctx.runtime.tools;
     let names = tools.tool_names_sorted();
     if names.is_empty() {
         return "⚠️ 没有注册的工具。".to_string();
@@ -155,7 +155,7 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
         };
 
         // Use Agent's configured compact_threshold (ContextConfig is per-Agent today).
-        let compact_threshold = ctx.agent.compact_threshold();
+        let compact_threshold = ctx.runtime.context.compact_threshold;
         let threshold = if context_window > 0 {
             let t = (context_window as f64 * compact_threshold) as u64;
             format!("{} token ({:.0}%)", t, compact_threshold * 100.0)
@@ -222,7 +222,7 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
             } else {
                 "未知".to_string()
             };
-            let compact_threshold = ctx.agent.compact_threshold();
+            let compact_threshold = ctx.runtime.context.compact_threshold;
             let threshold = if context_window > 0 {
                 let t = (context_window as f64 * compact_threshold) as u64;
                 format!("{} token ({:.0}%)", t, compact_threshold * 100.0)
@@ -386,7 +386,7 @@ pub async fn cmd_mcp(ctx: CommandContext<'_>) -> String {
 }
 
 pub fn cmd_skill(ctx: CommandContext<'_>) -> String {
-    let skills = ctx.agent.skills().read();
+    let skills = ctx.runtime.skills.read();
     let count = skills.skill_count();
     if count == 0 {
         return "📚 没有加载任何 skill。".to_string();

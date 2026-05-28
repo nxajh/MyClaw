@@ -20,7 +20,6 @@ use tokio::sync::{mpsc, Mutex as TokioMutex};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::agents::agent_impl::AgentBuilder;
 use crate::agents::session::{SessionManager, PersistHook, BackendPersistHook};
 
 const CHANNEL_QUEUE_SIZE: usize = 100;
@@ -77,7 +76,6 @@ pub struct Orchestrator {
     /// turn_lock + attachments + pending_retry + user_profile. Populated
     /// lazily from SessionManager on first inbound for a routing_key.
     session_contexts: Arc<DashMap<String, Arc<SessionContext>>>,
-    agent: AgentBuilder,
     session_manager: Arc<SessionManager>,
     /// The message receiver, owned and consumed by run().
     #[allow(clippy::type_complexity)]
@@ -184,7 +182,6 @@ fn history_has_incomplete_turn(history: &[crate::providers::capability_chat::Cha
 /// Built by the Composition Root (daemon.rs).  This struct is the seam that
 /// decouples the Application layer from Infrastructure assembly logic.
 pub struct OrchestratorParts {
-    pub agent: AgentBuilder,
     pub session_manager: Arc<SessionManager>,
     /// Pre-built channels: (channel_type, account_id, channel_instance).
     pub channels: Vec<(String, String, Arc<dyn Channel>)>,
@@ -266,7 +263,6 @@ impl Orchestrator {
         let orchestrator = Orchestrator {
             channels: channels_map,
             session_contexts: Arc::new(DashMap::new()),
-            agent: parts.agent,
             session_manager: parts.session_manager,
             msg_rx: Arc::new(TokioMutex::new(Some(msg_rx))),
             listener_handles,
@@ -705,9 +701,9 @@ impl Orchestrator {
                         let cmd_owned     = cmd.to_string();
                         let cmd_args_owned = cmd_args.to_string();
                         let session_ctx_cmd = self.session_contexts.get(&sk).map(|r| r.clone());
-                        let registry_cmd  = self.agent.registry().clone();
+                        let registry_cmd  = Arc::clone(&self.agent_runtime.providers);
                         let sm_cmd        = self.session_manager.clone();
-                        let agent_cmd     = self.agent.clone();
+                        let runtime_cmd   = self.agent_runtime.clone();
                         let mcp_cmd       = self.mcp_manager.clone();
                         let session_contexts_cmd = self.session_contexts.clone();
                         let cooldown_cmd  = self.search_cooldown.clone();
@@ -720,7 +716,7 @@ impl Orchestrator {
                                 user_id:        &sk_cmd,
                                 registry:       &registry_cmd,
                                 session_manager: &sm_cmd,
-                                agent:          &agent_cmd,
+                                runtime:        &runtime_cmd,
                                 session_ctx:    session_ctx_cmd.as_ref(),
                                 mcp_manager:    mcp_cmd.as_ref(),
                                 session_contexts: &session_contexts_cmd,
@@ -780,9 +776,9 @@ impl Orchestrator {
                     .get("main")
                     .unwrap_or_else(Self::build_default_main_agent_config);
                 let agent2 = crate::agents::Agent::new(agent2_config);
-                let prompt_config_base = self.agent.config().prompt_config.clone();
-                let skills_arc = Arc::clone(self.agent.skills());
-                let cached_prompt = self.agent.cached_system_prompt().to_string();
+                let prompt_config_base = self.agent_runtime.prompt_config.clone();
+                let skills_arc = Arc::clone(&self.agent_runtime.skills);
+                let cached_prompt = self.agent_runtime.system_prompt.clone();
                 let persist_hook: Arc<dyn PersistHook> = Arc::new(
                     BackendPersistHook::new(Arc::clone(&self.persist_backend))
                 );
@@ -947,7 +943,6 @@ impl Orchestrator {
                     session_contexts: self.session_contexts.clone(),
                     session_manager: self.session_manager.clone(),
                     persist_backend: self.persist_backend.clone(),
-                    agent: self.agent.clone(),
                     agent_runtime: self.agent_runtime.clone(),
                     channels: self.channels.clone(),
                     last_channel: self.last_channel.clone(),
@@ -970,7 +965,6 @@ impl Orchestrator {
                     session_contexts: self.session_contexts.clone(),
                     session_manager: self.session_manager.clone(),
                     persist_backend: self.persist_backend.clone(),
-                    agent: self.agent.clone(),
                     agent_runtime: self.agent_runtime.clone(),
                     channels: self.channels.clone(),
                     last_channel: self.last_channel.clone(),
@@ -1019,9 +1013,9 @@ impl Orchestrator {
                 .get("main")
                 .unwrap_or_else(Self::build_default_main_agent_config);
             let agent2 = crate::agents::Agent::new(agent2_config);
-            let prompt_config_base = self.agent.config().prompt_config.clone();
-            let skills_arc = Arc::clone(self.agent.skills());
-            let cached_prompt = self.agent.cached_system_prompt().to_string();
+            let prompt_config_base = self.agent_runtime.prompt_config.clone();
+            let skills_arc = Arc::clone(&self.agent_runtime.skills);
+            let cached_prompt = self.agent_runtime.system_prompt.clone();
             let persist_hook: Arc<dyn PersistHook> = Arc::new(
                 BackendPersistHook::new(Arc::clone(&self.persist_backend))
             );
@@ -1118,9 +1112,9 @@ impl Orchestrator {
                 .get(&agent_name)
                 .unwrap_or_else(Self::build_default_main_agent_config);
             let agent2 = crate::agents::Agent::new(agent2_config);
-            let prompt_config_base = self.agent.config().prompt_config.clone();
-            let skills_arc = Arc::clone(self.agent.skills());
-            let cached_prompt = self.agent.cached_system_prompt().to_string();
+            let prompt_config_base = self.agent_runtime.prompt_config.clone();
+            let skills_arc = Arc::clone(&self.agent_runtime.skills);
+            let cached_prompt = self.agent_runtime.system_prompt.clone();
             let persist_hook: Arc<dyn PersistHook> = Arc::new(
                 BackendPersistHook::new(Arc::clone(&self.persist_backend))
             );
@@ -1319,7 +1313,6 @@ struct SchedulerContext {
     session_contexts: Arc<DashMap<String, Arc<SessionContext>>>,
     session_manager: Arc<SessionManager>,
     persist_backend: Arc<dyn crate::storage::SessionBackend>,
-    agent: AgentBuilder,
     agent_runtime: crate::agents::AgentRuntime,
     channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
     last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
@@ -1363,9 +1356,9 @@ async fn run_scheduled_turn(
         .get("main")
         .unwrap_or_else(Orchestrator::build_default_main_agent_config);
     let agent2 = crate::agents::Agent::new(agent2_config);
-    let prompt_config_base = ctx.agent.config().prompt_config.clone();
-    let skills_arc = Arc::clone(ctx.agent.skills());
-    let cached_prompt = ctx.agent.cached_system_prompt().to_string();
+    let prompt_config_base = ctx.agent_runtime.prompt_config.clone();
+    let skills_arc = Arc::clone(&ctx.agent_runtime.skills);
+    let cached_prompt = ctx.agent_runtime.system_prompt.clone();
     let persist_hook: Arc<dyn PersistHook> = Arc::new(
         BackendPersistHook::new(Arc::clone(&ctx.persist_backend))
     );
