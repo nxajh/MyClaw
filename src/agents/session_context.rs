@@ -28,10 +28,13 @@ use crate::channels::{Channel, ChannelMessage, SendMessage};
 /// them verbatim to the user.
 const MSG_TURN_FAILED: &str = "⚠️ 处理超时，未收到模型回复。";
 
-/// Per-session bundle held by the Orchestrator's session table.
+/// Per-session bundle held by the SessionManager's session-context table.
 ///
 /// Fields:
 /// - `session`: owns the conversation state (Session — history, override, …)
+/// - `agent`: Agent bound to this session (resolved from `Session.agent_name`
+///   at construction time; reused across every turn so per-session
+///   dispatch doesn't re-look-up the SubAgentConfig)
 /// - `attachments`: per-session AttachmentManager (file uploads pending injection)
 /// - `pending_retry`: user message saved when last turn ended abnormally;
 ///   surfaced as a "retry?" prompt next time the user types
@@ -45,6 +48,9 @@ pub struct SessionContext {
     /// Mutable session state. Wrapped in Mutex so the turn lock and the
     /// Session itself share the same critical section.
     pub session: Arc<Mutex<Session>>,
+    /// Agent bound to this session at creation time. Built from
+    /// `Session.agent_name` via `SessionManager.build_agent_for_session`.
+    pub agent: Arc<Agent>,
     /// Attachments awaiting injection on the next user turn.
     pub attachments: Arc<AttachmentManager>,
     /// User message saved when the previous turn ended with an empty LLM
@@ -60,27 +66,15 @@ pub struct SessionContext {
 }
 
 impl SessionContext {
-    pub fn new(session: Session) -> Self {
+    pub fn new(session: Session, agent: Arc<Agent>) -> Self {
         Self {
             session: Arc::new(Mutex::new(session)),
+            agent,
             attachments: Arc::new(AttachmentManager::new()),
             pending_retry: Arc::new(Mutex::new(None)),
             turn_lock: Arc::new(Mutex::new(())),
             user_profile: Arc::new(Mutex::new(UserProfile::default())),
         }
-    }
-
-    /// Build a context with the user profile already loaded.
-    /// `workspace_dir` and `user_id` are the profile lookup coordinates.
-    pub fn with_user_profile(
-        session: Session,
-        workspace_dir: &std::path::Path,
-        user_id: &str,
-    ) -> Self {
-        let profile = UserProfile::load(workspace_dir, user_id);
-        let ctx = Self::new(session);
-        *ctx.user_profile.try_lock().expect("fresh Mutex must be unlocked") = profile;
-        ctx
     }
 
     /// Re-read profile.toml from disk and update the held profile.
@@ -118,7 +112,6 @@ impl SessionContext {
         content: String,
         channel: Arc<dyn Channel>,
         reply_target: String,
-        agent: Agent,
         runtime: AgentRuntime,
     ) {
         let _turn_guard = self.turn_lock.lock().await;
@@ -167,7 +160,7 @@ impl SessionContext {
             run_mode: prompt_config.run_mode,
         };
 
-        let result = agent.run(&mut session, turn_ctx, &runtime).await;
+        let result = self.agent.run(&mut session, turn_ctx, &runtime).await;
         match result {
             Ok(turn_result) => {
                 if !turn_result.text.trim().is_empty() {

@@ -354,27 +354,6 @@ impl Orchestrator {
     /// The session's transient `persist` and `channel` fields are NOT
     /// populated here — callers wire them per-turn before locking the
     /// session to call `Agent::run`.
-    /// Build a permissive default `SubAgentConfig` for the main agent
-    /// when `workspace/agents/main/AGENT.md` hasn't been parsed into the
-    /// registry yet. All filters default to "all" so the main agent
-    /// sees every registered tool / skill / MCP server. The system
-    /// prompt is empty because the orchestrator's cached prompt
-    /// (`Agent::with_system_prompt`) is what's actually injected at
-    /// turn start.
-    fn build_default_main_agent_config() -> crate::config::sub_agent::SubAgentConfig {
-        crate::config::sub_agent::SubAgentConfig {
-            name: "main".to_string(),
-            description: None,
-            system_prompt: String::new(),
-            tools: vec!["all".to_string()],
-            skills: Default::default(),
-            mcp: Default::default(),
-            model: None,
-            max_tool_calls: None,
-            isolation: Default::default(),
-        }
-    }
-
     fn session_context_for(&self, sk: &str) -> Arc<SessionContext> {
         self.session_manager.get_or_create_context(sk)
     }
@@ -757,13 +736,8 @@ impl Orchestrator {
                 // Dispatch via SessionContext.process_turn — the canonical
                 // RFC v2 per-turn entry point. Spawn on a background task so
                 // the main event loop is not blocked by the LLM round-trip.
-                let session_ctx = self.session_context_for(&sk);
+                let session_ctx = self.session_manager.get_or_create_context(&sk);
                 let runtime = self.agent_runtime.clone();
-                let agent_config = runtime
-                    .agents
-                    .get("main")
-                    .unwrap_or_else(Self::build_default_main_agent_config);
-                let agent = crate::agents::Agent::new(agent_config);
                 let inbound_msg = msg.clone();
                 let _ = (image_urls, image_base64, reply_to_id);
 
@@ -774,7 +748,7 @@ impl Orchestrator {
                     // reply_to_id is unused — channels send replies in-line
                     // without thread context for now.
                     session_ctx
-                        .process_turn(inbound_msg, content, channel, reply_target, agent, runtime)
+                        .process_turn(inbound_msg, content, channel, reply_target, runtime)
                         .await;
                 });
 
@@ -901,11 +875,6 @@ impl Orchestrator {
             let persist_backend = self.persist_backend.clone();
             let channels = self.channels.clone();
             let runtime = self.agent_runtime.clone();
-            let agent2_config = runtime
-                .agents
-                .get("main")
-                .unwrap_or_else(Self::build_default_main_agent_config);
-            let agent2 = crate::agents::Agent::new(agent2_config);
             let prompt_config_base = self.agent_runtime.prompt_config.clone();
             let skills_arc = Arc::clone(&self.agent_runtime.skills);
             let cached_prompt = self.agent_runtime.system_prompt.clone();
@@ -943,7 +912,7 @@ impl Orchestrator {
                     run_mode: prompt_config.run_mode,
                 };
 
-                match agent2.run_recovery(&mut session, turn_ctx, &runtime).await {
+                match session_ctx.agent.run_recovery(&mut session, turn_ctx, &runtime).await {
                     Ok(Some(tr)) if !tr.text.is_empty() => {
                         tracing::info!(session = %sk_owned, "startup recovery: turn completed");
                         let recipient = persist_backend.load_reply_target(&sk_owned)
@@ -999,12 +968,6 @@ impl Orchestrator {
             let sa_reply_target = sa.reply_target.clone();
             let dm = delegation_manager.clone();
             let runtime = self.agent_runtime.clone();
-            let agent_name = sa.agent_name.clone();
-            let agent2_config = runtime
-                .agents
-                .get(&agent_name)
-                .unwrap_or_else(Self::build_default_main_agent_config);
-            let agent2 = crate::agents::Agent::new(agent2_config);
             let prompt_config_base = self.agent_runtime.prompt_config.clone();
             let skills_arc = Arc::clone(&self.agent_runtime.skills);
             let cached_prompt = self.agent_runtime.system_prompt.clone();
@@ -1041,7 +1004,7 @@ impl Orchestrator {
                     run_mode: prompt_config.run_mode,
                 };
 
-                match agent2.run_recovery(&mut session, turn_ctx, &runtime).await {
+                match session_ctx.agent.run_recovery(&mut session, turn_ctx, &runtime).await {
                     Ok(Some(tr)) if !tr.text.is_empty() => {
                         tracing::info!(task_id = %task_id, "sub-agent startup recovery: turn completed");
                         if let Some(dm) = dm {
@@ -1224,27 +1187,19 @@ async fn run_scheduled_turn(
     prompt: &str,
     model_override: Option<String>,
 ) -> anyhow::Result<String> {
-    let session_ctx = match ctx.session_manager.get_context(session_key) {
-        Some(existing) => existing,
-        None => {
-            let mut session = ctx.session_manager.get_or_create(session_key);
+    let model_override_for_init = model_override.clone();
+    let session_ctx = ctx.session_manager.get_or_create_context_with(
+        session_key,
+        move |session| {
             session.session_override.run_mode =
                 Some(crate::config::agent::RunMode::Background);
-            if let Some(m) = model_override.clone() {
+            if let Some(m) = model_override_for_init {
                 session.session_override.model = Some(m);
             }
-            let sc = Arc::new(SessionContext::new(session));
-            ctx.session_manager.register_context(session_key, sc.clone());
-            sc
-        }
-    };
+        },
+    );
 
     let runtime = ctx.agent_runtime.clone();
-    let agent2_config = runtime
-        .agents
-        .get("main")
-        .unwrap_or_else(Orchestrator::build_default_main_agent_config);
-    let agent2 = crate::agents::Agent::new(agent2_config);
     let prompt_config_base = ctx.agent_runtime.prompt_config.clone();
     let skills_arc = Arc::clone(&ctx.agent_runtime.skills);
     let cached_prompt = ctx.agent_runtime.system_prompt.clone();
@@ -1299,7 +1254,7 @@ async fn run_scheduled_turn(
         run_mode: prompt_config.run_mode,
     };
 
-    let res = agent2.run(&mut session, turn_ctx, &runtime).await;
+    let res = session_ctx.agent.run(&mut session, turn_ctx, &runtime).await;
     session.persist = None;
     res.map(|tr| tr.text)
 }

@@ -960,34 +960,15 @@ pub async fn run_scheduled_task(
     session_key: &str,
     prompt: &str,
 ) -> anyhow::Result<String> {
-    let session_ctx = match ctx.session_manager.get_context(session_key) {
-        Some(existing) => existing,
-        None => {
-            let mut session = ctx.session_manager.get_or_create(session_key);
+    let session_ctx = ctx.session_manager.get_or_create_context_with(
+        session_key,
+        |session| {
             session.session_override.run_mode =
                 Some(crate::config::agent::RunMode::Background);
-            let sc = Arc::new(crate::agents::SessionContext::new(session));
-            ctx.session_manager.register_context(session_key, sc.clone());
-            sc
-        }
-    };
+        },
+    );
 
     let runtime = ctx.agent_runtime.clone();
-    let agent2_config = runtime
-        .agents
-        .get("main")
-        .unwrap_or_else(|| crate::config::sub_agent::SubAgentConfig {
-            name: "main".to_string(),
-            description: None,
-            system_prompt: String::new(),
-            tools: vec!["all".to_string()],
-            skills: Default::default(),
-            mcp: Default::default(),
-            model: None,
-            max_tool_calls: None,
-            isolation: Default::default(),
-        });
-    let agent2 = crate::agents::Agent::new(agent2_config);
     let prompt_config_base = ctx.agent_runtime.prompt_config.clone();
     let skills_arc = Arc::clone(&ctx.agent_runtime.skills);
     let cached_prompt = ctx.agent_runtime.system_prompt.clone();
@@ -1034,7 +1015,7 @@ pub async fn run_scheduled_task(
         run_mode: prompt_config.run_mode,
     };
 
-    let res = agent2.run(&mut session, turn_ctx, &runtime).await;
+    let res = session_ctx.agent.run(&mut session, turn_ctx, &runtime).await;
     session.persist = None;
     res.map(|tr| tr.text)
 }

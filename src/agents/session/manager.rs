@@ -6,7 +6,10 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 
+use crate::agents::agent_registry::AgentRegistry;
 use crate::agents::session_context::SessionContext;
+use crate::agents::Agent;
+use crate::config::sub_agent::SubAgentConfig;
 
 /// Returned by `switch_session` when the caller tries to point a routing_key
 /// at a session that doesn't belong to it.
@@ -56,6 +59,11 @@ pub struct SessionManager {
     /// routing_key (the 1:1 invariant): every active routing_key has a
     /// SessionContext that wraps its active Session.
     contexts: DashMap<String, Arc<SessionContext>>,
+    /// AgentRegistry used to resolve `Session.agent_name` to a SubAgentConfig
+    /// when building SessionContexts. Defaults to an empty registry for
+    /// test-only managers; production daemons install the workspace-loaded
+    /// registry via `with_agent_registry`.
+    agent_registry: AgentRegistry,
 }
 
 impl SessionManager {
@@ -65,7 +73,15 @@ impl SessionManager {
             cache: RwLock::new(HashMap::new()),
             active: RwLock::new(HashMap::new()),
             contexts: DashMap::new(),
+            agent_registry: AgentRegistry::new(),
         }
+    }
+
+    /// Install the AgentRegistry used to resolve `Session.agent_name` to
+    /// a SubAgentConfig when materializing SessionContexts.
+    pub fn with_agent_registry(mut self, registry: AgentRegistry) -> Self {
+        self.agent_registry = registry;
+        self
     }
 
     pub fn in_memory() -> Self {
@@ -510,16 +526,47 @@ impl SessionManager {
     }
 
     /// Get-or-create the SessionContext for a routing_key. On miss,
-    /// loads the active Session via `get_or_create` and wraps it.
-    /// This is the canonical entry point for per-turn dispatch.
+    /// loads the active Session via `get_or_create` and wraps it with
+    /// an Agent resolved from `Session.agent_name`. This is the
+    /// canonical entry point for per-turn dispatch.
     pub fn get_or_create_context(&self, routing_key: &str) -> Arc<SessionContext> {
+        self.get_or_create_context_with(routing_key, |_| {})
+    }
+
+    /// Get-or-create with a hook to mutate the freshly loaded Session
+    /// before it's wrapped (scheduler/webhook paths use this to force
+    /// `session_override.run_mode = Background` so the prompt builder
+    /// knows the turn is unattended). The closure runs only on cache
+    /// miss — once a SessionContext exists, subsequent calls reuse it
+    /// verbatim.
+    pub fn get_or_create_context_with<F>(
+        &self,
+        routing_key: &str,
+        configure_session: F,
+    ) -> Arc<SessionContext>
+    where
+        F: FnOnce(&mut Session),
+    {
         if let Some(existing) = self.get_context(routing_key) {
             return existing;
         }
-        let session = self.get_or_create(routing_key);
-        let ctx = Arc::new(SessionContext::new(session));
+        let mut session = self.get_or_create(routing_key);
+        configure_session(&mut session);
+        let agent = self.build_agent_for_session(&session);
+        let ctx = Arc::new(SessionContext::new(session, agent));
         self.contexts.insert(routing_key.to_string(), ctx.clone());
         ctx
+    }
+
+    /// Resolve `session.agent_name` to a SubAgentConfig via the
+    /// installed AgentRegistry, falling back to a permissive default
+    /// for the "main" agent before workspace/agents/main is parsed.
+    fn build_agent_for_session(&self, session: &Session) -> Arc<Agent> {
+        let config = self
+            .agent_registry
+            .get(&session.agent_name)
+            .unwrap_or_else(|| permissive_main_default(&session.agent_name));
+        Arc::new(Agent::new(config))
     }
 
     /// Register a caller-built SessionContext. Used by the
@@ -551,5 +598,23 @@ impl SessionManager {
 impl Default for SessionManager {
     fn default() -> Self {
         Self::in_memory()
+    }
+}
+
+/// Permissive fallback SubAgentConfig used when the AgentRegistry
+/// doesn't yet have a definition for `agent_name`. "all" tools / skills
+/// / MCP servers; empty system prompt because the cached prompt on
+/// AgentRuntime is what's actually injected at turn start.
+fn permissive_main_default(agent_name: &str) -> SubAgentConfig {
+    SubAgentConfig {
+        name: agent_name.to_string(),
+        description: None,
+        system_prompt: String::new(),
+        tools: vec!["all".to_string()],
+        skills: Default::default(),
+        mcp: Default::default(),
+        model: None,
+        max_tool_calls: None,
+        isolation: Default::default(),
     }
 }

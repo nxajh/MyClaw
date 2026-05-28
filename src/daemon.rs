@@ -722,7 +722,10 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // top-level peers instead of opening a per-parent JsonFileBackend at
     // `{sessions_root}/{parent}/subagents/`.
     let session_backend = build_session_backend(&config);
-    let session_manager = Arc::new(SessionManager::new(Arc::clone(&session_backend)));
+    let session_manager = Arc::new(
+        SessionManager::new(Arc::clone(&session_backend))
+            .with_agent_registry(sub_agent_registry.clone()),
+    );
 
     // ── Sub-agent delegator (conditional) ──────────────────────────────────────
 
