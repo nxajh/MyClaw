@@ -540,19 +540,20 @@ fn build_channel_accounts(config: &crate::config::AppConfig) -> Vec<(String, Str
     channels
 }
 
-/// Convert config agent settings into Application-layer prompt config.
+/// Convert config sections into Application-layer prompt config.
 fn build_prompt_config(
-    cfg: &crate::config::agent::AgentConfig,
+    agent: &crate::config::agent::AgentConfig,
+    prompt: &crate::config::agent::PromptConfig,
     workspace_dir: &std::path::Path,
     knowledge_dir: &std::path::Path,
 ) -> SystemPromptConfig {
     SystemPromptConfig {
         workspace_dir: workspace_dir.to_string_lossy().to_string(),
         knowledge_dir: knowledge_dir.to_string_lossy().to_string(),
-        permission_mode: cfg.permission_mode,
+        permission_mode: agent.permission_mode,
         run_mode: RunMode::Interactive,
-        max_chars: cfg.prompt.max_chars,
-        native_tools: cfg.prompt.native_tools,
+        max_chars: prompt.max_chars,
+        native_tools: prompt.native_tools,
         identity_header: None,
     }
 }
@@ -652,9 +653,9 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let skills_arc: Arc<parking_lot::RwLock<SkillManager>> = Arc::new(parking_lot::RwLock::new(skills));
 
     // Resolve timezone: config.timezone (IANA) takes precedence over timezone_offset.
-    let tz_name = config.agent.prompt.timezone.clone().unwrap_or_else(|| {
+    let tz_name = config.prompt.timezone.clone().unwrap_or_else(|| {
         // Convert legacy offset to Etc/GMT name (signs are inverted in Etc/GMT).
-        let offset = config.agent.prompt.timezone_offset;
+        let offset = config.prompt.timezone_offset;
         if offset == 0 { "UTC".to_string() }
         else { format!("Etc/GMT{}", if offset > 0 { format!("-{}", offset) } else { format!("{}", -offset) }) }
     });
@@ -684,8 +685,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     }
 
     // Read heartbeat config early for the scheduler.
-    let heartbeat_config = if config.agent.scheduler.heartbeat.enabled {
-        Some(config.agent.scheduler.heartbeat.clone())
+    let heartbeat_config = if config.scheduler.heartbeat.enabled {
+        Some(config.scheduler.heartbeat.clone())
     } else {
         None
     };
@@ -762,7 +763,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             registry_arc.clone(),
             Arc::clone(&base_tools_arc),
             Arc::clone(&skills_arc),
-            config.agent.max_tool_calls,
+            config.loop_breaker.max_tool_calls,
             Arc::clone(&session_manager),
             config.workspace_dir.join("worktrees"),
         );
@@ -892,14 +893,14 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         channels.push(("client".to_string(), "default".to_string(), cc.clone() as Arc<dyn Channel>));
     }
 
-    let prompt_config = build_prompt_config(&config.agent, &config.workspace_dir, &config.knowledge_dir);
+    let prompt_config = build_prompt_config(&config.agent, &config.prompt, &config.workspace_dir, &config.knowledge_dir);
     let mcp_manager_arc = Arc::new(mcp_manager);
 
     // Get MCP server instructions for attachment injection.
     let _mcp_instructions = mcp_manager_arc.server_instructions().await;
 
     // Scheduler config (used for both parts and webhook launch).
-    let scheduler_config = config.agent.scheduler.clone();
+    let scheduler_config = config.scheduler.clone();
 
     // scheduler_tx already created above; scheduler_rx goes to OrchestratorParts.
 
@@ -934,21 +935,21 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             config.workspace_dir.join("skills"),
             config.workspace_dir.join("agents"),
             config.knowledge_dir.to_string_lossy().to_string(),
-            config.agent.prompt.timezone_offset,
+            config.prompt.timezone_offset,
         );
         let context_engine = Arc::new(crate::agents::context_engine::ContextEngine::new(
-            &config.agent.context,
+            &config.context_engine,
             Arc::clone(&registry_arc),
             resources,
             Arc::clone(&tools_arc),
         ));
         let tool_executor = Arc::new(crate::agents::tool_executor::ToolExecutor::new(
             Arc::clone(&tools_arc),
-            config.agent.tool_timeout_secs,
+            config.tool_executor.timeout_secs,
         ));
         let loop_breaker = Arc::new(crate::agents::loop_breaker::LoopBreaker::new(
             crate::agents::loop_breaker::LoopBreakerConfig {
-                max_tool_calls: config.agent.max_tool_calls,
+                max_tool_calls: config.loop_breaker.max_tool_calls,
                 ..Default::default()
             },
         ));

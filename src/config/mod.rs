@@ -66,10 +66,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use agent::AgentConfig;
+use agent::{AgentConfig, ContextConfig, PromptConfig, ToolExecutorConfig};
 use channel::ChannelConfigs;
 use mcp::McpServerConfig;
 use memory::MemoryConfig;
+use crate::agents::loop_breaker::LoopBreakerConfig;
+use crate::config::scheduler::SchedulerConfig;
 use provider::ProviderConfig;
 use routing::RoutingConfig;
 
@@ -98,9 +100,29 @@ struct RawConfig {
     #[serde(default)]
     channels: ChannelConfigs,
 
-    /// Agent configuration.
+    /// Agent configuration (`[agent]` — permission_mode only).
     #[serde(default)]
     agent: AgentConfig,
+
+    /// Context-engine configuration (`[context_engine]`).
+    #[serde(default)]
+    context_engine: ContextConfig,
+
+    /// Tool-executor configuration (`[tool_executor]`).
+    #[serde(default)]
+    tool_executor: ToolExecutorConfig,
+
+    /// Loop-breaker configuration (`[loop_breaker]`).
+    #[serde(default)]
+    loop_breaker: LoopBreakerConfig,
+
+    /// System prompt configuration (`[prompt]`).
+    #[serde(default)]
+    prompt: PromptConfig,
+
+    /// Scheduler configuration (`[scheduler]`).
+    #[serde(default)]
+    scheduler: SchedulerConfig,
 
     /// Memory configuration.
     #[serde(default)]
@@ -148,8 +170,18 @@ pub struct AppConfig {
     pub routing: RoutingConfig,
     /// Channel configurations.
     pub channels: ChannelConfigs,
-    /// Agent configuration.
+    /// Agent configuration (`[agent]` — permission_mode only).
     pub agent: AgentConfig,
+    /// Context-engine configuration (`[context_engine]`).
+    pub context_engine: ContextConfig,
+    /// Tool-executor configuration (`[tool_executor]`).
+    pub tool_executor: ToolExecutorConfig,
+    /// Loop-breaker configuration (`[loop_breaker]`).
+    pub loop_breaker: LoopBreakerConfig,
+    /// System prompt configuration (`[prompt]`).
+    pub prompt: PromptConfig,
+    /// Scheduler configuration (`[scheduler]`).
+    pub scheduler: SchedulerConfig,
     /// Memory configuration.
     pub memory: MemoryConfig,
     /// MCP server configurations.
@@ -212,6 +244,11 @@ impl ConfigLoader {
             routing: raw.routing,
             channels: raw.channels,
             agent: raw.agent,
+            context_engine: raw.context_engine,
+            tool_executor: raw.tool_executor,
+            loop_breaker: raw.loop_breaker,
+            prompt: raw.prompt,
+            scheduler: raw.scheduler,
             memory: raw.memory,
             mcp_servers: raw.mcp_servers,
             logging: raw.logging,
@@ -377,10 +414,12 @@ bot_token = "test-telegram-token"
 allowed_users = ["*"]
 
 [agent]
-max_tool_calls = 50
 permission_mode = "full"
 
-[agent.prompt]
+[prompt]
+
+[loop_breaker]
+max_tool_calls = 50
 
 [memory]
 storage = "sqlite"
@@ -414,8 +453,9 @@ level = "INFO"
         // Channels
         assert_eq!(config.channels.enabled_channels(), vec!["wechat", "telegram"]);
 
-        // Agent
-        assert_eq!(config.agent.max_tool_calls, 50);
+        // Agent / loop breaker
+        assert_eq!(config.agent.permission_mode, agent::PermissionMode::Full);
+        assert_eq!(config.loop_breaker.max_tool_calls, 50);
 
         // Memory
         assert_eq!(config.memory.db_path, "test.db");
