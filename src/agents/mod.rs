@@ -78,5 +78,5 @@ pub use scheduling::webhook_loader::{WebhookJobDef, load_webhook_jobs};
 pub use workspace::skills::{Skill, SkillManager};
 pub use tool_registry::ToolRegistry;
 pub use mcp_manager::McpManager;
-pub use delegation_coordinator::{DelegationCoordinator, SubAgentDelegator};
+pub use delegation_coordinator::DelegationCoordinator;
 pub use error::AgentError;

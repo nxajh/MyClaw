@@ -16,7 +16,7 @@ use crate::channels::{Channel, ChannelMessage, SendMessage, InlineButton};
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex as TokioMutex, oneshot};
+use tokio::sync::{mpsc, Mutex as TokioMutex};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
@@ -84,11 +84,6 @@ pub struct Orchestrator {
     msg_rx: Arc<TokioMutex<Option<mpsc::Receiver<((String, String), ChannelMessage)>>>>,
     /// Listener task handles — taken and awaited on shutdown.
     listener_handles: Vec<JoinHandle<()>>,
-    /// Pending ask_user replies (legacy, indexed by routing_key): session_key →
-    /// (oneshot sender, reply_target). Used by the closure-based AskUserHandler
-    /// wired into AgentLoop. Stage 2 / E29 will replace this with `ask_router`
-    /// once Agent.run is the only execution path.
-    pending_asks: Arc<DashMap<String, (oneshot::Sender<String>, String)>>,
     /// AskRouter (RFC v2 §三.B): indexed by session.id, fulfilled by inbound
     /// messages ahead of process_turn. Wired here so the new
     /// `AskUserTool::with_router` path is reachable end-to-end before
@@ -275,7 +270,6 @@ impl Orchestrator {
             session_manager: parts.session_manager,
             msg_rx: Arc::new(TokioMutex::new(Some(msg_rx))),
             listener_handles,
-            pending_asks: Arc::new(DashMap::new()),
             ask_router: parts.ask_router,
             agent_runtime: parts.agent_runtime,
             delegation_manager: parts.delegation_manager,
@@ -598,10 +592,7 @@ impl Orchestrator {
                 // RFC v2 §三.B: check the new `AskRouter` first (indexed
                 // by session.id, used by AskUserTool::with_router). If
                 // it fulfilled an outstanding ask, the inbound message
-                // is consumed and no fresh turn is spawned. Falls
-                // through to the legacy `pending_asks` path below when
-                // no router-side ask was pending — both paths coexist
-                // during the C18 / E29 transition window.
+                // is consumed and no fresh turn is spawned.
                 {
                     let session_id = self
                         .session_manager
@@ -617,15 +608,6 @@ impl Orchestrator {
                     }
                 }
 
-                // Check if this is a reply to a pending ask_user.
-                if let Some((_, (tx, _))) = self.pending_asks.remove(&sk) {
-                    // Deliver the user's answer to the waiting ask_user handler.
-                    if tx.send(msg.content.clone()).is_err() {
-                        warn!(session = %sk, "ask_user oneshot already closed");
-                    }
-                    // Do NOT spawn a new agent loop — the existing one is waiting.
-                    return;
-                }
 
                 // Check if this is a retry/abort callback from an EmptyResponse prompt.
                 // E29 final: pending_retry lives on SessionContext. For

@@ -37,7 +37,7 @@ pub use agents::{
     SystemPromptBuilder, SystemPromptConfig,
     PermissionMode, RunMode,
     McpManager,
-    DelegationCoordinator, SubAgentDelegator,
+    DelegationCoordinator,
     DelegationEvent, DelegationManager,
     UserResolver, UserProfile,
     AgentDelegator,

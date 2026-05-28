@@ -34,13 +34,8 @@ use crate::agents::tool_registry::ToolRegistry;
 use crate::config::sub_agent::{AgentIsolation, SubAgentConfig};
 use crate::providers::ProviderRegistry;
 
-/// F36: prefer this name. `SubAgentDelegator` remains as a type alias to
-/// keep external callers compiling while H47's removal of `TaskDelegator`
-/// propagates; the alias will be deleted once every reference reads
-/// `DelegationCoordinator`.
-pub type SubAgentDelegator = DelegationCoordinator;
-
-/// Holds sub-agent configs and creates temporary AgentLoops for delegation.
+/// Holds sub-agent configs and creates temporary `Agent::run` invocations
+/// for delegation.
 ///
 /// Implements [`AgentDelegator`](crate::agents::AgentDelegator); the legacy
 /// `TaskDelegator` dual-impl was removed in H47 (callers now go through
