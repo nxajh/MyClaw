@@ -28,7 +28,6 @@ const CHANNEL_QUEUE_SIZE: usize = 100;
 const MSG_NO_PENDING_RETRY: &str = "没有待重试的消息，请重新发送。";
 const MSG_ABORT_ACK: &str = "已取消";
 const MSG_INCOMPLETE_TURN: &str = "⚠️ 检测到上次请求未处理完成（可能是服务重启）。\n\n请选择重试或放弃。";
-const MSG_TIMEOUT: &str = "⚠️ 处理超时，未收到模型回复。";
 const BTN_RETRY: &str = "🔄 重试";
 const BTN_ABORT: &str = "✖ 放弃";
 
@@ -764,123 +763,28 @@ impl Orchestrator {
                     None => return,
                 };
 
-                // E29 final: dispatch via Agent + SessionContext instead of
-                // the AgentLoop session-actor pattern. SessionContext.turn_lock
-                // serializes turns per session; SessionContext.session is the
-                // canonical Arc<Mutex<Session>>. Spawning here keeps the main
-                // dispatch loop unblocked while the turn runs.
+                // Dispatch via SessionContext.process_turn — the canonical
+                // RFC v2 per-turn entry point. Spawn on a background task so
+                // the main event loop is not blocked by the LLM round-trip.
                 let session_ctx = self.session_context_for(&sk);
                 let runtime = self.agent_runtime.clone();
-                let agent2_config = runtime
+                let agent_config = runtime
                     .agents
                     .get("main")
                     .unwrap_or_else(Self::build_default_main_agent_config);
-                let agent2 = crate::agents::Agent::new(agent2_config);
-                let prompt_config_base = self.agent_runtime.prompt_config.clone();
-                let skills_arc = Arc::clone(&self.agent_runtime.skills);
-                let cached_prompt = self.agent_runtime.system_prompt.clone();
-                let persist_hook: Arc<dyn PersistHook> = Arc::new(
-                    BackendPersistHook::new(Arc::clone(&self.persist_backend))
-                );
+                let agent = crate::agents::Agent::new(agent_config);
                 let inbound_msg = msg.clone();
-                let _ = (image_urls, image_base64, reply_to_id); // see comment below
+                let _ = (image_urls, image_base64, reply_to_id);
 
                 tokio::spawn(async move {
-                    // Note: image_urls / image_base64 are still attached via
-                    // `session.last_message` (which was recorded via
-                    // `record_inbound` upstream). Agent.run reads them from
-                    // there. reply_to_id is unused under Agent — channel
-                    // send replies in-line without thread context for now.
-
-                    // turn_lock: per-session FIFO serialization (replaces the
-                    // session_actor mpsc pattern from H45-deleted code).
-                    let _turn_guard = session_ctx.turn_lock.lock().await;
-                    let mut session = session_ctx.session.lock().await;
-
-                    // Apply inbound msg to the locked session — record_inbound
-                    // happened on the SessionManager cached copy upstream; the
-                    // canonical SessionContext.session needs the same update.
-                    session.record_inbound(inbound_msg.clone());
-
-                    // Wire transient handles for this turn.
-                    session.persist = Some(persist_hook.clone());
-                    session.channel = Some(channel.clone());
-
-                    // Resolve TurnContext from session override + base config.
-                    let session_override = session.session_override.clone();
-                    let mut prompt_config = prompt_config_base.clone();
-                    if let Some(pm) = session_override.permission_mode {
-                        prompt_config.permission_mode = pm;
-                    }
-                    if let Some(rm) = session_override.run_mode {
-                        prompt_config.run_mode = rm;
-                    }
-
-                    let system_prompt = if !cached_prompt.is_empty() {
-                        cached_prompt
-                    } else {
-                        let s = skills_arc.read();
-                        crate::agents::SystemPromptBuilder::new(prompt_config.clone()).build(&s)
-                    };
-
-                    // Append the user message to history before running.
-                    session.add_user(content.clone());
-                    if let Some(last) = session.history.last().cloned() {
-                        if let Some(id) = persist_hook.persist_message(&session.id, &last) {
-                            if let Some(slot) = session.message_ids.last_mut() {
-                                *slot = id;
-                            }
-                        }
-                    }
-
-                    let thinking = session_override.to_thinking_config();
-                    let model_id = session_override.model.as_deref();
-                    let turn_ctx = crate::agents::TurnContext {
-                        system_prompt: &system_prompt,
-                        model_id,
-                        thinking: thinking.as_ref(),
-                        permission_mode: prompt_config.permission_mode,
-                        run_mode: prompt_config.run_mode,
-                    };
-
-                    let result = agent2.run(&mut session, turn_ctx, &runtime).await;
-                    match result {
-                        Ok(turn_result) => {
-                            if !turn_result.text.trim().is_empty() {
-                                let send_msg = SendMessage {
-                                    content: turn_result.text,
-                                    recipient: reply_target,
-                                    subject: None,
-                                    thread_ts: None,
-                                    cancellation_token: None,
-                                    attachments: vec![],
-                                    image_urls: None,
-                                    inline_buttons: None,
-                                };
-                                if let Err(e) = channel.send(&send_msg).await {
-                                    tracing::error!(session = %session.id, err = %e, "send response failed");
-                                }
-                            }
-                            // Stash pending_retry on SessionContext if the turn
-                            // ended in an empty-response state.
-                            if let Some(retry_msg) = turn_result.pending_retry {
-                                *session_ctx.pending_retry.lock().await = Some(retry_msg);
-                            }
-                        }
-                        Err(e) => {
-                            // Log the full error context for operators but
-                            // send the user a sanitized notice — anyhow::Error
-                            // strings can leak internal paths, tool arguments,
-                            // and backend stack hints.
-                            tracing::error!(session = %session.id, err = %e, "Agent turn failed");
-                            let send_msg = SendMessage::new(MSG_TIMEOUT, reply_target);
-                            let _ = channel.send(&send_msg).await;
-                        }
-                    }
-
-                    // Clear transient handles (they don't need to live across turns).
-                    session.persist = None;
-                    session.channel = None;
+                    // image_urls / image_base64 are attached via
+                    // `session.last_message` (recorded via `record_inbound`
+                    // upstream); Agent.run reads them from there.
+                    // reply_to_id is unused — channels send replies in-line
+                    // without thread context for now.
+                    session_ctx
+                        .process_turn(inbound_msg, content, channel, reply_target, agent, runtime)
+                        .await;
                 });
 
             }

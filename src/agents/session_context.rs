@@ -19,7 +19,14 @@ use tokio::sync::Mutex;
 
 use crate::agents::attachment::AttachmentManager;
 use crate::agents::session::Session;
-use crate::agents::UserProfile;
+use crate::agents::{Agent, AgentRuntime, TurnContext, UserProfile};
+use crate::channels::{Channel, ChannelMessage, SendMessage};
+
+/// Sent when the per-turn `Agent.run` returns Err. Mirrors the same
+/// short notice the old AgentLoop surfaced — anyhow::Error strings can
+/// leak internal paths, tool args, and stack hints, so we never forward
+/// them verbatim to the user.
+const MSG_TURN_FAILED: &str = "⚠️ 处理超时，未收到模型回复。";
 
 /// Per-session bundle held by the Orchestrator's session table.
 ///
@@ -91,5 +98,105 @@ impl SessionContext {
     /// Snapshot the session for read-only consumers (e.g., /status commands).
     pub async fn session_snapshot(&self) -> Session {
         self.session.lock().await.clone()
+    }
+
+    /// Run one user turn end-to-end: acquire the turn lock, append the
+    /// user message, resolve TurnContext from the session override, invoke
+    /// `Agent.run`, then dispatch the response (or error notice) back to
+    /// the channel. This is the canonical per-turn entry point — the
+    /// Orchestrator's inbound dispatch path spawns this on a background
+    /// task per message so the main event loop stays unblocked.
+    ///
+    /// `inbound_msg` is replayed into `Session.record_inbound` against the
+    /// canonical session held by this context (the upstream `SessionManager`
+    /// cache copy was updated earlier; this keeps the two in sync).
+    /// `content` is the user-visible text that gets appended via
+    /// `Session::add_user`.
+    pub async fn process_turn(
+        self: &Arc<Self>,
+        inbound_msg: ChannelMessage,
+        content: String,
+        channel: Arc<dyn Channel>,
+        reply_target: String,
+        agent: Agent,
+        runtime: AgentRuntime,
+    ) {
+        let _turn_guard = self.turn_lock.lock().await;
+        let mut session = self.session.lock().await;
+
+        session.record_inbound(inbound_msg);
+
+        let persist_hook = runtime.persist.clone();
+        session.persist = persist_hook.clone();
+        session.channel = Some(channel.clone());
+
+        let session_override = session.session_override.clone();
+        let mut prompt_config = runtime.prompt_config.clone();
+        if let Some(pm) = session_override.permission_mode {
+            prompt_config.permission_mode = pm;
+        }
+        if let Some(rm) = session_override.run_mode {
+            prompt_config.run_mode = rm;
+        }
+
+        let system_prompt = if !runtime.system_prompt.is_empty() {
+            runtime.system_prompt.clone()
+        } else {
+            let s = runtime.skills.read();
+            crate::agents::SystemPromptBuilder::new(prompt_config.clone()).build(&s)
+        };
+
+        session.add_user(content);
+        if let Some(ref hook) = persist_hook {
+            if let Some(last) = session.history.last().cloned() {
+                if let Some(id) = hook.persist_message(&session.id, &last) {
+                    if let Some(slot) = session.message_ids.last_mut() {
+                        *slot = id;
+                    }
+                }
+            }
+        }
+
+        let thinking = session_override.to_thinking_config();
+        let model_id = session_override.model.as_deref();
+        let turn_ctx = TurnContext {
+            system_prompt: &system_prompt,
+            model_id,
+            thinking: thinking.as_ref(),
+            permission_mode: prompt_config.permission_mode,
+            run_mode: prompt_config.run_mode,
+        };
+
+        let result = agent.run(&mut session, turn_ctx, &runtime).await;
+        match result {
+            Ok(turn_result) => {
+                if !turn_result.text.trim().is_empty() {
+                    let send_msg = SendMessage {
+                        content: turn_result.text,
+                        recipient: reply_target,
+                        subject: None,
+                        thread_ts: None,
+                        cancellation_token: None,
+                        attachments: vec![],
+                        image_urls: None,
+                        inline_buttons: None,
+                    };
+                    if let Err(e) = channel.send(&send_msg).await {
+                        tracing::error!(session = %session.id, err = %e, "send response failed");
+                    }
+                }
+                if let Some(retry_msg) = turn_result.pending_retry {
+                    *self.pending_retry.lock().await = Some(retry_msg);
+                }
+            }
+            Err(e) => {
+                tracing::error!(session = %session.id, err = %e, "Agent turn failed");
+                let send_msg = SendMessage::new(MSG_TURN_FAILED, reply_target);
+                let _ = channel.send(&send_msg).await;
+            }
+        }
+
+        session.persist = None;
+        session.channel = None;
     }
 }
