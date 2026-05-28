@@ -112,7 +112,7 @@ impl Agent {
         // we re-seed from history. ContextConfig comes from `runtime.context`
         // so the user's `[agent.context]` (compact_threshold,
         // retain_work_units) is actually honored.
-        let mut context = ContextEngine::new(
+        let context = ContextEngine::new(
             &runtime.context,
             Arc::clone(&runtime.providers),
             // ResourceProvider not yet plumbed via AgentRuntime; the
@@ -121,14 +121,16 @@ impl Agent {
             placeholder_resources(runtime),
             Arc::clone(&runtime.tools),
         );
-        context.init_from_history(turn_ctx.system_prompt, &session.history);
         // Seed Session.token_tracker on fresh sessions / post-restart.
         // After restart `last_total_tokens` carries the persisted total;
-        // otherwise we derive from ContextEngine's estimate so the
+        // otherwise we estimate from the loaded history so the
         // compaction-trigger arithmetic stays consistent.
         if session.token_tracker.is_fresh() {
-            let seed = session.last_total_tokens.unwrap_or_else(|| context.token_total());
-            session.token_tracker.update_from_usage(seed, 0, 0);
+            if let Some(total) = session.last_total_tokens {
+                session.token_tracker.update_from_usage(total, 0, 0);
+            } else {
+                session.token_tracker.seed_from_history(turn_ctx.system_prompt, &session.history);
+            }
         }
 
         // Assemble the LLM request prefix once. Subsequent rebuilds re-clone
@@ -238,17 +240,15 @@ impl Agent {
             )
             .await?;
 
-            // Update token tracker from API response. Target architecture:
-            // `Session.token_tracker` is the canonical per-session counter
-            // (lives on the Session so it survives restarts via
-            // `last_total_tokens`). ContextEngine mirrors the value during
-            // its per-turn lifetime; both are kept in sync so compaction
-            // sees a fresh count and disk persistence sees a non-zero one.
+            // Update Session.token_tracker from the API response. Target
+            // architecture: tokens are tracked solely on the Session (so
+            // they survive restarts via `last_total_tokens`); ContextEngine
+            // reads the count via `should_compact(total, window)` instead
+            // of keeping its own copy.
             if let Some(ref usage) = response.usage {
                 let input = usage.input_tokens.unwrap_or(0);
                 let output = usage.output_tokens.unwrap_or(0);
                 let cached = usage.cached_input_tokens.unwrap_or(0);
-                context.update_usage(input, output, cached);
                 session.token_tracker.update_from_usage(input, output, cached);
                 if let Some(ref hook) = session.persist {
                     hook.save_token_count(&session.id, session.token_tracker.total_tokens());
@@ -263,10 +263,11 @@ impl Agent {
             // (AgentLoop has the same forgive-and-proceed policy).
             if let Ok(cfg) = runtime.providers.get_chat_model_config(&model_id) {
                 if let Some(window) = cfg.context_window {
-                    if context.should_compact(window) {
+                    let total = session.token_tracker.total_tokens();
+                    if context.should_compact(total, window) {
                         tracing::info!(
                             session = %session.id,
-                            total = context.token_total(),
+                            total,
                             window,
                             "context threshold crossed, attempting compaction"
                         );
@@ -319,10 +320,6 @@ impl Agent {
                                         summary_msg,
                                         version,
                                         last_compacted_id,
-                                        result.summary_tokens,
-                                    );
-                                    context.adjust_for_compaction(
-                                        result.removed_tokens,
                                         result.summary_tokens,
                                     );
                                     session.token_tracker.adjust_for_compaction(

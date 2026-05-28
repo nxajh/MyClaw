@@ -63,6 +63,18 @@ impl TokenTracker {
         self.pending_estimated_tokens += tokens;
     }
 
+    /// Seed the tracker by estimating tokens for the system prompt + every
+    /// message in the history. Used at turn start when no prior API usage
+    /// has been recorded yet (fresh session or post-restart).
+    pub fn seed_from_history(&mut self, system_prompt: &str, history: &[ChatMessage]) {
+        if !system_prompt.is_empty() {
+            self.record_pending(estimate_tokens(system_prompt) + 4);
+        }
+        for msg in history {
+            self.record_pending(estimate_message_tokens(msg));
+        }
+    }
+
     pub fn total_tokens(&self) -> u64 {
         self.last_input_tokens
             .saturating_add(self.last_cached_tokens)

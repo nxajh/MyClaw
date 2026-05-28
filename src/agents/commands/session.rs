@@ -45,13 +45,17 @@ pub async fn cmd_compact(ctx: CommandContext<'_>) -> String {
         String::new(),
         0,
     );
-    let mut engine = crate::agents::context_engine::ContextEngine::new(
+    let engine = crate::agents::context_engine::ContextEngine::new(
         &Default::default(),
         std::sync::Arc::clone(&ctx.runtime.providers),
         runtime_resources,
         std::sync::Arc::clone(&ctx.runtime.tools),
     );
-    engine.init_from_history(ctx.runtime.system_prompt.as_str(), &session.history);
+    // Seed Session.token_tracker so we have a baseline for the post-compaction display.
+    if session.token_tracker.is_fresh() {
+        let history_snap = session.history.clone();
+        session.token_tracker.seed_from_history(ctx.runtime.system_prompt.as_str(), &history_snap);
+    }
 
     let cfg = match ctx.registry.get_chat_model_config(&model_id) {
         Ok(c) => c,
@@ -111,10 +115,9 @@ pub async fn cmd_compact(ctx: CommandContext<'_>) -> String {
                 last_compacted_id,
                 result.summary_tokens,
             );
-            engine.adjust_for_compaction(result.removed_tokens, result.summary_tokens);
-            session.token_tracker = Default::default();
-            session.token_tracker.update_from_usage(engine.token_total(), 0, 0);
-            format!("✅ 上下文压缩完成，当前 token: {}", engine.token_total())
+            session.token_tracker.adjust_for_compaction(result.removed_tokens, result.summary_tokens);
+            let total = session.token_tracker.total_tokens();
+            format!("✅ 上下文压缩完成，当前 token: {}", total)
         }
         Err(e) => format!("❌ 压缩失败: {}", e),
     }
