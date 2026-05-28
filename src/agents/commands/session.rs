@@ -51,10 +51,15 @@ pub async fn cmd_compact(ctx: CommandContext<'_>) -> String {
         runtime_resources,
         std::sync::Arc::clone(&ctx.runtime.tools),
     );
+    // Build the system prompt once for both the token seed + the
+    // compaction request — must match what Agent.run uses so the
+    // summarizer hits the prefix cache.
+    let system_prompt = ctx.runtime.build_system_prompt(&ctx.runtime.defaults.prompt);
+
     // Seed Session.token_tracker so we have a baseline for the post-compaction display.
     if session.token_tracker.is_fresh() {
         let history_snap = session.history.clone();
-        session.token_tracker.seed_from_history(ctx.runtime.defaults.system_prompt.as_str(), &history_snap);
+        session.token_tracker.seed_from_history(system_prompt.as_str(), &history_snap);
     }
 
     let cfg = match ctx.registry.get_chat_model_config(&model_id) {
@@ -66,7 +71,7 @@ pub async fn cmd_compact(ctx: CommandContext<'_>) -> String {
         None => return "❌ 模型未配置 context_window".to_string(),
     };
 
-    let sys_tokens = (ctx.runtime.defaults.system_prompt.as_str().len() as u64).div_ceil(4);
+    let sys_tokens = (system_prompt.len() as u64).div_ceil(4);
     let tool_tokens: u64 = ctx.runtime.tools.all_tools().iter().map(|t| {
         let spec = t.spec();
         let schema = spec.parameters.to_string();
@@ -84,7 +89,7 @@ pub async fn cmd_compact(ctx: CommandContext<'_>) -> String {
     let history_snap: Vec<crate::providers::ChatMessage> = session.history.clone();
     match engine.execute_compaction(
         &history_snap,
-        ctx.runtime.defaults.system_prompt.as_str(),
+        system_prompt.as_str(),
         &ctx.runtime.tools.all_tools().iter().map(|t| {
             let s = t.spec();
             crate::providers::capability_chat::ToolSpec {

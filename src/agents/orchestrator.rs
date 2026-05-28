@@ -884,8 +884,6 @@ impl Orchestrator {
             let channels = self.channels.clone();
             let runtime = self.agent_runtime.clone();
             let prompt_config_base = self.agent_runtime.defaults.prompt.clone();
-            let skills_arc = Arc::clone(&self.agent_runtime.skills);
-            let cached_prompt = self.agent_runtime.defaults.system_prompt.clone();
             let persist_hook: Arc<dyn PersistHook> = Arc::new(
                 BackendPersistHook::new(Arc::clone(self.session_manager.backend()))
             );
@@ -903,12 +901,7 @@ impl Orchestrator {
                 if let Some(rm) = session_override.run_mode {
                     prompt_config.run_mode = rm;
                 }
-                let system_prompt = if !cached_prompt.is_empty() {
-                    cached_prompt
-                } else {
-                    let s = skills_arc.read();
-                    crate::agents::SystemPromptBuilder::new(prompt_config.clone()).build(&s)
-                };
+                let system_prompt = runtime.build_system_prompt(&prompt_config);
 
                 let thinking = session_override.to_thinking_config();
                 let model_id = session_override.model.as_deref();
@@ -978,8 +971,6 @@ impl Orchestrator {
             let dm = delegation_manager.clone();
             let runtime = self.agent_runtime.clone();
             let prompt_config_base = self.agent_runtime.defaults.prompt.clone();
-            let skills_arc = Arc::clone(&self.agent_runtime.skills);
-            let cached_prompt = self.agent_runtime.defaults.system_prompt.clone();
             let persist_hook: Arc<dyn PersistHook> = Arc::new(
                 BackendPersistHook::new(Arc::clone(self.session_manager.backend()))
             );
@@ -997,12 +988,7 @@ impl Orchestrator {
                 if let Some(rm) = session_override.run_mode {
                     prompt_config.run_mode = rm;
                 }
-                let system_prompt = if !cached_prompt.is_empty() {
-                    cached_prompt
-                } else {
-                    let s = skills_arc.read();
-                    crate::agents::SystemPromptBuilder::new(prompt_config.clone()).build(&s)
-                };
+                let system_prompt = runtime.build_system_prompt(&prompt_config);
                 let thinking = session_override.to_thinking_config();
                 let model_id = session_override.model.as_deref();
                 let turn_ctx = crate::agents::TurnContext {
@@ -1197,8 +1183,6 @@ async fn run_scheduled_turn(
 
     let runtime = orch.agent_runtime.clone();
     let prompt_config_base = orch.agent_runtime.defaults.prompt.clone();
-    let skills_arc = Arc::clone(&orch.agent_runtime.skills);
-    let cached_prompt = orch.agent_runtime.defaults.system_prompt.clone();
     let persist_hook: Arc<dyn PersistHook> = Arc::new(
         BackendPersistHook::new(Arc::clone(orch.session_manager.backend()))
     );
@@ -1224,12 +1208,7 @@ async fn run_scheduled_turn(
     if let Some(rm) = session_override.run_mode {
         prompt_config.run_mode = rm;
     }
-    let system_prompt = if !cached_prompt.is_empty() {
-        cached_prompt
-    } else {
-        let s = skills_arc.read();
-        crate::agents::SystemPromptBuilder::new(prompt_config.clone()).build(&s)
-    };
+    let system_prompt = runtime.build_system_prompt(&prompt_config);
 
     session.add_user(prompt.to_string());
     if let Some(last) = session.history.last().cloned() {

@@ -7,7 +7,9 @@ pub fn cmd_stop() -> String {
 }
 
 pub async fn cmd_reload(ctx: CommandContext<'_>) -> String {
-    let workspace_dir = &ctx.runtime.defaults.workspace_dir;
+    // Workspace root comes from the prompt config — same path the
+    // builder uses for AGENT.md / SKILL.md resolution.
+    let workspace_dir = std::path::PathBuf::from(&ctx.runtime.defaults.prompt.workspace_dir);
 
     // 1. Re-scan skills
     let skills_dir = workspace_dir.join("skills");

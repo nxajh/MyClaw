@@ -891,14 +891,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // Scheduler config (used for both parts and webhook launch).
     let scheduler_config = config.agent.scheduler.clone();
 
-    // Build the "main" agent's cached system prompt up front so AgentRuntime
-    // can hold it (callers prefer the cached value over rebuilding on every
-    // turn).
-    let cached_system_prompt = {
-        let skills = skills_arc.read();
-        crate::agents::SystemPromptBuilder::new(prompt_config.clone()).build(&skills)
-    };
-
     // scheduler_tx already created above; scheduler_rx goes to OrchestratorParts.
 
     // F35 / partial E29: build the AskRouter once and share between the
@@ -958,9 +950,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         let defaults = crate::agents::runtime::RuntimeDefaults {
             permission_mode: config.agent.permission_mode,
             prompt: prompt_config,
-            system_prompt: cached_system_prompt,
-            workspace_dir: config.workspace_dir.clone(),
-            knowledge_dir: config.knowledge_dir.clone(),
         };
 
         crate::agents::AgentRuntime::new(

@@ -8,7 +8,6 @@
 //! one shared instance instead of rebuilding the executor stack each
 //! message.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -27,26 +26,15 @@ use super::tool_registry::ToolRegistry;
 
 /// Default runtime values applied to every turn unless overridden by
 /// `SessionOverride`. Matches the target architecture's
-/// `RuntimeDefaults { permission_mode, prompt }` shape; `system_prompt`
-/// is the pre-built cache derived from `prompt`, and the path fields
-/// provide a PathBuf view of the workspace / knowledge dirs (the
-/// `prompt` config stores them as Strings for prompt assembly).
+/// `RuntimeDefaults { permission_mode, prompt }` shape exactly.
 #[derive(Clone)]
 pub struct RuntimeDefaults {
     /// Default permission mode (overridden per turn by SessionOverride).
     pub permission_mode: PermissionMode,
-    /// Base prompt config (workspace/knowledge dirs as Strings, identity,
-    /// native_tools, …).
+    /// Base prompt config — workspace/knowledge dirs (as strings, used
+    /// by SystemPromptBuilder + file-tool path resolution), identity
+    /// header, native_tools, …
     pub prompt: SystemPromptConfig,
-    /// Pre-built system prompt for the "main" agent. Empty string means
-    /// "rebuild via SystemPromptBuilder from skills + prompt". Per-turn
-    /// callers prefer this cached value to avoid rebuilding on every
-    /// message.
-    pub system_prompt: String,
-    /// Workspace root as a `PathBuf` (file tools, /reload skill scan).
-    pub workspace_dir: PathBuf,
-    /// Knowledge root (memory/ directory) as a `PathBuf`.
-    pub knowledge_dir: PathBuf,
 }
 
 impl Default for RuntimeDefaults {
@@ -54,9 +42,6 @@ impl Default for RuntimeDefaults {
         Self {
             permission_mode: PermissionMode::Default,
             prompt: SystemPromptConfig::default(),
-            system_prompt: String::new(),
-            workspace_dir: PathBuf::new(),
-            knowledge_dir: PathBuf::new(),
         }
     }
 }
@@ -126,5 +111,16 @@ impl AgentRuntime {
     pub fn with_persist(mut self, persist: Arc<dyn PersistHook>) -> Self {
         self.persist = Some(persist);
         self
+    }
+
+    /// Build the system prompt for a turn. Applies the supplied
+    /// `prompt_config` (with any per-session overrides already merged
+    /// in) against the live SkillManager. Per the RFC v2 target,
+    /// AgentRuntime no longer caches the assembled prompt — it's
+    /// constructed fresh each turn so session-override changes are
+    /// honored immediately.
+    pub fn build_system_prompt(&self, prompt_config: &SystemPromptConfig) -> String {
+        let skills = self.skills.read();
+        crate::agents::SystemPromptBuilder::new(prompt_config.clone()).build(&skills)
     }
 }

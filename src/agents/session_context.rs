@@ -132,12 +132,7 @@ impl SessionContext {
             prompt_config.run_mode = rm;
         }
 
-        let system_prompt = if !runtime.defaults.system_prompt.is_empty() {
-            runtime.defaults.system_prompt.clone()
-        } else {
-            let s = runtime.skills.read();
-            crate::agents::SystemPromptBuilder::new(prompt_config.clone()).build(&s)
-        };
+        let system_prompt = runtime.build_system_prompt(&prompt_config);
 
         session.add_user(content);
         if let Some(ref hook) = persist_hook {

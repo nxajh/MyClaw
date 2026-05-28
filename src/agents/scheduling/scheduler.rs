@@ -965,8 +965,6 @@ pub async fn run_scheduled_task(
     let agent_runtime = ctx.orchestrator.agent_runtime();
     let runtime = agent_runtime.clone();
     let prompt_config_base = agent_runtime.defaults.prompt.clone();
-    let skills_arc = Arc::clone(&agent_runtime.skills);
-    let cached_prompt = agent_runtime.defaults.system_prompt.clone();
     let persist_hook: Arc<dyn crate::agents::PersistHook> = Arc::new(
         crate::agents::BackendPersistHook::new(Arc::clone(ctx.orchestrator.persist_backend()))
     );
@@ -984,12 +982,7 @@ pub async fn run_scheduled_task(
     if let Some(rm) = session_override.run_mode {
         prompt_config.run_mode = rm;
     }
-    let system_prompt = if !cached_prompt.is_empty() {
-        cached_prompt
-    } else {
-        let s = skills_arc.read();
-        crate::agents::SystemPromptBuilder::new(prompt_config.clone()).build(&s)
-    };
+    let system_prompt = runtime.build_system_prompt(&prompt_config);
 
     session.add_user(prompt.to_string());
     if let Some(last) = session.history.last().cloned() {
