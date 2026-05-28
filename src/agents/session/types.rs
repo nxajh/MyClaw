@@ -53,9 +53,6 @@ pub struct Session {
     pub compact_version: u32,
     /// In-memory summary metadata (restored from backend on load).
     pub summary_metadata: Option<SummaryMetadata>,
-    /// Last total token count reported by the API (input + cached + output).
-    /// Loaded from meta.json on session restore; None for brand-new sessions.
-    pub last_total_tokens: Option<u64>,
     /// Per-session runtime overrides set by slash commands.
     pub session_override: SessionOverride,
     /// Set when the last persisted turn ended with a user message but no
@@ -70,8 +67,8 @@ pub struct Session {
     pub last_message: Option<ChannelMessage>,
     /// Token usage tracker. Owned by the session so `Agent.run` /
     /// `ContextEngine` can read budgets without needing a parallel struct.
-    /// Not persisted (rebuilt from API usage on next turn / from
-    /// `last_total_tokens` on session reload).
+    /// Seeded by `SessionManager` from `backend.load_token_count` on
+    /// session reload; updated from API `Usage` events thereafter.
     pub token_tracker: TokenTracker,
     /// Transient persistence hook installed by the Orchestrator at session
     /// load time. `None` for tests and the in-memory CLI mode. C18's
@@ -95,7 +92,6 @@ impl std::fmt::Debug for Session {
             .field("parent_session_id", &self.parent_session_id)
             .field("history_len", &self.history.len())
             .field("compact_version", &self.compact_version)
-            .field("last_total_tokens", &self.last_total_tokens)
             .field("incomplete_turn", &self.incomplete_turn)
             .field("has_last_message", &self.last_message.is_some())
             .field("has_persist", &self.persist.is_some())
@@ -115,7 +111,6 @@ impl Session {
             message_ids: Vec::new(),
             compact_version: 0,
             summary_metadata: None,
-            last_total_tokens: None,
             session_override: SessionOverride::default(),
             incomplete_turn: false,
             last_message: None,

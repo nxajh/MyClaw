@@ -125,7 +125,7 @@ impl SessionManager {
         let session_id = self.resolve_active(user_id);
 
         // Load from backend.
-        let last_total_tokens = self.backend.load_token_count(&session_id);
+        let stored_total_tokens = self.backend.load_token_count(&session_id);
         let session_override = self.backend.load_session_override(&session_id)
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or_default();
@@ -189,7 +189,7 @@ impl SessionManager {
                         session = %session_id,
                         message_count = count,
                         sanitized,
-                        last_total_tokens,
+                        stored_total_tokens,
                         "session restored from compacted history"
                     );
                 } else {
@@ -204,6 +204,14 @@ impl SessionManager {
             (i, m, Vec::new())
         };
 
+        // Seed the token tracker from the persisted total so it carries
+        // across restarts. If there's no stored value, the tracker stays
+        // fresh and Agent::run will estimate from history at turn start.
+        let mut token_tracker = crate::agents::tokens::TokenTracker::new();
+        if let Some(total) = stored_total_tokens {
+            token_tracker.update_from_usage(total, 0, 0);
+        }
+
         let mut session = Session {
             id: session_id.clone(),
             owner: user_id.to_string(),
@@ -214,11 +222,10 @@ impl SessionManager {
             message_ids: ids,
             compact_version: compact_ver,
             summary_metadata: summary_meta,
-            last_total_tokens,
             session_override,
             incomplete_turn: false,
             last_message: self.backend.load_last_message(&session_id),
-            token_tracker: crate::agents::tokens::TokenTracker::new(),
+            token_tracker,
             persist: None,
             channel: None,
         };

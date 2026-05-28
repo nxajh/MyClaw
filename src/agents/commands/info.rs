@@ -216,8 +216,9 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
                  状态: 新会话，无历史",
                 model_id, context_window
             )
-        } else if let Some(total) = session.last_total_tokens {
-            let usage_pct = if context_window > 0 {
+        } else {
+            let total = session.token_tracker.total_tokens();
+            let usage_pct = if context_window > 0 && total > 0 {
                 format!("{:.1}%", (total as f64 / context_window as f64) * 100.0)
             } else {
                 "未知".to_string()
@@ -250,24 +251,6 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
                 model_id, context_window, window_kb,
                 total, used_kb, usage_pct,
                 threshold, session.history.len(), summary_info
-            )
-        } else {
-            // History exists but no stored token count (e.g. session predates
-            // token persistence). Don't estimate — just report as unknown.
-            format!(
-                "📐 **上下文详情**  \n\n\
-                 模型: `{}`  \n\
-                 上下文窗口: {} token  \n\
-                 当前使用: 暂无记录（发送一条消息后获取精确值）  \n\
-                 历史消息: {} 条  \n\
-                 压缩状态: {}",
-                model_id, context_window,
-                session.history.len(),
-                if let Some(ref meta) = session.summary_metadata {
-                    format!("已压缩 v{}", meta.version)
-                } else {
-                    "尚未压缩".to_string()
-                }
             )
         }
     }

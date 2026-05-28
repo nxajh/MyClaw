@@ -112,16 +112,11 @@ impl Agent {
         // tracking lives solely on `Session.token_tracker`; ContextEngine
         // only carries threshold/retain_units + summarizer state.
         let context = &runtime.context_engine;
-        // Seed Session.token_tracker on fresh sessions / post-restart.
-        // After restart `last_total_tokens` carries the persisted total;
-        // otherwise we estimate from the loaded history so the
-        // compaction-trigger arithmetic stays consistent.
+        // Seed Session.token_tracker from history when fresh — restart
+        // restoration is handled by SessionManager (it loads the
+        // persisted total directly into the tracker on session load).
         if session.token_tracker.is_fresh() {
-            if let Some(total) = session.last_total_tokens {
-                session.token_tracker.update_from_usage(total, 0, 0);
-            } else {
-                session.token_tracker.seed_from_history(turn_ctx.system_prompt, &session.history);
-            }
+            session.token_tracker.seed_from_history(turn_ctx.system_prompt, &session.history);
         }
 
         // Assemble the LLM request prefix once. Subsequent rebuilds re-clone
