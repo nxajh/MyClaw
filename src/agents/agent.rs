@@ -122,6 +122,14 @@ impl Agent {
             Arc::clone(&runtime.tools),
         );
         context.init_from_history(turn_ctx.system_prompt, &session.history);
+        // Seed Session.token_tracker on fresh sessions / post-restart.
+        // After restart `last_total_tokens` carries the persisted total;
+        // otherwise we derive from ContextEngine's estimate so the
+        // compaction-trigger arithmetic stays consistent.
+        if session.token_tracker.is_fresh() {
+            let seed = session.last_total_tokens.unwrap_or_else(|| context.token_total());
+            session.token_tracker.update_from_usage(seed, 0, 0);
+        }
 
         // Assemble the LLM request prefix once. Subsequent rebuilds re-clone
         // the session's growing history.
@@ -230,15 +238,20 @@ impl Agent {
             )
             .await?;
 
-            // Update token tracker from API response.
+            // Update token tracker from API response. Target architecture:
+            // `Session.token_tracker` is the canonical per-session counter
+            // (lives on the Session so it survives restarts via
+            // `last_total_tokens`). ContextEngine mirrors the value during
+            // its per-turn lifetime; both are kept in sync so compaction
+            // sees a fresh count and disk persistence sees a non-zero one.
             if let Some(ref usage) = response.usage {
-                context.update_usage(
-                    usage.input_tokens.unwrap_or(0),
-                    usage.output_tokens.unwrap_or(0),
-                    usage.cached_input_tokens.unwrap_or(0),
-                );
+                let input = usage.input_tokens.unwrap_or(0);
+                let output = usage.output_tokens.unwrap_or(0);
+                let cached = usage.cached_input_tokens.unwrap_or(0);
+                context.update_usage(input, output, cached);
+                session.token_tracker.update_from_usage(input, output, cached);
                 if let Some(ref hook) = session.persist {
-                    hook.save_token_count(&session.id, context.token_total());
+                    hook.save_token_count(&session.id, session.token_tracker.total_tokens());
                 }
             }
 
@@ -309,6 +322,10 @@ impl Agent {
                                         result.summary_tokens,
                                     );
                                     context.adjust_for_compaction(
+                                        result.removed_tokens,
+                                        result.summary_tokens,
+                                    );
+                                    session.token_tracker.adjust_for_compaction(
                                         result.removed_tokens,
                                         result.summary_tokens,
                                     );
