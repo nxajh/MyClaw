@@ -52,8 +52,6 @@ use super::session_override::SessionOverride;
 /// Manages session lifecycle — creates, retrieves, and persists sessions.
 pub struct SessionManager {
     backend: Arc<dyn SessionBackend>,
-    /// In-memory session cache: session_id → Session.
-    cache: RwLock<HashMap<String, Session>>,
     /// User's active session: user_id → session_id.
     active: RwLock<HashMap<String, String>>,
     /// Per-routing-key SessionContext. At most one SessionContext per
@@ -76,7 +74,6 @@ impl SessionManager {
     pub fn new(backend: Arc<dyn SessionBackend>) -> Self {
         Self {
             backend,
-            cache: RwLock::new(HashMap::new()),
             active: RwLock::new(HashMap::new()),
             contexts: DashMap::new(),
             agents: Arc::new(AgentRegistry::new()),
@@ -119,19 +116,17 @@ impl SessionManager {
 
     /// Get the active session for a user. Auto-creates if none exists.
     /// Attempts summary-based recovery first, then falls back to full load.
+    ///
+    /// Per the RFC v2 target shape, SessionManager no longer keeps a
+    /// per-session cache — the canonical mutable state lives on
+    /// `SessionContext.session` (held in `contexts`). Callers that
+    /// just need a read-only snapshot reach for `get_context(rk)?
+    /// .session.lock().await.clone()`; this helper loads fresh from
+    /// the backend for callers that want a one-shot value.
     pub fn get_or_create(&self, user_id: &str) -> Session {
-        // 1. Resolve active session_id.
         let session_id = self.resolve_active(user_id);
 
-        // 2. Check cache.
-        {
-            let cache = self.cache.read();
-            if let Some(s) = cache.get(&session_id) {
-                return s.clone();
-            }
-        }
-
-        // 3. Load from backend.
+        // Load from backend.
         let last_total_tokens = self.backend.load_token_count(&session_id);
         let session_override = self.backend.load_session_override(&session_id)
             .and_then(|json| serde_json::from_str(&json).ok())
@@ -234,18 +229,13 @@ impl SessionManager {
         // history) so we don't carry the detected items on the Session.
         let _ = breakpoints;
 
-        // 4. Detect incomplete turn (last message is user without assistant reply).
-        //    Only check the most recent turn — earlier orphan user messages are
-        //    ignored because compaction or manual cleanup may have removed them.
+        // Detect incomplete turn (last message is user without assistant
+        // reply). Only check the most recent turn — earlier orphan user
+        // messages are ignored because compaction or manual cleanup may
+        // have removed them.
         if session.history.last().is_some_and(|m| m.role == "user") {
             session.incomplete_turn = true;
             tracing::warn!(session = %session_id, "detected incomplete turn on load");
-        }
-
-        // 5. Cache.
-        {
-            let mut cache = self.cache.write();
-            cache.insert(session_id, session.clone());
         }
 
         session
@@ -291,11 +281,6 @@ impl SessionManager {
 
     /// Create a new session and make it active for the user.
     pub fn new_session(&self, user_id: &str, name: Option<&str>) -> std::io::Result<SessionInfo> {
-        // Invalidate old cached session.
-        if let Some(old_id) = self.active.read().get(user_id).cloned() {
-            self.cache.write().remove(&old_id);
-        }
-
         let info = self.backend.create_session(user_id, name)?;
         self.backend.set_active_session(user_id, &info.id)?;
         self.active.write().insert(user_id.to_string(), info.id.clone());
@@ -319,11 +304,6 @@ impl SessionManager {
                 routing_key: user_id.to_string(),
             };
             return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, err));
-        }
-
-        // Invalidate old cached session.
-        if let Some(old_id) = self.active.read().get(user_id).cloned() {
-            self.cache.write().remove(&old_id);
         }
 
         self.backend.set_active_session(user_id, session_id)?;
@@ -355,7 +335,6 @@ impl SessionManager {
         // sub-sessions still reachable through their (now orphaned) parent,
         // rather than the other way around.
         for sub in self.list_sub_sessions(session_id) {
-            self.cache.write().remove(&sub.id);
             if let Err(e) = self.backend.delete_session(&sub.id) {
                 tracing::warn!(
                     parent = %session_id,
@@ -366,7 +345,6 @@ impl SessionManager {
             }
         }
 
-        self.cache.write().remove(session_id);
         self.backend.delete_session(session_id)?;
         tracing::info!(user = %user_id, session = %session_id, "session deleted (cascade)");
         Ok(())
@@ -444,11 +422,6 @@ impl SessionManager {
     /// Get a session by ID (caller doesn't need to know the routing_key).
     /// Used by delegation recovery and PR-review tools.
     pub fn get_by_id(&self, session_id: &str) -> Option<Session> {
-        if let Some(s) = self.cache.read().get(session_id) {
-            return Some(s.clone());
-        }
-        // Cache miss — fall back to the owner-keyed get_or_create using the
-        // backend's recorded owner. Returns None if the session doesn't exist.
         let info = self.backend.get_session(session_id)?;
         Some(self.get_or_create(&info.owner))
     }
@@ -506,17 +479,22 @@ impl SessionManager {
     }
 
     /// Save a session override for a user's active session.
-    /// Updates the in-memory cache and persists to the backend.
+    ///
+    /// If a `SessionContext` is currently materialized for the
+    /// routing_key, the live `Session.session_override` inside it is
+    /// updated synchronously (acquiring the mutex via `try_lock` to
+    /// avoid blocking when a turn is in flight; the backend write
+    /// happens unconditionally so the next session load sees the new
+    /// value either way).
     pub fn save_session_override(&self, user_id: &str, session_override: SessionOverride) {
         let session_id = match self.active_session_id(user_id) {
             Some(id) => id,
             None => return,
         };
 
-        // Update cache.
-        {
-            let mut cache = self.cache.write();
-            if let Some(session) = cache.get_mut(&session_id) {
+        // Update the live SessionContext.session if we can grab the mutex.
+        if let Some(ctx) = self.get_context(user_id) {
+            if let Ok(mut session) = ctx.session.try_lock() {
                 session.session_override = session_override.clone();
             }
         }
@@ -531,12 +509,19 @@ impl SessionManager {
 
     /// Get the current session override for the user's active session.
     pub fn get_session_override(&self, user_id: &str) -> SessionOverride {
+        // Prefer the live SessionContext's view when one is materialized.
+        if let Some(ctx) = self.get_context(user_id) {
+            if let Ok(session) = ctx.session.try_lock() {
+                return session.session_override.clone();
+            }
+        }
+        // Otherwise read from the backend.
         let session_id = match self.active_session_id(user_id) {
             Some(id) => id,
             None => return SessionOverride::default(),
         };
-        self.cache.read().get(&session_id)
-            .map(|s| s.session_override.clone())
+        self.backend.load_session_override(&session_id)
+            .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or_default()
     }
 
@@ -616,14 +601,14 @@ impl SessionManager {
         self.contexts.remove(routing_key);
     }
 
-    /// Append a message to a session and persist.
+    /// Append a message to a session's backend store.
+    ///
+    /// Used by the queue-drain path on daemon startup before any
+    /// `SessionContext` for the session has been materialized; the
+    /// session's first inbound thereafter loads the appended messages
+    /// from the backend like any other history.
     pub fn append_message(&self, session_id: &str, message: ChatMessage) {
-        let msg_id = self.backend.append_message(session_id, &message).unwrap_or(0);
-        let mut cache = self.cache.write();
-        if let Some(session) = cache.get_mut(session_id) {
-            session.history.push(message);
-            session.message_ids.push(msg_id);
-        }
+        let _ = self.backend.append_message(session_id, &message);
     }
 }
 
