@@ -119,8 +119,11 @@ impl SessionContext {
 
         session.record_inbound(inbound_msg);
 
-        let persist_hook = runtime.persist.clone();
-        session.persist = persist_hook.clone();
+        // Session.persist was wired at SessionContext creation by
+        // SessionManager; capture a clone so the post-turn `add_user`
+        // persistence call sees the same hook even if the field is
+        // cleared at end of turn.
+        let persist_hook = session.persist.clone();
         session.channel = Some(channel.clone());
 
         let session_override = session.session_override.clone();
@@ -184,7 +187,9 @@ impl SessionContext {
             }
         }
 
-        session.persist = None;
+        // session.persist stays set across turns — SessionManager wires
+        // it once at SessionContext creation. Only the per-turn channel
+        // handle is cleared.
         session.channel = None;
     }
 }

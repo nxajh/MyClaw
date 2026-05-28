@@ -915,10 +915,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // sits in parallel so E29 can flip the dispatch over without
     // having to re-thread plumbing first.
     let agent_runtime = {
-        let persist_hook: Arc<dyn crate::agents::PersistHook> = Arc::new(
-            crate::agents::session::BackendPersistHook::new(Arc::clone(&session_backend)),
-        );
-
         // Build the ResourceProvider once so ContextEngine can hold it as
         // a shared resource (rather than rebuilding per turn).
         let resources = crate::agents::resource_provider::ResourceProvider::new(
@@ -962,7 +958,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             loop_breaker,
         )
         .with_defaults(defaults)
-        .with_persist(persist_hook)
     };
 
     let parts = OrchestratorParts {

@@ -21,7 +21,6 @@ use crate::agents::AgentRegistry;
 use crate::config::agent::PermissionMode;
 use crate::providers::ProviderRegistry;
 
-use super::session::PersistHook;
 use super::tool_registry::ToolRegistry;
 
 /// Default runtime values applied to every turn unless overridden by
@@ -70,12 +69,9 @@ pub struct AgentRuntime {
     /// Loop-breaker policy. Hands out per-turn `LoopBreakerCounter`s
     /// via `new_counter()`.
     pub loop_breaker: Arc<LoopBreaker>,
-    /// Defaults (permission_mode, prompt config, cached system prompt).
+    /// Defaults — exactly `{ permission_mode, prompt }` per the target
+    /// shape; see RFC v2 §三.A.
     pub defaults: RuntimeDefaults,
-    /// Optional session-persistence hook — None for tests; Some for
-    /// production daemons. Kept here so `SessionContext::process_turn`
-    /// can wire `Session.persist` at turn start.
-    pub persist: Option<Arc<dyn PersistHook>>,
 }
 
 impl AgentRuntime {
@@ -99,17 +95,11 @@ impl AgentRuntime {
             tool_executor,
             loop_breaker,
             defaults: RuntimeDefaults::default(),
-            persist: None,
         }
     }
 
     pub fn with_defaults(mut self, defaults: RuntimeDefaults) -> Self {
         self.defaults = defaults;
-        self
-    }
-
-    pub fn with_persist(mut self, persist: Arc<dyn PersistHook>) -> Self {
-        self.persist = Some(persist);
         self
     }
 

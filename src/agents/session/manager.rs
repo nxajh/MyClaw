@@ -573,10 +573,22 @@ impl SessionManager {
         }
         let mut session = self.get_or_create(routing_key);
         configure_session(&mut session);
+        // Wire the persist hook once at SessionContext creation. It's
+        // the same hook every turn; process_turn no longer needs to
+        // pull it from AgentRuntime.
+        session.persist = Some(self.build_persist_hook());
         let agent = self.build_agent_for_session(&session);
         let ctx = Arc::new(SessionContext::new(session, agent));
         self.contexts.insert(routing_key.to_string(), ctx.clone());
         ctx
+    }
+
+    /// Build a fresh BackendPersistHook bound to the manager's
+    /// backend. Cheap (just Arc-clones the backend); callers that
+    /// need their own hook (recovery paths) can ask for one without
+    /// reaching for the AgentRuntime.
+    pub fn build_persist_hook(&self) -> Arc<dyn super::PersistHook> {
+        Arc::new(super::BackendPersistHook::new(Arc::clone(&self.backend)))
     }
 
     /// Resolve `session.agent_name` to an `Arc<Agent>` via the
