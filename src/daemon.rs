@@ -760,10 +760,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
         let delegator = DelegationCoordinator::new(
             sub_agent_registry.clone(),
-            registry_arc.clone(),
-            Arc::clone(&base_tools_arc),
-            Arc::clone(&skills_arc),
-            config.loop_breaker.max_tool_calls,
             Arc::clone(&session_manager),
             config.workspace_dir.join("worktrees"),
         );
@@ -947,6 +943,14 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         .with_mcp_manager(Arc::clone(&mcp_manager_arc))
         .with_search_cooldown(Arc::clone(&search_cooldown))
     };
+
+    // DelegationCoordinator was constructed before the runtime existed
+    // (circular dep: runtime needs the AgentRegistry the coordinator
+    // also holds). Install the runtime now that both sides are ready —
+    // sub-agent turns will read it via the cell.
+    if let Some(ref delegator) = sub_agent_delegator_arc {
+        delegator.set_runtime(agent_runtime.clone());
+    }
 
     let parts = OrchestratorParts {
         session_manager,

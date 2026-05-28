@@ -25,14 +25,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use parking_lot::RwLock;
-
 use crate::agents::delegation::{DelegationEvent, DelegationManager};
-use crate::agents::session::{BackendPersistHook, PersistHook, Session, SessionManager};
-use crate::agents::skills::SkillManager;
-use crate::agents::tool_registry::ToolRegistry;
+use crate::agents::session::{BackendPersistHook, PersistHook, SessionManager};
 use crate::config::sub_agent::AgentIsolation;
-use crate::providers::ProviderRegistry;
 
 /// Holds sub-agent configs and creates temporary `Agent::run` invocations
 /// for delegation.
@@ -43,75 +38,58 @@ use crate::providers::ProviderRegistry;
 /// available end-to-end).
 #[derive(Clone)]
 pub struct DelegationCoordinator {
-    /// Sub-agent configurations, indexed by name.
+    /// Sub-agent configurations, indexed by name. Same Arc as
+    /// `AgentRuntime.agents` so name → Agent lookups stay consistent.
     configs: Arc<super::AgentRegistry>,
-    /// Shared service registry (for LLM access).
-    registry: Arc<dyn ProviderRegistry>,
-    /// Parent tool registry (tools are filtered per sub-agent).
-    tools: Arc<ToolRegistry>,
-    /// Parent skill manager (shared read-only).
-    skills: Arc<RwLock<SkillManager>>,
-    /// Default max_tool_calls from parent agent config.
-    default_max_tool_calls: usize,
-    /// Shared SessionManager — B15: sub-sessions are top-level peers of
-    /// regular sessions, distinguished by `meta.parent_session_id`.
-    /// Replaces the old per-parent `JsonFileBackend` rooted at
-    /// `{sessions_root}/{parent}/subagents/`.
+    /// Shared SessionManager. Sub-sessions are flat peers of regular
+    /// sessions (`meta.parent_session_id` is the link).
     session_manager: Arc<SessionManager>,
     /// Root directory for git worktrees (when isolation = worktree).
     worktrees_root: PathBuf,
+    /// Parent AgentRuntime, installed by the daemon after both this
+    /// coordinator and the runtime have been built. `delegate` reads
+    /// the runtime from here and passes it (with workspace_dir
+    /// overlaid when worktree-isolated) to `SessionContext::process_turn`.
+    runtime_cell: Arc<parking_lot::RwLock<Option<crate::agents::AgentRuntime>>>,
 }
 
 impl DelegationCoordinator {
     pub fn new(
         configs: Arc<super::AgentRegistry>,
-        registry: Arc<dyn ProviderRegistry>,
-        tools: Arc<ToolRegistry>,
-        skills: Arc<RwLock<SkillManager>>,
-        default_max_tool_calls: usize,
         session_manager: Arc<SessionManager>,
         worktrees_root: PathBuf,
     ) -> Self {
         Self {
             configs,
-            registry,
-            tools,
-            skills,
-            default_max_tool_calls,
             session_manager,
             worktrees_root,
+            runtime_cell: Arc::new(parking_lot::RwLock::new(None)),
         }
+    }
+
+    /// Install the AgentRuntime that sub-agent turns will use. Called
+    /// by the daemon after both the coordinator and the runtime are
+    /// constructed (chicken-egg: runtime construction needs the
+    /// AgentRegistry which the coordinator also references).
+    pub fn set_runtime(&self, runtime: crate::agents::AgentRuntime) {
+        *self.runtime_cell.write() = Some(runtime);
+    }
+
+    fn runtime(&self) -> anyhow::Result<crate::agents::AgentRuntime> {
+        self.runtime_cell
+            .read()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("DelegationCoordinator: runtime not installed"))
     }
 
     fn find_agent(&self, name: &str) -> Option<Arc<crate::agents::Agent>> {
         self.configs.get(name)
     }
 
-    /// Build a filtered ToolRegistry containing only the allowed tools.
-    fn build_filtered_tools(&self, allowed_tools: &[String]) -> ToolRegistry {
-        let mut filtered = ToolRegistry::new();
-        for tool_name in allowed_tools {
-            if let Some(tool) = self.tools.get(tool_name) {
-                filtered.register(tool);
-            } else {
-                tracing::warn!(tool = %tool_name, "sub-agent references unknown tool, skipping");
-            }
-        }
-        filtered
-    }
-
-    /// Create a persisted sub-session for a sub-agent invocation.
-    ///
-    /// B15: sub-sessions are top-level peers of regular sessions, sharing
-    /// the same backend. `SessionManager.create_sub_session` writes
-    /// `meta.parent_session_id` and `meta.agent_name` so recovery can
-    /// link sub-sessions back to their parent without per-parent
-    /// subdirectories. The returned `PersistHook` points at the shared
-    /// backend.
-    ///
-    /// Returns `(session_id, Some(hook))` on success, or `(random_id, None)`
-    /// if the parent is unknown or storage is unavailable — letting the
-    /// sub-agent run ephemerally.
+    /// Resolve a sub-session id. RFC v2: SessionManager.create_sub_session
+    /// is the canonical path; an empty parent yields an ephemeral id so
+    /// the caller can still run a one-shot turn without persistence.
+    #[allow(dead_code)] // kept for delegate_async legacy path
     fn open_sub_session(
         &self,
         parent_session_id: &str,
@@ -176,8 +154,6 @@ impl DelegationCoordinator {
             "creating sub-agent for delegation"
         );
 
-        let tools = self.build_filtered_tools(&config.tools);
-
         // --- worktree creation (moved BEFORE prompt so we can inject the path) ---
         let (worktree_path, cleanup_worktree, branch_name) = match config.isolation {
             AgentIsolation::Worktree => {
@@ -232,90 +208,59 @@ impl DelegationCoordinator {
             format!("{}{}", config.system_prompt, workspace_section)
         };
 
-        let (session_id, persist_hook) = self.open_sub_session(parent_session_id, &config.name);
         // session_key + reply_target args are still accepted (delegate_async
         // passes them) but no longer persisted to a marker file.
-        let _ = (session_key, reply_target);
+        let _ = (session_key, reply_target, &agent);
 
-        let mut session = Session::new(session_id);
-        // Sub-sessions inherit the parent's owner for per-user scoping.
-        session.parent_session_id = Some(parent_session_id.to_string());
-        session.agent_name = config.name.clone();
-        if let Some(ref m) = config.model {
-            session.session_override.model = Some(m.clone());
-        }
-        if let Some(hook) = persist_hook.as_ref() {
-            session.persist = Some(Arc::clone(hook));
-        }
+        // RFC §三.A line 404-419: sub-sessions flow through the unified
+        // path — SessionManager builds a SessionContext (held only by this
+        // function), session-level overrides carry the run_mode / model /
+        // identity prompt, and `process_turn` does the rest.
+        let sub_ctx = self
+            .session_manager
+            .create_sub_session_context(parent_session_id, &config.name)?;
 
-        // Build a per-sub-agent AgentRuntime: same provider registry, but a
-        // filtered ToolRegistry containing only the tools this sub-agent is
-        // allowed to call (config.tools). Skills + agents registries are
-        // empty here so the sub-agent can't recursively delegate (matches
-        // the legacy AgentLoop construction at line 263 which passed a
-        // fresh SkillManager).
-        // Build a per-sub-agent runtime with fresh executor instances.
-        // ResourceProvider is a placeholder (no memory tools for sub-agents).
-        let sub_tools = Arc::new(tools);
-        let sub_skills = Arc::new(RwLock::new(SkillManager::new()));
-        let sub_agents = Arc::new(crate::agents::AgentRegistry::new());
-        let resources = crate::agents::resource_provider::ResourceProvider::new(
-            Arc::clone(&sub_skills),
-            Arc::clone(&sub_agents),
-            Vec::new(),
-            std::path::PathBuf::new(),
-            std::path::PathBuf::new(),
-            String::new(),
-            0,
-        );
-        let context_engine = Arc::new(crate::agents::context_engine::ContextEngine::new(
-            &Default::default(),
-            Arc::clone(&self.registry),
-            resources,
-            Arc::clone(&sub_tools),
-        ));
-        let tool_executor = Arc::new(crate::agents::tool_executor::ToolExecutor::new(
-            Arc::clone(&sub_tools),
-            180,
-        ));
-        let loop_breaker = Arc::new(crate::agents::loop_breaker::LoopBreaker::new(
-            crate::agents::loop_breaker::LoopBreakerConfig::default(),
-        ));
-        let runtime = crate::agents::AgentRuntime::new(
-            Arc::clone(&self.registry),
-            sub_tools,
-            sub_skills,
-            sub_agents,
-            context_engine,
-            tool_executor,
-            loop_breaker,
-        );
-
-        // Use the canonical Arc<Agent> from the registry — the
-        // sub-agent's config already carries the tools filter +
-        // max_tool_calls + isolation.
-        tracing::debug!(agent = %config.name, "sub-agent started");
-        let turn_ctx = crate::agents::TurnContext {
-            system_prompt: &identity,
-            model_id: config.model.as_deref(),
-            thinking: None,
-            permission_mode: crate::agents::PermissionMode::Full,
-            run_mode: crate::config::agent::RunMode::Background,
-        };
-        session.add_user(task.to_string());
-        if let Some(hook) = persist_hook.as_ref() {
-            if let Some(last) = session.history.last().cloned() {
-                if let Some(id) = hook.persist_message(&session.id, &last) {
-                    if let Some(slot) = session.message_ids.last_mut() {
-                        *slot = id;
-                    }
-                }
+        {
+            let mut session = sub_ctx.session.lock().await;
+            session.session_override.run_mode =
+                Some(crate::config::agent::RunMode::Background);
+            session.session_override.permission_mode =
+                Some(crate::agents::PermissionMode::Full);
+            if let Some(ref m) = config.model {
+                session.session_override.model = Some(m.clone());
             }
+            session.session_override.system_prompt_override = Some(identity.clone());
         }
-        let result = agent
-            .run(&mut session, turn_ctx, &runtime)
+
+        // Snapshot the runtime; for worktree isolation, overlay the
+        // working directory so file tools see the worktree path.
+        let mut runtime = self.runtime()?;
+        if !worktree_path.as_os_str().is_empty() {
+            runtime.defaults.prompt.workspace_dir = worktree_path.to_string_lossy().to_string();
+        }
+
+        // Synthetic ChannelMessage carries the delegated task. No channel
+        // — sub-agent output is returned to the parent's tool call via
+        // the TurnResult text.
+        let synthetic = crate::channels::ChannelMessage {
+            id: format!("delegation:{}", task_id),
+            sender: format!("agent:{}", config.name),
+            reply_target: String::new(),
+            content: task.to_string(),
+            timestamp: chrono::Utc::now().timestamp() as u64,
+            thread_ts: None,
+            interruption_scope_id: None,
+            attachments: Vec::new(),
+            image_urls: None,
+            image_base64: None,
+        };
+
+        tracing::debug!(agent = %config.name, "sub-agent started");
+        let result = sub_ctx
+            .process_turn(synthetic, None, runtime)
             .await
             .map(|tr| tr.text);
+
         match &result {
             Ok(text) => tracing::debug!(agent = %config.name, text_len = text.len(), "sub-agent completed"),
             Err(e) => tracing::warn!(agent = %config.name, err = %e, "sub-agent failed"),
@@ -433,13 +378,7 @@ impl DelegationCoordinator {
             "spawning sub-agent in background"
         );
 
-        let configs = self.configs.clone();
-        let registry = self.registry.clone();
-        let tools = self.tools.clone();
-        let skills = self.skills.clone();
-        let default_max_tool_calls = self.default_max_tool_calls;
-        let session_manager = Arc::clone(&self.session_manager);
-        let worktrees_root = self.worktrees_root.clone();
+        let sub_delegator = self.clone();
         let task_owned = task.to_string();
         let parent_session_id_owned = parent_session_id.to_string();
         let session_key_owned = parent_session_id.to_string();
@@ -450,16 +389,6 @@ impl DelegationCoordinator {
 
         let handle = tokio::spawn(async move {
             let start_time = std::time::Instant::now();
-
-            let sub_delegator = DelegationCoordinator {
-                configs,
-                registry,
-                tools,
-                skills,
-                default_max_tool_calls,
-                session_manager,
-                worktrees_root,
-            };
 
             let result = sub_delegator
                 .delegate_with_parent(

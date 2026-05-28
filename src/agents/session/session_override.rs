@@ -34,6 +34,13 @@ pub struct SessionOverride {
     /// Override number of recent work units to retain during compaction.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retain_work_units: Option<usize>,
+    /// Replace the assembled system prompt with this string. Used by
+    /// `DelegationCoordinator` so sub-agent turns can run through
+    /// `SessionContext::process_turn` while still seeing their
+    /// minimal AGENT.md identity prompt instead of the full builder
+    /// output. Not persisted — set per-context-lifecycle.
+    #[serde(skip)]
+    pub system_prompt_override: Option<String>,
 }
 
 impl SessionOverride {
@@ -47,6 +54,7 @@ impl SessionOverride {
             && self.max_tool_calls.is_none()
             && self.compact_threshold.is_none()
             && self.retain_work_units.is_none()
+            && self.system_prompt_override.is_none()
     }
 
     /// Resolve the optional thinking/effort fields into a `ThinkingConfig`.

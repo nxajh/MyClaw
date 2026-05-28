@@ -138,7 +138,14 @@ impl SessionContext {
             prompt_config.run_mode = rm;
         }
 
-        let system_prompt = runtime.build_system_prompt(&prompt_config);
+        // Sub-agent delegations set `system_prompt_override` to bypass
+        // the full SystemPromptBuilder (sub-agents want a minimal
+        // AGENT.md-derived identity prompt, not the full behavioral
+        // ruleset).
+        let system_prompt = match &session_override.system_prompt_override {
+            Some(custom) => custom.clone(),
+            None => runtime.build_system_prompt(&prompt_config),
+        };
 
         // RFC §三.A line 312-323: process_turn computes the attachment
         // delta (skills/agents/MCP/memory/date/autonomy) against the

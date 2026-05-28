@@ -422,6 +422,41 @@ impl SessionManager {
         Some(self.get_or_create(&info.owner))
     }
 
+    /// Per RFC §三.A line 412: build a sub-session SessionContext that
+    /// is NOT registered in the `contexts` table — the caller holds the
+    /// only Arc and drops it when the delegation finishes. The bound
+    /// Session.session_override is left empty; the caller (typically
+    /// `DelegationCoordinator`) populates it (run_mode = Background,
+    /// permission_mode = Full, system_prompt_override = identity prompt)
+    /// before calling `process_turn`.
+    pub fn create_sub_session_context(
+        &self,
+        parent_session_id: &str,
+        agent_name: &str,
+    ) -> std::io::Result<Arc<SessionContext>> {
+        let info = self.create_sub_session(parent_session_id, agent_name)?;
+        // Load the freshly-created session through the standard get_or_create
+        // path — owner is resolved from backend metadata.
+        let owner = self
+            .backend
+            .get_session(&info.id)
+            .map(|s| s.owner)
+            .unwrap_or_else(|| parent_session_id.to_string());
+        let mut session = self.get_or_create(&owner);
+        if session.id != info.id {
+            // get_or_create returned the routing_key's active session, not
+            // the sub-session we just made. Load explicitly via owner +
+            // sub-session id: backend.load_messages on the sub-session id.
+            session = crate::agents::session::types::Session::new(info.id.clone());
+            session.owner = owner;
+            session.parent_session_id = Some(parent_session_id.to_string());
+            session.agent_name = agent_name.to_string();
+        }
+        session.persist = Some(self.build_persist_hook());
+        let agent = self.build_agent_for_session(&session);
+        Ok(Arc::new(SessionContext::new(session, agent)))
+    }
+
     /// Create a sub-session that delegates work back to its parent for routing
     /// (replies go through parent.last_message.reply_target).
     ///
