@@ -59,13 +59,10 @@ struct SessionMeta {
     /// Per-session runtime overrides (JSON-encoded SessionOverride).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     session_override: Option<String>,
-    /// Last reply_target for this session (e.g. "c2c:<openid>", "group:<group_openid>").
-    /// Used by startup recovery to send responses to the correct target.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    last_reply_target: Option<String>,
-    /// Last incoming ChannelMessage (richer replacement for last_reply_target;
-    /// added in B12). Stored as embedded JSON so meta.json remains a single
-    /// file.
+    /// Last incoming ChannelMessage. Carries sender / reply_target /
+    /// attachments / images so startup recovery can replay the routing
+    /// context. RFC v2 §三.A made this the canonical replacement for
+    /// the older standalone `last_reply_target` field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_message: Option<crate::channels::ChannelMessage>,
     /// Owning agent name. "main" for top-level sessions; sub-agent name for
@@ -254,7 +251,6 @@ impl SessionBackend for JsonFileBackend {
             compact_token_estimate: None,
             last_total_tokens: None,
             session_override: None,
-            last_reply_target: None,
             last_message: None,
             agent_name: None,
             parent_session_id: None,
@@ -521,18 +517,6 @@ impl SessionBackend for JsonFileBackend {
         self.read_meta(session_id)?.session_override
     }
 
-    fn save_reply_target(&self, session_id: &str, target: &str) -> std::io::Result<()> {
-        if let Some(mut meta) = self.read_meta(session_id) {
-            meta.last_reply_target = if target.is_empty() { None } else { Some(target.to_string()) };
-            self.write_meta(&meta)?;
-        }
-        Ok(())
-    }
-
-    fn load_reply_target(&self, session_id: &str) -> Option<String> {
-        self.read_meta(session_id)?.last_reply_target
-    }
-
     fn save_last_message(
         &self,
         session_id: &str,
@@ -540,8 +524,6 @@ impl SessionBackend for JsonFileBackend {
     ) -> std::io::Result<()> {
         if let Some(mut meta) = self.read_meta(session_id) {
             meta.last_message = Some(msg.clone());
-            // Keep legacy field in sync for readers still using it.
-            meta.last_reply_target = Some(msg.reply_target.clone());
             self.write_meta(&meta)?;
         }
         Ok(())

@@ -158,7 +158,7 @@ impl Session {
             None => return,
         };
         if let Some(ref msg) = self.last_message {
-            hook.save_reply_target(&self.id, &msg.reply_target);
+            hook.save_last_message(&self.id, msg);
         }
         if let Ok(s) = serde_json::to_string(&self.session_override) {
             hook.save_session_override(&self.id, &s);

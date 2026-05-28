@@ -122,19 +122,9 @@ pub trait SessionBackend: Send + Sync {
         None
     }
 
-    /// Persist the last reply_target for a session (e.g. "c2c:<openid>").
-    fn save_reply_target(&self, _session_id: &str, _target: &str) -> std::io::Result<()> {
-        Ok(())
-    }
-
-    /// Load persisted last reply_target for a session.
-    fn load_reply_target(&self, _session_id: &str) -> Option<String> {
-        None
-    }
-
-    /// Persist the last incoming ChannelMessage as JSON.
-    /// RFC v2 §三.A: richer than `save_reply_target` — carries sender +
-    /// attachments + images so startup recovery can replay context.
+    /// Persist the last incoming ChannelMessage as JSON. The
+    /// `reply_target` field is read back from this when recovery needs
+    /// to know where to deliver the resumed turn's response.
     fn save_last_message(
         &self,
         _session_id: &str,

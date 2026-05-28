@@ -758,9 +758,6 @@ impl Orchestrator {
                 if let Err(e) = self.persist_backend.save_last_message(&sk, &msg) {
                     tracing::warn!(session = %sk, err = %e, "failed to persist last_message");
                 }
-                if let Err(e) = self.persist_backend.save_reply_target(&sk, &reply_target) {
-                    tracing::warn!(session = %sk, err = %e, "failed to persist reply_target");
-                }
 
                 let channel = match channels.get(&channel_key).map(|r| r.clone()) {
                     Some(c) => c,
@@ -931,7 +928,8 @@ impl Orchestrator {
                 match session_ctx.agent.run_recovery(&mut session, turn_ctx, &runtime).await {
                     Ok(Some(tr)) if !tr.text.is_empty() => {
                         tracing::info!(session = %sk_owned, "startup recovery: turn completed");
-                        let recipient = persist_backend.load_reply_target(&sk_owned)
+                        let recipient = persist_backend.load_last_message(&sk_owned)
+                            .map(|m| m.reply_target)
                             .unwrap_or_else(|| {
                                 parse_session_key(&sk_owned)
                                     .map(|(_, _, sender)| sender.to_string())
