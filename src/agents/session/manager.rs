@@ -8,6 +8,7 @@ use dashmap::DashMap;
 
 use crate::agents::agent_registry::AgentRegistry;
 use crate::agents::session_context::SessionContext;
+use crate::agents::user_profile::UserResolver;
 use crate::agents::Agent;
 use crate::config::sub_agent::SubAgentConfig;
 
@@ -62,9 +63,13 @@ pub struct SessionManager {
     /// AgentRegistry used to resolve `Session.agent_name` to an
     /// `Arc<Agent>` when building SessionContexts. Defaults to an
     /// empty registry for test-only managers; production daemons
-    /// install the workspace-loaded registry via `with_agent_registry`.
+    /// install the workspace-loaded registry via `with_agents`.
     /// Stored as `Arc` so it stays in sync with AgentRuntime's view.
     agents: Arc<AgentRegistry>,
+    /// User resolver — maps routing_key → user_id for per-user paths
+    /// (profile, memory). Held here so `list_sessions_for_user` and
+    /// future per-user lookups don't need to take it as a parameter.
+    resolver: Arc<UserResolver>,
 }
 
 impl SessionManager {
@@ -75,6 +80,7 @@ impl SessionManager {
             active: RwLock::new(HashMap::new()),
             contexts: DashMap::new(),
             agents: Arc::new(AgentRegistry::new()),
+            resolver: Arc::new(UserResolver::new()),
         }
     }
 
@@ -85,6 +91,19 @@ impl SessionManager {
     pub fn with_agents(mut self, agents: Arc<AgentRegistry>) -> Self {
         self.agents = agents;
         self
+    }
+
+    /// Install the shared UserResolver. The daemon shares the same
+    /// `Arc<UserResolver>` between SessionManager and other components
+    /// that need routing_key → user_id mappings.
+    pub fn with_resolver(mut self, resolver: Arc<UserResolver>) -> Self {
+        self.resolver = resolver;
+        self
+    }
+
+    /// Borrow the installed resolver.
+    pub fn resolver(&self) -> &Arc<UserResolver> {
+        &self.resolver
     }
 
     pub fn in_memory() -> Self {
@@ -205,15 +224,15 @@ impl SessionManager {
             last_total_tokens,
             session_override,
             incomplete_turn: false,
-            breakpoint_items: breakpoints,
             last_message: self.backend.load_last_message(&session_id),
             token_tracker: crate::agents::tokens::TokenTracker::new(),
             persist: None,
             channel: None,
         };
-
-        // Breakpoint items are kept for diagnostics, but recovery is now handled
-        // automatically by `recover_incomplete_turn` in run.rs — no prompt injection needed.
+        // Breakpoints are detected purely for the incomplete-turn flag below;
+        // recovery itself is handled by `Agent::run_recovery` (which re-reads
+        // history) so we don't carry the detected items on the Session.
+        let _ = breakpoints;
 
         // 4. Detect incomplete turn (last message is user without assistant reply).
         //    Only check the most recent turn — earlier orphan user messages are
@@ -379,12 +398,11 @@ impl SessionManager {
     /// the per-human aggregation needed by the `/sessions` slash command.
     pub fn list_sessions_for_user(
         &self,
-        resolver: &crate::agents::UserResolver,
         user_id: &str,
     ) -> Vec<SessionInfo> {
         let mut seen = std::collections::HashSet::<String>::new();
         let mut out = Vec::new();
-        for rk in resolver.routing_keys_for(user_id) {
+        for rk in self.resolver.routing_keys_for(user_id) {
             for info in self.list_sessions(&rk) {
                 if seen.insert(info.id.clone()) {
                     out.push(info);

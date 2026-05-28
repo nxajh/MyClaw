@@ -7,7 +7,6 @@ use crate::channels::{Channel, ChannelMessage};
 use crate::providers::capability_chat::ChatMessage;
 use super::backend::PersistHook;
 use super::session_override::SessionOverride;
-use super::recovery::BreakpointItem;
 
 /// Summary metadata stored in Session memory (no text parsing needed).
 #[derive(Debug, Clone)]
@@ -64,11 +63,6 @@ pub struct Session {
     /// orchestrator will prompt the user to retry or abort on the next
     /// interaction. Not persisted — rebuilt on every session load.
     pub incomplete_turn: bool,
-    /// Tool calls that were pending when the session was interrupted
-    /// (assistant emitted tool_calls but no tool results were persisted).
-    /// Detected on session load; used by the orchestrator to inject a
-    /// recovery prompt so the model can re-execute the missing tools.
-    pub breakpoint_items: Vec<BreakpointItem>,
     /// Last incoming ChannelMessage. Carries sender, reply_target, attachments,
     /// images. Persisted so startup recovery can reconstruct the routing
     /// context and resume an interrupted turn. RFC v2 §三.A replaces the old
@@ -103,7 +97,6 @@ impl std::fmt::Debug for Session {
             .field("compact_version", &self.compact_version)
             .field("last_total_tokens", &self.last_total_tokens)
             .field("incomplete_turn", &self.incomplete_turn)
-            .field("breakpoint_items", &self.breakpoint_items.len())
             .field("has_last_message", &self.last_message.is_some())
             .field("has_persist", &self.persist.is_some())
             .field("has_channel", &self.channel.is_some())
@@ -125,7 +118,6 @@ impl Session {
             last_total_tokens: None,
             session_override: SessionOverride::default(),
             incomplete_turn: false,
-            breakpoint_items: Vec::new(),
             last_message: None,
             token_tracker: TokenTracker::new(),
             persist: None,

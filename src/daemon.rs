@@ -724,7 +724,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let session_backend = build_session_backend(&config);
     let session_manager = Arc::new(
         SessionManager::new(Arc::clone(&session_backend))
-            .with_agents(Arc::clone(&sub_agent_registry)),
+            .with_agents(Arc::clone(&sub_agent_registry))
+            .with_resolver(Arc::clone(&user_resolver)),
     );
 
     // ── Sub-agent delegator (conditional) ──────────────────────────────────────
