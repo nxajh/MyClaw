@@ -27,6 +27,7 @@ const CHANNEL_QUEUE_SIZE: usize = 100;
 // ── User-facing message strings ────────────────────────────────────────────────
 const MSG_NO_PENDING_RETRY: &str = "没有待重试的消息，请重新发送。";
 const MSG_ABORT_ACK: &str = "已取消";
+const MSG_TURN_FAILED: &str = "⚠️ 处理超时，未收到模型回复。";
 const MSG_INCOMPLETE_TURN: &str = "⚠️ 检测到上次请求未处理完成（可能是服务重启）。\n\n请选择重试或放弃。";
 const BTN_RETRY: &str = "🔄 重试";
 const BTN_ABORT: &str = "✖ 放弃";
@@ -705,7 +706,7 @@ impl Orchestrator {
                 let session_ctx = self.session_manager.get_or_create_context(&sk);
                 let runtime = self.agent_runtime.clone();
                 let inbound_msg = msg.clone();
-                let _ = (image_urls, image_base64, reply_to_id);
+                let _ = (image_urls, image_base64, reply_to_id, content);
 
                 tokio::spawn(async move {
                     // image_urls / image_base64 are attached via
@@ -713,9 +714,23 @@ impl Orchestrator {
                     // upstream); Agent.run reads them from there.
                     // reply_to_id is unused — channels send replies in-line
                     // without thread context for now.
-                    session_ctx
-                        .process_turn(inbound_msg, content, channel, reply_target, runtime)
+                    let result = session_ctx
+                        .process_turn(inbound_msg, Some(channel.clone()), runtime)
                         .await;
+                    match result {
+                        Ok(turn_result) => {
+                            if !turn_result.text.trim().is_empty() {
+                                let send_msg = SendMessage::new(turn_result.text, reply_target);
+                                if let Err(e) = channel.send(&send_msg).await {
+                                    tracing::error!(err = %e, "send response failed");
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            let send_msg = SendMessage::new(MSG_TURN_FAILED, reply_target);
+                            let _ = channel.send(&send_msg).await;
+                        }
+                    }
                 });
 
             }
@@ -1109,69 +1124,47 @@ async fn run_scheduled_turn(
     prompt: &str,
     model_override: Option<String>,
 ) -> anyhow::Result<String> {
-    let model_override_for_init = model_override.clone();
+    // Get-or-create the SessionContext, forcing Background run_mode on
+    // first materialization. Per-call model override is applied on
+    // every invocation so cron jobs that change `model` mid-stream are
+    // honored on the next turn.
+    let model_for_init = model_override.clone();
     let session_ctx = orch.session_manager.get_or_create_context_with(
         session_key,
         move |session| {
             session.session_override.run_mode =
                 Some(crate::config::agent::RunMode::Background);
-            if let Some(m) = model_override_for_init {
+            if let Some(m) = model_for_init {
                 session.session_override.model = Some(m);
             }
         },
     );
-
-    let runtime = orch.agent_runtime.clone();
-    let prompt_config_base = orch.agent_runtime.defaults.prompt.clone();
-    let persist_hook: Arc<dyn PersistHook> = Arc::new(
-        BackendPersistHook::new(Arc::clone(orch.session_manager.backend()))
-    );
-
-    let _turn_guard = session_ctx.turn_lock.lock().await;
-    let mut session = session_ctx.session.lock().await;
-
-    // Apply per-call model override.
-    if let Some(m) = model_override.as_ref() {
+    if let Some(ref m) = model_override {
+        let mut session = session_ctx.session.lock().await;
         session.session_override.model = Some(m.clone());
     }
 
-    // Wire transient handles for this turn (no channel — scheduled
-    // tasks deliver via send_to_target_internal after the turn).
-    session.persist = Some(persist_hook.clone());
-
-    // Resolve TurnContext.
-    let session_override = session.session_override.clone();
-    let mut prompt_config = prompt_config_base.clone();
-    if let Some(pm) = session_override.permission_mode {
-        prompt_config.permission_mode = pm;
-    }
-    if let Some(rm) = session_override.run_mode {
-        prompt_config.run_mode = rm;
-    }
-    let system_prompt = runtime.build_system_prompt(&prompt_config);
-
-    session.add_user(prompt.to_string());
-    if let Some(last) = session.history.last().cloned() {
-        if let Some(id) = persist_hook.persist_message(&session.id, &last) {
-            if let Some(slot) = session.message_ids.last_mut() {
-                *slot = id;
-            }
-        }
-    }
-
-    let thinking = session_override.to_thinking_config();
-    let model_id = session_override.model.as_deref();
-    let turn_ctx = crate::agents::TurnContext {
-        system_prompt: &system_prompt,
-        model_id,
-        thinking: thinking.as_ref(),
-        permission_mode: prompt_config.permission_mode,
-        run_mode: prompt_config.run_mode,
+    // Synthetic ChannelMessage so process_turn drives the same code path
+    // as user inbound turns. No channel — scheduled output is delivered
+    // by the caller via `send_to_target_internal` after process_turn
+    // returns.
+    let inbound = ChannelMessage {
+        id: format!("scheduled:{}", session_key),
+        sender: format!("scheduler:{}", session_key),
+        reply_target: String::new(),
+        content: prompt.to_string(),
+        timestamp: chrono::Utc::now().timestamp() as u64,
+        thread_ts: None,
+        interruption_scope_id: None,
+        attachments: Vec::new(),
+        image_urls: None,
+        image_base64: None,
     };
-
-    let res = session_ctx.agent.run(&mut session, turn_ctx, &runtime).await;
-    session.persist = None;
-    res.map(|tr| tr.text)
+    let runtime = orch.agent_runtime.clone();
+    session_ctx
+        .process_turn(inbound, None, runtime)
+        .await
+        .map(|tr| tr.text)
 }
 
 /// Execute a heartbeat turn as an independent spawned task.

@@ -19,14 +19,9 @@ use tokio::sync::Mutex;
 
 use crate::agents::attachment::AttachmentManager;
 use crate::agents::session::Session;
+use crate::agents::turn::TurnResult;
 use crate::agents::{Agent, AgentRuntime, TurnContext, UserProfile};
-use crate::channels::{Channel, ChannelMessage, SendMessage};
-
-/// Sent when the per-turn `Agent.run` returns Err. Mirrors the same
-/// short notice the old AgentLoop surfaced — anyhow::Error strings can
-/// leak internal paths, tool args, and stack hints, so we never forward
-/// them verbatim to the user.
-const MSG_TURN_FAILED: &str = "⚠️ 处理超时，未收到模型回复。";
+use crate::channels::{Channel, ChannelMessage};
 
 /// Per-session bundle held by the SessionManager's session-context table.
 ///
@@ -94,37 +89,39 @@ impl SessionContext {
         self.session.lock().await.clone()
     }
 
-    /// Run one user turn end-to-end: acquire the turn lock, append the
-    /// user message, resolve TurnContext from the session override, invoke
-    /// `Agent.run`, then dispatch the response (or error notice) back to
-    /// the channel. This is the canonical per-turn entry point — the
-    /// Orchestrator's inbound dispatch path spawns this on a background
-    /// task per message so the main event loop stays unblocked.
+    /// Run one turn end-to-end: acquire the turn lock, replay the
+    /// inbound message, resolve `TurnContext` from the session override,
+    /// invoke `Agent.run`, and return the result. The caller is
+    /// responsible for dispatching the response — user-message paths
+    /// send via `channel.send`; scheduled paths route through the
+    /// scheduler's `send_to_target_internal`.
     ///
-    /// `inbound_msg` is replayed into `Session.record_inbound` against the
-    /// canonical session held by this context (the upstream `SessionManager`
-    /// cache copy was updated earlier; this keeps the two in sync).
-    /// `content` is the user-visible text that gets appended via
-    /// `Session::add_user`.
+    /// `channel` is `Some` when an originating channel exists (user
+    /// turn or scheduler turn with a "last channel" handle). It's
+    /// stored on `session.channel` so per-turn tools like `ask_user`
+    /// can reach it; `None` means tools requiring a channel will error.
+    ///
+    /// On `Ok(TurnResult)`, the caller may inspect `text` /
+    /// `pending_retry`. The latter is also stashed on
+    /// `SessionContext.pending_retry` here so the next inbound for the
+    /// same session can offer a retry prompt.
     pub async fn process_turn(
         self: &Arc<Self>,
         inbound_msg: ChannelMessage,
-        content: String,
-        channel: Arc<dyn Channel>,
-        reply_target: String,
+        channel: Option<Arc<dyn Channel>>,
         runtime: AgentRuntime,
-    ) {
+    ) -> anyhow::Result<TurnResult> {
         let _turn_guard = self.turn_lock.lock().await;
         let mut session = self.session.lock().await;
 
+        let content = inbound_msg.content.clone();
         session.record_inbound(inbound_msg);
 
         // Session.persist was wired at SessionContext creation by
         // SessionManager; capture a clone so the post-turn `add_user`
-        // persistence call sees the same hook even if the field is
-        // cleared at end of turn.
+        // persistence call sees the same hook.
         let persist_hook = session.persist.clone();
-        session.channel = Some(channel.clone());
+        session.channel = channel;
 
         let session_override = session.session_override.clone();
         let mut prompt_config = runtime.defaults.prompt.clone();
@@ -159,37 +156,20 @@ impl SessionContext {
         };
 
         let result = self.agent.run(&mut session, turn_ctx, &runtime).await;
+        // Per-turn channel is transient; persist hook stays set.
+        session.channel = None;
+
         match result {
             Ok(turn_result) => {
-                if !turn_result.text.trim().is_empty() {
-                    let send_msg = SendMessage {
-                        content: turn_result.text,
-                        recipient: reply_target,
-                        subject: None,
-                        thread_ts: None,
-                        cancellation_token: None,
-                        attachments: vec![],
-                        image_urls: None,
-                        inline_buttons: None,
-                    };
-                    if let Err(e) = channel.send(&send_msg).await {
-                        tracing::error!(session = %session.id, err = %e, "send response failed");
-                    }
+                if let Some(ref retry_msg) = turn_result.pending_retry {
+                    *self.pending_retry.lock().await = Some(retry_msg.clone());
                 }
-                if let Some(retry_msg) = turn_result.pending_retry {
-                    *self.pending_retry.lock().await = Some(retry_msg);
-                }
+                Ok(turn_result)
             }
             Err(e) => {
                 tracing::error!(session = %session.id, err = %e, "Agent turn failed");
-                let send_msg = SendMessage::new(MSG_TURN_FAILED, reply_target);
-                let _ = channel.send(&send_msg).await;
+                Err(e)
             }
         }
-
-        // session.persist stays set across turns — SessionManager wires
-        // it once at SessionContext creation. Only the per-turn channel
-        // handle is cleared.
-        session.channel = None;
     }
 }

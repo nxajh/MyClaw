@@ -990,9 +990,10 @@ fn parse_hhmm(s: &str) -> Option<u32> {
 
 // ── Webhook execution helpers ──────────────────────────────────────────────
 
-/// Execute one webhook turn via Agent + SessionContext. Mirrors the
-/// orchestrator's run_scheduled_turn but lives here because the webhook
-/// server task doesn't have a direct Orchestrator reference.
+/// Execute one webhook turn via `SessionContext::process_turn`. Same
+/// unified entry point as the orchestrator's run_scheduled_turn —
+/// scheduled output (no channel during the turn) is dispatched by the
+/// webhook caller via `send_to_target` after this returns.
 pub async fn run_scheduled_task(
     ctx: &WebhookContext,
     session_key: &str,
@@ -1006,50 +1007,23 @@ pub async fn run_scheduled_task(
         },
     );
 
-    let agent_runtime = ctx.orchestrator.agent_runtime();
-    let runtime = agent_runtime.clone();
-    let prompt_config_base = agent_runtime.defaults.prompt.clone();
-    let persist_hook: Arc<dyn crate::agents::PersistHook> = Arc::new(
-        crate::agents::BackendPersistHook::new(Arc::clone(ctx.orchestrator.persist_backend()))
-    );
-
-    let _turn_guard = session_ctx.turn_lock.lock().await;
-    let mut session = session_ctx.session.lock().await;
-
-    session.persist = Some(persist_hook.clone());
-
-    let session_override = session.session_override.clone();
-    let mut prompt_config = prompt_config_base.clone();
-    if let Some(pm) = session_override.permission_mode {
-        prompt_config.permission_mode = pm;
-    }
-    if let Some(rm) = session_override.run_mode {
-        prompt_config.run_mode = rm;
-    }
-    let system_prompt = runtime.build_system_prompt(&prompt_config);
-
-    session.add_user(prompt.to_string());
-    if let Some(last) = session.history.last().cloned() {
-        if let Some(id) = persist_hook.persist_message(&session.id, &last) {
-            if let Some(slot) = session.message_ids.last_mut() {
-                *slot = id;
-            }
-        }
-    }
-
-    let thinking = session_override.to_thinking_config();
-    let model_id = session_override.model.as_deref();
-    let turn_ctx = crate::agents::TurnContext {
-        system_prompt: &system_prompt,
-        model_id,
-        thinking: thinking.as_ref(),
-        permission_mode: prompt_config.permission_mode,
-        run_mode: prompt_config.run_mode,
+    let inbound = crate::channels::ChannelMessage {
+        id: format!("webhook:{}", session_key),
+        sender: format!("webhook:{}", session_key),
+        reply_target: String::new(),
+        content: prompt.to_string(),
+        timestamp: chrono::Utc::now().timestamp() as u64,
+        thread_ts: None,
+        interruption_scope_id: None,
+        attachments: Vec::new(),
+        image_urls: None,
+        image_base64: None,
     };
-
-    let res = session_ctx.agent.run(&mut session, turn_ctx, &runtime).await;
-    session.persist = None;
-    res.map(|tr| tr.text)
+    let runtime = ctx.orchestrator.agent_runtime().clone();
+    session_ctx
+        .process_turn(inbound, None, runtime)
+        .await
+        .map(|tr| tr.text)
 }
 
 
