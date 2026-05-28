@@ -6,7 +6,6 @@
 use crate::agents::AgentRuntime;
 use crate::agents::mcp_manager::McpManager;
 use crate::agents::session::{SessionManager, SessionOverride};
-use dashmap::DashMap;
 use std::sync::Arc;
 
 mod config;
@@ -35,9 +34,6 @@ pub struct CommandContext<'a> {
     pub session_ctx: Option<&'a Arc<crate::agents::SessionContext>>,
     /// MCP manager (for /mcp command).
     pub mcp_manager: Option<&'a Arc<McpManager>>,
-    /// SessionContext cache — needed by /new and /switch to evict the
-    /// cached SessionContext when the active session changes.
-    pub session_contexts: &'a DashMap<String, Arc<crate::agents::SessionContext>>,
     /// Search provider cooldown tracker (for /status command).
     pub search_cooldown: Option<&'a Arc<crate::tools::search_cooldown::SearchProviderCooldown>>,
 }

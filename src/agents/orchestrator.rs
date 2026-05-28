@@ -71,10 +71,10 @@ pub type ChannelMsgSender = mpsc::Sender<((String, String), ChannelMessage)>;
 pub struct Orchestrator {
     /// Channels, keyed by (channel_type, account_id).
     channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
-    /// RFC v2 §三.A: per-session bundle holding `Arc<Mutex<Session>>` +
-    /// turn_lock + attachments + pending_retry + user_profile. Populated
-    /// lazily from SessionManager on first inbound for a routing_key.
-    session_contexts: Arc<DashMap<String, Arc<SessionContext>>>,
+    /// SessionManager owns the SessionContext table — see
+    /// `SessionManager::get_or_create_context`. The Orchestrator no longer
+    /// keeps its own copy; reach for `session_manager.get_context(rk)` or
+    /// `get_or_create_context(rk)` instead.
     session_manager: Arc<SessionManager>,
     /// The message receiver, owned and consumed by run().
     #[allow(clippy::type_complexity)]
@@ -121,10 +121,11 @@ pub struct Orchestrator {
 }
 
 /// Resources shared between Orchestrator and scheduler tasks.
+///
+/// SessionContext lookup now lives on `SessionManager` (1:1 invariant);
+/// callers that previously held an `Arc<DashMap<_, Arc<SessionContext>>>`
+/// reach for `session_manager.get_or_create_context(rk)` instead.
 pub struct SharedSessions {
-    /// SessionContext map (Agent dispatch path). Shared with webhook
-    /// server + future scheduler tasks.
-    pub session_contexts: Arc<DashMap<String, Arc<SessionContext>>>,
     /// AgentRuntime for Agent dispatch in webhook tasks.
     pub agent_runtime: crate::agents::AgentRuntime,
     pub channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
@@ -261,7 +262,6 @@ impl Orchestrator {
 
         let orchestrator = Orchestrator {
             channels: channels_map,
-            session_contexts: Arc::new(DashMap::new()),
             session_manager: parts.session_manager,
             msg_rx: Arc::new(TokioMutex::new(Some(msg_rx))),
             listener_handles,
@@ -288,7 +288,6 @@ impl Orchestrator {
     /// Get shared resources for scheduler tasks.
     pub fn shared(&self) -> SharedSessions {
         SharedSessions {
-            session_contexts: self.session_contexts.clone(),
             agent_runtime: self.agent_runtime.clone(),
             channels: self.channels.clone(),
             last_channel: self.last_channel.clone(),
@@ -377,13 +376,7 @@ impl Orchestrator {
     }
 
     fn session_context_for(&self, sk: &str) -> Arc<SessionContext> {
-        if let Some(existing) = self.session_contexts.get(sk) {
-            return existing.clone();
-        }
-        let session = self.session_manager.get_or_create(sk);
-        let ctx = Arc::new(SessionContext::new(session));
-        self.session_contexts.insert(sk.to_string(), ctx.clone());
-        ctx
+        self.session_manager.get_or_create_context(sk)
     }
 
     /// Main message loop. Consumes self.msg_rx.
@@ -699,12 +692,11 @@ impl Orchestrator {
                         let sk_cmd        = sk.clone();
                         let cmd_owned     = cmd.to_string();
                         let cmd_args_owned = cmd_args.to_string();
-                        let session_ctx_cmd = self.session_contexts.get(&sk).map(|r| r.clone());
+                        let session_ctx_cmd = self.session_manager.get_context(&sk);
                         let registry_cmd  = Arc::clone(&self.agent_runtime.providers);
                         let sm_cmd        = self.session_manager.clone();
                         let runtime_cmd   = self.agent_runtime.clone();
                         let mcp_cmd       = self.mcp_manager.clone();
-                        let session_contexts_cmd = self.session_contexts.clone();
                         let cooldown_cmd  = self.search_cooldown.clone();
                         let channel_cmd   = channels.get(&channel_key).map(|r| r.clone());
                         let rt_cmd        = reply_target.clone();
@@ -718,7 +710,6 @@ impl Orchestrator {
                                 runtime:        &runtime_cmd,
                                 session_ctx:    session_ctx_cmd.as_ref(),
                                 mcp_manager:    mcp_cmd.as_ref(),
-                                session_contexts: &session_contexts_cmd,
                                 search_cooldown: cooldown_cmd.as_ref(),
                             };
                             if let Some(response) = super::commands::dispatch(
@@ -844,7 +835,6 @@ impl Orchestrator {
 
                 // Spawn: LLM execution runs independently of the main loop.
                 let ctx = SchedulerContext {
-                    session_contexts: self.session_contexts.clone(),
                     session_manager: self.session_manager.clone(),
                     persist_backend: self.persist_backend.clone(),
                     agent_runtime: self.agent_runtime.clone(),
@@ -866,7 +856,6 @@ impl Orchestrator {
             SchedulerEvent::Cron { session_key, prompt, target_channel, target_account, job_id, delivery, enabled_tools, disabled_tools, model, provider } => {
                 tracing::debug!(session_key = %session_key, "cron job triggered (from scheduler)");
                 let ctx = SchedulerContext {
-                    session_contexts: self.session_contexts.clone(),
                     session_manager: self.session_manager.clone(),
                     persist_backend: self.persist_backend.clone(),
                     agent_runtime: self.agent_runtime.clone(),
@@ -1210,11 +1199,7 @@ pub(crate) fn is_silent_ok(response: &str, prefix: &str) -> bool {
 /// Shared resources for spawned scheduler tasks (heartbeat/cron).
 ///
 /// Shared resources for scheduled-turn spawned tasks (heartbeat + cron).
-/// `agent` is kept only for `prompt_config` / `cached_system_prompt`
-/// fallback while the legacy Agent factory exists; H45 cleanup will
-/// replace it with prompt-resolution data on `AgentRuntime`.
 struct SchedulerContext {
-    session_contexts: Arc<DashMap<String, Arc<SessionContext>>>,
     session_manager: Arc<SessionManager>,
     persist_backend: Arc<dyn crate::storage::SessionBackend>,
     agent_runtime: crate::agents::AgentRuntime,
@@ -1229,29 +1214,29 @@ struct SchedulerContext {
 /// the assistant's text response, or an Err.
 ///
 /// `session_key` is a routing_key — synthetic ("_heartbeat_<uuid>") for
-/// heartbeats, real-looking for cron. The SessionContext is created or
-/// reused via the orchestrator's session_contexts map (passed through
-/// SchedulerContext). Session.session_override.run_mode is forced to
-/// Background to inform the prompt builder.
+/// heartbeats, real-looking for cron. The SessionContext comes from
+/// `SessionManager.get_or_create_context` or, on first use, is built
+/// with `session_override.run_mode = Background` so the prompt builder
+/// knows this is unattended work.
 async fn run_scheduled_turn(
     ctx: &SchedulerContext,
     session_key: &str,
     prompt: &str,
     model_override: Option<String>,
 ) -> anyhow::Result<String> {
-    // Get or create a SessionContext for this scheduled session.
-    let session_ctx = if let Some(existing) = ctx.session_contexts.get(session_key) {
-        existing.clone()
-    } else {
-        let mut session = ctx.session_manager.get_or_create(session_key);
-        session.session_override.run_mode =
-            Some(crate::config::agent::RunMode::Background);
-        if let Some(m) = model_override.clone() {
-            session.session_override.model = Some(m);
+    let session_ctx = match ctx.session_manager.get_context(session_key) {
+        Some(existing) => existing,
+        None => {
+            let mut session = ctx.session_manager.get_or_create(session_key);
+            session.session_override.run_mode =
+                Some(crate::config::agent::RunMode::Background);
+            if let Some(m) = model_override.clone() {
+                session.session_override.model = Some(m);
+            }
+            let sc = Arc::new(SessionContext::new(session));
+            ctx.session_manager.register_context(session_key, sc.clone());
+            sc
         }
-        let sc = Arc::new(SessionContext::new(session));
-        ctx.session_contexts.insert(session_key.to_string(), sc.clone());
-        sc
     };
 
     let runtime = ctx.agent_runtime.clone();

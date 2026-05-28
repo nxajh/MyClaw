@@ -857,13 +857,11 @@ fn generate_id() -> String {
 /// Resources needed by the webhook server to run agent tasks.
 /// Heartbeat and cron use the Orchestrator event path instead.
 pub struct WebhookContext {
-    /// AgentRuntime for Agent dispatch (H45 transition).
+    /// AgentRuntime for Agent dispatch.
     pub agent_runtime: crate::agents::AgentRuntime,
     pub channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
-    /// Shared SessionContext map (same Arc as Orchestrator's
-    /// session_contexts) for the Agent dispatch path.
-    pub session_contexts: Arc<DashMap<String, Arc<crate::agents::SessionContext>>>,
-    /// Shared session manager — avoids creating throwaway instances per request.
+    /// SessionManager owns the SessionContext table — see
+    /// `SessionManager.get_or_create_context`.
     pub session_manager: Arc<crate::agents::session::SessionManager>,
     /// Backend kept separately for persist hooks (BackendPersistHook needs it).
     pub session_backend: Arc<dyn SessionBackend>,
@@ -962,15 +960,16 @@ pub async fn run_scheduled_task(
     session_key: &str,
     prompt: &str,
 ) -> anyhow::Result<String> {
-    let session_ctx = if let Some(existing) = ctx.session_contexts.get(session_key) {
-        existing.clone()
-    } else {
-        let mut session = ctx.session_manager.get_or_create(session_key);
-        session.session_override.run_mode =
-            Some(crate::config::agent::RunMode::Background);
-        let sc = Arc::new(crate::agents::SessionContext::new(session));
-        ctx.session_contexts.insert(session_key.to_string(), sc.clone());
-        sc
+    let session_ctx = match ctx.session_manager.get_context(session_key) {
+        Some(existing) => existing,
+        None => {
+            let mut session = ctx.session_manager.get_or_create(session_key);
+            session.session_override.run_mode =
+                Some(crate::config::agent::RunMode::Background);
+            let sc = Arc::new(crate::agents::SessionContext::new(session));
+            ctx.session_manager.register_context(session_key, sc.clone());
+            sc
+        }
     };
 
     let runtime = ctx.agent_runtime.clone();

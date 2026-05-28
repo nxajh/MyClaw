@@ -4,6 +4,10 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
+use dashmap::DashMap;
+
+use crate::agents::session_context::SessionContext;
+
 /// Returned by `switch_session` when the caller tries to point a routing_key
 /// at a session that doesn't belong to it.
 ///
@@ -48,6 +52,10 @@ pub struct SessionManager {
     cache: RwLock<HashMap<String, Session>>,
     /// User's active session: user_id → session_id.
     active: RwLock<HashMap<String, String>>,
+    /// Per-routing-key SessionContext. At most one SessionContext per
+    /// routing_key (the 1:1 invariant): every active routing_key has a
+    /// SessionContext that wraps its active Session.
+    contexts: DashMap<String, Arc<SessionContext>>,
 }
 
 impl SessionManager {
@@ -56,6 +64,7 @@ impl SessionManager {
             backend,
             cache: RwLock::new(HashMap::new()),
             active: RwLock::new(HashMap::new()),
+            contexts: DashMap::new(),
         }
     }
 
@@ -492,6 +501,40 @@ impl SessionManager {
         self.cache.read().get(&session_id)
             .map(|s| s.session_override.clone())
             .unwrap_or_default()
+    }
+
+    /// Look up an existing SessionContext for a routing_key. Returns
+    /// `None` if no turn has materialized one yet.
+    pub fn get_context(&self, routing_key: &str) -> Option<Arc<SessionContext>> {
+        self.contexts.get(routing_key).map(|r| r.clone())
+    }
+
+    /// Get-or-create the SessionContext for a routing_key. On miss,
+    /// loads the active Session via `get_or_create` and wraps it.
+    /// This is the canonical entry point for per-turn dispatch.
+    pub fn get_or_create_context(&self, routing_key: &str) -> Arc<SessionContext> {
+        if let Some(existing) = self.get_context(routing_key) {
+            return existing;
+        }
+        let session = self.get_or_create(routing_key);
+        let ctx = Arc::new(SessionContext::new(session));
+        self.contexts.insert(routing_key.to_string(), ctx.clone());
+        ctx
+    }
+
+    /// Register a caller-built SessionContext. Used by the
+    /// scheduler/webhook paths that need to customize
+    /// `session_override.run_mode` before wrapping the Session.
+    pub fn register_context(&self, routing_key: &str, ctx: Arc<SessionContext>) {
+        self.contexts.insert(routing_key.to_string(), ctx);
+    }
+
+    /// Drop the SessionContext for a routing_key. Called by /reset,
+    /// /autonomy, and /switch-session so the next turn rebuilds the
+    /// context (and, transitively, the cached system prompt) from
+    /// the fresh override.
+    pub fn drop_context(&self, routing_key: &str) {
+        self.contexts.remove(routing_key);
     }
 
     /// Append a message to a session and persist.

@@ -133,6 +133,6 @@ pub async fn cmd_autonomy(args: &str, ctx: CommandContext<'_>) -> String {
     apply_and_persist_override(ov, &ctx).await;
 
     // Evict the cached SessionContext so the system prompt is rebuilt with the new autonomy.
-    ctx.session_contexts.remove(ctx.user_id);
+    ctx.session_manager.drop_context(ctx.user_id);
     format!("{}\n_系统提示词将在下次请求时重建。_", msg)
 }

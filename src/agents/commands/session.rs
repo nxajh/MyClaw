@@ -7,7 +7,7 @@ pub async fn cmd_new(args: &str, ctx: CommandContext<'_>) -> String {
     let name = if args.trim().is_empty() { None } else { Some(args.trim()) };
     // Evict cached SessionContext so the next message creates fresh
     // state for the new session.
-    ctx.session_contexts.remove(ctx.user_id);
+    ctx.session_manager.drop_context(ctx.user_id);
     match ctx.session_manager.new_session(ctx.user_id, name) {
         Ok(info) => {
             let display = info.display_name.as_deref().unwrap_or("(未命名)");
@@ -213,7 +213,7 @@ pub async fn cmd_switch(args: &str, ctx: CommandContext<'_>) -> String {
     };
 
     // Evict cached SessionContext.
-    ctx.session_contexts.remove(ctx.user_id);
+    ctx.session_manager.drop_context(ctx.user_id);
 
     match ctx.session_manager.switch_session(ctx.user_id, &target.id) {
         Ok(info) => {

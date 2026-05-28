@@ -971,7 +971,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         let wh_ctx = Arc::new(crate::agents::WebhookContext {
             agent_runtime: orchestrator.shared().agent_runtime.clone(),
             channels: orchestrator.shared().channels,
-            session_contexts: orchestrator.shared().session_contexts,
             session_manager: session_manager_for_webhook,
             session_backend: session_backend.clone(),
             timezone: tz_name.clone(),
