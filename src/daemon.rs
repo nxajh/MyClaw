@@ -899,7 +899,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     };
 
     // scheduler_tx already created above; scheduler_rx goes to OrchestratorParts.
-    let session_manager_for_webhook = Arc::clone(&session_manager);
 
     // F35 / partial E29: build the AskRouter once and share between the
     // orchestrator (fulfill side) and AskUserTool::with_router (register
@@ -957,7 +956,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
     // ── Launch ─────────────────────────────────────────────────────────────
 
-    let (mut orchestrator, _msg_tx) = Orchestrator::new(parts);
+    let (orchestrator, _msg_tx) = Orchestrator::new(parts);
+    let orchestrator = Arc::new(orchestrator);
 
     // H57: AgentLoop is gone; the ClientChannel's previous loop_registry +
     // evict_loop dance to flush stale per-session AgentLoop instances on
@@ -972,12 +972,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         let wh_dir = config.workspace_dir.join("webhooks");
         let wh_jobs = crate::agents::load_webhook_jobs(&wh_dir);
         let wh_ctx = Arc::new(crate::agents::WebhookContext {
-            agent_runtime: orchestrator.shared().agent_runtime.clone(),
-            channels: orchestrator.shared().channels,
-            session_manager: session_manager_for_webhook,
-            session_backend: session_backend.clone(),
+            orchestrator: Arc::clone(&orchestrator),
             timezone: tz_name.clone(),
-            last_channel: orchestrator.shared().last_channel,
         });
         let wh_config = scheduler_config.webhook.clone();
 
@@ -1101,7 +1097,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     }
 
     // Run the message dispatch loop (blocks until shutdown).
-    orchestrator.run(shutdown_rx).await.context("orchestrator run error")?;
+    Arc::clone(&orchestrator).run(shutdown_rx).await.context("orchestrator run error")?;
 
     // Graceful shutdown.
     tracing::debug!("dispatch loop ended, shutting down listeners");

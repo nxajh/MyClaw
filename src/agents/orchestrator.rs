@@ -80,7 +80,10 @@ pub struct Orchestrator {
     #[allow(clippy::type_complexity)]
     msg_rx: Arc<TokioMutex<Option<mpsc::Receiver<((String, String), ChannelMessage)>>>>,
     /// Listener task handles — taken and awaited on shutdown.
-    listener_handles: Vec<JoinHandle<()>>,
+    /// Wrapped in a TokioMutex so `shutdown_listeners(&self)` can drain
+    /// them without requiring `&mut self` (which would block the
+    /// `Arc<Self>` sharing pattern that scheduler dispatch relies on).
+    listener_handles: Arc<TokioMutex<Vec<JoinHandle<()>>>>,
     /// AskRouter (RFC v2 §三.B): indexed by session.id, fulfilled by inbound
     /// messages ahead of process_turn. Wired here so the new
     /// `AskUserTool::with_router` path is reachable end-to-end before
@@ -264,7 +267,7 @@ impl Orchestrator {
             channels: channels_map,
             session_manager: parts.session_manager,
             msg_rx: Arc::new(TokioMutex::new(Some(msg_rx))),
-            listener_handles,
+            listener_handles: Arc::new(TokioMutex::new(listener_handles)),
             ask_router: parts.ask_router,
             agent_runtime: parts.agent_runtime,
             delegation_manager: parts.delegation_manager,
@@ -293,6 +296,33 @@ impl Orchestrator {
             last_channel: self.last_channel.clone(),
             last_recipient: self.last_recipient.clone(),
         }
+    }
+
+    /// Accessor for the webhook server's axum app state. Avoids
+    /// exposing the field directly while still letting the webhook
+    /// task reach the manager via `orchestrator.session_manager()`.
+    pub fn session_manager(&self) -> &Arc<SessionManager> {
+        &self.session_manager
+    }
+
+    /// Accessor for the AgentRuntime — used by the webhook server's
+    /// per-request Agent dispatch.
+    pub fn agent_runtime(&self) -> &crate::agents::AgentRuntime {
+        &self.agent_runtime
+    }
+
+    /// Accessor for the channels map — used by the webhook server to
+    /// resolve `target_channel:account` references at delivery time.
+    #[allow(clippy::type_complexity)]
+    pub fn channels(&self) -> &Arc<DashMap<(String, String), Arc<dyn Channel>>> {
+        &self.channels
+    }
+
+    /// Accessor for the persisted session backend (the BackendPersistHook
+    /// constructor target). Used by the webhook server to materialize a
+    /// persist hook for in-flight scheduled turns.
+    pub fn persist_backend(&self) -> &Arc<dyn crate::storage::SessionBackend> {
+        &self.persist_backend
     }
 
     fn spawn_listener(
@@ -360,7 +390,11 @@ impl Orchestrator {
 
     /// Main message loop. Consumes self.msg_rx.
     /// Call from the Composition Root; blocks until shutdown.
-    pub async fn run(&self, mut shutdown_rx: tokio::sync::watch::Receiver<bool>) -> anyhow::Result<()> {
+    ///
+    /// Takes `self: Arc<Self>` so scheduler-event spawned tasks
+    /// (heartbeat / cron) can hold an Arc reference to the orchestrator
+    /// for the duration of the LLM round-trip.
+    pub async fn run(self: Arc<Self>, mut shutdown_rx: tokio::sync::watch::Receiver<bool>) -> anyhow::Result<()> {
         let rx = {
             let mut guard = self.msg_rx.lock().await;
             guard.take().context("run() already called or msg_rx was None")?
@@ -487,7 +521,7 @@ impl Orchestrator {
 
             match event {
                 OrchestratorEvent::Scheduled(e) => {
-                    self.handle_scheduler_event(e).await;
+                    Arc::clone(&self).handle_scheduler_event(e).await;
                 }
                 OrchestratorEvent::Shutdown => {
                     tracing::info!("OrchestratorEvent::Shutdown received");
@@ -767,7 +801,7 @@ impl Orchestrator {
     /// Dispatch scheduler events by spawning independent tasks.
     /// Pre-flight checks (file read, parse, due filter) run inline to avoid
     /// unnecessary task creation; the actual LLM execution is spawned.
-    async fn handle_scheduler_event(&self, event: SchedulerEvent) {
+    async fn handle_scheduler_event(self: Arc<Self>, event: SchedulerEvent) {
         match event {
             SchedulerEvent::Heartbeat { target_channel, target_account } => {
                 tracing::debug!("heartbeat triggered (from scheduler)");
@@ -808,17 +842,8 @@ impl Orchestrator {
                 );
 
                 // Spawn: LLM execution runs independently of the main loop.
-                let ctx = SchedulerContext {
-                    session_manager: self.session_manager.clone(),
-                    persist_backend: self.persist_backend.clone(),
-                    agent_runtime: self.agent_runtime.clone(),
-                    channels: self.channels.clone(),
-                    last_channel: self.last_channel.clone(),
-                    last_recipient: self.last_recipient.clone(),
-                    scheduler: self.scheduler.clone(),
-                };
                 tokio::spawn(run_heartbeat_task(
-                    ctx,
+                    Arc::clone(&self),
                     target_channel,
                     target_account,
                     prompt,
@@ -829,17 +854,8 @@ impl Orchestrator {
             }
             SchedulerEvent::Cron { session_key, prompt, target_channel, target_account, job_id, delivery, enabled_tools, disabled_tools, model, provider } => {
                 tracing::debug!(session_key = %session_key, "cron job triggered (from scheduler)");
-                let ctx = SchedulerContext {
-                    session_manager: self.session_manager.clone(),
-                    persist_backend: self.persist_backend.clone(),
-                    agent_runtime: self.agent_runtime.clone(),
-                    channels: self.channels.clone(),
-                    last_channel: self.last_channel.clone(),
-                    last_recipient: self.last_recipient.clone(),
-                    scheduler: self.scheduler.clone(),
-                };
                 tokio::spawn(run_cron_task(
-                    ctx,
+                    Arc::clone(&self),
                     session_key,
                     prompt,
                     target_channel,
@@ -1030,8 +1046,8 @@ impl Orchestrator {
     }
 
     /// Abort all listener handles (call after run() returns).
-    pub async fn shutdown_listeners(&mut self) {
-        let handles = std::mem::take(&mut self.listener_handles);
+    pub async fn shutdown_listeners(&self) {
+        let handles = std::mem::take(&mut *self.listener_handles.lock().await);
         for h in handles {
             h.abort();
         }
@@ -1159,19 +1175,6 @@ pub(crate) fn is_silent_ok(response: &str, prefix: &str) -> bool {
     trimmed == marker
 }
 
-/// Shared resources for spawned scheduler tasks (heartbeat/cron).
-///
-/// Shared resources for scheduled-turn spawned tasks (heartbeat + cron).
-struct SchedulerContext {
-    session_manager: Arc<SessionManager>,
-    persist_backend: Arc<dyn crate::storage::SessionBackend>,
-    agent_runtime: crate::agents::AgentRuntime,
-    channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
-    last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
-    last_recipient: Arc<tokio::sync::Mutex<Option<String>>>,
-    scheduler: Option<crate::agents::SharedScheduler>,
-}
-
 /// Execute one scheduled turn (heartbeat / cron) via Agent. Shared
 /// helper extracted from run_heartbeat_task / run_cron_task. Returns
 /// the assistant's text response, or an Err.
@@ -1182,13 +1185,13 @@ struct SchedulerContext {
 /// with `session_override.run_mode = Background` so the prompt builder
 /// knows this is unattended work.
 async fn run_scheduled_turn(
-    ctx: &SchedulerContext,
+    orch: &Orchestrator,
     session_key: &str,
     prompt: &str,
     model_override: Option<String>,
 ) -> anyhow::Result<String> {
     let model_override_for_init = model_override.clone();
-    let session_ctx = ctx.session_manager.get_or_create_context_with(
+    let session_ctx = orch.session_manager.get_or_create_context_with(
         session_key,
         move |session| {
             session.session_override.run_mode =
@@ -1199,12 +1202,12 @@ async fn run_scheduled_turn(
         },
     );
 
-    let runtime = ctx.agent_runtime.clone();
-    let prompt_config_base = ctx.agent_runtime.prompt_config.clone();
-    let skills_arc = Arc::clone(&ctx.agent_runtime.skills);
-    let cached_prompt = ctx.agent_runtime.system_prompt.clone();
+    let runtime = orch.agent_runtime.clone();
+    let prompt_config_base = orch.agent_runtime.prompt_config.clone();
+    let skills_arc = Arc::clone(&orch.agent_runtime.skills);
+    let cached_prompt = orch.agent_runtime.system_prompt.clone();
     let persist_hook: Arc<dyn PersistHook> = Arc::new(
-        BackendPersistHook::new(Arc::clone(&ctx.persist_backend))
+        BackendPersistHook::new(Arc::clone(&orch.persist_backend))
     );
 
     let _turn_guard = session_ctx.turn_lock.lock().await;
@@ -1261,7 +1264,7 @@ async fn run_scheduled_turn(
 
 /// Execute a heartbeat turn as an independent spawned task.
 async fn run_heartbeat_task(
-    ctx: SchedulerContext,
+    orch: Arc<Orchestrator>,
     target_channel: Option<String>,
     target_account: Option<String>,
     prompt: String,
@@ -1270,7 +1273,7 @@ async fn run_heartbeat_task(
     state_path: std::path::PathBuf,
 ) {
     let session_key = format!("_heartbeat_{}", uuid::Uuid::new_v4());
-    let result = run_scheduled_turn(&ctx, &session_key, &prompt, None).await;
+    let result = run_scheduled_turn(&orch, &session_key, &prompt, None).await;
 
     // Update task state on success.
     if result.is_ok() {
@@ -1289,7 +1292,7 @@ async fn run_heartbeat_task(
             tracing::debug!("heartbeat: nothing needs attention");
         }
         Ok(response) if !response.trim().is_empty() => {
-            send_to_target_internal(ctx.channels, ctx.last_channel, ctx.last_recipient.clone(), target_channel, target_account, &response).await;
+            send_to_target_internal(orch.channels.clone(), orch.last_channel.clone(), orch.last_recipient.clone(), target_channel, target_account, &response).await;
         }
         Ok(_) => {}
         Err(e) => {
@@ -1301,7 +1304,7 @@ async fn run_heartbeat_task(
 /// Execute a cron job turn as an independent spawned task.
 #[allow(clippy::too_many_arguments)]
 async fn run_cron_task(
-    ctx: SchedulerContext,
+    orch: Arc<Orchestrator>,
     session_key: String,
     prompt: String,
     target_channel: Option<String>,
@@ -1314,7 +1317,7 @@ async fn run_cron_task(
     _provider: Option<String>,
 ) {
     let start = std::time::Instant::now();
-    let result = run_scheduled_turn(&ctx, &session_key, &prompt, model.clone()).await;
+    let result = run_scheduled_turn(&orch, &session_key, &prompt, model.clone()).await;
     let duration_ms = start.elapsed().as_millis() as u64;
 
     // Build run record and mark result in scheduler.
@@ -1334,7 +1337,7 @@ async fn run_cron_task(
     };
 
     // Record run result in scheduler (returns failure alert message if needed).
-    let failure_alert = if let Some(ref scheduler) = ctx.scheduler {
+    let failure_alert = if let Some(ref scheduler) = orch.scheduler {
         scheduler.mark_run_result(&job_id, record)
     } else {
         None
@@ -1344,7 +1347,7 @@ async fn run_cron_task(
     if let Ok(ref response) = result {
         if !response.trim().is_empty() {
             send_to_target_internal(
-                ctx.channels.clone(), ctx.last_channel.clone(), ctx.last_recipient.clone(),
+                orch.channels.clone(), orch.last_channel.clone(), orch.last_recipient.clone(),
                 target_channel.clone(), target_account.clone(), response,
             ).await;
         }
@@ -1354,7 +1357,7 @@ async fn run_cron_task(
     if let Some(alert_msg) = failure_alert {
         tracing::warn!(job_id = %job_id, alert = %alert_msg, "sending failure alert");
         send_to_target_internal(
-            ctx.channels, ctx.last_channel, ctx.last_recipient,
+            orch.channels.clone(), orch.last_channel.clone(), orch.last_recipient.clone(),
             target_channel, target_account, &alert_msg,
         ).await;
     }

@@ -14,17 +14,14 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use chrono::Timelike;
-use dashmap::DashMap;
 use parking_lot::{Mutex as ParkMutex, RwLock};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
 
 use crate::agents::orchestrator::SchedulerEvent;
 use crate::agents::scheduling::cron_types::{DeliveryConfig, RunRecord, RunStatus, ScheduleKind};
 use crate::agents::webhook_loader::{WebhookAuth, WebhookJobDef, render_template};
-use crate::channels::{Channel, SendMessage};
+use crate::channels::SendMessage;
 use crate::config::scheduler::{HeartbeatConfig, WebhookConfig};
-use crate::storage::SessionBackend;
 
 /// Shared handle to the Scheduler for concurrent access.
 pub type SharedScheduler = Arc<Scheduler>;
@@ -852,22 +849,19 @@ fn generate_id() -> String {
     format!("{:012x}", nanos & 0xfffffffffff)
 }
 
-// ── Webhook context ────────────────────────────────────────────────────────
+// ── Webhook app state ──────────────────────────────────────────────────────
 
-/// Resources needed by the webhook server to run agent tasks.
-/// Heartbeat and cron use the Orchestrator event path instead.
+/// Axum app state for the webhook server. Holds an `Arc<Orchestrator>`
+/// so handlers can reach the shared SessionManager / AgentRuntime /
+/// channel map via accessor methods, plus the webhook-specific
+/// timezone for cron parsing.
 pub struct WebhookContext {
-    /// AgentRuntime for Agent dispatch.
-    pub agent_runtime: crate::agents::AgentRuntime,
-    pub channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
-    /// SessionManager owns the SessionContext table — see
-    /// `SessionManager.get_or_create_context`.
-    pub session_manager: Arc<crate::agents::session::SessionManager>,
-    /// Backend kept separately for persist hooks (BackendPersistHook needs it).
-    pub session_backend: Arc<dyn SessionBackend>,
+    /// Shared Orchestrator. Webhook handlers reach for
+    /// `orchestrator.session_manager()`, `agent_runtime()`,
+    /// `channels()`, `persist_backend()`, and the `last_channel` field.
+    pub orchestrator: Arc<crate::agents::Orchestrator>,
+    /// Timezone string used for cron evaluation in the webhook server.
     pub timezone: String,
-    /// Last channel that received a user message (format: "channel_type:account_id").
-    pub last_channel: Arc<Mutex<Option<String>>>,
 }
 
 // ── Interval parsing ───────────────────────────────────────────────────────
@@ -960,7 +954,7 @@ pub async fn run_scheduled_task(
     session_key: &str,
     prompt: &str,
 ) -> anyhow::Result<String> {
-    let session_ctx = ctx.session_manager.get_or_create_context_with(
+    let session_ctx = ctx.orchestrator.session_manager().get_or_create_context_with(
         session_key,
         |session| {
             session.session_override.run_mode =
@@ -968,12 +962,13 @@ pub async fn run_scheduled_task(
         },
     );
 
-    let runtime = ctx.agent_runtime.clone();
-    let prompt_config_base = ctx.agent_runtime.prompt_config.clone();
-    let skills_arc = Arc::clone(&ctx.agent_runtime.skills);
-    let cached_prompt = ctx.agent_runtime.system_prompt.clone();
+    let agent_runtime = ctx.orchestrator.agent_runtime();
+    let runtime = agent_runtime.clone();
+    let prompt_config_base = agent_runtime.prompt_config.clone();
+    let skills_arc = Arc::clone(&agent_runtime.skills);
+    let cached_prompt = agent_runtime.system_prompt.clone();
     let persist_hook: Arc<dyn crate::agents::PersistHook> = Arc::new(
-        crate::agents::BackendPersistHook::new(ctx.session_backend.clone())
+        crate::agents::BackendPersistHook::new(Arc::clone(ctx.orchestrator.persist_backend()))
     );
 
     let _turn_guard = session_ctx.turn_lock.lock().await;
@@ -1026,7 +1021,7 @@ pub async fn send_to_target(ctx: &WebhookContext, target: &str, content: &str) {
     let (ch_type, acc_id) = match target {
         "none" => return,
         "last" => {
-            let last = ctx.last_channel.lock().await.clone();
+            let last = ctx.orchestrator.last_channel.lock().await.clone();
             match last {
                 Some(ref key) => match key.split_once(':') {
                     Some((ch, acc)) => (ch.to_string(), acc.to_string()),
@@ -1050,7 +1045,7 @@ pub async fn send_to_target(ctx: &WebhookContext, target: &str, content: &str) {
         }
     };
 
-    let channel = match ctx.channels.get(&(ch_type.clone(), acc_id.clone())) {
+    let channel = match ctx.orchestrator.channels().get(&(ch_type.clone(), acc_id.clone())) {
         Some(ch) => ch.clone(),
         None => {
             tracing::warn!(channel = %ch_type, account = %acc_id, "target channel not found");
