@@ -46,8 +46,11 @@ pub struct SessionContext {
     /// Agent bound to this session at creation time. Built from
     /// `Session.agent_name` via `SessionManager.build_agent_for_session`.
     pub agent: Arc<Agent>,
-    /// Attachments awaiting injection on the next user turn.
-    pub attachments: Arc<AttachmentManager>,
+    /// Attachments awaiting injection on the next user turn. Mutex
+    /// because `AttachmentManager.diff_*` mutate pending state; the
+    /// outer Arc lives on the SessionContext itself, so a plain
+    /// `Mutex<AttachmentManager>` here is sufficient.
+    pub attachments: Mutex<AttachmentManager>,
     /// User message saved when the previous turn ended with an empty LLM
     /// response or interrupted streaming. Cleared once retried.
     pub pending_retry: Arc<Mutex<Option<String>>>,
@@ -67,7 +70,7 @@ impl SessionContext {
         Self {
             session: Arc::new(Mutex::new(session)),
             agent,
-            attachments: Arc::new(AttachmentManager::new()),
+            attachments: Mutex::new(AttachmentManager::new()),
             pending_retry: Arc::new(Mutex::new(None)),
             turn_lock: Arc::new(Mutex::new(())),
             user_profile: Arc::new(UserProfile::default()),
@@ -80,7 +83,7 @@ impl SessionContext {
         Self {
             session: Arc::new(Mutex::new(session)),
             agent,
-            attachments: Arc::new(AttachmentManager::new()),
+            attachments: Mutex::new(AttachmentManager::new()),
             pending_retry: Arc::new(Mutex::new(None)),
             turn_lock: Arc::new(Mutex::new(())),
             user_profile: profile,
@@ -137,7 +140,35 @@ impl SessionContext {
 
         let system_prompt = runtime.build_system_prompt(&prompt_config);
 
-        session.add_user(content);
+        // RFC §三.A line 312-323: process_turn computes the attachment
+        // delta (skills/agents/MCP/memory/date/autonomy) against the
+        // history's announced state and prepends a <system-reminder> to
+        // the user content before recording the turn.
+        let reminder = {
+            let mut attachments = self.attachments.lock().await;
+            let skills_snap = runtime.skills.read();
+            attachments.diff_skills(&skills_snap, &session.history);
+            let agent_list: Vec<(String, String)> = runtime
+                .agents
+                .values_cloned()
+                .into_iter()
+                .map(|a| (a.config.name.clone(), a.config.description.clone().unwrap_or_default()))
+                .collect();
+            attachments.diff_agents(&agent_list, &session.history);
+            // TODO: thread real timezone_offset from [prompt] config into
+            // SystemPromptConfig so date injection respects user TZ.
+            attachments.diff_date(0, &session.history);
+            attachments.diff_autonomy(&prompt_config.permission_mode);
+            let text = attachments.build_text(&skills_snap);
+            attachments.clear_pending();
+            text
+        };
+
+        let user_content = match reminder {
+            Some(rem) => format!("{}\n\n{}", rem, content),
+            None => content,
+        };
+        session.add_user(user_content);
         if let Some(ref hook) = persist_hook {
             if let Some(last) = session.history.last().cloned() {
                 if let Some(id) = hook.persist_message(&session.id, &last) {
