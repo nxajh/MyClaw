@@ -981,7 +981,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         channels,
         delegation_manager,
         delegation_rx,
-        persist_backend: session_backend.clone(),
         mcp_manager: Some(Arc::clone(&mcp_manager_arc)),
         scheduler_rx: Some(scheduler_rx),
         search_cooldown: Some(search_cooldown),

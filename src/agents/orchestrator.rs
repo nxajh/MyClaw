@@ -99,8 +99,6 @@ pub struct Orchestrator {
     delegation_manager: Option<Arc<DelegationManager>>,
     /// Delegation event receiver.
     delegation_rx: Arc<TokioMutex<Option<mpsc::Receiver<DelegationEvent>>>>,
-    /// Backend for session persistence (shared with persist hooks).
-    persist_backend: Arc<dyn crate::storage::SessionBackend>,
     /// MCP manager (for /mcp command).
     mcp_manager: Option<Arc<crate::agents::McpManager>>,
     /// Last channel that received a user message (shared with schedulers).
@@ -192,8 +190,6 @@ pub struct OrchestratorParts {
     pub delegation_manager: Option<Arc<DelegationManager>>,
     /// Delegation event receiver (conditional).
     pub delegation_rx: Option<mpsc::Receiver<DelegationEvent>>,
-    /// Backend for session persistence (shared with persist hooks).
-    pub persist_backend: Arc<dyn crate::storage::SessionBackend>,
     /// MCP manager (conditional — only when MCP servers are configured).
     pub mcp_manager: Option<Arc<crate::agents::McpManager>>,
     /// Scheduler event receiver (heartbeat ticks, cron triggers from Scheduler task).
@@ -272,7 +268,6 @@ impl Orchestrator {
             agent_runtime: parts.agent_runtime,
             delegation_manager: parts.delegation_manager,
             delegation_rx: Arc::new(TokioMutex::new(parts.delegation_rx)),
-            persist_backend: parts.persist_backend,
             mcp_manager: parts.mcp_manager,
             last_channel: Arc::new(tokio::sync::Mutex::new(last_channel_value)),
             last_channel_file,
@@ -322,7 +317,7 @@ impl Orchestrator {
     /// constructor target). Used by the webhook server to materialize a
     /// persist hook for in-flight scheduled turns.
     pub fn persist_backend(&self) -> &Arc<dyn crate::storage::SessionBackend> {
-        &self.persist_backend
+        self.session_manager.backend()
     }
 
     fn spawn_listener(
@@ -755,7 +750,7 @@ impl Orchestrator {
                     let mut session = self.session_manager.get_or_create(&sk);
                     session.record_inbound(msg.clone());
                 }
-                if let Err(e) = self.persist_backend.save_last_message(&sk, &msg) {
+                if let Err(e) = self.session_manager.backend().save_last_message(&sk, &msg) {
                     tracing::warn!(session = %sk, err = %e, "failed to persist last_message");
                 }
 
@@ -885,14 +880,14 @@ impl Orchestrator {
             tracing::info!(session = %sk, "startup recovery: found incomplete turn, spawning background task");
             let session_ctx = self.session_context_for(sk);
             let sk_owned = sk.clone();
-            let persist_backend = self.persist_backend.clone();
+            let persist_backend = Arc::clone(self.session_manager.backend());
             let channels = self.channels.clone();
             let runtime = self.agent_runtime.clone();
             let prompt_config_base = self.agent_runtime.defaults.prompt.clone();
             let skills_arc = Arc::clone(&self.agent_runtime.skills);
             let cached_prompt = self.agent_runtime.defaults.system_prompt.clone();
             let persist_hook: Arc<dyn PersistHook> = Arc::new(
-                BackendPersistHook::new(Arc::clone(&self.persist_backend))
+                BackendPersistHook::new(Arc::clone(self.session_manager.backend()))
             );
 
             tokio::spawn(async move {
@@ -986,7 +981,7 @@ impl Orchestrator {
             let skills_arc = Arc::clone(&self.agent_runtime.skills);
             let cached_prompt = self.agent_runtime.defaults.system_prompt.clone();
             let persist_hook: Arc<dyn PersistHook> = Arc::new(
-                BackendPersistHook::new(Arc::clone(&self.persist_backend))
+                BackendPersistHook::new(Arc::clone(self.session_manager.backend()))
             );
 
             tokio::spawn(async move {
@@ -1205,7 +1200,7 @@ async fn run_scheduled_turn(
     let skills_arc = Arc::clone(&orch.agent_runtime.skills);
     let cached_prompt = orch.agent_runtime.defaults.system_prompt.clone();
     let persist_hook: Arc<dyn PersistHook> = Arc::new(
-        BackendPersistHook::new(Arc::clone(&orch.persist_backend))
+        BackendPersistHook::new(Arc::clone(orch.session_manager.backend()))
     );
 
     let _turn_guard = session_ctx.turn_lock.lock().await;
