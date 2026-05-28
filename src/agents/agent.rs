@@ -104,9 +104,14 @@ impl Agent {
         let scoped_tools = Arc::new(build_scoped_registry(&allowed_tools));
         let tool_executor = ToolExecutor::new(scoped_tools, runtime.tool_executor.timeout_secs);
 
-        // Per-turn loop breaker counter — allocated fresh each turn
-        // by the shared `runtime.loop_breaker` singleton.
-        let mut loop_breaker = runtime.loop_breaker.new_counter();
+        // Per-turn loop breaker counter — allocated fresh each turn by
+        // the shared `runtime.loop_breaker` singleton. Per-agent
+        // `SubAgentConfig.max_tool_calls` overrides the runtime default;
+        // when None, the shared config wins.
+        let mut loop_breaker = match self.config.max_tool_calls {
+            Some(n) => runtime.loop_breaker.new_counter_with_max(n),
+            None => runtime.loop_breaker.new_counter(),
+        };
 
         // Shared ContextEngine singleton — RFC v2 target shape. Token
         // tracking lives solely on `Session.token_tracker`; ContextEngine
@@ -127,8 +132,6 @@ impl Agent {
             .collect();
         crate::agents::session::sanitize_history(&mut messages);
 
-        let mut tool_calls_count: usize = 0;
-        let max_tool_calls = self.config.max_tool_calls.unwrap_or(100);
         let permission_mode = turn_ctx.permission_mode;
         let mut empty_response_retries: usize = 0;
         const MAX_EMPTY_RETRIES: usize = 3;
@@ -404,11 +407,15 @@ impl Agent {
             persist_last(session);
 
             for call in &response.tool_calls {
-                tool_calls_count += 1;
-                if max_tool_calls > 0 && tool_calls_count > max_tool_calls {
+                // The shared LoopBreakerCounter enforces max_tool_calls;
+                // the manual check below is replaced by its `MaxCalls`
+                // reason at `record_and_check` below. We keep a tiny
+                // early-exit so the per-call tool execution doesn't run
+                // when we're already over budget.
+                if loop_breaker.total_calls() >= loop_breaker.max_tool_calls() {
                     return Err(anyhow::anyhow!(
                         "tool call limit reached ({}), loop broken",
-                        max_tool_calls
+                        loop_breaker.max_tool_calls()
                     ));
                 }
 

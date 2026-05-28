@@ -126,6 +126,16 @@ impl LoopBreaker {
     pub fn new_counter(&self) -> LoopBreakerCounter {
         LoopBreakerCounter::new(self.config.clone())
     }
+
+    /// Allocate a counter with the `max_tool_calls` field overridden
+    /// from the shared config — used by `Agent::run` so per-agent
+    /// SubAgentConfig caps win over the global default while still
+    /// inheriting every other detection threshold.
+    pub fn new_counter_with_max(&self, max_tool_calls: usize) -> LoopBreakerCounter {
+        let mut cfg = self.config.clone();
+        cfg.max_tool_calls = max_tool_calls;
+        LoopBreakerCounter::new(cfg)
+    }
 }
 
 /// Per-turn loop-breaker state. Built by `LoopBreaker::new_counter` at
@@ -200,6 +210,11 @@ impl LoopBreakerCounter {
     /// Total calls recorded so far.
     pub fn total_calls(&self) -> usize {
         self.total_calls
+    }
+
+    /// Configured hard cap on tool calls (0 = unlimited).
+    pub fn max_tool_calls(&self) -> usize {
+        self.config.max_tool_calls
     }
 
     // ── Pattern detectors ──────────────────────────────────────────────────
