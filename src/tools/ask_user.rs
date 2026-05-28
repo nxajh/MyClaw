@@ -193,8 +193,8 @@ impl Tool for AskUserTool {
         // Register with the router and await the user's reply. Index by
         // session.id so cross-channel sub-agents work post-E29.
         let rx = router.register(&session.id, reply_target);
-        let answer = match tokio::time::timeout(ASK_USER_TIMEOUT, rx).await {
-            Ok(Ok(a)) => a,
+        let reply = match tokio::time::timeout(ASK_USER_TIMEOUT, rx).await {
+            Ok(Ok(m)) => m,
             Ok(Err(_)) => {
                 return Ok(ToolResult {
                     success: false,
@@ -216,9 +216,25 @@ impl Tool for AskUserTool {
             }
         };
 
+        // Surface any attached images alongside the text answer so the
+        // model sees the full reply. RFC §三.B: AskRouter delivers a
+        // ChannelMessage so image attachments survive the round trip.
+        let mut output = reply.content;
+        if let Some(ref urls) = reply.image_urls {
+            for url in urls {
+                output.push_str("\n[image] ");
+                output.push_str(url);
+            }
+        }
+        if let Some(ref b64) = reply.image_base64 {
+            if !b64.is_empty() {
+                output.push_str(&format!("\n[{} inline image(s) attached]", b64.len()));
+            }
+        }
+
         Ok(ToolResult {
             success: true,
-            output: answer,
+            output,
             error: None,
         })
     }

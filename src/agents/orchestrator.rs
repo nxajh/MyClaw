@@ -478,12 +478,12 @@ impl Orchestrator {
                     tracing::info!("OrchestratorEvent::Shutdown received");
                     break;
                 }
-                OrchestratorEvent::AskReply { session_id, answer } => {
+                OrchestratorEvent::AskReply { session_id, reply } => {
                     // F35 forward path: AskRouter.fulfill on inbound is the
                     // normal mechanism; the AskReply variant exists for
                     // future explicit routing (e.g. webhook-delivered
                     // replies). For now log and discard if unfulfilled.
-                    if !self.ask_router.fulfill(&session_id, answer) {
+                    if !self.ask_router.fulfill(&session_id, reply) {
                         tracing::warn!(session = %session_id, "AskReply for unknown session");
                     }
                 }
@@ -540,7 +540,7 @@ impl Orchestrator {
                         .get_or_create(&sk)
                         .id
                         .clone();
-                    if self.ask_router.fulfill(&session_id, msg.content.clone()) {
+                    if self.ask_router.fulfill(&session_id, msg.clone()) {
                         tracing::debug!(
                             session = %session_id,
                             "ask_router fulfilled pending ask, consuming inbound"

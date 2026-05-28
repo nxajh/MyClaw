@@ -18,9 +18,14 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use tokio::sync::oneshot;
 
+use crate::channels::ChannelMessage;
+
 /// Per-pending-ask state stored in the router.
 struct Pending {
-    sender: oneshot::Sender<String>,
+    /// Sends the full reply ChannelMessage so AskUserTool can read the
+    /// answer content + any image attachments the user included. RFC
+    /// §三.B "AskRouter.wait_for_reply → 返回 ChannelMessage".
+    sender: oneshot::Sender<ChannelMessage>,
     /// reply_target captured at ask time — used so the orchestrator sends
     /// the question to the same channel + thread, not the latest one.
     reply_target: String,
@@ -46,7 +51,7 @@ impl AskRouter {
         &self,
         session_id: &str,
         reply_target: String,
-    ) -> oneshot::Receiver<String> {
+    ) -> oneshot::Receiver<ChannelMessage> {
         let (tx, rx) = oneshot::channel();
         let pending = Pending {
             sender: tx,
@@ -68,14 +73,14 @@ impl AskRouter {
     /// `process_turn` — if `fulfill` returns true, the inbound message is
     /// consumed by the ask_user resolution and should NOT trigger a fresh
     /// turn.
-    pub fn fulfill(&self, session_id: &str, answer: String) -> bool {
+    pub fn fulfill(&self, session_id: &str, reply: ChannelMessage) -> bool {
         match self.pending.remove(session_id) {
             Some((_, Pending { sender, .. })) => {
                 // Send result is Ok unless the receiver has been dropped (the
                 // sub-agent task that asked has been cancelled). Either way
                 // we treat this as "ask consumed" because the session has
                 // moved on.
-                let _ = sender.send(answer);
+                let _ = sender.send(reply);
                 true
             }
             None => false,
@@ -110,20 +115,35 @@ impl AskRouter {
 mod tests {
     use super::*;
 
+    fn msg(content: &str) -> ChannelMessage {
+        ChannelMessage {
+            id: "test".into(),
+            sender: "s".into(),
+            reply_target: "rt".into(),
+            content: content.into(),
+            timestamp: 0,
+            thread_ts: None,
+            interruption_scope_id: None,
+            attachments: Vec::new(),
+            image_urls: None,
+            image_base64: None,
+        }
+    }
+
     #[tokio::test]
     async fn fulfill_resolves_future() {
         let r = AskRouter::new();
         let rx = r.register("s1", "tg:42".into());
-        assert!(r.fulfill("s1", "yes".into()));
-        let ans = rx.await.unwrap();
-        assert_eq!(ans, "yes");
+        assert!(r.fulfill("s1", msg("yes")));
+        let reply = rx.await.unwrap();
+        assert_eq!(reply.content, "yes");
         assert!(!r.has_pending("s1"));
     }
 
     #[tokio::test]
     async fn fulfill_missing_returns_false() {
         let r = AskRouter::new();
-        assert!(!r.fulfill("nope", "x".into()));
+        assert!(!r.fulfill("nope", msg("x")));
     }
 
     #[tokio::test]

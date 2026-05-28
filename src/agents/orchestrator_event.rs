@@ -42,7 +42,7 @@ pub enum OrchestratorEvent {
     /// routing_key, so cross-channel ask_user works for sub-agents).
     AskReply {
         session_id: String,
-        answer: String,
+        reply: crate::channels::ChannelMessage,
     },
 
     /// Graceful shutdown signal — main loop should drain and exit.
