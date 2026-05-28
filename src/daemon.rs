@@ -978,7 +978,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         mcp_manager: Some(Arc::clone(&mcp_manager_arc)),
         scheduler_rx: Some(scheduler_rx),
         search_cooldown: Some(search_cooldown),
-        unfinished_subagents,
         workspace_dir: config.workspace_dir.clone(),
         scheduler: Some(shared_scheduler.clone()),
         ask_router: Arc::clone(&ask_router),
@@ -1128,7 +1127,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     }
 
     // Run the message dispatch loop (blocks until shutdown).
-    Arc::clone(&orchestrator).run(shutdown_rx).await.context("orchestrator run error")?;
+    Arc::clone(&orchestrator).run(shutdown_rx, unfinished_subagents).await.context("orchestrator run error")?;
 
     // Graceful shutdown.
     tracing::debug!("dispatch loop ended, shutting down listeners");

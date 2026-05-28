@@ -105,9 +105,6 @@ pub struct Orchestrator {
     scheduler_rx: Arc<TokioMutex<Option<mpsc::Receiver<SchedulerEvent>>>>,
     /// Search provider cooldown tracker (shared with WebSearchTool).
     search_cooldown: Option<Arc<crate::tools::search_cooldown::SearchProviderCooldown>>,
-    /// Sub-agents that were interrupted by a hot-switch restart.
-    /// Injected as a system reminder on the first session interaction, then cleared.
-    unfinished_subagents: parking_lot::Mutex<Vec<crate::agents::UnfinishedSubAgent>>,
     /// Shared scheduler for run result tracking from cron tasks.
     scheduler: Option<crate::agents::SharedScheduler>,
 }
@@ -195,9 +192,6 @@ pub struct OrchestratorParts {
     /// orchestrator's main-loop dispatch over to Agent::run and H45
     /// deletes AgentLoop.
     pub agent_runtime: crate::agents::AgentRuntime,
-    /// Sub-agents that were still running when the previous daemon was killed.
-    /// Injected as a recovery hint into the first session interaction.
-    pub unfinished_subagents: Vec<crate::agents::UnfinishedSubAgent>,
     /// Workspace directory for persisting runtime state.
     pub workspace_dir: std::path::PathBuf,
     /// Shared scheduler for run result tracking and auto-delete.
@@ -244,7 +238,6 @@ impl Orchestrator {
             mcp_manager: parts.mcp_manager,
             scheduler_rx: Arc::new(TokioMutex::new(parts.scheduler_rx)),
             search_cooldown: parts.search_cooldown,
-            unfinished_subagents: parking_lot::Mutex::new(parts.unfinished_subagents),
             scheduler: parts.scheduler,
         };
 
@@ -363,7 +356,11 @@ impl Orchestrator {
     /// Takes `self: Arc<Self>` so scheduler-event spawned tasks
     /// (heartbeat / cron) can hold an Arc reference to the orchestrator
     /// for the duration of the LLM round-trip.
-    pub async fn run(self: Arc<Self>, mut shutdown_rx: tokio::sync::watch::Receiver<bool>) -> anyhow::Result<()> {
+    pub async fn run(
+        self: Arc<Self>,
+        mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+        unfinished_subagents: Vec<crate::agents::UnfinishedSubAgent>,
+    ) -> anyhow::Result<()> {
         let rx = {
             let mut guard = self.msg_rx.lock().await;
             guard.take().context("run() already called or msg_rx was None")?
@@ -382,12 +379,6 @@ impl Orchestrator {
         };
 
         let mut rx = rx;
-
-        // Build recovery hint for sub-agents interrupted by previous hot-switch.
-        let unfinished_subagents = {
-            let guard = self.unfinished_subagents.lock();
-            guard.clone()
-        };
 
         // ── Startup recovery ──────────────────────────────────────────────
         // Sessions register a SessionContext synchronously; the recovery
