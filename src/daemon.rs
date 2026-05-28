@@ -670,7 +670,12 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     if !jobs_json_path.exists() {
         let (dummy_tx, _) = tokio::sync::mpsc::channel(1);
         let migrator = crate::agents::scheduling::scheduler::Scheduler::new(
-            jobs_json_path.clone(), tz_name.clone(), None, dummy_tx,
+            jobs_json_path.clone(),
+            tz_name.clone(),
+            None,
+            dummy_tx,
+            config.workspace_dir.join(".last_channel"),
+            config.workspace_dir.join(".last_recipient"),
         );
         let count = migrator.migrate_from_markdown(&cron_dir);
         if count > 0 {
@@ -686,7 +691,12 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     };
 
     let shared_scheduler = crate::agents::scheduling::scheduler::Scheduler::new(
-        jobs_json_path.clone(), tz_name.clone(), heartbeat_config, scheduler_tx.clone(),
+        jobs_json_path.clone(),
+        tz_name.clone(),
+        heartbeat_config,
+        scheduler_tx.clone(),
+        config.workspace_dir.join(".last_channel"),
+        config.workspace_dir.join(".last_recipient"),
     );
 
     // G39: shared user resolver — defaults to identity (user_id == routing_key).

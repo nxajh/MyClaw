@@ -101,15 +101,6 @@ pub struct Orchestrator {
     delegation_rx: Arc<TokioMutex<Option<mpsc::Receiver<DelegationEvent>>>>,
     /// MCP manager (for /mcp command).
     mcp_manager: Option<Arc<crate::agents::McpManager>>,
-    /// Last channel that received a user message (shared with schedulers).
-    /// Format: "channel_type:account_id"
-    pub last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
-    /// Path to persist last_channel across restarts.
-    last_channel_file: std::path::PathBuf,
-    /// Last recipient (reply_target) that received a user message (shared with schedulers).
-    pub last_recipient: Arc<tokio::sync::Mutex<Option<String>>>,
-    /// Path to persist last_recipient across restarts.
-    last_recipient_file: std::path::PathBuf,
     /// Scheduler event receiver (heartbeat ticks, cron triggers).
     scheduler_rx: Arc<TokioMutex<Option<mpsc::Receiver<SchedulerEvent>>>>,
     /// Search provider cooldown tracker (shared with WebSearchTool).
@@ -130,8 +121,6 @@ pub struct SharedSessions {
     /// AgentRuntime for Agent dispatch in webhook tasks.
     pub agent_runtime: crate::agents::AgentRuntime,
     pub channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
-    pub last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
-    pub last_recipient: Arc<tokio::sync::Mutex<Option<String>>>,
 }
 
 /// Parse a session key like "telegram:ops:12345" into (channel_type, account_id, sender).
@@ -243,22 +232,6 @@ impl Orchestrator {
             warn!("no channels enabled");
         }
 
-        let last_channel_file = parts.workspace_dir.join(".last_channel");
-
-        // Load persisted last_channel from disk.
-        let last_channel_value = std::fs::read_to_string(&last_channel_file)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-
-        let last_recipient_file = parts.workspace_dir.join(".last_recipient");
-
-        // Load persisted last_recipient from disk.
-        let last_recipient_value = std::fs::read_to_string(&last_recipient_file)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-
         let orchestrator = Orchestrator {
             channels: channels_map,
             session_manager: parts.session_manager,
@@ -269,10 +242,6 @@ impl Orchestrator {
             delegation_manager: parts.delegation_manager,
             delegation_rx: Arc::new(TokioMutex::new(parts.delegation_rx)),
             mcp_manager: parts.mcp_manager,
-            last_channel: Arc::new(tokio::sync::Mutex::new(last_channel_value)),
-            last_channel_file,
-            last_recipient: Arc::new(tokio::sync::Mutex::new(last_recipient_value)),
-            last_recipient_file,
             scheduler_rx: Arc::new(TokioMutex::new(parts.scheduler_rx)),
             search_cooldown: parts.search_cooldown,
             unfinished_subagents: parking_lot::Mutex::new(parts.unfinished_subagents),
@@ -288,8 +257,6 @@ impl Orchestrator {
         SharedSessions {
             agent_runtime: self.agent_runtime.clone(),
             channels: self.channels.clone(),
-            last_channel: self.last_channel.clone(),
-            last_recipient: self.last_recipient.clone(),
         }
     }
 
@@ -318,6 +285,13 @@ impl Orchestrator {
     /// persist hook for in-flight scheduled turns.
     pub fn persist_backend(&self) -> &Arc<dyn crate::storage::SessionBackend> {
         self.session_manager.backend()
+    }
+
+    /// Accessor for the shared Scheduler (if scheduling is enabled).
+    /// Webhook handlers reach through this to read
+    /// `scheduler.last_channel` / `last_recipient` for `target = "last"`.
+    pub fn scheduler(&self) -> Option<&crate::agents::SharedScheduler> {
+        self.scheduler.as_ref()
     }
 
     fn spawn_listener(
@@ -563,23 +537,12 @@ impl Orchestrator {
         let channels = self.channels.clone();
         match event {
             ChannelEvent::UserMessage(((channel_type, account_id), mut msg)) => {
-                // Track last channel for scheduler target resolution.
-                let lc_val = format!("{}:{}", channel_type, account_id);
-                {
-                    let mut lc = self.last_channel.lock().await;
-                    if lc.as_deref() != Some(&lc_val) {
-                        *lc = Some(lc_val.clone());
-                        let _ = std::fs::write(&self.last_channel_file, &lc_val);
-                    }
-                }
-                // Track last recipient for heartbeat/cron target resolution.
-                let recipient = msg.reply_target.clone();
-                {
-                    let mut lr = self.last_recipient.lock().await;
-                    if lr.as_deref() != Some(&recipient) {
-                        *lr = Some(recipient.clone());
-                        let _ = std::fs::write(&self.last_recipient_file, &recipient);
-                    }
+                // Tell the Scheduler about this user message so cron /
+                // heartbeat jobs with `target = "last"` know where to
+                // deliver their output. No-op when scheduler is disabled.
+                if let Some(ref scheduler) = self.scheduler {
+                    let channel_key = format!("{}:{}", channel_type, account_id);
+                    scheduler.record_user_message(&channel_key, &msg.reply_target).await;
                 }
 
                 let sk = Self::session_key(&channel_type, &account_id, &msg.sender);
@@ -1264,7 +1227,7 @@ async fn run_heartbeat_task(
             tracing::debug!("heartbeat: nothing needs attention");
         }
         Ok(response) if !response.trim().is_empty() => {
-            send_to_target_internal(orch.channels.clone(), orch.last_channel.clone(), orch.last_recipient.clone(), target_channel, target_account, &response).await;
+            send_to_target_internal(&orch, target_channel, target_account, &response).await;
         }
         Ok(_) => {}
         Err(e) => {
@@ -1318,28 +1281,20 @@ async fn run_cron_task(
     // Send output to target channel (on success with non-empty output).
     if let Ok(ref response) = result {
         if !response.trim().is_empty() {
-            send_to_target_internal(
-                orch.channels.clone(), orch.last_channel.clone(), orch.last_recipient.clone(),
-                target_channel.clone(), target_account.clone(), response,
-            ).await;
+            send_to_target_internal(&orch, target_channel.clone(), target_account.clone(), response).await;
         }
     }
 
     // Send failure alert to channel if generated.
     if let Some(alert_msg) = failure_alert {
         tracing::warn!(job_id = %job_id, alert = %alert_msg, "sending failure alert");
-        send_to_target_internal(
-            orch.channels.clone(), orch.last_channel.clone(), orch.last_recipient.clone(),
-            target_channel, target_account, &alert_msg,
-        ).await;
+        send_to_target_internal(&orch, target_channel, target_account, &alert_msg).await;
     }
 }
 
 /// Send a response to the configured target channel (used by heartbeat).
 async fn send_to_target_internal(
-    channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
-    last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
-    last_recipient: Arc<tokio::sync::Mutex<Option<String>>>,
+    orch: &Orchestrator,
     target_channel: Option<String>,
     target_account: Option<String>,
     content: &str,
@@ -1348,8 +1303,11 @@ async fn send_to_target_internal(
         (Some(ch), Some(acc)) => (ch, acc),
         (Some(ch), None) => (ch, "default".to_string()),
         (None, _) => {
-            // Resolve from last_channel (format: "channel_type:account_id")
-            let last = last_channel.lock().await.clone();
+            // Resolve from scheduler.last_channel (set by handle_channel_event).
+            let last = match orch.scheduler.as_ref() {
+                Some(s) => s.last_channel.lock().await.clone(),
+                None => None,
+            };
             match last {
                 Some(ref key) => match key.split_once(':') {
                     Some((ch, acc)) => (ch.to_string(), acc.to_string()),
@@ -1366,7 +1324,7 @@ async fn send_to_target_internal(
         }
     };
 
-    let channel = match channels.get(&(ch_type.clone(), acc_id.clone())) {
+    let channel = match orch.channels.get(&(ch_type.clone(), acc_id.clone())) {
         Some(ch) => ch.clone(),
         None => {
             tracing::warn!(channel = %ch_type, account = %acc_id, "target channel not found");
@@ -1374,8 +1332,11 @@ async fn send_to_target_internal(
         }
     };
 
-    // Resolve recipient from last_recipient.
-    let recipient = last_recipient.lock().await.clone().unwrap_or_default();
+    // Resolve recipient from scheduler.last_recipient.
+    let recipient = match orch.scheduler.as_ref() {
+        Some(s) => s.last_recipient.lock().await.clone().unwrap_or_default(),
+        None => String::new(),
+    };
 
     let msg = SendMessage {
         content: content.to_string(),

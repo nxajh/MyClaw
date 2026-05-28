@@ -157,6 +157,16 @@ pub struct Scheduler {
     heartbeat_config: Option<HeartbeatConfig>,
     /// Event channel to orchestrator.
     event_tx: tokio::sync::mpsc::Sender<SchedulerEvent>,
+    /// Last channel that received a user message (format
+    /// `channel_type:account_id`). Read by heartbeat / cron output
+    /// dispatch when the job's target is "last".
+    pub last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
+    /// Path to persist `last_channel` across restarts.
+    last_channel_file: PathBuf,
+    /// Last recipient (reply_target) that received a user message.
+    pub last_recipient: Arc<tokio::sync::Mutex<Option<String>>>,
+    /// Path to persist `last_recipient` across restarts.
+    last_recipient_file: PathBuf,
 }
 
 impl Scheduler {
@@ -167,6 +177,8 @@ impl Scheduler {
         timezone: String,
         heartbeat_config: Option<HeartbeatConfig>,
         event_tx: tokio::sync::mpsc::Sender<SchedulerEvent>,
+        last_channel_file: PathBuf,
+        last_recipient_file: PathBuf,
     ) -> SharedScheduler {
         let mut data = JobsFile::default();
         let mut last_mtime = None;
@@ -183,6 +195,15 @@ impl Scheduler {
         let job_count = data.jobs.len();
         tracing::info!(count = job_count, "scheduler loaded cron jobs from JSON store");
 
+        let last_channel_value = std::fs::read_to_string(&last_channel_file)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let last_recipient_value = std::fs::read_to_string(&last_recipient_file)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
         Arc::new(Self {
             jobs: RwLock::new(data),
             path,
@@ -190,7 +211,30 @@ impl Scheduler {
             timezone,
             heartbeat_config,
             event_tx,
+            last_channel: Arc::new(tokio::sync::Mutex::new(last_channel_value)),
+            last_channel_file,
+            last_recipient: Arc::new(tokio::sync::Mutex::new(last_recipient_value)),
+            last_recipient_file,
         })
+    }
+
+    /// Record the most recent (channel_type, account_id, reply_target)
+    /// the orchestrator routed to. Called once per inbound UserMessage
+    /// so heartbeat / cron jobs configured with `target = "last"` know
+    /// where to send their output.
+    pub async fn record_user_message(&self, channel_key: &str, reply_target: &str) {
+        {
+            let mut lc = self.last_channel.lock().await;
+            if lc.as_deref() != Some(channel_key) {
+                *lc = Some(channel_key.to_string());
+                let _ = std::fs::write(&self.last_channel_file, channel_key);
+            }
+        }
+        let mut lr = self.last_recipient.lock().await;
+        if lr.as_deref() != Some(reply_target) {
+            *lr = Some(reply_target.to_string());
+            let _ = std::fs::write(&self.last_recipient_file, reply_target);
+        }
     }
 
     /// Whether the scheduler should run (has heartbeat or cron jobs).
@@ -1014,7 +1058,10 @@ pub async fn send_to_target(ctx: &WebhookContext, target: &str, content: &str) {
     let (ch_type, acc_id) = match target {
         "none" => return,
         "last" => {
-            let last = ctx.orchestrator.last_channel.lock().await.clone();
+            let last: Option<String> = match ctx.orchestrator.scheduler() {
+                Some(s) => s.last_channel.lock().await.clone(),
+                None => None,
+            };
             match last {
                 Some(ref key) => match key.split_once(':') {
                     Some((ch, acc)) => (ch.to_string(), acc.to_string()),
