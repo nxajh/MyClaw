@@ -42,7 +42,7 @@ pub async fn run(cli: &Cli, prompt: Option<&str>, agent: Option<&str>, model: Op
         Arc::clone(&registry_arc),
         Arc::clone(&tools_arc),
         Arc::clone(&skills_arc),
-        myclaw::agents::AgentRegistry::new(),
+        Arc::new(myclaw::agents::AgentRegistry::new()),
     );
 
     let main_config = myclaw::config::sub_agent::SubAgentConfig {

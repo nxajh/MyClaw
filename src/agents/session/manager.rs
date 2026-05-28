@@ -59,11 +59,12 @@ pub struct SessionManager {
     /// routing_key (the 1:1 invariant): every active routing_key has a
     /// SessionContext that wraps its active Session.
     contexts: DashMap<String, Arc<SessionContext>>,
-    /// AgentRegistry used to resolve `Session.agent_name` to a SubAgentConfig
-    /// when building SessionContexts. Defaults to an empty registry for
-    /// test-only managers; production daemons install the workspace-loaded
-    /// registry via `with_agent_registry`.
-    agent_registry: AgentRegistry,
+    /// AgentRegistry used to resolve `Session.agent_name` to an
+    /// `Arc<Agent>` when building SessionContexts. Defaults to an
+    /// empty registry for test-only managers; production daemons
+    /// install the workspace-loaded registry via `with_agent_registry`.
+    /// Stored as `Arc` so it stays in sync with AgentRuntime's view.
+    agents: Arc<AgentRegistry>,
 }
 
 impl SessionManager {
@@ -73,14 +74,16 @@ impl SessionManager {
             cache: RwLock::new(HashMap::new()),
             active: RwLock::new(HashMap::new()),
             contexts: DashMap::new(),
-            agent_registry: AgentRegistry::new(),
+            agents: Arc::new(AgentRegistry::new()),
         }
     }
 
-    /// Install the AgentRegistry used to resolve `Session.agent_name` to
-    /// a SubAgentConfig when materializing SessionContexts.
-    pub fn with_agent_registry(mut self, registry: AgentRegistry) -> Self {
-        self.agent_registry = registry;
+    /// Install the shared AgentRegistry used to resolve
+    /// `Session.agent_name` to an `Arc<Agent>` when materializing
+    /// SessionContexts. The same `Arc<AgentRegistry>` is shared with
+    /// AgentRuntime so workspace reloads are visible to both.
+    pub fn with_agents(mut self, agents: Arc<AgentRegistry>) -> Self {
+        self.agents = agents;
         self
     }
 
@@ -558,15 +561,14 @@ impl SessionManager {
         ctx
     }
 
-    /// Resolve `session.agent_name` to a SubAgentConfig via the
-    /// installed AgentRegistry, falling back to a permissive default
-    /// for the "main" agent before workspace/agents/main is parsed.
+    /// Resolve `session.agent_name` to an `Arc<Agent>` via the
+    /// installed AgentRegistry. Falls back to a permissive default
+    /// for cases where `workspace/agents/<name>` hasn't been parsed
+    /// into the registry yet.
     fn build_agent_for_session(&self, session: &Session) -> Arc<Agent> {
-        let config = self
-            .agent_registry
+        self.agents
             .get(&session.agent_name)
-            .unwrap_or_else(|| permissive_main_default(&session.agent_name));
-        Arc::new(Agent::new(config))
+            .unwrap_or_else(|| Arc::new(Agent::new(permissive_main_default(&session.agent_name))))
     }
 
     /// Register a caller-built SessionContext. Used by the

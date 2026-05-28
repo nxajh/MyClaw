@@ -699,7 +699,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let sub_agent_configs = build_sub_agents(&config.workspace_dir);
     let sub_agent_count = sub_agent_configs.len();
     let sub_agent_names: Vec<String> = sub_agent_configs.iter().map(|a| a.name.clone()).collect();
-    let sub_agent_registry = crate::agents::AgentRegistry::from_vec(sub_agent_configs);
+    let sub_agent_registry = Arc::new(crate::agents::AgentRegistry::from_vec(sub_agent_configs));
 
     let registry_arc: Arc<dyn crate::providers::ProviderRegistry> = Arc::new(registry);
 
@@ -724,7 +724,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let session_backend = build_session_backend(&config);
     let session_manager = Arc::new(
         SessionManager::new(Arc::clone(&session_backend))
-            .with_agent_registry(sub_agent_registry.clone()),
+            .with_agents(Arc::clone(&sub_agent_registry)),
     );
 
     // ── Sub-agent delegator (conditional) ──────────────────────────────────────

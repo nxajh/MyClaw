@@ -14,7 +14,7 @@ use super::AgentRegistry;
 #[allow(dead_code)]
 pub(crate) struct ResourceProvider {
     pub(crate) skills: Arc<RwLock<SkillManager>>,
-    pub(crate) sub_agents: AgentRegistry,
+    pub(crate) sub_agents: Arc<AgentRegistry>,
     pub(crate) mcp_instructions: Vec<(String, String)>,
     pub(crate) skills_dir: PathBuf,
     pub(crate) agents_dir: PathBuf,
@@ -27,7 +27,7 @@ pub(crate) struct ResourceProvider {
 impl ResourceProvider {
     pub(crate) fn new(
         skills: Arc<RwLock<SkillManager>>,
-        sub_agents: AgentRegistry,
+        sub_agents: Arc<AgentRegistry>,
         mcp_instructions: Vec<(String, String)>,
         skills_dir: PathBuf,
         agents_dir: PathBuf,

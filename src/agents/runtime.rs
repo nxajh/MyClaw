@@ -38,8 +38,11 @@ pub struct AgentRuntime {
     pub tools: Arc<ToolRegistry>,
     /// Skill metadata for system-prompt injection and the `skill_view` tool.
     pub skills: Arc<RwLock<SkillManager>>,
-    /// Sub-agents available for `agent_delegate`.
-    pub agents: AgentRegistry,
+    /// Sub-agents available for `agent_delegate`. Shared `Arc` so the
+    /// AgentRegistry held by SessionManager and AgentRuntime is the
+    /// same live table — reloads via WorkspaceWatcher are visible to
+    /// every consumer without an extra refresh step.
+    pub agents: Arc<AgentRegistry>,
     /// Default loop-breaker policy. Per-turn instances are spawned in
     /// `Agent.run` and reset between turns.
     pub loop_breaker_defaults: LoopBreakerConfig,
@@ -74,7 +77,7 @@ impl AgentRuntime {
         providers: Arc<dyn ProviderRegistry>,
         tools: Arc<ToolRegistry>,
         skills: Arc<RwLock<SkillManager>>,
-        agents: AgentRegistry,
+        agents: Arc<AgentRegistry>,
     ) -> Self {
         Self {
             providers,

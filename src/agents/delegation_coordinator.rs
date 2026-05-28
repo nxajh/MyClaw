@@ -31,7 +31,7 @@ use crate::agents::delegation::{DelegationEvent, DelegationManager};
 use crate::agents::session::{BackendPersistHook, PersistHook, Session, SessionManager};
 use crate::agents::skills::SkillManager;
 use crate::agents::tool_registry::ToolRegistry;
-use crate::config::sub_agent::{AgentIsolation, SubAgentConfig};
+use crate::config::sub_agent::AgentIsolation;
 use crate::providers::ProviderRegistry;
 
 /// Holds sub-agent configs and creates temporary `Agent::run` invocations
@@ -44,7 +44,7 @@ use crate::providers::ProviderRegistry;
 #[derive(Clone)]
 pub struct DelegationCoordinator {
     /// Sub-agent configurations, indexed by name.
-    configs: super::AgentRegistry,
+    configs: Arc<super::AgentRegistry>,
     /// Shared service registry (for LLM access).
     registry: Arc<dyn ProviderRegistry>,
     /// Parent tool registry (tools are filtered per sub-agent).
@@ -64,7 +64,7 @@ pub struct DelegationCoordinator {
 
 impl DelegationCoordinator {
     pub fn new(
-        configs: super::AgentRegistry,
+        configs: Arc<super::AgentRegistry>,
         registry: Arc<dyn ProviderRegistry>,
         tools: Arc<ToolRegistry>,
         skills: Arc<RwLock<SkillManager>>,
@@ -83,7 +83,7 @@ impl DelegationCoordinator {
         }
     }
 
-    fn find_config(&self, name: &str) -> Option<SubAgentConfig> {
+    fn find_agent(&self, name: &str) -> Option<Arc<crate::agents::Agent>> {
         self.configs.get(name)
     }
 
@@ -151,7 +151,7 @@ impl DelegationCoordinator {
         reply_target: Option<&'a str>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'a>> {
         Box::pin(async move {
-        let config = self.find_config(agent_name)
+        let agent = self.find_agent(agent_name)
             .ok_or_else(|| {
                 let available = self.configs.names();
                 anyhow::anyhow!(
@@ -159,6 +159,7 @@ impl DelegationCoordinator {
                     agent_name, available.join(", ")
                 )
             })?;
+        let config = &agent.config;
 
         // H50: no marker file. Recovery scans SessionManager for sub-sessions
         // (by `meta.parent_session_id`) and checks their history shape —
@@ -257,13 +258,12 @@ impl DelegationCoordinator {
             Arc::clone(&self.registry),
             Arc::new(tools),
             Arc::new(RwLock::new(SkillManager::new())),
-            crate::agents::AgentRegistry::new(),
+            Arc::new(crate::agents::AgentRegistry::new()),
         );
 
-        // Agent with the sub-agent's SubAgentConfig (already has tools
-        // filter + max_tool_calls + isolation).
-        let agent2 = crate::agents::Agent::new(config.clone());
-
+        // Use the canonical Arc<Agent> from the registry — the
+        // sub-agent's config already carries the tools filter +
+        // max_tool_calls + isolation.
         tracing::debug!(agent = %config.name, "sub-agent started");
         let turn_ctx = crate::agents::TurnContext {
             system_prompt: &identity,
@@ -282,7 +282,7 @@ impl DelegationCoordinator {
                 }
             }
         }
-        let result = agent2
+        let result = agent
             .run(&mut session, turn_ctx, &runtime)
             .await
             .map(|tr| tr.text);
@@ -384,7 +384,7 @@ impl DelegationCoordinator {
         reply_target: &str,
         delegation_manager: &DelegationManager,
     ) -> anyhow::Result<String> {
-        let config = self.find_config(agent_name)
+        let agent = self.find_agent(agent_name)
             .ok_or_else(|| {
                 let available = self.configs.names();
                 anyhow::anyhow!(
@@ -392,6 +392,7 @@ impl DelegationCoordinator {
                     agent_name, available.join(", ")
                 )
             })?;
+        let config = &agent.config;
 
         let task_id = format!("del_{}", uuid::Uuid::new_v4());
 
@@ -498,7 +499,7 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
         self.configs
             .values_cloned()
             .into_iter()
-            .map(|c| (c.name.clone(), c.description.clone()))
+            .map(|a| (a.config.name.clone(), a.config.description.clone()))
             .collect()
     }
 }
