@@ -14,27 +14,18 @@
 //!   second takes its place — UI conventions assume the latest question wins.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use dashmap::DashMap;
 use tokio::sync::oneshot;
 
 use crate::channels::ChannelMessage;
 
-/// Per-pending-ask state stored in the router.
-struct Pending {
-    /// Sends the full reply ChannelMessage so AskUserTool can read the
-    /// answer content + any image attachments the user included. RFC
-    /// §三.B "AskRouter.wait_for_reply → 返回 ChannelMessage".
-    sender: oneshot::Sender<ChannelMessage>,
-    /// reply_target captured at ask time — used so the orchestrator sends
-    /// the question to the same channel + thread, not the latest one.
-    reply_target: String,
-}
-
-/// Manages outstanding `ask_user` calls.
+/// Manages outstanding `ask_user` calls. The API mirrors RFC v2 §三.B:
+/// `wait_for_reply` (caller-facing) + `fulfill` (orchestrator-facing).
 #[derive(Clone, Default)]
 pub struct AskRouter {
-    pending: Arc<DashMap<String, Pending>>,
+    pending: Arc<DashMap<String, oneshot::Sender<ChannelMessage>>>,
 }
 
 impl AskRouter {
@@ -42,72 +33,57 @@ impl AskRouter {
         Self::default()
     }
 
-    /// Register a pending ask. Returns the receiver future that resolves with
-    /// the user's eventual answer.
+    /// Register a pending ask for `session_id` and wait up to `timeout`
+    /// for the user's next ChannelMessage. RFC §三.B reference impl.
     ///
-    /// If a previous pending ask exists for the same session, it is dropped
-    /// (sending None to its receiver) so this new ask replaces it.
-    pub fn register(
+    /// If a previous pending ask exists for the same session, it is
+    /// dropped (the older receiver future resolves with `RecvError`).
+    /// On timeout, the pending slot is cleared so a stale sender doesn't
+    /// linger.
+    pub async fn wait_for_reply(
         &self,
         session_id: &str,
-        reply_target: String,
-    ) -> oneshot::Receiver<ChannelMessage> {
+        timeout: Duration,
+    ) -> anyhow::Result<ChannelMessage> {
         let (tx, rx) = oneshot::channel();
-        let pending = Pending {
-            sender: tx,
-            reply_target,
-        };
-        if let Some(_old) = self.pending.insert(session_id.to_string(), pending) {
+        if self.pending.insert(session_id.to_string(), tx).is_some() {
             tracing::warn!(
                 session = %session_id,
                 "replaced outstanding ask_user with a newer one"
             );
         }
-        rx
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(msg)) => Ok(msg),
+            Ok(Err(_)) => Err(anyhow::anyhow!("ask_user: receiver cancelled")),
+            Err(_) => {
+                self.pending.remove(session_id);
+                Err(anyhow::anyhow!(
+                    "ask_user: timed out after {}s",
+                    timeout.as_secs()
+                ))
+            }
+        }
     }
 
-    /// Fulfill a pending ask with the user's reply. Returns true if there
-    /// was an outstanding ask to fulfill, false otherwise.
+    /// Fulfill a pending ask with the user's reply. Returns true if
+    /// there was an outstanding ask to fulfill, false otherwise.
     ///
-    /// E29 orchestrator calls this before dispatching the message to
-    /// `process_turn` — if `fulfill` returns true, the inbound message is
-    /// consumed by the ask_user resolution and should NOT trigger a fresh
-    /// turn.
+    /// The orchestrator calls this before dispatching the message to
+    /// `process_turn` — if `fulfill` returns true, the inbound message
+    /// is consumed by the ask_user resolution and should NOT trigger a
+    /// fresh turn.
     pub fn fulfill(&self, session_id: &str, reply: ChannelMessage) -> bool {
         match self.pending.remove(session_id) {
-            Some((_, Pending { sender, .. })) => {
-                // Send result is Ok unless the receiver has been dropped (the
-                // sub-agent task that asked has been cancelled). Either way
-                // we treat this as "ask consumed" because the session has
+            Some((_, sender)) => {
+                // Send result is Ok unless the receiver has been dropped
+                // (the sub-agent task that asked has been cancelled). Either
+                // way we treat this as "ask consumed" — the session has
                 // moved on.
                 let _ = sender.send(reply);
                 true
             }
             None => false,
         }
-    }
-
-    /// Read the reply_target for an outstanding ask without resolving it.
-    /// Used when the orchestrator wants to know where to send the question.
-    pub fn pending_reply_target(&self, session_id: &str) -> Option<String> {
-        self.pending.get(session_id).map(|p| p.reply_target.clone())
-    }
-
-    /// True if a session has an outstanding ask.
-    pub fn has_pending(&self, session_id: &str) -> bool {
-        self.pending.contains_key(session_id)
-    }
-
-    /// Cancel a pending ask without delivering an answer. The asking
-    /// future receives a `RecvError`. Used by the /reset slash command and
-    /// by session deletion.
-    pub fn cancel(&self, session_id: &str) {
-        self.pending.remove(session_id);
-    }
-
-    /// Count of outstanding asks (diagnostics).
-    pub fn pending_count(&self) -> usize {
-        self.pending.len()
     }
 }
 
@@ -133,11 +109,15 @@ mod tests {
     #[tokio::test]
     async fn fulfill_resolves_future() {
         let r = AskRouter::new();
-        let rx = r.register("s1", "tg:42".into());
+        let router = r.clone();
+        let waiter = tokio::spawn(async move {
+            router.wait_for_reply("s1", Duration::from_secs(5)).await
+        });
+        // Let the waiter register before we fulfill.
+        tokio::task::yield_now().await;
         assert!(r.fulfill("s1", msg("yes")));
-        let reply = rx.await.unwrap();
+        let reply = waiter.await.unwrap().unwrap();
         assert_eq!(reply.content, "yes");
-        assert!(!r.has_pending("s1"));
     }
 
     #[tokio::test]
@@ -147,22 +127,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replacing_pending_drops_old() {
+    async fn timeout_clears_pending_slot() {
         let r = AskRouter::new();
-        let rx1 = r.register("s", "rt".into());
-        let _rx2 = r.register("s", "rt".into());
-        // rx1's sender was dropped when rx2 was registered
-        assert!(rx1.await.is_err());
-    }
-
-    #[test]
-    fn pending_reply_target_roundtrip() {
-        let r = AskRouter::new();
-        let _rx = r.register("s", "telegram:default:42".into());
-        assert_eq!(
-            r.pending_reply_target("s"),
-            Some("telegram:default:42".to_string())
-        );
-        assert_eq!(r.pending_count(), 1);
+        let err = r
+            .wait_for_reply("s", Duration::from_millis(10))
+            .await
+            .expect_err("should time out");
+        assert!(err.to_string().contains("timed out"));
+        // Fulfilling after timeout should report no pending ask.
+        assert!(!r.fulfill("s", msg("late")));
     }
 }

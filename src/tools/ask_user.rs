@@ -192,26 +192,14 @@ impl Tool for AskUserTool {
 
         // Register with the router and await the user's reply. Index by
         // session.id so cross-channel sub-agents work post-E29.
-        let rx = router.register(&session.id, reply_target);
-        let reply = match tokio::time::timeout(ASK_USER_TIMEOUT, rx).await {
-            Ok(Ok(m)) => m,
-            Ok(Err(_)) => {
+        let _ = reply_target; // reply_target was used for SendMessage above
+        let reply = match router.wait_for_reply(&session.id, ASK_USER_TIMEOUT).await {
+            Ok(m) => m,
+            Err(e) => {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some("ask_user: receiver cancelled".to_string()),
-                });
-            }
-            Err(_) => {
-                // Timeout — clean up the pending entry.
-                router.cancel(&session.id);
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!(
-                        "ask_user: timed out after {}s",
-                        ASK_USER_TIMEOUT.as_secs()
-                    )),
+                    error: Some(e.to_string()),
                 });
             }
         };
