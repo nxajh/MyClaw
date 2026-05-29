@@ -53,10 +53,7 @@ pub async fn run(cli: &Cli, prompt: &str, agent: Option<&str>, model: Option<&st
             resources,
             Arc::clone(&tools_arc),
         ));
-        let tool_executor = Arc::new(myclaw::agents::tool_executor::ToolExecutor::new(
-            Arc::clone(&tools_arc),
-            180,
-        ));
+        let tool_executor = Arc::new(myclaw::agents::tool_executor::ToolExecutor::new(180));
         let loop_breaker = Arc::new(myclaw::agents::loop_breaker::LoopBreaker::new(
             myclaw::agents::loop_breaker::LoopBreakerConfig::default(),
         ));

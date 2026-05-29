@@ -4,59 +4,39 @@ use std::time::Duration;
 use crate::config::agent::PermissionMode;
 use crate::providers::ToolCall;
 use crate::providers::capability_tool::ToolResult;
-use crate::providers::capability_chat::ToolSpec;
-use super::tool_registry::ToolRegistry;
 use super::session::Session;
 use super::tokens::is_write_tool;
+use super::tool_registry::ToolRegistry;
 
 /// Executes tool calls on behalf of `Agent::run`.
 ///
-/// Holds the tool registry; autonomy enforcement happens here (write
-/// tools blocked in `PermissionMode::ReadOnly`). Special tools
-/// (`ask_user`, `agent_delegate`) are real `Tool` impls registered in
-/// the registry by the daemon — they're dispatched through the same
-/// path as any other tool, no special-casing here.
+/// Per the RFC v2 target shape, the executor is a global singleton —
+/// it carries only the timeout policy and dispatches against a
+/// `&[Arc<dyn Tool>]` slice the caller (Agent::run) has already
+/// filtered through the agent's `tools` / `skills` / `mcp` filters.
+/// No `ToolRegistry` field; the executor is stateless w.r.t. which
+/// tools an agent may call.
 pub struct ToolExecutor {
-    pub(crate) tools: Arc<ToolRegistry>,
     pub timeout_secs: u64,
 }
 
 impl ToolExecutor {
-    pub fn new(tools: Arc<ToolRegistry>, timeout_secs: u64) -> Self {
-        Self {
-            tools,
-            timeout_secs,
-        }
+    pub fn new(timeout_secs: u64) -> Self {
+        Self { timeout_secs }
     }
 
-    /// Build tool specs from the registry. Currently unused (Agent::run
-    /// builds the spec list inline since it already iterates the
-    /// filtered tool view). Kept available for future callers.
-    #[allow(dead_code)]
-    pub(crate) fn build_tool_specs(&self) -> Vec<ToolSpec> {
-        self.tools
-            .all_tools()
-            .iter()
-            .map(|t| {
-                let spec = t.spec();
-                ToolSpec {
-                    name: spec.name,
-                    description: Some(spec.description),
-                    input_schema: spec.parameters,
-                }
-            })
-            .collect()
-    }
-
-    /// Execute a single tool call.
+    /// Execute a single tool call against the pre-filtered `allowed`
+    /// slice.
     ///
-    /// `autonomy` controls write-tool blocking. Special tools (ask_user, agent_delegate)
-    /// are handled before reaching the generic tool dispatch.
+    /// `autonomy` controls write-tool blocking. Special tools
+    /// (`ask_user`, `agent_delegate`) are real `Tool` impls in
+    /// `allowed`, dispatched through the same path as any other tool.
     pub(crate) async fn execute(
         &self,
         call: &ToolCall,
         session: &mut Session,
         autonomy: Option<&PermissionMode>,
+        allowed: &[Arc<dyn crate::providers::Tool>],
     ) -> anyhow::Result<ToolResult> {
         // Autonomy enforcement: block write tools in ReadOnly mode.
         if let Some(autonomy) = autonomy {
@@ -73,11 +53,13 @@ impl ToolExecutor {
             }
         }
 
-        // Generic tool dispatch. ask_user / agent_delegate are real
-        // Tool impls in the registry (no special-casing).
-        let tool = self.tools.get(&call.name).ok_or_else(|| {
-            anyhow::anyhow!("Unknown tool: '{}'", call.name)
-        })?;
+        // Generic tool dispatch against the filtered slice. `ask_user` /
+        // `agent_delegate` are real Tool impls in `allowed` (no
+        // special-casing).
+        let tool = allowed
+            .iter()
+            .find(|t| t.spec().name == call.name)
+            .ok_or_else(|| anyhow::anyhow!("Unknown tool: '{}'", call.name))?;
         let args = parse_tool_args(&call.arguments);
         self.run_tool(tool.as_ref(), &call.name, args, session).await
     }

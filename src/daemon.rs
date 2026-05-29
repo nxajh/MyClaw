@@ -919,7 +919,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             Arc::clone(&tools_arc),
         ));
         let tool_executor = Arc::new(crate::agents::tool_executor::ToolExecutor::new(
-            Arc::clone(&tools_arc),
             config.tool_executor.timeout_secs,
         ));
         let loop_breaker = Arc::new(crate::agents::loop_breaker::LoopBreaker::new(

@@ -32,7 +32,6 @@ use futures_util::StreamExt;
 use crate::agents::error::AgentError;
 use crate::agents::loop_breaker::LoopBreak;
 use crate::agents::session::Session;
-use crate::agents::tool_executor::ToolExecutor;
 use crate::agents::turn::{TurnContext, TurnResult};
 use crate::agents::turn_event::TurnEvent;
 use crate::agents::AgentRuntime;
@@ -97,12 +96,11 @@ impl Agent {
             None => runtime.providers.get_chat_provider(Capability::Chat)?,
         };
 
-        // Per-turn ToolExecutor scoped to the allowed-tool slice. The
-        // shared `runtime.tool_executor` holds the timeout; we wrap a
-        // scoped tools registry around it so `execute_tool` can't reach
-        // beyond the agent's filter.
-        let scoped_tools = Arc::new(build_scoped_registry(&allowed_tools));
-        let tool_executor = ToolExecutor::new(scoped_tools, runtime.tool_executor.timeout_secs);
+        // Shared ToolExecutor singleton — per the target architecture,
+        // the executor is stateless w.r.t. which tools the agent may
+        // call; the `allowed_tools` slice computed above is passed
+        // explicitly on every `execute` call.
+        let tool_executor = &runtime.tool_executor;
 
         // Per-turn loop breaker counter — allocated fresh each turn by
         // the shared `runtime.loop_breaker` singleton. Per-agent
@@ -441,7 +439,7 @@ impl Agent {
                 }
 
                 let result = tool_executor
-                    .execute(call, session, Some(&permission_mode))
+                    .execute(call, session, Some(&permission_mode), &allowed_tools)
                     .await;
                 let (result_content, is_error) = match &result {
                     Ok(r) => {
@@ -575,12 +573,11 @@ impl Agent {
                 "recovery: re-executing interrupted tool calls"
             );
             let allowed_tools = self.allowed_tools(runtime);
-            let scoped_tools = Arc::new(build_scoped_registry(&allowed_tools));
-            let tool_executor = ToolExecutor::new(scoped_tools, runtime.tool_executor.timeout_secs);
+            let tool_executor = &runtime.tool_executor;
 
             for call in &pending_calls {
                 let result = tool_executor
-                    .execute(call, session, Some(&turn_ctx.permission_mode))
+                    .execute(call, session, Some(&turn_ctx.permission_mode), &allowed_tools)
                     .await;
                 let (result_content, is_error) = match &result {
                     Ok(r) => {
@@ -627,18 +624,6 @@ impl Agent {
             })
             .collect()
     }
-}
-
-// Tool registry constructor scoped to a pre-filtered list. Avoids
-// re-running the filter inside ToolExecutor every call.
-fn build_scoped_registry(
-    tools: &[Arc<dyn crate::providers::Tool>],
-) -> crate::agents::tool_registry::ToolRegistry {
-    let mut reg = crate::agents::tool_registry::ToolRegistry::new();
-    for t in tools {
-        reg.register(Arc::clone(t));
-    }
-    reg
 }
 
 /// Char-count → token estimate. Matches `agent_impl::types::estimate_tokens`
