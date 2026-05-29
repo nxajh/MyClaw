@@ -121,12 +121,14 @@ impl SessionContext {
         let mut session = self.session.lock().await;
 
         let content = inbound_msg.content.clone();
+        let reply_target = inbound_msg.reply_target.clone();
         session.record_inbound(inbound_msg);
 
         // Session.persist was wired at SessionContext creation by
         // SessionManager; capture a clone so the post-turn `add_user`
         // persistence call sees the same hook.
         let persist_hook = session.persist.clone();
+        let channel_for_send = channel.clone();
         session.channel = channel;
 
         let session_override = session.session_override.clone();
@@ -204,6 +206,28 @@ impl SessionContext {
             Ok(turn_result) => {
                 if let Some(ref retry_msg) = turn_result.pending_retry {
                     *self.pending_retry.lock().await = Some(retry_msg.clone());
+                }
+                // RFC §三.B line 359-363: fallback final-text send. When
+                // a channel is wired and the model produced text, deliver
+                // it here. Streaming channels have already emitted via
+                // `push_event`; this `send` is the non-streaming fallback
+                // / summary. Scheduled / webhook paths pass `channel:
+                // None` and dispatch via their own `send_to_target` after
+                // process_turn returns.
+                if let Some(ch) = channel_for_send {
+                    if !turn_result.text.trim().is_empty() {
+                        let send_msg = crate::channels::SendMessage::new(
+                            turn_result.text.clone(),
+                            reply_target.clone(),
+                        );
+                        if let Err(e) = ch.send(&send_msg).await {
+                            tracing::error!(
+                                session = %session.id,
+                                err = %e,
+                                "process_turn: fallback send failed"
+                            );
+                        }
+                    }
                 }
                 Ok(turn_result)
             }

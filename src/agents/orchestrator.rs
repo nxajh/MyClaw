@@ -714,22 +714,15 @@ impl Orchestrator {
                     // upstream); Agent.run reads them from there.
                     // reply_to_id is unused — channels send replies in-line
                     // without thread context for now.
+                    // Successful turns: process_turn does the fallback
+                    // `channel.send(text)` internally per RFC §三.B. We
+                    // only handle the error notice here.
                     let result = session_ctx
                         .process_turn(inbound_msg, Some(channel.clone()), runtime)
                         .await;
-                    match result {
-                        Ok(turn_result) => {
-                            if !turn_result.text.trim().is_empty() {
-                                let send_msg = SendMessage::new(turn_result.text, reply_target);
-                                if let Err(e) = channel.send(&send_msg).await {
-                                    tracing::error!(err = %e, "send response failed");
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            let send_msg = SendMessage::new(MSG_TURN_FAILED, reply_target);
-                            let _ = channel.send(&send_msg).await;
-                        }
+                    if result.is_err() {
+                        let send_msg = SendMessage::new(MSG_TURN_FAILED, reply_target);
+                        let _ = channel.send(&send_msg).await;
                     }
                 });
 
