@@ -15,12 +15,13 @@
 5. [核心设计](#5-核心设计)
 6. [新增类型](#6-新增类型)
 7. [Channel trait 改动](#7-channel-trait-改动)
-8. [Orchestrator 改动](#8-orchestrator-改动)
+8. [SessionContext / Orchestrator 改动](#8-sessioncontext--orchestrator-改动)
 9. [配置变更](#9-配置变更)
 10. [各 Channel 实现影响](#10-各-channel-实现影响)
 11. [实施阶段](#11-实施阶段)
 12. [测试计划](#12-测试计划)
-13. [附录](#附录-a-sendmessage-保留-vs-淘汰)
+13. [跨模块耦合与迁移清单](#13-跨模块耦合与迁移清单)
+14. [附录](#附录-a-sendmessage-删除时间线)
 
 ---
 
@@ -967,6 +968,207 @@ if let Some(ch) = channel_for_send {
 - [ ] 按钮点击产生结构化 callback（非 `__retry:` 前缀）
 - [ ] orchestrator 正确路由 callback 到目标处理逻辑
 - [ ] 现有 retry/abort 按钮平滑迁移
+
+---
+
+## 13. 跨模块耦合与迁移清单
+
+Channel 改动不只影响 `channels::` 模块本身。下表列出所有跨模块依赖点，
+按 Phase 时间线说明每处的迁移路径。
+
+### 13.1 所有 `channel.send(SendMessage)` callsite 清单
+
+Phase 0 不影响这些；Phase 2 大部分迁移到 `send_payload`；Phase 4 强制全部迁移。
+
+| 文件:行 | 场景 | Phase 2 改造 | Phase 4 删 SendMessage |
+|---|---|---|---|
+| `orchestrator.rs:592` | callback 命中无 retry 时的回应 | text → `MessagePayload::Text` | 必改 |
+| `orchestrator.rs:598` | `MSG_ABORT_ACK` 确认 | text → `MessagePayload::Text` | 必改 |
+| `orchestrator.rs:629` | incomplete turn 提示（含 retry/abort 按钮） | **典型 `MessagePayload::Interactive` 目标** | 必改 |
+| `orchestrator.rs:679` | command 响应（`/help`、`/status` 等） | text → `MessagePayload::Text` | 必改 |
+| `orchestrator.rs:726` | `MSG_TURN_FAILED` 错误通知 | text → `MessagePayload::Text` | 必改 |
+| `orchestrator.rs:878` | startup recovery 恢复后的响应 | text → `MessagePayload::Text` | 必改 |
+| `orchestrator.rs:1318` | `send_to_target_internal`（cron/heartbeat 投递） | text → `MessagePayload::Text` | 必改 |
+| `scheduler.rs:1081` | Webhook `send_to_target` 投递 | text → `MessagePayload::Text` | 必改 |
+| `session_context.rs:223` | `process_turn` 内 fallback send（**Phase 0 加 guard 的位置**） | text → `MessagePayload::Text` | 必改 |
+| `tools/ask_user.rs:184` | AskUserTool 发送问题 | text → `MessagePayload::Text` | 必改 |
+
+共 **10 个 callsite**。其中 1 个（`orchestrator.rs:629` retry/abort 按钮构造，
+即 `retry_abort_prompt()` 辅助函数）是 `MessagePayload::Interactive` 的天然
+迁移目标——Phase 2 应该把它一起改了。
+
+### 13.2 AskUserTool：Phase 4 删 SendMessage 时**首先失败**的工具
+
+`tools/ask_user.rs:184` 构造 `SendMessage::new(question, reply_target)` 然后
+`channel.send(&send_msg)`。Phase 4 删 SendMessage 后这个工具会编译失败，必须
+同步迁移到：
+
+```rust
+let target = SendTarget::new(reply_target);
+channel.send_payload(&target, &MessagePayload::Text { content: question }).await?;
+```
+
+**Phase 2 必须把 AskUserTool 列入迁移清单**——否则 Phase 4 时被动改。
+
+### 13.3 TurnEvent vs MessagePayload 的边界
+
+两套平行的出站路径，**用途互补不冲突**：
+
+| 路径 | 触发场景 | 内容形态 | 调用方 |
+|------|----------|----------|--------|
+| `push_event(reply_target, TurnEvent)` | streaming channel 的流式增量推送 | `Chunk` / `Thinking` / `ToolCall` / `ToolResult` / `Done` | `Agent::run` 内部的 `collect_stream` |
+| `send_payload(SendTarget, MessagePayload)` | 最终消息 / 控制消息 / 工具发送 | `Text` / `Interactive` / `Media` | process_turn fallback、orchestrator 各路径、AskUserTool 等 |
+
+**边界规则**（Phase 0 起执行）：
+
+1. **streaming channel**（`supports_streaming = true`）：
+   - 通过 `push_event(TurnEvent::Chunk)` 增量推送 token，`push_event(TurnEvent::Done)` 标记结束
+   - **不再**通过 `send_payload` 发送最终文本（Phase 0 的守卫负责跳过）
+   - 控制消息（错误、命令响应）仍走 `send_payload`
+
+2. **非 streaming channel**（`supports_streaming = false`）：
+   - `push_event` 是 no-op（trait 默认实现）
+   - 所有出站消息走 `send_payload`
+
+不在本 RFC 范围内的扩展：**edit-based streaming**（非 streaming channel 用
+`send_payload` 发占位 + 持续 `edit_message` 更新）是 Phase 3 之后的可能演进，
+届时需要在 Channel trait 上再加一个 `supports_edit_streaming` capability，
+和 `push_event` 形成分支。当前 RFC 不预留 trait 方法。
+
+### 13.4 ChannelCapabilities 与 TOML 配置的合并
+
+§9 引入 `[channels.telegram] max_message_length = 4096` 这类配置。§6.1 把
+`ChannelCapabilities::telegram()` 写成 `const fn` 硬编码默认值。两者通过
+**channel 构造时**合并，**不**通过运行时查询合并：
+
+```rust
+// TelegramChannel::new(cfg: TelegramConfig) — Phase 1 实施时
+let capabilities = {
+    let mut base = ChannelCapabilities::telegram();  // const default
+    if let Some(limit) = cfg.max_message_length {
+        base.message_chunk_limit = limit;            // config override
+    }
+    base
+};
+Self { capabilities, ... }
+```
+
+`Channel::capabilities()` 返回 `&self.capabilities`（结构体存在 channel 实例
+里）。**不要**在 `capabilities()` 默认实现里读 config——会引入运行时分支和
+锁，违背 §6.1 "不可变在构造时确定" 的设计。
+
+Phase 1 channel 实现的字段从原本的几个 `max_message_length / unit` 散字段，
+合并为单个 `capabilities: ChannelCapabilities` 字段。
+
+### 13.5 Session.channel transient 字段：工具侧的耦合
+
+`Session.channel: Option<Arc<dyn Channel>>` 由 `process_turn` 写入，由
+**Agent.run 内部** 和**工具 execute 时** 读取：
+
+| 读取方 | 用途 | Phase 4 影响 |
+|---|---|---|
+| `Agent::run` 的 `collect_stream` | 调 `channel.push_event(reply_target, ev)` 推流 | 无（push_event 不依赖 SendMessage） |
+| `Agent::run` 的 `cancel_signal(reply_target)` | 取消 token 获取 | 无 |
+| `AskUserTool` | 调 `channel.send(SendMessage{question})` | **必改**（13.2） |
+| 其他工具 | 当前没有其他工具读 `session.channel` | 无 |
+
+**结论**：Phase 4 删 SendMessage 时，唯一受影响的工具是 AskUserTool。
+其他工具不读 `session.channel`，无连带改动。
+
+### 13.6 ChannelMessage（入站侧）的演进
+
+本 RFC 主要谈出站。入站侧 `ChannelMessage` 的字段：
+
+```rust
+pub struct ChannelMessage {
+    pub id: String,
+    pub sender: String,
+    pub reply_target: String,
+    pub content: String,
+    pub timestamp: u64,
+    pub thread_ts: Option<String>,
+    pub interruption_scope_id: Option<String>,
+    pub attachments: Vec<MediaAttachment>,
+    pub image_urls: Option<Vec<String>>,
+    pub image_base64: Option<Vec<String>>,
+}
+```
+
+**Phase 1-4 不动入站侧**——只动出站。但 Phase 5（callback 通用化）需要
+入站侧支持结构化按钮回调：
+
+```rust
+// Phase 5 候选扩展
+pub struct ChannelMessage {
+    // ... 现有字段 ...
+    /// 用户点击按钮产生的结构化回调（替代当前 "__retry:..." 文本前缀）
+    pub callback: Option<InteractionCallback>,
+}
+
+pub enum InteractionCallback {
+    Retry { session_key_prefix: String },
+    Abort { session_key_prefix: String },
+    Custom { action: String, payload: serde_json::Value },
+}
+```
+
+各 channel 在 `listen()` 内构造 ChannelMessage 时填充：Telegram 从
+`callback_query.data` 解析，QQBot 从 `INTERACTION_CREATE.button_data` 解析。
+
+Phase 5 时再细化；本 RFC 仅声明入站侧"Phase 1-4 保持现状，Phase 5 加结构化
+callback 字段"。
+
+### 13.7 WebhookContext + Recovery：透传，无独立改造
+
+| 模块 | 涉及 Channel 的方式 | Phase 影响 |
+|---|---|---|
+| `WebhookContext`（axum app state） | 持 `Arc<Orchestrator>`，通过 `orchestrator.channels()` 访问 channel 集合；调 `send_to_target_internal` 派发 | Phase 4 跟随 `send_to_target_internal` 一起改 |
+| `Orchestrator::startup_recover_sessions` | 调 `channel.send(MSG_INCOMPLETE_TURN)` 等控制消息 | Phase 4 必改（13.1 表格里已列） |
+| `DelegationCoordinator` | 调 `sub_ctx.process_turn(synthetic, None, runtime)` —— **channel 传 None** | **不直接调用 Channel；Phase 4 无影响** |
+
+### 13.8 子代理的 channel 继承：决策点
+
+`DelegationCoordinator::delegate_with_parent` 当前给子代理传 `channel: None`
+（见 commit `b26bd61`）。结果：
+
+- 子代理走 streaming（push_event）的能力 = ❌（session.channel = None）
+- 子代理调 ask_user 的能力 = ❌（AskUserTool 检查 channel.is_none() 时 fallback
+  到"返回 question 让 LLM 自答"模式）
+
+**RFC 决策**：保持现状——子代理是后台 background 任务，不应抢占用户对话
+通道。如果将来要让子代理能主动 ask_user（例如 git worktree 子代理需要 push
+权限确认），单独 RFC 讨论，**不在 Channel 模型重构范围**。
+
+### 13.9 跨 Phase 迁移依赖图
+
+```
+Phase 0  ── 仅改 session_context.rs:223 一处 ────── 无下游依赖
+            │
+Phase 1  ── ChannelCapabilities + LenUnit ──────── 必须先于 Phase 2
+            │     fix Telegram UTF-16 bug
+            │
+Phase 2  ── MessagePayload + send_payload ──────── 必须先于 Phase 4
+            │     ↓ callsite 迁移：
+            │       - orchestrator.rs 7 处（含 retry_abort_prompt）
+            │       - scheduler.rs 1 处
+            │       - tools/ask_user.rs 1 处
+            │       - session_context.rs 1 处
+            │
+Phase 3  ── edit_message / delete_message ──────── 独立，可与 Phase 2 并行
+            │
+Phase 4  ── 删除 SendMessage ────────────────────── 依赖 Phase 2 callsite 全迁完
+            │
+Phase 5  ── 结构化 callback ─────────────────────── 独立，依赖 Phase 3 提供 edit
+            │     ↓ 同时改造：
+            │       - 出站：MessagePayload::Interactive 已有
+            │       - 入站：ChannelMessage 加 callback 字段（13.6）
+            │
+Phase 6+ ── Voice / Poll / Card / 安全策略抽象 ──── 等真实需求 PR
+```
+
+**关键依赖**：Phase 2 必须把 §13.1 表格列出的 10 个 callsite 全部迁移，否则
+Phase 4 无法删除 `SendMessage`。各 Phase 的"完成定义"必须包含 callsite 验收：
+`grep -rn 'SendMessage::new\|channel.send(' src/` 返回空才算 Phase 2 完成。
 
 ---
 
