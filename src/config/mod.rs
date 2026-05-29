@@ -41,9 +41,6 @@
 //! [agent]
 //! permission_mode = "default"
 //!
-//! [memory]
-//! storage = "sqlite"
-//!
 //! [[mcp_servers]]
 //! name = "filesystem"
 //! command = "npx"
@@ -54,7 +51,6 @@ pub mod agent;
 pub mod channel;
 pub mod filters;
 pub mod mcp;
-pub mod memory;
 pub mod provider;
 pub mod routing;
 pub mod scheduler;
@@ -69,7 +65,6 @@ use serde::{Deserialize, Serialize};
 use agent::{AgentConfig, ContextConfig, PromptConfig, ToolExecutorConfig};
 use channel::ChannelConfigs;
 use mcp::McpServerConfig;
-use memory::MemoryConfig;
 use crate::agents::loop_breaker::LoopBreakerConfig;
 use crate::config::scheduler::SchedulerConfig;
 use provider::ProviderConfig;
@@ -123,10 +118,6 @@ struct RawConfig {
     /// Scheduler configuration (`[scheduler]`).
     #[serde(default)]
     scheduler: SchedulerConfig,
-
-    /// Memory configuration.
-    #[serde(default)]
-    memory: MemoryConfig,
 
     /// MCP server configurations.
     #[serde(default)]
@@ -182,8 +173,6 @@ pub struct AppConfig {
     pub prompt: PromptConfig,
     /// Scheduler configuration (`[scheduler]`).
     pub scheduler: SchedulerConfig,
-    /// Memory configuration.
-    pub memory: MemoryConfig,
     /// MCP server configurations.
     pub mcp_servers: Vec<McpServerConfig>,
     /// Logging configuration.
@@ -249,7 +238,6 @@ impl ConfigLoader {
             loop_breaker: raw.loop_breaker,
             prompt: raw.prompt,
             scheduler: raw.scheduler,
-            memory: raw.memory,
             mcp_servers: raw.mcp_servers,
             logging: raw.logging,
         })
@@ -421,10 +409,6 @@ permission_mode = "full"
 [loop_breaker]
 max_tool_calls = 50
 
-[memory]
-storage = "sqlite"
-db_path = "test.db"
-
 [[mcp_servers]]
 name = "filesystem"
 command = "npx"
@@ -456,9 +440,6 @@ level = "INFO"
         // Agent / loop breaker
         assert_eq!(config.agent.permission_mode, agent::PermissionMode::Full);
         assert_eq!(config.loop_breaker.max_tool_calls, 50);
-
-        // Memory
-        assert_eq!(config.memory.db_path, "test.db");
 
         // MCP
         assert_eq!(config.mcp_servers.len(), 1);
