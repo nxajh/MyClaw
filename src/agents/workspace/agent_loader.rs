@@ -42,7 +42,15 @@ pub fn parse_agent_file(path: &Path) -> Result<SubAgentConfig> {
 
     let description = extract_yaml_string(&front_matter, "description").unwrap_or_default();
 
-    let tools = extract_yaml_list(&front_matter, "tools");
+    // Parse `tools:` YAML list into a ToolFilter. `[all]` → All; otherwise
+    // the list is taken as an Allow-list. Deny-list syntax
+    // (`{ except: [...] }`) is reserved for future structured parsing.
+    let tools_list = extract_yaml_list(&front_matter, "tools");
+    let tools = if tools_list.is_empty() || tools_list.iter().any(|t| t == "all") {
+        crate::config::filters::ToolFilter::all()
+    } else {
+        crate::config::filters::ToolFilter::Allow(tools_list)
+    };
 
     let max_tool_calls = extract_yaml_string(&front_matter, "max_tool_calls")
         .and_then(|s| s.parse::<usize>().ok());
@@ -149,10 +157,16 @@ pub fn validate_agents(agents: &[SubAgentConfig], known_tools: &[&str]) -> Vec<S
         }
     }
 
-    // Check for unknown tool references
+    // Check for unknown tool references. Only the Allow / Deny variants
+    // carry explicit names worth validating; `[all]` matches everything.
     let known: std::collections::HashSet<&str> = known_tools.iter().copied().collect();
     for agent in agents {
-        for tool in &agent.tools {
+        let names: &[String] = match &agent.tools {
+            crate::config::filters::ToolFilter::Allow(list) => list,
+            crate::config::filters::ToolFilter::Deny(deny) => &deny.except,
+            _ => continue,
+        };
+        for tool in names {
             if !known.contains(tool.as_str()) {
                 warnings.push(format!(
                     "agent '{}' references unknown tool '{}'",
@@ -194,10 +208,10 @@ You are an expert programmer. Write clean, idiomatic code.
         let agent = parse_agent_file(&agent_dir.join("AGENT.md")).unwrap();
         assert_eq!(agent.name, "coder");
         assert_eq!(agent.description.as_deref(), Some("Expert programmer"));
-        assert_eq!(
-            agent.tools,
-            vec!["shell", "file_read", "file_write", "file_edit"]
-        );
+        for t in ["shell", "file_read", "file_write", "file_edit"] {
+            assert!(agent.tools.allows(t));
+        }
+        assert!(!agent.tools.allows("net"));
         assert_eq!(agent.max_tool_calls, Some(30));
         assert!(agent.model.is_none());
         assert!(agent.system_prompt.contains("# Coder Agent"));
@@ -215,7 +229,7 @@ You are an expert programmer. Write clean, idiomatic code.
 
         let agent = parse_agent_file(&agent_dir.join("AGENT.md")).unwrap();
         assert_eq!(agent.name, "simple");
-        assert!(agent.tools.is_empty());
+        assert!(agent.tools.is_all());
         assert!(agent.max_tool_calls.is_none());
         assert!(agent.model.is_none());
         assert_eq!(agent.system_prompt, "You are a simple agent.");
@@ -297,7 +311,7 @@ You are an expert programmer. Write clean, idiomatic code.
             SubAgentConfig {
                 name: "coder".into(),
                 system_prompt: "a".into(),
-                tools: vec![],
+                tools: Default::default(),
                 skills: Default::default(),
                 mcp: Default::default(),
                 max_tool_calls: None,
@@ -308,7 +322,7 @@ You are an expert programmer. Write clean, idiomatic code.
             SubAgentConfig {
                 name: "coder".into(),
                 system_prompt: "b".into(),
-                tools: vec![],
+                tools: Default::default(),
                 skills: Default::default(),
                 mcp: Default::default(),
                 max_tool_calls: None,
@@ -326,7 +340,7 @@ You are an expert programmer. Write clean, idiomatic code.
         let agents = vec![SubAgentConfig {
             name: "coder".into(),
             system_prompt: "a".into(),
-            tools: vec!["shell".into(), "nonexistent_tool".into()],
+            tools: crate::config::filters::ToolFilter::Allow(vec!["shell".into(), "nonexistent_tool".into()]),
             skills: Default::default(),
             mcp: Default::default(),
             max_tool_calls: None,

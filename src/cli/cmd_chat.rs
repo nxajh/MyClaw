@@ -77,7 +77,7 @@ pub async fn run(cli: &Cli, prompt: Option<&str>, agent: Option<&str>, model: Op
         name: "main".to_string(),
         description: None,
         system_prompt: String::new(),
-        tools: vec!["all".to_string()],
+        tools: myclaw::config::filters::ToolFilter::all(),
         skills: Default::default(),
         mcp: Default::default(),
         model: model.map(|s| s.to_string()),

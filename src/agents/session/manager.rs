@@ -657,7 +657,7 @@ fn permissive_main_default(agent_name: &str) -> SubAgentConfig {
         name: agent_name.to_string(),
         description: None,
         system_prompt: String::new(),
-        tools: vec!["all".to_string()],
+        tools: crate::config::filters::ToolFilter::all(),
         skills: Default::default(),
         mcp: Default::default(),
         model: None,

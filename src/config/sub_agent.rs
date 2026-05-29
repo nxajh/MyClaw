@@ -53,12 +53,11 @@ pub struct SubAgentConfig {
     /// System prompt for this sub-agent (body of AGENT.md).
     pub system_prompt: String,
 
-    /// Tools this sub-agent is allowed to use.
-    /// Legacy `Vec<String>` form (whitelist) — empty → no tools.
-    /// RFC v2 prefers `ToolFilter` (All/Allow/Deny); kept as Vec here until
-    /// AGENT.md parser learns to read the structured form.
+    /// Tools this sub-agent is allowed to use. RFC v2 §三.A:
+    /// `ToolFilter` (`[all]` / explicit allow-list /
+    /// `{ except: [...] }` deny-list). Default = `[all]`.
     #[serde(default)]
-    pub tools: Vec<String>,
+    pub tools: crate::config::filters::ToolFilter,
 
     /// Skills this sub-agent may see in system reminders / load via skill_view.
     /// RFC v2 §三.B: NameFilter form `[all]` / `[skill_a, skill_b]` /
@@ -91,9 +90,8 @@ pub struct SubAgentConfig {
 
 impl SubAgentConfig {
     /// True if `tool_name` is allowed by this agent's tool filter.
-    /// Legacy semantics: empty `tools` → none allowed; non-empty → allow-list.
     pub fn allows_tool(&self, tool_name: &str) -> bool {
-        self.tools.iter().any(|t| t == tool_name || t == "all")
+        self.tools.allows(tool_name)
     }
 
     /// True if `skill_name` is allowed by this agent's skill filter.
@@ -136,7 +134,9 @@ mod tests {
         "#;
         let config: SubAgentConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.name, "coder");
-        assert_eq!(config.tools, vec!["shell", "file_read"]);
+        assert!(config.tools.allows("shell"));
+        assert!(config.tools.allows("file_read"));
+        assert!(!config.tools.allows("file_write"));
         assert_eq!(config.max_tool_calls, Some(30));
     }
 
@@ -156,7 +156,7 @@ mod tests {
         let config = SubAgentConfig {
             name: "test".to_string(),
             system_prompt: String::new(),
-            tools: vec![],
+            tools: Default::default(),
             skills: Default::default(),
             mcp: Default::default(),
             max_tool_calls: None,
@@ -172,7 +172,7 @@ mod tests {
         let config = SubAgentConfig {
             name: "test".to_string(),
             system_prompt: String::new(),
-            tools: vec![],
+            tools: Default::default(),
             skills: Default::default(),
             mcp: Default::default(),
             max_tool_calls: None,
@@ -189,7 +189,7 @@ mod tests {
         let config = SubAgentConfig {
             name: "t".to_string(),
             system_prompt: String::new(),
-            tools: vec!["shell".to_string(), "file_read".to_string()],
+            tools: crate::config::filters::ToolFilter::Allow(vec!["shell".to_string(), "file_read".to_string()]),
             skills: Default::default(),
             mcp: Default::default(),
             max_tool_calls: None,

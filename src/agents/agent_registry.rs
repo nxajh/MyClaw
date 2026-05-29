@@ -115,7 +115,7 @@ mod tests {
             name: name.to_string(),
             description: None,
             system_prompt: String::new(),
-            tools: Vec::new(),
+            tools: Default::default(),
             skills: Default::default(),
             mcp: Default::default(),
             model: None,

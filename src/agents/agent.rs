@@ -829,7 +829,7 @@ mod tests {
         SubAgentConfig {
             name: "test".into(),
             system_prompt: String::new(),
-            tools: Vec::new(),
+            tools: Default::default(),
             skills: Default::default(),
             mcp: Default::default(),
             max_tool_calls: None,
