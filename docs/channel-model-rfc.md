@@ -31,11 +31,15 @@
 Agent 回复通过两条互不感知的路径同时到达 WebUI：
 
 1. **Streaming 路径**：`Agent::run` → `collect_stream` → `push_event(TurnEvent::Chunk/Done)` → WebSocket → WebUI
-2. **`channel.send` 路径**：`process_turn` 返回后 → orchestrator 无条件调用 `channel.send()` → WebSocket → WebUI
+2. **`channel.send` 路径**：`SessionContext::process_turn` 在 `agent.run` 返回后调用
+   `channel.send()`（commit `49e408a` 后此调用在 process_turn 内部，不在 orchestrator）
+   → WebSocket → WebUI
 
-Streaming 已交付完整文本后，`channel.send` 又发一次 `{"type":"message","content":"..."}` ，WebUI 检测到 `done:true` 的 assistant 消息已存在，创建一条全新的重复消息。
+Streaming 已交付完整文本后，`channel.send` 又发一次 `{"type":"message","content":"..."}`，
+WebUI 检测到 `done:true` 的 assistant 消息已存在，创建一条全新的重复消息。
 
-**根因**：orchestrator 不区分 streaming 和非 streaming channel，对所有 channel 都执行 `send()`。
+**根因**：`process_turn` 的 fallback send 不区分 streaming 和非 streaming channel，
+对所有 channel 都执行 `send()`。
 
 ### 1.2 Channel trait 能力不足
 
@@ -97,13 +101,16 @@ pub struct SendMessage {
 
 ### 目标
 
-1. 修复 WebUI 回复双显示 bug
-2. 引入 `MessagePayload` 枚举统一文本/媒体/按钮/投票/语音/卡片的发送接口，替代 `SendMessage` 字段膨胀
-3. 新增 `edit_message` / `delete_message` / `send_draft`，为非 WebUI channel 的流式推送和交互闭环打基础
-4. 引入 `ChannelCapabilities` 结构体，集中声明各 channel 的能力
-5. 按 platform 实际计量单位切分消息
-6. 统一平台文本清洗（`format_message`）
-7. 预留群组安全策略抽象
+1. 修复 WebUI 回复双显示 bug（Phase 0）
+2. 引入 `ChannelCapabilities` 结构体，集中声明各 channel 的能力（Phase 1）
+3. 按 platform 实际计量单位切分消息，修复 Telegram UTF-16 bug（Phase 1）
+4. 引入 `MessagePayload` 枚举统一现有的文本 / 按钮 / 媒体三类发送接口，替代
+   `SendMessage` 字段膨胀（Phase 2）—— Voice/Poll/Card 等到对应功能 PR 出现时
+   作为新 variant 加入，不在本次范围
+5. 新增 `edit_message` / `delete_message`，为非 WebUI channel 的流式推送和交互
+   闭环打基础（Phase 3）
+6. 预留群组安全策略抽象（Phase 4）
+7. 预留按钮回调通用化（Phase 5）
 
 ### 非目标
 
@@ -111,6 +118,13 @@ pub struct SendMessage {
 - 不做 Hermes 式的外挂 `GatewayStreamConsumer`（`push_event` + `TurnEvent` 已是等价设计）
 - 不做完整插件系统（`before_send` / `after_send` 钩子作为 P3 预留）
 - 不做跨 channel 的 presentation 抽象渲染层（`renderPresentation`），由各 channel 自行处理 payload
+- **不在 trait 上暴露 `send_draft`**——Telegram `sendMessageDraft` 仍是 beta API，
+  作为 TelegramChannel 内部实现细节即可（见 §7.2 / 附录 C.1）
+- **不在 trait 上暴露 `format_message`**——平台格式转换是 channel 实现私事，
+  调用方不应感知（见 §7.3）
+- 不在本次新增 `Voice` / `Poll` / `Card` 等 payload variant——`MessagePayload` 是
+  开放枚举，trait 默认 fallback 让加变体不破坏现有 channel；等真实消费者 PR
+  出现时再加
 
 ---
 
@@ -138,25 +152,30 @@ WebUI → WebSocket → ClientChannel.listen()
     → session_ctx.process_turn()
       → Agent::run()
         → collect_stream() → push_event(Chunk/Done)  ─── 路径 1: streaming
+      → if let Some(ch) = channel_for_send { ch.send(...) }  ── 路径 2: 重复!
       → return TurnResult { text }
-    ← TurnResult
-    → channel.send(SendMessage { text })  ──────────── 路径 2: 重复!
 ```
 
-**Orchestrator 中所有 `channel.send()` 调用点**（共 9 处）：
+**RFC v2 §三.B 重构（commit `49e408a`）后，fallback `channel.send` 已经移进
+`SessionContext::process_turn`，不再在 orchestrator 调用方做**。这意味着 Phase 0
+的修复点是 `session_context.rs:217` 附近的 `if let Some(ch) = channel_for_send`
+块，而不是 orchestrator。
 
-| 位置 | 场景 | 走 streaming？ | Phase 0 影响 |
+**`channel.send()` 当前调用点清单**：
+
+| 文件:行 | 场景 | 走 streaming？ | Phase 0 影响 |
 |------|------|---------------|-------------|
-| L591 | 无 pending retry 的回调响应 | 否 | 无 |
-| L597 | abort 确认 | 否 | 无 |
-| L628 | incomplete turn 提示（retry/abort 按钮） | 否 | 无 |
-| L678 | command 响应（如 /help、/status） | 否 | 无 |
-| **L724** | **process_turn 结果发送** | **是（ClientChannel）** | **需加条件** |
-| L731 | process_turn 错误发送 | 始终发送 | 无（错误需保证送达） |
-| L884 | startup recovery 恢复响应 | 否（无 push_event） | 无 |
-| L1322 | startup recovery 发送 | 否 | 无 |
+| `orchestrator.rs` L591 | 无 pending retry 的回调响应 | 否 | 无 |
+| `orchestrator.rs` L597 | abort 确认 | 否 | 无 |
+| `orchestrator.rs` L628 | incomplete turn 提示（retry/abort 按钮） | 否 | 无 |
+| `orchestrator.rs` L678 | command 响应（如 /help、/status） | 否 | 无 |
+| `orchestrator.rs` L726 | process_turn 返回 Err 的错误通知 | 始终发送 | 无（错误需保证送达） |
+| `orchestrator.rs` L884 | startup recovery 恢复响应 | 否（无 push_event） | 无 |
+| `orchestrator.rs` L1322 | startup recovery 发送 | 否 | 无 |
+| **`session_context.rs` L223** | **process_turn 内部 fallback send** | **是（ClientChannel）** | **需加条件** |
 
-**结论**：只有 L724 一处需要加 `!channel.supports_streaming()` 条件判断。其余场景都是一次性控制消息或非 streaming 路径，不受影响。
+**结论**：只有 `session_context.rs` 一处需要加 `!channel.supports_streaming()`
+条件判断。其余场景都是一次性控制消息或非 streaming 路径，不受影响。
 
 ### 3.3 SendMessage 当前字段
 
@@ -228,7 +247,7 @@ class BasePlatformAdapter(ABC):
 | 维度 | OpenClaw | Hermes-agent | MyClaw（目标） |
 |------|----------|-------------|---------------|
 | 能力声明 | `ChannelCapabilities` 结构体 | 方法覆盖 + 返回值 | `ChannelCapabilities` 结构体 |
-| 发送接口 | `sendText/Media/Payload/Poll` | `send` + `edit_message` + `send_draft` | `send_payload` 统一 + `edit/delete/draft` |
+| 发送接口 | `sendText/Media/Payload/Poll` | `send` + `edit_message` + `send_draft` | `send_payload` 统一 + `edit/delete` |
 | 防重复 | `deliveredVisibleText` 状态追踪 | `already_sent` 标志位 | `supports_streaming()` 条件判断 |
 | 消息计量 | 不处理 | `message_len_fn`（可插拔） | `message_len_unit` 枚举 |
 | 安全策略 | `ChannelSecurityAdapter` 抽象 | 各 adapter 各写 | `ChannelSecurityAdapter` 抽象 |
@@ -254,18 +273,41 @@ class BasePlatformAdapter(ABC):
 - 不需要 Hermes 式的 `already_sent` 标志位追踪，因为 `process_turn` 的调用方（orchestrator）可以直接判断
 
 ```rust
-// orchestrator.rs — process_turn 返回后
+// session_context.rs — process_turn 内部 fallback send
 Ok(turn_result) => {
-    if !turn_result.text.trim().is_empty()
-        && !channel.supports_streaming()  // streaming channel 已通过 TurnEvent 交付
-    {
-        let send_msg = SendMessage::new(turn_result.text, reply_target);
-        let _ = channel.send(&send_msg).await;
+    if let Some(retry_msg) = &turn_result.pending_retry {
+        *self.pending_retry.lock().await = Some(retry_msg.clone());
     }
+    if let Some(ch) = channel_for_send {
+        if !turn_result.text.trim().is_empty()
+            && !ch.supports_streaming()  // streaming channel 已通过 TurnEvent 交付
+        {
+            let send_msg = SendMessage::new(turn_result.text.clone(), reply_target.clone());
+            let _ = ch.send(&send_msg).await;
+        }
+    }
+    Ok(turn_result)
 }
 ```
 
 未来当 Telegram/QQBot 也支持 edit-based streaming 时，它们的 `supports_streaming()` 会返回 `true`，同一个判断点自然生效。
+
+### 5.3 流式中断时的 fallback
+
+加上 `!supports_streaming()` 守卫后，streaming channel **完全依赖** `push_event`
+交付最终文本。当 push_event 链路失败（WebSocket 断开后又重连、Chunk 丢失等）时
+用户可能看不到回复。
+
+缓解策略：
+
+1. **首选：streaming channel 自己保证可靠性**。ClientChannel 的 WebSocket 关闭
+   时会通过 `dedup_state` 在重连后重放最后 N 条事件（已存在机制）。
+2. **次选**：`push_event` 在 channel 实现内部返回 `Result`，失败时退回 `send()`
+   兜底——但这把"是否需要 fallback"的判断下沉到 channel，不在本 Phase 范围内。
+
+Phase 0 接受现状："streaming 已成功完成"是 channel 的责任；orchestrator/
+process_turn 信任 `supports_streaming()` 声明。后续如果出现可观测的丢失率，再
+扩展 Channel trait 加 `send_event_ack` 之类的确认机制。
 
 ---
 
@@ -275,7 +317,11 @@ Ok(turn_result) => {
 
 ```rust
 /// Channel 能力声明。不可变，在 channel 构造时确定。
-#[derive(Debug, Clone)]
+///
+/// 字段只覆盖**当前或下一个 Phase 真实会消费**的能力。`supports_voice`/
+/// `supports_poll` 等等到对应 MessagePayload variant 引入时一起加（trait 默认
+/// fallback 保证扩展不破坏现有 channel）。
+#[derive(Debug, Clone, Copy)]
 pub struct ChannelCapabilities {
     // ── 传输能力 ──
     /// 是否支持 streaming events（push_event + TurnEvent）
@@ -284,16 +330,10 @@ pub struct ChannelCapabilities {
     pub supports_edit: bool,
     /// 是否支持删除消息（delete_message）
     pub supports_delete: bool,
-    /// 是否支持原生 draft streaming（send_draft），如 Telegram sendMessageDraft
-    pub supports_draft: bool,
 
     // ── 内容能力 ──
     /// 是否支持发送媒体文件（图片/文件）
     pub supports_media: bool,
-    /// 是否支持发送投票
-    pub supports_poll: bool,
-    /// 是否支持发送语音消息
-    pub supports_voice: bool,
     /// 是否支持交互按钮
     pub supports_buttons: bool,
     /// 是否支持线程回复（reply_to）
@@ -317,16 +357,17 @@ pub enum LenUnit {
 }
 
 impl ChannelCapabilities {
-    /// 默认能力：不支持任何高级特性，4096 codepoint 限制
-    pub fn minimal() -> Self {
+    /// 默认能力：不支持任何高级特性，4096 codepoint 限制。
+    /// `const fn` 让 `static MINIMAL: ChannelCapabilities = minimal()`
+    /// 可以在编译期生成，trait 默认实现直接返回 `&MINIMAL` 即可，
+    /// 不需要 `thread_local!` 或 `LazyLock`。
+    pub const fn minimal() -> Self {
         Self {
             supports_streaming: false,
             supports_edit: false,
             supports_delete: false,
-            supports_draft: false,
             supports_media: false,
             supports_poll: false,
-            supports_voice: false,
             supports_buttons: false,
             supports_threads: false,
             message_chunk_limit: 4096,
@@ -335,42 +376,51 @@ impl ChannelCapabilities {
     }
 
     /// WebUI/WebSocket channel 能力
-    pub fn client() -> Self {
-        Self {
-            supports_streaming: true,
-            ..Self::minimal()
-        }
+    pub const fn client() -> Self {
+        let mut c = Self::minimal();
+        c.supports_streaming = true;
+        c
     }
 
     /// Telegram Bot API 能力
-    pub fn telegram() -> Self {
-        Self {
-            supports_edit: true,
-            supports_delete: true,
-            supports_draft: true,
-            supports_media: true,
-            supports_buttons: true,
-            supports_threads: true,
-            message_chunk_limit: 4096,
-            message_len_unit: LenUnit::Utf16Units,
-            ..Self::minimal()
-        }
+    pub const fn telegram() -> Self {
+        let mut c = Self::minimal();
+        c.supports_edit = true;
+        c.supports_delete = true;
+        c.supports_media = true;
+        c.supports_buttons = true;
+        c.supports_threads = true;
+        c.message_chunk_limit = 4096;
+        c.message_len_unit = LenUnit::Utf16Units;
+        c
     }
 
     /// QQ Bot 能力
-    pub fn qqbot() -> Self {
-        Self {
-            supports_buttons: true,
-            message_chunk_limit: 2000,
-            ..Self::minimal()
-        }
+    pub const fn qqbot() -> Self {
+        let mut c = Self::minimal();
+        c.supports_buttons = true;
+        c.message_chunk_limit = 2000;
+        c
     }
 }
+
+/// 编译期生成的默认值，trait 默认实现直接返回引用。
+pub static MINIMAL_CAPABILITIES: ChannelCapabilities = ChannelCapabilities::minimal();
 ```
 
-**设计选择**：用预定义的 `client()` / `telegram()` / `qqbot()` 构造函数，避免各 channel 实现手写 10+ 字段。需要微调时链式调用：`ChannelCapabilities::telegram().with_message_chunk_limit(2048)`（Phase 2 再加 builder 方法，目前不做）。
+**设计选择**：用预定义的 `client()` / `telegram()` / `qqbot()` 构造函数，避免各
+channel 实现手写 10+ 字段。需要微调时链式调用：
+`ChannelCapabilities::telegram().with_message_chunk_limit(2048)`（Phase 2 再加
+builder 方法，目前不做）。
+
+注意删掉了 `supports_draft` 字段——见 §7.1 关于 `send_draft` 的决策说明。
 
 ### 6.2 MessagePayload
+
+**Phase 2 范围**：只引入 `Text` / `Interactive` / `Media` 三个 variant —— 这些
+是已经被 `SendMessage` 字段（`content` / `inline_buttons` / `attachments` +
+`image_urls`）实际消费的能力。`Voice` / `Poll` / `Card` 等到对应的功能 PR 进来
+时再加 variant；trait 默认 fallback 保证扩展不破坏现有 channel。
 
 ```rust
 /// 平台无关的结构化消息 payload。
@@ -395,27 +445,6 @@ pub enum MessagePayload {
         caption: Option<String>,
         source: MediaSource,
     },
-
-    /// 语音消息
-    Voice {
-        data: Vec<u8>,
-        format: AudioFormat,
-        caption: Option<String>,
-    },
-
-    /// 投票
-    Poll {
-        question: String,
-        options: Vec<String>,
-        anonymous: bool,
-    },
-
-    /// 富文本卡片（标题 + 正文 + 操作）
-    Card {
-        title: String,
-        body: String,
-        actions: Vec<CardAction>,
-    },
 }
 
 /// 媒体来源
@@ -427,23 +456,6 @@ pub enum MediaSource {
     FilePath(String),
     /// 内联二进制数据
     Inline { data: Vec<u8>, mime_type: Option<String> },
-}
-
-/// 音频格式
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AudioFormat {
-    Ogg,   // Telegram voice
-    Mp3,
-    Wav,
-    M4a,
-    Opus,
-}
-
-/// 卡片操作
-#[derive(Debug, Clone)]
-pub struct CardAction {
-    pub label: String,
-    pub action: String,  // callback_data / url / postback
 }
 
 impl MessagePayload {
@@ -459,22 +471,6 @@ impl MessagePayload {
                 format!("{}\n{}", content, btn_text)
             }
             Self::Media { caption, .. } => caption.clone().unwrap_or_default(),
-            Self::Voice { caption, .. } => caption.clone().unwrap_or_default(),
-            Self::Poll { question, options, .. } => {
-                let opts = options.iter()
-                    .enumerate()
-                    .map(|(i, o)| format!("{}. {}", i + 1, o))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                format!("📊 {}\n{}", question, opts)
-            }
-            Self::Card { title, body, actions } => {
-                let act_text = actions.iter()
-                    .map(|a| format!("[{}]", a.label))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                format!("**{}**\n{}\n{}", title, body, act_text)
-            }
         }
     }
 
@@ -484,18 +480,31 @@ impl MessagePayload {
             Self::Text { content } => Some(content),
             Self::Interactive { content, .. } => Some(content),
             Self::Media { caption, .. } => caption.as_deref(),
-            Self::Voice { caption, .. } => caption.as_deref(),
-            Self::Poll { question, .. } => Some(question),
-            Self::Card { body, .. } => Some(body),
         }
     }
 }
 ```
 
-### 6.3 SendTarget
+**未来扩展模板**（不在本次 Phase 范围）：当真正需要语音时，加 variant
+即可，trait 默认 fallback 保证旧 channel 直接降级文本——
 
 ```rust
-/// 发送目标（从 SendMessage 中提取）
+// Phase 6+：当有 Voice TTS 集成 PR 时
+Voice {
+    data: Vec<u8>,
+    format: AudioFormat,
+    caption: Option<String>,
+},
+```
+
+### 6.3 SendTarget — 取代 SendMessage 的路由信息部分
+
+```rust
+/// 发送目标。Phase 2 启用后**取代** `SendMessage` 中的路由字段
+/// （`recipient` / `thread_ts` / `cancellation_token`）。
+///
+/// 新接口形态：`channel.send_payload(target: &SendTarget, payload: &MessagePayload)`
+/// 不再有 `SendMessage` 把路由和内容混在一起，避免 §1.4 的字段膨胀。
 #[derive(Debug, Clone)]
 pub struct SendTarget {
     /// 目标路由 key / chat_id
@@ -504,6 +513,8 @@ pub struct SendTarget {
     pub reply_to: Option<String>,
     /// 线程 ID（Telegram topic / Slack thread）
     pub thread_id: Option<String>,
+    /// 取消令牌（移自 SendMessage）
+    pub cancellation_token: Option<CancellationToken>,
 }
 
 impl SendTarget {
@@ -512,10 +523,26 @@ impl SendTarget {
             recipient: recipient.into(),
             reply_to: None,
             thread_id: None,
+            cancellation_token: None,
         }
     }
 }
 ```
+
+### 6.4 SendResult
+
+```rust
+/// send_payload 的返回结果。`Some(id)` 表示平台返回了消息 ID
+/// （可后续 `edit_message` / `delete_message` 引用），`None` 表示送达但无 ID。
+pub type SendResult = Option<MessageId>;
+
+/// 平台消息 ID 的轻量 newtype（防止与其他 String 混淆）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageId(pub String);
+```
+
+不用之前提案的 `enum SendResult { Delivered, WithId{...} }` 二元枚举——
+`Option<MessageId>` 语义完全等价，少一层 match，调用方习惯。
 
 ---
 
@@ -530,12 +557,9 @@ pub trait Channel: Send + Sync {
     fn name(&self) -> &str;
 
     /// Channel 能力声明。不可变。
+    /// 默认指向 `MINIMAL_CAPABILITIES`（编译期 const）。
     fn capabilities(&self) -> &ChannelCapabilities {
-        // 使用 thread_local 避免非 const fn 的 static 初始化问题。
-        thread_local! {
-            static DEFAULT: ChannelCapabilities = ChannelCapabilities::minimal();
-        }
-        DEFAULT.with(|c| c)
+        &MINIMAL_CAPABILITIES
     }
 
     // ── 入站 ──
@@ -552,12 +576,12 @@ pub trait Channel: Send + Sync {
         let text = payload.to_fallback_text();
         let mut msg = SendMessage::new(text, &target.recipient);
         msg.thread_ts = target.thread_id.clone();
+        msg.cancellation_token = target.cancellation_token.clone();
         self.send(&msg).await?;
-        Ok(SendResult::Delivered)
+        Ok(None) // 没有 message_id 可返回
     }
 
-    // ── 出站：兼容旧接口 ──
-    /// 发送文本消息（向后兼容）。
+    // ── 出站：兼容旧接口（Phase 4 后强制迁移到 send_payload，见附录 A）──
     async fn send(&self, msg: &SendMessage) -> anyhow::Result<()>;
 
     // ── 出站：编辑/删除 ──
@@ -565,9 +589,10 @@ pub trait Channel: Send + Sync {
     async fn edit_message(
         &self,
         target: &SendTarget,
-        message_id: &str,
+        message_id: &MessageId,
         payload: &MessagePayload,
     ) -> anyhow::Result<()> {
+        let _ = (target, message_id, payload);
         Err(anyhow::anyhow!("edit_message not supported by {}", self.name()))
     }
 
@@ -575,26 +600,14 @@ pub trait Channel: Send + Sync {
     async fn delete_message(
         &self,
         target: &SendTarget,
-        message_id: &str,
+        message_id: &MessageId,
     ) -> anyhow::Result<()> {
+        let _ = (target, message_id);
         Err(anyhow::anyhow!("delete_message not supported by {}", self.name()))
     }
 
-    // ── 出站：Draft streaming ──
-    /// 发送/更新原生流式预览（如 Telegram sendMessageDraft）。
-    /// 返回 None 表示不支持（降级到 edit 路径）。
-    async fn send_draft(
-        &self,
-        target: &SendTarget,
-        draft_id: u64,
-        content: &str,
-    ) -> anyhow::Result<Option<String>> {
-        Ok(None) // None = 不支持
-    }
-
     // ── 流式事件 ──
-    /// 是否支持 streaming turn events。
-    /// 保留向后兼容：默认从 capabilities() 读取。
+    /// 是否支持 streaming turn events。默认从 capabilities() 读取。
     fn supports_streaming(&self) -> bool {
         self.capabilities().supports_streaming
     }
@@ -605,12 +618,6 @@ pub trait Channel: Send + Sync {
     /// 获取当前 turn 的取消令牌。
     fn cancel_signal(&self, _reply_target: &str) -> Option<CancellationToken> {
         None
-    }
-
-    // ── 格式化 ──
-    /// 将通用 markdown 文本转为平台格式（Telegram MarkdownV2 / QQBot markdown 子集等）。
-    fn format_message(&self, content: &str) -> String {
-        content.to_string()
     }
 
     /// 按平台计量单位计算消息长度。
@@ -628,72 +635,92 @@ pub trait Channel: Send + Sync {
     // ── 状态通知 ──
     async fn on_status(&self, _recipient: &str, _status: ProcessingStatus) {}
 }
-
-/// send_payload 的返回结果
-#[derive(Debug, Clone)]
-pub enum SendResult {
-    /// 消息已送达
-    Delivered,
-    /// 消息已送达，携带平台消息 ID（用于后续 edit/delete）
-    WithId { message_id: String },
-}
 ```
 
-### 7.2 向后兼容
+### 7.2 关于 `send_draft` 的取舍
+
+之前草案在 trait 上加了 `send_draft(target, draft_id, content)` 方法以利用
+Telegram 的 `sendMessageDraft` API 做原生流式预览。**本 RFC 不在 trait 上暴露
+这个能力**：
+
+1. **Telegram `sendMessageDraft` 仍是 beta API**（见附录 C.1），签名/行为可能
+   变动。trait 是 channel 间公约，绑定不稳定外部 API 不合适。
+2. **edit-based streaming 已能覆盖同样的 UX**：发送占位消息 → 持续 `edit_message`
+   更新——所有支持 `edit_message` 的平台都能用。
+3. 如果 TelegramChannel 实现内部想用 `sendMessageDraft` 做优化，可以作为
+   `send_payload` / `edit_message` 实现的私有细节，不需要让上层感知。
+
+后续如果 sendMessageDraft 稳定且有其它平台也提供等价能力，再加 trait 方法不迟。
+
+### 7.3 关于 `format_message` 的取舍
+
+之前草案在 trait 上暴露 `format_message(&str) -> String` 做 markdown → 平台格式
+转换。**本 RFC 不暴露**：
+
+- 平台格式转换是 `send` / `send_payload` 实现内部的事，调用方不应该感知"这条
+  消息现在是 Telegram MarkdownV2 还是 QQBot markdown 子集"。
+- 各 channel 实现里有私有的 `markdown_to_telegram_html()` 之类的辅助函数，已经
+  够用；提到 trait 上反而邀请上层在不该感知格式的地方调用。
+
+### 7.4 向后兼容
 
 | 现有方法 | 变化 |
 |----------|------|
 | `name()` | 不变 |
-| `send()` | 不变，所有现有调用继续工作 |
+| `send()` | Phase 1-3 不变；Phase 4 后转 `#[deprecated]`，附录 A 定下线节奏 |
 | `listen()` | 不变 |
 | `health_check()` | 不变 |
 | `supports_streaming()` | 不变，默认实现改为从 `capabilities()` 读取 |
 | `push_event()` | 不变，默认 no-op |
 | `cancel_signal()` | 不变，默认 None |
 | `on_status()` | 不变，默认 no-op |
-| **新增** `capabilities()` | 默认返回 `ChannelCapabilities::minimal()` |
+| **新增** `capabilities()` | 默认返回 `&MINIMAL_CAPABILITIES`（编译期 const） |
 | **新增** `send_payload()` | 默认降级到 `send()` |
 | **新增** `edit_message()` | 默认返回 Err |
 | **新增** `delete_message()` | 默认返回 Err |
-| **新增** `send_draft()` | 默认返回 Ok(None) |
-| **新增** `format_message()` | 默认原样返回 |
 | **新增** `message_len()` | 默认按 `capabilities().message_len_unit` 计算 |
 
-所有新增方法都有默认实现，现有 channel 实现无需改动即可编译。
+所有新增方法都有默认实现，现有 channel 实现无需改动即可编译。删除了之前草案
+的 `send_draft()` / `format_message()`——见 §7.2 / §7.3 的取舍说明。
 
 ---
 
-## 8. Orchestrator 改动
+## 8. SessionContext / Orchestrator 改动
 
-### 8.1 防重复发送
+### 8.1 防重复发送（Phase 0）
+
+修复点在 **`session_context.rs::process_turn` 的 fallback send 块**，**不是
+orchestrator**——commit `49e408a` 已把 `channel.send` 从 orchestrator 移进
+process_turn。
 
 ```rust
-// orchestrator.rs handle_channel_event — user message dispatch
-tokio::spawn(async move {
-    let result = session_ctx
-        .process_turn(inbound_msg, Some(channel.clone()), runtime)
-        .await;
-    match result {
-        Ok(turn_result) => {
+// src/agents/session_context.rs — process_turn 内的 Ok 分支
+match result {
+    Ok(turn_result) => {
+        if let Some(retry_msg) = &turn_result.pending_retry {
+            *self.pending_retry.lock().await = Some(retry_msg.clone());
+        }
+        if let Some(ch) = channel_for_send {
             if !turn_result.text.trim().is_empty()
-                && !channel.supports_streaming()
-                // ↑ streaming channel 已通过 TurnEvent::Chunk + Done 交付，
-                //   不需要再 channel.send()
+                && !ch.supports_streaming()
+                // ↑ streaming channel 已通过 TurnEvent::Chunk + Done 交付
             {
-                let send_msg = SendMessage::new(turn_result.text, reply_target);
-                if let Err(e) = channel.send(&send_msg).await {
-                    tracing::error!(err = %e, "send response failed");
-                }
+                let send_msg = SendMessage::new(
+                    turn_result.text.clone(),
+                    reply_target.clone(),
+                );
+                let _ = ch.send(&send_msg).await;
             }
         }
-        Err(_) => {
-            // 错误消息始终发送（streaming 不保证错误事件已推送）
-            let send_msg = SendMessage::new(MSG_TURN_FAILED, reply_target);
-            let _ = channel.send(&send_msg).await;
-        }
+        Ok(turn_result)
     }
-});
+    Err(e) => Err(e),
+}
 ```
+
+**Orchestrator 的错误通知路径不变**——`Err` 分支调用方在
+`orchestrator.rs:724` 仍然无条件 `channel.send(MSG_TURN_FAILED)`，因为流式不
+保证错误已推送。
 
 ### 8.2 未来：非 WebUI channel 的 edit-based streaming
 
@@ -747,10 +774,9 @@ max_message_length = 2000  # codepoints
 | `capabilities()` | 覆盖返回 `ChannelCapabilities::telegram()` |
 | `edit_message`（trait） | **提升已有内部方法**：现有 `edit_message(chat_id, message_id, text)` 已调用 `editMessageText` API，只需包装为 trait 签名（接受 `SendTarget + &MessagePayload`） |
 | `delete_message`（trait） | **提升已有内部方法**：现有 `delete_message(chat_id, message_id)` 已调用 `deleteMessage` API |
-| `send_draft` | 新增，调用 Telegram `sendMessageDraft` API |
-| `format_message` | 新增，包装现有 `markdown_to_telegram_html()` |
 | `message_len` | 新增，`encode_utf16().count()`，**修复现有 `chars().count()` bug** |
 | `chunk_for_telegram` | 改用 `self.message_len()` 替代硬编码 `chars().count()` |
+| 内部 `markdown_to_telegram_html()` | 保留为私有辅助，在 `send_payload` / `edit_message` 实现里调用 |
 
 **现有安全策略**：
 - `allowed_users: Arc<RwLock<Vec<String>>>`（支持热重载）+ `is_user_allowed(username, user_id)`
@@ -767,7 +793,7 @@ max_message_length = 2000  # codepoints
 |------|------|
 | `capabilities()` | 覆盖返回 `ChannelCapabilities::qqbot()`（`supports_buttons: true, message_chunk_limit: 2000`） |
 | `edit_message` | 调研 QQBot 消息编辑 API 是否可用，不可用则保持默认 Err |
-| `format_message` | 新增，QQBot markdown 子集清洗（去除不支持的语法） |
+| 内部 markdown 子集清洗 | 现有/新增私有辅助函数，在 `send_payload` 实现里调用，**不暴露到 trait** |
 
 **现有安全策略**：
 - `allow_from: Option<Vec<String>>`（C2C 白名单）+ `is_user_allowed(openid)`
@@ -781,7 +807,7 @@ QQBot 的 `send()` 内部自行调用 `split_message_chunk(&msg.content, QQ_MAX_
 | 改动 | 内容 |
 |------|------|
 | `capabilities()` | 基本保持 `minimal()`（默认） |
-| `format_message` | 新增，Markdown → 纯文本降级 |
+| 内部 markdown → 纯文本降级 | 私有辅助函数，在 `send_payload` 内调用 |
 
 **现有安全策略**：`allowed_users` 白名单检查。
 
@@ -791,11 +817,18 @@ QQBot 的 `send()` 内部自行调用 `split_message_chunk(&msg.content, QQ_MAX_
 
 ### Phase 0：修复 WebUI 双显示 bug（P0）
 
-**范围**：仅改 orchestrator.rs 1 行
+**范围**：仅改 `src/agents/session_context.rs` 的 process_turn 内 fallback send 块
 
 ```rust
-// orchestrator.rs:722 加条件判断
-if !channel.supports_streaming() { channel.send(...) }
+// session_context.rs:223 附近，给 fallback send 加 supports_streaming 守卫
+if let Some(ch) = channel_for_send {
+    if !turn_result.text.trim().is_empty()
+        && !ch.supports_streaming()   // ← 新增条件
+    {
+        let send_msg = SendMessage::new(turn_result.text.clone(), reply_target.clone());
+        let _ = ch.send(&send_msg).await;
+    }
+}
 ```
 
 **风险**：极低。`supports_streaming()` 已有，ClientChannel 返回 `true`，其他 channel 返回 `false`。
@@ -803,37 +836,61 @@ if !channel.supports_streaming() { channel.send(...) }
 ### Phase 1：引入 ChannelCapabilities + message_len_unit（P1）
 
 **范围**：
-- 新增 `ChannelCapabilities` / `LenUnit` 类型（含 `client()` / `telegram()` / `qqbot()` 预定义构造函数）
-- Channel trait 新增 `capabilities()` / `format_message()` / `message_len()` 默认方法
-- ClientChannel 覆盖 `capabilities()` 返回 `ChannelCapabilities::client()`
-- TelegramChannel 覆盖 `capabilities()` 返回 `ChannelCapabilities::telegram()`
-- QQBotChannel 覆盖 `capabilities()` 返回 `ChannelCapabilities::qqbot()`
-- 改造 `split_message_chunk()` 接受 `LenUnit` 参数（**同时修复 Telegram UTF-16 计量 bug**）
-- TelegramChannel 的 `chunk_for_telegram` 改用 `self.message_len()` 替代 `chars().count()`
-- QQBotChannel 的 `send()` 内部 `split_message_chunk` 调用改用 `self.capabilities().message_chunk_limit` + `self.capabilities().message_len_unit`
+- 新增 `ChannelCapabilities` / `LenUnit` 类型（含 `const fn client()` / `telegram()` /
+  `qqbot()` 预定义构造）
+- `pub static MINIMAL_CAPABILITIES: ChannelCapabilities` 编译期常量
+- Channel trait 新增 `capabilities()` / `message_len()` 默认方法（**不**包含
+  `format_message`——见 §7.3）
+- ClientChannel / TelegramChannel / QQBotChannel 覆盖 `capabilities()` 返回各自常量
+- 改造 `split_message_chunk()` 接受 `LenUnit` 参数（**同时修复 Telegram UTF-16
+  计量 bug**）
+- TelegramChannel 的 `chunk_for_telegram` 改用 `self.message_len()` 替代
+  `chars().count()`
+- QQBotChannel 的 `send()` 内部 `split_message_chunk` 调用改用
+  `self.capabilities().message_chunk_limit` + `self.capabilities().message_len_unit`
 
-**风险**：低。所有新方法有默认实现。`split_message_chunk` 签名变化会影响所有调用方（Telegram + QQBot + 测试），但改动是机械的。
+**风险**：低。所有新方法有默认实现。`split_message_chunk` 签名变化会影响所有
+调用方（Telegram + QQBot + 测试），但改动是机械的；可保留旧名作为
+`split_message_chunk_chars` 兼容包装减少改动面。
 
-### Phase 2：引入 MessagePayload + send_payload（P1）
+### Phase 2：引入 MessagePayload + send_payload（P1，缩范围版）
 
 **范围**：
-- 新增 `MessagePayload` / `MediaSource` / `AudioFormat` / `CardAction` / `SendTarget` / `SendResult` 类型
+- 新增类型：`MessagePayload`（只含 `Text` / `Interactive` / `Media` 三个 variant）、
+  `MediaSource`、`SendTarget`、`MessageId`、`SendResult = Option<MessageId>`
 - Channel trait 新增 `send_payload()` 默认方法（降级到 `send`）
-- 重构 `SendMessage` 的 `inline_buttons` 走 `send_payload(Interactive{...})`
-- 各 channel 实现覆盖 `send_payload()` 支持各自的 payload 类型
+- **重构 inline_buttons**：所有走 `SendMessage.inline_buttons` 的调用点改为
+  `send_payload(target, MessagePayload::Interactive{...})`
+- **重构 attachments / image_urls**：所有走 `SendMessage.attachments` 或
+  `image_urls` 的调用点改为 `send_payload(target, MessagePayload::Media{...})`
+- 各 channel 实现覆盖 `send_payload()`：Telegram 完整支持三个 variant；QQBot
+  完整支持 `Text` + `Interactive`，`Media` 降级；ClientChannel 全部支持
+- Phase 2 结束时，所有 callsite 不再读 `SendMessage.inline_buttons` /
+  `attachments` / `image_urls`，为附录 A 的 Phase 4 删除 `SendMessage` 做铺垫
+
+**不在 Phase 2 范围内**（推迟到对应功能 PR 出现时再加）：
+- `Voice` variant（需要 TTS 集成 PR）
+- `Poll` variant（需要投票 UI PR）
+- `Card` variant（需要富文本卡片 PR）
 
 **风险**：中。需要逐一改造 channel 实现，但默认降级保证不影响现有功能。
 
-### Phase 3：edit_message / delete_message / send_draft（P1）
+### Phase 3：edit_message / delete_message（P1）
 
 **范围**：
-- Channel trait 新增 `edit_message()` / `delete_message()` / `send_draft()` 默认方法
-- TelegramChannel：**将已有私有 `edit_message(chat_id, msg_id, text)` 提升为 trait 实现**（接受 `SendTarget + MessagePayload`，内部复用现有 `editMessageText` API 调用）
-- TelegramChannel：**将已有私有 `delete_message(chat_id, msg_id)` 提升为 trait 实现**
-- TelegramChannel：新增 `send_draft()` 调用 `sendMessageDraft` API
-- QQBotChannel：调研并实现 `edit_message`（如 API 支持）
+- Channel trait 新增 `edit_message()` / `delete_message()` 默认方法（默认返回 Err）
+- TelegramChannel：**将已有私有 `edit_message(chat_id, msg_id, text)` 提升为
+  trait 实现**（接受 `SendTarget + MessageId + MessagePayload`，内部复用现有
+  `editMessageText` API 调用）
+- TelegramChannel：**将已有私有 `delete_message(chat_id, msg_id)` 提升为 trait
+  实现**
+- QQBotChannel：调研并实现 `edit_message`（如 API 支持），否则保持默认 Err
 
-**风险**：低。默认实现返回 Err，不影响不支持的 channel。Telegram 的 edit/delete 已有成熟实现，只是签名包装。
+**不在 Phase 3 范围内**：`send_draft`——见 §7.2 决策。如果将来需要 Telegram
+`sendMessageDraft` 的优势，作为 TelegramChannel 内部细节实现，不暴露到 trait。
+
+**风险**：低。默认实现返回 Err，不影响不支持的 channel。Telegram 的 edit/delete
+已有成熟实现，只是签名包装。
 
 ### Phase 4：群组安全策略抽象（P2）
 
@@ -871,30 +928,33 @@ if !channel.supports_streaming() { channel.send(...) }
 
 - [ ] WebUI 发消息后，agent 回复只出现一次（不出现重复）
 - [ ] Telegram/QQBot 回复正常发送（不受 `supports_streaming()` 判断影响）
-- [ ] 错误消息仍然正常发送到 WebUI
+- [ ] 错误消息（`MSG_TURN_FAILED`）仍然正常发送到 WebUI（走 orchestrator 的 Err 分支）
+- [ ] 流式中断场景：ClientChannel 断连后重连，仍能看到完整回复（验证现有
+  `dedup_state` 重放机制不被守卫破坏）
 
 ### Phase 1
 
-- [ ] 各 channel 的 `capabilities()` 返回正确值
+- [ ] 各 channel 的 `capabilities()` 返回正确值（且为 `&'static`，不分配）
 - [ ] `message_len()` 对 UTF-16 计量准确（emoji 算 2 单位）
 - [ ] `split_message_chunk` 按 UTF-16 切分 Telegram 消息不超限
-- [ ] `format_message()` 对 Telegram MarkdownV2 正确转义
+- [ ] `chars().count() ≤ 4096 但 encode_utf16().count() > 4096` 的 emoji 消息不再触发 Telegram `400 Bad Request`（回归测试）
 
 ### Phase 2
 
-- [ ] `send_payload(Text)` 等价于现有 `send()`
-- [ ] `send_payload(Interactive)` 在 Telegram 渲染 inline_keyboard
-- [ ] `send_payload(Poll)` 在 Telegram 发起投票
-- [ ] `send_payload(Voice)` 在 Telegram 发送语音
-- [ ] 不支持 payload 类型的 channel 降级到 `to_fallback_text()`
+- [ ] `send_payload(Text)` 等价于现有 `send(SendMessage::new(text, target))`
+- [ ] `send_payload(Interactive)` 在 Telegram 渲染 inline_keyboard，在 QQBot 渲染 Keyboard
+- [ ] `send_payload(Media{Url})` 在 Telegram 发送图片，在 QQBot 降级为 caption 文本
+- [ ] `send_payload(Media{Inline})` 在 Telegram 发送二进制媒体
+- [ ] 不支持 payload 类型的 channel 降级到 `to_fallback_text()`，输出可读
+- [ ] `send_payload` 返回 `Some(MessageId)` 当平台返回 ID，否则 `None`
+- [ ] 所有 callsite 不再读 `SendMessage.{inline_buttons, attachments, image_urls}`
 
 ### Phase 3
 
 - [ ] Telegram `edit_message` 更新已发消息内容
 - [ ] Telegram `delete_message` 删除指定消息
-- [ ] Telegram `send_draft` 原生流式预览（降级到 edit 当不支持时）
-- [ ] QQBot `edit_message` 正常工作（或返回 Err）
-- [ ] WebUI 不受影响（不调用 edit/delete/draft）
+- [ ] QQBot `edit_message` 正常工作（或返回 Err，由实际 API 决定）
+- [ ] WebUI 不受影响（不调用 edit/delete）
 
 ### Phase 4
 
@@ -910,9 +970,24 @@ if !channel.supports_streaming() { channel.send(...) }
 
 ---
 
-## 附录 A：SendMessage 保留 vs 淘汰
+## 附录 A：SendMessage 删除时间线
 
-`send(&SendMessage)` 在 Phase 2 之后标记为 `#[deprecated]`，建议新代码使用 `send_payload()`。但不删除——太多内部和测试代码依赖它（orchestrator 中 9 处调用 + 测试代码）。过渡期两者共存，`send_payload` 的默认实现内部调用 `send()`。
+之前草案是"标记 deprecated 但不删除"——这会创造永久的双 API 状态（新代码用
+`send_payload`，旧代码用 `send`），永远不收敛。本 RFC 定下线时间线：
+
+| 时点 | 状态 |
+|------|------|
+| Phase 2 完成 | 所有 callsite 改用 `send_payload`；`SendMessage` 字段
+（`inline_buttons` / `attachments` / `image_urls` / `subject` 等）不再被读 |
+| Phase 3 完成 | `Channel::send(&SendMessage)` 加 `#[deprecated]` 标注 |
+| Phase 4 完成 | **删除 `Channel::send`、删除 `SendMessage` 结构**。所有 channel 实现只暴露 `send_payload`；调用方只用 `send_payload(target, payload)` |
+
+过渡期（Phase 2 → 4）两个 API 共存：`send_payload` 默认实现内部调用 `send`
+作为降级路径；`send` 仍是 trait 上的核心方法。Phase 4 时翻转——`send_payload`
+变为 trait 上的核心方法，`SendMessage` 类型整体删除。
+
+理由：保留双 API 的运维成本（文档、新人理解、误用风险）比一次性迁移高得多。
+MyClaw 当前没有外部 channel 实现需要考虑兼容（仅 4 个内置 channel）。
 
 ## 附录 B：与 RFC Session 架构的关系
 
@@ -920,9 +995,13 @@ if !channel.supports_streaming() { channel.send(...) }
 
 ## 附录 C：已知风险和待决事项
 
-### C.1 Telegram `sendMessageDraft` API 稳定性
+### C.1 Telegram `sendMessageDraft` API 不在 trait 范围
 
-Telegram 的 `sendMessageDraft` API 尚未正式发布（截至 2026-05 仍在 beta），`send_draft` 的实现可能需要随 API 变动调整。建议在 Phase 3 实现时确认 API 状态，必要时改为纯 edit-based streaming 方案（发送一条 → 持续 edit 更新）。
+之前草案担心 `sendMessageDraft` API 稳定性。本 RFC §7.2 决策已经把 `send_draft`
+从 trait 移除——`sendMessageDraft` 即使将来用，也作为 TelegramChannel 内部实现
+细节（在 `send_payload` 或 `edit_message` 内部决定用 sendMessageDraft 还是
+sendMessage + editMessageText），调用方完全不感知。API 变动时只影响一个文件，
+不影响 trait 公约。
 
 ### C.2 `split_message_chunk` 签名变更影响面
 
@@ -931,8 +1010,24 @@ Telegram 的 `sendMessageDraft` API 尚未正式发布（截至 2026-05 仍在 b
 2. `QQBotChannel::send`（直接调用 `split_message_chunk(&msg.content, QQ_MAX_MESSAGE_LENGTH)`）
 3. `QQBotChannel` 的 bot command 回复
 
-改为 `split_message_chunk(message: &str, limit: usize, unit: LenUnit)` 后，所有调用方都需要加 `LenUnit` 参数。可以考虑提供兼容的 `split_message_chunk_chars(message, limit)` 包装函数来减少改动面。
+改为 `split_message_chunk(message: &str, limit: usize, unit: LenUnit)` 后，所有
+调用方都需要加 `LenUnit` 参数。Phase 1 实施时提供兼容包装
+`split_message_chunk_chars(message, limit)` = `split_message_chunk(message,
+limit, LenUnit::Codepoints)`，让 QQBot 改动可以分批做。
 
-### C.3 `capabilities()` 的 `thread_local` 性能
+### C.3 默认 `capabilities()` 性能
 
-默认实现使用 `thread_local!` 返回 `&ChannelCapabilities`，每次调用有一次 TLS 访问开销。对于不覆盖 `capabilities()` 的 channel（如 WeChatChannel），可以考虑让它们直接覆盖返回 `&'static ChannelCapabilities`。但这属于微优化，不阻塞实施。
+默认实现返回 `&MINIMAL_CAPABILITIES`（编译期 `static`），只是一次引用复制。
+不需要 thread_local 或 LazyLock。各 channel 实现一般会覆盖该方法返回各自的
+`&'static ChannelCapabilities`，开销同样为零。
+
+### C.4 流式中断时的兜底
+
+Phase 0 加 `!supports_streaming()` 守卫后，streaming channel 完全依赖
+`push_event` 链路交付最终文本。如果 push_event 失败（WebSocket 断开等），用户
+可能看不到回复。
+
+当前依赖 ClientChannel 自身的 `dedup_state` 重连重放机制（已存在）。后续如果
+出现可观测的丢失率，可以扩展 Channel trait 加 `acknowledge_event(reply_target,
+event_id)` 之类的确认机制，让上层在 ack 超时时退回 `send()` 兜底。本 RFC 不
+强求此扩展——属于"出现问题再做"的范畴。
