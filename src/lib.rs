@@ -38,7 +38,7 @@ pub use agents::{
     PermissionMode, RunMode,
     McpManager,
     DelegationCoordinator,
-    DelegationEvent, DelegationManager,
+    DelegationEvent,
     UserResolver, UserProfile,
     AgentDelegator,
 };

@@ -55,7 +55,7 @@ pub use runtime::AgentRuntime;
 pub use user_profile::{UserProfile, UserResolver};
 pub use attachment::AttachmentManager;
 pub use workspace::watcher::{WorkspaceWatcher, ChangeSet};
-pub use delegation::{DelegationEvent, DelegationManager};
+pub use delegation::DelegationEvent;
 pub use loop_breaker::{LoopBreak, LoopBreakReason, LoopBreaker, LoopBreakerConfig};
 pub use session::{InMemoryBackend, PersistHook, BackendPersistHook, Session, BreakpointItem};
 pub use session::{identify_breakpoint, detect_incomplete_turn};

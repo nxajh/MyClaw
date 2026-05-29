@@ -10,7 +10,8 @@
 //! not here. This struct receives fully-assembled components via its constructor.
 
 use anyhow::Context;
-use crate::agents::delegation::{DelegationEvent, DelegationManager};
+use crate::agents::delegation::DelegationEvent;
+use crate::agents::DelegationCoordinator;
 use crate::agents::{OrchestratorEvent, SessionContext};
 use crate::channels::{Channel, ChannelMessage, SendMessage, InlineButton};
 use dashmap::DashMap;
@@ -97,7 +98,7 @@ pub struct Orchestrator {
     /// legacy fields.
     agent_runtime: crate::agents::AgentRuntime,
     /// Delegation manager (shared with DelegateTaskTool via handler).
-    delegation_manager: Option<Arc<DelegationManager>>,
+    delegator: Option<Arc<DelegationCoordinator>>,
     /// Delegation event receiver.
     delegation_rx: Arc<TokioMutex<Option<mpsc::Receiver<DelegationEvent>>>>,
     /// Scheduler event receiver (heartbeat ticks, cron triggers).
@@ -170,7 +171,7 @@ pub struct OrchestratorParts {
     /// Pre-built channels: (channel_type, account_id, channel_instance).
     pub channels: Vec<(String, String, Arc<dyn Channel>)>,
     /// Delegation manager (conditional — only when sub-agents are configured).
-    pub delegation_manager: Option<Arc<DelegationManager>>,
+    pub delegator: Option<Arc<DelegationCoordinator>>,
     /// Delegation event receiver (conditional).
     pub delegation_rx: Option<mpsc::Receiver<DelegationEvent>>,
     /// Scheduler event receiver (heartbeat ticks, cron triggers from Scheduler task).
@@ -226,7 +227,7 @@ impl Orchestrator {
             listener_handles: Arc::new(TokioMutex::new(listener_handles)),
             ask_router: parts.ask_router,
             agent_runtime: parts.agent_runtime,
-            delegation_manager: parts.delegation_manager,
+            delegator: parts.delegator,
             delegation_rx: Arc::new(TokioMutex::new(parts.delegation_rx)),
             scheduler_rx: Arc::new(TokioMutex::new(parts.scheduler_rx)),
             scheduler: parts.scheduler,
@@ -376,7 +377,7 @@ impl Orchestrator {
         // LLM work spawns into background tasks so the event loop starts
         // without blocking.
         self.startup_recover_sessions();
-        self.startup_recover_subagents(&unfinished_subagents, &self.delegation_manager);
+        self.startup_recover_subagents(&unfinished_subagents, &self.delegator);
 
         // E29: unify the three event sources (user messages / delegation /
         // scheduler) onto a single mpsc<OrchestratorEvent>. Adapter tasks
@@ -898,7 +899,7 @@ impl Orchestrator {
     fn startup_recover_subagents(
         &self,
         unfinished: &[crate::agents::UnfinishedSubAgent],
-        delegation_manager: &Option<Arc<DelegationManager>>,
+        delegator: &Option<Arc<DelegationCoordinator>>,
     ) {
         for sa in unfinished {
             if sa.sub_session_id.is_empty() || sa.session_key.is_empty() {
@@ -916,7 +917,7 @@ impl Orchestrator {
             let task_id = sa.task_id.clone();
             let session_key = sa.session_key.clone();
             let sa_reply_target = sa.reply_target.clone();
-            let dm = delegation_manager.clone();
+            let dm = delegator.clone();
             let runtime = self.agent_runtime.clone();
             let prompt_config_base = self.agent_runtime.defaults.prompt.clone();
             let persist_hook: Arc<dyn PersistHook> = Arc::new(
@@ -951,13 +952,15 @@ impl Orchestrator {
                     Ok(Some(tr)) if !tr.text.is_empty() => {
                         tracing::info!(task_id = %task_id, "sub-agent startup recovery: turn completed");
                         if let Some(dm) = dm {
-                            let _ = dm.event_sender().send(DelegationEvent::Completed {
-                                task_id,
-                                parent_session_id: session_key,
-                                reply_target: sa_reply_target,
-                                summary: tr.text,
-                                duration_secs: 0,
-                            }).await;
+                            if let Some(tx) = dm.event_sender() {
+                                let _ = tx.send(DelegationEvent::Completed {
+                                    task_id,
+                                    parent_session_id: session_key,
+                                    reply_target: sa_reply_target,
+                                    summary: tr.text,
+                                    duration_secs: 0,
+                                }).await;
+                            }
                         }
                     }
                     Ok(_) => {

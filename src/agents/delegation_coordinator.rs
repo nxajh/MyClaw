@@ -25,7 +25,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::agents::delegation::{DelegationEvent, DelegationManager};
+use dashmap::DashMap;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+
+use crate::agents::delegation::DelegationEvent;
 use crate::agents::session::{BackendPersistHook, PersistHook, SessionManager};
 use crate::config::sub_agent::AgentIsolation;
 
@@ -51,6 +55,12 @@ pub struct DelegationCoordinator {
     /// the runtime from here and passes it (with workspace_dir
     /// overlaid when worktree-isolated) to `SessionContext::process_turn`.
     runtime_cell: Arc<parking_lot::RwLock<Option<crate::agents::AgentRuntime>>>,
+    /// In-flight background delegations (task_id → JoinHandle). Powers
+    /// `/agent_list` (read snapshot) and `/agent_kill` (abort by id).
+    running: Arc<DashMap<String, JoinHandle<()>>>,
+    /// Sender for `DelegationEvent`s emitted when background
+    /// delegations complete. Installed by daemon via `set_event_sender`.
+    event_tx_cell: Arc<parking_lot::RwLock<Option<mpsc::Sender<DelegationEvent>>>>,
 }
 
 impl DelegationCoordinator {
@@ -64,6 +74,8 @@ impl DelegationCoordinator {
             session_manager,
             worktrees_root,
             runtime_cell: Arc::new(parking_lot::RwLock::new(None)),
+            running: Arc::new(DashMap::new()),
+            event_tx_cell: Arc::new(parking_lot::RwLock::new(None)),
         }
     }
 
@@ -73,6 +85,35 @@ impl DelegationCoordinator {
     /// AgentRegistry which the coordinator also references).
     pub fn set_runtime(&self, runtime: crate::agents::AgentRuntime) {
         *self.runtime_cell.write() = Some(runtime);
+    }
+
+    /// Install the mpsc sender for `DelegationEvent`s. Called by daemon
+    /// when wiring the orchestrator's `delegation_rx` receiver.
+    pub fn set_event_sender(&self, tx: mpsc::Sender<DelegationEvent>) {
+        *self.event_tx_cell.write() = Some(tx);
+    }
+
+    /// Get a clone of the installed event sender, if any. Used by
+    /// background spawns (including startup recovery) to emit
+    /// `DelegationEvent::Completed` / `Failed` to the orchestrator
+    /// event loop.
+    pub fn event_sender(&self) -> Option<mpsc::Sender<DelegationEvent>> {
+        self.event_tx_cell.read().clone()
+    }
+
+    /// Snapshot of currently-running background task ids.
+    pub fn running_snapshot(&self) -> Vec<String> {
+        self.running.iter().map(|e| e.key().clone()).collect()
+    }
+
+    /// Cancel a running background task by id.
+    pub fn cancel(&self, task_id: &str) -> bool {
+        if let Some((_, handle)) = self.running.remove(task_id) {
+            handle.abort();
+            true
+        } else {
+            false
+        }
     }
 
     fn runtime(&self) -> anyhow::Result<crate::agents::AgentRuntime> {
@@ -347,17 +388,15 @@ impl DelegationCoordinator {
         }) // end Box::pin
     }
 
-    /// Delegate a task asynchronously — spawns sub-agent in a background tokio task.
-    ///
-    /// `parent_session_id` is the hex session ID of the calling agent; used to
-    /// locate the `subagents/` directory for history persistence.
+    /// Delegate a task asynchronously — spawns the sub-agent in a
+    /// background tokio task whose JoinHandle is stashed in `running`
+    /// so `/agent_list` and `/agent_kill` can see it.
     pub fn delegate_async(
         &self,
         agent_name: &str,
         task: &str,
         parent_session_id: &str,
         reply_target: &str,
-        delegation_manager: &DelegationManager,
     ) -> anyhow::Result<String> {
         let agent = self.find_agent(agent_name)
             .ok_or_else(|| {
@@ -383,9 +422,11 @@ impl DelegationCoordinator {
         let parent_session_id_owned = parent_session_id.to_string();
         let session_key_owned = parent_session_id.to_string();
         let reply_target_owned = reply_target.to_string();
-        let event_tx = delegation_manager.event_sender();
+        let event_tx = self.event_sender();
         let task_id_clone = task_id.clone();
         let agent_name_owned = agent_name.to_string();
+        let running = Arc::clone(&self.running);
+        let running_task_id = task_id.clone();
 
         let handle = tokio::spawn(async move {
             let start_time = std::time::Instant::now();
@@ -399,30 +440,35 @@ impl DelegationCoordinator {
 
             let duration_secs = start_time.elapsed().as_secs();
 
-            match result {
-                Ok(summary) => {
-                    tracing::info!(task_id = %task_id_clone, duration_secs, "sub-agent completed successfully");
-                    let _ = event_tx.send(DelegationEvent::Completed {
-                        task_id: task_id_clone.clone(),
-                        parent_session_id: parent_session_id_owned,
-                        reply_target: reply_target_owned,
-                        summary,
-                        duration_secs,
-                    }).await;
-                }
-                Err(e) => {
-                    tracing::warn!(task_id = %task_id_clone, duration_secs, err = %e, "sub-agent failed");
-                    let _ = event_tx.send(DelegationEvent::Failed {
-                        task_id: task_id_clone.clone(),
-                        parent_session_id: parent_session_id_owned,
-                        reply_target: reply_target_owned,
-                        error: e.to_string(),
-                    }).await;
+            if let Some(tx) = event_tx {
+                match result {
+                    Ok(summary) => {
+                        tracing::info!(task_id = %task_id_clone, duration_secs, "sub-agent completed successfully");
+                        let _ = tx.send(DelegationEvent::Completed {
+                            task_id: task_id_clone.clone(),
+                            parent_session_id: parent_session_id_owned,
+                            reply_target: reply_target_owned,
+                            summary,
+                            duration_secs,
+                        }).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(task_id = %task_id_clone, duration_secs, err = %e, "sub-agent failed");
+                        let _ = tx.send(DelegationEvent::Failed {
+                            task_id: task_id_clone.clone(),
+                            parent_session_id: parent_session_id_owned,
+                            reply_target: reply_target_owned,
+                            error: e.to_string(),
+                        }).await;
+                    }
                 }
             }
+
+            // Self-remove from the running table once the spawn finishes.
+            running.remove(&running_task_id);
         });
 
-        delegation_manager.register(task_id.clone(), handle);
+        self.running.insert(task_id.clone(), handle);
         Ok(task_id)
     }
 }

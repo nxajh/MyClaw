@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use crate::agents::{
     InMemoryBackend, Orchestrator, OrchestratorParts, SessionManager,
     ToolRegistry, SkillManager, Skill, SystemPromptConfig, RunMode,
-    McpManager, DelegationCoordinator, DelegationManager,
+    McpManager, DelegationCoordinator,
 };
 use crate::agents::AgentDelegator;
 use std::path::PathBuf;
@@ -786,11 +786,15 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     };
 
     // ── Delegation channel (conditional — only when sub-agents configured) ─────
-    let (delegation_manager, delegation_rx) = if sub_agent_delegator_arc.is_some() {
+    // The DelegationCoordinator is the single owner of the sender and
+    // the running-task table (RFC §三.C). DelegationManager no longer
+    // exists as a separate type.
+    let delegation_rx = if let Some(ref delegator) = sub_agent_delegator_arc {
         let (tx, rx) = tokio::sync::mpsc::channel::<crate::agents::DelegationEvent>(100);
-        (Some(Arc::new(DelegationManager::new(tx))), Some(rx))
+        delegator.set_event_sender(tx);
+        Some(rx)
     } else {
-        (None, None)
+        None
     };
 
     // session_backend / session_manager are constructed earlier (above the
@@ -955,7 +959,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let parts = OrchestratorParts {
         session_manager,
         channels,
-        delegation_manager,
+        delegator: sub_agent_delegator_arc.clone(),
         delegation_rx,
         scheduler_rx: Some(scheduler_rx),
         workspace_dir: config.workspace_dir.clone(),
