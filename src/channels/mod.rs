@@ -9,7 +9,10 @@ pub mod wechat;
 #[cfg(feature = "client")]
 pub mod client;
 
-pub use message::{Channel, ChannelMessage, SendMessage, InlineButton, DedupState, ProcessingStatus};
+pub use message::{
+    Channel, ChannelCapabilities, ChannelMessage, DedupState, InlineButton, LenUnit,
+    MINIMAL_CAPABILITIES, ProcessingStatus, SendMessage,
+};
 pub use telegram::TelegramChannel;
 #[cfg(feature = "qqbot")]
 pub use qqbot::QQBotChannel;

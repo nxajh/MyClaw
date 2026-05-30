@@ -541,10 +541,17 @@ impl ClientChannel {
     }
 }
 
+static CLIENT_CAPS: crate::channels::message::ChannelCapabilities =
+    crate::channels::message::ChannelCapabilities::client();
+
 #[async_trait]
 impl Channel for ClientChannel {
     fn name(&self) -> &str {
         "client"
+    }
+
+    fn capabilities(&self) -> &crate::channels::message::ChannelCapabilities {
+        &CLIENT_CAPS
     }
 
     async fn send(&self, msg: &SendMessage) -> anyhow::Result<()> {
@@ -587,10 +594,6 @@ impl Channel for ClientChannel {
 
     async fn health_check(&self) -> bool {
         true // Local WebSocket server is always healthy.
-    }
-
-    fn supports_streaming(&self) -> bool {
-        true
     }
 
     /// E32: push a per-turn event (Chunk, Thinking, ToolCall, …) at

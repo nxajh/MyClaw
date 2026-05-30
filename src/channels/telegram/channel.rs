@@ -392,17 +392,24 @@ impl TelegramChannel {
         );
 
         // Ensure plain text fits Telegram's limit (truncate if necessary).
-        let plain_text = if text.chars().count() > MAX_MESSAGE_LENGTH {
+        // Telegram measures in UTF-16 code units — emoji counts as 2.
+        let plain_units = text.encode_utf16().count();
+        let plain_text = if plain_units > MAX_MESSAGE_LENGTH {
             warn!(
-                original_chars = text.chars().count(),
+                original_units = plain_units,
                 limit = MAX_MESSAGE_LENGTH,
                 "plain text exceeds Telegram limit, truncating"
             );
-            let end_byte = text
-                .char_indices()
-                .nth(MAX_MESSAGE_LENGTH)
-                .map(|(i, _)| i)
-                .unwrap_or(text.len());
+            let mut acc = 0usize;
+            let mut end_byte = text.len();
+            for (i, ch) in text.char_indices() {
+                let cost = ch.len_utf16();
+                if acc + cost > MAX_MESSAGE_LENGTH {
+                    end_byte = i;
+                    break;
+                }
+                acc += cost;
+            }
             let mut truncated = text[..end_byte].to_string();
             truncated.push_str("\n\n[... message truncated ...]");
             truncated
@@ -1183,26 +1190,31 @@ impl TelegramChannel {
     /// 2. For each chunk, check if its HTML conversion exceeds 4096
     /// 3. If it does, re-split that chunk more aggressively using plain text limit
     fn chunk_for_telegram(content: &str) -> Vec<String> {
+        use crate::channels::message::LenUnit;
         let html_overhead_per_chunk = 200; // conservative estimate for HTML expansion
         let raw_limit = MAX_MESSAGE_LENGTH
             .saturating_sub(CONTINUATION_OVERHEAD)
             .saturating_sub(html_overhead_per_chunk);
 
-        let raw_chunks = crate::channels::message::split_message_chunk(content, raw_limit);
+        // Telegram measures in UTF-16 code units; splitting by codepoints
+        // under-counts emoji-heavy text and trips the 4096 limit.
+        let raw_chunks =
+            crate::channels::message::split_message_chunk(content, raw_limit, LenUnit::Utf16Units);
 
         let mut final_chunks = Vec::new();
         for chunk in raw_chunks {
             let html = markdown_to_telegram_html(&chunk);
-            if html.chars().count() <= MAX_MESSAGE_LENGTH {
-                // HTML fits — send_raw will try HTML first, then plain fallback
+            if html.encode_utf16().count() <= MAX_MESSAGE_LENGTH {
                 final_chunks.push(chunk);
             } else {
-                // HTML exceeds limit — re-split this chunk more aggressively.
-                // Use plain text limit that accounts for continuation suffix.
                 let plain_limit = MAX_MESSAGE_LENGTH
                     .saturating_sub(CONTINUATION_OVERHEAD)
-                    .saturating_sub(CONTINUATION_OVERHEAD); // double-subtract for safety
-                let sub_chunks = crate::channels::message::split_message_chunk(&chunk, plain_limit);
+                    .saturating_sub(CONTINUATION_OVERHEAD);
+                let sub_chunks = crate::channels::message::split_message_chunk(
+                    &chunk,
+                    plain_limit,
+                    LenUnit::Utf16Units,
+                );
                 final_chunks.extend(sub_chunks);
             }
         }
@@ -1211,10 +1223,17 @@ impl TelegramChannel {
     }
 }
 
+static TELEGRAM_CAPS: crate::channels::message::ChannelCapabilities =
+    crate::channels::message::ChannelCapabilities::telegram();
+
 #[async_trait]
 impl Channel for TelegramChannel {
     fn name(&self) -> &str {
         "telegram"
+    }
+
+    fn capabilities(&self) -> &crate::channels::message::ChannelCapabilities {
+        &TELEGRAM_CAPS
     }
 
     async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
@@ -1585,14 +1604,35 @@ mod tests {
 
     #[test]
     fn test_message_chunking() {
-        let chunks = crate::channels::message::split_message_chunk("short", 10);
+        use crate::channels::message::LenUnit;
+        let chunks =
+            crate::channels::message::split_message_chunk("short", 10, LenUnit::Codepoints);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0], "short");
 
         let long = "a".repeat(5000);
-        let chunks = crate::channels::message::split_message_chunk(&long, 100);
+        let chunks =
+            crate::channels::message::split_message_chunk(&long, 100, LenUnit::Codepoints);
         assert!(chunks.len() > 1);
         assert!(chunks.iter().all(|c| c.len() <= 100));
+    }
+
+    #[test]
+    fn test_utf16_chunking_emoji() {
+        use crate::channels::message::{LenUnit, split_message_chunk};
+        // Build 2100 codepoints of emoji (each is 2 UTF-16 units = 4200 units total)
+        let emoji_text = "😀".repeat(2100);
+        assert_eq!(emoji_text.chars().count(), 2100);
+        assert_eq!(emoji_text.encode_utf16().count(), 4200);
+
+        let chunks = split_message_chunk(&emoji_text, 4096, LenUnit::Utf16Units);
+        assert!(chunks.len() > 1, "must split when UTF-16 exceeds limit");
+        for c in &chunks {
+            assert!(
+                c.encode_utf16().count() <= 4096,
+                "each chunk must fit Telegram UTF-16 limit"
+            );
+        }
     }
 
     // ── Markdown → Telegram HTML tests ──────────────────────────────────────

@@ -821,7 +821,11 @@ Type any command or just chat!"#;
         };
 
         // Send reply directly via REST API (bypass orchestrator), with chunking.
-        let chunks = split_message_chunk(&reply, QQ_MAX_MESSAGE_LENGTH);
+        let chunks = split_message_chunk(
+            &reply,
+            QQ_MAX_MESSAGE_LENGTH,
+            crate::channels::message::LenUnit::Codepoints,
+        );
         if let Some(openid) = reply_target.strip_prefix("c2c:") {
             for (i, chunk) in chunks.iter().enumerate() {
                 let seq = self.next_msg_seq() + i as u32;
@@ -852,14 +856,25 @@ Type any command or just chat!"#;
 
 // ── Channel trait implementation ──────────────────────────────────────────────
 
+static QQBOT_CAPS: crate::channels::message::ChannelCapabilities =
+    crate::channels::message::ChannelCapabilities::qqbot();
+
 #[async_trait]
 impl Channel for QQBotChannel {
     fn name(&self) -> &str {
         "qqbot"
     }
 
+    fn capabilities(&self) -> &crate::channels::message::ChannelCapabilities {
+        &QQBOT_CAPS
+    }
+
     async fn send(&self, msg: &SendMessage) -> anyhow::Result<()> {
-        let chunks = split_message_chunk(&msg.content, QQ_MAX_MESSAGE_LENGTH);
+        let chunks = split_message_chunk(
+            &msg.content,
+            QQ_MAX_MESSAGE_LENGTH,
+            crate::channels::message::LenUnit::Codepoints,
+        );
         // thread_ts carries the original message event ID for passive replies.
         let msg_id = msg.thread_ts.as_deref().unwrap_or("");
 

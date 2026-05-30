@@ -638,13 +638,24 @@ impl WechatChannel {
     }
 }
 
+static WECHAT_CAPS: crate::channels::message::ChannelCapabilities =
+    crate::channels::message::ChannelCapabilities::wechat();
+
 #[async_trait]
 impl Channel for WechatChannel {
     fn name(&self) -> &str { "wechat" }
 
+    fn capabilities(&self) -> &crate::channels::message::ChannelCapabilities {
+        &WECHAT_CAPS
+    }
+
     async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
         let ctx_token = self.api.state.read().context_tokens.get(&message.recipient).cloned();
-        let chunks = crate::channels::message::split_message_chunk(&message.content, 2048);
+        let chunks = crate::channels::message::split_message_chunk(
+            &message.content,
+            self.capabilities().message_chunk_limit,
+            self.capabilities().message_len_unit,
+        );
         for chunk in chunks {
             self.api.send_text(&message.recipient, &chunk, ctx_token.as_deref()).await?;
         }
