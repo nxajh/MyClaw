@@ -689,6 +689,10 @@ Telegram 的 `sendMessageDraft` API 做原生流式预览。**本 RFC 不在 tra
 这是**唯一一个改动签名**的现有方法。现有调用方都是 `let _ = ch.push_event(...)`
 形态，加一个 `let _ =` 即可保持原有 fire-and-forget 行为。详见 §7.5。
 
+**Phase 1.5 端到端替代**：§7.6 提出用 `TurnStream` trait 替代 `push_event` +
+`cancel_signal`。Phase 1.5 落地时，这两个 trait 方法被删除，新增
+`create_stream(rt) -> Option<Box<dyn TurnStream>>`。Phase 0-1 仍保留 `push_event`。
+
 ### 7.5 流式可靠性契约
 
 `push_event` 在表面上是 fire-and-forget（调用方不用 retry，不用回退），但
@@ -726,6 +730,154 @@ no-op 实现 + `Ok(())` 满足契约。`Agent::run` 的 §8.1 守卫保证它的
 
 **实现侧建议**：channel 实现 `push_event` 时返回 `Err` 主要用于 log /
 metrics / 测试 assert，不期望调用方做策略决策。
+
+### 7.6 TurnStream — `push_event` 的强化替代方案（目标态）
+
+#### 7.6.1 push_event 在 §7.5 契约下暴露的两个弱点
+
+§7.5 已经把可靠性契约写清了，但 `push_event(&str, TurnEvent)` 这个签名本身仍有
+两个结构性弱点：
+
+1. **per-turn 状态的归属是 channel 私有的、按 `reply_target` 字符串索引的 map**
+   （`ClientChannel.stream_contexts: HashMap<String, StreamContext>`）。
+   - 新建 / 销毁的时机散落在 `push_event` 实现里靠"看见首个 chunk 才创建、看见
+     Done 才清理"隐式管理；cancel 抢断、客户端断连等异常路径会留下孤立条目。
+   - Agent 那侧每次 push 都做一次字符串 hash 查找，热路径上微小但持续的开销。
+2. **`push_event` 只能返回 `Result<()>`**，无法告诉 Agent "这次 event 是已缓冲
+   待发还是已被消费端确认"。日后想做 backpressure（如客户端处理慢就暂停
+   chunk 生成）或 ack-based 重试，签名都不够。
+
+#### 7.6.2 替代设计：把 per-turn 流抽出为 `TurnStream` trait
+
+```rust
+/// 一次 push_event 的送达态。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum StreamDelivery {
+    /// 已缓冲，未确认抵达消费者（默认）。
+    #[default]
+    Pending,
+    /// 已抵达消费端（如 WS send 调用返回，HTTP 200，editMessageText 成功）。
+    Visible,
+    /// 消费端已确认完成（如 client ack / Telegram 最终 edit 成功）。
+    FinalDelivered,
+}
+
+/// 一次 agent turn 的流式出口。由 `Channel::create_stream` 工厂创建，
+/// 生命周期 = 一个 turn。
+#[async_trait]
+pub trait TurnStream: Send {
+    /// 推一个 event。返回当前送达态；返回 `Err` 表示传输层永久失败，
+    /// channel 实现已无法继续推送（调用方应停止推送但不必 fallback）。
+    async fn push(&mut self, event: TurnEvent) -> anyhow::Result<StreamDelivery>;
+
+    /// 当前累积送达态（不触发新动作，只读）。
+    fn status(&self) -> StreamDelivery;
+
+    /// 正常收尾：等待最终 event 抵达消费者。实现 SHOULD await 网络确认或
+    /// best-effort timeout。返回 `FinalDelivered` 表示已确认，`Visible` 表示
+    /// 已发送但未收到 ack。
+    async fn finish(self: Box<Self>) -> StreamDelivery;
+
+    /// 异常收尾：取消未完成的传输，不再 await ack。
+    async fn abort(self: Box<Self>);
+
+    /// 用户侧 cancel 抢断 token。Agent::run 监听此 token 决定是否提前退出。
+    fn cancel_token(&self) -> Option<CancellationToken> { None }
+}
+```
+
+Channel trait 上增加一个工厂方法：
+
+```rust
+/// 为本轮 turn 创建流式出口。
+/// 不支持流式的 channel 返回 None；调用方走 send_payload 兜底。
+fn create_stream(&self, reply_target: &str) -> Option<Box<dyn TurnStream>> {
+    let _ = reply_target;
+    None
+}
+```
+
+Session 新增一个 transient 字段（不持久化，不进 snapshot）：
+
+```rust
+// src/agents/session.rs — Session struct 新增
+pub turn_stream: Option<Box<dyn TurnStream>>,  // transient: per-turn 重置
+```
+
+`Agent::run` 的 streaming 路径从 `channel.push_event(rt, ev).await` 改为
+`if let Some(s) = &mut session.turn_stream { s.push(ev).await }`。
+
+#### 7.6.3 比 `push_event` 强在哪
+
+| 维度 | `push_event(&str, TurnEvent)` | `TurnStream` |
+|---|---|---|
+| Per-turn 状态归属 | channel 私有 HashMap，字符串索引 | `Box<dyn TurnStream>` owned by Session |
+| 生命周期 | 隐式（首 chunk 起，Done 止） | 显式（`create_stream` → `push`* → `finish/abort`）|
+| Cancel | 独立方法 `cancel_signal(rt)` | `stream.cancel_token()`，与 stream 同生命周期 |
+| 送达反馈 | `Result<()>` 两态 | `StreamDelivery` 三态（Pending/Visible/Final）|
+| 热路径开销 | 每次 push 做 string hash 查找 | 直接 `&mut self` 调用 |
+| 异常清理 | 依赖 channel "看不到 Done 就漏" | 走 `abort` 或 Drop 兜底（见 §7.6.5） |
+| Telegram edit-streaming | 难——`push_event` 需把 message_id 状态藏在 HashMap | 自然——`TelegramEditStream` 内部持有 message_id |
+| 第三方 channel 自带 stream | 可以但 reply_target map 是黑盒 | 工厂返回 `Box<dyn TurnStream>`，完全开放 |
+
+#### 7.6.4 不变量声明（§7.5 在 TurnStream 下的重述）
+
+声明 `create_stream(rt) -> Some(_)` 的 channel 实现，承担：
+
+1. **有序送达**：连续 `push` 的 event 必须按调用顺序抵达消费者。
+2. **断连重连透明**：传输层临时失败由 stream 实现内部解决（缓冲、replay）。
+3. **`Done` 后停止**：Agent 推送 `TurnEvent::Done` 后不再 push 新 event；
+   随后调用 `finish` 收尾。
+4. **Cancel 抢断**：`cancel_token` 被 cancel 后，Agent 退出且**不**再 push `Done`，
+   走 `abort` 收尾。stream 应识别此模式。
+5. **意外丢弃 = abort**：Session 析构或 turn_stream 字段被覆盖时，Drop 触发
+   best-effort abort（见 §7.6.5）。
+
+#### 7.6.5 两条来自候选方案的强化（**必须实现**）
+
+**(a) `push` 返回 `Result<StreamDelivery>` 而非 `StreamDelivery`**
+
+允许传输层错误上抛供 Agent 决定是否提前结束（不重试，但可短路后续 push 节省
+LLM 输出）。当前态用 `StreamDelivery` 表达。
+
+**(b) Drop 兜底 = abort 安全网**
+
+```rust
+impl Drop for ClientTurnStream {
+    fn drop(&mut self) {
+        if !self.finished {
+            let cancel = self.cancel.clone();
+            tokio::spawn(async move { cancel.cancel(); });
+        }
+    }
+}
+```
+
+任何意外丢弃（Session 重置、panic unwind、字段被覆盖）都不会留下悬挂资源。
+`finish` / `abort` 仍是首选路径——它们能 await 确认；Drop 只是兜底。
+
+#### 7.6.6 与 `push_event` 的关系：迁移、不并存
+
+| 时点 | 状态 |
+|---|---|
+| Phase 0（按 §8.1 原计划） | 仅加 `!supports_streaming()` 守卫，保持 `push_event` 接口 |
+| Phase 1.5（新增 phase） | 引入 `TurnStream` / `StreamDelivery` / `Channel::create_stream`；ClientChannel 提供 `ClientTurnStream` 实现；Session 加 `turn_stream` 字段；Agent::run 切到 `session.turn_stream` 路径 |
+| Phase 1.5 完成 | 删除 `Channel::push_event` 和 `Channel::cancel_signal`；删除各 channel 的 `stream_contexts` map |
+
+§7.5 的契约在 Phase 1.5 后由 §7.6.4 重述版替代，但**语义不变**——只是从 channel
+全局 map 索引改为 per-stream owned state。
+
+#### 7.6.7 待 RFC 落地时还需确认
+
+- `finish` 返回值能 await 到什么程度？ClientChannel 走 WS ack 可以确认 Visible→
+  FinalDelivered；TelegramEditStream 走 HTTP 200 也可以；但实现 SHOULD 文档化
+  "最长 await N 秒后降级为 Visible 返回"。
+- `create_stream` 返回 None 后 `session.turn_stream` 保持 None；Agent::run 的
+  push 路径需要 `if let Some(s) = &mut session.turn_stream` 短路——Phase 1.5
+  的 §11 实施计划需把这点列入 callsite 改造清单。
+- `Box<dyn TurnStream>` 必须 `Send`（已在 trait 上）——Session 跨 await，不
+  Send 的实现会在编译期挡住。
+- `Session::clone` 需自定义实现：`turn_stream` 不可 clone，clone 时设为 None。
 
 ---
 
@@ -897,6 +1049,49 @@ if let Some(ch) = channel_for_send {
 调用方（Telegram + QQBot + 测试），但改动是机械的；可保留旧名作为
 `split_message_chunk_chars` 兼容包装减少改动面。
 
+### Phase 1.5：TurnStream 替代 push_event（P1，依赖 Phase 0）
+
+**范围**（见 §7.6 完整设计）：
+
+- 新增类型：`StreamDelivery`（Pending/Visible/FinalDelivered）、`TurnStream` trait
+- Channel trait 新增 `create_stream(reply_target) -> Option<Box<dyn TurnStream>>`
+  工厂方法
+- **删除** `Channel::push_event` 和 `Channel::cancel_signal`（两者职责合并进
+  `TurnStream`）
+- Session struct 新增 transient 字段 `turn_stream: Option<Box<dyn TurnStream>>`，
+  custom `Clone` 重置为 None；snapshot 序列化跳过
+- ClientChannel：实现 `ClientTurnStream`，把现有 `stream_contexts: HashMap<...>`
+  里的逐 reply_target 状态收进 stream owned state；删除 channel 上的
+  HashMap 字段
+- Agent::run：streaming push 路径从 `channel.push_event(rt, ev).await` 改为
+  `if let Some(s) = &mut session.turn_stream { s.push(ev).await? }`；cancel
+  监听从 `channel.cancel_signal(rt)` 改为 `session.turn_stream.as_ref()
+  .and_then(|s| s.cancel_token())`
+- SessionContext::process_turn：在 agent.run 前调用 `channel.create_stream(rt)`
+  填充 `session.turn_stream`；agent.run 返回后调用 `finish`（正常）或
+  `abort`（错误）
+- 所有 TurnStream 实现：加 Drop 兜底（§7.6.5(b)），意外丢弃 = best-effort abort
+
+**callsite 改造清单**：
+
+| 文件 | 改动 |
+|---|---|
+| `src/agents/agent.rs` | `collect_stream` 内 `channel.push_event(rt, ev)` → `session.turn_stream.as_mut()` 路径；cancel 监听同步切换 |
+| `src/agents/session.rs` | 加 `turn_stream` 字段 + custom Clone |
+| `src/agents/session_context.rs` | process_turn 入口创建 stream，出口 finish/abort；Phase 0 守卫从 `!ch.supports_streaming()` 改为 `session.turn_stream.is_none()`（两者等价但更直接） |
+| `src/channels/message.rs` | trait 删 `push_event` / `cancel_signal`，加 `create_stream` 默认 None |
+| `src/channels/client.rs` | 实现 `ClientTurnStream`，删 `stream_contexts` |
+| `src/channels/telegram/channel.rs` | 暂保持 `create_stream → None`，Phase 3 后再实现 `TelegramEditStream` |
+
+**Phase 0 守卫语义同步**：Phase 0 的 `!ch.supports_streaming()` 守卫在 Phase 1.5
+后等价于 `session.turn_stream.is_none()`——None 意味着 channel 不支持流式（或
+本轮显式关闭），需走 send_payload 兜底；Some 意味着流式已交付完整文本，
+不重复发。两种写法**任选其一保留**即可（推荐后者，更直接）。
+
+**风险**：中。涉及 Session 字段、Agent::run 路径切换、ClientChannel 重构。
+但全部在 Phase 0 守卫保护下进行——任何阶段回归到双发 bug 都能被 §12 Phase 0
+测试用例捕获。
+
 ### Phase 2：引入 MessagePayload + send_payload（P1，缩范围版）
 
 **范围**：
@@ -982,6 +1177,22 @@ if let Some(ch) = channel_for_send {
 - [ ] `message_len()` 对 UTF-16 计量准确（emoji 算 2 单位）
 - [ ] `split_message_chunk` 按 UTF-16 切分 Telegram 消息不超限
 - [ ] `chars().count() ≤ 4096 但 encode_utf16().count() > 4096` 的 emoji 消息不再触发 Telegram `400 Bad Request`（回归测试）
+
+### Phase 1.5
+
+- [ ] ClientChannel `create_stream(rt)` 返回 `Some(_)`，QQBot/Wechat 返回 `None`
+- [ ] `ClientTurnStream::push` 在 WS 正常时返回 `Ok(Visible)`，断连重连期间
+  返回 `Ok(Pending)`，最终 `finish` 返回 `FinalDelivered`
+- [ ] Agent::run 不再调用 `channel.push_event` / `channel.cancel_signal`
+  （grep 验证）
+- [ ] `session.turn_stream` 在 turn 结束（正常 / 错误 / cancel）后被重置或
+  drop；连续多 turn 不泄漏 stream
+- [ ] Cancel：在 `cancel_token` 被触发后，Agent::run 退出且 `session.turn_stream`
+  走 `abort` 收尾（不 finish）
+- [ ] Drop 兜底：在 Agent::run panic 路径下，Session 析构触发
+  `ClientTurnStream::drop`，cancel_token 被点亮（验证孤立 WS 资源被清理）
+- [ ] 双发回归：WebUI 单次提问，回复仍只显示一次（Phase 0 守卫等价改写后保持
+  正确）
 
 ### Phase 2
 
@@ -1326,10 +1537,12 @@ limit, LenUnit::Codepoints)`，让 QQBot 改动可以分批做。
 
 ### C.4 流式中断时的兜底
 
-已在正文 §7.5（Streaming 可靠性契约）展开。简要：
+已在正文 §7.5（Streaming 可靠性契约）和 §7.6（TurnStream 替代方案）展开。简要：
 
 - Phase 0 守卫让 streaming channel 完全负责自己的可靠性
 - `push_event` 返回 `Result<()>` 用于 log/metric，不参与策略决策
 - ClientChannel 已有 `dedup_state` 重连重放机制
+- Phase 1.5 切到 `TurnStream` 后：`push` 返回 `Result<StreamDelivery>` 提供
+  Pending/Visible/FinalDelivered 三态；Drop 触发 best-effort abort 兜底
 - 若出现实际可观测丢失率再扩展 trait（如 `acknowledge_event(rt, event_id)`），
   当前不预留

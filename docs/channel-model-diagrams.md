@@ -283,6 +283,64 @@ AskRouter 不直接接触 Channel — 是 Orchestrator 帮它桥接 inbound ChMs
                   Phase 2 清理
 ```
 
+## 8. 流式出口的形态演进（push_event → TurnStream，§7.6）
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│  当前 / Phase 0-1（push_event 形态）                                   │
+│                                                                        │
+│  Agent::run                                                            │
+│     │                                                                  │
+│     ▼                                                                  │
+│  let _ = session.channel.as_ref()                                      │
+│      .map(|ch| ch.push_event(reply_target, ev))?  ← &str 索引          │
+│                                                                        │
+│  ClientChannel.stream_contexts: HashMap<String, StreamContext>         │
+│      ├─ insert on first chunk (隐式)                                   │
+│      └─ remove on Done    (隐式，cancel 路径易漏)                      │
+│                                                                        │
+│  cancel: 单独 Channel::cancel_signal(rt) → Option<CancelToken>         │
+└────────────────────────────────────────────────────────────────────────┘
+
+                                ↓ Phase 1.5
+
+┌────────────────────────────────────────────────────────────────────────┐
+│  Phase 1.5 后（TurnStream 形态）                                       │
+│                                                                        │
+│  SessionContext::process_turn                                          │
+│     │                                                                  │
+│     │  ① 入口：session.turn_stream = ch.create_stream(rt);             │
+│     ▼                                                                  │
+│  Agent::run                                                            │
+│     │                                                                  │
+│     │  ② 推送：if let Some(s) = &mut session.turn_stream {             │
+│     │              s.push(ev).await?   →  Result<StreamDelivery>       │
+│     │          }                          (Pending/Visible/Final)      │
+│     │                                                                  │
+│     │  ③ cancel：s.cancel_token() — 与 stream 同生命周期               │
+│     ▼                                                                  │
+│  SessionContext::process_turn                                          │
+│     │                                                                  │
+│     │  ④ 收尾：正常 → turn_stream.finish().await  (await ack)          │
+│     │          错误 → turn_stream.abort().await                        │
+│     │          panic → Drop impl 触发 best-effort abort                │
+│     ▼                                                                  │
+│                                                                        │
+│  ClientTurnStream  (owned, per-turn)                                   │
+│      ├─ event_tx: mpsc<TurnEvent>                                      │
+│      ├─ cancel: CancelToken                                            │
+│      ├─ ws_sender: WsSender                                            │
+│      ├─ finished: bool                                                 │
+│      └─ impl Drop { if !finished { spawn(cancel.cancel()) } }          │
+│                                                                        │
+│  Channel trait 上少了 push_event / cancel_signal,                      │
+│  多了 create_stream(rt) → Option<Box<dyn TurnStream>>                  │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+**为什么不留双形态**：see RFC §7.6.6 — `push_event` 和 `TurnStream` 表达同一
+能力，并存只增加心智负担；Phase 1.5 强制翻转。
+
 ---
 
 **图例**：
