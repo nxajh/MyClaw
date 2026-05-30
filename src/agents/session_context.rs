@@ -207,15 +207,14 @@ impl SessionContext {
                 if let Some(ref retry_msg) = turn_result.pending_retry {
                     *self.pending_retry.lock().await = Some(retry_msg.clone());
                 }
-                // RFC §三.B line 359-363: fallback final-text send. When
-                // a channel is wired and the model produced text, deliver
-                // it here. Streaming channels have already emitted via
-                // `push_event`; this `send` is the non-streaming fallback
-                // / summary. Scheduled / webhook paths pass `channel:
-                // None` and dispatch via their own `send_to_target` after
-                // process_turn returns.
+                // RFC §三.B line 359-363 + channel-model-rfc.md §8.1 Phase 0:
+                // fallback final-text send. Streaming channels (e.g. ClientChannel)
+                // already deliver via `push_event`; the `supports_streaming()`
+                // guard prevents the WebUI double-display bug. Scheduled /
+                // webhook paths pass `channel: None` and dispatch via their own
+                // `send_to_target` after process_turn returns.
                 if let Some(ch) = channel_for_send {
-                    if !turn_result.text.trim().is_empty() {
+                    if !turn_result.text.trim().is_empty() && !ch.supports_streaming() {
                         let send_msg = crate::channels::SendMessage::new(
                             turn_result.text.clone(),
                             reply_target.clone(),
