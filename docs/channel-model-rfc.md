@@ -997,18 +997,17 @@ Phase 0 不影响这些；Phase 2 大部分迁移到 `send_payload`；Phase 4 �
 即 `retry_abort_prompt()` 辅助函数）是 `MessagePayload::Interactive` 的天然
 迁移目标——Phase 2 应该把它一起改了。
 
-### 13.2 AskUserTool：Phase 4 删 SendMessage 时**首先失败**的工具
+### 13.2 AskUserTool：两个独立的清理点
 
-`tools/ask_user.rs:184` 构造 `SendMessage::new(question, reply_target)` 然后
-`channel.send(&send_msg)`。Phase 4 删 SendMessage 后这个工具会编译失败，必须
-同步迁移到：
+`tools/ask_user.rs` 有**两个**和本 RFC 相关的问题，应在 Phase 2 一起做完：
 
-```rust
-let target = SendTarget::new(reply_target);
-channel.send_payload(&target, &MessagePayload::Text { content: question }).await?;
-```
+1. **`channel.send(SendMessage)` → `channel.send_payload(SendTarget, MessagePayload::Text)`**
+   （和其他 9 个 callsite 同节奏）
+2. **不再自持 `channels: ChannelMap`，改读 `session.channel`**
+   （和其他工具的官方约定对齐，见 §13.5）
 
-**Phase 2 必须把 AskUserTool 列入迁移清单**——否则 Phase 4 时被动改。
+完整迁移代码在 §13.5 给出。这样 Phase 4 删除 `SendMessage` 时工具层不再有任何
+连带改动；同时清理了 AskUserTool 与其他工具的接口不一致点。
 
 ### 13.3 TurnEvent vs MessagePayload 的边界
 
@@ -1060,20 +1059,49 @@ Self { capabilities, ... }
 Phase 1 channel 实现的字段从原本的几个 `max_message_length / unit` 散字段，
 合并为单个 `capabilities: ChannelCapabilities` 字段。
 
-### 13.5 Session.channel transient 字段：工具侧的耦合
+### 13.5 Session.channel transient 字段：当前读取方与不一致点
 
-`Session.channel: Option<Arc<dyn Channel>>` 由 `process_turn` 写入，由
-**Agent.run 内部** 和**工具 execute 时** 读取：
+`Session.channel: Option<Arc<dyn Channel>>` 由 `process_turn` 写入。读取方：
 
-| 读取方 | 用途 | Phase 4 影响 |
+| 读取方 | 现状 | 一致性 |
 |---|---|---|
-| `Agent::run` 的 `collect_stream` | 调 `channel.push_event(reply_target, ev)` 推流 | 无（push_event 不依赖 SendMessage） |
-| `Agent::run` 的 `cancel_signal(reply_target)` | 取消 token 获取 | 无 |
-| `AskUserTool` | 调 `channel.send(SendMessage{question})` | **必改**（13.2） |
-| 其他工具 | 当前没有其他工具读 `session.channel` | 无 |
+| `Agent::run` 的 `collect_stream` | `session.channel.as_ref()` 调 `push_event(reply_target, ev)` | ✅ 走官方约定 |
+| `Agent::run` 的 cancel checkpoint | `session.channel.as_ref()` 调 `cancel_signal(reply_target)` | ✅ 走官方约定 |
+| `AskUserTool` | **解析 `session.owner` 字符串 → 自持 `channels: ChannelMap` 反查** | ❌ **绕开 session.channel，自持 channels map** |
+| 其他工具 | 不读 | — |
 
-**结论**：Phase 4 删 SendMessage 时，唯一受影响的工具是 AskUserTool。
-其他工具不读 `session.channel`，无连带改动。
+`AskUserTool` 自持 `Option<ChannelMap>` 是历史遗留——`session.channel`
+transient 字段晚于 AskUserTool 出现。**应清理为统一约定**：所有需要 channel
+访问的工具都应读 `session.channel`，不自持 channels map。
+
+**Phase 2 AskUserTool 改造完整内容**（§13.2 的扩展）：
+
+```rust
+// 之前
+pub struct AskUserTool {
+    router: Option<Arc<AskRouter>>,
+    channels: Option<ChannelMap>,   // ← 自持 channels map
+}
+
+// 之后（接口一致性后）
+pub struct AskUserTool {
+    router: Option<Arc<AskRouter>>,
+    // 不再自持 channels — 改读 session.channel
+}
+
+// execute() 内部
+let channel = match &session.channel {
+    Some(ch) => ch.clone(),
+    None => return Ok(ToolResult::error("ask_user: no channel on session")),
+};
+let target = SendTarget::new(session.reply_target().unwrap_or(""));
+channel.send_payload(&target, &MessagePayload::Text { content: question }).await?;
+```
+
+`daemon.rs` 构造 AskUserTool 时不再传 channels map（少一个参数）。
+
+**Phase 4 删 SendMessage 时，唯一在工具层受影响的是 AskUserTool**——
+完成 Phase 2 改造后，删除 SendMessage 在工具层零影响。
 
 ### 13.6 ChannelMessage（入站侧）的演进
 
@@ -1169,6 +1197,36 @@ Phase 6+ ── Voice / Poll / Card / 安全策略抽象 ──── 等真实�
 **关键依赖**：Phase 2 必须把 §13.1 表格列出的 10 个 callsite 全部迁移，否则
 Phase 4 无法删除 `SendMessage`。各 Phase 的"完成定义"必须包含 callsite 验收：
 `grep -rn 'SendMessage::new\|channel.send(' src/` 返回空才算 Phase 2 完成。
+
+### 13.10 接口一致性原则（确立约定）
+
+复盘 §13.1–13.9 后，可以总结出 Channel 与其他模块的**官方接口约定**。本 RFC
+执行期间和之后，新增 channel 用户必须遵守这些约定，避免再出现像 AskUserTool
+那样的孤立模式：
+
+| 调用方类型 | 获取 channel 的官方途径 | ❌ 反模式 |
+|---|---|---|
+| **工具（`impl Tool`）** | 读 `session.channel.as_ref()` | 自持 `channels: ChannelMap` 字段，再解析 `session.owner` 反查 |
+| **运行时核心**（`Agent::run` / process_turn） | 读 `session.channel` 或接受 `Option<Arc<dyn Channel>>` 参数 | 反查 channels map |
+| **调度/Webhook**（已有外部入口） | 通过 `Orchestrator::channels()` accessor 或 `send_to_target_internal` | 自持 channels map |
+| **Orchestrator 自己** | 自持 `channels: Arc<DashMap>` ✓（它就是所有者） | — |
+
+**为什么不让工具直接接收 channel 参数？**——`Tool::execute(args, session)` 签名
+不该为了少数需要 channel 的工具加 `Option<&dyn Channel>` 参数；让全部工具承担
+不相关的签名负担。`session.channel` transient 字段已经是 architecture-target.md
+line 92-93 定义的标准约定，工具按需读取即可。
+
+**Channel trait 自身保持 Session 无关**：
+
+- `push_event(reply_target: &str, event: TurnEvent)` 以**字符串 key** 寻址，
+  不是 `&Session`。让 Channel 不感知 Session 结构，保持解耦。
+- `cancel_signal(reply_target: &str) -> Option<CancellationToken>` 同理。
+- `send_payload(target: &SendTarget, payload: &MessagePayload)` 同理 ——
+  `SendTarget.recipient` 是 routing 字符串，channel 不知道它对应哪个 Session。
+
+**结论**：Channel 与其他模块的接口形态**总体合理，无需重新设计**。唯一的偏差
+是 AskUserTool 自持 channels map 这一历史遗留，按本 RFC §13.5 的方案在 Phase 2
+随手清理即可。
 
 ---
 
