@@ -293,22 +293,18 @@ Ok(turn_result) => {
 
 未来当 Telegram/QQBot 也支持 edit-based streaming 时，它们的 `supports_streaming()` 会返回 `true`，同一个判断点自然生效。
 
-### 5.3 流式中断时的 fallback
+### 5.3 流式可靠性归属
 
-加上 `!supports_streaming()` 守卫后，streaming channel **完全依赖** `push_event`
-交付最终文本。当 push_event 链路失败（WebSocket 断开后又重连、Chunk 丢失等）时
-用户可能看不到回复。
+加上 `!supports_streaming()` 守卫后，streaming channel **完全依赖**
+`push_event` 链路交付最终文本。可靠性责任明确归到 channel 实现侧 —— 详细契约
+见 §7.5（Streaming 可靠性契约）。
 
-缓解策略：
-
-1. **首选：streaming channel 自己保证可靠性**。ClientChannel 的 WebSocket 关闭
-   时会通过 `dedup_state` 在重连后重放最后 N 条事件（已存在机制）。
-2. **次选**：`push_event` 在 channel 实现内部返回 `Result`，失败时退回 `send()`
-   兜底——但这把"是否需要 fallback"的判断下沉到 channel，不在本 Phase 范围内。
-
-Phase 0 接受现状："streaming 已成功完成"是 channel 的责任；orchestrator/
-process_turn 信任 `supports_streaming()` 声明。后续如果出现可观测的丢失率，再
-扩展 Channel trait 加 `send_event_ack` 之类的确认机制。
+简单总结：
+- ClientChannel 已经有 `dedup_state` 做 WebSocket 断连重连后的事件 replay
+- `push_event` 改为返回 `Result<()>`（默认 `Ok(())`）让 channel 实现可以 log
+  / metric 失败事件，但 `Agent::run` 不基于该返回值做策略决策
+- 如果将来出现可观测的丢失率，再考虑扩展 trait（如 `send_event_ack`）；
+  当前不预留
 
 ---
 
@@ -614,7 +610,12 @@ pub trait Channel: Send + Sync {
     }
 
     /// 推送 per-turn 流式事件（chunk/thinking/tool_call/done）。
-    async fn push_event(&self, _reply_target: &str, _event: TurnEvent) {}
+    /// 返回 `Result<()>` 用于诊断（如 channel 实现想 log "WS 断连，event
+    /// 丢弃"），调用方一般 `let _ = ch.push_event(...).await;` 忽略错误。
+    /// Fire-and-forget 语义不变 —— 见 §7.5 流式可靠性契约。
+    async fn push_event(&self, _reply_target: &str, _event: TurnEvent) -> anyhow::Result<()> {
+        Ok(())
+    }
 
     /// 获取当前 turn 的取消令牌。
     fn cancel_signal(&self, _reply_target: &str) -> Option<CancellationToken> {
@@ -683,6 +684,48 @@ Telegram 的 `sendMessageDraft` API 做原生流式预览。**本 RFC 不在 tra
 
 所有新增方法都有默认实现，现有 channel 实现无需改动即可编译。删除了之前草案
 的 `send_draft()` / `format_message()`——见 §7.2 / §7.3 的取舍说明。
+
+**`push_event` 签名变化**：从 `→ ()` 改为 `→ Result<()>`（默认 `Ok(())`）。
+这是**唯一一个改动签名**的现有方法。现有调用方都是 `let _ = ch.push_event(...)`
+形态，加一个 `let _ =` 即可保持原有 fire-and-forget 行为。详见 §7.5。
+
+### 7.5 流式可靠性契约
+
+`push_event` 在表面上是 fire-and-forget（调用方不用 retry，不用回退），但
+**这建立在 channel 实现对自己 streaming 通道负责的前提下**。trait 把这个契约
+显式写出来：
+
+> **Channel 实现声明 `supports_streaming() == true`（即 `capabilities()
+> .supports_streaming = true`）的，承担以下契约：**
+>
+> 1. **有序送达**：`push_event(reply_target, e1)` 在 `push_event(reply_target, e2)`
+>    之前 await 完成时，e1 必须在 e2 之前抵达消费者。
+> 2. **断连重连透明**：传输层临时失败（WebSocket 断连重连等）由 channel 内部
+>    解决，包括必要时的事件重放（replay）。`Agent::run` 不会重试 `push_event`，
+>    也不会因为流式失败而 fallback 到 `send_payload`。
+> 3. **`TurnEvent::Done` 后停止**：channel 在收到 `Done` 后视为本轮结束；
+>    `Agent::run` 不会再 push 任何 event。channel 实现可以借此清理
+>    per-reply_target 资源。
+> 4. **Cancel 抢断**：用户在 `cancel_signal(rt)` 返回的 token 上发出 cancel
+>    后，`Agent::run` 退出且**不**再 push `Done`。channel 应当能识别"看到 cancel
+>    后流不再有 Done" 的情况，作为流终结信号处理。
+> 5. **未知 reply_target**：`push_event(rt, ev)` 调用时 channel 内若没有 `rt`
+>    对应的活跃 stream（比如已经在客户端断开后清理过），实现可以静默丢弃但
+>    **建议 log**，便于排查。
+
+**声明 `supports_streaming() == false`** 的 channel：default `push_event`
+no-op 实现 + `Ok(())` 满足契约。`Agent::run` 的 §8.1 守卫保证它的最终文本走
+`send_payload` 兜底，**不**依赖 push_event 送达。
+
+**为什么不让 Agent.run 自己重试或回退？** —— 把可靠性逻辑下沉到 channel 实现
+的理由：
+1. 不同传输（WS / SSE / Telegram editMessageText）的重试语义差别大，统一在
+   Agent.run 写会很丑
+2. ClientChannel 已经有 `dedup_state` 重连重放机制；这是 channel 私有实现细节
+3. Agent.run 一旦做 fallback，就回到了 Phase 0 之前的双发 bug
+
+**实现侧建议**：channel 实现 `push_event` 时返回 `Err` 主要用于 log /
+metrics / 测试 assert，不期望调用方做策略决策。
 
 ---
 
@@ -1283,11 +1326,10 @@ limit, LenUnit::Codepoints)`，让 QQBot 改动可以分批做。
 
 ### C.4 流式中断时的兜底
 
-Phase 0 加 `!supports_streaming()` 守卫后，streaming channel 完全依赖
-`push_event` 链路交付最终文本。如果 push_event 失败（WebSocket 断开等），用户
-可能看不到回复。
+已在正文 §7.5（Streaming 可靠性契约）展开。简要：
 
-当前依赖 ClientChannel 自身的 `dedup_state` 重连重放机制（已存在）。后续如果
-出现可观测的丢失率，可以扩展 Channel trait 加 `acknowledge_event(reply_target,
-event_id)` 之类的确认机制，让上层在 ack 超时时退回 `send()` 兜底。本 RFC 不
-强求此扩展——属于"出现问题再做"的范畴。
+- Phase 0 守卫让 streaming channel 完全负责自己的可靠性
+- `push_event` 返回 `Result<()>` 用于 log/metric，不参与策略决策
+- ClientChannel 已有 `dedup_state` 重连重放机制
+- 若出现实际可观测丢失率再扩展 trait（如 `acknowledge_event(rt, event_id)`），
+  当前不预留

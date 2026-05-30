@@ -25,7 +25,9 @@
 │                                  │                     &MessagePayload) │
 │                                  │  async delete_message(&SendTarget,   │
 │                                  │                       &MessageId)    │
-│  async push_event(rt, TurnEvent) │                                      │
+│  async push_event(rt,           │  async push_event(rt,                │
+│      TurnEvent) → ()             │      TurnEvent) → Result<()>         │
+│                                  │  (新版本调用方 `let _ = ...`)        │
 │  fn cancel_signal(rt)            │                                      │
 │     → Option<CancelToken>        │                                      │
 └──────────────────────────────────┴──────────────────────────────────────┘
@@ -196,7 +198,7 @@ WechatChannel (HTTP webhook)
 │  Agent::run（Session 内部读取，从不直接持有 channels map）              │
 │                                                                          │
 │  if let Some(ch) = session.channel.as_ref() {                            │
-│      ch.push_event(reply_target, TurnEvent::Chunk{...}).await;           │
+│      let _ = ch.push_event(reply_target, TurnEvent::Chunk{...}).await;   │
 │  }                                                                       │
 │  if let Some(token) = session.channel.as_ref()                           │
 │        .and_then(|ch| ch.cancel_signal(reply_target)) {                  │
