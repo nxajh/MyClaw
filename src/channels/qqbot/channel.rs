@@ -251,6 +251,7 @@ impl QQBotChannel {
             }
             "INTERACTION_CREATE" => {
                 // QQ Bot interaction: button click -> convert to text message.
+                debug!(data = %data, "INTERACTION_CREATE raw event data");
                 let resolved = data.get("data")
                     .and_then(|d| d.get("resolved"))
                     .or_else(|| data.get("resolved"));
@@ -306,6 +307,17 @@ impl QQBotChannel {
                 // Acknowledge the interaction within 3 seconds (QQ Bot requirement).
                 self.ack_interaction(event_id);
 
+                // Try to extract the original message ID from the interaction
+                // event for passive-reply routing (avoids active-message restrictions).
+                let original_msg_id = data.get("message_id")
+                    .or_else(|| data.get("data").and_then(|d| d.get("message_id")))
+                    .or_else(|| resolved.and_then(|r| r.get("message_id")))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                if let Some(ref mid) = original_msg_id {
+                    debug!(msg_id = %mid, "INTERACTION_CREATE: extracted original message_id for passive reply");
+                }
+
                 Some(ChannelMessage {
                     id: event_id.to_string(),
                     sender,
@@ -315,7 +327,7 @@ impl QQBotChannel {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs(),
-                    thread_ts: None,
+                    thread_ts: original_msg_id,
                     interruption_scope_id: None,
                     attachments: vec![],
                     image_urls: None,
@@ -415,6 +427,23 @@ impl QQBotChannel {
     }
 
     /// Build a markdown message body for QQ Bot API.
+    /// Build a plain-text message body (msg_type=0).
+    /// Required for active messages where markdown (msg_type=2) is not supported.
+    fn build_text_body(&self, content: &str, msg_id: &str, msg_seq: u32) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "content": content,
+            "msg_type": 0,
+        });
+        if !msg_id.is_empty() {
+            body["msg_id"] = serde_json::Value::String(msg_id.to_string());
+            body["msg_seq"] = serde_json::Value::Number(msg_seq.into());
+        } else {
+            let seq = self.next_msg_seq();
+            body["msg_seq"] = serde_json::Value::Number(seq.into());
+        }
+        body
+    }
+
     fn build_markdown_body(&self, content: &str, msg_id: &str, msg_seq: u32) -> serde_json::Value {
         let mut body = serde_json::json!({
             "content": "",
@@ -512,6 +541,34 @@ impl QQBotChannel {
         }
 
         Err(anyhow::anyhow!("QQ Bot REST returned {}: {}", status, text))
+    }
+
+    /// Send a C2C message via REST API (plain text, msg_type=0).
+    /// Used for active messages (no msg_id) where markdown is not allowed.
+    async fn send_c2c_text(
+        &self,
+        openid: &str,
+        content: &str,
+        msg_id: &str,
+        msg_seq: u32,
+    ) -> anyhow::Result<()> {
+        let url = format!("{}/v2/users/{}/messages", API_BASE, openid);
+        let body = self.build_text_body(content, msg_id, msg_seq);
+        self.send_rest_with_retry(&url, &body).await
+    }
+
+    /// Send a group message via REST API (plain text, msg_type=0).
+    /// Used for active messages (no msg_id) where markdown is not allowed.
+    async fn send_group_text(
+        &self,
+        group_openid: &str,
+        content: &str,
+        msg_id: &str,
+        msg_seq: u32,
+    ) -> anyhow::Result<()> {
+        let url = format!("{}/v2/groups/{}/messages", API_BASE, group_openid);
+        let body = self.build_text_body(content, msg_id, msg_seq);
+        self.send_rest_with_retry(&url, &body).await
     }
 
     /// Send a C2C message via REST API (markdown format).
@@ -915,15 +972,19 @@ impl Channel for QQBotChannel {
             Keyboard::from_pairs(&pairs)
         });
 
+        // QQ Bot requires msg_id for passive-reply mode (markdown, keyboard).
+        // Active messages (no msg_id) must use plain text (msg_type: 0).
+        let is_passive = !msg_id.is_empty();
+
         let count = chunks.len();
         for (i, chunk) in chunks.iter().enumerate() {
             // msg_seq must be unique per chunk for the same msg_id (1-based).
             let msg_seq = (i as u32) + 1;
             let is_last = i == count - 1;
 
-            let result = if is_last {
+            let result = if is_last && is_passive {
                 if let Some(kb) = &keyboard {
-                    // Last chunk with buttons — use keyboard endpoint.
+                    // Last chunk with buttons — use keyboard endpoint (passive only).
                     if let Some(openid) = recipient.strip_prefix("c2c:") {
                         self.send_c2c_keyboard(openid, chunk, kb, msg_id).await
                     } else if let Some(group_openid) = recipient.strip_prefix("group:") {
@@ -948,11 +1009,11 @@ impl Channel for QQBotChannel {
                     }
                 }
             } else {
-                // Non-last chunk — always normal send.
+                // Non-last chunk or active message — always plain text send.
                 if let Some(openid) = recipient.strip_prefix("c2c:") {
-                    self.send_c2c_message(openid, chunk, msg_id, msg_seq).await
+                    self.send_c2c_text(openid, chunk, msg_id, msg_seq).await
                 } else if let Some(group_openid) = recipient.strip_prefix("group:") {
-                    self.send_group_message(group_openid, chunk, msg_id, msg_seq).await
+                    self.send_group_text(group_openid, chunk, msg_id, msg_seq).await
                 } else {
                     Err(anyhow::anyhow!(
                         "invalid QQ Bot recipient format: {} (expected c2c:<openid> or group:<openid>)",
