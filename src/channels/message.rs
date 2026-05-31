@@ -278,6 +278,56 @@ pub struct InlineButton {
     pub callback_data: String,
 }
 
+// ── Callback actions (RFC §11 Phase 5) ─────────────────────────────────────────
+
+/// Structured button callback action.
+///
+/// Replaces the `__retry:{sk_prefix}` / `__abort:{sk_prefix}` string-prefix
+/// convention with a closed enum. `serialize()` produces the wire format
+/// embedded in `InlineButton.callback_data` (kept under Telegram's 64-byte
+/// limit); `parse()` recognises inbound callback strings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallbackAction {
+    /// User asked to retry the last failed turn.
+    Retry { session_key_prefix: String },
+    /// User asked to abort the pending retry prompt.
+    Abort { session_key_prefix: String },
+    /// Future-extension hook for app-defined callbacks.
+    Custom { tag: String, data: String },
+}
+
+impl CallbackAction {
+    /// Wire format: `__<tag>:<payload>`. Stays compatible with the
+    /// historical `__retry:` / `__abort:` prefixes so messages produced
+    /// by older orchestrator builds still parse.
+    pub fn serialize(&self) -> String {
+        match self {
+            Self::Retry { session_key_prefix } => format!("__retry:{}", session_key_prefix),
+            Self::Abort { session_key_prefix } => format!("__abort:{}", session_key_prefix),
+            Self::Custom { tag, data } => format!("__{}:{}", tag, data),
+        }
+    }
+
+    /// Parse a callback_data / inbound text string into a `CallbackAction`.
+    /// Returns `None` for non-callback text (regular user messages).
+    pub fn parse(s: &str) -> Option<Self> {
+        let rest = s.strip_prefix("__")?;
+        let (tag, data) = rest.split_once(':')?;
+        match tag {
+            "retry" => Some(Self::Retry {
+                session_key_prefix: data.to_string(),
+            }),
+            "abort" => Some(Self::Abort {
+                session_key_prefix: data.to_string(),
+            }),
+            other => Some(Self::Custom {
+                tag: other.to_string(),
+                data: data.to_string(),
+            }),
+        }
+    }
+}
+
 /// A message to send through a channel.
 #[derive(Debug, Clone)]
 pub struct SendMessage {
@@ -587,4 +637,49 @@ fn find_last_pattern(chars: &[char], pattern: &[char]) -> Option<usize> {
 /// Find the last occurrence of a character in the slice.
 fn find_last_char(chars: &[char], target: char) -> Option<usize> {
     (0..chars.len()).rev().find(|&i| chars[i] == target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn callback_action_roundtrip_retry_abort() {
+        let r = CallbackAction::Retry { session_key_prefix: "abc123".into() };
+        assert_eq!(r.serialize(), "__retry:abc123");
+        assert_eq!(CallbackAction::parse("__retry:abc123"), Some(r));
+
+        let a = CallbackAction::Abort { session_key_prefix: "xyz".into() };
+        assert_eq!(a.serialize(), "__abort:xyz");
+        assert_eq!(CallbackAction::parse("__abort:xyz"), Some(a));
+    }
+
+    #[test]
+    fn callback_action_custom_passthrough() {
+        let c = CallbackAction::Custom { tag: "vote".into(), data: "yes".into() };
+        assert_eq!(c.serialize(), "__vote:yes");
+        assert_eq!(CallbackAction::parse("__vote:yes"), Some(c));
+    }
+
+    #[test]
+    fn callback_action_rejects_non_callback() {
+        assert_eq!(CallbackAction::parse("hello world"), None);
+        assert_eq!(CallbackAction::parse("__noseparator"), None);
+        assert_eq!(CallbackAction::parse(""), None);
+    }
+
+    #[test]
+    fn message_payload_fallback_text() {
+        let t = MessagePayload::text("hi");
+        assert_eq!(t.to_fallback_text(), "hi");
+
+        let i = MessagePayload::Interactive {
+            text: "Pick one".into(),
+            buttons: vec![
+                InlineButton { label: "A".into(), callback_data: "a".into() },
+                InlineButton { label: "B".into(), callback_data: "b".into() },
+            ],
+        };
+        assert_eq!(i.to_fallback_text(), "Pick one\n[A | B]");
+    }
 }

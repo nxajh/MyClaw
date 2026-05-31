@@ -558,8 +558,18 @@ impl Orchestrator {
                 // standard dispatch below so the regular Agent path
                 // handles it. For abort, we clear pending_retry and
                 // ack inline.
-                if msg.content.starts_with("__retry:") || msg.content.starts_with("__abort:") {
-                    let is_retry = msg.content.starts_with("__retry:");
+                // RFC §11 Phase 5: structured CallbackAction parsing
+                // replaces the ad-hoc "__retry:" / "__abort:" prefix check.
+                let callback_action = crate::channels::CallbackAction::parse(&msg.content);
+                if matches!(
+                    callback_action,
+                    Some(
+                        crate::channels::CallbackAction::Retry { .. }
+                            | crate::channels::CallbackAction::Abort { .. }
+                    )
+                ) {
+                    let is_retry =
+                        matches!(callback_action, Some(crate::channels::CallbackAction::Retry { .. }));
                     let reply_target = msg.reply_target.clone();
 
                     let channel: Option<Arc<dyn Channel>> = {
@@ -1007,11 +1017,17 @@ fn retry_abort_prompt(
         buttons: vec![
             InlineButton {
                 label: BTN_RETRY.to_string(),
-                callback_data: format!("__retry:{}", sk_prefix),
+                callback_data: crate::channels::CallbackAction::Retry {
+                    session_key_prefix: sk_prefix.clone(),
+                }
+                .serialize(),
             },
             InlineButton {
                 label: BTN_ABORT.to_string(),
-                callback_data: format!("__abort:{}", sk_prefix),
+                callback_data: crate::channels::CallbackAction::Abort {
+                    session_key_prefix: sk_prefix,
+                }
+                .serialize(),
             },
         ],
     };
