@@ -620,13 +620,13 @@ impl Orchestrator {
                                 Some(c) => c,
                                 None => return,
                             };
-                            let send_msg = retry_abort_prompt(
+                            let (target, payload) = retry_abort_prompt(
                                 MSG_INCOMPLETE_TURN,
                                 &sk,
                                 msg.reply_target.clone(),
                                 Some(msg.id.clone()),
                             );
-                            if let Err(e) = channel.send(&send_msg).await {
+                            if let Err(e) = channel.send_payload(&target, &payload).await {
                                 error!(session = %sk, err = %e, "failed to send incomplete-turn prompt");
                             }
                             return;
@@ -987,29 +987,24 @@ impl Orchestrator {
 
 // ── retry_abort_prompt ────────────────────────────────────────────────────────
 
-/// Build a `SendMessage` that presents the user with **Retry / Abort** inline
-/// buttons.
+/// Build a `(SendTarget, MessagePayload::Interactive)` pair for the
+/// **Retry / Abort** inline buttons prompt (RFC §6.2 / Phase 2).
 ///
-/// Centralises the construction that previously appeared 6–7 times verbatim in
-/// `Orchestrator::run()`.  The callback data is prefixed with `__retry:` /
-/// `__abort:` and a 32-char prefix of the session key so it fits within
-/// Telegram's 64-byte limit.
+/// The callback data is prefixed with `__retry:` / `__abort:` and a
+/// 32-char prefix of the session key so it fits within Telegram's
+/// 64-byte limit.
 fn retry_abort_prompt(
     content: impl Into<String>,
     sk: &str,
     reply_target: impl Into<String>,
     thread_ts: Option<String>,
-) -> SendMessage {
+) -> (crate::channels::SendTarget, crate::channels::MessagePayload) {
     let sk_prefix: String = sk.chars().take(32).collect();
-    SendMessage {
-        content: content.into(),
-        recipient: reply_target.into(),
-        subject: None,
-        thread_ts,
-        cancellation_token: None,
-        attachments: vec![],
-        image_urls: None,
-        inline_buttons: Some(vec![
+    let mut target = crate::channels::SendTarget::new(reply_target);
+    target.thread_id = thread_ts;
+    let payload = crate::channels::MessagePayload::Interactive {
+        text: content.into(),
+        buttons: vec![
             InlineButton {
                 label: BTN_RETRY.to_string(),
                 callback_data: format!("__retry:{}", sk_prefix),
@@ -1018,8 +1013,9 @@ fn retry_abort_prompt(
                 label: BTN_ABORT.to_string(),
                 callback_data: format!("__abort:{}", sk_prefix),
             },
-        ]),
-    }
+        ],
+    };
+    (target, payload)
 }
 
 impl Orchestrator {

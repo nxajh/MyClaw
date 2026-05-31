@@ -115,6 +115,133 @@ impl ChannelCapabilities {
 /// implementation doesn't override it. Zero-cost reference.
 pub static MINIMAL_CAPABILITIES: ChannelCapabilities = ChannelCapabilities::minimal();
 
+// ── MessagePayload (RFC §6.2-§6.4) ─────────────────────────────────────────────
+
+/// Platform-specific message id (e.g. Telegram message_id, QQBot msg_id).
+/// Returned by `send_payload` / `edit_message` and accepted by
+/// `edit_message` / `delete_message` to identify a previously sent message.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MessageId(pub String);
+
+impl MessageId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Result of `send_payload`. `Some(id)` when the platform returns a
+/// message identifier (Telegram, QQBot do); `None` for fire-and-forget
+/// transports (current ClientChannel / Wechat).
+pub type SendResult = Option<MessageId>;
+
+/// Where to deliver a message. Replaces the routing fields of
+/// `SendMessage` (recipient + thread_ts + cancellation_token).
+#[derive(Debug, Clone)]
+pub struct SendTarget {
+    pub recipient: String,
+    pub thread_id: Option<String>,
+    pub cancellation_token: Option<CancellationToken>,
+}
+
+impl SendTarget {
+    pub fn new(recipient: impl Into<String>) -> Self {
+        Self {
+            recipient: recipient.into(),
+            thread_id: None,
+            cancellation_token: None,
+        }
+    }
+
+    pub fn with_thread(mut self, thread_id: impl Into<String>) -> Self {
+        self.thread_id = Some(thread_id.into());
+        self
+    }
+
+    pub fn with_cancel(mut self, token: CancellationToken) -> Self {
+        self.cancellation_token = Some(token);
+        self
+    }
+}
+
+/// Source of media content for `MessagePayload::Media`.
+#[derive(Debug, Clone)]
+pub enum MediaSource {
+    /// Remote URL (HTTP/HTTPS).
+    Url(String),
+    /// In-memory bytes (e.g. from Telegram file API decryption).
+    Inline {
+        data: Vec<u8>,
+        mime_type: Option<String>,
+        file_name: Option<String>,
+    },
+}
+
+/// What to send. Replaces the content/attachments/image_urls/inline_buttons
+/// salad of `SendMessage` with a closed enum.
+///
+/// Channels that don't support a variant downgrade via `to_fallback_text`
+/// or return an error from `send_payload` (implementation choice).
+#[derive(Debug, Clone)]
+pub enum MessagePayload {
+    /// Plain text.
+    Text { text: String },
+    /// Text + inline action buttons. Channels without button support
+    /// downgrade by sending the text alone.
+    Interactive {
+        text: String,
+        buttons: Vec<InlineButton>,
+    },
+    /// Media (image/file) with optional caption.
+    Media {
+        source: MediaSource,
+        caption: Option<String>,
+    },
+}
+
+impl MessagePayload {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+
+    /// Lossy downgrade to a plain-text representation. Used by the default
+    /// `send_payload` impl to keep non-overriding channels functional.
+    pub fn to_fallback_text(&self) -> String {
+        match self {
+            MessagePayload::Text { text } => text.clone(),
+            MessagePayload::Interactive { text, buttons } => {
+                let mut s = text.clone();
+                if !buttons.is_empty() {
+                    s.push_str("\n[");
+                    for (i, b) in buttons.iter().enumerate() {
+                        if i > 0 {
+                            s.push_str(" | ");
+                        }
+                        s.push_str(&b.label);
+                    }
+                    s.push(']');
+                }
+                s
+            }
+            MessagePayload::Media { caption, source } => {
+                let url_or_size = match source {
+                    MediaSource::Url(u) => format!("<media: {}>", u),
+                    MediaSource::Inline { data, file_name, .. } => match file_name {
+                        Some(f) => format!("<media: {} ({} bytes)>", f, data.len()),
+                        None => format!("<media: {} bytes>", data.len()),
+                    },
+                };
+                match caption {
+                    Some(c) => format!("{}\n{}", c, url_or_size),
+                    None => url_or_size,
+                }
+            }
+        }
+    }
+}
+
 // ── Core message types ─────────────────────────────────────────────────────────
 
 /// A message received from a channel.
@@ -208,6 +335,48 @@ pub enum ProcessingStatus {
 pub trait Channel: Send + Sync {
     fn name(&self) -> &str;
     async fn send(&self, msg: &SendMessage) -> anyhow::Result<()>;
+
+    /// Structured send (RFC §6.2 / Phase 2). Default downgrades to
+    /// `send()` using `payload.to_fallback_text()`; channels override to
+    /// natively render `Interactive` (inline keyboards) and `Media`
+    /// (image / file uploads). Returns the platform message id when one
+    /// is produced.
+    async fn send_payload(
+        &self,
+        target: &SendTarget,
+        payload: &MessagePayload,
+    ) -> anyhow::Result<SendResult> {
+        let mut msg = SendMessage::new(payload.to_fallback_text(), &target.recipient);
+        msg.thread_ts = target.thread_id.clone();
+        msg.cancellation_token = target.cancellation_token.clone();
+        if let MessagePayload::Interactive { buttons, .. } = payload {
+            msg.inline_buttons = Some(buttons.clone());
+        }
+        self.send(&msg).await?;
+        Ok(None)
+    }
+
+    /// Edit a previously sent message in-place. Default returns Err for
+    /// channels that don't support edit (RFC §7.1; Phase 3 will add
+    /// real impls on Telegram).
+    async fn edit_message(
+        &self,
+        _target: &SendTarget,
+        _message_id: &MessageId,
+        _payload: &MessagePayload,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("edit_message not supported by {}", self.name())
+    }
+
+    /// Delete a previously sent message. Default returns Err.
+    async fn delete_message(
+        &self,
+        _target: &SendTarget,
+        _message_id: &MessageId,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("delete_message not supported by {}", self.name())
+    }
+
     async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>>;
     async fn health_check(&self) -> bool;
 

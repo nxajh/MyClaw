@@ -12,7 +12,8 @@ pub mod client;
 
 pub use message::{
     Channel, ChannelCapabilities, ChannelMessage, DedupState, InlineButton, LenUnit,
-    MINIMAL_CAPABILITIES, ProcessingStatus, SendMessage,
+    MINIMAL_CAPABILITIES, MediaSource, MessageId, MessagePayload, ProcessingStatus, SendMessage,
+    SendResult, SendTarget,
 };
 pub use turn_stream::{StreamDelivery, TurnStream};
 pub use telegram::TelegramChannel;
