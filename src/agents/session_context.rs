@@ -216,16 +216,21 @@ impl SessionContext {
                 if let Some(ref retry_msg) = turn_result.pending_retry {
                     *self.pending_retry.lock().await = Some(retry_msg.clone());
                 }
-                // RFC §7.6: streaming path is consumed by finish().
-                // Non-streaming path: fallback final-text send via send().
-                // `session.turn_stream.is_none()` is the single source of
-                // truth for "streaming did NOT happen this turn" — equivalent
-                // to but more direct than `!ch.supports_streaming()`.
-                let streamed = stream.is_some();
-                if let Some(s) = stream {
-                    let _delivery = s.finish().await;
-                }
-                if !streamed {
+                // RFC §7.6: consume the stream first; its `finish()` reports
+                // how far the streaming path actually got. Fall back to
+                // `send_payload`/`send` whenever delivery did NOT reach
+                // `FinalDelivered` — covers three cases uniformly:
+                //   1. No stream at all (non-streaming channel) → Pending
+                //   2. Stream existed but transport failed mid-turn → Visible
+                //      or Pending (push_or_drop in Agent::run set turn_stream
+                //      to None on Err; finish() returns Pending here)
+                //   3. Stream existed and acked everything → FinalDelivered
+                //      → skip fallback (avoids the double-display bug)
+                let delivery = match stream {
+                    Some(s) => s.finish().await,
+                    None => crate::channels::StreamDelivery::Pending,
+                };
+                if delivery != crate::channels::StreamDelivery::FinalDelivered {
                     if let Some(ch) = channel_for_send {
                         if !turn_result.text.trim().is_empty() {
                             let send_msg = crate::channels::SendMessage::new(

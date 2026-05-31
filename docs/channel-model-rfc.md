@@ -333,7 +333,7 @@ pub struct ChannelCapabilities {
     /// 是否支持发送媒体文件（图片/文件）
     pub supports_media: bool,
     /// 是否支持交互按钮
-    pub supports_buttons: bool,
+    pub supports_inline_buttons: bool,
     /// 是否支持线程回复（reply_to）
     pub supports_threads: bool,
 
@@ -364,11 +364,10 @@ impl ChannelCapabilities {
             supports_streaming: false,
             supports_edit: false,
             supports_delete: false,
+            supports_inline_buttons: false,
             supports_media: false,
-            supports_poll: false,
-            supports_buttons: false,
             supports_threads: false,
-            message_chunk_limit: 4096,
+            message_chunk_limit: 65_536,
             message_len_unit: LenUnit::Codepoints,
         }
     }
@@ -377,6 +376,8 @@ impl ChannelCapabilities {
     pub const fn client() -> Self {
         let mut c = Self::minimal();
         c.supports_streaming = true;
+        c.supports_inline_buttons = true;
+        c.supports_media = true;
         c
     }
 
@@ -386,7 +387,7 @@ impl ChannelCapabilities {
         c.supports_edit = true;
         c.supports_delete = true;
         c.supports_media = true;
-        c.supports_buttons = true;
+        c.supports_inline_buttons = true;
         c.supports_threads = true;
         c.message_chunk_limit = 4096;
         c.message_len_unit = LenUnit::Utf16Units;
@@ -396,8 +397,15 @@ impl ChannelCapabilities {
     /// QQ Bot 能力
     pub const fn qqbot() -> Self {
         let mut c = Self::minimal();
-        c.supports_buttons = true;
+        c.supports_inline_buttons = true;
         c.message_chunk_limit = 2000;
+        c
+    }
+
+    /// WeChat channel 能力（最简集）
+    pub const fn wechat() -> Self {
+        let mut c = Self::minimal();
+        c.message_chunk_limit = 2048;
         c
     }
 }
@@ -414,6 +422,15 @@ builder 方法，目前不做）。
 注意删掉了 `supports_draft` 字段——见 §7.1 关于 `send_draft` 的决策说明。
 
 ### 6.2 MessagePayload
+
+> **当前实现（Phase 2 已落地）**：`Text` / `Interactive` / `Media` 三个 variant。
+> `Poll` / `Voice` / `Card` **deferred** —— 等对应功能 PR 进来时再加 variant。
+> `to_fallback_text()` 机制保证扩展新 variant 不破坏现有 channel 实现：未覆盖
+> 该 variant 的 channel 自动降级到文本。
+>
+> **新增 variant 时还需要同步加回 `ChannelCapabilities` 上的能力字段**（`supports_poll`、
+> `supports_voice`、`supports_card` 等），让上层调用方在选择 payload 形态前能查询
+> channel 是否原生支持。这些字段在 Phase 1 第一版被精简掉了，加回去的方式见 §6.1。
 
 **Phase 2 范围**：只引入 `Text` / `Interactive` / `Media` 三个 variant —— 这些
 是已经被 `SendMessage` 字段（`content` / `inline_buttons` / `attachments` +
@@ -988,7 +1005,7 @@ max_message_length = 2000  # codepoints
 
 | 改动 | 内容 |
 |------|------|
-| `capabilities()` | 覆盖返回 `ChannelCapabilities::qqbot()`（`supports_buttons: true, message_chunk_limit: 2000`） |
+| `capabilities()` | 覆盖返回 `ChannelCapabilities::qqbot()`（`supports_inline_buttons: true, message_chunk_limit: 2000`） |
 | `edit_message` | 调研 QQBot 消息编辑 API 是否可用，不可用则保持默认 Err |
 | 内部 markdown 子集清洗 | 现有/新增私有辅助函数，在 `send_payload` 实现里调用，**不暴露到 trait** |
 
