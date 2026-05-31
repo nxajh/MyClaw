@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::agents::tokens::TokenTracker;
-use crate::channels::{Channel, ChannelMessage};
+use crate::channels::{Channel, ChannelMessage, TurnStream};
 use crate::providers::capability_chat::ChatMessage;
 use super::backend::PersistHook;
 use super::session_override::SessionOverride;
@@ -31,7 +31,6 @@ pub struct SummaryMetadata {
 /// - Transient persist / channel handles — `Option<Arc<dyn …>>` so they
 ///   survive `Clone` cheaply, default to `None` for tests and ephemeral
 ///   sessions.
-#[derive(Clone)]
 pub struct Session {
     /// Session ID (e.g. "k3jr9px2").
     pub id: String,
@@ -76,9 +75,40 @@ pub struct Session {
     pub persist: Option<Arc<dyn PersistHook>>,
     /// Transient channel handle installed by the Orchestrator. `None` for
     /// sub-sessions that piggyback on the parent, and for tests.
-    /// `Agent.run` uses `channel.push_event(reply_target, …)` to stream
-    /// turn events to the originating UI.
+    /// `Agent.run` uses `session.turn_stream` to stream turn events to the
+    /// originating UI (see `TurnStream` / RFC §7.6).
     pub channel: Option<Arc<dyn Channel>>,
+    /// Per-turn streaming output handle. Installed by
+    /// `SessionContext::process_turn` via `channel.create_stream(rt)`
+    /// before `Agent::run`; consumed by `finish` / `abort` after.
+    /// `None` when the channel is non-streaming or no channel is wired.
+    /// Never persisted; reset on clone.
+    pub turn_stream: Option<Box<dyn TurnStream>>,
+}
+
+// `Session` cannot derive `Clone` because `Box<dyn TurnStream>` is not
+// Clone. Hand-roll one that resets `turn_stream` to None — clones are
+// either snapshots (tests) or carry no live transport.
+impl Clone for Session {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            owner: self.owner.clone(),
+            agent_name: self.agent_name.clone(),
+            parent_session_id: self.parent_session_id.clone(),
+            history: self.history.clone(),
+            message_ids: self.message_ids.clone(),
+            compact_version: self.compact_version,
+            summary_metadata: self.summary_metadata.clone(),
+            session_override: self.session_override.clone(),
+            incomplete_turn: self.incomplete_turn,
+            last_message: self.last_message.clone(),
+            token_tracker: self.token_tracker.clone(),
+            persist: self.persist.clone(),
+            channel: self.channel.clone(),
+            turn_stream: None,
+        }
+    }
 }
 
 // `Arc<dyn PersistHook>` and `Arc<dyn Channel>` don't carry `Debug`, so a
@@ -96,6 +126,7 @@ impl std::fmt::Debug for Session {
             .field("has_last_message", &self.last_message.is_some())
             .field("has_persist", &self.persist.is_some())
             .field("has_channel", &self.channel.is_some())
+            .field("has_turn_stream", &self.turn_stream.is_some())
             .finish()
     }
 }
@@ -117,6 +148,7 @@ impl Session {
             token_tracker: TokenTracker::new(),
             persist: None,
             channel: None,
+            turn_stream: None,
         }
     }
 

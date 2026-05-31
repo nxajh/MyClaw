@@ -228,6 +228,7 @@ impl SessionManager {
             token_tracker,
             persist: None,
             channel: None,
+            turn_stream: None,
         };
         // Breakpoints are detected purely for the incomplete-turn flag below;
         // recovery itself is handled by `Agent::run_recovery` (which re-reads

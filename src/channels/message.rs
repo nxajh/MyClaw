@@ -6,8 +6,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::agents::TurnEvent;
-
 // ── Channel capabilities (RFC §6.1) ────────────────────────────────────────────
 
 /// Unit used by the platform to measure message length.
@@ -236,27 +234,23 @@ pub trait Channel: Send + Sync {
     }
 
     /// Whether this channel supports streaming turn events via the
-    /// `push_event` mechanism. Default reads from `capabilities()`.
+    /// `create_stream` mechanism. Default reads from `capabilities()`.
     fn supports_streaming(&self) -> bool {
         self.capabilities().supports_streaming
     }
 
-    /// Forward a per-turn event to the channel addressed by `reply_target`.
+    /// Create a per-turn streaming output handle.
     ///
-    /// RFC v2 §三.B: replaces the prepare/take_stream_context two-call dance.
-    /// `Agent.run()` calls this whenever it has a `TurnEvent` to surface
-    /// (text chunk, tool call, thinking delta). Non-streaming channels keep
-    /// the default no-op; `ClientChannel` overrides to push into the
-    /// per-reply_target stream.
-    async fn push_event(&self, _reply_target: &str, _event: TurnEvent) {}
-
-    /// Get a cancellation token for the current turn at `reply_target`, if any.
-    ///
-    /// RFC v2 §三.B: `Agent.run()` polls this once per turn to decide whether
-    /// it should abort the LLM call on user request. Non-streaming channels
-    /// keep the default `None`; `ClientChannel` overrides to look up the
-    /// token registered via `cancel_signal_register`.
-    fn cancel_signal(&self, _reply_target: &str) -> Option<CancellationToken> {
+    /// RFC §7.6 (Phase 1.5): replaces `push_event` + `cancel_signal`.
+    /// `SessionContext::process_turn` installs the returned stream on
+    /// `Session.turn_stream` before invoking `Agent::run`; the agent
+    /// pushes via `session.turn_stream.as_mut()`. Non-streaming channels
+    /// return `None`; the agent then falls through to the
+    /// `send_payload` / `send` fallback at end of turn.
+    fn create_stream(
+        &self,
+        _reply_target: &str,
+    ) -> Option<Box<dyn crate::channels::TurnStream>> {
         None
     }
 }

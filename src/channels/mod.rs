@@ -1,6 +1,7 @@
 //! channels — Message channel adapters (Telegram, WeChat, QQ Bot, Client).
 
 pub mod message;
+pub mod turn_stream;
 pub mod telegram;
 #[cfg(feature = "qqbot")]
 pub mod qqbot;
@@ -13,6 +14,7 @@ pub use message::{
     Channel, ChannelCapabilities, ChannelMessage, DedupState, InlineButton, LenUnit,
     MINIMAL_CAPABILITIES, ProcessingStatus, SendMessage,
 };
+pub use turn_stream::{StreamDelivery, TurnStream};
 pub use telegram::TelegramChannel;
 #[cfg(feature = "qqbot")]
 pub use qqbot::QQBotChannel;

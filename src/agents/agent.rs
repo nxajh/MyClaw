@@ -35,7 +35,6 @@ use crate::agents::session::Session;
 use crate::agents::turn::{TurnContext, TurnResult};
 use crate::agents::turn_event::TurnEvent;
 use crate::agents::AgentRuntime;
-use crate::channels::Channel;
 use crate::config::sub_agent::SubAgentConfig;
 use crate::providers::capability_chat::{ChatMessage, ChatRequest, StopReason, ToolSpec};
 use crate::providers::{BoxStream, Capability, ContentPart, StreamEvent, ToolCall};
@@ -162,19 +161,20 @@ impl Agent {
                 });
             }
 
-            // User-cancel checkpoint: if the session's channel surfaces a
-            // CancellationToken for this reply_target (ClientChannel does),
-            // honor it. Without this poll the WebSocket "cancel" message
-            // signals the token but Agent::run never sees the cancel.
-            if let (Some(ch), Some(rt)) = (session.channel.as_ref(), session.reply_target()) {
-                if let Some(token) = ch.cancel_signal(rt) {
-                    if token.is_cancelled() {
-                        return Ok(TurnResult {
-                            text: String::new(),
-                            stop_reason: StopReason::EndTurn,
-                            pending_retry: None,
-                        });
-                    }
+            // User-cancel checkpoint: if the session's TurnStream surfaces a
+            // CancellationToken, honor it. RFC §7.6 (Phase 1.5): cancel
+            // lives on the per-turn stream now, not on Channel directly.
+            if let Some(token) = session
+                .turn_stream
+                .as_ref()
+                .and_then(|s| s.cancel_token())
+            {
+                if token.is_cancelled() {
+                    return Ok(TurnResult {
+                        text: String::new(),
+                        stop_reason: StopReason::EndTurn,
+                        pending_retry: None,
+                    });
                 }
             }
 
@@ -220,12 +220,7 @@ impl Agent {
             };
 
             let stream = provider.chat(req)?;
-            let response = collect_stream(
-                stream,
-                session.channel.as_ref(),
-                session.reply_target(),
-            )
-            .await?;
+            let response = collect_stream(stream, session.turn_stream.as_mut()).await?;
 
             // Update Session.token_tracker from the API response. Target
             // architecture: tokens are tracked solely on the Session (so
@@ -341,10 +336,9 @@ impl Agent {
             if response.tool_calls.is_empty() {
                 // Emit Done event before persisting so the streaming UI gets
                 // the final-text signal in the canonical order.
-                if let (Some(ch), Some(rt)) = (session.channel.as_ref(), session.reply_target()) {
-                    let rt = rt.to_string();
-                    let ch = Arc::clone(ch);
-                    ch.push_event(&rt, TurnEvent::Done { text: response.text.clone() })
+                if let Some(stream) = session.turn_stream.as_mut() {
+                    let _ = stream
+                        .push(TurnEvent::Done { text: response.text.clone() })
                         .await;
                 }
                 if response.text.trim().is_empty() {
@@ -418,24 +412,17 @@ impl Agent {
                 }
 
                 // Emit ToolCall event before execution (streaming UIs show
-                // the call spinner) — snapshot the channel + reply_target
-                // outside the &mut session borrow that follows.
-                if let (Some(ch), Some(rt)) =
-                    (session.channel.as_ref(), session.reply_target())
-                {
-                    let rt = rt.to_string();
-                    let ch = Arc::clone(ch);
+                // the call spinner).
+                if let Some(stream) = session.turn_stream.as_mut() {
                     let args: serde_json::Value = serde_json::from_str(&call.arguments)
                         .unwrap_or(serde_json::Value::Null);
-                    ch.push_event(
-                        &rt,
-                        TurnEvent::ToolCall {
+                    let _ = stream
+                        .push(TurnEvent::ToolCall {
                             id: call.id.clone(),
                             name: call.name.clone(),
                             args,
-                        },
-                    )
-                    .await;
+                        })
+                        .await;
                 }
 
                 let result = tool_executor
@@ -476,20 +463,14 @@ impl Agent {
                 // Emit ToolResult event after execution, before persisting,
                 // so the UI updates the call status without waiting for
                 // disk I/O.
-                if let (Some(ch), Some(rt)) =
-                    (session.channel.as_ref(), session.reply_target())
-                {
-                    let rt = rt.to_string();
-                    let ch = Arc::clone(ch);
-                    ch.push_event(
-                        &rt,
-                        TurnEvent::ToolResult {
+                if let Some(stream) = session.turn_stream.as_mut() {
+                    let _ = stream
+                        .push(TurnEvent::ToolResult {
                             id: call.id.clone(),
                             name: call.name.clone(),
                             output: result_content.clone(),
-                        },
-                    )
-                    .await;
+                        })
+                        .await;
                 }
 
                 session.add_tool_result(call.id.clone(), result_content, is_error);
@@ -680,15 +661,13 @@ struct CollectedResponse {
 }
 
 /// Read a full stream into a [`CollectedResponse`]. When `channel`
-/// and `reply_target` are supplied (Session.channel is Some), per-chunk
-/// `TurnEvent::Chunk` / `Thinking` events are pushed via
-/// `channel.push_event(reply_target, …)` as text streams in.
+/// per-chunk `TurnEvent::Chunk` / `Thinking` events are pushed via
+/// `session.turn_stream.push(…)` as text streams in (RFC §7.6).
 /// Simplified compared to `AgentLoop::collect_stream_inner` — no
 /// max_output_bytes guard, no cancellation token.
 async fn collect_stream(
     stream: BoxStream<StreamEvent>,
-    channel: Option<&Arc<dyn Channel>>,
-    reply_target: Option<&str>,
+    mut turn_stream: Option<&mut Box<dyn crate::channels::TurnStream>>,
 ) -> anyhow::Result<CollectedResponse> {
     let mut stream = stream;
     let mut text = String::new();
@@ -728,14 +707,17 @@ async fn collect_stream(
         match event {
             StreamEvent::Delta { text: delta } => {
                 text.push_str(&delta);
-                if let (Some(ch), Some(rt)) = (channel, reply_target) {
-                    ch.push_event(rt, TurnEvent::Chunk { delta: delta.clone() }).await;
+                if let Some(stream) = turn_stream.as_deref_mut() {
+                    let _ = stream
+                        .push(TurnEvent::Chunk { delta: delta.clone() })
+                        .await;
                 }
             }
             StreamEvent::Thinking { text: delta } => {
                 if !delta.is_empty() {
-                    if let (Some(ch), Some(rt)) = (channel, reply_target) {
-                        ch.push_event(rt, TurnEvent::Thinking { delta: delta.clone() })
+                    if let Some(stream) = turn_stream.as_deref_mut() {
+                        let _ = stream
+                            .push(TurnEvent::Thinking { delta: delta.clone() })
                             .await;
                     }
                     if let Some(rc) = &mut reasoning_content {

@@ -596,28 +596,91 @@ impl Channel for ClientChannel {
         true // Local WebSocket server is always healthy.
     }
 
-    /// E32: push a per-turn event (Chunk, Thinking, ToolCall, …) at
-    /// the stream context indexed by `reply_target`. Agent::run calls
-    /// this via `session.channel.push_event(reply_target, event)`.
-    /// No-op if no stream context is registered for this target —
-    /// non-streaming connections drop events silently.
-    async fn push_event(&self, reply_target: &str, event: TurnEvent) {
-        let sender = {
-            let contexts = self.stream_contexts.read();
-            contexts.get(reply_target).map(|ctx| ctx.event_tx.clone())
-        };
-        if let Some(tx) = sender {
-            if tx.send(event).await.is_err() {
-                tracing::debug!(reply_target = %reply_target, "push_event: client disconnected");
-            }
+    /// RFC §7.6: build a per-turn TurnStream over the WebSocket stream
+    /// already registered for `reply_target`. Returns None if no client
+    /// is currently subscribed for this target — caller falls through to
+    /// the non-streaming `send` path.
+    fn create_stream(
+        &self,
+        reply_target: &str,
+    ) -> Option<Box<dyn crate::channels::TurnStream>> {
+        let contexts = self.stream_contexts.read();
+        let ctx = contexts.get(reply_target)?;
+        Some(Box::new(ClientTurnStream {
+            reply_target: reply_target.to_string(),
+            event_tx: ctx.event_tx.clone(),
+            cancel: ctx.cancel.clone(),
+            status: crate::channels::StreamDelivery::Pending,
+            finished: false,
+        }))
+    }
+}
+
+/// Per-turn streaming handle for ClientChannel (RFC §7.6).
+///
+/// Wraps the already-registered `StreamContext.event_tx` plus its cancel
+/// token. The underlying `StreamContext` stays in `ClientChannel.stream_contexts`
+/// (it tracks "where to deliver" per active WebSocket); this struct
+/// represents "Agent's per-turn push handle into that channel".
+pub(crate) struct ClientTurnStream {
+    reply_target: String,
+    event_tx: mpsc::Sender<TurnEvent>,
+    cancel: CancellationToken,
+    status: crate::channels::StreamDelivery,
+    finished: bool,
+}
+
+#[async_trait]
+impl crate::channels::TurnStream for ClientTurnStream {
+    async fn push(
+        &mut self,
+        event: TurnEvent,
+    ) -> anyhow::Result<crate::channels::StreamDelivery> {
+        if self.event_tx.send(event).await.is_err() {
+            tracing::debug!(
+                reply_target = %self.reply_target,
+                "ClientTurnStream::push: client disconnected"
+            );
+            anyhow::bail!("client stream closed");
         }
+        // WebSocket layer takes the bytes from the mpsc; we model that as
+        // Visible. FinalDelivered happens at finish() when the consumer
+        // has had a chance to drain.
+        self.status = crate::channels::StreamDelivery::Visible;
+        Ok(self.status)
     }
 
-    /// E32: return the cancellation token registered for this
-    /// `reply_target` so `Agent::run` can poll for user-initiated cancels.
-    fn cancel_signal(&self, reply_target: &str) -> Option<CancellationToken> {
-        let contexts = self.stream_contexts.read();
-        contexts.get(reply_target).map(|ctx| ctx.cancel.clone())
+    fn status(&self) -> crate::channels::StreamDelivery {
+        self.status
+    }
+
+    async fn finish(mut self: Box<Self>) -> crate::channels::StreamDelivery {
+        // ClientChannel ack semantics: once we've handed the bytes to the
+        // mpsc and the WS forwarder runs, the consumer has the data.
+        // Treat that as FinalDelivered.
+        self.finished = true;
+        self.status = crate::channels::StreamDelivery::FinalDelivered;
+        self.status
+    }
+
+    async fn abort(mut self: Box<Self>) {
+        self.finished = true;
+        self.cancel.cancel();
+    }
+
+    fn cancel_token(&self) -> Option<CancellationToken> {
+        Some(self.cancel.clone())
+    }
+}
+
+// Drop-based safety net (RFC §7.6.5(b)): if a TurnStream is dropped
+// without finish/abort (panic, accidental field overwrite), cancel the
+// transport so the consumer isn't left hanging.
+impl Drop for ClientTurnStream {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.cancel.cancel();
+        }
     }
 }
 

@@ -129,6 +129,12 @@ impl SessionContext {
         // persistence call sees the same hook.
         let persist_hook = session.persist.clone();
         let channel_for_send = channel.clone();
+        // RFC §7.6: install per-turn streaming handle BEFORE Agent::run.
+        // Channels that don't support streaming return None; the
+        // fallback send block below covers them.
+        session.turn_stream = channel
+            .as_ref()
+            .and_then(|ch| ch.create_stream(&reply_target));
         session.channel = channel;
 
         let session_override = session.session_override.clone();
@@ -199,38 +205,49 @@ impl SessionContext {
         };
 
         let result = self.agent.run(&mut session, turn_ctx, &runtime).await;
-        // Per-turn channel is transient; persist hook stays set.
+        // Per-turn channel + turn_stream are transient. Consume the
+        // stream first (RFC §7.6): finish on success delivers FinalDelivered;
+        // abort on error cancels the WS transport.
+        let turn_stream = session.turn_stream.take();
         session.channel = None;
 
-        match result {
-            Ok(turn_result) => {
+        match (result, turn_stream) {
+            (Ok(turn_result), stream) => {
                 if let Some(ref retry_msg) = turn_result.pending_retry {
                     *self.pending_retry.lock().await = Some(retry_msg.clone());
                 }
-                // RFC §三.B line 359-363 + channel-model-rfc.md §8.1 Phase 0:
-                // fallback final-text send. Streaming channels (e.g. ClientChannel)
-                // already deliver via `push_event`; the `supports_streaming()`
-                // guard prevents the WebUI double-display bug. Scheduled /
-                // webhook paths pass `channel: None` and dispatch via their own
-                // `send_to_target` after process_turn returns.
-                if let Some(ch) = channel_for_send {
-                    if !turn_result.text.trim().is_empty() && !ch.supports_streaming() {
-                        let send_msg = crate::channels::SendMessage::new(
-                            turn_result.text.clone(),
-                            reply_target.clone(),
-                        );
-                        if let Err(e) = ch.send(&send_msg).await {
-                            tracing::error!(
-                                session = %session.id,
-                                err = %e,
-                                "process_turn: fallback send failed"
+                // RFC §7.6: streaming path is consumed by finish().
+                // Non-streaming path: fallback final-text send via send().
+                // `session.turn_stream.is_none()` is the single source of
+                // truth for "streaming did NOT happen this turn" — equivalent
+                // to but more direct than `!ch.supports_streaming()`.
+                let streamed = stream.is_some();
+                if let Some(s) = stream {
+                    let _delivery = s.finish().await;
+                }
+                if !streamed {
+                    if let Some(ch) = channel_for_send {
+                        if !turn_result.text.trim().is_empty() {
+                            let send_msg = crate::channels::SendMessage::new(
+                                turn_result.text.clone(),
+                                reply_target.clone(),
                             );
+                            if let Err(e) = ch.send(&send_msg).await {
+                                tracing::error!(
+                                    session = %session.id,
+                                    err = %e,
+                                    "process_turn: fallback send failed"
+                                );
+                            }
                         }
                     }
                 }
                 Ok(turn_result)
             }
-            Err(e) => {
+            (Err(e), stream) => {
+                if let Some(s) = stream {
+                    s.abort().await;
+                }
                 tracing::error!(session = %session.id, err = %e, "Agent turn failed");
                 Err(e)
             }
