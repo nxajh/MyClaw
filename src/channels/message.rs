@@ -472,6 +472,25 @@ pub trait Channel: Send + Sync {
     ) -> Option<Box<dyn crate::channels::TurnStream>> {
         None
     }
+
+    /// Authorization policy snapshot for this channel (RFC §14).
+    /// Default: open policy — used by Client (connection-level token authn).
+    /// Hot-reload-capable channels read through their internal RwLock and
+    /// return a cloned snapshot.
+    fn security_policy(&self) -> crate::channels::ChannelSecurityPolicy {
+        crate::channels::ChannelSecurityPolicy::open()
+    }
+
+    /// Decide whether an inbound message is authorized. Channels call this
+    /// in their listen/poll loop before forwarding to the orchestrator.
+    /// Default implementation delegates to `security_policy()`.
+    fn check_authorization(
+        &self,
+        sender: &str,
+        scope: crate::channels::MessageScope<'_>,
+    ) -> crate::channels::AuthDecision {
+        crate::channels::security::evaluate(&self.security_policy(), sender, scope)
+    }
 }
 
 /// Dedup state for a channel adapter (in-memory).

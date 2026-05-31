@@ -1683,12 +1683,29 @@ pub trait Channel: Send + Sync {
 
 ### 14.5 各 channel 的迁移
 
+**统一约定**（"统一关" + 字段重命名）：
+
+- **direct 默认开**：`allowed_users = None` / 缺省 = 允许所有 DM（保留各 channel 现有 None=All 语义）
+- **group 默认关**：`allowed_groups = None` / 缺省 = **拒绝所有群消息**（新约定，向 Telegram `mention_only=false` 的"开"行为开刀）
+- **QQBot config 字段重命名**：`allow_from` → `allowed_users`；`group_allow_from` → `allowed_groups`
+
+**`security_policy()` 合成规则**（统一）：
+
+| Config 字段 | → ChannelSecurityPolicy 字段 |
+|---|---|
+| `allowed_users: Option<Vec<String>>` | `policy.allowed_users = AllowList::from_config(allowed_users)` |
+| `allowed_groups = None` | `policy.group_mode = Reject`，`group_allowlist` 不参与判定 |
+| `allowed_groups = Some(...)` 且 Telegram `mention_only=true` | `policy.group_mode = MentionOnly`，`group_allowlist = from_config(allowed_groups)` |
+| `allowed_groups = Some(...)` 且非 Telegram-mention-only | `policy.group_mode = Open`，`group_allowlist = from_config(allowed_groups)` |
+
+各 channel 的具体改动：
+
 | Channel | 改动 |
 |---------|------|
-| **Client** | 用默认 `security_policy() = open()`；连接层 token 校验保留 |
-| **Telegram** | `security_policy()` 从 `Arc<RwLock<Vec<String>>>` + `mention_only` 合成；`is_user_allowed` 删除，poll_loop 改调 `check_authorization` |
-| **QQBot** | `security_policy()` 从 `config.allow_from` + `config.group_allow_from` 合成（走 `AllowList::from_config`）；`is_user_allowed` / `is_group_allowed` 删除 |
-| **Wechat** | `security_policy()` 从 `config.allowed_users` 合成（走 `from_config`）；inline 检查删除 |
+| **Client** | 用默认 `security_policy() = open()`；连接层 token 校验保留；构造期 warn_if_locked_down 也走默认（None 永远不会触发） |
+| **Telegram** | `security_policy()` 从 `Arc<RwLock<Vec<String>>>` + `allowed_groups: Option<Vec<String>>`（新字段）+ `mention_only: bool` 合成；`is_user_allowed` 删除；poll_loop 改调 `check_authorization` |
+| **QQBot** | `config.allow_from` 重命名为 `allowed_users`；`config.group_allow_from` 重命名为 `allowed_groups`；`is_user_allowed` / `is_group_allowed` 删除 |
+| **Wechat** | `security_policy()` 从 `config.allowed_users` 合成；`group_mode = Reject`（Wechat 无群概念）；inline 检查删除 |
 
 每个 channel 的 listen / poll / receive loop 把原有的"if 拒绝就 continue"
 改成：
@@ -1704,25 +1721,43 @@ match self.check_authorization(&sender, scope) {
 }
 ```
 
-### 14.6 破坏性变更细则
+### 14.6 破坏性变更细则（"统一关"扩张矩阵）
+
+#### 直接消息（保留 Phase 4 初版语义）
 
 | 平台 | Phase 4 前 | Phase 4 后 | 修复方法 |
 |------|-----------|-----------|--------|
 | Telegram `allowed_users = []` | 拒绝全部 | 拒绝全部 | 无变化 |
 | Telegram `allowed_users = ["alice"]` | alice 允许 | alice 允许 | 无变化 |
 | Telegram `allowed_users = ["*"]` | 允许全部 | 允许全部 | 无变化 |
-| QQBot `allow_from` 未设 | 允许全部（None）| 允许全部（None）| 无变化 |
-| QQBot `allow_from = []` | 允许全部（None 等价）| **拒绝全部** | 改为 `["*"]` 或移除字段 |
-| QQBot `allow_from = ["uid"]` | uid 允许 | uid 允许 | 无变化 |
+| QQBot `allowed_users` 未设（旧名 `allow_from`） | 允许全部 | 允许全部 | **字段重命名**：`allow_from` → `allowed_users` |
+| QQBot `allowed_users = []` | 允许全部（None 等价）| **拒绝全部** | 改为 `["*"]` |
+| QQBot `allowed_users = ["uid"]` | uid 允许 | uid 允许 | **字段重命名** |
 | **Wechat `allowed_users = []`** | **允许全部** | **拒绝全部** | 改为 `["*"]` |
 | Wechat `allowed_users = ["uid"]` | uid 允许 | uid 允许 | 无变化 |
 
-**唯一真正破坏**：Wechat 空数组 + QQBot 空数组（QQBot 的 `None` vs `Some([])`
-原本等价，归一后 `Some([])` 变成拒绝）。
+#### 群消息（"统一关"新约定，全部默认 Reject）
+
+| 平台 | Phase 4 前 | Phase 4 后 | 修复方法 |
+|------|-----------|-----------|--------|
+| **Telegram `mention_only=false`，无 `allowed_groups` 字段** | **接受所有群消息** | **拒绝全部** | 添加 `allowed_groups = ["*"]` 保留旧行为 |
+| **Telegram `mention_only=true`，无 `allowed_groups` 字段** | **响应所有群里的 @bot** | **拒绝全部** | 添加 `allowed_groups = ["*"]` |
+| Telegram `mention_only=true` + `allowed_groups=["*"]` | — | 响应所有群里的 @bot | 新写法 |
+| Telegram `mention_only=true` + `allowed_groups=["g1"]` | — | 仅 g1 群里响应 @bot | 新写法 |
+| **QQBot `group_allow_from` 未设** | **接受所有群消息** | **拒绝全部** | 字段重命名 + 添加 `allowed_groups = ["*"]` |
+| QQBot `group_allow_from = ["g1"]` | g1 允许 | g1 允许 | **字段重命名**：`group_allow_from` → `allowed_groups` |
+| Wechat 群 | N/A | 永远拒绝（无群概念） | 无 |
+
+**真正破坏的场景**（按影响面排序）：
+
+1. **Telegram 默认配置**（绝大多数部署）—— `mention_only=false` 且无群白名单字段。Phase 4 后**默认拒绝所有群消息**。修复：`allowed_groups = ["*"]`。
+2. **QQBot 默认配置** —— `group_allow_from=None`，Phase 4 后**默认拒绝所有群消息**。修复：字段改名 + `allowed_groups = ["*"]`。
+3. **Wechat 空白名单**（罕见）—— 见上表。
+4. **QQBot 空数组**（罕见）—— 见上表。
 
 ### 14.7 启动期 warn log 兜底
 
-每个 channel 启动时（`listen()` 第一次成功后）调用一次：
+每个 channel 在 **`Channel::new()` 构造期**调用一次（不等 listen 启动）：
 
 ```rust
 fn warn_if_locked_down(&self) {
@@ -1730,33 +1765,63 @@ fn warn_if_locked_down(&self) {
     if matches!(policy.allowed_users, AllowList::Whitelist(ref v) if v.is_empty()) {
         warn!(
             channel = %self.name(),
-            "allowed_users is empty — channel will reject all messages. \
-             To allow all senders, set allowed_users = [\"*\"]. \
-             (Phase 4 behavior change for wechat/qqbot, see CHANGELOG)"
+            "allowed_users is empty — channel will reject all DMs. \
+             To allow all senders, set allowed_users = [\"*\"]."
+        );
+    }
+    if matches!(policy.group_mode, GroupAuthMode::Reject)
+        && matches!(policy.group_allowlist, AllowList::All)
+    {
+        // 群被关，但 group_allowlist 是默认 All（即用户没显式配置 allowed_groups）。
+        // 这是 Phase 4 "统一关" 默认行为，提醒用户。
+        warn!(
+            channel = %self.name(),
+            "groups are rejected (Phase 4 default). \
+             To accept groups, set allowed_groups = [\"*\"] (all) or [\"g1\", \"g2\"] (whitelist). \
+             For Telegram, set mention_only = true to only respond to @mentions in allowed groups."
         );
     }
 }
 ```
 
-依赖运行时观察，配上文档说明，足够引导用户自助修复。
+构造期调用让 daemon 启动 1 秒内即可在日志看到提醒，无需等首条消息进来。
 
 ### 14.8 CHANGELOG 草稿
 
 ```markdown
 ## BREAKING: Channel security policy unified (Phase 4)
 
-`allowed_users` semantics now match across all channels:
+### DM allowlist
 
+`allowed_users` semantics now match across all channels:
 - Empty list = reject all messages (was: allow-all on wechat/qqbot)
 - ["*"] = explicitly allow all (was: telegram-only convention)
-- Omitted field = allow all (QQBot's prior `None` behavior, preserved)
+- Omitted field = allow all (preserved)
 
-If your wechat or qqbot config has `allowed_users = []` and you want to
-keep the prior "allow all" behavior, change it to `allowed_users = ["*"]`.
-Otherwise the channel will start with all messages rejected and log a
-warning at startup.
+If your wechat or qqbot config has `allowed_users = []` and you want
+"allow all" behavior, change it to `allowed_users = ["*"]`.
 
-Telegram is unaffected; this brings the other channels to its behavior.
+### Group messages — DEFAULT NOW REJECTS
+
+Phase 4 changes group-message handling to default-deny across all channels:
+- Telegram with `mention_only = false` previously accepted all group messages
+- Telegram with `mention_only = true` previously responded to @mentions in all groups
+- QQBot with `group_allow_from = None` previously accepted all group messages
+
+All three now **reject all group messages by default**. To restore prior
+behavior, add `allowed_groups = ["*"]` to your channel config. To whitelist
+specific groups, use `allowed_groups = ["g1", "g2"]`.
+
+### QQBot config field rename
+
+- `allow_from` → `allowed_users`
+- `group_allow_from` → `allowed_groups`
+
+Old field names are no longer recognized; rename at config load time will
+warn and the channel will use the (default-reject) fallback.
+
+Telegram's DM behavior is unaffected by Phase 4; only its group handling
+changes per the above.
 ```
 
 ### 14.9 测试
