@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -41,7 +41,11 @@ type ReactionTracker = Arc<Mutex<std::collections::HashMap<String, Vec<(i64, i64
 #[derive(Clone)]
 pub struct TelegramChannel {
     bot_token: String,
-    allowed_users: Arc<RwLock<Vec<String>>>,
+    /// Normalized DM whitelist. Plain `Vec<String>` (not Arc<RwLock>)
+    /// because MyClaw applies config changes via `myclaw reload` → SIGUSR1
+    /// → hot_switch full-process restart, not in-process mutation. New
+    /// process = fresh struct = no writer ever exists in this process.
+    allowed_users: Vec<String>,
     /// Phase 4: allowed group chat IDs (RFC §14.5). `None` = reject all
     /// groups (Phase 4 default); `Some(vec ["*"])` = allow all groups.
     allowed_groups: Option<Vec<String>>,
@@ -82,7 +86,7 @@ impl TelegramChannel {
 
         let ch = Self {
             bot_token: config.bot_token.clone(),
-            allowed_users: Arc::new(RwLock::new(allowed)),
+            allowed_users: allowed,
             allowed_groups: config.allowed_groups.clone(),
             mention_only: config.mention_only,
             api_base: config
@@ -1287,13 +1291,11 @@ impl Channel for TelegramChannel {
 
     fn security_policy(&self) -> crate::channels::ChannelSecurityPolicy {
         use crate::channels::{AllowList, ChannelSecurityPolicy, GroupAuthMode};
-        let users = self.allowed_users.read().unwrap();
-        let allowed_users = if users.iter().any(|s| s == "*") {
+        let allowed_users = if self.allowed_users.iter().any(|s| s == "*") {
             AllowList::All
         } else {
-            AllowList::Whitelist(users.clone())
+            AllowList::Whitelist(self.allowed_users.clone())
         };
-        drop(users);
         let group_allowlist = AllowList::from_config(self.allowed_groups.clone());
         let group_mode = match (&self.allowed_groups, self.mention_only) {
             (None, _) => GroupAuthMode::Reject,

@@ -1710,10 +1710,15 @@ pub fn evaluate(
 }
 ```
 
-**热重载支持**：`security_policy()` 返回值类型（不是引用），channel 可以
-内部用 `Arc<RwLock<ChannelSecurityPolicy>>`，每次调用 clone 出快照。每次
-调用一次 mutex + clone，对热路径来说可接受（一个 `Vec<String>` clone 在
-百微秒级，且 listen loop 本身就是 I/O bound）。
+**为什么 `security_policy()` 返回值而非引用**：让 channel 实现内部
+**可以**用 `Arc<RwLock<...>>` 包装策略数据并 clone 出快照 —— 接口层面不暴露
+锁。当前所有 channel 都用 plain owned 字段（`Vec<String>` / `Option<Vec<String>>`），
+因为 MyClaw 的配置变更走 `myclaw reload` → SIGUSR1 → `hot_switch` 全进程
+替换，而不是 in-process mutation。任何 channel 字段在本进程生命周期内
+都没有 writer。
+
+未来若加 admin UI 实时修改白名单（不重启），换成 `Arc<RwLock<...>>` 包装
+内部字段即可，trait 接口不动。
 
 ### 14.5 各 channel 的迁移
 

@@ -22,8 +22,6 @@ use super::token::TokenManager;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-/// QQ Bot message max length (conservative, real limit may vary).
-
 /// WebSocket gateway URL endpoint.
 pub const GATEWAY_URL: &str = "https://api.sgroup.qq.com/gateway/bot";
 
