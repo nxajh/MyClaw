@@ -2,35 +2,44 @@
 
 > 配合 `docs/channel-model-rfc.md` 阅读
 
-## 1. Channel trait 的方法表（Phase 0 后 → Phase 1-3 后）
+## 1. Channel trait 的方法表（Phase 0-5 全部落地后）
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  Channel trait                                                          │
-├──────────────────────────────────┬──────────────────────────────────────┤
-│  当前（Phase 0 后）              │  Phase 1-3 后新增                    │
-├──────────────────────────────────┼──────────────────────────────────────┤
-│  fn name()                       │                                      │
-│  fn supports_streaming()         │  fn capabilities() → &ChannelCaps    │
-│                                  │  fn message_len(text) → usize        │
-│  async send(&SendMessage)        │  async send_payload(&SendTarget,     │
-│                                  │                     &MessagePayload) │
-│                                  │     → Option<MessageId>              │
-│  async listen()                  │                                      │
-│     → mpsc::Receiver<ChMsg>      │                                      │
-│  async health_check()            │                                      │
-│  async on_status(rt, status)     │                                      │
-│                                  │  async edit_message(&SendTarget,     │
-│                                  │                     &MessageId,      │
-│                                  │                     &MessagePayload) │
-│                                  │  async delete_message(&SendTarget,   │
-│                                  │                       &MessageId)    │
-│  async push_event(rt,           │  async push_event(rt,                │
-│      TurnEvent) → ()             │      TurnEvent) → Result<()>         │
-│                                  │  (新版本调用方 `let _ = ...`)        │
-│  fn cancel_signal(rt)            │                                      │
-│     → Option<CancelToken>        │                                      │
-└──────────────────────────────────┴──────────────────────────────────────┘
+│  Channel trait（已实现状态）                                            │
+├──────────────────────────────────────────────────────────────────────────┤
+│  ── 元信息 ──                                                            │
+│  fn name() → &str                                                        │
+│  fn capabilities() → &ChannelCapabilities       (Phase 1)               │
+│  fn message_len(text) → usize                   (Phase 1, by len_unit)  │
+│                                                                          │
+│  ── 入站 ──                                                              │
+│  async listen() → mpsc::Receiver<ChMsg>                                  │
+│                                                                          │
+│  ── 出站：结构化 ──                                                       │
+│  async send_payload(&SendTarget, &MessagePayload)                       │
+│     → Option<MessageId>                          (Phase 2, default ↓)   │
+│  async send(&SendMessage)                        (legacy, Phase 4 删)   │
+│                                                                          │
+│  ── 编辑/删除 ──                                                          │
+│  async edit_message(&SendTarget, &MessageId,    (Phase 3, Telegram impl)│
+│                     &MessagePayload)                                     │
+│  async delete_message(&SendTarget, &MessageId)  (Phase 3, Telegram impl)│
+│                                                                          │
+│  ── 流式（Phase 1.5 删 push_event/cancel_signal，统一为 TurnStream）─    │
+│  fn supports_streaming() → bool                 (default: from caps)    │
+│  fn create_stream(reply_target)                 (Phase 1.5)             │
+│     → Option<Box<dyn TurnStream>>                                        │
+│                                                                          │
+│  ── 安全策略（Phase 4 新增）──                                            │
+│  fn security_policy() → ChannelSecurityPolicy   (default: open())       │
+│  fn check_authorization(sender, scope)          (default: evaluate(…))  │
+│     → AuthDecision                                                       │
+│                                                                          │
+│  ── 状态通知 ──                                                          │
+│  async health_check() → bool                                             │
+│  async on_status(recipient, status)                                      │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## 2. 各 Channel 实现持有的数据
@@ -53,8 +62,9 @@ ClientChannel (WebSocket，supports_streaming=true)
 
 TelegramChannel (HTTP polling，supports_edit=true)
 ├─ bot_token / api_base / http: reqwest::Client  Telegram API 客户端
-├─ allowed_users: RwLock<Vec<String>>            热重载白名单
-├─ mention_only: bool                            群组只响应 @
+├─ allowed_users: RwLock<Vec<String>>            热重载 DM 白名单
+├─ allowed_groups: Option<Vec<String>>           Phase 4 新增；None=拒绝群
+├─ mention_only: bool                            群消息要求 @bot
 ├─ dedup: DedupState                             update_id 去重
 ├─ debounce_buffer / debounce_ms                 合并连续消息
 ├─ typing_tasks: HashMap<recipient,JoinHandle>   typing 心跳
@@ -65,7 +75,9 @@ TelegramChannel (HTTP polling，supports_edit=true)
 └─ data_dir: PathBuf                             dedup 持久化
 
 QQBotChannel (HTTP + WebSocket)
-├─ config: QQBotAccountConfig
+├─ config: QQBotAccountConfig                    含 allowed_users/allowed_groups
+│                                                (Phase 4 重命名自 allow_from/
+│                                                 group_allow_from，serde alias)
 ├─ token_manager: Arc<TokenManager>              OAuth token 刷新
 ├─ dedup: DedupState
 ├─ http_client: reqwest::Client
@@ -340,6 +352,80 @@ AskRouter 不直接接触 Channel — 是 Orchestrator 帮它桥接 inbound ChMs
 
 **为什么不留双形态**：see RFC §7.6.6 — `push_event` 和 `TurnStream` 表达同一
 能力，并存只增加心智负担；Phase 1.5 强制翻转。
+
+## 9. Security policy 数据流（Phase 4，RFC §14）
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│  Channel 配置                                                          │
+│                                                                        │
+│  TelegramAccountConfig          QQBotAccountConfig                     │
+│  ├─ allowed_users: Vec<String>  ├─ allowed_users: Option<Vec<String>>  │
+│  ├─ allowed_groups:             │  (alias: allow_from)                 │
+│  │     Option<Vec<String>>      ├─ allowed_groups:                     │
+│  └─ mention_only: bool          │     Option<Vec<String>>              │
+│                                 │  (alias: group_allow_from)           │
+│  WechatAccountConfig                                                   │
+│  └─ allowed_users: Vec<String>  ClientConfig                           │
+│     (空集 = reject all)         └─ (无 channel-level allowlist；        │
+│                                     依赖 WS 连接层 token)              │
+└────────────────────────────────────────────────────────────────────────┘
+                              │
+                              │  Channel::new() 调用 build_security_policy()
+                              ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│  ChannelSecurityPolicy { allowed_users, group_mode, group_allowlist }  │
+│                                                                        │
+│  AllowList::from_config(Option<Vec<String>>)                           │
+│   ├─ None      → All                                                   │
+│   ├─ ["*"]     → All                                                   │
+│   ├─ []        → Whitelist(empty)  →  reject all (触发 warn_if_locked) │
+│   └─ [list]    → Whitelist(list)                                       │
+│                                                                        │
+│  group_mode 派生：                                                     │
+│   Telegram: (allowed_groups, mention_only) →                           │
+│             (None, _)      → Reject                                    │
+│             (Some, true)   → MentionOnly                               │
+│             (Some, false)  → Open                                      │
+│   QQBot:    allowed_groups None=Reject, Some=Open（无 @ 概念）         │
+│   Wechat:   永远 Reject（无群）                                        │
+│   Client:   Open（用 open() 默认）                                     │
+└────────────────────────────────────────────────────────────────────────┘
+                              │
+        Channel::new() 还调用 warn_if_locked_down(&ch) — 启动期一次性
+        提醒：allowed_users 空白名单 / 群默认拒绝
+                              │
+   ─── 运行时 ─────────────────┴──────────────────────────────────────────
+                              ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│  poll_loop / receive_loop 收到入站 inbound                              │
+│     │                                                                  │
+│     │  ① 计算 sender (username/openid/wxid) 与 scope                   │
+│     │     scope = Direct                                               │
+│     │           | Group { id, has_mention }                            │
+│     ▼                                                                  │
+│  channel.check_authorization(sender, scope) → AuthDecision             │
+│     │                                                                  │
+│     │  默认实现 = security::evaluate(&self.security_policy(), …)       │
+│     │  Telegram 重写为 try_authorize：先按 username 试，再按 user_id    │
+│     │  试，任一 Allow 即 Allow                                          │
+│     ▼                                                                  │
+│  match decision {                                                      │
+│      Allow                  → forward 给 orchestrator                  │
+│      Ignore                 → continue（静默；不 warn）                │
+│      Reject { reason }      → warn!(reason); continue                 │
+│  }                                                                     │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+**关键设计点**：
+
+- `evaluate()` 是**纯函数**——测试 / admin UI / 模拟器 可以脱离 Channel 调用
+- `security_policy()` **返回值（不是引用）**，channel 内部 `Arc<RwLock<...>>`
+  支持热重载且不暴露锁
+- `AuthDecision::Ignore` ≠ `Reject` —— MentionOnly 群没 @ 是预期路径，
+  不该 warn 刷屏
+- `warn_if_locked_down` 仅在构造期触发一次，避免热路径加噪声
 
 ---
 

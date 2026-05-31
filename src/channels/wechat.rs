@@ -592,16 +592,12 @@ impl WechatChannel {
     /// Wechat keeps `allowed_users: Vec<String>` (not Option) so the
     /// historical "missing field = empty = reject all" semantic stays in
     /// place — flipping the field type to Option would be a security
-    /// downgrade for users who omit `allowed_users`.
+    /// downgrade for users who omit `allowed_users`. We wrap with
+    /// `Some(...)` to reuse the unified `AllowList::from_config` path.
     fn build_security_policy(&self) -> crate::channels::ChannelSecurityPolicy {
         use crate::channels::{AllowList, ChannelSecurityPolicy, GroupAuthMode};
-        let allowed_users = if self.config.allowed_users.iter().any(|s| s == "*") {
-            AllowList::All
-        } else {
-            AllowList::Whitelist(self.config.allowed_users.clone())
-        };
         ChannelSecurityPolicy {
-            allowed_users,
+            allowed_users: AllowList::from_config(Some(self.config.allowed_users.clone())),
             group_mode: GroupAuthMode::Reject, // Wechat has no group concept
             group_allowlist: AllowList::All,
         }

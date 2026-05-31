@@ -1566,6 +1566,12 @@ impl AllowList {
             Self::Whitelist(v) => v.iter().any(|u| u == sender),
         }
     }
+
+    /// 是否为"白名单空集"——`warn_if_locked_down` 用来判断"用户大概率
+    /// 配错了，channel 实际拒绝所有 DM"。
+    pub fn is_empty_whitelist(&self) -> bool {
+        matches!(self, Self::Whitelist(v) if v.is_empty())
+    }
 }
 
 /// 群消息处理策略。
@@ -1597,6 +1603,16 @@ impl ChannelSecurityPolicy {
         Self {
             allowed_users: AllowList::All,
             group_mode: GroupAuthMode::Open,
+            group_allowlist: AllowList::All,
+        }
+    }
+
+    /// "DMs allowed, groups rejected" 默认 —— 用作测试 fixture 和
+    /// 没显式配 `allowed_groups` 时的语义参考。
+    pub fn dm_only() -> Self {
+        Self {
+            allowed_users: AllowList::All,
+            group_mode: GroupAuthMode::Reject,
             group_allowlist: AllowList::All,
         }
     }
@@ -1646,33 +1662,50 @@ pub trait Channel: Send + Sync {
 
     /// 对单条入站消息做鉴权决策。Channel 自己的 listen/poll loop
     /// 在 forward 给 orchestrator 前调用本方法。
-    /// 默认实现走 `security_policy()`：抽出快照，按字段判定。
+    /// 默认实现委托给 `security::evaluate()` 自由函数。
     fn check_authorization(&self, sender: &str, scope: MessageScope<'_>) -> AuthDecision {
-        let policy = self.security_policy();
-        match scope {
-            MessageScope::Direct => {
-                if policy.allowed_users.allows(sender) {
-                    AuthDecision::Allow
-                } else {
-                    AuthDecision::Reject { reason: "user not in allowed_users" }
-                }
-            }
-            MessageScope::Group { id, has_mention } => {
-                match policy.group_mode {
-                    GroupAuthMode::Reject => AuthDecision::Ignore,
-                    GroupAuthMode::MentionOnly if !has_mention => AuthDecision::Ignore,
-                    _ => {
-                        if !policy.group_allowlist.allows(id) {
-                            AuthDecision::Reject { reason: "group not in allowlist" }
-                        } else if policy.allowed_users.allows(sender) {
-                            AuthDecision::Allow
-                        } else {
-                            AuthDecision::Reject { reason: "sender not in allowed_users" }
-                        }
-                    }
-                }
+        crate::channels::security::evaluate(&self.security_policy(), sender, scope)
+    }
+}
+```
+
+**为什么把判定逻辑放在 `security::evaluate` 而非内联进 trait**：
+
+- 让"安全策略 → 决策"是一个**纯函数**，admin UI / 模拟器 / 测试 fixture
+  无需构造完整 Channel 就能调用 `evaluate(&policy, sender, scope)`
+- Channel 实现需要变种行为时（例：Telegram 双 identity 同时匹配）可在
+  自己的 inherent method 里多次调用 trait 的 `check_authorization`，
+  无须重复 match 逻辑
+
+`evaluate` 完整签名（实现在 `src/channels/security.rs`）：
+
+```rust
+pub fn evaluate(
+    policy: &ChannelSecurityPolicy,
+    sender: &str,
+    scope: MessageScope<'_>,
+) -> AuthDecision {
+    match scope {
+        MessageScope::Direct => {
+            if policy.allowed_users.allows(sender) {
+                AuthDecision::Allow
+            } else {
+                AuthDecision::Reject { reason: "sender not in allowed_users" }
             }
         }
+        MessageScope::Group { id, has_mention } => match policy.group_mode {
+            GroupAuthMode::Reject => AuthDecision::Ignore,
+            GroupAuthMode::MentionOnly if !has_mention => AuthDecision::Ignore,
+            GroupAuthMode::Open | GroupAuthMode::MentionOnly => {
+                if !policy.group_allowlist.allows(id) {
+                    AuthDecision::Reject { reason: "group not in allowed_groups" }
+                } else if policy.allowed_users.allows(sender) {
+                    AuthDecision::Allow
+                } else {
+                    AuthDecision::Reject { reason: "sender not in allowed_users" }
+                }
+            }
+        },
     }
 }
 ```
