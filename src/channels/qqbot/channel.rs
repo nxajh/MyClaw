@@ -23,7 +23,6 @@ use super::token::TokenManager;
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /// QQ Bot message max length (conservative, real limit may vary).
-pub const QQ_MAX_MESSAGE_LENGTH: usize = 2000;
 
 /// WebSocket gateway URL endpoint.
 pub const GATEWAY_URL: &str = "https://api.sgroup.qq.com/gateway/bot";
@@ -839,8 +838,8 @@ Type any command or just chat!"#;
         // Send reply directly via REST API (bypass orchestrator), with chunking.
         let chunks = split_message_chunk(
             &reply,
-            QQ_MAX_MESSAGE_LENGTH,
-            crate::channels::message::LenUnit::Codepoints,
+            self.capabilities().message_chunk_limit,
+            self.capabilities().message_len_unit,
         );
         if let Some(openid) = reply_target.strip_prefix("c2c:") {
             for (i, chunk) in chunks.iter().enumerate() {
@@ -892,8 +891,8 @@ impl Channel for QQBotChannel {
     async fn send(&self, msg: &SendMessage) -> anyhow::Result<()> {
         let chunks = split_message_chunk(
             &msg.content,
-            QQ_MAX_MESSAGE_LENGTH,
-            crate::channels::message::LenUnit::Codepoints,
+            self.capabilities().message_chunk_limit,
+            self.capabilities().message_len_unit,
         );
         // thread_ts carries the original message event ID for passive replies.
         let msg_id = msg.thread_ts.as_deref().unwrap_or("");
