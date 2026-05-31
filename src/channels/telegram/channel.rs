@@ -462,8 +462,11 @@ impl TelegramChannel {
         Ok(msg_id)
     }
 
-    /// Delete a message by chat_id and message_id (inherent helper).
-    async fn tg_delete_message(&self, chat_id: i64, message_id: i64) -> anyhow::Result<()> {
+    /// Low-level `deleteMessage` API wrapper using primitive i64 ids.
+    /// Distinct from the trait method `Channel::delete_message` which
+    /// takes the abstract `&SendTarget` + `&MessageId`. Matches the
+    /// `send_raw` convention for inherent Telegram API helpers.
+    async fn delete_message_raw(&self, chat_id: i64, message_id: i64) -> anyhow::Result<()> {
         let client = self.http_client();
         let body = serde_json::json!({
             "chat_id": chat_id,
@@ -481,8 +484,11 @@ impl TelegramChannel {
         Ok(())
     }
 
-    /// Edit an existing message by chat_id and message_id (inherent helper).
-    async fn tg_edit_message_text(&self, chat_id: i64, message_id: i64, text: &str) -> anyhow::Result<bool> {
+    /// Low-level `editMessageText` API wrapper using primitive i64 ids.
+    /// Distinct from the trait method `Channel::edit_message` which
+    /// takes the abstract `&SendTarget` + `&MessageId` + `&MessagePayload`.
+    /// Matches the `send_raw` convention for inherent Telegram API helpers.
+    async fn edit_message_text_raw(&self, chat_id: i64, message_id: i64, text: &str) -> anyhow::Result<bool> {
         let client = self.http_client();
         let html_text = markdown_to_telegram_html(text);
 
@@ -893,7 +899,7 @@ impl TelegramChannel {
                 if let Some(msg_ids) = existing_msg_ids {
                     let text = format!("🤔 还在思考中... (已等待 {secs}s)");
                     for (cid, mid) in msg_ids {
-                        if let Err(e) = self.tg_edit_message_text(cid, mid, &text).await {
+                        if let Err(e) = self.edit_message_text_raw(cid, mid, &text).await {
                             warn!("Failed to edit stall message {mid}: {e}");
                         }
                     }
@@ -1316,7 +1322,7 @@ impl Channel for TelegramChannel {
         let stall_msgs = self.stall_messages.lock().remove(&message.recipient);
         if let Some(msgs) = stall_msgs {
             for (chat_id, msg_id) in msgs {
-                if let Err(e) = self.tg_delete_message(chat_id, msg_id).await {
+                if let Err(e) = self.delete_message_raw(chat_id, msg_id).await {
                     debug!("Failed to delete stall message {}: {e}", msg_id);
                 }
             }
@@ -1409,7 +1415,7 @@ impl Channel for TelegramChannel {
         // Media → fallback text. Interactive (inline buttons) edit requires
         // a separate editMessageReplyMarkup call we don't expose yet.
         let text = payload.to_fallback_text();
-        let ok = self.tg_edit_message_text(chat_id_i64, msg_id_i64, &text).await?;
+        let ok = self.edit_message_text_raw(chat_id_i64, msg_id_i64, &text).await?;
         if !ok {
             anyhow::bail!("editMessageText reported failure");
         }
@@ -1430,7 +1436,7 @@ impl Channel for TelegramChannel {
             .as_str()
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid message_id '{}': {e}", message_id.as_str()))?;
-        self.tg_delete_message(chat_id_i64, msg_id_i64).await
+        self.delete_message_raw(chat_id_i64, msg_id_i64).await
     }
 
     async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>> {
