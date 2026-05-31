@@ -13,7 +13,7 @@ use anyhow::Context;
 use crate::agents::delegation::DelegationEvent;
 use crate::agents::DelegationCoordinator;
 use crate::agents::{OrchestratorEvent, SessionContext};
-use crate::channels::{Channel, ChannelMessage, SendMessage, InlineButton};
+use crate::channels::{Channel, ChannelMessage, InlineButton};
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -595,17 +595,24 @@ impl Orchestrator {
                                 msg.content = user_msg;
                             }
                             None => {
-                                let send_msg = SendMessage::new(
-                                    MSG_NO_PENDING_RETRY,
-                                    reply_target.clone(),
-                                );
-                                let _ = channel.send(&send_msg).await;
+                                let target = crate::channels::SendTarget::new(reply_target.clone());
+                                let _ = channel
+                                    .send_payload(
+                                        &target,
+                                        &crate::channels::MessagePayload::text(MSG_NO_PENDING_RETRY),
+                                    )
+                                    .await;
                                 return;
                             }
                         }
                     } else {
-                        let send_msg = SendMessage::new(MSG_ABORT_ACK, reply_target.clone());
-                        let _ = channel.send(&send_msg).await;
+                        let target = crate::channels::SendTarget::new(reply_target.clone());
+                        let _ = channel
+                            .send_payload(
+                                &target,
+                                &crate::channels::MessagePayload::text(MSG_ABORT_ACK),
+                            )
+                            .await;
                         return;
                     }
                 }
@@ -676,17 +683,15 @@ impl Orchestrator {
                                 &cmd_owned, &cmd_args_owned, cmd_ctx,
                             ).await {
                                 if let Some(channel) = channel_cmd {
-                                    let send_msg = SendMessage {
-                                        recipient:          rt_cmd,
-                                        content:            response,
-                                        subject:            None,
-                                        thread_ts:          rid_cmd,
-                                        cancellation_token: None,
-                                        attachments:        vec![],
-                                        image_urls:         None,
-                                        inline_buttons:     None,
-                                    };
-                                    if let Err(e) = channel.send(&send_msg).await {
+                                    let mut target = crate::channels::SendTarget::new(rt_cmd);
+                                    target.thread_id = rid_cmd;
+                                    if let Err(e) = channel
+                                        .send_payload(
+                                            &target,
+                                            &crate::channels::MessagePayload::text(response),
+                                        )
+                                        .await
+                                    {
                                         error!(session = %sk_cmd, err = %e,
                                             "command response send failed");
                                     }
@@ -732,8 +737,13 @@ impl Orchestrator {
                         .process_turn(inbound_msg, Some(channel.clone()), runtime)
                         .await;
                     if result.is_err() {
-                        let send_msg = SendMessage::new(MSG_TURN_FAILED, reply_target);
-                        let _ = channel.send(&send_msg).await;
+                        let target = crate::channels::SendTarget::new(reply_target);
+                        let _ = channel
+                            .send_payload(
+                                &target,
+                                &crate::channels::MessagePayload::text(MSG_TURN_FAILED),
+                            )
+                            .await;
                     }
                 });
 
@@ -884,8 +894,14 @@ impl Orchestrator {
                             });
                         if let Some((ch_type, acc_id, _)) = parse_session_key(&sk_owned) {
                             if let Some(channel) = channels.get(&(ch_type.to_string(), acc_id.to_string())).map(|r| r.clone()) {
-                                let send_msg = SendMessage::new(&tr.text, &recipient);
-                                if let Err(e) = channel.send(&send_msg).await {
+                                let target = crate::channels::SendTarget::new(&recipient);
+                                if let Err(e) = channel
+                                    .send_payload(
+                                        &target,
+                                        &crate::channels::MessagePayload::text(&tr.text),
+                                    )
+                                    .await
+                                {
                                     tracing::warn!(session = %sk_owned, err = %e, "startup recovery: failed to send response");
                                 }
                             }
@@ -1316,18 +1332,14 @@ async fn send_to_target_internal(
         None => String::new(),
     };
 
-    let msg = SendMessage {
-        content: content.to_string(),
-        recipient,
-        subject: None,
-        thread_ts: None,
-        cancellation_token: None,
-        attachments: vec![],
-        image_urls: None,
-        inline_buttons: None,
-    };
-
-    if let Err(e) = channel.send(&msg).await {
+    let target = crate::channels::SendTarget::new(recipient);
+    if let Err(e) = channel
+        .send_payload(
+            &target,
+            &crate::channels::MessagePayload::text(content.to_string()),
+        )
+        .await
+    {
         tracing::warn!(channel = %ch_type, account = %acc_id, err = %e, "failed to send scheduled response");
     }
 }
