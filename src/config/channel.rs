@@ -70,10 +70,15 @@ pub struct WechatChannelConfig {
 pub struct TelegramAccountConfig {
     /// Telegram Bot API token (supports `${ENV_VAR}` expansion).
     pub bot_token: String,
-    /// Allowed Telegram usernames or user IDs (`["*"]` = all).
+    /// Allowed Telegram usernames or user IDs for DM (`["*"]` = all).
     #[serde(default)]
     pub allowed_users: Vec<String>,
-    /// Only respond when @mentioned in groups.
+    /// Allowed Telegram group IDs (RFC §14).
+    /// `None` = reject all groups (Phase 4 default); `["*"]` = accept all
+    /// groups; `["g1", "g2"]` = whitelist by chat ID.
+    #[serde(default)]
+    pub allowed_groups: Option<Vec<String>>,
+    /// Only respond when @mentioned in (allowed) groups.
     #[serde(default)]
     pub mention_only: bool,
     /// Override the Telegram Bot API base URL (for local Bot API servers).
@@ -137,12 +142,17 @@ pub struct QQBotAccountConfig {
     pub app_id: String,
     /// QQ Bot Client Secret.
     pub client_secret: String,
-    /// Allowed user OpenIDs for private chat. None = allow all.
-    #[serde(default)]
-    pub allow_from: Option<Vec<String>>,
-    /// Allowed group OpenIDs. None = allow all groups.
-    #[serde(default)]
-    pub group_allow_from: Option<Vec<String>>,
+    /// Allowed user OpenIDs for private chat (RFC §14).
+    /// `None` = allow all; `[]` = reject all; `["*"]` = allow all.
+    /// Replaces the legacy `allow_from` field (Phase 4 rename).
+    #[serde(default, alias = "allow_from")]
+    pub allowed_users: Option<Vec<String>>,
+    /// Allowed group OpenIDs (RFC §14).
+    /// `None` = reject all groups (Phase 4 default); `["*"]` = accept all
+    /// groups; `["g1", "g2"]` = whitelist.
+    /// Replaces the legacy `group_allow_from` field (Phase 4 rename).
+    #[serde(default, alias = "group_allow_from")]
+    pub allowed_groups: Option<Vec<String>>,
 }
 
 // ── QQBotChannelConfig ───────────────────────────────────────────────────────

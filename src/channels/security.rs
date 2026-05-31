@@ -122,6 +122,34 @@ impl AuthDecision {
     }
 }
 
+/// Emit `warn!` log lines if the channel's security policy is configured
+/// in a way that's likely a mis-configuration (empty whitelists, default
+/// group reject). Call from `Channel::new()` so daemon startup surfaces
+/// the warning before any messages arrive.
+pub fn warn_if_locked_down(channel: &dyn super::Channel) {
+    let policy = channel.security_policy();
+    if policy.allowed_users.is_empty_whitelist() {
+        tracing::warn!(
+            channel = %channel.name(),
+            "allowed_users is empty — channel will reject all DMs. \
+             To allow all senders, set allowed_users = [\"*\"]."
+        );
+    }
+    if matches!(policy.group_mode, GroupAuthMode::Reject)
+        && matches!(policy.group_allowlist, AllowList::All)
+    {
+        // Default-reject groups + no explicit group config = Phase 4 default
+        // landed unchanged. Warn so operators upgrading from pre-Phase-4
+        // know group messages are now silently dropped.
+        tracing::warn!(
+            channel = %channel.name(),
+            "groups are rejected (Phase 4 default). \
+             To accept groups, set allowed_groups = [\"*\"] (all) or [\"g1\", \"g2\"] (whitelist). \
+             For Telegram, set mention_only = true to only respond to @mentions in allowed groups."
+        );
+    }
+}
+
 /// Default `check_authorization` body — channels with a `ChannelSecurityPolicy`
 /// can delegate here instead of re-implementing the dispatch logic.
 pub fn evaluate(policy: &ChannelSecurityPolicy, sender: &str, scope: MessageScope<'_>) -> AuthDecision {

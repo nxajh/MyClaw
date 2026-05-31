@@ -583,12 +583,28 @@ pub struct WechatChannel {
 
 impl WechatChannel {
     pub fn new(config: WechatAccountConfig) -> Self {
-        Self { api: ApiClient::new(&config), config, dedup: DedupState::new() }
+        let ch = Self { api: ApiClient::new(&config), config, dedup: DedupState::new() };
+        crate::channels::warn_if_locked_down(&ch);
+        ch
     }
 
-    fn is_user_allowed(&self, user_id: &str) -> bool {
-        let allowed = &self.config.allowed_users;
-        !allowed.is_empty() && (allowed.iter().any(|u| u == "*" || u == user_id))
+    /// Build the unified security policy from Wechat config (RFC §14.5).
+    /// Wechat keeps `allowed_users: Vec<String>` (not Option) so the
+    /// historical "missing field = empty = reject all" semantic stays in
+    /// place — flipping the field type to Option would be a security
+    /// downgrade for users who omit `allowed_users`.
+    fn build_security_policy(&self) -> crate::channels::ChannelSecurityPolicy {
+        use crate::channels::{AllowList, ChannelSecurityPolicy, GroupAuthMode};
+        let allowed_users = if self.config.allowed_users.iter().any(|s| s == "*") {
+            AllowList::All
+        } else {
+            AllowList::Whitelist(self.config.allowed_users.clone())
+        };
+        ChannelSecurityPolicy {
+            allowed_users,
+            group_mode: GroupAuthMode::Reject, // Wechat has no group concept
+            group_allowlist: AllowList::All,
+        }
     }
 
     async fn login(&self) -> anyhow::Result<()> {
@@ -649,6 +665,10 @@ impl Channel for WechatChannel {
         &WECHAT_CAPS
     }
 
+    fn security_policy(&self) -> crate::channels::ChannelSecurityPolicy {
+        self.build_security_policy()
+    }
+
     async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
         let ctx_token = self.api.state.read().context_tokens.get(&message.recipient).cloned();
         let chunks = crate::channels::message::split_message_chunk(
@@ -679,7 +699,17 @@ impl Channel for WechatChannel {
                         for msg in resp.msgs {
                             let event = parse_inbound(&msg);
                             if !this.dedup.check_and_record(&event.msg_id) { continue; }
-                            if !this.is_user_allowed(&event.sender_wxid) { continue; }
+                            match this.check_authorization(
+                                &event.sender_wxid,
+                                crate::channels::MessageScope::Direct,
+                            ) {
+                                crate::channels::AuthDecision::Allow => {}
+                                crate::channels::AuthDecision::Ignore => continue,
+                                crate::channels::AuthDecision::Reject { reason } => {
+                                    warn!(sender = %event.sender_wxid, reason, "wechat: rejected by policy");
+                                    continue;
+                                }
+                            }
 
                             let content = match event.content {
                                 InboundContent::Text(t) => t,

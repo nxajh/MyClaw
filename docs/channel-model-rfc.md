@@ -1501,12 +1501,13 @@ line 92-93 定义的标准约定，工具按需读取即可。
 | Channel | 检查位置 | 数据 | 空白名单语义 |
 |---------|---------|------|------------|
 | **Telegram** | `poll_loop` 内 inline | `Arc<RwLock<Vec<String>>>` + `mention_only: bool` | **拒绝全部** + warn log |
-| **QQBot** | `is_user_allowed` / `is_group_allowed`，3 处调用 | `config.allow_from: Option<Vec<String>>` + `config.group_allow_from` | `None` = **允许全部**；`Some(empty)` 等同 `None` |
-| **Wechat** | inline 一处 | `config.allowed_users: Vec<String>` | 空 = **允许全部** |
+| **QQBot** | `is_user_allowed` / `is_group_allowed`，3 处调用 | `config.allow_from: Option<Vec<String>>` + `config.group_allow_from` | `None` = **允许全部**；`Some(empty)` = **拒绝全部** |
+| **Wechat** | inline 一处（`!allowed.is_empty() && ...`） | `config.allowed_users: Vec<String>` | 空 = **拒绝全部** |
 | **Client** | 连接层 token | — | 不适用（连接通过即可信） |
 
-**三个 channel 三套语义** —— 是 Phase 4 必须解决的根本问题。Telegram 的
-"empty = closed" 是安全默认；Wechat / QQBot 的 "empty = open" 是历史遗留。
+**DM 语义其实已经基本统一**——三个有 allowlist 的 channel 都是"empty/未配 → 拒绝"
+（QQBot 的 `None` 是例外）。Phase 4 真正要修的是**群消息默认开放**这件事，按
+"统一关"决策把所有 channel 的群默认改为 Reject。
 
 ### 14.2 决策：方向 C 而非 A/B
 
@@ -1723,18 +1724,21 @@ match self.check_authorization(&sender, scope) {
 
 ### 14.6 破坏性变更细则（"统一关"扩张矩阵）
 
-#### 直接消息（保留 Phase 4 初版语义）
+#### 直接消息（DM 语义本就基本一致，仅 QQBot 字段改名）
 
 | 平台 | Phase 4 前 | Phase 4 后 | 修复方法 |
 |------|-----------|-----------|--------|
 | Telegram `allowed_users = []` | 拒绝全部 | 拒绝全部 | 无变化 |
 | Telegram `allowed_users = ["alice"]` | alice 允许 | alice 允许 | 无变化 |
 | Telegram `allowed_users = ["*"]` | 允许全部 | 允许全部 | 无变化 |
-| QQBot `allowed_users` 未设（旧名 `allow_from`） | 允许全部 | 允许全部 | **字段重命名**：`allow_from` → `allowed_users` |
-| QQBot `allowed_users = []` | 允许全部（None 等价）| **拒绝全部** | 改为 `["*"]` |
-| QQBot `allowed_users = ["uid"]` | uid 允许 | uid 允许 | **字段重命名** |
-| **Wechat `allowed_users = []`** | **允许全部** | **拒绝全部** | 改为 `["*"]` |
+| QQBot `allow_from` 未设 | 允许全部 | 允许全部 | **字段改名**：迁到 `allowed_users`（旧名通过 serde alias 仍可解析） |
+| QQBot `allow_from = []` | 拒绝全部 | 拒绝全部 | **字段改名** |
+| QQBot `allow_from = ["uid"]` | uid 允许 | uid 允许 | **字段改名** |
+| Wechat `allowed_users = []` | 拒绝全部 | 拒绝全部 | 无变化 |
 | Wechat `allowed_users = ["uid"]` | uid 允许 | uid 允许 | 无变化 |
+
+DM 部分**没有真正的行为变更**——只是 QQBot 的字段名变了，且通过 serde `alias`
+保留旧字段名一段时间，旧 config 直接可用。
 
 #### 群消息（"统一关"新约定，全部默认 Reject）
 
@@ -1748,12 +1752,13 @@ match self.check_authorization(&sender, scope) {
 | QQBot `group_allow_from = ["g1"]` | g1 允许 | g1 允许 | **字段重命名**：`group_allow_from` → `allowed_groups` |
 | Wechat 群 | N/A | 永远拒绝（无群概念） | 无 |
 
-**真正破坏的场景**（按影响面排序）：
+**真正破坏的场景**（仅群消息）：
 
 1. **Telegram 默认配置**（绝大多数部署）—— `mention_only=false` 且无群白名单字段。Phase 4 后**默认拒绝所有群消息**。修复：`allowed_groups = ["*"]`。
-2. **QQBot 默认配置** —— `group_allow_from=None`，Phase 4 后**默认拒绝所有群消息**。修复：字段改名 + `allowed_groups = ["*"]`。
-3. **Wechat 空白名单**（罕见）—— 见上表。
-4. **QQBot 空数组**（罕见）—— 见上表。
+2. **Telegram `mention_only=true`** —— 同样需要显式添加 `allowed_groups = ["*"]`，否则群消息全部拒绝。
+3. **QQBot 默认配置** —— `group_allow_from=None` Phase 4 后**默认拒绝所有群消息**。修复：字段改名为 `allowed_groups = ["*"]`。
+
+DM 行为完全不变。`serde alias` 让 QQBot 旧字段名继续工作，所以 DM 路径根本不需要改 config。
 
 ### 14.7 启动期 warn log 兜底
 
@@ -1789,21 +1794,9 @@ fn warn_if_locked_down(&self) {
 ### 14.8 CHANGELOG 草稿
 
 ```markdown
-## BREAKING: Channel security policy unified (Phase 4)
+## BREAKING: Group messages now default-rejected (Phase 4)
 
-### DM allowlist
-
-`allowed_users` semantics now match across all channels:
-- Empty list = reject all messages (was: allow-all on wechat/qqbot)
-- ["*"] = explicitly allow all (was: telegram-only convention)
-- Omitted field = allow all (preserved)
-
-If your wechat or qqbot config has `allowed_users = []` and you want
-"allow all" behavior, change it to `allowed_users = ["*"]`.
-
-### Group messages — DEFAULT NOW REJECTS
-
-Phase 4 changes group-message handling to default-deny across all channels:
+Channel group-message handling switches to default-deny across all channels:
 - Telegram with `mention_only = false` previously accepted all group messages
 - Telegram with `mention_only = true` previously responded to @mentions in all groups
 - QQBot with `group_allow_from = None` previously accepted all group messages
@@ -1812,16 +1805,25 @@ All three now **reject all group messages by default**. To restore prior
 behavior, add `allowed_groups = ["*"]` to your channel config. To whitelist
 specific groups, use `allowed_groups = ["g1", "g2"]`.
 
-### QQBot config field rename
+If your bot operates in 1:1 chats only, no change is needed.
+
+## Cosmetic: QQBot config field rename
 
 - `allow_from` → `allowed_users`
 - `group_allow_from` → `allowed_groups`
 
-Old field names are no longer recognized; rename at config load time will
-warn and the channel will use the (default-reject) fallback.
+Old field names continue to work via serde alias; planned for removal
+in a future release.
 
-Telegram's DM behavior is unaffected by Phase 4; only its group handling
-changes per the above.
+## DM authorization semantics unified (no behavior change)
+
+All channels now share the same `allowed_users` semantic:
+- Empty list = reject all DMs
+- `["*"]` = explicitly allow all
+- Omitted field (or `None`) = allow all (channel-default-open for DMs)
+
+This matches what Telegram, QQBot (`Some(empty)`), and Wechat already did;
+the change is purely that the rule is now codified in one place.
 ```
 
 ### 14.9 测试
@@ -1881,15 +1883,16 @@ fn wechat_empty_allowlist_now_rejects() {
 
 **风险**：
 
-1. Wechat / QQBot 用户配置空数组并依赖"allow all"行为 → 启动期 warn log +
-   CHANGELOG 引导自助修复
+1. **群消息默认拒绝**是真正会被用户感知的变更。Telegram + QQBot 没显式
+   配 `allowed_groups` 的部署，升级后群消息**完全拒绝**（带 warn log）。
+   补救路径：CHANGELOG + 启动期 warn log 指引添加 `allowed_groups = ["*"]`
 2. 热路径调用 `security_policy()` clone Vec<String> → listen/poll 本就是
    I/O bound，clone 开销可忽略；如成为瓶颈再换 `Arc<...>` 共享
 
 **回滚**：Phase 4 是纯 channel 内部重构，不动 orchestrator / session。
-若发现 Wechat 用户大面积配置依赖旧行为，可在下一个 patch release 临时
-加一个 `allowed_users_empty_means_open: bool = false` 配置项作为兼容
-开关，下两个 release 强制移除。
+若群消息默认拒绝导致大面积投诉，下个 patch release 加一个
+`group_default_accept: bool = false` 兼容开关即可（默认 false 保留
+Phase 4 行为，true 退回 Phase 4 前行为），两个 release 后移除。
 
 ---
 

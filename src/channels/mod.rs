@@ -18,6 +18,7 @@ pub use message::{
 };
 pub use security::{
     AllowList, AuthDecision, ChannelSecurityPolicy, GroupAuthMode, MessageScope,
+    warn_if_locked_down,
 };
 pub use turn_stream::{StreamDelivery, TurnStream};
 pub use telegram::TelegramChannel;
