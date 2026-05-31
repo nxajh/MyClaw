@@ -442,8 +442,8 @@ impl TelegramChannel {
         Ok(msg_id)
     }
 
-    /// Delete a message by chat_id and message_id.
-    async fn delete_message(&self, chat_id: i64, message_id: i64) -> anyhow::Result<()> {
+    /// Delete a message by chat_id and message_id (inherent helper).
+    async fn tg_delete_message(&self, chat_id: i64, message_id: i64) -> anyhow::Result<()> {
         let client = self.http_client();
         let body = serde_json::json!({
             "chat_id": chat_id,
@@ -461,8 +461,8 @@ impl TelegramChannel {
         Ok(())
     }
 
-    /// Edit an existing message by chat_id and message_id.
-    async fn edit_message(&self, chat_id: i64, message_id: i64, text: &str) -> anyhow::Result<bool> {
+    /// Edit an existing message by chat_id and message_id (inherent helper).
+    async fn tg_edit_message_text(&self, chat_id: i64, message_id: i64, text: &str) -> anyhow::Result<bool> {
         let client = self.http_client();
         let html_text = markdown_to_telegram_html(text);
 
@@ -873,7 +873,7 @@ impl TelegramChannel {
                 if let Some(msg_ids) = existing_msg_ids {
                     let text = format!("🤔 还在思考中... (已等待 {secs}s)");
                     for (cid, mid) in msg_ids {
-                        if let Err(e) = self.edit_message(cid, mid, &text).await {
+                        if let Err(e) = self.tg_edit_message_text(cid, mid, &text).await {
                             warn!("Failed to edit stall message {mid}: {e}");
                         }
                     }
@@ -1243,7 +1243,7 @@ impl Channel for TelegramChannel {
         let stall_msgs = self.stall_messages.lock().remove(&message.recipient);
         if let Some(msgs) = stall_msgs {
             for (chat_id, msg_id) in msgs {
-                if let Err(e) = self.delete_message(chat_id, msg_id).await {
+                if let Err(e) = self.tg_delete_message(chat_id, msg_id).await {
                     debug!("Failed to delete stall message {}: {e}", msg_id);
                 }
             }
@@ -1313,6 +1313,51 @@ impl Channel for TelegramChannel {
             return Err(e);
         }
         Ok(())
+    }
+
+    /// RFC §7.1 Phase 3: edit a previously sent Telegram message.
+    /// `target.recipient` carries the chat_id; `message_id` is the
+    /// Telegram message_id as a decimal string.
+    async fn edit_message(
+        &self,
+        target: &crate::channels::SendTarget,
+        message_id: &crate::channels::MessageId,
+        payload: &crate::channels::MessagePayload,
+    ) -> anyhow::Result<()> {
+        let (chat_id, _thread_id) = Self::parse_reply_target(&target.recipient);
+        let chat_id_i64: i64 = chat_id
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid chat_id '{chat_id}': {e}"))?;
+        let msg_id_i64: i64 = message_id
+            .as_str()
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid message_id '{}': {e}", message_id.as_str()))?;
+        // Telegram editMessageText takes plain/HTML text only; downgrade
+        // Media → fallback text. Interactive (inline buttons) edit requires
+        // a separate editMessageReplyMarkup call we don't expose yet.
+        let text = payload.to_fallback_text();
+        let ok = self.tg_edit_message_text(chat_id_i64, msg_id_i64, &text).await?;
+        if !ok {
+            anyhow::bail!("editMessageText reported failure");
+        }
+        Ok(())
+    }
+
+    /// RFC §7.1 Phase 3: delete a Telegram message.
+    async fn delete_message(
+        &self,
+        target: &crate::channels::SendTarget,
+        message_id: &crate::channels::MessageId,
+    ) -> anyhow::Result<()> {
+        let (chat_id, _thread_id) = Self::parse_reply_target(&target.recipient);
+        let chat_id_i64: i64 = chat_id
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid chat_id '{chat_id}': {e}"))?;
+        let msg_id_i64: i64 = message_id
+            .as_str()
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid message_id '{}': {e}", message_id.as_str()))?;
+        self.tg_delete_message(chat_id_i64, msg_id_i64).await
     }
 
     async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>> {
