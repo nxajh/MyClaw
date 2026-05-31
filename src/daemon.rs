@@ -771,13 +771,25 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             Arc::clone(&delegator_arc) as Arc<dyn AgentDelegator>,
         );
 
-        // Build parent tool registry: same tools + agent_delegate + tool_search.
+        // Build parent tool registry: same tools + agent_delegate + agent_list
+        // + agent_kill + tool_search.
         let mut parent_tools = ToolRegistry::new();
         for tool in base_tools_arc.all_tools() {
             parent_tools.register(tool);
         }
         parent_tools.register(Arc::new(delegate_tool));
         tracing::debug!("agent_delegate tool registered (multi-agent mode)");
+
+        // agent_list / agent_kill let the parent inspect and terminate running
+        // sub-agents. Both depend on the DelegationCoordinator, so they live in
+        // the multi-agent branch (single-agent mode has no coordinator).
+        parent_tools.register(Arc::new(
+            crate::tools::AgentListTool::new(Arc::clone(&delegator_arc)),
+        ));
+        parent_tools.register(Arc::new(
+            crate::tools::AgentKillTool::new(Arc::clone(&delegator_arc)),
+        ));
+        tracing::debug!("agent_list / agent_kill tools registered (multi-agent mode)");
 
         let tool_search = crate::tools::ToolSearchTool::new(Arc::clone(&base_tools_arc));
         parent_tools.register(Arc::new(tool_search));
