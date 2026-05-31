@@ -21,7 +21,8 @@
 11. [实施阶段](#11-实施阶段)
 12. [测试计划](#12-测试计划)
 13. [跨模块耦合与迁移清单](#13-跨模块耦合与迁移清单)
-14. [附录](#附录-a-sendmessage-删除时间线)
+14. [Phase 4 — 群组安全策略归一（方向 C 设计）](#14-phase-4--群组安全策略归一方向-c-设计)
+15. [附录](#附录-a-sendmessage-删除时间线)
 
 ---
 
@@ -1131,14 +1132,20 @@ if let Some(ch) = channel_for_send {
 **风险**：低。默认实现返回 Err，不影响不支持的 channel。Telegram 的 edit/delete
 已有成熟实现，只是签名包装。
 
-### Phase 4：群组安全策略抽象（P2）
+### Phase 4：群组安全策略归一（P2，方向 C — 详见 §14）
 
-**范围**：
-- 新增 `ChannelSecurityPolicy` trait（白名单/@过滤/DM 策略）
-- 各 channel 的安全逻辑提取到独立 struct
-- Orchestrator 在 dispatch 前统一检查安全策略
+**摘要**（完整设计见 §14）：
 
-**风险**：中。需要重构各 channel 的鉴权代码。
+- 新增类型：`ChannelSecurityPolicy` 数据结构 + `AllowList` / `GroupAuthMode` /
+  `MessageScope` / `AuthDecision` 枚举
+- Channel trait 新增 `security_policy(&self) -> &ChannelSecurityPolicy` +
+  `check_authorization(sender, scope) -> AuthDecision`
+- **破坏性变更**：Wechat 的 `allowed_users = []` 语义从"允许全部"统一为"拒绝
+  全部"（与 Telegram 对齐）；保留 `["*"]` 作为"显式允许全部"的统一约定
+- 启动期 warn log 兜底；CHANGELOG 标注 BREAKING
+
+**风险**：中。Wechat 配置语义变更需要 release note + warn log；refactor
+所有 channel 的 inline 检查到 policy 调用。
 
 ### Phase 5：按钮回调通用化（P2）
 
@@ -1481,6 +1488,343 @@ line 92-93 定义的标准约定，工具按需读取即可。
 **结论**：Channel 与其他模块的接口形态**总体合理，无需重新设计**。唯一的偏差
 是 AskUserTool 自持 channels map 这一历史遗留，按本 RFC §13.5 的方案在 Phase 2
 随手清理即可。
+
+---
+
+## 14. Phase 4 — 群组安全策略归一（方向 C 设计）
+
+> 本节是 §11 Phase 4 的深入设计文档。结论：在三种候选方向中选 **C — 语义归一**，
+> 用一次性、可观测、可文档化的破坏性变更换长期清爽的数据模型。
+
+### 14.1 当前安全检查的散落形态
+
+| Channel | 检查位置 | 数据 | 空白名单语义 |
+|---------|---------|------|------------|
+| **Telegram** | `poll_loop` 内 inline | `Arc<RwLock<Vec<String>>>` + `mention_only: bool` | **拒绝全部** + warn log |
+| **QQBot** | `is_user_allowed` / `is_group_allowed`，3 处调用 | `config.allow_from: Option<Vec<String>>` + `config.group_allow_from` | `None` = **允许全部**；`Some(empty)` 等同 `None` |
+| **Wechat** | inline 一处 | `config.allowed_users: Vec<String>` | 空 = **允许全部** |
+| **Client** | 连接层 token | — | 不适用（连接通过即可信） |
+
+**三个 channel 三套语义** —— 是 Phase 4 必须解决的根本问题。Telegram 的
+"empty = closed" 是安全默认；Wechat / QQBot 的 "empty = open" 是历史遗留。
+
+### 14.2 决策：方向 C 而非 A/B
+
+候选方向回顾：
+
+- **A**（仅命名约定）：trait 方法包装现有 inline 检查，零语义变更。
+- **B**（保留异构数据模型）：`AllowList { Open, Whitelist(Vec), WhitelistStrict(Vec) }`
+  把语义差异编码到类型里。
+- **C**（语义归一）：所有 channel 统一为"empty = closed"，破坏性变更 Wechat。
+
+**为什么 C 在"有需求"前提下胜出 B**：
+
+1. **B 的 `WhitelistStrict` 是永久负债** —— 新代码不会主动用它，只是为兼容
+   存在；下一次有人加 channel 时面临"我该用 Whitelist 还是 WhitelistStrict？"
+   的决策瘫痪。
+2. **Admin UI 渲染 B 是 UX 灾难** —— "为什么 `Whitelist([])` 和
+   `WhitelistStrict([])` 看起来一样行为不同？"用户无法理解。
+3. **C 的破坏性远比纸面看起来小**：
+   - Wechat 故意配置空 `allowed_users` 让所有人能聊 = 反模式，几乎无人采用
+   - 默认拒绝是更安全的方向（防止"忘了配白名单 = 全开"事故）
+   - `["*"]` 已经是 Telegram 的"显式允许全部"约定，迁移成本为一行 config
+4. **C 的破坏可观测**：启动时 warn log + CHANGELOG 一次性消化，过渡期短
+
+### 14.3 新增类型（`src/channels/security.rs` 新文件）
+
+```rust
+/// 哪些用户被允许向本 channel 发消息。
+///
+/// 跨 channel 统一语义：`Whitelist(empty)` = 拒绝全部；要"允许全部"
+/// 必须显式用 `All`（config 写 `allowed_users = ["*"]`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AllowList {
+    /// 显式允许全部。Config 写 `["*"]`，或单独的 wildcard 标记。
+    All,
+    /// 限定白名单。空集 = 拒绝全部，会在启动期触发 warn log。
+    Whitelist(Vec<String>),
+}
+
+impl AllowList {
+    /// 从 config 的 `Option<Vec<String>>` 解析为本类型。
+    /// `None`               → `All`（向后兼容 QQBot 历史语义）
+    /// `Some(vec ["*"])`    → `All`
+    /// `Some(empty)`        → `Whitelist(vec![])` 拒绝全部（与 Telegram 对齐）
+    /// `Some(vec)` 否则     → `Whitelist(vec)`
+    pub fn from_config(opt: Option<Vec<String>>) -> Self {
+        match opt {
+            None => Self::All,
+            Some(v) if v.iter().any(|s| s == "*") => Self::All,
+            Some(v) => Self::Whitelist(v),
+        }
+    }
+
+    pub fn allows(&self, sender: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Whitelist(v) => v.iter().any(|u| u == sender),
+        }
+    }
+}
+
+/// 群消息处理策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupAuthMode {
+    /// 拒绝所有群消息（仅响应 1:1）
+    Reject,
+    /// 接受所有群消息
+    Open,
+    /// 仅响应 @提及本 bot 的群消息（Telegram 现有 mention_only=true 行为）
+    MentionOnly,
+}
+
+/// 完整的安全策略数据。每个 channel 暴露一份，admin UI / 配置工具
+/// 可以读取或（未来）写入。
+#[derive(Debug, Clone)]
+pub struct ChannelSecurityPolicy {
+    pub allowed_users: AllowList,
+    /// 群消息策略 + 群白名单。`group_allowlist` 与 `allowed_users` 独立
+    /// 控制：用户白名单决定"个人发消息能否被回复"，群白名单决定
+    /// "在哪些群里被听到"。
+    pub group_mode: GroupAuthMode,
+    pub group_allowlist: AllowList,
+}
+
+impl ChannelSecurityPolicy {
+    /// 安全的 "all open" 默认（用于 Client 这类无平台级鉴权概念的 channel）。
+    pub fn open() -> Self {
+        Self {
+            allowed_users: AllowList::All,
+            group_mode: GroupAuthMode::Open,
+            group_allowlist: AllowList::All,
+        }
+    }
+}
+
+/// 入站消息的作用域（用于 `check_authorization`）。
+/// `'a` 让调用方避免 String 分配，热路径调用零成本。
+#[derive(Debug, Clone, Copy)]
+pub enum MessageScope<'a> {
+    /// 1:1 私聊。
+    Direct,
+    /// 群组消息。`id` 用于查 group_allowlist；
+    /// `has_mention` 用于 MentionOnly 模式。
+    Group { id: &'a str, has_mention: bool },
+}
+
+/// 鉴权决策。三态而非 bool —— 调用方需要区分"静默丢弃"和"显式拒绝"
+/// 以决定是否 log 或回 ack。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthDecision {
+    Allow,
+    /// 静默丢弃。例：群消息没 @bot 且 mention_only=true ——
+    /// 这是预期路径，不该 warn。
+    Ignore,
+    /// 显式拒绝，调用方应当 log（含 reason）。例：白名单外的用户
+    /// 试图私聊 —— 安全相关，需可追溯。
+    Reject { reason: &'static str },
+}
+
+impl AuthDecision {
+    pub fn allowed(self) -> bool { matches!(self, Self::Allow) }
+}
+```
+
+### 14.4 Channel trait 改动
+
+```rust
+#[async_trait]
+pub trait Channel: Send + Sync {
+    // ── 既有方法不变 ──
+
+    /// 本 channel 的安全策略快照。Admin UI / 配置工具的读取入口。
+    /// 默认 `ChannelSecurityPolicy::open()`（Client 适用）。
+    fn security_policy(&self) -> ChannelSecurityPolicy {
+        ChannelSecurityPolicy::open()
+    }
+
+    /// 对单条入站消息做鉴权决策。Channel 自己的 listen/poll loop
+    /// 在 forward 给 orchestrator 前调用本方法。
+    /// 默认实现走 `security_policy()`：抽出快照，按字段判定。
+    fn check_authorization(&self, sender: &str, scope: MessageScope<'_>) -> AuthDecision {
+        let policy = self.security_policy();
+        match scope {
+            MessageScope::Direct => {
+                if policy.allowed_users.allows(sender) {
+                    AuthDecision::Allow
+                } else {
+                    AuthDecision::Reject { reason: "user not in allowed_users" }
+                }
+            }
+            MessageScope::Group { id, has_mention } => {
+                match policy.group_mode {
+                    GroupAuthMode::Reject => AuthDecision::Ignore,
+                    GroupAuthMode::MentionOnly if !has_mention => AuthDecision::Ignore,
+                    _ => {
+                        if !policy.group_allowlist.allows(id) {
+                            AuthDecision::Reject { reason: "group not in allowlist" }
+                        } else if policy.allowed_users.allows(sender) {
+                            AuthDecision::Allow
+                        } else {
+                            AuthDecision::Reject { reason: "sender not in allowed_users" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+**热重载支持**：`security_policy()` 返回值类型（不是引用），channel 可以
+内部用 `Arc<RwLock<ChannelSecurityPolicy>>`，每次调用 clone 出快照。每次
+调用一次 mutex + clone，对热路径来说可接受（一个 `Vec<String>` clone 在
+百微秒级，且 listen loop 本身就是 I/O bound）。
+
+### 14.5 各 channel 的迁移
+
+| Channel | 改动 |
+|---------|------|
+| **Client** | 用默认 `security_policy() = open()`；连接层 token 校验保留 |
+| **Telegram** | `security_policy()` 从 `Arc<RwLock<Vec<String>>>` + `mention_only` 合成；`is_user_allowed` 删除，poll_loop 改调 `check_authorization` |
+| **QQBot** | `security_policy()` 从 `config.allow_from` + `config.group_allow_from` 合成（走 `AllowList::from_config`）；`is_user_allowed` / `is_group_allowed` 删除 |
+| **Wechat** | `security_policy()` 从 `config.allowed_users` 合成（走 `from_config`）；inline 检查删除 |
+
+每个 channel 的 listen / poll / receive loop 把原有的"if 拒绝就 continue"
+改成：
+
+```rust
+match self.check_authorization(&sender, scope) {
+    AuthDecision::Allow => { /* forward to orchestrator */ }
+    AuthDecision::Ignore => { continue; }
+    AuthDecision::Reject { reason } => {
+        warn!(sender = %sender, reason, "channel rejected inbound");
+        continue;
+    }
+}
+```
+
+### 14.6 破坏性变更细则
+
+| 平台 | Phase 4 前 | Phase 4 后 | 修复方法 |
+|------|-----------|-----------|--------|
+| Telegram `allowed_users = []` | 拒绝全部 | 拒绝全部 | 无变化 |
+| Telegram `allowed_users = ["alice"]` | alice 允许 | alice 允许 | 无变化 |
+| Telegram `allowed_users = ["*"]` | 允许全部 | 允许全部 | 无变化 |
+| QQBot `allow_from` 未设 | 允许全部（None）| 允许全部（None）| 无变化 |
+| QQBot `allow_from = []` | 允许全部（None 等价）| **拒绝全部** | 改为 `["*"]` 或移除字段 |
+| QQBot `allow_from = ["uid"]` | uid 允许 | uid 允许 | 无变化 |
+| **Wechat `allowed_users = []`** | **允许全部** | **拒绝全部** | 改为 `["*"]` |
+| Wechat `allowed_users = ["uid"]` | uid 允许 | uid 允许 | 无变化 |
+
+**唯一真正破坏**：Wechat 空数组 + QQBot 空数组（QQBot 的 `None` vs `Some([])`
+原本等价，归一后 `Some([])` 变成拒绝）。
+
+### 14.7 启动期 warn log 兜底
+
+每个 channel 启动时（`listen()` 第一次成功后）调用一次：
+
+```rust
+fn warn_if_locked_down(&self) {
+    let policy = self.security_policy();
+    if matches!(policy.allowed_users, AllowList::Whitelist(ref v) if v.is_empty()) {
+        warn!(
+            channel = %self.name(),
+            "allowed_users is empty — channel will reject all messages. \
+             To allow all senders, set allowed_users = [\"*\"]. \
+             (Phase 4 behavior change for wechat/qqbot, see CHANGELOG)"
+        );
+    }
+}
+```
+
+依赖运行时观察，配上文档说明，足够引导用户自助修复。
+
+### 14.8 CHANGELOG 草稿
+
+```markdown
+## BREAKING: Channel security policy unified (Phase 4)
+
+`allowed_users` semantics now match across all channels:
+
+- Empty list = reject all messages (was: allow-all on wechat/qqbot)
+- ["*"] = explicitly allow all (was: telegram-only convention)
+- Omitted field = allow all (QQBot's prior `None` behavior, preserved)
+
+If your wechat or qqbot config has `allowed_users = []` and you want to
+keep the prior "allow all" behavior, change it to `allowed_users = ["*"]`.
+Otherwise the channel will start with all messages rejected and log a
+warning at startup.
+
+Telegram is unaffected; this brings the other channels to its behavior.
+```
+
+### 14.9 测试
+
+```rust
+#[test]
+fn allow_list_from_config() {
+    use AllowList::*;
+    assert_eq!(AllowList::from_config(None), All);
+    assert_eq!(AllowList::from_config(Some(vec![])), Whitelist(vec![]));
+    assert_eq!(AllowList::from_config(Some(vec!["*".into()])), All);
+    assert_eq!(
+        AllowList::from_config(Some(vec!["alice".into()])),
+        Whitelist(vec!["alice".into()])
+    );
+}
+
+#[test]
+fn telegram_default_check_authorization() {
+    let ch = TelegramChannel::new(config_with_users(&["alice"]));
+    assert!(ch.check_authorization("alice", MessageScope::Direct).allowed());
+    assert!(!ch.check_authorization("bob", MessageScope::Direct).allowed());
+}
+
+#[test]
+fn group_mention_only_ignores_unmentioned() {
+    let ch = TelegramChannel::new(config_with_mention_only());
+    assert_eq!(
+        ch.check_authorization("alice", MessageScope::Group { id: "g1", has_mention: false }),
+        AuthDecision::Ignore
+    );
+    assert_eq!(
+        ch.check_authorization("alice", MessageScope::Group { id: "g1", has_mention: true }),
+        AuthDecision::Allow
+    );
+}
+
+#[test]
+fn wechat_empty_allowlist_now_rejects() {
+    // BREAKING regression test
+    let ch = WechatChannel::new(config_with_users(&[]));
+    assert!(!ch.check_authorization("anyone", MessageScope::Direct).allowed());
+}
+```
+
+### 14.10 不在 Phase 4 范围内（保留给未来）
+
+- **Orchestrator-level 中央拦截**：Phase 4 仍由 channel 内部调用
+  `check_authorization`。trait 方法已经就位，未来若要在 `handle_channel_event`
+  入口加一次调用做 audit log，只是一行新代码。
+- **跨 channel 策略**（"alice 在 telegram 允许但 wechat 不允许"）：当前数据
+  模型在 channel 内部，无法表达跨 channel 规则。需要时另起 Policy Service。
+- **动态权限**（运行时通过 API 修改 policy）：`security_policy()` 返回值
+  而非引用是为此预留扩展空间，但 admin API 不在 Phase 4 范围。
+
+### 14.11 风险与回滚
+
+**风险**：
+
+1. Wechat / QQBot 用户配置空数组并依赖"allow all"行为 → 启动期 warn log +
+   CHANGELOG 引导自助修复
+2. 热路径调用 `security_policy()` clone Vec<String> → listen/poll 本就是
+   I/O bound，clone 开销可忽略；如成为瓶颈再换 `Arc<...>` 共享
+
+**回滚**：Phase 4 是纯 channel 内部重构，不动 orchestrator / session。
+若发现 Wechat 用户大面积配置依赖旧行为，可在下一个 patch release 临时
+加一个 `allowed_users_empty_means_open: bool = false` 配置项作为兼容
+开关，下两个 release 强制移除。
 
 ---
 
