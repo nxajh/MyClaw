@@ -378,14 +378,21 @@ impl Agent {
             // Tool calls present — append assistant message with the calls
             // (preserving thinking content for re-send), execute each tool,
             // append tool_result messages, then loop for the next LLM call.
+            //
+            // Only carry the Thinking ContentPart when we captured BOTH the
+            // reasoning text AND its signature. Without a signature the next
+            // Anthropic round-trip rejects the message with `Field required`,
+            // so we'd rather lose the reasoning content than lose the turn.
             let mut assistant_msg = ChatMessage::assistant_text(&response.text);
             assistant_msg.tool_calls = Some(response.tool_calls.clone());
-            if let Some(ref thinking_text) = response.reasoning_content {
+            if let (Some(thinking_text), Some(sig)) =
+                (&response.reasoning_content, &response.thinking_signature)
+            {
                 assistant_msg.parts.insert(
                     0,
                     ContentPart::Thinking {
                         thinking: thinking_text.clone(),
-                        signature: response.thinking_signature.clone(),
+                        signature: Some(sig.clone()),
                     },
                 );
             }

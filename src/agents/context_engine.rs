@@ -262,10 +262,18 @@ impl ContextEngine {
 
             let mut assistant_msg = ChatMessage::assistant_text(&response.text);
             assistant_msg.tool_calls = Some(response.tool_calls.clone());
-            if let Some(ref thinking_text) = response.reasoning_content {
+            // Same guard as agent.rs: only carry the Thinking block when we
+            // have both the reasoning text and its signature, or Anthropic
+            // rejects the next request with `Field required`.
+            if let (Some(thinking_text), Some(sig)) =
+                (&response.reasoning_content, &response.thinking_signature)
+            {
                 assistant_msg.parts.insert(
                     0,
-                    ContentPart::Thinking { thinking: thinking_text.clone(), signature: response.thinking_signature.clone() },
+                    ContentPart::Thinking {
+                        thinking: thinking_text.clone(),
+                        signature: Some(sig.clone()),
+                    },
                 );
             }
             messages.push(assistant_msg);
