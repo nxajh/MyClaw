@@ -220,7 +220,7 @@ impl Agent {
             };
 
             let stream = provider.chat(req)?;
-            let response = collect_stream(stream, session.turn_stream.as_mut()).await?;
+            let response = collect_stream(stream, &mut session.turn_stream).await?;
 
             // Update Session.token_tracker from the API response. Target
             // architecture: tokens are tracked solely on the Session (so
@@ -336,11 +336,11 @@ impl Agent {
             if response.tool_calls.is_empty() {
                 // Emit Done event before persisting so the streaming UI gets
                 // the final-text signal in the canonical order.
-                if let Some(stream) = session.turn_stream.as_mut() {
-                    let _ = stream
-                        .push(TurnEvent::Done { text: response.text.clone() })
-                        .await;
-                }
+                push_or_drop(
+                    &mut session.turn_stream,
+                    TurnEvent::Done { text: response.text.clone() },
+                )
+                .await;
                 if response.text.trim().is_empty() {
                     // Empty response: retry up to MAX_EMPTY_RETRIES like
                     // AgentLoop's chat_loop does. The provider sometimes
@@ -413,16 +413,18 @@ impl Agent {
 
                 // Emit ToolCall event before execution (streaming UIs show
                 // the call spinner).
-                if let Some(stream) = session.turn_stream.as_mut() {
+                {
                     let args: serde_json::Value = serde_json::from_str(&call.arguments)
                         .unwrap_or(serde_json::Value::Null);
-                    let _ = stream
-                        .push(TurnEvent::ToolCall {
+                    push_or_drop(
+                        &mut session.turn_stream,
+                        TurnEvent::ToolCall {
                             id: call.id.clone(),
                             name: call.name.clone(),
                             args,
-                        })
-                        .await;
+                        },
+                    )
+                    .await;
                 }
 
                 let result = tool_executor
@@ -463,15 +465,15 @@ impl Agent {
                 // Emit ToolResult event after execution, before persisting,
                 // so the UI updates the call status without waiting for
                 // disk I/O.
-                if let Some(stream) = session.turn_stream.as_mut() {
-                    let _ = stream
-                        .push(TurnEvent::ToolResult {
-                            id: call.id.clone(),
-                            name: call.name.clone(),
-                            output: result_content.clone(),
-                        })
-                        .await;
-                }
+                push_or_drop(
+                    &mut session.turn_stream,
+                    TurnEvent::ToolResult {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        output: result_content.clone(),
+                    },
+                )
+                .await;
 
                 session.add_tool_result(call.id.clone(), result_content, is_error);
                 persist_last(session);
@@ -660,6 +662,28 @@ struct CollectedResponse {
     usage: Option<crate::providers::ChatUsage>,
 }
 
+/// Push a `TurnEvent` to `session.turn_stream`, dropping the stream on
+/// permanent transport failure (RFC §7.6.5(a)).
+///
+/// Without this short-circuit, `Agent::run` would keep generating chunks
+/// for a disconnected client and waste LLM output budget. After drop,
+/// subsequent `push_or_drop` calls become no-ops; the end-of-turn fallback
+/// `send_payload` in `SessionContext::process_turn` then ensures the user
+/// still receives the final text via the non-streaming path.
+async fn push_or_drop(
+    turn_stream: &mut Option<Box<dyn crate::channels::TurnStream>>,
+    event: TurnEvent,
+) {
+    let Some(stream) = turn_stream.as_mut() else { return };
+    if let Err(e) = stream.push(event).await {
+        tracing::warn!(
+            err = %e,
+            "turn_stream push failed; dropping stream for remainder of turn"
+        );
+        *turn_stream = None;
+    }
+}
+
 /// Read a full stream into a [`CollectedResponse`]. When `channel`
 /// per-chunk `TurnEvent::Chunk` / `Thinking` events are pushed via
 /// `session.turn_stream.push(…)` as text streams in (RFC §7.6).
@@ -667,7 +691,7 @@ struct CollectedResponse {
 /// max_output_bytes guard, no cancellation token.
 async fn collect_stream(
     stream: BoxStream<StreamEvent>,
-    mut turn_stream: Option<&mut Box<dyn crate::channels::TurnStream>>,
+    turn_stream: &mut Option<Box<dyn crate::channels::TurnStream>>,
 ) -> anyhow::Result<CollectedResponse> {
     let mut stream = stream;
     let mut text = String::new();
@@ -707,19 +731,15 @@ async fn collect_stream(
         match event {
             StreamEvent::Delta { text: delta } => {
                 text.push_str(&delta);
-                if let Some(stream) = turn_stream.as_deref_mut() {
-                    let _ = stream
-                        .push(TurnEvent::Chunk { delta: delta.clone() })
-                        .await;
-                }
+                push_or_drop(turn_stream, TurnEvent::Chunk { delta: delta.clone() }).await;
             }
             StreamEvent::Thinking { text: delta } => {
                 if !delta.is_empty() {
-                    if let Some(stream) = turn_stream.as_deref_mut() {
-                        let _ = stream
-                            .push(TurnEvent::Thinking { delta: delta.clone() })
-                            .await;
-                    }
+                    push_or_drop(
+                        turn_stream,
+                        TurnEvent::Thinking { delta: delta.clone() },
+                    )
+                    .await;
                     if let Some(rc) = &mut reasoning_content {
                         rc.push_str(&delta);
                     } else {
