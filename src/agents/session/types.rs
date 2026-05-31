@@ -244,17 +244,16 @@ impl Session {
         }
         let mut msg = ChatMessage::assistant_text(&text);
         msg.tool_calls = Some(tool_calls);
-        // Only attach a Thinking ContentPart when we have BOTH the thinking
-        // text AND a valid signature — Anthropic Messages API rejects
-        // signature-less thinking blocks on replay. Dropping the block when
-        // the signature is missing (truncated stream, non-Anthropic provider
-        // that emitted reasoning without signing) keeps history replayable.
-        if let (Some(thinking), Some(sig)) = (thinking, thinking_signature) {
+        // Persist whatever reasoning the provider returned, signature or not.
+        // Non-Anthropic providers (Xiaomi MiMo, …) emit thinking without a
+        // signature_delta — that's their normal protocol, not a bug.
+        // Provider-specific renderers (anthropic/message_rendering.rs) decide
+        // whether to include the block when replaying; Anthropic's renderer
+        // already drops signature-less blocks via filter_map to avoid the
+        // `Field required` 400.
+        if let Some(thinking) = thinking {
             use crate::providers::ContentPart;
-            msg.parts.insert(0, ContentPart::Thinking {
-                thinking,
-                signature: Some(sig),
-            });
+            msg.parts.insert(0, ContentPart::Thinking { thinking, signature: thinking_signature });
         }
         self.history.push(msg);
         self.message_ids.push(0);

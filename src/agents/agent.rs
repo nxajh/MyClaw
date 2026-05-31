@@ -796,17 +796,6 @@ async fn collect_stream(
         }
     }
 
-    // Invariant: every thinking_delta sequence MUST be terminated by a
-    // signature_delta. If we accumulated thinking text but never saw the
-    // signature, the stream was truncated (network blip, HTTP early close,
-    // provider hiccup). Bail so the caller's retry path re-issues the
-    // request rather than persisting an unreplayable Thinking block.
-    if reasoning_content.is_some() && thinking_signature.is_none() {
-        anyhow::bail!(
-            "stream ended with thinking content but no signature_delta (truncated upstream)"
-        );
-    }
-
     Ok(CollectedResponse {
         text,
         reasoning_content,
@@ -857,26 +846,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn collect_stream_bails_on_thinking_without_signature() {
+    async fn collect_stream_accepts_thinking_without_signature() {
         use crate::providers::StreamEvent;
 
-        // Stream truncated: thinking content arrived but signature_delta
-        // never did. Simulates network blip / HTTP early close after
-        // thinking_delta.
+        // Non-Anthropic providers (Xiaomi MiMo, …) speak Anthropic-compatible
+        // protocol but never emit signature_delta. Collect must succeed; the
+        // anthropic renderer's filter_map drops the unreplayable block at
+        // send time so the next turn doesn't 400.
         let s = events_to_stream(vec![
             StreamEvent::Thinking { text: "let me think...".into() },
             StreamEvent::Done { reason: crate::providers::StopReason::EndTurn },
         ]);
         let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
-        let result = collect_stream(s, &mut turn_stream).await;
-        let err = match result {
-            Err(e) => e.to_string(),
-            Ok(_) => panic!("should bail when thinking lacks signature"),
+        let resp = match collect_stream(s, &mut turn_stream).await {
+            Ok(r) => r,
+            Err(e) => panic!("should succeed without signature: {e}"),
         };
-        assert!(
-            err.contains("signature_delta") || err.contains("truncated"),
-            "error should mention truncated/signature_delta, got: {err}"
-        );
+        assert_eq!(resp.reasoning_content.as_deref(), Some("let me think..."));
+        assert!(resp.thinking_signature.is_none());
     }
 
     #[tokio::test]

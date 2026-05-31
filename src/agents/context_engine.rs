@@ -359,14 +359,6 @@ impl ContextEngine {
             }
         }
 
-        // Same invariant as Agent::collect_stream: thinking content without
-        // a signature means the stream was truncated upstream — bail to retry.
-        if reasoning_content.is_some() && thinking_signature.is_none() {
-            anyhow::bail!(
-                "summarizer stream ended with thinking content but no signature_delta"
-            );
-        }
-
         Ok(SummaryResponse { text, reasoning_content, thinking_signature, tool_calls, usage })
     }
 }
