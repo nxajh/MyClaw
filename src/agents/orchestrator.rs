@@ -87,10 +87,9 @@ pub struct Orchestrator {
     /// `Arc<Self>` sharing pattern that scheduler dispatch relies on).
     listener_handles: Arc<TokioMutex<Vec<JoinHandle<()>>>>,
     /// AskRouter (RFC v2 §三.B): indexed by session.id, fulfilled by inbound
-    /// messages ahead of process_turn. Wired here so the new
-    /// `AskUserTool::with_router` path is reachable end-to-end before
-    /// AgentLoop is deleted (H45). Shared with daemon-side AskUserTool
-    /// construction.
+    /// messages ahead of process_turn. Shared with the daemon-built
+    /// `AskUserTool` (same `Arc<AskRouter>`) so the register/fulfill loop
+    /// closes through a single inbox.
     ask_router: Arc<crate::agents::AskRouter>,
     /// AgentRuntime for `Agent::run` (RFC v2 §三.A). Held alongside
     /// the legacy `agent` field — E29 will eventually swap the main-
@@ -176,10 +175,9 @@ pub struct OrchestratorParts {
     pub delegation_rx: Option<mpsc::Receiver<DelegationEvent>>,
     /// Scheduler event receiver (heartbeat ticks, cron triggers from Scheduler task).
     pub scheduler_rx: Option<mpsc::Receiver<SchedulerEvent>>,
-    /// AskRouter shared with the daemon-side `AskUserTool::with_router`
-    /// construction. The orchestrator's inbound dispatch calls
-    /// `ask_router.fulfill(session.id, msg.content)` ahead of the legacy
-    /// `pending_asks` check so both paths work during the transition.
+    /// AskRouter shared with the daemon-built `AskUserTool` (same
+    /// `Arc<AskRouter>`). The orchestrator's inbound dispatch calls
+    /// `ask_router.fulfill(session.id, msg)` to wake any pending ask.
     pub ask_router: Arc<crate::agents::AskRouter>,
     /// AgentRuntime for the new `Agent::run` per-turn path. Coexists
     /// with `agent` (legacy AgentLoop factory) until E29 swaps the
@@ -531,10 +529,10 @@ impl Orchestrator {
                 let sk = Self::session_key(&channel_type, &account_id, &msg.sender);
                 let channel_key = (channel_type.clone(), account_id.clone());
 
-                // RFC v2 §三.B: check the new `AskRouter` first (indexed
-                // by session.id, used by AskUserTool::with_router). If
-                // it fulfilled an outstanding ask, the inbound message
-                // is consumed and no fresh turn is spawned.
+                // RFC v2 §三.B: check the AskRouter first (indexed by
+                // session.id, registered by AskUserTool). If it fulfilled
+                // an outstanding ask, the inbound message is consumed and
+                // no fresh turn is spawned.
                 {
                     let session_id = self
                         .session_manager

@@ -396,12 +396,18 @@ async fn build_tools(
     workspace_dir: &std::path::Path,
     _knowledge_dir: &str,
     user_resolver: &Arc<crate::agents::UserResolver>,
+    ask_router: Arc<crate::agents::AskRouter>,
 ) -> ToolRegistry {
     let mut tools = ToolRegistry::new();
     let builtin = crate::tools::builtin_tools();
     for tool in builtin {
         tools.register(tool);
     }
+
+    // AskUserTool reads `session.channel` at execute time — no per-tool
+    // channels map. Bound to the shared `AskRouter` so Orchestrator's
+    // inbound dispatch can fulfill its waits via the same router instance.
+    tools.register(Arc::new(crate::tools::AskUserTool::new(ask_router)));
 
     // Register additional built-in tools.
     tools.register(Arc::new(crate::tools::ListDirTool::new()));
@@ -703,8 +709,21 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // G39: shared user resolver — defaults to identity (user_id == routing_key).
     let user_resolver = Arc::new(crate::agents::UserResolver::new());
 
-    // Build tool registry (all built-in + MCP + skill tools).
-    let mut tools = build_tools(&mcp_manager, &skills_arc, &shared_scheduler, &config.workspace_dir, config.knowledge_dir.to_str().unwrap_or("."), &user_resolver).await;
+    // Shared AskRouter — wired into both AskUserTool (register side, inside
+    // build_tools) and the Orchestrator (fulfill side, set on OrchestratorParts
+    // below). Same Arc, single inbox.
+    let ask_router = Arc::new(crate::agents::AskRouter::new());
+
+    // Build tool registry (all built-in + MCP + skill tools + ask_user).
+    let mut tools = build_tools(
+        &mcp_manager,
+        &skills_arc,
+        &shared_scheduler,
+        &config.workspace_dir,
+        config.knowledge_dir.to_str().unwrap_or("."),
+        &user_resolver,
+        Arc::clone(&ask_router),
+    ).await;
 
     // Build sub-agent configs (AGENT.md files from workspace/agents/).
     let sub_agent_configs = build_sub_agents(&config.workspace_dir);
@@ -890,22 +909,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let scheduler_config = config.scheduler.clone();
 
     // scheduler_tx already created above; scheduler_rx goes to OrchestratorParts.
-
-    // F35 / partial E29: build the AskRouter once and share between the
-    // orchestrator (fulfill side) and AskUserTool::with_router (register
-    // side). Stored as a top-level binding so future tool constructions
-    // (DelegateTool etc.) can share it too.
-    //
-    // The matching `AskUserTool::with_router(ask_router, channels_map)`
-    // registration belongs alongside the rest of `build_tools()`. That
-    // function runs before `channels` is built in this function, so a
-    // clean swap requires either threading `Arc<AskRouter>` into
-    // build_tools earlier or constructing the real tool here and
-    // overwrite-registering it after build_tools returns. Doing the
-    // latter would need a `tools_mut()` accessor on the Arc<ToolRegistry>
-    // we don't yet have. Left as the immediate F35 wire-up the next
-    // session can finish in ~10 lines.
-    let ask_router = Arc::new(crate::agents::AskRouter::new());
+    // ask_router was built above (before build_tools) so AskUserTool can
+    // register with the same instance the orchestrator fulfills from.
 
     // E30 final: build AgentRuntime to hand to the orchestrator. Today
     // the orchestrator's main loop still constructs AgentLoop per

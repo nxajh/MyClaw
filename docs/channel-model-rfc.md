@@ -1339,47 +1339,53 @@ Phase 1 channel 实现的字段从原本的几个 `max_message_length / unit` �
 
 ### 13.5 Session.channel transient 字段：当前读取方与不一致点
 
-`Session.channel: Option<Arc<dyn Channel>>` 由 `process_turn` 写入。读取方：
+`Session.channel: Option<Arc<dyn Channel>>` 由 `process_turn` 写入。读取方
+（已全部统一）：
 
 | 读取方 | 现状 | 一致性 |
 |---|---|---|
-| `Agent::run` 的 `collect_stream` | `session.channel.as_ref()` 调 `push_event(reply_target, ev)` | ✅ 走官方约定 |
-| `Agent::run` 的 cancel checkpoint | `session.channel.as_ref()` 调 `cancel_signal(reply_target)` | ✅ 走官方约定 |
-| `AskUserTool` | **解析 `session.owner` 字符串 → 自持 `channels: ChannelMap` 反查** | ❌ **绕开 session.channel，自持 channels map** |
+| `Agent::run` 的 `collect_stream` | `session.turn_stream.as_mut()` 调 `push(ev)`（Phase 1.5 切换）| ✅ 走官方约定 |
+| `Agent::run` 的 cancel checkpoint | `session.turn_stream.as_ref().and_then(\|s\| s.cancel_token())` | ✅ 走官方约定 |
+| `AskUserTool` | `session.channel.as_ref()` 调 `send_payload(&target, &payload)` | ✅ **重构后统一**（见下） |
 | 其他工具 | 不读 | — |
 
-`AskUserTool` 自持 `Option<ChannelMap>` 是历史遗留——`session.channel`
-transient 字段晚于 AskUserTool 出现。**应清理为统一约定**：所有需要 channel
-访问的工具都应读 `session.channel`，不自持 channels map。
+**历史背景**：`AskUserTool` 曾自持 `Option<ChannelMap>`，绕开 `session.channel`
+解析 `session.owner` 字符串反查 channel。`session.channel` transient 字段晚于
+AskUserTool 出现，所以一直没收口。本 RFC 落地的同时**已经把这处历史不一致
+清掉**。
 
-**Phase 2 AskUserTool 改造完整内容**（§13.2 的扩展）：
+**实际改造内容**：
 
 ```rust
-// 之前
+// 之前（含 ChannelMap 反查 + 两种构造器）
 pub struct AskUserTool {
     router: Option<Arc<AskRouter>>,
-    channels: Option<ChannelMap>,   // ← 自持 channels map
+    channels: Option<ChannelMap>,
+}
+impl AskUserTool {
+    pub fn new() -> Self { /* fallback：echo 模式，不真发问 */ }
+    pub fn with_router(router, channels) -> Self { /* 真模式 */ }
 }
 
-// 之后（接口一致性后）
+// 之后（统一约定）
 pub struct AskUserTool {
-    router: Option<Arc<AskRouter>>,
-    // 不再自持 channels — 改读 session.channel
+    router: Arc<AskRouter>,    // 必填，无 fallback
+}
+impl AskUserTool {
+    pub fn new(router: Arc<AskRouter>) -> Self { /* 唯一构造器 */ }
 }
 
 // execute() 内部
-let channel = match &session.channel {
-    Some(ch) => ch.clone(),
-    None => return Ok(ToolResult::error("ask_user: no channel on session")),
-};
-let target = SendTarget::new(session.reply_target().unwrap_or(""));
-channel.send_payload(&target, &MessagePayload::Text { content: question }).await?;
+let channel = session.channel.as_ref().ok_or(...)?;
+let target = SendTarget::new(session.reply_target().unwrap());
+channel.send_payload(&target, &MessagePayload::text(question)).await?;
 ```
 
-`daemon.rs` 构造 AskUserTool 时不再传 channels map（少一个参数）。
+`daemon.rs` 把 `ask_router` 在 `build_tools()` 调用前构造，作为参数传入；
+`build_tools()` 用 `AskUserTool::new(ask_router)` 注册到 ToolRegistry。
+旧 fallback "echo 模式"删除——没了 router 这个工具就没有意义。
 
-**Phase 4 删 SendMessage 时，唯一在工具层受影响的是 AskUserTool**——
-完成 Phase 2 改造后，删除 SendMessage 在工具层零影响。
+**Phase 4 删 SendMessage 时工具层零影响**，因为 AskUserTool 已经走 `send_payload`。
 
 ### 13.6 ChannelMessage（入站侧）的演进
 
