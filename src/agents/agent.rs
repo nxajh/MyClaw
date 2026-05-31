@@ -378,21 +378,14 @@ impl Agent {
             // Tool calls present — append assistant message with the calls
             // (preserving thinking content for re-send), execute each tool,
             // append tool_result messages, then loop for the next LLM call.
-            //
-            // Only carry the Thinking ContentPart when we captured BOTH the
-            // reasoning text AND its signature. Without a signature the next
-            // Anthropic round-trip rejects the message with `Field required`,
-            // so we'd rather lose the reasoning content than lose the turn.
             let mut assistant_msg = ChatMessage::assistant_text(&response.text);
             assistant_msg.tool_calls = Some(response.tool_calls.clone());
-            if let (Some(thinking_text), Some(sig)) =
-                (&response.reasoning_content, &response.thinking_signature)
-            {
+            if let Some(ref thinking_text) = response.reasoning_content {
                 assistant_msg.parts.insert(
                     0,
                     ContentPart::Thinking {
                         thinking: thinking_text.clone(),
-                        signature: Some(sig.clone()),
+                        signature: response.thinking_signature.clone(),
                     },
                 );
             }
@@ -803,6 +796,17 @@ async fn collect_stream(
         }
     }
 
+    // Invariant: every thinking_delta sequence MUST be terminated by a
+    // signature_delta. If we accumulated thinking text but never saw the
+    // signature, the stream was truncated (network blip, HTTP early close,
+    // provider hiccup). Bail so the caller's retry path re-issues the
+    // request rather than persisting an unreplayable Thinking block.
+    if reasoning_content.is_some() && thinking_signature.is_none() {
+        anyhow::bail!(
+            "stream ended with thinking content but no signature_delta (truncated upstream)"
+        );
+    }
+
     Ok(CollectedResponse {
         text,
         reasoning_content,
@@ -845,5 +849,71 @@ mod tests {
         let session = Session::new("s".into());
         assert!(session.persist.is_none());
         assert!(session.channel.is_none());
+    }
+
+    fn events_to_stream(events: Vec<crate::providers::StreamEvent>) -> BoxStream<crate::providers::StreamEvent> {
+        use futures_util::stream;
+        Box::pin(stream::iter(events))
+    }
+
+    #[tokio::test]
+    async fn collect_stream_bails_on_thinking_without_signature() {
+        use crate::providers::StreamEvent;
+
+        // Stream truncated: thinking content arrived but signature_delta
+        // never did. Simulates network blip / HTTP early close after
+        // thinking_delta.
+        let s = events_to_stream(vec![
+            StreamEvent::Thinking { text: "let me think...".into() },
+            StreamEvent::Done { reason: crate::providers::StopReason::EndTurn },
+        ]);
+        let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
+        let result = collect_stream(s, &mut turn_stream).await;
+        let err = match result {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("should bail when thinking lacks signature"),
+        };
+        assert!(
+            err.contains("signature_delta") || err.contains("truncated"),
+            "error should mention truncated/signature_delta, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_stream_accepts_thinking_with_signature() {
+        use crate::providers::StreamEvent;
+
+        let s = events_to_stream(vec![
+            StreamEvent::Thinking { text: "thinking...".into() },
+            StreamEvent::ThinkingSignature { signature: "sig123".into() },
+            StreamEvent::Delta { text: "hello".into() },
+            StreamEvent::Done { reason: crate::providers::StopReason::EndTurn },
+        ]);
+        let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
+        let resp = match collect_stream(s, &mut turn_stream).await {
+            Ok(r) => r,
+            Err(e) => panic!("should succeed: {e}"),
+        };
+        assert_eq!(resp.reasoning_content.as_deref(), Some("thinking..."));
+        assert_eq!(resp.thinking_signature.as_deref(), Some("sig123"));
+        assert_eq!(resp.text, "hello");
+    }
+
+    #[tokio::test]
+    async fn collect_stream_accepts_no_thinking() {
+        use crate::providers::StreamEvent;
+
+        // No thinking at all → no signature needed.
+        let s = events_to_stream(vec![
+            StreamEvent::Delta { text: "hi".into() },
+            StreamEvent::Done { reason: crate::providers::StopReason::EndTurn },
+        ]);
+        let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
+        let resp = match collect_stream(s, &mut turn_stream).await {
+            Ok(r) => r,
+            Err(e) => panic!("should succeed: {e}"),
+        };
+        assert!(resp.reasoning_content.is_none());
+        assert!(resp.thinking_signature.is_none());
     }
 }

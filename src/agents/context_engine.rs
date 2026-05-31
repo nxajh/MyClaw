@@ -262,18 +262,10 @@ impl ContextEngine {
 
             let mut assistant_msg = ChatMessage::assistant_text(&response.text);
             assistant_msg.tool_calls = Some(response.tool_calls.clone());
-            // Same guard as agent.rs: only carry the Thinking block when we
-            // have both the reasoning text and its signature, or Anthropic
-            // rejects the next request with `Field required`.
-            if let (Some(thinking_text), Some(sig)) =
-                (&response.reasoning_content, &response.thinking_signature)
-            {
+            if let Some(ref thinking_text) = response.reasoning_content {
                 assistant_msg.parts.insert(
                     0,
-                    ContentPart::Thinking {
-                        thinking: thinking_text.clone(),
-                        signature: Some(sig.clone()),
-                    },
+                    ContentPart::Thinking { thinking: thinking_text.clone(), signature: response.thinking_signature.clone() },
                 );
             }
             messages.push(assistant_msg);
@@ -365,6 +357,14 @@ impl ContextEngine {
                     chunk_timeout.as_secs()
                 ),
             }
+        }
+
+        // Same invariant as Agent::collect_stream: thinking content without
+        // a signature means the stream was truncated upstream — bail to retry.
+        if reasoning_content.is_some() && thinking_signature.is_none() {
+            anyhow::bail!(
+                "summarizer stream ended with thinking content but no signature_delta"
+            );
         }
 
         Ok(SummaryResponse { text, reasoning_content, thinking_signature, tool_calls, usage })

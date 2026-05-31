@@ -292,15 +292,25 @@ impl ChatResponse {
             }
         }
 
+        let reasoning_content = if reasoning_content.is_empty() {
+            None
+        } else {
+            Some(reasoning_content)
+        };
+
+        // Same invariant as Agent::collect_stream: thinking content without
+        // a signature means the stream was truncated upstream.
+        if reasoning_content.is_some() && thinking_signature.is_none() {
+            anyhow::bail!(
+                "stream ended with thinking content but no signature_delta (truncated upstream)"
+            );
+        }
+
         Ok(Self {
             text,
             tool_calls,
             usage,
-            reasoning_content: if reasoning_content.is_empty() {
-                None
-            } else {
-                Some(reasoning_content)
-            },
+            reasoning_content,
             thinking_signature,
             stop_reason,
         })
