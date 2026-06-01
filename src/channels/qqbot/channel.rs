@@ -972,31 +972,42 @@ impl Channel for QQBotChannel {
             Keyboard::from_pairs(&pairs)
         });
 
-        // QQ Bot requires msg_id for passive-reply mode (markdown, keyboard).
-        // Active messages (no msg_id) must use plain text (msg_type: 0).
-        let is_passive = !msg_id.is_empty();
-
         let count = chunks.len();
         for (i, chunk) in chunks.iter().enumerate() {
             // msg_seq must be unique per chunk for the same msg_id (1-based).
             let msg_seq = (i as u32) + 1;
             let is_last = i == count - 1;
 
-            let result = if is_last && is_passive {
+            let result = if is_last {
                 if let Some(kb) = &keyboard {
-                    // Last chunk with buttons — use keyboard endpoint (passive only).
-                    if let Some(openid) = recipient.strip_prefix("c2c:") {
-                        self.send_c2c_keyboard(openid, chunk, kb, msg_id).await
-                    } else if let Some(group_openid) = recipient.strip_prefix("group:") {
-                        self.send_group_keyboard(group_openid, chunk, kb, msg_id).await
+                    // Keyboard endpoint requires a passive msg_id. When
+                    // absent (active message), fall back to plain markdown.
+                    if !msg_id.is_empty() {
+                        if let Some(openid) = recipient.strip_prefix("c2c:") {
+                            self.send_c2c_keyboard(openid, chunk, kb, msg_id).await
+                        } else if let Some(group_openid) = recipient.strip_prefix("group:") {
+                            self.send_group_keyboard(group_openid, chunk, kb, msg_id).await
+                        } else {
+                            Err(anyhow::anyhow!(
+                                "invalid QQ Bot recipient format: {} (expected c2c:<openid> or group:<openid>)",
+                                recipient
+                            ))
+                        }
                     } else {
-                        Err(anyhow::anyhow!(
-                            "invalid QQ Bot recipient format: {} (expected c2c:<openid> or group:<openid>)",
-                            recipient
-                        ))
+                        // Active message + keyboard: degrade to markdown (msg_type=2).
+                        if let Some(openid) = recipient.strip_prefix("c2c:") {
+                            self.send_c2c_message(openid, chunk, msg_id, msg_seq).await
+                        } else if let Some(group_openid) = recipient.strip_prefix("group:") {
+                            self.send_group_message(group_openid, chunk, msg_id, msg_seq).await
+                        } else {
+                            Err(anyhow::anyhow!(
+                                "invalid QQ Bot recipient format: {} (expected c2c:<openid> or group:<openid>)",
+                                recipient
+                            ))
+                        }
                     }
                 } else {
-                    // Last chunk without buttons — normal send.
+                    // No keyboard — markdown send (msg_type=2).
                     if let Some(openid) = recipient.strip_prefix("c2c:") {
                         self.send_c2c_message(openid, chunk, msg_id, msg_seq).await
                     } else if let Some(group_openid) = recipient.strip_prefix("group:") {
@@ -1009,11 +1020,11 @@ impl Channel for QQBotChannel {
                     }
                 }
             } else {
-                // Non-last chunk or active message — always plain text send.
+                // Non-last chunk — markdown send (msg_type=2).
                 if let Some(openid) = recipient.strip_prefix("c2c:") {
-                    self.send_c2c_text(openid, chunk, msg_id, msg_seq).await
+                    self.send_c2c_message(openid, chunk, msg_id, msg_seq).await
                 } else if let Some(group_openid) = recipient.strip_prefix("group:") {
-                    self.send_group_text(group_openid, chunk, msg_id, msg_seq).await
+                    self.send_group_message(group_openid, chunk, msg_id, msg_seq).await
                 } else {
                     Err(anyhow::anyhow!(
                         "invalid QQ Bot recipient format: {} (expected c2c:<openid> or group:<openid>)",
