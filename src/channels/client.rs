@@ -883,7 +883,7 @@ fn handle_api_request(
         }
 
         "memory.list" => {
-            let result = match ctx.workspace_dir.get() {
+            match ctx.workspace_dir.get() {
                 Some(dir) => {
                     let memory_dir = dir.join("memory");
                     let files = crate::memory::scan_memory_files(&memory_dir);
@@ -909,8 +909,7 @@ fn handle_api_request(
                     "id": id,
                     "error": "workspace directory not configured"
                 }).to_string(),
-            };
-            result
+            }
         }
 
         "memory.write" => {
@@ -922,7 +921,7 @@ fn handle_api_request(
                 return serde_json::json!({ "type": "api_error", "id": id, "error": "invalid filename" }).to_string();
             }
             let content = params["content"].as_str().unwrap_or("");
-            let result = match ctx.workspace_dir.get() {
+            match ctx.workspace_dir.get() {
                 Some(dir) => {
                     let memory_dir = dir.join("memory");
                     let _ = std::fs::create_dir_all(&memory_dir);
@@ -933,8 +932,7 @@ fn handle_api_request(
                     }
                 }
                 None => serde_json::json!({ "type": "api_error", "id": id, "error": "workspace directory not configured" }).to_string(),
-            };
-            result
+            }
         }
 
         "memory.delete" => {
@@ -945,7 +943,7 @@ fn handle_api_request(
             if filename.contains('/') || filename.contains('\\') || filename.starts_with('.') {
                 return serde_json::json!({ "type": "api_error", "id": id, "error": "invalid filename" }).to_string();
             }
-            let result = match ctx.workspace_dir.get() {
+            match ctx.workspace_dir.get() {
                 Some(dir) => {
                     let path = dir.join("memory").join(filename);
                     match std::fs::remove_file(&path) {
@@ -954,8 +952,7 @@ fn handle_api_request(
                     }
                 }
                 None => serde_json::json!({ "type": "api_error", "id": id, "error": "workspace directory not configured" }).to_string(),
-            };
-            result
+            }
         }
 
         "memory.read" => {
@@ -977,7 +974,7 @@ fn handle_api_request(
                     "error": "invalid filename"
                 }).to_string();
             }
-            let result = match ctx.workspace_dir.get() {
+            match ctx.workspace_dir.get() {
                 Some(dir) => {
                     let path = dir.join("memory").join(filename);
                     match std::fs::read_to_string(&path) {
@@ -998,8 +995,7 @@ fn handle_api_request(
                     "id": id,
                     "error": "workspace directory not configured"
                 }).to_string(),
-            };
-            result
+            }
         }
 
         "config.get" => {
