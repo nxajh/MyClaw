@@ -53,6 +53,12 @@ pub async fn read_to_string(stream: BoxStream<StreamEvent>) -> Result<String> {
         match read_next(&mut s, STREAM_CHUNK_INTERVAL_TIMEOUT).await? {
             Some(StreamEvent::Delta { text: delta }) => text.push_str(&delta),
             Some(StreamEvent::Done { .. }) => break,
+            // A truncated provider stream surfaces as Error/HttpError; don't
+            // silently return a partial summary as if it were complete.
+            Some(StreamEvent::Error(e)) => return Err(anyhow!("stream error: {e}")),
+            Some(StreamEvent::HttpError { status, message }) => {
+                return Err(anyhow!("stream HTTP {status}: {message}"));
+            }
             Some(_) => {}
             None => break,
         }

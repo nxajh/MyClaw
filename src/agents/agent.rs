@@ -678,11 +678,10 @@ async fn collect_stream(
     let mut reasoning_content: Option<String> = None;
     let mut thinking_signature: Option<String> = None;
     let mut tool_calls: Vec<ToolCall> = Vec::new();
-    let mut stop_reason = StopReason::EndTurn;
     let mut usage: Option<crate::providers::ChatUsage> = None;
     let mut received_first_chunk = false;
 
-    loop {
+    let stop_reason = loop {
         let event_opt = if !received_first_chunk {
             match tokio::time::timeout(
                 crate::agents::llm_stream::STREAM_FIRST_CHUNK_TIMEOUT,
@@ -697,7 +696,21 @@ async fn collect_stream(
                 ),
             }
         } else {
-            stream.next().await
+            // Bound mid-stream stalls: once data has started flowing, a long
+            // silence means a broken/hung connection (distinct from a slow
+            // cold start, which the first-chunk timeout covers).
+            match tokio::time::timeout(
+                crate::agents::llm_stream::STREAM_CHUNK_INTERVAL_TIMEOUT,
+                stream.next(),
+            )
+            .await
+            {
+                Ok(ev) => ev,
+                Err(_) => anyhow::bail!(
+                    "stream stalled: no chunk for {}s mid-response",
+                    crate::agents::llm_stream::STREAM_CHUNK_INTERVAL_TIMEOUT.as_secs()
+                ),
+            }
         };
 
         let event = match event_opt {
@@ -705,7 +718,13 @@ async fn collect_stream(
                 received_first_chunk = true;
                 e
             }
-            None => break, // stream ended without explicit Done
+            // The stream ended without a terminal `Done`/`Error`/`HttpError`.
+            // A well-behaved provider always sends one; reaching here means the
+            // connection was closed mid-response. Fail the turn instead of
+            // persisting a truncated reply as if it were complete.
+            None => anyhow::bail!(
+                "stream ended without a completion marker (provider truncated the response)"
+            ),
         };
 
         match event {
@@ -765,16 +784,13 @@ async fn collect_stream(
                     usage = Some(u);
                 }
             }
-            StreamEvent::Done { reason } => {
-                stop_reason = reason;
-                break;
-            }
+            StreamEvent::Done { reason } => break reason,
             StreamEvent::HttpError { status, message } => {
                 return Err(crate::providers::ProviderHttpError { status, message }.into());
             }
             StreamEvent::Error(e) => anyhow::bail!("stream error: {}", e),
         }
-    }
+    };
 
     Ok(CollectedResponse {
         text,
@@ -882,5 +898,39 @@ mod tests {
         };
         assert!(resp.reasoning_content.is_none());
         assert!(resp.thinking_signature.is_none());
+    }
+
+    #[tokio::test]
+    async fn collect_stream_rejects_truncated_stream() {
+        use crate::providers::StreamEvent;
+
+        // Stream ends with content but no terminal Done/Error — i.e. the
+        // provider connection was closed mid-response. collect_stream must
+        // fail the turn rather than persist the partial text as complete.
+        let s = events_to_stream(vec![
+            StreamEvent::Delta { text: "中方".into() },
+        ]);
+        let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
+        assert!(
+            collect_stream(s, &mut turn_stream).await.is_err(),
+            "truncated stream (no completion marker) must error"
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_stream_propagates_provider_error() {
+        use crate::providers::StreamEvent;
+
+        // A provider that detects truncation emits StreamEvent::Error after
+        // the partial deltas; that must surface as a turn failure.
+        let s = events_to_stream(vec![
+            StreamEvent::Delta { text: "partial".into() },
+            StreamEvent::Error("stream closed before completion".into()),
+        ]);
+        let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
+        assert!(
+            collect_stream(s, &mut turn_stream).await.is_err(),
+            "provider Error must fail the turn"
+        );
     }
 }

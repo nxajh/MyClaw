@@ -8,7 +8,7 @@ use futures_util::StreamExt;
 use std::collections::HashMap;
 
 use crate::providers::{
-    BoxStream, ChatProvider, ChatRequest, StreamEvent, StopReason,
+    BoxStream, ChatProvider, ChatRequest, StreamEvent,
 };
 use reqwest::Client;
 use crate::providers::http::build_reqwest_client;
@@ -105,6 +105,10 @@ impl AnthropicMessagesClient {
 
             // index → (tool_id, tool_name) mapping for Anthropic's block-indexed SSE.
             let mut tool_index_map: HashMap<u64, (String, String)> = HashMap::new();
+            // Set once an authoritative terminal event (`message_delta` stop /
+            // `message_stop`, both parsed into `Done`) is seen. If the byte
+            // stream ends without one, the connection was closed mid-response.
+            let mut saw_terminal = false;
             let mut buffer = String::new();
             let mut utf8_buf = Vec::new();
             let mut stream = resp.bytes_stream();
@@ -137,11 +141,25 @@ impl AnthropicMessagesClient {
                     buffer.drain(..=pos);
                     let events = parse_anthropic_sse(&line, &mut tool_index_map);
                     for event in events {
+                        if matches!(event, StreamEvent::Done { .. }) {
+                            saw_terminal = true;
+                        }
                         let _ = tx.send(event).await;
                     }
                 }
             }
-            let _ = tx.send(StreamEvent::Done { reason: StopReason::EndTurn }).await;
+            // No `message_stop` seen before the byte stream ended → the server
+            // closed the connection mid-response. Surface an error instead of a
+            // silent, truncated success.
+            if !saw_terminal {
+                let _ = tx
+                    .send(StreamEvent::Error(
+                        "Anthropic stream closed before completion (no message_stop; \
+                         likely upstream truncation)"
+                            .to_string(),
+                    ))
+                    .await;
+            }
         });
 
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
