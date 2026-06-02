@@ -3,16 +3,18 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::config::sub_agent::SubAgentConfig;
 use super::workspace::skills::SkillManager;
+use super::AgentRegistry;
 
-/// Hot-loadable shared resources, held in Arc for sharing between AgentLoop instances.
-///
-/// Immutable after construction (skills/sub_agents are interior-mutable via RwLock).
-/// Sub-agents get their own ResourceProvider with no change_rx (no hot-reload).
-pub(crate) struct ResourceProvider {
+/// Hot-loadable shared resources, held in Arc for sharing between
+/// CompactionExecutor instances. Most fields are kept for future
+/// summarizer features (hot-reload of skills/agents during compaction,
+/// memory dir lookups) — `knowledge_dir` is the only one actively read
+/// today by `build_memory_prompt`.
+#[allow(dead_code)]
+pub struct ResourceProvider {
     pub(crate) skills: Arc<RwLock<SkillManager>>,
-    pub(crate) sub_agents: Arc<RwLock<Vec<SubAgentConfig>>>,
+    pub(crate) sub_agents: Arc<AgentRegistry>,
     pub(crate) mcp_instructions: Vec<(String, String)>,
     pub(crate) skills_dir: PathBuf,
     pub(crate) agents_dir: PathBuf,
@@ -23,9 +25,9 @@ pub(crate) struct ResourceProvider {
 }
 
 impl ResourceProvider {
-    pub(crate) fn new(
+    pub fn new(
         skills: Arc<RwLock<SkillManager>>,
-        sub_agents: Arc<RwLock<Vec<SubAgentConfig>>>,
+        sub_agents: Arc<AgentRegistry>,
         mcp_instructions: Vec<(String, String)>,
         skills_dir: PathBuf,
         agents_dir: PathBuf,

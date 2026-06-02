@@ -3,17 +3,17 @@
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::agents::DelegationManager;
+use crate::agents::DelegationCoordinator;
 use crate::providers::{Tool, ToolResult};
 
 /// The agent_list tool — shows running sub-agents.
 pub struct AgentListTool {
-    delegation_manager: Arc<DelegationManager>,
+    delegator: Arc<DelegationCoordinator>,
 }
 
 impl AgentListTool {
-    pub fn new(delegation_manager: Arc<DelegationManager>) -> Self {
-        Self { delegation_manager }
+    pub fn new(delegator: Arc<DelegationCoordinator>) -> Self {
+        Self { delegator }
     }
 }
 
@@ -40,8 +40,8 @@ impl Tool for AgentListTool {
         2000
     }
 
-    async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let running = self.delegation_manager.running_snapshot();
+    async fn execute(&self, _args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
+        let running = self.delegator.running_snapshot();
 
         let items: Vec<serde_json::Value> = running
             .into_iter()

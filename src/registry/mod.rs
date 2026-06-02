@@ -1,4 +1,4 @@
-//! ServiceRegistry — capability routing center.
+//! ProviderRegistry — capability routing center.
 
 // Declare routing submodule FIRST (before imports that use it).
 pub mod routing;
@@ -12,7 +12,7 @@ use crate::providers::capability_chat::ChatProvider;
 use crate::providers::capability_embedding::EmbeddingProvider;
 use crate::providers::image::ImageGenerationProvider;
 use crate::providers::search::SearchProvider;
-use crate::providers::service_registry::ServiceRegistry;
+use crate::providers::provider_registry::ProviderRegistry;
 use crate::providers::stt::SttProvider;
 use crate::providers::tts::TtsProvider;
 use crate::providers::video::VideoGenerationProvider;
@@ -395,9 +395,9 @@ impl Registry {
     }
 }
 
-// ── ServiceRegistry trait impl ─────────────────────────────────────────────────
+// ── ProviderRegistry trait impl ─────────────────────────────────────────────────
 
-impl ServiceRegistry for Registry {
+impl ProviderRegistry for Registry {
     fn get_chat_provider(&self, capability: Capability) -> anyhow::Result<(Arc<dyn ChatProvider>, String)> {
         // For Chat capability, prefer the dedicated fallback wrapper when present.
         // This keeps get_chat_provider_by_model pointing at the raw per-model provider.

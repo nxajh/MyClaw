@@ -3,17 +3,17 @@
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::agents::DelegationManager;
+use crate::agents::DelegationCoordinator;
 use crate::providers::{Tool, ToolResult};
 
 /// The agent_kill tool — terminates a running sub-agent.
 pub struct AgentKillTool {
-    delegation_manager: Arc<DelegationManager>,
+    delegator: Arc<DelegationCoordinator>,
 }
 
 impl AgentKillTool {
-    pub fn new(delegation_manager: Arc<DelegationManager>) -> Self {
-        Self { delegation_manager }
+    pub fn new(delegator: Arc<DelegationCoordinator>) -> Self {
+        Self { delegator }
     }
 }
 
@@ -45,12 +45,12 @@ impl Tool for AgentKillTool {
         20_000
     }
 
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
         let task_id = args["task_id"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'task_id' is required"))?;
 
-        let cancelled = self.delegation_manager.cancel(task_id);
+        let cancelled = self.delegator.cancel(task_id);
 
         if cancelled {
             Ok(ToolResult {

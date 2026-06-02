@@ -10,7 +10,7 @@ pub enum ConfigAction {
     /// Show the full resolved configuration.
     Show,
 
-    /// Get a specific config value by dotted path (e.g. "defaults.model").
+    /// Get a specific config value by dotted path (e.g. "routing.chat.models").
     Get {
         /// Dotted config path.
         path: String,
@@ -41,9 +41,13 @@ pub async fn run(cli: &Cli, action: ConfigAction) -> Result<()> {
             println!("workspace_dir = \"{}\"", cfg.workspace_dir.display());
             println!("config_path = \"{}\"", cfg.config_path.display());
             println!();
-            println!("[defaults]");
-            println!("model = \"{}\"", cfg.defaults.model);
-            println!();
+            if let Some(route) = cfg.routing.get(myclaw::providers::Capability::Chat) {
+                if let Some(model) = route.models.first() {
+                    println!("[routing.chat]");
+                    println!("models = [\"{}\"]", model);
+                    println!();
+                }
+            }
             if !cfg.providers.is_empty() {
                 println!("[providers]");
                 for name in cfg.providers.keys() {
@@ -115,8 +119,9 @@ fn generate_default_config() -> String {
 
 workspace_dir = "~/.myclaw/workspace"
 
-[defaults]
-model = "minimax-m2.7"
+[routing.chat]
+strategy = "fallback"
+models = ["minimax-m2.7"]
 
 [agent]
 permission_mode = "default"

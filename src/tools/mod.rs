@@ -37,7 +37,7 @@ pub use agent_list::AgentListTool;
 pub use ask_user::AskUserTool;
 pub use calculator::CalculatorTool;
 pub use cronjob_tool::CronJobTool;
-pub use delegate::{AgentDelegateTool, TaskDelegator};
+pub use delegate::AgentDelegateTool;
 pub use file_ops::{FileEditTool, FileReadTool, FileWriteTool};
 pub use http::HttpRequestTool;
 pub use list_dir::ListDirTool;
@@ -56,7 +56,10 @@ pub use web_search::WebSearchTool;
 use crate::providers::Tool;
 use std::sync::Arc;
 
-/// Create all built-in tools.
+/// Create all built-in tools that don't depend on shared state managed by
+/// the daemon (router / channels / scheduler / etc). Tools requiring such
+/// state — `ask_user`, `web_search`, `agent_delegate`, `agent_list`,
+/// `agent_kill`, `tool_search` — are registered by daemon.rs::build_tools.
 pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
     vec![
         // Core tools
@@ -69,9 +72,7 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         // Web tools
         Arc::new(WebFetchTool::new()),
         Arc::new(HttpRequestTool::new()),
-        // WebSearchTool requires a ServiceRegistry — registered separately in daemon.rs
         // Utility tools
         Arc::new(CalculatorTool::new()),
-        Arc::new(AskUserTool::new()),
     ]
 }

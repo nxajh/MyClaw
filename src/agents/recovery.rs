@@ -2,13 +2,23 @@
 //!
 //! Extracted from `daemon.rs` (the Composition Root) so that Application-layer
 //! types such as `Orchestrator` can reference `UnfinishedSubAgent` without
-//! importing the Composition Root — which would violate the DDD layering rule
-//! that Application must not depend on Infrastructure / Composition Root.
+//! importing the Composition Root.
+//!
+//! F37 + H50: the old `subagent_running_*.json` marker mechanism is gone.
+//! `scan_unfinished_subagents` now reads `SessionManager.list_all_sessions`
+//! and reconstructs `UnfinishedSubAgent` records from session metadata
+//! (`parent_session_id`, `agent_name`, parent's `owner` / `last_message`).
+//! This works because B15 made sub-sessions top-level peers of regular
+//! sessions, distinguished only by `meta.parent_session_id`.
+
+use crate::agents::session::SessionManager;
 
 /// Info about a sub-agent that was still running when the daemon was killed.
 ///
-/// Populated on startup by scanning the session directory for
-/// `subagent_running_*.json` marker files left by a previous process.
+/// Reconstructed from session metadata on startup — no on-disk marker file
+/// is required. `task_id` reuses the sub-session id (which is the durable
+/// identifier post-restart); `task_preview` is derived from the first user
+/// message in the sub-session history.
 #[derive(Debug, Clone)]
 pub struct UnfinishedSubAgent {
     pub agent_name: String,
@@ -16,55 +26,71 @@ pub struct UnfinishedSubAgent {
     pub task_preview: String,
     pub parent_session_id: String,
     pub sub_session_id: String,
-    /// The parent session key (e.g. "telegram:12345") used to look up the
-    /// main agent's session and emit a DelegationEvent when recovery completes.
+    /// The parent session key (e.g. "telegram:default:12345") used to look up
+    /// the main agent's session and emit a `DelegationEvent` when recovery
+    /// completes. Resolved from the parent session's `owner` field.
     pub session_key: String,
-    /// The reply_target stored when the parent session last received a message.
+    /// The reply_target stored on the parent session's last_message.
     pub reply_target: String,
 }
 
-/// Scan `sessions_root` for `subagent_running_*.json` marker files left behind
-/// by a previous daemon that was killed while sub-agents were executing.
-pub fn scan_unfinished_subagents(sessions_root: &std::path::Path) -> Vec<UnfinishedSubAgent> {
+/// Walk `SessionManager` for sub-sessions (those with a `parent_session_id`)
+/// whose history ends mid-turn. Each match is reported as one
+/// `UnfinishedSubAgent`.
+///
+/// "Mid-turn" matches the same shape `agent_impl::recover_incomplete_turn`
+/// looks for: the trailing user / assistant-tool_calls / dangling tool-result
+/// block. We don't re-encode that logic here — we just check the cheap
+/// approximation that `incomplete_turn` is true OR the last message is a
+/// `user` / `tool` role (the orchestrator's per-session recovery does the
+/// authoritative check before re-executing).
+pub fn scan_unfinished_subagents(session_manager: &SessionManager) -> Vec<UnfinishedSubAgent> {
     let mut unfinished = Vec::new();
-    let entries = match std::fs::read_dir(sessions_root) {
-        Ok(e) => e,
-        Err(_) => return unfinished,
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with("subagent_running_") && name.ends_with(".json") {
-            if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                if let Ok(state) = serde_json::from_str::<serde_json::Value>(&content) {
-                    unfinished.push(UnfinishedSubAgent {
-                        agent_name: state["agent_name"].as_str().unwrap_or("unknown").to_string(),
-                        task_id: state["task_id"].as_str().unwrap_or("unknown").to_string(),
-                        task_preview: state["task_preview"].as_str().unwrap_or("").to_string(),
-                        parent_session_id: state["parent_session_id"].as_str().unwrap_or("").to_string(),
-                        sub_session_id: state["sub_session_id"].as_str().unwrap_or("").to_string(),
-                        session_key: state["session_key"].as_str().unwrap_or("").to_string(),
-                        reply_target: state["reply_target"].as_str().unwrap_or("").to_string(),
-                    });
-                }
-            }
+    for info in session_manager.list_all_sessions() {
+        let session = match session_manager.get_by_id(&info.id) {
+            Some(s) => s,
+            None => continue,
+        };
+        let parent_id = match &session.parent_session_id {
+            Some(p) if !p.is_empty() => p.clone(),
+            _ => continue,
+        };
+        let needs_recovery = session.incomplete_turn
+            || session
+                .history
+                .last()
+                .is_some_and(|m| m.role == "user" || m.role == "tool");
+        if !needs_recovery {
+            continue;
         }
+
+        let parent_session = session_manager.get_by_id(&parent_id);
+        let session_key = parent_session
+            .as_ref()
+            .map(|p| p.owner.clone())
+            .unwrap_or_default();
+        let reply_target = parent_session
+            .as_ref()
+            .and_then(|p| p.reply_target().map(|s| s.to_string()))
+            .unwrap_or_default();
+
+        let task_preview = session
+            .history
+            .iter()
+            .find(|m| m.role == "user")
+            .map(|m| m.text_content())
+            .map(|s| s.chars().take(200).collect::<String>())
+            .unwrap_or_default();
+
+        unfinished.push(UnfinishedSubAgent {
+            agent_name: session.agent_name.clone(),
+            task_id: session.id.clone(),
+            task_preview,
+            parent_session_id: parent_id,
+            sub_session_id: session.id.clone(),
+            session_key,
+            reply_target,
+        });
     }
     unfinished
-}
-
-/// Remove all stale `subagent_running_*.json` marker files so they do not
-/// accumulate across restarts.  Called once after the Orchestrator has been
-/// informed about unfinished sub-agents.
-pub fn cleanup_stale_subagent_markers(sessions_root: &std::path::Path) {
-    let entries = match std::fs::read_dir(sessions_root) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with("subagent_running_") && name.ends_with(".json") {
-            let _ = std::fs::remove_file(entry.path());
-            tracing::info!(file = %name, "cleaned up stale sub-agent marker");
-        }
-    }
 }

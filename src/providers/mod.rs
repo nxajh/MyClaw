@@ -13,7 +13,7 @@ pub mod search;              // SearchProvider
 pub mod tts;                 // TtsProvider
 pub mod stt;                 // SttProvider
 pub mod video;               // VideoGenerationProvider
-pub mod service_registry;    // ServiceRegistry trait
+pub mod provider_registry;    // ProviderRegistry trait
 
 // Re-export traits at crate level for external consumers
 pub use capability::{
@@ -29,13 +29,13 @@ pub use error_class::{ClassifiedError, ErrorCategory, FailoverReason, ProviderHt
 pub use capability_embedding::{
     EmbeddingProvider, EmbedRequest, EmbedResponse, EmbeddingUsage, EmbedInput,
 };
-pub use capability_tool::{Tool, ToolResult, ToolSpec};
+pub use capability_tool::{Tool, ToolResult, ToolSource, ToolSpec};
 pub use image::{ImageGenerationProvider, ImageRequest, ImageResponse, ImageFormat, ImageOutput};
 pub use search::{SearchProvider, SearchRequest, SearchResult, SearchResults};
 pub use tts::{TtsProvider, TtsRequest, TtsFormat, TtsVoice};
 pub use stt::{SttProvider, SttRequest, TranscriptionResponse, SttSegment};
 pub use video::{VideoGenerationProvider, VideoRequest, VideoResponse};
-pub use service_registry::{ServiceRegistry, ProviderSummary};
+pub use provider_registry::{ProviderRegistry, ProviderSummary};
 
 // ── Implementations ────────────────────────────────────────────────────────────
 

@@ -31,17 +31,21 @@ pub mod tui;
 
 // Re-exports
 pub use agents::{
-    Agent, AgentConfig, AgentLoop, InMemoryBackend, Session, SessionManager,
+    Agent, AgentRuntime, InMemoryBackend, Session, SessionManager,
+    SessionContext, TurnContext, TurnResult,
     ToolRegistry, SkillManager, Orchestrator, OrchestratorParts,
     SystemPromptBuilder, SystemPromptConfig,
     PermissionMode, RunMode,
-    McpManager, AskUserHandler, DelegateHandler, SubAgentDelegator,
-    DelegationEvent, DelegationManager,
+    McpManager,
+    DelegationCoordinator,
+    DelegationEvent,
+    UserResolver, UserProfile,
+    AgentDelegator,
 };
 pub use channels::{Channel, ChannelMessage, SendMessage, DedupState, ProcessingStatus};
 pub use config::{AppConfig, ConfigLoader};
 pub use registry::{Registry};
-pub use providers::ServiceRegistry;
+pub use providers::ProviderRegistry;
 pub use providers::{
     ChatProvider, FallbackChatProvider, ToolResult,
     XiaomiProvider, // Xiaomi MiMo provider

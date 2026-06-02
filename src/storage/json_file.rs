@@ -59,10 +59,19 @@ struct SessionMeta {
     /// Per-session runtime overrides (JSON-encoded SessionOverride).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     session_override: Option<String>,
-    /// Last reply_target for this session (e.g. "c2c:<openid>", "group:<group_openid>").
-    /// Used by startup recovery to send responses to the correct target.
+    /// Last incoming ChannelMessage. Carries sender / reply_target /
+    /// attachments / images so startup recovery can replay the routing
+    /// context. RFC v2 §三.A made this the canonical replacement for
+    /// the older standalone `last_reply_target` field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    last_reply_target: Option<String>,
+    last_message: Option<crate::channels::ChannelMessage>,
+    /// Owning agent name. "main" for top-level sessions; sub-agent name for
+    /// delegate-spawned sessions. Skipped when absent for forward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_name: Option<String>,
+    /// Parent session ID for sub-sessions. None for top-level user sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -242,7 +251,9 @@ impl SessionBackend for JsonFileBackend {
             compact_token_estimate: None,
             last_total_tokens: None,
             session_override: None,
-            last_reply_target: None,
+            last_message: None,
+            agent_name: None,
+            parent_session_id: None,
         };
         self.write_meta(&meta)?;
 
@@ -506,15 +517,51 @@ impl SessionBackend for JsonFileBackend {
         self.read_meta(session_id)?.session_override
     }
 
-    fn save_reply_target(&self, session_id: &str, target: &str) -> std::io::Result<()> {
+    fn save_last_message(
+        &self,
+        session_id: &str,
+        msg: &crate::channels::ChannelMessage,
+    ) -> std::io::Result<()> {
         if let Some(mut meta) = self.read_meta(session_id) {
-            meta.last_reply_target = if target.is_empty() { None } else { Some(target.to_string()) };
+            meta.last_message = Some(msg.clone());
             self.write_meta(&meta)?;
         }
         Ok(())
     }
 
-    fn load_reply_target(&self, session_id: &str) -> Option<String> {
-        self.read_meta(session_id)?.last_reply_target
+    fn load_last_message(&self, session_id: &str) -> Option<crate::channels::ChannelMessage> {
+        self.read_meta(session_id)?.last_message
+    }
+
+    fn save_agent_name(&self, session_id: &str, name: &str) -> std::io::Result<()> {
+        if let Some(mut meta) = self.read_meta(session_id) {
+            meta.agent_name = if name.is_empty() || name == "main" {
+                None
+            } else {
+                Some(name.to_string())
+            };
+            self.write_meta(&meta)?;
+        }
+        Ok(())
+    }
+
+    fn load_agent_name(&self, session_id: &str) -> Option<String> {
+        self.read_meta(session_id)?.agent_name
+    }
+
+    fn save_parent_session_id(&self, session_id: &str, parent: &str) -> std::io::Result<()> {
+        if let Some(mut meta) = self.read_meta(session_id) {
+            meta.parent_session_id = if parent.is_empty() {
+                None
+            } else {
+                Some(parent.to_string())
+            };
+            self.write_meta(&meta)?;
+        }
+        Ok(())
+    }
+
+    fn load_parent_session_id(&self, session_id: &str) -> Option<String> {
+        self.read_meta(session_id)?.parent_session_id
     }
 }

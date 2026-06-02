@@ -84,7 +84,7 @@ impl Tool for SkillManageTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
         let action = args["action"].as_str().ok_or_else(|| anyhow::anyhow!("'action' is required"))?;
         let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("'name' is required"))?;
 
@@ -478,7 +478,7 @@ mod tests {
         let result = tool.execute(json!({
             "action": "create", "name": "mys",
             "content": "---\nname: mys\ndescription: \"My skill\"\n---\n# My Skill\n\nDo stuff."
-        })).await.unwrap();
+        }), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
         assert!(result.success, "{}", result.output);
         assert!(mgr.read().get("mys").is_some());
     }
@@ -490,7 +490,7 @@ mod tests {
         let result = tool.execute(json!({
             "action": "create", "name": "self",
             "content": "---\nname: self\ndescription: \"x\"\n---\n# x\n\nBody."
-        })).await.unwrap();
+        }), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
         assert!(!result.success);
     }
 
@@ -502,7 +502,7 @@ mod tests {
         let result = tool.execute(json!({
             "action": "create", "name": "existing",
             "content": "---\nname: existing\ndescription: \"Exists\"\n---\n# Exists\n\nAlready here."
-        })).await.unwrap();
+        }), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
         assert!(!result.success);
         assert!(result.output.contains("already exists"));
     }
@@ -514,7 +514,7 @@ mod tests {
         let result = tool.execute(json!({
             "action": "create", "name": "myskill",
             "content": "---\nname: other\ndescription: \"Test\"\n---\n# Body\n\nContent."
-        })).await.unwrap();
+        }), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
         assert!(!result.success);
         assert!(result.output.contains("does not match"));
     }
@@ -527,7 +527,7 @@ mod tests {
         let result = tool.execute(json!({
             "action": "patch", "name": "myskill",
             "old_string": "Do stuff.", "new_string": "Do something better."
-        })).await.unwrap();
+        }), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
         assert!(result.success, "{}", result.output);
         let content = std::fs::read_to_string(
             dir.path().join("skills/myskill/SKILL.md")
@@ -543,7 +543,7 @@ mod tests {
         let result = tool.execute(json!({
             "action": "patch", "name": "myskill",
             "old_string": "this does not exist", "new_string": "x"
-        })).await.unwrap();
+        }), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
         assert!(!result.success);
         assert!(result.output.contains("not found"));
     }
@@ -553,7 +553,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mgr = setup(dir.path(), "myskill");
         let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf());
-        let result = tool.execute(json!({"action": "delete", "name": "myskill"})).await.unwrap();
+        let result = tool.execute(json!({"action": "delete", "name": "myskill"}), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
         assert!(result.success, "{}", result.output);
         assert!(mgr.read().get("myskill").is_none());
     }
@@ -562,7 +562,7 @@ mod tests {
     async fn test_delete_self_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let tool = SkillManageTool::new(Arc::new(RwLock::new(SkillManager::new())), dir.path().to_path_buf());
-        let result = tool.execute(json!({"action": "delete", "name": "self"})).await.unwrap();
+        let result = tool.execute(json!({"action": "delete", "name": "self"}), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
         assert!(!result.success);
     }
 
@@ -575,13 +575,13 @@ mod tests {
         let wr = tool.execute(json!({
             "action": "write_file", "name": "myskill",
             "file_path": "references/api.md", "file_content": "# API"
-        })).await.unwrap();
+        }), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
         assert!(wr.success, "{}", wr.output);
         assert!(dir.path().join("skills/myskill/references/api.md").exists());
 
         let rm = tool.execute(json!({
             "action": "remove_file", "name": "myskill", "file_path": "references/api.md"
-        })).await.unwrap();
+        }), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
         assert!(rm.success, "{}", rm.output);
         assert!(!dir.path().join("skills/myskill/references/api.md").exists());
     }
@@ -594,7 +594,7 @@ mod tests {
         let result = tool.execute(json!({
             "action": "write_file", "name": "myskill",
             "file_path": "references/../../evil.sh", "file_content": "evil"
-        })).await.unwrap();
+        }), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
         assert!(!result.success);
     }
 }

@@ -41,9 +41,6 @@
 //! [agent]
 //! permission_mode = "default"
 //!
-//! [memory]
-//! storage = "sqlite"
-//!
 //! [[mcp_servers]]
 //! name = "filesystem"
 //! command = "npx"
@@ -52,8 +49,8 @@
 
 pub mod agent;
 pub mod channel;
+pub mod filters;
 pub mod mcp;
-pub mod memory;
 pub mod provider;
 pub mod routing;
 pub mod scheduler;
@@ -65,36 +62,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use agent::AgentConfig;
+use agent::{AgentConfig, ContextConfig, PromptConfig, ToolExecutorConfig};
 use channel::ChannelConfigs;
 use mcp::McpServerConfig;
-use memory::MemoryConfig;
+use crate::agents::loop_breaker::LoopBreakerConfig;
+use crate::config::scheduler::SchedulerConfig;
 use provider::ProviderConfig;
 use routing::RoutingConfig;
-
-// ── Defaults ──────────────────────────────────────────────────────────────────
-
-fn default_defaults_model() -> String {
-    "minimax-m2.7".to_string()
-}
-
-// ── Defaults section ──────────────────────────────────────────────────────────
-
-/// Global default settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Defaults {
-    /// Default model for routing.
-    #[serde(default = "default_defaults_model")]
-    pub model: String,
-}
-
-impl Default for Defaults {
-    fn default() -> Self {
-        Self {
-            model: default_defaults_model(),
-        }
-    }
-}
 
 // ── RawConfig (1:1 mapping of TOML file) ──────────────────────────────────────
 
@@ -121,21 +95,33 @@ struct RawConfig {
     #[serde(default)]
     channels: ChannelConfigs,
 
-    /// Agent configuration.
+    /// Agent configuration (`[agent]` — permission_mode only).
     #[serde(default)]
     agent: AgentConfig,
 
-    /// Memory configuration.
+    /// Context-engine configuration (`[context_engine]`).
     #[serde(default)]
-    memory: MemoryConfig,
+    context_engine: ContextConfig,
+
+    /// Tool-executor configuration (`[tool_executor]`).
+    #[serde(default)]
+    tool_executor: ToolExecutorConfig,
+
+    /// Loop-breaker configuration (`[loop_breaker]`).
+    #[serde(default)]
+    loop_breaker: LoopBreakerConfig,
+
+    /// System prompt configuration (`[prompt]`).
+    #[serde(default)]
+    prompt: PromptConfig,
+
+    /// Scheduler configuration (`[scheduler]`).
+    #[serde(default)]
+    scheduler: SchedulerConfig,
 
     /// MCP server configurations.
     #[serde(default)]
     mcp_servers: Vec<McpServerConfig>,
-
-    /// Global defaults.
-    #[serde(default)]
-    defaults: Defaults,
 
     /// Logging configuration.
     #[serde(default)]
@@ -175,14 +161,20 @@ pub struct AppConfig {
     pub routing: RoutingConfig,
     /// Channel configurations.
     pub channels: ChannelConfigs,
-    /// Agent configuration.
+    /// Agent configuration (`[agent]` — permission_mode only).
     pub agent: AgentConfig,
-    /// Memory configuration.
-    pub memory: MemoryConfig,
+    /// Context-engine configuration (`[context_engine]`).
+    pub context_engine: ContextConfig,
+    /// Tool-executor configuration (`[tool_executor]`).
+    pub tool_executor: ToolExecutorConfig,
+    /// Loop-breaker configuration (`[loop_breaker]`).
+    pub loop_breaker: LoopBreakerConfig,
+    /// System prompt configuration (`[prompt]`).
+    pub prompt: PromptConfig,
+    /// Scheduler configuration (`[scheduler]`).
+    pub scheduler: SchedulerConfig,
     /// MCP server configurations.
     pub mcp_servers: Vec<McpServerConfig>,
-    /// Global defaults.
-    pub defaults: Defaults,
     /// Logging configuration.
     pub logging: LoggingConfig,
 }
@@ -241,9 +233,12 @@ impl ConfigLoader {
             routing: raw.routing,
             channels: raw.channels,
             agent: raw.agent,
-            memory: raw.memory,
+            context_engine: raw.context_engine,
+            tool_executor: raw.tool_executor,
+            loop_breaker: raw.loop_breaker,
+            prompt: raw.prompt,
+            scheduler: raw.scheduler,
             mcp_servers: raw.mcp_servers,
-            defaults: raw.defaults,
             logging: raw.logging,
         })
     }
@@ -407,22 +402,17 @@ bot_token = "test-telegram-token"
 allowed_users = ["*"]
 
 [agent]
-max_tool_calls = 50
 permission_mode = "full"
 
-[agent.prompt]
+[prompt]
 
-[memory]
-storage = "sqlite"
-db_path = "test.db"
+[loop_breaker]
+max_tool_calls = 50
 
 [[mcp_servers]]
 name = "filesystem"
 command = "npx"
 args = ["mcp-server-filesystem"]
-
-[defaults]
-model = "gpt-4o"
 
 [logging]
 level = "INFO"
@@ -447,11 +437,9 @@ level = "INFO"
         // Channels
         assert_eq!(config.channels.enabled_channels(), vec!["wechat", "telegram"]);
 
-        // Agent
-        assert_eq!(config.agent.max_tool_calls, 50);
-
-        // Memory
-        assert_eq!(config.memory.db_path, "test.db");
+        // Agent / loop breaker
+        assert_eq!(config.agent.permission_mode, agent::PermissionMode::Full);
+        assert_eq!(config.loop_breaker.max_tool_calls, 50);
 
         // MCP
         assert_eq!(config.mcp_servers.len(), 1);

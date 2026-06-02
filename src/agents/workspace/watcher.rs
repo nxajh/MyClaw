@@ -1,12 +1,20 @@
 //! WorkspaceWatcher — 监视 skills/ 和 agents/ 目录变化，通知 AgentLoop。
 //!
+//! 两种使用模式：
+//!  1. **观察者模式**（`new`）：暴露 `watch::Receiver<ChangeSet>`，调用方
+//!     自己根据 ChangeSet 决定如何响应。
+//!  2. **自维护模式**（`spawn_managed`，RFC v2 §三.D）：watcher 持有
+//!     AgentRegistry + SkillManager 引用，目录变化时直接调用其 reload
+//!     方法，调用方无需关心信号流。
+//!
 //! 使用 notify crate 实现文件系统监视。
-//! 变化信号通过 tokio::sync::watch channel 传递。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use parking_lot::RwLock;
 use tokio::sync::watch;
 
 /// 目录变化描述
@@ -93,5 +101,78 @@ impl WorkspaceWatcher {
             rx,
             _watcher: watcher,
         })
+    }
+
+    /// Self-maintaining mode: spawn a tokio task that owns the watcher and
+    /// directly drives `agent_registry.reload_from_dir` and `skill_manager.reload`
+    /// when the corresponding directories change.
+    ///
+    /// Callers no longer need to subscribe to `rx`; the watcher is the
+    /// authoritative reloader. Returns a guard whose Drop terminates the task.
+    pub fn spawn_managed(
+        workspace_dir: &Path,
+        knowledge_dir: &Path,
+        agent_registry: crate::agents::AgentRegistry,
+        skill_manager: Arc<RwLock<super::skills::SkillManager>>,
+    ) -> Result<ManagedWatcherGuard> {
+        let watcher = Self::new(workspace_dir, knowledge_dir)?;
+        let mut rx = watcher.rx.clone();
+        let agents_dir = workspace_dir.join("agents");
+        let skills_dir = workspace_dir.join("skills");
+
+        let token = tokio_util::sync::CancellationToken::new();
+        let task_token = token.clone();
+
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = task_token.cancelled() => break,
+                    res = rx.changed() => {
+                        if res.is_err() { break; }
+                        let changes = rx.borrow().clone();
+                        if changes.agents_changed {
+                            let n = agent_registry.reload_from_dir(&agents_dir);
+                            tracing::info!(agent_count = n, "agents hot-reloaded by watcher");
+                        }
+                        if changes.skills_changed {
+                            let defs = super::skill_loader::load_skills_from_dir(&skills_dir);
+                            let skills: Vec<crate::agents::Skill> =
+                                defs.iter().map(crate::agents::Skill::from_definition).collect();
+                            let count = skills.len();
+                            skill_manager.write().reload(skills);
+                            tracing::info!(skill_count = count, "skills hot-reloaded by watcher");
+                        }
+                        // memory_changed is left to AttachmentManager.diff_memory
+                        // because the attachment payload is computed per-turn.
+                    }
+                }
+            }
+        });
+
+        Ok(ManagedWatcherGuard {
+            _watcher: watcher,
+            _handle: handle,
+            cancel: token,
+            agents_dir: workspace_dir.join("agents"),
+            skills_dir: workspace_dir.join("skills"),
+        })
+    }
+}
+
+/// Handle returned by `WorkspaceWatcher::spawn_managed`. Dropping it cancels
+/// the watcher task and releases the inotify handles.
+pub struct ManagedWatcherGuard {
+    _watcher: WorkspaceWatcher,
+    _handle: tokio::task::JoinHandle<()>,
+    cancel: tokio_util::sync::CancellationToken,
+    /// Directories the watcher reloads on change — exposed so callers can
+    /// trigger a manual reload (e.g. `/reload` slash command).
+    pub agents_dir: PathBuf,
+    pub skills_dir: PathBuf,
+}
+
+impl Drop for ManagedWatcherGuard {
+    fn drop(&mut self) {
+        self.cancel.cancel();
     }
 }

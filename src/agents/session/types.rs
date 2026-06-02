@@ -1,8 +1,12 @@
 //! Session types — SummaryMetadata and Session struct.
 
+use std::sync::Arc;
+
+use crate::agents::tokens::TokenTracker;
+use crate::channels::{Channel, ChannelMessage, TurnStream};
 use crate::providers::capability_chat::ChatMessage;
+use super::backend::PersistHook;
 use super::session_override::SessionOverride;
-use super::recovery::BreakpointItem;
 
 /// Summary metadata stored in Session memory (no text parsing needed).
 #[derive(Debug, Clone)]
@@ -12,13 +16,34 @@ pub struct SummaryMetadata {
     pub up_to_message: i64,
 }
 
-/// Per-session conversation state held by AgentLoop.
-#[derive(Debug, Clone)]
+/// Per-session conversation state.
+///
+/// Per RFC v2 §三.A the Session holds:
+/// - The incremental conversation history and its persistence-bookkeeping.
+/// - The last incoming ChannelMessage so retry / recovery / ask_user replies
+///   land back on the same channel + reply_target.
+/// - Optional `parent_session_id` for sub-sessions spawned by `agent_delegate`.
+/// - `agent_name` identifying which agent in `workspace/agents/` owns this
+///   session (defaults to "main").
+/// - Token usage tracker — moved from CompactionPolicy so the session owns
+///   its own context budget (C18 will rewire CompactionPolicy/ContextEngine
+///   to read through `&Session.token_tracker`).
+/// - Transient persist / channel handles — `Option<Arc<dyn …>>` so they
+///   survive `Clone` cheaply, default to `None` for tests and ephemeral
+///   sessions.
 pub struct Session {
     /// Session ID (e.g. "k3jr9px2").
     pub id: String,
-    /// Owner user ID (e.g. "telegram:12345").
+    /// Owner routing key (e.g. "telegram:default:12345").
+    /// RFC v2 renames "owner" semantically to `routing_key`; the field stays
+    /// named `owner` for source-diff churn reasons.
     pub owner: String,
+    /// Agent name that owns this session. References `workspace/agents/{name}/AGENT.md`.
+    /// Defaults to "main"; sub-sessions inherit their delegating agent's name.
+    pub agent_name: String,
+    /// Parent session ID for sub-sessions spawned by `agent_delegate`.
+    /// `None` for top-level user sessions.
+    pub parent_session_id: Option<String>,
     /// Current conversation history (in-memory).
     pub history: Vec<ChatMessage>,
     /// Parallel to `history`: database message IDs, 0 for summary or unpersisted messages.
@@ -27,9 +52,6 @@ pub struct Session {
     pub compact_version: u32,
     /// In-memory summary metadata (restored from backend on load).
     pub summary_metadata: Option<SummaryMetadata>,
-    /// Last total token count reported by the API (input + cached + output).
-    /// Loaded from meta.json on session restore; None for brand-new sessions.
-    pub last_total_tokens: Option<u64>,
     /// Per-session runtime overrides set by slash commands.
     pub session_override: SessionOverride,
     /// Set when the last persisted turn ended with a user message but no
@@ -37,15 +59,76 @@ pub struct Session {
     /// orchestrator will prompt the user to retry or abort on the next
     /// interaction. Not persisted — rebuilt on every session load.
     pub incomplete_turn: bool,
-    /// Tool calls that were pending when the session was interrupted
-    /// (assistant emitted tool_calls but no tool results were persisted).
-    /// Detected on session load; used by the orchestrator to inject a
-    /// recovery prompt so the model can re-execute the missing tools.
-    pub breakpoint_items: Vec<BreakpointItem>,
-    /// Last reply_target used for this session (e.g. "c2c:<openid>", "group:<group_openid>").
-    /// Used by startup recovery to send the response to the correct target.
-    /// Not persisted — set from incoming ChannelMessage.
-    pub last_reply_target: Option<String>,
+    /// Last incoming ChannelMessage. Carries sender, reply_target, attachments,
+    /// images. Persisted so startup recovery can reconstruct the routing
+    /// context and resume an interrupted turn. RFC v2 §三.A replaces the old
+    /// `last_reply_target: Option<String>` field with this richer message.
+    pub last_message: Option<ChannelMessage>,
+    /// Token usage tracker. Owned by the session so `Agent.run` /
+    /// `ContextEngine` can read budgets without needing a parallel struct.
+    /// Seeded by `SessionManager` from `backend.load_token_count` on
+    /// session reload; updated from API `Usage` events thereafter.
+    pub token_tracker: TokenTracker,
+    /// Transient persistence hook installed by the Orchestrator at session
+    /// load time. `None` for tests and the in-memory CLI mode. C18's
+    /// `Agent.run` reaches through this to persist per-turn state.
+    pub persist: Option<Arc<dyn PersistHook>>,
+    /// Transient channel handle installed by the Orchestrator. `None` for
+    /// sub-sessions that piggyback on the parent, and for tests.
+    /// `Agent.run` uses `session.turn_stream` to stream turn events to the
+    /// originating UI (see `TurnStream` / RFC §7.6).
+    pub channel: Option<Arc<dyn Channel>>,
+    /// Per-turn streaming output handle. Installed by
+    /// `SessionContext::process_turn` via `channel.create_stream(rt)`
+    /// before `Agent::run`; consumed by `finish` / `abort` after.
+    /// `None` when the channel is non-streaming or no channel is wired.
+    /// Never persisted; reset on clone.
+    pub turn_stream: Option<Box<dyn TurnStream>>,
+}
+
+// `Session` cannot derive `Clone` because `Box<dyn TurnStream>` is not
+// Clone. Hand-roll one that resets `turn_stream` to None — clones are
+// either snapshots (tests) or carry no live transport.
+impl Clone for Session {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            owner: self.owner.clone(),
+            agent_name: self.agent_name.clone(),
+            parent_session_id: self.parent_session_id.clone(),
+            history: self.history.clone(),
+            message_ids: self.message_ids.clone(),
+            compact_version: self.compact_version,
+            summary_metadata: self.summary_metadata.clone(),
+            session_override: self.session_override.clone(),
+            incomplete_turn: self.incomplete_turn,
+            last_message: self.last_message.clone(),
+            token_tracker: self.token_tracker.clone(),
+            persist: self.persist.clone(),
+            channel: self.channel.clone(),
+            turn_stream: None,
+        }
+    }
+}
+
+// `Arc<dyn PersistHook>` and `Arc<dyn Channel>` don't carry `Debug`, so a
+// derived Debug fails. Hand-roll one that elides the transient handles.
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("id", &self.id)
+            .field("owner", &self.owner)
+            .field("agent_name", &self.agent_name)
+            .field("parent_session_id", &self.parent_session_id)
+            .field("history_len", &self.history.len())
+            .field("compact_version", &self.compact_version)
+            .field("incomplete_turn", &self.incomplete_turn)
+            .field("has_last_message", &self.last_message.is_some())
+            .field("has_persist", &self.persist.is_some())
+            .field("has_channel", &self.channel.is_some())
+            .field("has_turn_stream", &self.turn_stream.is_some())
+            .finish()
+    }
 }
 
 impl Session {
@@ -53,32 +136,98 @@ impl Session {
         Self {
             owner: String::new(),
             id,
+            agent_name: "main".to_string(),
+            parent_session_id: None,
             history: Vec::new(),
             message_ids: Vec::new(),
             compact_version: 0,
             summary_metadata: None,
-            last_total_tokens: None,
             session_override: SessionOverride::default(),
             incomplete_turn: false,
-            breakpoint_items: Vec::new(),
-            last_reply_target: None,
+            last_message: None,
+            token_tracker: TokenTracker::new(),
+            persist: None,
+            channel: None,
+            turn_stream: None,
         }
     }
 
+    /// Install a persistence hook on this session. Returns `self` for chaining.
+    pub fn with_persist(mut self, persist: Arc<dyn PersistHook>) -> Self {
+        self.persist = Some(persist);
+        self
+    }
+
+    /// Install a channel handle on this session. Returns `self` for chaining.
+    pub fn with_channel(mut self, channel: Arc<dyn Channel>) -> Self {
+        self.channel = Some(channel);
+        self
+    }
+
+    /// Persist the session's per-turn metadata to disk via the installed
+    /// `PersistHook`. Currently flushes `last_message.reply_target`, the
+    /// session override JSON, and the most recent total token count. Per-
+    /// message persistence is handled inline by `Agent.run`; this is the
+    /// "after-turn settle" call for snapshot fields.
+    ///
+    /// No-op when no persist hook is installed.
+    pub fn save_to_disk(&self) {
+        let hook = match self.persist.as_ref() {
+            Some(h) => h,
+            None => return,
+        };
+        if let Some(ref msg) = self.last_message {
+            hook.save_last_message(&self.id, msg);
+        }
+        if let Ok(s) = serde_json::to_string(&self.session_override) {
+            hook.save_session_override(&self.id, &s);
+        }
+        let total = self.token_tracker.total_tokens();
+        if total > 0 {
+            hook.save_token_count(&self.id, total);
+        }
+    }
+
+    /// Return the routing target for the next outbound message, derived from
+    /// the most recently stored ChannelMessage.
+    pub fn reply_target(&self) -> Option<&str> {
+        self.last_message.as_ref().map(|m| m.reply_target.as_str())
+    }
+
+    /// Store the incoming message context.
+    pub fn record_inbound(&mut self, msg: ChannelMessage) {
+        self.last_message = Some(msg);
+    }
+
     /// Append a user message to history.
-    pub fn add_user_text(&mut self, text: String) {
+    pub fn add_user(&mut self, text: String) {
         self.history.push(ChatMessage::user_text(text));
         self.message_ids.push(0);
     }
 
+    /// Deprecated alias for [`Session::add_user`]. Kept so 40+ existing call
+    /// sites compile during the C18 migration window; new code should call
+    /// `add_user`.
+    #[deprecated(note = "use Session::add_user")]
+    pub fn add_user_text(&mut self, text: String) {
+        self.add_user(text);
+    }
+
     /// Append an assistant text message to history.
     /// Skips empty messages to avoid API format errors on reload.
-    pub fn add_assistant_text(&mut self, text: String) {
+    pub fn add_assistant(&mut self, text: String) {
         if text.trim().is_empty() {
             return;
         }
         self.history.push(ChatMessage::assistant_text(text));
         self.message_ids.push(0);
+    }
+
+    /// Deprecated alias for [`Session::add_assistant`]. Kept so existing
+    /// call sites compile during the C18 migration window.
+    #[deprecated(note = "use Session::add_assistant")]
+    pub fn add_assistant_text(&mut self, text: String) {
+        self.add_assistant(text);
     }
 
     /// Append an assistant message with tool_calls to history.
@@ -95,6 +244,13 @@ impl Session {
         }
         let mut msg = ChatMessage::assistant_text(&text);
         msg.tool_calls = Some(tool_calls);
+        // Persist whatever reasoning the provider returned, signature or not.
+        // Non-Anthropic providers (Xiaomi MiMo, …) emit thinking without a
+        // signature_delta — that's their normal protocol, not a bug.
+        // Provider-specific renderers (anthropic/message_rendering.rs) decide
+        // whether to include the block when replaying; Anthropic's renderer
+        // already drops signature-less blocks via filter_map to avoid the
+        // `Field required` 400.
         if let Some(thinking) = thinking {
             use crate::providers::ContentPart;
             msg.parts.insert(0, ContentPart::Thinking { thinking, signature: thinking_signature });
@@ -162,6 +318,7 @@ impl Session {
 
     /// Drop history[..boundary] with no summary (fallback when summarizer fails).
     /// Bumps compact_version so the backend can record the event.
+    #[allow(dead_code)] // restored summarizer-failure fallback path
     pub(crate) fn drop_pre_boundary(&mut self, boundary: usize, version: u32) {
         self.history.drain(..boundary);
         self.message_ids.drain(..boundary);

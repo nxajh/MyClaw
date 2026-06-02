@@ -22,9 +22,6 @@ use super::token::TokenManager;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-/// QQ Bot message max length (conservative, real limit may vary).
-pub const QQ_MAX_MESSAGE_LENGTH: usize = 2000;
-
 /// WebSocket gateway URL endpoint.
 pub const GATEWAY_URL: &str = "https://api.sgroup.qq.com/gateway/bot";
 
@@ -87,7 +84,7 @@ impl QQBotChannel {
         let app_id = config.app_id.clone();
         let client_secret = config.client_secret.clone();
 
-        Self {
+        let ch = Self {
             config,
             token_manager: Arc::new(TokenManager::new(app_id, client_secret)),
             dedup: DedupState::new(),
@@ -99,7 +96,9 @@ impl QQBotChannel {
             typing_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session: Arc::new(Mutex::new(None)),
             msg_seq_counter: Arc::new(AtomicU32::new(1)),
-        }
+        };
+        crate::channels::warn_if_locked_down(&ch);
+        ch
     }
 
     /// Return the next proactive msg_seq value (monotonically increasing).
@@ -107,19 +106,19 @@ impl QQBotChannel {
         self.msg_seq_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Check if a C2C user is allowed.
-    fn is_user_allowed(&self, openid: &str) -> bool {
-        match &self.config.allow_from {
-            None => true,
-            Some(list) => list.iter().any(|u| u == openid),
-        }
-    }
-
-    /// Check if a group is allowed.
-    fn is_group_allowed(&self, group_openid: &str) -> bool {
-        match &self.config.group_allow_from {
-            None => true,
-            Some(list) => list.iter().any(|g| g == group_openid),
+    /// Build the unified security policy from QQBot config (RFC §14.5).
+    fn build_security_policy(&self) -> crate::channels::ChannelSecurityPolicy {
+        use crate::channels::{AllowList, ChannelSecurityPolicy, GroupAuthMode};
+        let group_allowlist =
+            AllowList::from_config(self.config.allowed_groups.clone());
+        let group_mode = match &self.config.allowed_groups {
+            None => GroupAuthMode::Reject, // Phase 4 "统一关"
+            Some(_) => GroupAuthMode::Open, // QQBot has no @mention concept
+        };
+        ChannelSecurityPolicy {
+            allowed_users: AllowList::from_config(self.config.allowed_users.clone()),
+            group_mode,
+            group_allowlist,
         }
     }
 
@@ -202,39 +201,57 @@ impl QQBotChannel {
         event_type: &str,
         data: &serde_json::Value,
     ) -> Option<ChannelMessage> {
+        fn apply_auth(
+            ch: &QQBotChannel,
+            sender: &str,
+            scope: crate::channels::MessageScope<'_>,
+        ) -> bool {
+            use crate::channels::Channel;
+            match ch.check_authorization(sender, scope) {
+                crate::channels::AuthDecision::Allow => true,
+                crate::channels::AuthDecision::Ignore => {
+                    debug!(sender = %sender, "qqbot: inbound ignored by policy");
+                    false
+                }
+                crate::channels::AuthDecision::Reject { reason } => {
+                    warn!(sender = %sender, reason, "qqbot: inbound rejected by policy");
+                    false
+                }
+            }
+        }
         match event_type {
             "C2C_MESSAGE_CREATE" => {
                 let msg = self.parse_c2c_message(data)?;
-                // Dedup check.
                 if self.dedup.check_and_record(&msg.id) {
                     debug!(msg_id = %msg.id, "duplicate C2C message, skipping");
                     return None;
                 }
-                // Access check.
-                if !self.is_user_allowed(&msg.sender) {
-                    debug!(sender = %msg.sender, "C2C message from disallowed user");
+                if !apply_auth(self, &msg.sender, crate::channels::MessageScope::Direct) {
                     return None;
                 }
                 Some(msg)
             }
             "GROUP_AT_MESSAGE_CREATE" => {
                 let msg = self.parse_group_message(data)?;
-                // Dedup check.
                 if self.dedup.check_and_record(&msg.id) {
                     debug!(msg_id = %msg.id, "duplicate group message, skipping");
                     return None;
                 }
-                // Access check: check group allow list.
-                if let Some(group_id) = msg.reply_target.strip_prefix("group:") {
-                    if !self.is_group_allowed(group_id) {
-                        debug!(group = group_id, "group message from disallowed group");
-                        return None;
-                    }
+                let group_id = msg.reply_target.strip_prefix("group:").unwrap_or("");
+                // GROUP_AT_MESSAGE_CREATE is by definition an @-mention, so
+                // has_mention=true. Policy decides whether the group itself is allowed.
+                if !apply_auth(
+                    self,
+                    &msg.sender,
+                    crate::channels::MessageScope::Group { id: group_id, has_mention: true },
+                ) {
+                    return None;
                 }
                 Some(msg)
             }
             "INTERACTION_CREATE" => {
                 // QQ Bot interaction: button click -> convert to text message.
+                debug!(data = %data, "INTERACTION_CREATE raw event data");
                 let resolved = data.get("data")
                     .and_then(|d| d.get("resolved"))
                     .or_else(|| data.get("resolved"));
@@ -277,21 +294,29 @@ impl QQBotChannel {
                     (user_openid.to_string(), format!("c2c:{}", user_openid))
                 };
 
-                // Access check for interaction
-                if let Some(openid) = reply_target.strip_prefix("c2c:") {
-                    if !self.is_user_allowed(openid) {
-                        debug!(sender = %sender, "interaction from disallowed user");
-                        return None;
-                    }
-                } else if let Some(group_id) = reply_target.strip_prefix("group:") {
-                    if !self.is_group_allowed(group_id) {
-                        debug!(group = group_id, "interaction from disallowed group");
-                        return None;
-                    }
+                // Access check for interaction.
+                let scope = if let Some(group_id) = reply_target.strip_prefix("group:") {
+                    crate::channels::MessageScope::Group { id: group_id, has_mention: true }
+                } else {
+                    crate::channels::MessageScope::Direct
+                };
+                if !apply_auth(self, &sender, scope) {
+                    return None;
                 }
 
                 // Acknowledge the interaction within 3 seconds (QQ Bot requirement).
                 self.ack_interaction(event_id);
+
+                // Try to extract the original message ID from the interaction
+                // event for passive-reply routing (avoids active-message restrictions).
+                let original_msg_id = data.get("message_id")
+                    .or_else(|| data.get("data").and_then(|d| d.get("message_id")))
+                    .or_else(|| resolved.and_then(|r| r.get("message_id")))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                if let Some(ref mid) = original_msg_id {
+                    debug!(msg_id = %mid, "INTERACTION_CREATE: extracted original message_id for passive reply");
+                }
 
                 Some(ChannelMessage {
                     id: event_id.to_string(),
@@ -302,7 +327,7 @@ impl QQBotChannel {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs(),
-                    thread_ts: None,
+                    thread_ts: original_msg_id,
                     interruption_scope_id: None,
                     attachments: vec![],
                     image_urls: None,
@@ -402,6 +427,23 @@ impl QQBotChannel {
     }
 
     /// Build a markdown message body for QQ Bot API.
+    /// Build a plain-text message body (msg_type=0).
+    /// Required for active messages where markdown (msg_type=2) is not supported.
+    fn build_text_body(&self, content: &str, msg_id: &str, msg_seq: u32) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "content": content,
+            "msg_type": 0,
+        });
+        if !msg_id.is_empty() {
+            body["msg_id"] = serde_json::Value::String(msg_id.to_string());
+            body["msg_seq"] = serde_json::Value::Number(msg_seq.into());
+        } else {
+            let seq = self.next_msg_seq();
+            body["msg_seq"] = serde_json::Value::Number(seq.into());
+        }
+        body
+    }
+
     fn build_markdown_body(&self, content: &str, msg_id: &str, msg_seq: u32) -> serde_json::Value {
         let mut body = serde_json::json!({
             "content": "",
@@ -499,6 +541,34 @@ impl QQBotChannel {
         }
 
         Err(anyhow::anyhow!("QQ Bot REST returned {}: {}", status, text))
+    }
+
+    /// Send a C2C message via REST API (plain text, msg_type=0).
+    /// Used for active messages (no msg_id) where markdown is not allowed.
+    async fn send_c2c_text(
+        &self,
+        openid: &str,
+        content: &str,
+        msg_id: &str,
+        msg_seq: u32,
+    ) -> anyhow::Result<()> {
+        let url = format!("{}/v2/users/{}/messages", API_BASE, openid);
+        let body = self.build_text_body(content, msg_id, msg_seq);
+        self.send_rest_with_retry(&url, &body).await
+    }
+
+    /// Send a group message via REST API (plain text, msg_type=0).
+    /// Used for active messages (no msg_id) where markdown is not allowed.
+    async fn send_group_text(
+        &self,
+        group_openid: &str,
+        content: &str,
+        msg_id: &str,
+        msg_seq: u32,
+    ) -> anyhow::Result<()> {
+        let url = format!("{}/v2/groups/{}/messages", API_BASE, group_openid);
+        let body = self.build_text_body(content, msg_id, msg_seq);
+        self.send_rest_with_retry(&url, &body).await
     }
 
     /// Send a C2C message via REST API (markdown format).
@@ -821,7 +891,11 @@ Type any command or just chat!"#;
         };
 
         // Send reply directly via REST API (bypass orchestrator), with chunking.
-        let chunks = split_message_chunk(&reply, QQ_MAX_MESSAGE_LENGTH);
+        let chunks = split_message_chunk(
+            &reply,
+            self.capabilities().message_chunk_limit,
+            self.capabilities().message_len_unit,
+        );
         if let Some(openid) = reply_target.strip_prefix("c2c:") {
             for (i, chunk) in chunks.iter().enumerate() {
                 let seq = self.next_msg_seq() + i as u32;
@@ -852,14 +926,29 @@ Type any command or just chat!"#;
 
 // ── Channel trait implementation ──────────────────────────────────────────────
 
+static QQBOT_CAPS: crate::channels::message::ChannelCapabilities =
+    crate::channels::message::ChannelCapabilities::qqbot();
+
 #[async_trait]
 impl Channel for QQBotChannel {
     fn name(&self) -> &str {
         "qqbot"
     }
 
+    fn capabilities(&self) -> &crate::channels::message::ChannelCapabilities {
+        &QQBOT_CAPS
+    }
+
+    fn security_policy(&self) -> crate::channels::ChannelSecurityPolicy {
+        self.build_security_policy()
+    }
+
     async fn send(&self, msg: &SendMessage) -> anyhow::Result<()> {
-        let chunks = split_message_chunk(&msg.content, QQ_MAX_MESSAGE_LENGTH);
+        let chunks = split_message_chunk(
+            &msg.content,
+            self.capabilities().message_chunk_limit,
+            self.capabilities().message_len_unit,
+        );
         // thread_ts carries the original message event ID for passive replies.
         let msg_id = msg.thread_ts.as_deref().unwrap_or("");
 
@@ -891,19 +980,34 @@ impl Channel for QQBotChannel {
 
             let result = if is_last {
                 if let Some(kb) = &keyboard {
-                    // Last chunk with buttons — use keyboard endpoint.
-                    if let Some(openid) = recipient.strip_prefix("c2c:") {
-                        self.send_c2c_keyboard(openid, chunk, kb, msg_id).await
-                    } else if let Some(group_openid) = recipient.strip_prefix("group:") {
-                        self.send_group_keyboard(group_openid, chunk, kb, msg_id).await
+                    // Keyboard endpoint requires a passive msg_id. When
+                    // absent (active message), fall back to plain markdown.
+                    if !msg_id.is_empty() {
+                        if let Some(openid) = recipient.strip_prefix("c2c:") {
+                            self.send_c2c_keyboard(openid, chunk, kb, msg_id).await
+                        } else if let Some(group_openid) = recipient.strip_prefix("group:") {
+                            self.send_group_keyboard(group_openid, chunk, kb, msg_id).await
+                        } else {
+                            Err(anyhow::anyhow!(
+                                "invalid QQ Bot recipient format: {} (expected c2c:<openid> or group:<openid>)",
+                                recipient
+                            ))
+                        }
                     } else {
-                        Err(anyhow::anyhow!(
-                            "invalid QQ Bot recipient format: {} (expected c2c:<openid> or group:<openid>)",
-                            recipient
-                        ))
+                        // Active message + keyboard: degrade to markdown (msg_type=2).
+                        if let Some(openid) = recipient.strip_prefix("c2c:") {
+                            self.send_c2c_message(openid, chunk, msg_id, msg_seq).await
+                        } else if let Some(group_openid) = recipient.strip_prefix("group:") {
+                            self.send_group_message(group_openid, chunk, msg_id, msg_seq).await
+                        } else {
+                            Err(anyhow::anyhow!(
+                                "invalid QQ Bot recipient format: {} (expected c2c:<openid> or group:<openid>)",
+                                recipient
+                            ))
+                        }
                     }
                 } else {
-                    // Last chunk without buttons — normal send.
+                    // No keyboard — markdown send (msg_type=2).
                     if let Some(openid) = recipient.strip_prefix("c2c:") {
                         self.send_c2c_message(openid, chunk, msg_id, msg_seq).await
                     } else if let Some(group_openid) = recipient.strip_prefix("group:") {
@@ -916,7 +1020,7 @@ impl Channel for QQBotChannel {
                     }
                 }
             } else {
-                // Non-last chunk — always normal send.
+                // Non-last chunk — markdown send (msg_type=2).
                 if let Some(openid) = recipient.strip_prefix("c2c:") {
                     self.send_c2c_message(openid, chunk, msg_id, msg_seq).await
                 } else if let Some(group_openid) = recipient.strip_prefix("group:") {

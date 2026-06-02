@@ -9,16 +9,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::{Mutex as SyncMutex, RwLock};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
-
-/// Shared loop registry: session_key → cached AgentLoop handle.
-type LoopRegistryMap = Arc<DashMap<String, Arc<crate::agents::SessionHandle>>>;
 
 use crate::agents::TurnEvent;
 use crate::channels::message::{Channel, ChannelMessage, SendMessage};
@@ -73,9 +69,7 @@ pub struct ClientChannel {
     /// Skill manager for skills API (set after construction).
     skill_manager: Arc<RwLock<Option<Arc<RwLock<crate::agents::SkillManager>>>>>,
     /// Service registry for models API (set after construction).
-    service_registry: Arc<RwLock<Option<Arc<dyn crate::providers::ServiceRegistry>>>>,
-    /// Loop registry for evicting cached AgentLoop on session switch (set after construction).
-    loop_registry: Arc<RwLock<Option<LoopRegistryMap>>>,
+    provider_registry: Arc<RwLock<Option<Arc<dyn crate::providers::ProviderRegistry>>>>,
 }
 
 impl ClientChannel {
@@ -94,8 +88,7 @@ impl ClientChannel {
             workspace_dir: Arc::new(RwLock::new(None)),
             config_path: Arc::new(RwLock::new(None)),
             skill_manager: Arc::new(RwLock::new(None)),
-            service_registry: Arc::new(RwLock::new(None)),
-            loop_registry: Arc::new(RwLock::new(None)),
+            provider_registry: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -131,13 +124,8 @@ impl ClientChannel {
     }
 
     /// Set the service registry (called from daemon.rs after construction).
-    pub fn set_service_registry(&self, sr: Arc<dyn crate::providers::ServiceRegistry>) {
-        *self.service_registry.write() = Some(sr);
-    }
-
-    /// Set the loop registry for evicting cached AgentLoop on session switch.
-    pub fn set_loop_registry(&self, lr: LoopRegistryMap) {
-        *self.loop_registry.write() = Some(lr);
+    pub fn set_provider_registry(&self, sr: Arc<dyn crate::providers::ProviderRegistry>) {
+        *self.provider_registry.write() = Some(sr);
     }
 
     /// Start the WebSocket server (spawns a background task).
@@ -175,8 +163,7 @@ impl ClientChannel {
         let workspace_dir = self.workspace_dir.clone();
         let config_path = self.config_path.clone();
         let skill_manager = self.skill_manager.clone();
-        let service_registry = self.service_registry.clone();
-        let loop_registry = self.loop_registry.clone();
+        let provider_registry = self.provider_registry.clone();
 
         let local_addr = listener.local_addr()?;
         tracing::info!("WebSocket server listening on ws://{}/myclaw", local_addr);
@@ -250,8 +237,7 @@ impl ClientChannel {
                         let workspace_dir_clone = workspace_dir.clone();
                         let config_path_clone = config_path.clone();
                         let skill_manager_clone = skill_manager.clone();
-                        let service_registry_clone = service_registry.clone();
-                        let loop_registry_clone = loop_registry.clone();
+                        let provider_registry_clone = provider_registry.clone();
                         let auth_token_clone = auth_token.clone();
 
                         tracing::info!(
@@ -387,14 +373,18 @@ impl ClientChannel {
                                                 continue;
                                             }
 
-                                            // Create streaming context.
+                                            // E32: stream context indexed by reply_target.
+                                            // For ClientChannel today reply_target ==
+                                            // session_key, but using reply_target
+                                            // semantically lets sub-agents push events
+                                            // to the parent's UI when their session
+                                            // inherits the parent's reply_target.
                                             let (event_tx, mut event_rx) = mpsc::channel::<TurnEvent>(64);
                                             let cancel = CancellationToken::new();
-
-                                            // Store in stream_contexts.
+                                            let reply_target_key = session_key_clone.clone();
                                             {
                                                 let mut contexts = stream_contexts_clone.write();
-                                                contexts.insert(session_key_clone.clone(), StreamContext {
+                                                contexts.insert(reply_target_key.clone(), StreamContext {
                                                     event_tx: event_tx.clone(),
                                                     cancel: cancel.clone(),
                                                 });
@@ -471,8 +461,7 @@ impl ClientChannel {
                                                     workspace_dir: &workspace_dir_clone,
                                                     config_path: &config_path_clone,
                                                     skill_manager: &skill_manager_clone,
-                                                    service_registry: &service_registry_clone,
-                                                    loop_registry: &loop_registry_clone,
+                                                    provider_registry: &provider_registry_clone,
                                                 },
                                             );
                                             let _ = ws_sender.send(resp).await;
@@ -499,26 +488,43 @@ impl ClientChannel {
                                 _ = incoming => {},
                             }
 
-                            // Clean up on disconnect.
-                            {
+                            // Clean up on disconnect. Collect the
+                            // connection's owned session_keys first, then
+                            // drop the connections read-lock before taking
+                            // writes on session_owners + stream_contexts.
+                            // Also cancel any in-flight turns BEFORE the
+                            // stream_contexts removal so the cancel signal
+                            // actually reaches Agent::run.
+                            let owned_keys: Vec<String> = {
                                 let conns = connections_clone.read();
-                                if let Some(conn) = conns.get(&conn_id_clone) {
-                                    let mut owners = session_owners_clone.write();
-                                    for sk in &conn.sessions {
-                                        owners.remove(sk);
+                                conns
+                                    .get(&conn_id_clone)
+                                    .map(|conn| conn.sessions.iter().cloned().collect())
+                                    .unwrap_or_default()
+                            };
+                            // F7: cancel + remove stream_contexts entries
+                            // for every session this connection owned —
+                            // without this, the StreamContext lingers in
+                            // the map forever (per-disconnect leak) and
+                            // any in-flight Agent::run keeps streaming
+                            // into a dead channel.
+                            {
+                                let mut contexts = stream_contexts_clone.write();
+                                for sk in &owned_keys {
+                                    if let Some(ctx) = contexts.remove(sk) {
+                                        ctx.cancel.cancel();
                                     }
                                 }
-                                drop(conns);
+                            }
+                            {
+                                let mut owners = session_owners_clone.write();
+                                for sk in &owned_keys {
+                                    owners.remove(sk);
+                                }
+                            }
+                            {
                                 let mut conns = connections_clone.write();
                                 conns.remove(&conn_id_clone);
-                            }
-
-                            // Cancel any pending turn.
-                            {
-                                let contexts = stream_contexts_clone.read();
-                                if let Some(ctx) = contexts.get(&session_key_clone) {
-                                    ctx.cancel.cancel();
-                                }
                             }
 
                             tracing::debug!(conn_id = %conn_id_clone, "WebSocket client disconnected");
@@ -535,10 +541,17 @@ impl ClientChannel {
     }
 }
 
+static CLIENT_CAPS: crate::channels::message::ChannelCapabilities =
+    crate::channels::message::ChannelCapabilities::client();
+
 #[async_trait]
 impl Channel for ClientChannel {
     fn name(&self) -> &str {
         "client"
+    }
+
+    fn capabilities(&self) -> &crate::channels::message::ChannelCapabilities {
+        &CLIENT_CAPS
     }
 
     async fn send(&self, msg: &SendMessage) -> anyhow::Result<()> {
@@ -583,35 +596,90 @@ impl Channel for ClientChannel {
         true // Local WebSocket server is always healthy.
     }
 
-    fn supports_streaming(&self) -> bool {
-        true
-    }
-
-    fn prepare_stream(
+    /// RFC §7.6: build a per-turn TurnStream over the WebSocket stream
+    /// already registered for `reply_target`. Returns None if no client
+    /// is currently subscribed for this target — caller falls through to
+    /// the non-streaming `send` path.
+    fn create_stream(
         &self,
-        _session_key: &str,
-        _ws_sender: mpsc::Sender<String>,
-    ) -> Option<(mpsc::Sender<TurnEvent>, CancellationToken)> {
-        // Not used — context is prepared by WS handler.
-        None
-    }
-
-    fn take_stream_context(
-        &self,
-        session_key: &str,
-    ) -> Option<(mpsc::Sender<TurnEvent>, CancellationToken)> {
-        // Remove the entry so the event_forwarder task (which holds event_rx)
-        // will exit naturally once run_streamed drops the returned event_tx —
-        // no separate cleanup step needed, and no race with the next message's
-        // context insertion.
-        let mut contexts = self.stream_contexts.write();
-        contexts.remove(session_key).map(|ctx| (ctx.event_tx, ctx.cancel))
-    }
-
-    fn cancel_turn(&self, session_key: &str) {
+        reply_target: &str,
+    ) -> Option<Box<dyn crate::channels::TurnStream>> {
         let contexts = self.stream_contexts.read();
-        if let Some(ctx) = contexts.get(session_key) {
-            ctx.cancel.cancel();
+        let ctx = contexts.get(reply_target)?;
+        Some(Box::new(ClientTurnStream {
+            reply_target: reply_target.to_string(),
+            event_tx: ctx.event_tx.clone(),
+            cancel: ctx.cancel.clone(),
+            status: crate::channels::StreamDelivery::Pending,
+            finished: false,
+        }))
+    }
+}
+
+/// Per-turn streaming handle for ClientChannel (RFC §7.6).
+///
+/// Wraps the already-registered `StreamContext.event_tx` plus its cancel
+/// token. The underlying `StreamContext` stays in `ClientChannel.stream_contexts`
+/// (it tracks "where to deliver" per active WebSocket); this struct
+/// represents "Agent's per-turn push handle into that channel".
+pub(crate) struct ClientTurnStream {
+    reply_target: String,
+    event_tx: mpsc::Sender<TurnEvent>,
+    cancel: CancellationToken,
+    status: crate::channels::StreamDelivery,
+    finished: bool,
+}
+
+#[async_trait]
+impl crate::channels::TurnStream for ClientTurnStream {
+    async fn push(
+        &mut self,
+        event: TurnEvent,
+    ) -> anyhow::Result<crate::channels::StreamDelivery> {
+        if self.event_tx.send(event).await.is_err() {
+            tracing::debug!(
+                reply_target = %self.reply_target,
+                "ClientTurnStream::push: client disconnected"
+            );
+            anyhow::bail!("client stream closed");
+        }
+        // WebSocket layer takes the bytes from the mpsc; we model that as
+        // Visible. FinalDelivered happens at finish() when the consumer
+        // has had a chance to drain.
+        self.status = crate::channels::StreamDelivery::Visible;
+        Ok(self.status)
+    }
+
+    fn status(&self) -> crate::channels::StreamDelivery {
+        self.status
+    }
+
+    async fn finish(mut self: Box<Self>) -> crate::channels::StreamDelivery {
+        // ClientChannel ack semantics: once we've handed the bytes to the
+        // mpsc and the WS forwarder runs, the consumer has the data.
+        // Treat that as FinalDelivered.
+        self.finished = true;
+        self.status = crate::channels::StreamDelivery::FinalDelivered;
+        self.status
+    }
+
+    async fn abort(mut self: Box<Self>) {
+        self.finished = true;
+        self.cancel.cancel();
+    }
+
+    fn cancel_token(&self) -> Option<CancellationToken> {
+        Some(self.cancel.clone())
+    }
+}
+
+// Drop-based safety net (RFC §7.6.5(b)): if a TurnStream is dropped
+// without finish/abort (panic, accidental field overwrite), cancel the
+// transport so the consumer isn't left hanging.
+impl Drop for ClientTurnStream {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.cancel.cancel();
         }
     }
 }
@@ -627,17 +695,7 @@ struct ApiContext<'a> {
     workspace_dir: &'a Arc<RwLock<Option<std::path::PathBuf>>>,
     config_path: &'a Arc<RwLock<Option<std::path::PathBuf>>>,
     skill_manager: &'a Arc<RwLock<Option<Arc<RwLock<crate::agents::SkillManager>>>>>,
-    service_registry: &'a Arc<RwLock<Option<Arc<dyn crate::providers::ServiceRegistry>>>>,
-    loop_registry: &'a Arc<RwLock<Option<LoopRegistryMap>>>,
-}
-
-/// Evict the cached AgentLoop for `user_id` so the next message creates a fresh one
-/// bound to the newly activated session history.
-fn evict_loop(ctx: &ApiContext<'_>, user_id: &str) {
-    let guard = ctx.loop_registry.read();
-    if let Some(registry) = guard.as_ref() {
-        registry.remove(user_id);
-    }
+    provider_registry: &'a Arc<RwLock<Option<Arc<dyn crate::providers::ProviderRegistry>>>>,
 }
 
 /// Route a management API request and return a JSON response string.
@@ -684,7 +742,8 @@ fn handle_api_request(
             let name = params["name"].as_str();
             match sm.new_session(user_id, name) {
                 Ok(info) => {
-                    evict_loop(ctx, user_id);
+                    // H57: SessionContext eviction handled by slash command paths;
+                    // ClientChannel no longer caches AgentLoop instances.
                     serde_json::json!({
                         "type": "api_response",
                         "id": id,
@@ -716,7 +775,8 @@ fn handle_api_request(
             };
             match sm.switch_session(user_id, session_id) {
                 Ok(info) => {
-                    evict_loop(ctx, user_id);
+                    // H57: SessionContext eviction handled by slash command paths;
+                    // ClientChannel no longer caches AgentLoop instances.
                     serde_json::json!({
                         "type": "api_response",
                         "id": id,
@@ -747,7 +807,8 @@ fn handle_api_request(
             };
             match sm.delete_session(user_id, session_id) {
                 Ok(()) => {
-                    evict_loop(ctx, user_id);
+                    // H57: SessionContext eviction handled by slash command paths;
+                    // ClientChannel no longer caches AgentLoop instances.
                     serde_json::json!({
                         "type": "api_response",
                         "id": id,
@@ -1036,7 +1097,7 @@ fn handle_api_request(
         }
 
         "models.list" => {
-            let guard = ctx.service_registry.read();
+            let guard = ctx.provider_registry.read();
             match guard.as_ref() {
                 Some(reg) => {
                     let model_ids = reg.get_chat_routing_models();

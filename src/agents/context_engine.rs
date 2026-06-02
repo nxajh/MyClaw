@@ -1,10 +1,19 @@
+//! `ContextEngine` — unified context-management facade.
+//!
+//! RFC v2 §三.A: collapses `CompactionPolicy` + `CompactionExecutor` into
+//! a single type so `Agent.run` interacts with one touch point, not two.
+//! The per-session `TokenTracker` lives on `Session.token_tracker` (not
+//! here) — methods that need a token count take it as a parameter.
+//!
+//! Internals are private free functions inside this module; the public
+//! surface is the `ContextEngine` impl block.
+
 use std::sync::Arc;
-use std::time::Duration;
 
 use futures_util::StreamExt;
 
 use crate::providers::{
-    BoxStream, ChatMessage, ChatRequest, ChatUsage, ContentPart, ServiceRegistry,
+    BoxStream, ChatMessage, ChatRequest, ChatUsage, ContentPart, ProviderRegistry,
     StreamEvent, ThinkingConfig, ToolCall,
 };
 use crate::providers::capability_chat::ToolSpec;
@@ -12,60 +21,98 @@ use crate::providers::Capability;
 use crate::agents::resource_provider::ResourceProvider;
 use crate::agents::tool_executor::MemoryToolExecutor;
 use crate::agents::tool_registry::ToolRegistry;
-use crate::agents::agent_impl::types::estimate_message_tokens;
+use crate::agents::tokens::estimate_message_tokens;
+use crate::agents::scheduling::work_unit;
+use crate::config::agent::ContextConfig;
 
-/// Result returned by CompactionExecutor::execute.
-/// AgentLoop is responsible for applying it to session (drain/insert history, update metadata).
+/// Result returned by `ContextEngine::execute_compaction`.
+/// Caller is responsible for applying it to the live session (drain /
+/// insert history, update metadata, adjust `Session.token_tracker`).
 pub(crate) struct CompactionResult {
     pub compact_start: usize,
     pub compact_end: usize,
     pub summary: String,
     pub summary_tokens: u64,
     pub removed_tokens: u64,
+    #[allow(dead_code)]
     pub compacted_count: usize,
 }
 
-/// Generates a compaction summary from a read-only history slice.
-///
-/// Does not mutate session — the caller (AgentLoop.compact_with_boundary) applies
-/// the result. MemoryToolExecutor restricts the summarizer to file tools only,
-/// preventing accidental session mutation or sub-agent spawning.
-pub(crate) struct CompactionExecutor {
-    registry: Arc<dyn ServiceRegistry>,
+/// Unified context-management facade. Holds the compaction threshold
+/// / retain-units policy plus the summarizer plumbing (provider
+/// registry, memory-tool executor) in one struct.
+pub struct ContextEngine {
+    compact_threshold: f64,
+    retain_work_units: usize,
+    registry: Arc<dyn ProviderRegistry>,
     resources: Arc<ResourceProvider>,
     memory_executor: MemoryToolExecutor,
     max_rounds: usize,
-    stream_chunk_timeout_secs: u64,
 }
 
-impl CompactionExecutor {
-    pub(crate) fn new(
-        registry: Arc<dyn ServiceRegistry>,
+#[allow(dead_code)] // some accessors retained for /compact + future callers
+impl ContextEngine {
+    pub fn new(
+        context: &ContextConfig,
+        registry: Arc<dyn ProviderRegistry>,
         resources: Arc<ResourceProvider>,
         tools: Arc<ToolRegistry>,
-        stream_chunk_timeout_secs: u64,
     ) -> Self {
         Self {
+            compact_threshold: context.compact_threshold,
+            retain_work_units: context.retain_work_units,
             registry,
             resources,
             memory_executor: MemoryToolExecutor::new(tools),
             max_rounds: 10,
-            stream_chunk_timeout_secs,
         }
+    }
+
+    /// Public read of the configured compaction threshold (0.0–1.0).
+    pub fn compact_threshold(&self) -> f64 {
+        self.compact_threshold
+    }
+
+    /// True if the supplied token count has crossed the compaction
+    /// threshold for `context_window`. Caller passes
+    /// `session.token_tracker.total_tokens()` — the engine is
+    /// stateless w.r.t. token tracking.
+    pub fn should_compact(&self, total_tokens: u64, context_window: u64) -> bool {
+        let threshold = (context_window as f64 * self.compact_threshold) as u64;
+        total_tokens >= threshold
+    }
+
+    /// Find the boundary index for compaction, given the context budget.
+    pub fn compaction_boundary(
+        &self,
+        history: &[ChatMessage],
+        context_window: u64,
+        system_prompt_tokens: u64,
+        tool_spec_tokens: u64,
+    ) -> Option<usize> {
+        let budget = ((context_window as f64 * self.compact_threshold) as u64)
+            .saturating_sub(system_prompt_tokens)
+            .saturating_sub(tool_spec_tokens);
+        if budget == 0 {
+            return None;
+        }
+        work_unit::find_compaction_boundary_for_budget(history, budget, self.retain_work_units.max(1))
     }
 
     /// Generate a compaction summary for `history[0..boundary]`.
     ///
-    /// `tool_specs` must be the same spec list used for the main LLM request so
-    /// the provider's prefix cache key (model + system_prompt + tool_definitions)
-    /// matches and the summarizer call hits the cache.
-    pub(crate) async fn execute(
+    /// `tool_specs` must match the spec list used for the main LLM
+    /// request so the provider's prefix cache key (model +
+    /// system_prompt + tool_definitions) matches and the summarizer
+    /// call hits the cache.
+    pub(crate) async fn execute_compaction(
         &self,
         history: &[ChatMessage],
         system_prompt: &str,
         tool_specs: &[ToolSpec],
         boundary: usize,
         model_id: &str,
+        session: &crate::agents::session::Session,
     ) -> anyhow::Result<CompactionResult> {
         let (compact_start, compact_end, existing_summary) =
             find_incremental_range(history, boundary);
@@ -87,7 +134,7 @@ impl CompactionExecutor {
         );
 
         let summary = self
-            .summarize(&to_compact, existing_summary.as_deref(), system_prompt, tool_specs, model_id)
+            .summarize(&to_compact, existing_summary.as_deref(), system_prompt, tool_specs, model_id, session)
             .await?;
 
         let (ok, reasons) = audit_summary_quality(&to_compact, &summary);
@@ -114,8 +161,9 @@ impl CompactionExecutor {
         system_prompt: &str,
         tool_specs: &[ToolSpec],
         model_id: &str,
+        session: &crate::agents::session::Session,
     ) -> anyhow::Result<String> {
-        match self.do_summarize(to_compact, existing_summary, system_prompt, tool_specs, model_id).await {
+        match self.do_summarize(to_compact, existing_summary, system_prompt, tool_specs, model_id, session).await {
             Ok(s) if !s.trim().is_empty() => Ok(s),
             Ok(_) => {
                 tracing::warn!("summarize returned empty text");
@@ -135,6 +183,7 @@ impl CompactionExecutor {
         system_prompt: &str,
         tool_specs: &[ToolSpec],
         model_id: &str,
+        session: &crate::agents::session::Session,
     ) -> anyhow::Result<String> {
         let provider = match self.registry.get_chat_provider_by_model(model_id) {
             Some((p, _)) => p,
@@ -223,7 +272,7 @@ impl CompactionExecutor {
 
             for call in &response.tool_calls {
                 tracing::info!(tool = %call.name, id = %call.id, "summarize: executing tool");
-                let result = self.memory_executor.execute(call).await;
+                let result = self.memory_executor.execute(call, session).await;
                 let (result_content, is_error) = match &result {
                     Ok(r) => {
                         let mut out = r.output.clone();
@@ -250,7 +299,7 @@ impl CompactionExecutor {
         let mut thinking_signature: Option<String> = None;
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut usage: Option<ChatUsage> = None;
-        let chunk_timeout = Duration::from_secs(self.stream_chunk_timeout_secs);
+        let chunk_timeout = crate::agents::llm_stream::STREAM_FIRST_CHUNK_TIMEOUT;
 
         loop {
             match tokio::time::timeout(chunk_timeout, stream.next()).await {
@@ -305,7 +354,7 @@ impl CompactionExecutor {
                 }
                 Err(_) => anyhow::bail!(
                     "summarizer stream chunk timeout after {}s",
-                    self.stream_chunk_timeout_secs
+                    chunk_timeout.as_secs()
                 ),
             }
         }
@@ -314,11 +363,14 @@ impl CompactionExecutor {
     }
 }
 
+// ── Private helpers ─────────────────────────────────────────────────────
+
 struct SummaryResponse {
     text: String,
     reasoning_content: Option<String>,
     thinking_signature: Option<String>,
     tool_calls: Vec<ToolCall>,
+    #[allow(dead_code)]
     usage: Option<ChatUsage>,
 }
 

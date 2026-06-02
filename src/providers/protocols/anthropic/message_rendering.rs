@@ -61,24 +61,31 @@ pub fn render_anthropic_messages<'a>(req: &ChatRequest<'a>) -> RenderedAnthropic
                     "is_error": msg.is_error.unwrap_or(false),
                 })]
             } else {
-                let mut p: Vec<serde_json::Value> = msg.parts.iter().map(|part| match part {
+                let mut p: Vec<serde_json::Value> = msg.parts.iter().filter_map(|part| match part {
                     crate::providers::ContentPart::Text { text } =>
-                        serde_json::json!({"type": "text", "text": text}),
+                        Some(serde_json::json!({"type": "text", "text": text})),
                     crate::providers::ContentPart::ImageUrl { url, .. } =>
-                        serde_json::json!({"type": "image", "source": {"type": "url", "url": url}}),
+                        Some(serde_json::json!({"type": "image", "source": {"type": "url", "url": url}})),
                     crate::providers::ContentPart::ImageB64 { b64_json, media_type, .. } => {
                         let mime = media_type.as_deref()
                             .unwrap_or_else(|| detect_image_media_type(b64_json));
-                        serde_json::json!({"type": "image", "source": {
+                        Some(serde_json::json!({"type": "image", "source": {
                             "type": "base64", "media_type": mime, "data": b64_json,
-                        }})
+                        }}))
                     }
                     crate::providers::ContentPart::Thinking { thinking, signature } => {
-                        let mut block = serde_json::json!({"type": "thinking", "thinking": thinking});
-                        if let Some(sig) = signature {
-                            block["signature"] = serde_json::json!(sig);
-                        }
-                        block
+                        // Anthropic Messages API requires every thinking block to
+                        // carry a `signature`; sending one without (e.g. because
+                        // the SSE stream was truncated before `signature_delta`
+                        // arrived) triggers 400 "Field required". Drop the entire
+                        // block in that case — losing the model's reasoning on a
+                        // single replay is much better than failing the request.
+                        let sig = signature.as_deref()?;
+                        Some(serde_json::json!({
+                            "type": "thinking",
+                            "thinking": thinking,
+                            "signature": sig,
+                        }))
                     }
                 }).collect();
 

@@ -200,7 +200,7 @@ pub struct ToolSpec {
 
 /// Chat request sent to ChatProvider::chat().
 pub struct ChatRequest<'a> {
-    /// Model identifier (filled by ServiceRegistry from routing config).
+    /// Model identifier (filled by ProviderRegistry from routing config).
     pub model: &'a str,
     /// Message list.
     pub messages: &'a [ChatMessage],
@@ -292,15 +292,17 @@ impl ChatResponse {
             }
         }
 
+        let reasoning_content = if reasoning_content.is_empty() {
+            None
+        } else {
+            Some(reasoning_content)
+        };
+
         Ok(Self {
             text,
             tool_calls,
             usage,
-            reasoning_content: if reasoning_content.is_empty() {
-                None
-            } else {
-                Some(reasoning_content)
-            },
+            reasoning_content,
             thinking_signature,
             stop_reason,
         })

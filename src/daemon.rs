@@ -11,12 +11,11 @@
 
 use anyhow::{Context, Result};
 use crate::agents::{
-    Agent, AgentConfig, InMemoryBackend, Orchestrator, OrchestratorParts, SessionManager,
+    InMemoryBackend, Orchestrator, OrchestratorParts, SessionManager,
     ToolRegistry, SkillManager, Skill, SystemPromptConfig, RunMode,
-    McpManager, SubAgentDelegator, DelegationManager,
+    McpManager, DelegationCoordinator,
 };
-use crate::tools::TaskDelegator;
-use crate::config::sub_agent::SubAgentConfig;
+use crate::agents::AgentDelegator;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -120,42 +119,6 @@ pub fn init_tracing(config: &crate::config::AppConfig) {
 
     tracing::subscriber::set_global_default(subscriber)
         .expect("failed to set tracing subscriber");
-}
-
-/// Calculate max output bytes from model config (max_output_tokens).
-/// Approximate: 1 token ≈ 4 bytes, with 100KB minimum as safety floor.
-fn calculate_max_output_bytes(
-    config: &crate::config::AppConfig,
-    _registry: &Arc<dyn crate::providers::ServiceRegistry>,
-) -> usize {
-    // Try to get max_output_tokens from the first chat model
-    let default_bytes = 100 * 1024; // 100KB default
-    
-    if let Some(chat_route) = config.routing.get(crate::providers::Capability::Chat) {
-        if let Some(model_id) = chat_route.models.first() {
-            // Search through all providers for this model
-            for provider_config in config.providers.values() {
-                if let Some(chat_config) = &provider_config.chat {
-                    if let Some(model_config) = chat_config.models.get(model_id) {
-                        if let Some(max_tokens) = model_config.max_output_tokens {
-                            // 1 token ≈ 4 bytes, minimum 100KB
-                            let bytes = (max_tokens as usize * 4).max(default_bytes);
-                            tracing::debug!(
-                                model = %model_id,
-                                max_output_tokens = max_tokens,
-                                max_output_bytes = bytes,
-                                "calculated max output bytes from model config"
-                            );
-                            return bytes;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    tracing::debug!(max_output_bytes = default_bytes, "using default max output bytes");
-    default_bytes
 }
 
 /// Print startup banner with config summary.
@@ -431,13 +394,20 @@ async fn build_tools(
     skills: &Arc<parking_lot::RwLock<SkillManager>>,
     shared_scheduler: &crate::agents::SharedScheduler,
     workspace_dir: &std::path::Path,
-    knowledge_dir: &str,
+    _knowledge_dir: &str,
+    user_resolver: &Arc<crate::agents::UserResolver>,
+    ask_router: Arc<crate::agents::AskRouter>,
 ) -> ToolRegistry {
     let mut tools = ToolRegistry::new();
     let builtin = crate::tools::builtin_tools();
     for tool in builtin {
         tools.register(tool);
     }
+
+    // AskUserTool reads `session.channel` at execute time — no per-tool
+    // channels map. Bound to the shared `AskRouter` so Orchestrator's
+    // inbound dispatch can fulfill its waits via the same router instance.
+    tools.register(Arc::new(crate::tools::AskUserTool::new(ask_router)));
 
     // Register additional built-in tools.
     tools.register(Arc::new(crate::tools::ListDirTool::new()));
@@ -460,12 +430,13 @@ async fn build_tools(
     // CronJobTool — manage scheduled cron jobs.
     tools.register(Arc::new(crate::tools::CronJobTool::new(Arc::clone(shared_scheduler))));
 
-    // Memory tools — persistent memory management.
-    let kd = knowledge_dir.to_string();
-    tools.register(Arc::new(crate::tools::MemoryListTool::new(kd.clone())));
-    tools.register(Arc::new(crate::tools::MemoryViewTool::new(kd.clone())));
-    tools.register(Arc::new(crate::tools::MemorySearchTool::new(kd.clone())));
-    tools.register(Arc::new(crate::tools::MemoryManageTool::new(kd)));
+    // Memory tools — persistent per-user memory (G43: workspace/users/{uid}/memory/).
+    let wd = workspace_dir.to_path_buf();
+    let r = Arc::clone(user_resolver);
+    tools.register(Arc::new(crate::tools::MemoryListTool::new(wd.clone(), Arc::clone(&r))));
+    tools.register(Arc::new(crate::tools::MemoryViewTool::new(wd.clone(), Arc::clone(&r))));
+    tools.register(Arc::new(crate::tools::MemorySearchTool::new(wd.clone(), Arc::clone(&r))));
+    tools.register(Arc::new(crate::tools::MemoryManageTool::new(wd, r)));
 
     // Inject MCP tools (if any servers are configured and connected).
     if mcp_manager.is_connected().await {
@@ -575,20 +546,20 @@ fn build_channel_accounts(config: &crate::config::AppConfig) -> Vec<(String, Str
     channels
 }
 
-/// Convert config agent settings into Application-layer prompt config.
+/// Convert config sections into Application-layer prompt config.
 fn build_prompt_config(
-    cfg: &crate::config::agent::AgentConfig,
+    agent: &crate::config::agent::AgentConfig,
+    prompt: &crate::config::agent::PromptConfig,
     workspace_dir: &std::path::Path,
     knowledge_dir: &std::path::Path,
 ) -> SystemPromptConfig {
     SystemPromptConfig {
         workspace_dir: workspace_dir.to_string_lossy().to_string(),
         knowledge_dir: knowledge_dir.to_string_lossy().to_string(),
-        permission_mode: cfg.permission_mode,
+        permission_mode: agent.permission_mode,
         run_mode: RunMode::Interactive,
-        max_chars: cfg.prompt.max_chars,
-        bootstrap_max_chars: cfg.prompt.bootstrap_max_chars,
-        native_tools: cfg.prompt.native_tools,
+        max_chars: prompt.max_chars,
+        native_tools: prompt.native_tools,
         identity_header: None,
     }
 }
@@ -600,6 +571,20 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     std::env::set_current_dir(&config.workspace_dir).with_context(|| {
         format!("failed to set cwd to workspace_dir '{}'", config.workspace_dir.display())
     })?;
+
+    // D27 — RFC v2 §三.A: workspace/agents/main/AGENT.md is required.
+    // Without it there is no default agent to route inbound messages to.
+    // Run scripts/migrate_main_agent.sh on first boot after upgrade.
+    let main_agent_md = config.workspace_dir.join("agents").join("main").join("AGENT.md");
+    if !main_agent_md.exists() {
+        anyhow::bail!(
+            "missing main agent at {}\n\
+             RFC v2 requires every workspace to define a 'main' agent.\n\
+             Run scripts/migrate_main_agent.sh to fold IDENTITY.md/SOUL.md into it,\n\
+             or create the file manually.",
+            main_agent_md.display()
+        );
+    }
 
     // ── Hot switch: enhanced startup for fork+execv child ─────────────────
     // When the new binary is started via execv (hot switch), it inherits the
@@ -674,9 +659,9 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let skills_arc: Arc<parking_lot::RwLock<SkillManager>> = Arc::new(parking_lot::RwLock::new(skills));
 
     // Resolve timezone: config.timezone (IANA) takes precedence over timezone_offset.
-    let tz_name = config.agent.prompt.timezone.clone().unwrap_or_else(|| {
+    let tz_name = config.prompt.timezone.clone().unwrap_or_else(|| {
         // Convert legacy offset to Etc/GMT name (signs are inverted in Etc/GMT).
-        let offset = config.agent.prompt.timezone_offset;
+        let offset = config.prompt.timezone_offset;
         if offset == 0 { "UTC".to_string() }
         else { format!("Etc/GMT{}", if offset > 0 { format!("-{}", offset) } else { format!("{}", -offset) }) }
     });
@@ -692,7 +677,12 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     if !jobs_json_path.exists() {
         let (dummy_tx, _) = tokio::sync::mpsc::channel(1);
         let migrator = crate::agents::scheduling::scheduler::Scheduler::new(
-            jobs_json_path.clone(), tz_name.clone(), None, dummy_tx,
+            jobs_json_path.clone(),
+            tz_name.clone(),
+            None,
+            dummy_tx,
+            config.workspace_dir.join(".last_channel"),
+            config.workspace_dir.join(".last_recipient"),
         );
         let count = migrator.migrate_from_markdown(&cron_dir);
         if count > 0 {
@@ -701,39 +691,72 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     }
 
     // Read heartbeat config early for the scheduler.
-    let heartbeat_config = if config.agent.scheduler.heartbeat.enabled {
-        Some(config.agent.scheduler.heartbeat.clone())
+    let heartbeat_config = if config.scheduler.heartbeat.enabled {
+        Some(config.scheduler.heartbeat.clone())
     } else {
         None
     };
 
     let shared_scheduler = crate::agents::scheduling::scheduler::Scheduler::new(
-        jobs_json_path.clone(), tz_name.clone(), heartbeat_config, scheduler_tx.clone(),
+        jobs_json_path.clone(),
+        tz_name.clone(),
+        heartbeat_config,
+        scheduler_tx.clone(),
+        config.workspace_dir.join(".last_channel"),
+        config.workspace_dir.join(".last_recipient"),
     );
 
-    // Build tool registry (all built-in + MCP + skill tools).
-    let mut tools = build_tools(&mcp_manager, &skills_arc, &shared_scheduler, &config.workspace_dir, config.knowledge_dir.to_str().unwrap_or(".")).await;
+    // G39: shared user resolver — defaults to identity (user_id == routing_key).
+    let user_resolver = Arc::new(crate::agents::UserResolver::new());
+
+    // Shared AskRouter — wired into both AskUserTool (register side, inside
+    // build_tools) and the Orchestrator (fulfill side, set on OrchestratorParts
+    // below). Same Arc, single inbox.
+    let ask_router = Arc::new(crate::agents::AskRouter::new());
+
+    // Build tool registry (all built-in + MCP + skill tools + ask_user).
+    let mut tools = build_tools(
+        &mcp_manager,
+        &skills_arc,
+        &shared_scheduler,
+        &config.workspace_dir,
+        config.knowledge_dir.to_str().unwrap_or("."),
+        &user_resolver,
+        Arc::clone(&ask_router),
+    ).await;
 
     // Build sub-agent configs (AGENT.md files from workspace/agents/).
     let sub_agent_configs = build_sub_agents(&config.workspace_dir);
     let sub_agent_count = sub_agent_configs.len();
     let sub_agent_names: Vec<String> = sub_agent_configs.iter().map(|a| a.name.clone()).collect();
-    let sub_agent_configs_arc: Arc<parking_lot::RwLock<Vec<SubAgentConfig>>> =
-        Arc::new(parking_lot::RwLock::new(sub_agent_configs));
+    let sub_agent_registry = Arc::new(crate::agents::AgentRegistry::from_vec(sub_agent_configs));
 
-    let registry_arc: Arc<dyn crate::providers::ServiceRegistry> = Arc::new(registry);
+    let registry_arc: Arc<dyn crate::providers::ProviderRegistry> = Arc::new(registry);
 
-    // Register WebSearchTool — requires ServiceRegistry for search routing.
+    // Register WebSearchTool — requires ProviderRegistry for search routing.
     let search_cooldown = Arc::new(crate::tools::search_cooldown::SearchProviderCooldown::new());
     tools.register(Arc::new(crate::tools::WebSearchTool::new(
         registry_arc.clone(),
         Arc::clone(&search_cooldown),
     )));
-    tracing::debug!("web_search tool registered (connected to ServiceRegistry)");
+    tracing::debug!("web_search tool registered (connected to ProviderRegistry)");
 
     // WorkspaceWatcher for hot-reload.
-    let watcher = crate::agents::WorkspaceWatcher::new(&config.workspace_dir, &config.knowledge_dir)?;
-    let change_rx = watcher.rx.clone();
+    let _watcher = crate::agents::WorkspaceWatcher::new(&config.workspace_dir, &config.knowledge_dir)?;
+    // change_rx is no longer subscribed to — D25's WorkspaceWatcher::spawn_managed
+    // handles agent/skill reloads autonomously (the watcher publishes the
+    // ChangeSet but nothing now subscribes here).
+
+    // Build session backend + manager early — B15: the DelegationCoordinator
+    // needs SessionManager (shared backend) to create sub-sessions as
+    // top-level peers instead of opening a per-parent JsonFileBackend at
+    // `{sessions_root}/{parent}/subagents/`.
+    let session_backend = build_session_backend(&config);
+    let session_manager = Arc::new(
+        SessionManager::new(Arc::clone(&session_backend))
+            .with_agents(Arc::clone(&sub_agent_registry))
+            .with_resolver(Arc::clone(&user_resolver)),
+    );
 
     // ── Sub-agent delegator (conditional) ──────────────────────────────────────
 
@@ -754,29 +777,38 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
         let base_tools_arc: Arc<ToolRegistry> = Arc::new(tools);
 
-        let delegator = SubAgentDelegator::new(
-            Arc::clone(&sub_agent_configs_arc),
-            registry_arc.clone(),
-            Arc::clone(&base_tools_arc),
-            Arc::clone(&skills_arc),
-            config.agent.max_tool_calls,
-            config.workspace_dir.join("sessions"),
+        let delegator = DelegationCoordinator::new(
+            sub_agent_registry.clone(),
+            Arc::clone(&session_manager),
             config.workspace_dir.join("worktrees"),
         );
         let delegator_arc = Arc::new(delegator);
 
-        // Build agent_delegate tool.
+        // Build agent_delegate tool. H47: now wired through `AgentDelegator`
+        // (the legacy `TaskDelegator` trait has been removed).
         let delegate_tool = crate::tools::AgentDelegateTool::new(
-            Arc::clone(&delegator_arc) as Arc<dyn TaskDelegator>,
+            Arc::clone(&delegator_arc) as Arc<dyn AgentDelegator>,
         );
 
-        // Build parent tool registry: same tools + agent_delegate + tool_search.
+        // Build parent tool registry: same tools + agent_delegate + agent_list
+        // + agent_kill + tool_search.
         let mut parent_tools = ToolRegistry::new();
         for tool in base_tools_arc.all_tools() {
             parent_tools.register(tool);
         }
         parent_tools.register(Arc::new(delegate_tool));
         tracing::debug!("agent_delegate tool registered (multi-agent mode)");
+
+        // agent_list / agent_kill let the parent inspect and terminate running
+        // sub-agents. Both depend on the DelegationCoordinator, so they live in
+        // the multi-agent branch (single-agent mode has no coordinator).
+        parent_tools.register(Arc::new(
+            crate::tools::AgentListTool::new(Arc::clone(&delegator_arc)),
+        ));
+        parent_tools.register(Arc::new(
+            crate::tools::AgentKillTool::new(Arc::clone(&delegator_arc)),
+        ));
+        tracing::debug!("agent_list / agent_kill tools registered (multi-agent mode)");
 
         let tool_search = crate::tools::ToolSearchTool::new(Arc::clone(&base_tools_arc));
         parent_tools.register(Arc::new(tool_search));
@@ -785,20 +817,28 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     };
 
     // ── Delegation channel (conditional — only when sub-agents configured) ─────
-    let (delegation_manager, delegation_rx) = if sub_agent_delegator_arc.is_some() {
+    // The DelegationCoordinator is the single owner of the sender and
+    // the running-task table (RFC §三.C). DelegationManager no longer
+    // exists as a separate type.
+    let delegation_rx = if let Some(ref delegator) = sub_agent_delegator_arc {
         let (tx, rx) = tokio::sync::mpsc::channel::<crate::agents::DelegationEvent>(100);
-        (Some(Arc::new(DelegationManager::new(tx))), Some(rx))
+        delegator.set_event_sender(tx);
+        Some(rx)
     } else {
-        (None, None)
+        None
     };
 
-    let session_backend = build_session_backend(&config);
-    let session_manager = Arc::new(SessionManager::new(Arc::clone(&session_backend)));
+    // session_backend / session_manager are constructed earlier (above the
+    // DelegationCoordinator block — see B15 note) so they can be shared.
     let mut channels = build_channel_accounts(&config);
 
     // ── Sub-agent recovery: detect interrupted sub-agents from a previous run ──
-    let sessions_root = config.workspace_dir.join("sessions");
-    let unfinished_subagents = crate::agents::recovery::scan_unfinished_subagents(&sessions_root);
+    // F37 + H50: scan SessionManager for sub-sessions with mid-turn history
+    // instead of reading `subagent_running_*.json` marker files (the marker
+    // mechanism has been deleted along with the corresponding writes in
+    // DelegationCoordinator).
+    let unfinished_subagents =
+        crate::agents::recovery::scan_unfinished_subagents(&session_manager);
     if !unfinished_subagents.is_empty() {
         tracing::warn!(
             count = unfinished_subagents.len(),
@@ -812,32 +852,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             );
         }
     }
-    // Clean up stale marker files — they belong to the old process.
-    crate::agents::recovery::cleanup_stale_subagent_markers(&sessions_root);
-
-    // ── Queue processing: drain any queued messages ────────────────────────
-    // Messages may have been queued to queue.jsonl files during a hot switch
-    // or if the process was killed mid-turn. Always scan on startup.
-    match crate::agents::process_all_queues(&sessions_root) {
-        Ok(queues) => {
-            for (sid, msgs) in &queues {
-                for msg in msgs {
-                    session_manager.append_message(sid, msg.clone());
-                }
-            }
-            if !queues.is_empty() {
-                let total: usize = queues.values().map(|v| v.len()).sum();
-                tracing::info!(
-                    sessions = queues.len(),
-                    total_messages = total,
-                    "persisted queued messages from previous run"
-                );
-            }
-        }
-        Err(e) => {
-            tracing::warn!(err = %e, "failed to process session queues");
-        }
-    }
 
     // Create ClientChannel separately (needs session_manager for management API).
     #[cfg(feature = "client")]
@@ -849,7 +863,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             cc.set_workspace_dir(config.workspace_dir.clone());
             cc.set_config_path(config.config_path.clone());
             cc.set_skill_manager(skills_arc.clone());
-            cc.set_service_registry(registry_arc.clone());
+            cc.set_provider_registry(registry_arc.clone());
 
             // ── WebSocket socket: SO_REUSEPORT / fd inheritance ──────────────
             // Hot switch: reuse the inherited fd so the new process can bind the
@@ -885,64 +899,100 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         channels.push(("client".to_string(), "default".to_string(), cc.clone() as Arc<dyn Channel>));
     }
 
-    let agent_config = AgentConfig {
-        max_tool_calls: config.agent.max_tool_calls,
-        max_history: config.agent.max_history,
-        prompt_config: build_prompt_config(&config.agent, &config.workspace_dir, &config.knowledge_dir),
-        context: config.agent.context.clone(),
-        stream_first_chunk_timeout_secs: config.agent.stream_first_chunk_timeout_secs,
-        max_output_bytes: calculate_max_output_bytes(&config, &registry_arc),
-        loop_breaker_threshold: config.agent.loop_breaker_threshold as usize,
-        tool_timeout_secs: config.agent.tool_timeout_secs,
-        model_override: None,
-        thinking_override: None,
-        timezone_offset: config.agent.prompt.timezone_offset,
-    };
+    let prompt_config = build_prompt_config(&config.agent, &config.prompt, &config.workspace_dir, &config.knowledge_dir);
     let mcp_manager_arc = Arc::new(mcp_manager);
 
     // Get MCP server instructions for attachment injection.
-    let mcp_instructions = mcp_manager_arc.server_instructions().await;
+    let _mcp_instructions = mcp_manager_arc.server_instructions().await;
 
     // Scheduler config (used for both parts and webhook launch).
-    let scheduler_config = config.agent.scheduler.clone();
-
-    let agent = Agent::new(registry_arc, tools_arc, skills_arc, agent_config)
-        .with_mcp_instructions(mcp_instructions)
-        .with_sub_agent_configs(sub_agent_configs_arc)
-        .with_workspace_dirs(
-            config.workspace_dir.join("skills"),
-            config.workspace_dir.join("agents"),
-        );
+    let scheduler_config = config.scheduler.clone();
 
     // scheduler_tx already created above; scheduler_rx goes to OrchestratorParts.
-    let session_manager_for_webhook = Arc::clone(&session_manager);
+    // ask_router was built above (before build_tools) so AskUserTool can
+    // register with the same instance the orchestrator fulfills from.
+
+    // E30 final: build AgentRuntime to hand to the orchestrator. Today
+    // the orchestrator's main loop still constructs AgentLoop per
+    // session via `agent.loop_for_with_persist`; the AgentRuntime field
+    // sits in parallel so E29 can flip the dispatch over without
+    // having to re-thread plumbing first.
+    let agent_runtime = {
+        // Build the ResourceProvider once so ContextEngine can hold it as
+        // a shared resource (rather than rebuilding per turn).
+        let resources = crate::agents::resource_provider::ResourceProvider::new(
+            Arc::clone(&skills_arc),
+            Arc::clone(&sub_agent_registry),
+            Vec::new(),
+            config.workspace_dir.join("skills"),
+            config.workspace_dir.join("agents"),
+            config.knowledge_dir.to_string_lossy().to_string(),
+            config.prompt.timezone_offset,
+        );
+        let context_engine = Arc::new(crate::agents::context_engine::ContextEngine::new(
+            &config.context_engine,
+            Arc::clone(&registry_arc),
+            resources,
+            Arc::clone(&tools_arc),
+        ));
+        let tool_executor = Arc::new(crate::agents::tool_executor::ToolExecutor::new(
+            config.tool_executor.timeout_secs,
+        ));
+        let loop_breaker = Arc::new(crate::agents::loop_breaker::LoopBreaker::new(
+            crate::agents::loop_breaker::LoopBreakerConfig {
+                max_tool_calls: config.loop_breaker.max_tool_calls,
+                ..Default::default()
+            },
+        ));
+
+        let defaults = crate::agents::runtime::RuntimeDefaults {
+            permission_mode: config.agent.permission_mode,
+            prompt: prompt_config,
+        };
+
+        crate::agents::AgentRuntime::new(
+            Arc::clone(&registry_arc),
+            Arc::clone(&tools_arc),
+            Arc::clone(&skills_arc),
+            Arc::clone(&sub_agent_registry),
+            context_engine,
+            tool_executor,
+            loop_breaker,
+        )
+        .with_defaults(defaults)
+        .with_mcp_manager(Arc::clone(&mcp_manager_arc))
+        .with_search_cooldown(Arc::clone(&search_cooldown))
+    };
+
+    // DelegationCoordinator was constructed before the runtime existed
+    // (circular dep: runtime needs the AgentRegistry the coordinator
+    // also holds). Install the runtime now that both sides are ready —
+    // sub-agent turns will read it via the cell.
+    if let Some(ref delegator) = sub_agent_delegator_arc {
+        delegator.set_runtime(agent_runtime.clone());
+    }
 
     let parts = OrchestratorParts {
-        agent: agent.clone(),
         session_manager,
         channels,
-        sub_delegator: sub_agent_delegator_arc,
-        delegation_manager,
+        delegator: sub_agent_delegator_arc.clone(),
         delegation_rx,
-        persist_backend: session_backend.clone(),
-        mcp_manager: Some(Arc::clone(&mcp_manager_arc)),
-        change_rx: Some(change_rx.clone()),
         scheduler_rx: Some(scheduler_rx),
-        search_cooldown: Some(search_cooldown),
-        unfinished_subagents,
         workspace_dir: config.workspace_dir.clone(),
         scheduler: Some(shared_scheduler.clone()),
+        ask_router: Arc::clone(&ask_router),
+        agent_runtime,
     };
 
     // ── Launch ─────────────────────────────────────────────────────────────
 
-    let (mut orchestrator, _msg_tx) = Orchestrator::new(parts);
+    let (orchestrator, _msg_tx) = Orchestrator::new(parts);
+    let orchestrator = Arc::new(orchestrator);
 
-    // Wire the loop registry into ClientChannel so that session switch/create/delete
-    // can evict the cached AgentLoop (same mechanism as /switch slash command).
-    if let Some(ref cc) = _client_channel {
-        cc.set_loop_registry(orchestrator.shared().sessions);
-    }
+    // H57: AgentLoop is gone; the ClientChannel's previous loop_registry +
+    // evict_loop dance to flush stale per-session AgentLoop instances on
+    // /new and /switch is no longer needed. SessionContext is invalidated
+    // directly by the slash command handlers.
 
     print_banner(&config, mcp_manager_arc.server_count().await, mcp_manager_arc.tool_count().await, sub_agent_count, &sub_agent_names);
 
@@ -952,14 +1002,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         let wh_dir = config.workspace_dir.join("webhooks");
         let wh_jobs = crate::agents::load_webhook_jobs(&wh_dir);
         let wh_ctx = Arc::new(crate::agents::WebhookContext {
-            agent: agent.clone(),
-            channels: orchestrator.shared().channels,
-            sessions: orchestrator.shared().sessions,
-            session_manager: session_manager_for_webhook,
-            session_backend: session_backend.clone(),
+            orchestrator: Arc::clone(&orchestrator),
             timezone: tz_name.clone(),
-            last_channel: orchestrator.shared().last_channel,
-            change_rx: Some(change_rx.clone()),
         });
         let wh_config = scheduler_config.webhook.clone();
 
@@ -1083,7 +1127,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     }
 
     // Run the message dispatch loop (blocks until shutdown).
-    orchestrator.run(shutdown_rx).await.context("orchestrator run error")?;
+    Arc::clone(&orchestrator).run(shutdown_rx, unfinished_subagents).await.context("orchestrator run error")?;
 
     // Graceful shutdown.
     tracing::debug!("dispatch loop ended, shutting down listeners");

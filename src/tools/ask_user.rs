@@ -1,27 +1,35 @@
-//! Ask user tool — pauses the agent loop to ask the user a question and waits for a response.
+//! Ask user tool — pauses the agent to ask the user a question and waits for a reply.
 //!
-//! When the AgentLoop has an `AskUserHandler` wired (set by the Orchestrator),
-//! `ask_user` calls are intercepted before reaching this fallback implementation.
-//!
-//! This fallback exists for scenarios where the agent is run without a channel
-//! (e.g. CLI mode, tests). It returns the question text so the LLM can surface
-//! it to the user in its own response.
+//! Reads the active channel from `session.channel` (the transient handle
+//! installed by `SessionContext::process_turn`), so there is no per-tool
+//! channel map and no need to parse `session.owner`. The tool is wired
+//! with the global `AskRouter` at construction; orchestrator's inbound
+//! dispatch fulfills the wait via `AskRouter::fulfill(session_id, ...)`.
+
+use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use crate::providers::{Tool, ToolResult};
 use serde_json::json;
 
-pub struct AskUserTool;
+use crate::agents::ask_router::AskRouter;
+use crate::channels::{MessagePayload, SendTarget};
+use crate::providers::{Tool, ToolResult};
 
-impl AskUserTool {
-    pub fn new() -> Self {
-        Self
-    }
+/// Mirror of `Orchestrator::ASK_USER_TIMEOUT`. Kept here so the tool is
+/// self-contained.
+const ASK_USER_TIMEOUT: Duration = Duration::from_secs(300);
+
+pub struct AskUserTool {
+    router: Arc<AskRouter>,
 }
 
-impl Default for AskUserTool {
-    fn default() -> Self {
-        Self::new()
+impl AskUserTool {
+    /// Construct an `ask_user` tool bound to the shared `AskRouter`.
+    /// Orchestrator's inbound dispatch must use the *same* router so
+    /// `fulfill(session_id, msg)` wakes the wait registered here.
+    pub fn new(router: Arc<AskRouter>) -> Self {
+        Self { router }
     }
 }
 
@@ -52,23 +60,93 @@ impl Tool for AskUserTool {
         1_000
     }
 
-    /// Fallback: returns the question so the LLM can surface it to the user.
-    ///
-    /// When the Orchestrator is active, this code path is NOT reached —
-    /// the `AgentLoop` intercepts `ask_user` and uses the `AskUserHandler`
-    /// to send the question through the channel and wait for a real reply.
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        session: &crate::agents::session::Session,
+    ) -> anyhow::Result<ToolResult> {
         let question = args["question"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'question' is required"))?;
 
+        let channel = match session.channel.as_ref() {
+            Some(c) => c,
+            None => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(
+                        "ask_user requires an active channel on the session \
+                         (sub-agent / scheduled paths have none)"
+                            .to_string(),
+                    ),
+                });
+            }
+        };
+
+        let reply_target = match session.reply_target() {
+            Some(rt) => rt.to_string(),
+            None => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(
+                        "ask_user requires an active reply_target on the session"
+                            .to_string(),
+                    ),
+                });
+            }
+        };
+
+        let target = SendTarget::new(reply_target);
+        if let Err(e) = channel
+            .send_payload(&target, &MessagePayload::text(question))
+            .await
+        {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!("ask_user: send failed: {}", e)),
+            });
+        }
+
+        // Register with the router and await the user's reply, keyed by
+        // session.id (cross-channel sub-agents would route by session, not
+        // routing_key, after future delegation work).
+        let reply = match self
+            .router
+            .wait_for_reply(&session.id, ASK_USER_TIMEOUT)
+            .await
+        {
+            Ok(m) => m,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(e.to_string()),
+                });
+            }
+        };
+
+        // Surface any attached images alongside the text answer so the
+        // model sees the full reply (AskRouter delivers a ChannelMessage so
+        // image attachments survive the round trip).
+        let mut output = reply.content;
+        if let Some(ref urls) = reply.image_urls {
+            for url in urls {
+                output.push_str("\n[image] ");
+                output.push_str(url);
+            }
+        }
+        if let Some(ref b64) = reply.image_base64 {
+            if !b64.is_empty() {
+                output.push_str(&format!("\n[{} inline image(s) attached]", b64.len()));
+            }
+        }
+
         Ok(ToolResult {
             success: true,
-            output: format!(
-                "Please answer this question: {} (Note: direct channel delivery is not available, \
-                 please respond in the conversation.)",
-                question
-            ),
+            output,
             error: None,
         })
     }

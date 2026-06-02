@@ -39,7 +39,7 @@ impl Tool for SkillsListTool {
         })
     }
 
-    async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, _args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
         let skills = self.skills.read();
 
         let mut entries: Vec<serde_json::Value> = skills.skills_iter()
@@ -150,7 +150,7 @@ mod tests {
     #[tokio::test]
     async fn test_empty_skills() {
         let tool = SkillsListTool::new(Arc::new(RwLock::new(SkillManager::new())));
-        let result = tool.execute(json!({})).await.unwrap();
+        let result = tool.execute(json!({}), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
         assert!(result.success);
         let v: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         assert_eq!(v["count"], 0);
@@ -164,7 +164,7 @@ mod tests {
         mgr.register(make_skill("alpha", "Alpha skill"));
         let tool = SkillsListTool::new(Arc::new(RwLock::new(mgr)));
 
-        let result = tool.execute(json!({})).await.unwrap();
+        let result = tool.execute(json!({}), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
         assert!(result.success);
         let v: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         assert_eq!(v["count"], 2);
@@ -182,7 +182,7 @@ mod tests {
         mgr.register(skill);
         let tool = SkillsListTool::new(Arc::new(RwLock::new(mgr)));
 
-        let result = tool.execute(json!({})).await.unwrap();
+        let result = tool.execute(json!({}), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
         let v: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         let entry = &v["skills"][0];
         assert_eq!(entry["agent_invocable"], false);

@@ -1,22 +1,23 @@
-//! Async delegation — event types and manager for background sub-agent execution.
+//! Async-delegation event type used by the orchestrator event loop.
 //!
-//! When `agent_delegate` is called with mode="async", the sub-agent is spawned in a background
-//! tokio task. When it completes (or fails), a `DelegationEvent` is sent via
-//! mpsc channel to the Orchestrator, which wakes the main agent by injecting
-//! a synthetic message.
-
-use std::sync::Arc;
-use dashmap::DashMap;
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+//! When `agent_delegate` is called with mode="async", the sub-agent runs in
+//! a background tokio task. Completion (or failure) is reported via a
+//! `DelegationEvent` sent through an mpsc channel owned by
+//! `DelegationCoordinator`; the orchestrator's main event loop picks the
+//! event up and routes it back into the parent session's `process_turn`.
 
 /// Events sent from background sub-agents to the Orchestrator.
+///
+/// RFC v2 §三.C: `parent_session_id` (previously `session_key`) identifies
+/// the parent session that spawned the sub-agent — orchestrator routes the
+/// completion message back into this session's `process_turn` so the LLM
+/// can react to the sub-agent's result.
 #[derive(Debug, Clone)]
 pub enum DelegationEvent {
     /// Sub-agent completed successfully.
     Completed {
         task_id: String,
-        session_key: String,
+        parent_session_id: String,
         reply_target: String,
         summary: String,
         /// How long the sub-agent ran (in seconds).
@@ -25,52 +26,8 @@ pub enum DelegationEvent {
     /// Sub-agent failed.
     Failed {
         task_id: String,
-        session_key: String,
+        parent_session_id: String,
         reply_target: String,
         error: String,
     },
-}
-
-/// Manages background delegation tasks.
-pub struct DelegationManager {
-    /// Running background tasks: task_id → JoinHandle.
-    running: Arc<DashMap<String, JoinHandle<()>>>,
-    /// Event sender — cloned and given to sub-agent spawns.
-    event_tx: mpsc::Sender<DelegationEvent>,
-}
-
-impl DelegationManager {
-    pub fn new(event_tx: mpsc::Sender<DelegationEvent>) -> Self {
-        Self {
-            running: Arc::new(DashMap::new()),
-            event_tx,
-        }
-    }
-
-    /// Get a clone of the event sender (for passing to sub-agent spawns).
-    pub fn event_sender(&self) -> mpsc::Sender<DelegationEvent> {
-        self.event_tx.clone()
-    }
-
-    /// Register a running task.
-    pub fn register(&self, task_id: String, handle: JoinHandle<()>) {
-        self.running.insert(task_id, handle);
-    }
-
-    /// Cancel a running task.
-    #[allow(dead_code)]
-    pub fn cancel(&self, task_id: &str) -> bool {
-        if let Some((_, handle)) = self.running.remove(task_id) {
-            handle.abort();
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Get a snapshot of running task_ids.
-    pub fn running_snapshot(&self) -> Vec<String> {
-        self.running.iter().map(|e| e.key().clone()).collect()
-    }
-
 }

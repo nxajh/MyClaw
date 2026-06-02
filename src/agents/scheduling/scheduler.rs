@@ -14,20 +14,14 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use chrono::Timelike;
-use dashmap::DashMap;
 use parking_lot::{Mutex as ParkMutex, RwLock};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex as TokioMutex;
-use tokio::sync::Mutex;
 
-use crate::agents::Agent;
-use crate::agents::AgentLoop;
 use crate::agents::orchestrator::SchedulerEvent;
 use crate::agents::scheduling::cron_types::{DeliveryConfig, RunRecord, RunStatus, ScheduleKind};
 use crate::agents::webhook_loader::{WebhookAuth, WebhookJobDef, render_template};
-use crate::channels::{Channel, SendMessage};
+use crate::channels::SendMessage;
 use crate::config::scheduler::{HeartbeatConfig, WebhookConfig};
-use crate::storage::SessionBackend;
 
 /// Shared handle to the Scheduler for concurrent access.
 pub type SharedScheduler = Arc<Scheduler>;
@@ -163,6 +157,16 @@ pub struct Scheduler {
     heartbeat_config: Option<HeartbeatConfig>,
     /// Event channel to orchestrator.
     event_tx: tokio::sync::mpsc::Sender<SchedulerEvent>,
+    /// Last channel that received a user message (format
+    /// `channel_type:account_id`). Read by heartbeat / cron output
+    /// dispatch when the job's target is "last".
+    pub last_channel: Arc<tokio::sync::Mutex<Option<String>>>,
+    /// Path to persist `last_channel` across restarts.
+    last_channel_file: PathBuf,
+    /// Last recipient (reply_target) that received a user message.
+    pub last_recipient: Arc<tokio::sync::Mutex<Option<String>>>,
+    /// Path to persist `last_recipient` across restarts.
+    last_recipient_file: PathBuf,
 }
 
 impl Scheduler {
@@ -173,6 +177,8 @@ impl Scheduler {
         timezone: String,
         heartbeat_config: Option<HeartbeatConfig>,
         event_tx: tokio::sync::mpsc::Sender<SchedulerEvent>,
+        last_channel_file: PathBuf,
+        last_recipient_file: PathBuf,
     ) -> SharedScheduler {
         let mut data = JobsFile::default();
         let mut last_mtime = None;
@@ -189,6 +195,15 @@ impl Scheduler {
         let job_count = data.jobs.len();
         tracing::info!(count = job_count, "scheduler loaded cron jobs from JSON store");
 
+        let last_channel_value = std::fs::read_to_string(&last_channel_file)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let last_recipient_value = std::fs::read_to_string(&last_recipient_file)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
         Arc::new(Self {
             jobs: RwLock::new(data),
             path,
@@ -196,7 +211,30 @@ impl Scheduler {
             timezone,
             heartbeat_config,
             event_tx,
+            last_channel: Arc::new(tokio::sync::Mutex::new(last_channel_value)),
+            last_channel_file,
+            last_recipient: Arc::new(tokio::sync::Mutex::new(last_recipient_value)),
+            last_recipient_file,
         })
+    }
+
+    /// Record the most recent (channel_type, account_id, reply_target)
+    /// the orchestrator routed to. Called once per inbound UserMessage
+    /// so heartbeat / cron jobs configured with `target = "last"` know
+    /// where to send their output.
+    pub async fn record_user_message(&self, channel_key: &str, reply_target: &str) {
+        {
+            let mut lc = self.last_channel.lock().await;
+            if lc.as_deref() != Some(channel_key) {
+                *lc = Some(channel_key.to_string());
+                let _ = std::fs::write(&self.last_channel_file, channel_key);
+            }
+        }
+        let mut lr = self.last_recipient.lock().await;
+        if lr.as_deref() != Some(reply_target) {
+            *lr = Some(reply_target.to_string());
+            let _ = std::fs::write(&self.last_recipient_file, reply_target);
+        }
     }
 
     /// Whether the scheduler should run (has heartbeat or cron jobs).
@@ -855,22 +893,19 @@ fn generate_id() -> String {
     format!("{:012x}", nanos & 0xfffffffffff)
 }
 
-// ── Webhook context ────────────────────────────────────────────────────────
+// ── Webhook app state ──────────────────────────────────────────────────────
 
-/// Resources needed by the webhook server to run agent tasks.
-/// Heartbeat and cron use the Orchestrator event path instead.
+/// Axum app state for the webhook server. Holds an `Arc<Orchestrator>`
+/// so handlers can reach the shared SessionManager / AgentRuntime /
+/// channel map via accessor methods, plus the webhook-specific
+/// timezone for cron parsing.
 pub struct WebhookContext {
-    pub agent: Agent,
-    pub channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
-    pub sessions: Arc<DashMap<String, Arc<crate::agents::SessionHandle>>>,
-    /// Shared session manager — avoids creating throwaway instances per request.
-    pub session_manager: Arc<crate::agents::session::SessionManager>,
-    /// Backend kept separately for persist hooks (BackendPersistHook needs it).
-    pub session_backend: Arc<dyn SessionBackend>,
+    /// Shared Orchestrator. Webhook handlers reach for
+    /// `orchestrator.session_manager()`, `agent_runtime()`,
+    /// `channels()`, `persist_backend()`, and the `last_channel` field.
+    pub orchestrator: Arc<crate::agents::Orchestrator>,
+    /// Timezone string used for cron evaluation in the webhook server.
     pub timezone: String,
-    /// Last channel that received a user message (format: "channel_type:account_id").
-    pub last_channel: Arc<Mutex<Option<String>>>,
-    pub change_rx: Option<tokio::sync::watch::Receiver<crate::agents::ChangeSet>>,
 }
 
 // ── Interval parsing ───────────────────────────────────────────────────────
@@ -955,44 +990,52 @@ fn parse_hhmm(s: &str) -> Option<u32> {
 
 // ── Webhook execution helpers ──────────────────────────────────────────────
 
-/// Create or get an AgentLoop for a webhook session and run a prompt.
+/// Execute one webhook turn via `SessionContext::process_turn`. Same
+/// unified entry point as the orchestrator's run_scheduled_turn —
+/// scheduled output (no channel during the turn) is dispatched by the
+/// webhook caller via `send_to_target` after this returns.
 pub async fn run_scheduled_task(
     ctx: &WebhookContext,
     session_key: &str,
     prompt: &str,
 ) -> anyhow::Result<String> {
-    let loop_ = get_or_create_loop(ctx, session_key);
-    let mut guard = loop_.lock().await;
-    guard.run(prompt, None, None).await
-}
-
-fn get_or_create_loop(ctx: &WebhookContext, session_key: &str) -> Arc<TokioMutex<AgentLoop>> {
-    if let Some(existing) = ctx.sessions.get(session_key) {
-        return existing.loop_.clone();
-    }
-
-    let session = ctx.session_manager.get_or_create(session_key);
-    let persist_hook: Arc<dyn crate::agents::PersistHook> = Arc::new(
-        crate::agents::BackendPersistHook::new(ctx.session_backend.clone())
+    let session_ctx = ctx.orchestrator.session_manager().get_or_create_context_with(
+        session_key,
+        |session| {
+            session.session_override.run_mode =
+                Some(crate::config::agent::RunMode::Background);
+        },
     );
-    let mut loop_ = ctx.agent.loop_for_with_persist(session, Some(persist_hook));
 
-    if let Some(rx) = ctx.change_rx.clone() {
-        loop_ = loop_.with_change_rx(rx);
-    }
-
-    let loop_arc: Arc<TokioMutex<AgentLoop>> = Arc::new(TokioMutex::new(loop_));
-    let handle = Arc::new(crate::agents::SessionHandle::new_direct(loop_arc.clone()));
-    ctx.sessions.insert(session_key.to_string(), handle);
-    loop_arc
+    let inbound = crate::channels::ChannelMessage {
+        id: format!("webhook:{}", session_key),
+        sender: format!("webhook:{}", session_key),
+        reply_target: String::new(),
+        content: prompt.to_string(),
+        timestamp: chrono::Utc::now().timestamp() as u64,
+        thread_ts: None,
+        interruption_scope_id: None,
+        attachments: Vec::new(),
+        image_urls: None,
+        image_base64: None,
+    };
+    let runtime = ctx.orchestrator.agent_runtime().clone();
+    session_ctx
+        .process_turn(inbound, None, runtime)
+        .await
+        .map(|tr| tr.text)
 }
+
 
 /// Send a response to the configured target channel.
 pub async fn send_to_target(ctx: &WebhookContext, target: &str, content: &str) {
     let (ch_type, acc_id) = match target {
         "none" => return,
         "last" => {
-            let last = ctx.last_channel.lock().await.clone();
+            let last: Option<String> = match ctx.orchestrator.scheduler() {
+                Some(s) => s.last_channel.lock().await.clone(),
+                None => None,
+            };
             match last {
                 Some(ref key) => match key.split_once(':') {
                     Some((ch, acc)) => (ch.to_string(), acc.to_string()),
@@ -1016,7 +1059,7 @@ pub async fn send_to_target(ctx: &WebhookContext, target: &str, content: &str) {
         }
     };
 
-    let channel = match ctx.channels.get(&(ch_type.clone(), acc_id.clone())) {
+    let channel = match ctx.orchestrator.channels().get(&(ch_type.clone(), acc_id.clone())) {
         Some(ch) => ch.clone(),
         None => {
             tracing::warn!(channel = %ch_type, account = %acc_id, "target channel not found");

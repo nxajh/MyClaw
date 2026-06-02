@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -41,7 +41,14 @@ type ReactionTracker = Arc<Mutex<std::collections::HashMap<String, Vec<(i64, i64
 #[derive(Clone)]
 pub struct TelegramChannel {
     bot_token: String,
-    allowed_users: Arc<RwLock<Vec<String>>>,
+    /// Normalized DM whitelist. Plain `Vec<String>` (not Arc<RwLock>)
+    /// because MyClaw applies config changes via `myclaw reload` → SIGUSR1
+    /// → hot_switch full-process restart, not in-process mutation. New
+    /// process = fresh struct = no writer ever exists in this process.
+    allowed_users: Vec<String>,
+    /// Phase 4: allowed group chat IDs (RFC §14.5). `None` = reject all
+    /// groups (Phase 4 default); `Some(vec ["*"])` = allow all groups.
+    allowed_groups: Option<Vec<String>>,
     mention_only: bool,
     api_base: String,
     dedup: DedupState,
@@ -71,17 +78,16 @@ pub struct TelegramChannel {
     data_dir: std::path::PathBuf,
     /// Shared HTTP client with connection pool.
     http: reqwest::Client,
-    /// Whether we've logged the empty allowed_users warning.
-    empty_allowed_warned: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl TelegramChannel {
     pub fn new(config: TelegramAccountConfig) -> Self {
         let allowed = Self::normalize_allowed_users(config.allowed_users.clone());
 
-        Self {
+        let ch = Self {
             bot_token: config.bot_token.clone(),
-            allowed_users: Arc::new(RwLock::new(allowed)),
+            allowed_users: allowed,
+            allowed_groups: config.allowed_groups.clone(),
             mention_only: config.mention_only,
             api_base: config
                 .api_base
@@ -105,8 +111,9 @@ impl TelegramChannel {
                 .timeout(std::time::Duration::from_secs(60))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
-            empty_allowed_warned: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        }
+        };
+        crate::channels::warn_if_locked_down(&ch);
+        ch
     }
 
     fn api_url(&self, method: &str) -> String {
@@ -158,28 +165,41 @@ impl TelegramChannel {
             .collect()
     }
 
-    fn is_user_allowed(&self, username: Option<&str>, user_id: Option<i64>) -> bool {
-        let users = self.allowed_users.read().unwrap();
-        if users.is_empty() {
-            if !self.empty_allowed_warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                warn!("allowed_users is empty — all users will be rejected. Add users or '*' to allow all.");
+    /// Telegram-specific authorization helper that accommodates both
+    /// `username` and `user_id` candidates against the trait-level
+    /// `check_authorization(sender, scope)` primitive: a config can list
+    /// users by either form, so each candidate gets a shot.
+    ///
+    /// Returns `Allow` if any candidate matches; otherwise the decision
+    /// made for the username candidate (or a synthetic Reject).
+    fn try_authorize(
+        &self,
+        username: Option<&str>,
+        user_id: Option<i64>,
+        scope: crate::channels::MessageScope<'_>,
+    ) -> crate::channels::AuthDecision {
+        use crate::channels::{AuthDecision, Channel};
+        let identities: Vec<String> = [
+            username.map(Self::normalize_identity),
+            user_id.map(|i| i.to_string()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        if identities.is_empty() {
+            return AuthDecision::Reject { reason: "no sender identity" };
+        }
+
+        let mut last_non_allow = AuthDecision::Reject { reason: "sender not in allowed_users" };
+        for ident in &identities {
+            match self.check_authorization(ident, scope) {
+                AuthDecision::Allow => return AuthDecision::Allow,
+                AuthDecision::Ignore => return AuthDecision::Ignore,
+                r @ AuthDecision::Reject { .. } => last_non_allow = r,
             }
-            return false;
         }
-        if users.iter().any(|u| u == "*") {
-            return true;
-        }
-        if let Some(un) = username {
-            if users.iter().any(|u| u == &Self::normalize_identity(un)) {
-                return true;
-            }
-        }
-        if let Some(uid) = user_id {
-            if users.iter().any(|u| u == &uid.to_string()) {
-                return true;
-            }
-        }
-        false
+        last_non_allow
     }
 
     async fn fetch_bot_username(&self) -> Option<String> {
@@ -392,17 +412,24 @@ impl TelegramChannel {
         );
 
         // Ensure plain text fits Telegram's limit (truncate if necessary).
-        let plain_text = if text.chars().count() > MAX_MESSAGE_LENGTH {
+        // Telegram measures in UTF-16 code units — emoji counts as 2.
+        let plain_units = text.encode_utf16().count();
+        let plain_text = if plain_units > MAX_MESSAGE_LENGTH {
             warn!(
-                original_chars = text.chars().count(),
+                original_units = plain_units,
                 limit = MAX_MESSAGE_LENGTH,
                 "plain text exceeds Telegram limit, truncating"
             );
-            let end_byte = text
-                .char_indices()
-                .nth(MAX_MESSAGE_LENGTH)
-                .map(|(i, _)| i)
-                .unwrap_or(text.len());
+            let mut acc = 0usize;
+            let mut end_byte = text.len();
+            for (i, ch) in text.char_indices() {
+                let cost = ch.len_utf16();
+                if acc + cost > MAX_MESSAGE_LENGTH {
+                    end_byte = i;
+                    break;
+                }
+                acc += cost;
+            }
             let mut truncated = text[..end_byte].to_string();
             truncated.push_str("\n\n[... message truncated ...]");
             truncated
@@ -435,8 +462,11 @@ impl TelegramChannel {
         Ok(msg_id)
     }
 
-    /// Delete a message by chat_id and message_id.
-    async fn delete_message(&self, chat_id: i64, message_id: i64) -> anyhow::Result<()> {
+    /// Low-level `deleteMessage` API wrapper using primitive i64 ids.
+    /// Distinct from the trait method `Channel::delete_message` which
+    /// takes the abstract `&SendTarget` + `&MessageId`. Matches the
+    /// `send_raw` convention for inherent Telegram API helpers.
+    async fn delete_message_raw(&self, chat_id: i64, message_id: i64) -> anyhow::Result<()> {
         let client = self.http_client();
         let body = serde_json::json!({
             "chat_id": chat_id,
@@ -454,8 +484,11 @@ impl TelegramChannel {
         Ok(())
     }
 
-    /// Edit an existing message by chat_id and message_id.
-    async fn edit_message(&self, chat_id: i64, message_id: i64, text: &str) -> anyhow::Result<bool> {
+    /// Low-level `editMessageText` API wrapper using primitive i64 ids.
+    /// Distinct from the trait method `Channel::edit_message` which
+    /// takes the abstract `&SendTarget` + `&MessageId` + `&MessagePayload`.
+    /// Matches the `send_raw` convention for inherent Telegram API helpers.
+    async fn edit_message_text_raw(&self, chat_id: i64, message_id: i64, text: &str) -> anyhow::Result<bool> {
         let client = self.http_client();
         let html_text = markdown_to_telegram_html(text);
 
@@ -866,7 +899,7 @@ impl TelegramChannel {
                 if let Some(msg_ids) = existing_msg_ids {
                     let text = format!("🤔 还在思考中... (已等待 {secs}s)");
                     for (cid, mid) in msg_ids {
-                        if let Err(e) = self.edit_message(cid, mid, &text).await {
+                        if let Err(e) = self.edit_message_text_raw(cid, mid, &text).await {
                             warn!("Failed to edit stall message {mid}: {e}");
                         }
                     }
@@ -983,11 +1016,26 @@ impl TelegramChannel {
                         None => continue,
                     };
 
-                    // User filtering
+                    // User filtering (callback queries are user-initiated
+                    // button taps; we treat group callbacks as implicit
+                    // @mentions so MentionOnly mode still lets them through).
                     let sender_username = from_user.username.as_deref();
                     let sender_id = Some(from_user.id);
-                    if !self.is_user_allowed(sender_username, sender_id) {
-                        continue;
+                    let scope = if Self::is_group_message(&chat) {
+                        crate::channels::MessageScope::Group {
+                            id: &chat.id.to_string(),
+                            has_mention: true,
+                        }
+                    } else {
+                        crate::channels::MessageScope::Direct
+                    };
+                    match self.try_authorize(sender_username, sender_id, scope) {
+                        crate::channels::AuthDecision::Allow => {}
+                        crate::channels::AuthDecision::Ignore => continue,
+                        crate::channels::AuthDecision::Reject { reason } => {
+                            warn!(reason, "telegram: callback rejected by policy");
+                            continue;
+                        }
                     }
 
                     // Dedup using callback query ID
@@ -1059,13 +1107,31 @@ impl TelegramChannel {
                 let sender_username = from.as_ref().and_then(|u| u.username.as_deref());
                 let sender_id = from.as_ref().map(|u| u.id);
 
-                if !self.is_user_allowed(sender_username, sender_id) {
-                    continue;
-                }
-
-                if Self::is_group_message(&chat) && self.mention_only {
+                // Phase 4: build a MessageScope and let security_policy decide.
+                // has_mention is computed unconditionally so the policy (not the
+                // caller) controls whether to require it.
+                let chat_id_str = chat.id.to_string();
+                let scope = if Self::is_group_message(&chat) {
                     let text = msg.text.as_deref().unwrap_or("");
-                    if !self.contains_bot_mention(text) && !self.is_reply_to_bot(&msg) {
+                    let has_mention =
+                        self.contains_bot_mention(text) || self.is_reply_to_bot(&msg);
+                    crate::channels::MessageScope::Group {
+                        id: &chat_id_str,
+                        has_mention,
+                    }
+                } else {
+                    crate::channels::MessageScope::Direct
+                };
+                match self.try_authorize(sender_username, sender_id, scope) {
+                    crate::channels::AuthDecision::Allow => {}
+                    crate::channels::AuthDecision::Ignore => continue,
+                    crate::channels::AuthDecision::Reject { reason } => {
+                        warn!(
+                            chat_id = chat.id,
+                            sender_id = ?sender_id,
+                            reason,
+                            "telegram: inbound rejected by policy"
+                        );
                         continue;
                     }
                 }
@@ -1183,26 +1249,31 @@ impl TelegramChannel {
     /// 2. For each chunk, check if its HTML conversion exceeds 4096
     /// 3. If it does, re-split that chunk more aggressively using plain text limit
     fn chunk_for_telegram(content: &str) -> Vec<String> {
+        use crate::channels::message::LenUnit;
         let html_overhead_per_chunk = 200; // conservative estimate for HTML expansion
         let raw_limit = MAX_MESSAGE_LENGTH
             .saturating_sub(CONTINUATION_OVERHEAD)
             .saturating_sub(html_overhead_per_chunk);
 
-        let raw_chunks = crate::channels::message::split_message_chunk(content, raw_limit);
+        // Telegram measures in UTF-16 code units; splitting by codepoints
+        // under-counts emoji-heavy text and trips the 4096 limit.
+        let raw_chunks =
+            crate::channels::message::split_message_chunk(content, raw_limit, LenUnit::Utf16Units);
 
         let mut final_chunks = Vec::new();
         for chunk in raw_chunks {
             let html = markdown_to_telegram_html(&chunk);
-            if html.chars().count() <= MAX_MESSAGE_LENGTH {
-                // HTML fits — send_raw will try HTML first, then plain fallback
+            if html.encode_utf16().count() <= MAX_MESSAGE_LENGTH {
                 final_chunks.push(chunk);
             } else {
-                // HTML exceeds limit — re-split this chunk more aggressively.
-                // Use plain text limit that accounts for continuation suffix.
                 let plain_limit = MAX_MESSAGE_LENGTH
                     .saturating_sub(CONTINUATION_OVERHEAD)
-                    .saturating_sub(CONTINUATION_OVERHEAD); // double-subtract for safety
-                let sub_chunks = crate::channels::message::split_message_chunk(&chunk, plain_limit);
+                    .saturating_sub(CONTINUATION_OVERHEAD);
+                let sub_chunks = crate::channels::message::split_message_chunk(
+                    &chunk,
+                    plain_limit,
+                    LenUnit::Utf16Units,
+                );
                 final_chunks.extend(sub_chunks);
             }
         }
@@ -1211,10 +1282,37 @@ impl TelegramChannel {
     }
 }
 
+static TELEGRAM_CAPS: crate::channels::message::ChannelCapabilities =
+    crate::channels::message::ChannelCapabilities::telegram();
+
 #[async_trait]
 impl Channel for TelegramChannel {
     fn name(&self) -> &str {
         "telegram"
+    }
+
+    fn capabilities(&self) -> &crate::channels::message::ChannelCapabilities {
+        &TELEGRAM_CAPS
+    }
+
+    fn security_policy(&self) -> crate::channels::ChannelSecurityPolicy {
+        use crate::channels::{AllowList, ChannelSecurityPolicy, GroupAuthMode};
+        let allowed_users = if self.allowed_users.iter().any(|s| s == "*") {
+            AllowList::All
+        } else {
+            AllowList::Whitelist(self.allowed_users.clone())
+        };
+        let group_allowlist = AllowList::from_config(self.allowed_groups.clone());
+        let group_mode = match (&self.allowed_groups, self.mention_only) {
+            (None, _) => GroupAuthMode::Reject,
+            (Some(_), true) => GroupAuthMode::MentionOnly,
+            (Some(_), false) => GroupAuthMode::Open,
+        };
+        ChannelSecurityPolicy {
+            allowed_users,
+            group_mode,
+            group_allowlist,
+        }
     }
 
     async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
@@ -1224,7 +1322,7 @@ impl Channel for TelegramChannel {
         let stall_msgs = self.stall_messages.lock().remove(&message.recipient);
         if let Some(msgs) = stall_msgs {
             for (chat_id, msg_id) in msgs {
-                if let Err(e) = self.delete_message(chat_id, msg_id).await {
+                if let Err(e) = self.delete_message_raw(chat_id, msg_id).await {
                     debug!("Failed to delete stall message {}: {e}", msg_id);
                 }
             }
@@ -1294,6 +1392,51 @@ impl Channel for TelegramChannel {
             return Err(e);
         }
         Ok(())
+    }
+
+    /// RFC §7.1 Phase 3: edit a previously sent Telegram message.
+    /// `target.recipient` carries the chat_id; `message_id` is the
+    /// Telegram message_id as a decimal string.
+    async fn edit_message(
+        &self,
+        target: &crate::channels::SendTarget,
+        message_id: &crate::channels::MessageId,
+        payload: &crate::channels::MessagePayload,
+    ) -> anyhow::Result<()> {
+        let (chat_id, _thread_id) = Self::parse_reply_target(&target.recipient);
+        let chat_id_i64: i64 = chat_id
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid chat_id '{chat_id}': {e}"))?;
+        let msg_id_i64: i64 = message_id
+            .as_str()
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid message_id '{}': {e}", message_id.as_str()))?;
+        // Telegram editMessageText takes plain/HTML text only; downgrade
+        // Media → fallback text. Interactive (inline buttons) edit requires
+        // a separate editMessageReplyMarkup call we don't expose yet.
+        let text = payload.to_fallback_text();
+        let ok = self.edit_message_text_raw(chat_id_i64, msg_id_i64, &text).await?;
+        if !ok {
+            anyhow::bail!("editMessageText reported failure");
+        }
+        Ok(())
+    }
+
+    /// RFC §7.1 Phase 3: delete a Telegram message.
+    async fn delete_message(
+        &self,
+        target: &crate::channels::SendTarget,
+        message_id: &crate::channels::MessageId,
+    ) -> anyhow::Result<()> {
+        let (chat_id, _thread_id) = Self::parse_reply_target(&target.recipient);
+        let chat_id_i64: i64 = chat_id
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid chat_id '{chat_id}': {e}"))?;
+        let msg_id_i64: i64 = message_id
+            .as_str()
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid message_id '{}': {e}", message_id.as_str()))?;
+        self.delete_message_raw(chat_id_i64, msg_id_i64).await
     }
 
     async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>> {
@@ -1382,6 +1525,7 @@ mod tests {
         TelegramAccountConfig {
             bot_token: "test_token_123".into(),
             allowed_users: vec!["alice".into(), "123456".into()],
+            allowed_groups: None,
             mention_only: false,
             api_base: Some("https://api.telegram.org".into()),
             proxy_url: None,
@@ -1406,6 +1550,58 @@ mod tests {
         let users = vec!["@Alice".into(), "  Bob  ".into(), "charlie".into()];
         let normalized = TelegramChannel::normalize_allowed_users(users);
         assert_eq!(normalized, vec!["Alice", "Bob", "charlie"]);
+    }
+
+    #[test]
+    fn phase4_security_policy_default_rejects_groups() {
+        use crate::channels::{Channel, GroupAuthMode};
+        let ch = TelegramChannel::new(make_config());
+        // make_config has allowed_groups = None, mention_only = false
+        let policy = ch.security_policy();
+        assert!(matches!(policy.group_mode, GroupAuthMode::Reject),
+            "Phase 4 default: missing allowed_groups must reject groups");
+    }
+
+    #[test]
+    fn phase4_check_authorization_dm_allows_listed_user() {
+        use crate::channels::{AuthDecision, MessageScope};
+        let ch = TelegramChannel::new(make_config());
+        // make_config lists "alice" — should allow DM from username alice
+        let decision = ch.try_authorize(Some("alice"), Some(999), MessageScope::Direct);
+        assert_eq!(decision, AuthDecision::Allow);
+
+        // user_id 123456 also listed — should allow DM by id even without username
+        let decision = ch.try_authorize(None, Some(123456), MessageScope::Direct);
+        assert_eq!(decision, AuthDecision::Allow);
+
+        // Unlisted user → Reject
+        let decision = ch.try_authorize(Some("bob"), Some(777), MessageScope::Direct);
+        assert!(matches!(decision, AuthDecision::Reject { .. }));
+    }
+
+    #[test]
+    fn phase4_group_mention_only_with_allowlist() {
+        use crate::channels::{AuthDecision, MessageScope};
+        let mut cfg = make_config();
+        cfg.allowed_groups = Some(vec!["*".into()]);
+        cfg.mention_only = true;
+        let ch = TelegramChannel::new(cfg);
+
+        // Allowed user, group, no mention → Ignore (silent drop, not warn)
+        let decision = ch.try_authorize(
+            Some("alice"),
+            None,
+            MessageScope::Group { id: "-100123", has_mention: false },
+        );
+        assert_eq!(decision, AuthDecision::Ignore);
+
+        // Allowed user, group, with mention → Allow
+        let decision = ch.try_authorize(
+            Some("alice"),
+            None,
+            MessageScope::Group { id: "-100123", has_mention: true },
+        );
+        assert_eq!(decision, AuthDecision::Allow);
     }
 
     #[test]
@@ -1585,14 +1781,35 @@ mod tests {
 
     #[test]
     fn test_message_chunking() {
-        let chunks = crate::channels::message::split_message_chunk("short", 10);
+        use crate::channels::message::LenUnit;
+        let chunks =
+            crate::channels::message::split_message_chunk("short", 10, LenUnit::Codepoints);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0], "short");
 
         let long = "a".repeat(5000);
-        let chunks = crate::channels::message::split_message_chunk(&long, 100);
+        let chunks =
+            crate::channels::message::split_message_chunk(&long, 100, LenUnit::Codepoints);
         assert!(chunks.len() > 1);
         assert!(chunks.iter().all(|c| c.len() <= 100));
+    }
+
+    #[test]
+    fn test_utf16_chunking_emoji() {
+        use crate::channels::message::{LenUnit, split_message_chunk};
+        // Build 2100 codepoints of emoji (each is 2 UTF-16 units = 4200 units total)
+        let emoji_text = "😀".repeat(2100);
+        assert_eq!(emoji_text.chars().count(), 2100);
+        assert_eq!(emoji_text.encode_utf16().count(), 4200);
+
+        let chunks = split_message_chunk(&emoji_text, 4096, LenUnit::Utf16Units);
+        assert!(chunks.len() > 1, "must split when UTF-16 exceeds limit");
+        for c in &chunks {
+            assert!(
+                c.encode_utf16().count() <= 4096,
+                "each chunk must fit Telegram UTF-16 limit"
+            );
+        }
     }
 
     // ── Markdown → Telegram HTML tests ──────────────────────────────────────

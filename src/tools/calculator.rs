@@ -47,7 +47,7 @@ impl Tool for CalculatorTool {
         1_000
     }
 
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
         let expr = args["expression"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'expression' is required"))?;

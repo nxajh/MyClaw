@@ -7,30 +7,27 @@ pub fn cmd_stop() -> String {
 }
 
 pub async fn cmd_reload(ctx: CommandContext<'_>) -> String {
-    let workspace_dir = ctx.agent.workspace_dir();
+    // Workspace root comes from the prompt config — same path the
+    // builder uses for AGENT.md / SKILL.md resolution.
+    let workspace_dir = std::path::PathBuf::from(&ctx.runtime.defaults.prompt.workspace_dir);
 
     // 1. Re-scan skills
-    let skills_dir = std::path::Path::new(workspace_dir).join("skills");
+    let skills_dir = workspace_dir.join("skills");
     let new_defs = crate::agents::skill_loader::load_skills_from_dir(&skills_dir);
     let new_skills: Vec<crate::agents::Skill> =
         new_defs.iter().map(crate::agents::Skill::from_definition).collect();
     {
-        let mut skills = ctx.agent.skills().write();
+        let mut skills = ctx.runtime.skills.write();
         skills.reload(new_skills);
     }
 
     // 2. Re-scan agents
-    let agents_dir = std::path::Path::new(workspace_dir).join("agents");
-    let new_agents = crate::agents::agent_loader::load_agents_from_dir(&agents_dir);
-    {
-        let mut configs = ctx.agent.sub_agent_configs().write();
-        *configs = new_agents;
-    }
+    let agents_dir = workspace_dir.join("agents");
+    let agent_count = ctx.runtime.agents.reload_from_dir(&agents_dir);
 
     // 3. No need to reset attachment manager — next diff rebuilds from history.
 
-    let skill_count = ctx.agent.skills().read().skill_count();
-    let agent_count = ctx.agent.sub_agent_configs().read().len();
+    let skill_count = ctx.runtime.skills.read().skill_count();
 
     format!("🔄 已重新加载：{} 个 skills，{} 个 agents", skill_count, agent_count)
 }

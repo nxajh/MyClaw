@@ -6,30 +6,24 @@
 //! 2. Creates a temporary AgentLoop with the sub-agent's system prompt and tools
 //! 3. Runs the sub-agent to completion (sync) or in background (async)
 //! 4. Returns the result (sync) or task_id (async) to the main agent
+//!
+//! H47: this tool now talks to [`AgentDelegator`] (the RFC v2 trait that
+//! carries `&Session`); the legacy `TaskDelegator` trait was deleted.
 
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
 
+use crate::agents::AgentDelegator;
 use crate::providers::{Tool, ToolResult};
-
-/// Shared trait for task delegation — implemented by the Agent/Orchestrator layer.
-#[async_trait]
-pub trait TaskDelegator: Send + Sync {
-    /// Delegate a task to a named sub-agent and return its text response.
-    async fn delegate(&self, agent_name: &str, task: &str) -> anyhow::Result<String>;
-
-    /// List available sub-agent names and their descriptions.
-    fn available_agents(&self) -> Vec<(String, String)>;
-}
 
 /// The agent_delegate tool — injectable delegator for runtime dispatch.
 pub struct AgentDelegateTool {
-    delegator: Arc<dyn TaskDelegator>,
+    delegator: Arc<dyn AgentDelegator>,
 }
 
 impl AgentDelegateTool {
-    pub fn new(delegator: Arc<dyn TaskDelegator>) -> Self {
+    pub fn new(delegator: Arc<dyn AgentDelegator>) -> Self {
         Self { delegator }
     }
 }
@@ -73,7 +67,7 @@ impl Tool for AgentDelegateTool {
         20_000
     }
 
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, args: serde_json::Value, session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
         let agent_name = args["agent"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'agent' is required"))?;
@@ -83,7 +77,7 @@ impl Tool for AgentDelegateTool {
 
         tracing::info!(agent = %agent_name, task_len = task.len(), "delegating task to sub-agent");
 
-        match self.delegator.delegate(agent_name, task).await {
+        match self.delegator.delegate(agent_name, task, session).await {
             Ok(result) => Ok(ToolResult {
                 success: true,
                 output: result,

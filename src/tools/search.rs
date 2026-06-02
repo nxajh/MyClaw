@@ -113,7 +113,7 @@ impl Tool for GlobSearchTool {
         3_000
     }
 
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
         let pattern = args["pattern"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'pattern' is required"))?;
@@ -236,7 +236,7 @@ impl Tool for ContentSearchTool {
         3_000
     }
 
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
         let pattern = args["regex"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'regex' is required"))?;

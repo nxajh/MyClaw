@@ -18,8 +18,8 @@ pub fn cmd_config(args: &str, ctx: CommandContext<'_>) -> String {
         }
     };
     if args.is_empty() {
-        let tools = ctx.agent.tools();
-        let skills = ctx.agent.skills();
+        let tools = &ctx.runtime.tools;
+        let skills = &ctx.runtime.skills;
         let skills_count = skills.read().skill_count();
         format!(
             "⚙️ **运行时配置**\n\n\
@@ -132,7 +132,7 @@ pub async fn cmd_autonomy(args: &str, ctx: CommandContext<'_>) -> String {
     ov.permission_mode = autonomy;
     apply_and_persist_override(ov, &ctx).await;
 
-    // Evict the cached agent loop so the system prompt is rebuilt with the new autonomy.
-    ctx.sessions.remove(ctx.user_id);
+    // Evict the cached SessionContext so the system prompt is rebuilt with the new autonomy.
+    ctx.session_manager.drop_context(ctx.user_id);
     format!("{}\n_系统提示词将在下次请求时重建。_", msg)
 }

@@ -56,7 +56,7 @@ pub async fn cmd_status(ctx: CommandContext<'_>) -> String {
         // Determine status.
         let status = if total_models == 0 {
             "❌ 无模型".to_string()
-        } else if let Some(cooldown) = &ctx.search_cooldown {
+        } else if let Some(cooldown) = ctx.runtime.search_cooldown.as_ref() {
             // Check if any search model's provider is in cooldown.
             // SearchProviderCooldown tracks by provider name.
             if cooldown.is_cooled_down(&s.name) {
@@ -85,7 +85,7 @@ pub async fn cmd_status(ctx: CommandContext<'_>) -> String {
 }
 
 pub fn cmd_tools(ctx: CommandContext<'_>) -> String {
-    let tools = ctx.agent.tools();
+    let tools = &ctx.runtime.tools;
     let names = tools.tool_names_sorted();
     if names.is_empty() {
         return "⚠️ 没有注册的工具。".to_string();
@@ -107,46 +107,36 @@ pub fn cmd_tools(ctx: CommandContext<'_>) -> String {
 }
 
 pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
-    // Prefer session-level model_override if available, otherwise fall back to registry default.
-    let (model_id, context_window) = if let Some(loop_arc) = ctx.agent_loop {
-        let guard = loop_arc.lock().await;
-        let model = guard.session_override().model.clone()
+    // Try-lock pattern: a turn in flight holds session for the LLM call
+    // duration (~minutes). Block-waiting here would hang the command for
+    // that long; instead surface a friendly "busy" message and let the
+    // user re-issue /context after the response lands.
+    if let Some(session_ctx) = ctx.session_ctx {
+        let session = match session_ctx.session.try_lock() {
+            Ok(s) => s,
+            Err(_) => return "⏳ 会话正在响应中，请稍后再试 /context。".to_string(),
+        };
+        let model = session.session_override.model.clone()
             .unwrap_or_else(|| {
                 ctx.registry.get_chat_provider(crate::providers::Capability::Chat)
                     .ok()
                     .map(|(_, id)| id)
                     .unwrap_or_default()
             });
-        let cw = ctx.registry.get_chat_model_config(&model)
+        let context_window = ctx.registry.get_chat_model_config(&model)
             .ok()
             .and_then(|cfg| cfg.context_window)
             .unwrap_or(0);
-        (model, cw)
-    } else {
-        match ctx.registry.get_chat_provider(crate::providers::Capability::Chat) {
-            Ok((_, id)) => {
-                let cw = ctx.registry.get_chat_model_config(&id)
-                    .ok()
-                    .and_then(|cfg| cfg.context_window)
-                    .unwrap_or(0);
-                (id, cw)
-            }
-            Err(_) => return "❌ 无法获取模型信息。".to_string(),
-        }
-    };
+        let model_id = model;
 
-    if let Some(loop_arc) = ctx.agent_loop {
-        let guard = loop_arc.lock().await;
-        let tracker_total = guard.token_total();
-        let history_len = guard.session().history.len();
-        let session = guard.session();
+        let tracker_total = session.token_tracker.total_tokens();
+        let history_len = session.history.len();
 
         // Estimate actual context size from current history (system prompt + all messages).
         let estimated_total: u64 = session.history.iter()
-            .map(crate::agents::agent_impl::estimate_message_tokens)
+            .map(crate::agents::tokens::estimate_message_tokens)
             .sum();
 
-        // Use the larger of tracker and estimate for display.
         let total = std::cmp::max(tracker_total, estimated_total);
 
         let summary_info = if let Some(ref meta) = session.summary_metadata {
@@ -164,8 +154,8 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
             "未知".to_string()
         };
 
-        // Use actual config threshold instead of hardcoded 0.7.
-        let compact_threshold = guard.compact_threshold();
+        // Use Agent's configured compact_threshold (ContextConfig is per-Agent today).
+        let compact_threshold = ctx.runtime.context_engine.compact_threshold();
         let threshold = if context_window > 0 {
             let t = (context_window as f64 * compact_threshold) as u64;
             format!("{} token ({:.0}%)", t, compact_threshold * 100.0)
@@ -173,7 +163,11 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
             "未知".to_string()
         };
 
-        let (input, cached, output) = guard.last_usage();
+        let (input, cached, output) = (
+            session.token_tracker.last_input(),
+            session.token_tracker.last_cached(),
+            session.token_tracker.last_output(),
+        );
         let used_kb = total * 4 / 1024;
         let window_kb = context_window * 4 / 1024;
 
@@ -200,7 +194,19 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
             model_id, context_window, window_kb, total, usage_detail, used_kb, usage_pct, threshold, history_len, summary_info
         )
     } else {
-        // agent_loop is None: restart or session switch before first message.
+        // No active SessionContext (post-restart, post-/new, post-/switch).
+        // Resolve model from registry default and read history from
+        // SessionManager cache (cheap, doesn't block on a running turn).
+        let (model_id, context_window) = match ctx.registry.get_chat_provider(crate::providers::Capability::Chat) {
+            Ok((_, id)) => {
+                let cw = ctx.registry.get_chat_model_config(&id)
+                    .ok()
+                    .and_then(|cfg| cfg.context_window)
+                    .unwrap_or(0);
+                (id, cw)
+            }
+            Err(_) => return "❌ 无法获取模型信息。".to_string(),
+        };
         let session = ctx.session_manager.get_or_create(ctx.user_id);
         if session.history.is_empty() {
             format!(
@@ -210,13 +216,14 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
                  状态: 新会话，无历史",
                 model_id, context_window
             )
-        } else if let Some(total) = session.last_total_tokens {
-            let usage_pct = if context_window > 0 {
+        } else {
+            let total = session.token_tracker.total_tokens();
+            let usage_pct = if context_window > 0 && total > 0 {
                 format!("{:.1}%", (total as f64 / context_window as f64) * 100.0)
             } else {
                 "未知".to_string()
             };
-            let compact_threshold = ctx.agent.compact_threshold();
+            let compact_threshold = ctx.runtime.context_engine.compact_threshold();
             let threshold = if context_window > 0 {
                 let t = (context_window as f64 * compact_threshold) as u64;
                 format!("{} token ({:.0}%)", t, compact_threshold * 100.0)
@@ -244,24 +251,6 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
                 model_id, context_window, window_kb,
                 total, used_kb, usage_pct,
                 threshold, session.history.len(), summary_info
-            )
-        } else {
-            // History exists but no stored token count (e.g. session predates
-            // token persistence). Don't estimate — just report as unknown.
-            format!(
-                "📐 **上下文详情**  \n\n\
-                 模型: `{}`  \n\
-                 上下文窗口: {} token  \n\
-                 当前使用: 暂无记录（发送一条消息后获取精确值）  \n\
-                 历史消息: {} 条  \n\
-                 压缩状态: {}",
-                model_id, context_window,
-                session.history.len(),
-                if let Some(ref meta) = session.summary_metadata {
-                    format!("已压缩 v{}", meta.version)
-                } else {
-                    "尚未压缩".to_string()
-                }
             )
         }
     }
@@ -357,7 +346,7 @@ pub async fn cmd_export(ctx: CommandContext<'_>) -> String {
 }
 
 pub async fn cmd_mcp(ctx: CommandContext<'_>) -> String {
-    match ctx.mcp_manager {
+    match ctx.runtime.mcp_manager.as_ref() {
         Some(mgr) => {
             let connected = mgr.is_connected().await;
             let servers = mgr.server_count().await;
@@ -380,7 +369,7 @@ pub async fn cmd_mcp(ctx: CommandContext<'_>) -> String {
 }
 
 pub fn cmd_skill(ctx: CommandContext<'_>) -> String {
-    let skills = ctx.agent.skills().read();
+    let skills = ctx.runtime.skills.read();
     let count = skills.skill_count();
     if count == 0 {
         return "📚 没有加载任何 skill。".to_string();

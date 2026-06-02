@@ -39,18 +39,36 @@ impl Default for AgentIsolation {
 }
 
 /// A sub-agent definition.
+///
+/// RFC v2 §三.B: an agent's config is the union of its AGENT.md front-matter
+/// fields plus the body (`system_prompt`). The three filters (`tools` /
+/// `skills` / `mcp`) decide which globally-registered capabilities this agent
+/// is allowed to see; `Agent.run` snapshots the filtered ToolRegistry at
+/// turn start.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentConfig {
     /// Unique name for this sub-agent (used in agent_delegate tool call).
     pub name: String,
 
-    /// System prompt for this sub-agent.
+    /// System prompt for this sub-agent (body of AGENT.md).
     pub system_prompt: String,
 
-    /// Tools this sub-agent is allowed to use (whitelist).
-    /// If empty, the sub-agent has no tools (text-only).
+    /// Tools this sub-agent is allowed to use. RFC v2 §三.A:
+    /// `ToolFilter` (`[all]` / explicit allow-list /
+    /// `{ except: [...] }` deny-list). Default = `[all]`.
     #[serde(default)]
-    pub tools: Vec<String>,
+    pub tools: crate::config::filters::ToolFilter,
+
+    /// Skills this sub-agent may see in system reminders / load via skill_view.
+    /// RFC v2 §三.B: NameFilter form `[all]` / `[skill_a, skill_b]` /
+    /// `{ except: [...] }`. Default `all`.
+    #[serde(default)]
+    pub skills: crate::config::filters::SkillFilter,
+
+    /// MCP server names whose tools are exposed to this sub-agent.
+    /// Default `all`. Per-tool filtering still applies via `tools`.
+    #[serde(default)]
+    pub mcp: crate::config::filters::McpFilter,
 
     /// Hard cap on tool calls per delegation. Defaults to the parent agent's limit.
     #[serde(default)]
@@ -68,6 +86,23 @@ pub struct SubAgentConfig {
     /// File system isolation level. Defaults to "shared".
     #[serde(default)]
     pub isolation: AgentIsolation,
+}
+
+impl SubAgentConfig {
+    /// True if `tool_name` is allowed by this agent's tool filter.
+    pub fn allows_tool(&self, tool_name: &str) -> bool {
+        self.tools.allows(tool_name)
+    }
+
+    /// True if `skill_name` is allowed by this agent's skill filter.
+    pub fn allows_skill(&self, skill_name: &str) -> bool {
+        self.skills.allows(skill_name)
+    }
+
+    /// True if MCP `server_name`'s tools are allowed by this agent.
+    pub fn allows_mcp(&self, server_name: &str) -> bool {
+        self.mcp.allows(server_name)
+    }
 }
 
 impl SubAgentConfig {
@@ -99,7 +134,9 @@ mod tests {
         "#;
         let config: SubAgentConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.name, "coder");
-        assert_eq!(config.tools, vec!["shell", "file_read"]);
+        assert!(config.tools.allows("shell"));
+        assert!(config.tools.allows("file_read"));
+        assert!(!config.tools.allows("file_write"));
         assert_eq!(config.max_tool_calls, Some(30));
     }
 
@@ -119,12 +156,49 @@ mod tests {
         let config = SubAgentConfig {
             name: "test".to_string(),
             system_prompt: String::new(),
-            tools: vec![],
+            tools: Default::default(),
+            skills: Default::default(),
+            mcp: Default::default(),
             max_tool_calls: None,
             description: None,
             model: None,
             isolation: AgentIsolation::default(),
         };
         assert_eq!(config.isolation, AgentIsolation::Shared);
+    }
+
+    #[test]
+    fn allows_skill_default_is_all() {
+        let config = SubAgentConfig {
+            name: "test".to_string(),
+            system_prompt: String::new(),
+            tools: Default::default(),
+            skills: Default::default(),
+            mcp: Default::default(),
+            max_tool_calls: None,
+            description: None,
+            model: None,
+            isolation: AgentIsolation::default(),
+        };
+        assert!(config.allows_skill("anything"));
+        assert!(config.allows_mcp("anything"));
+    }
+
+    #[test]
+    fn allows_tool_whitelist() {
+        let config = SubAgentConfig {
+            name: "t".to_string(),
+            system_prompt: String::new(),
+            tools: crate::config::filters::ToolFilter::Allow(vec!["shell".to_string(), "file_read".to_string()]),
+            skills: Default::default(),
+            mcp: Default::default(),
+            max_tool_calls: None,
+            description: None,
+            model: None,
+            isolation: AgentIsolation::default(),
+        };
+        assert!(config.allows_tool("shell"));
+        assert!(config.allows_tool("file_read"));
+        assert!(!config.allows_tool("file_write"));
     }
 }

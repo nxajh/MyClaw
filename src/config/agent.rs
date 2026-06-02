@@ -1,4 +1,4 @@
-//! Agent configuration — permission mode, loop breaker, prompt settings.
+//! Agent + per-subsystem configuration sections.
 
 use serde::{Deserialize, Serialize};
 
@@ -30,9 +30,10 @@ pub enum RunMode {
     Background,
 }
 
-// ── ContextConfig ─────────────────────────────────────────────────────────────
+// ── ContextConfig — `[context_engine]` ────────────────────────────────────────
 
-/// Context window management configuration.
+/// Context-window management configuration. Maps the `[context_engine]`
+/// TOML section.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextConfig {
     /// Compact threshold: trigger compaction when token usage exceeds
@@ -57,83 +58,46 @@ impl Default for ContextConfig {
     }
 }
 
-// ── AgentConfig ───────────────────────────────────────────────────────────────
+// ── ToolExecutorConfig — `[tool_executor]` ────────────────────────────────────
 
-/// Agent behavior configuration.
+/// Tool-executor configuration. Maps the `[tool_executor]` TOML section.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentConfig {
-    /// Hard cap on tool calls per turn. 0 = unlimited.
-    #[serde(default = "default_max_tool_calls")]
-    pub max_tool_calls: usize,
-
-    /// Maximum conversation history messages to keep. 0 = unlimited.
-    #[serde(default = "default_max_history")]
-    pub max_history: usize,
-
-    /// Permission mode — controls tool approval requirements.
-    #[serde(default)]
-    pub permission_mode: PermissionMode,
-
+pub struct ToolExecutorConfig {
     /// Tool call timeout in seconds.
     #[serde(default = "default_tool_timeout")]
-    pub tool_timeout_secs: u64,
-
-    /// Timeout in seconds waiting for the first streaming chunk from the API.
-    /// Covers slow startup on large contexts; after the first chunk arrives,
-    /// TCP keepalive handles dead-connection detection at the OS level.
-    #[serde(default = "default_stream_first_chunk_timeout")]
-    pub stream_first_chunk_timeout_secs: u64,
-
-    /// Loop breaker: max consecutive identical tool calls before breaking.
-    #[serde(default = "default_loop_breaker_threshold")]
-    pub loop_breaker_threshold: u32,
-
-    /// System prompt configuration.
-    #[serde(default)]
-    pub prompt: PromptConfig,
-
-    /// Context window management settings.
-    #[serde(default)]
-    pub context: ContextConfig,
-    /// Scheduler settings (heartbeat, cron, webhook).
-    #[serde(default)]
-    pub scheduler: crate::config::scheduler::SchedulerConfig,
+    pub timeout_secs: u64,
 }
 
-fn default_max_tool_calls() -> usize { 100 }
-fn default_max_history() -> usize { 200 }
 fn default_tool_timeout() -> u64 { 180 }
-fn default_stream_first_chunk_timeout() -> u64 { 600 }
-fn default_loop_breaker_threshold() -> u32 { 3 }
 
-impl Default for AgentConfig {
+impl Default for ToolExecutorConfig {
     fn default() -> Self {
         Self {
-            max_tool_calls: default_max_tool_calls(),
-            max_history: default_max_history(),
-            permission_mode: PermissionMode::Default,
-            tool_timeout_secs: default_tool_timeout(),
-            stream_first_chunk_timeout_secs: default_stream_first_chunk_timeout(),
-            loop_breaker_threshold: default_loop_breaker_threshold(),
-            prompt: PromptConfig::default(),
-            context: ContextConfig::default(),
-            scheduler: crate::config::scheduler::SchedulerConfig::default(),
+            timeout_secs: default_tool_timeout(),
         }
     }
 }
 
-// ── PromptConfig ──────────────────────────────────────────────────────────────
+// ── AgentConfig — `[agent]` ───────────────────────────────────────────────────
 
-/// System prompt builder configuration.
+/// Agent-wide configuration. Per the RFC v2 target shape, this section
+/// only carries the permission mode (subsystem configs moved to their
+/// own top-level sections).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentConfig {
+    /// Permission mode — controls tool approval requirements.
+    #[serde(default)]
+    pub permission_mode: PermissionMode,
+}
+
+// ── PromptConfig — `[prompt]` ─────────────────────────────────────────────────
+
+/// System prompt builder configuration. Maps the `[prompt]` TOML section.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptConfig {
     /// Maximum system prompt length in characters. 0 = unlimited.
     #[serde(default)]
     pub max_chars: usize,
-
-    /// Maximum bytes to load from each bootstrap file.
-    #[serde(default = "default_bootstrap_max_chars")]
-    pub bootstrap_max_chars: usize,
 
     /// Use native tool calling (vs XML protocol).
     #[serde(default = "default_true")]
@@ -150,7 +114,6 @@ pub struct PromptConfig {
     pub timezone_offset: i32,
 }
 
-fn default_bootstrap_max_chars() -> usize { 8000 }
 fn default_timezone_offset() -> i32 { 8 }
 
 fn default_true() -> bool { true }
@@ -159,7 +122,6 @@ impl Default for PromptConfig {
     fn default() -> Self {
         Self {
             max_chars: 0,
-            bootstrap_max_chars: default_bootstrap_max_chars(),
             native_tools: true,
             timezone: None,
             timezone_offset: default_timezone_offset(),
@@ -176,26 +138,15 @@ mod tests {
     #[test]
     fn default_agent_config() {
         let config = AgentConfig::default();
-        assert_eq!(config.max_tool_calls, 100);
-        assert_eq!(config.max_history, 200);
         assert_eq!(config.permission_mode, PermissionMode::Default);
-        assert_eq!(config.tool_timeout_secs, 180);
-        assert!(config.prompt.native_tools);
     }
 
     #[test]
-    fn deserialize_agent_config() {
-        let toml_str = r#"
-max_tool_calls = 50
-permission_mode = "full"
-tool_timeout_secs = 300
-
-[prompt]
-max_chars = 10000
-"#;
-        let config: AgentConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.max_tool_calls, 50);
-        assert_eq!(config.permission_mode, PermissionMode::Full);
-        assert_eq!(config.prompt.max_chars, 10000);
+    fn default_subsystem_configs() {
+        let tex = ToolExecutorConfig::default();
+        assert_eq!(tex.timeout_secs, 180);
+        let ctx = ContextConfig::default();
+        assert!((ctx.compact_threshold - 0.7).abs() < 1e-9);
+        assert_eq!(ctx.retain_work_units, 2);
     }
 }

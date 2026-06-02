@@ -122,13 +122,44 @@ pub trait SessionBackend: Send + Sync {
         None
     }
 
-    /// Persist the last reply_target for a session (e.g. "c2c:<openid>").
-    fn save_reply_target(&self, _session_id: &str, _target: &str) -> std::io::Result<()> {
+    /// Persist the last incoming ChannelMessage as JSON. The
+    /// `reply_target` field is read back from this when recovery needs
+    /// to know where to deliver the resumed turn's response.
+    fn save_last_message(
+        &self,
+        _session_id: &str,
+        _msg: &crate::channels::ChannelMessage,
+    ) -> std::io::Result<()> {
         Ok(())
     }
 
-    /// Load persisted last reply_target for a session.
-    fn load_reply_target(&self, _session_id: &str) -> Option<String> {
+    /// Load the persisted last ChannelMessage.
+    fn load_last_message(&self, _session_id: &str) -> Option<crate::channels::ChannelMessage> {
+        None
+    }
+
+    /// Persist the agent_name owning this session ("main" for top-level, or
+    /// the sub-agent name for delegate-spawned sessions).
+    fn save_agent_name(&self, _session_id: &str, _name: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Load the agent_name. None → caller uses "main" default.
+    fn load_agent_name(&self, _session_id: &str) -> Option<String> {
+        None
+    }
+
+    /// Persist parent_session_id (sub-sessions only).
+    fn save_parent_session_id(
+        &self,
+        _session_id: &str,
+        _parent: &str,
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Load parent_session_id. None → top-level session.
+    fn load_parent_session_id(&self, _session_id: &str) -> Option<String> {
         None
     }
 
