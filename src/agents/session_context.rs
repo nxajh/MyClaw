@@ -1,17 +1,11 @@
 //! `SessionContext` — bundles a `Session` with everything the per-turn
 //! pipeline needs.
 //!
-//! RFC v2 §三.A: introduces SessionContext as the boundary that owns
-//! per-session mutable state (attachments, pending retry, turn lock) and
-//! triggers `process_turn`. `Agent.run` takes `&mut Session` plus a
-//! `TurnContext` (already-resolved decisions); SessionContext is what
-//! the Orchestrator actually holds in its session table.
-//!
-//! This struct is intentionally additive in this commit — it is not yet
-//! wired into the Orchestrator or AgentLoop. C18 (Agent.run rewrite) and
-//! E29 (Orchestrator main loop) will start consuming it. Keeping the
-//! scaffold here so downstream commits don't have to introduce both the
-//! type and its callers in one go.
+//! RFC v2 §三.A: SessionContext is the boundary that owns per-session
+//! mutable state (attachments, pending retry, turn lock) and drives
+//! `process_turn`. `Agent::run` takes `&mut Session` plus a `TurnContext`
+//! (already-resolved decisions); SessionContext is what the Orchestrator
+//! holds in its session table and what `process_turn` operates on per turn.
 
 use std::sync::Arc;
 
@@ -170,9 +164,9 @@ impl SessionContext {
                 .map(|a| (a.config.name.clone(), a.config.description.clone().unwrap_or_default()))
                 .collect();
             attachments.diff_agents(&agent_list, &session.history);
-            // TODO: thread real timezone_offset from [prompt] config into
-            // SystemPromptConfig so date injection respects user TZ.
-            attachments.diff_date(0, &session.history);
+            // Date injection respects the configured [prompt] timezone_offset
+            // (sourced from the shared ResourceProvider via ContextEngine).
+            attachments.diff_date(runtime.context_engine.timezone_offset(), &session.history);
             attachments.diff_autonomy(&prompt_config.permission_mode);
             let text = attachments.build_text(&skills_snap);
             attachments.clear_pending();

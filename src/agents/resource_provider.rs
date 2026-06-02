@@ -44,4 +44,10 @@ impl ResourceProvider {
             timezone_offset,
         })
     }
+
+    /// Configured timezone offset in hours (from `[prompt] timezone_offset`).
+    /// Used for date injection in the per-turn attachment diff.
+    pub fn timezone_offset(&self) -> i32 {
+        self.timezone_offset
+    }
 }

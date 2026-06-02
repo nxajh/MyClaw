@@ -3,6 +3,19 @@
 //! Unlike other channels (Telegram, QQBot) where MyClaw is a *client* connecting
 //! to an external platform, ClientChannel runs a WebSocket *server* that TUI and
 //! Web UI clients connect to.
+//!
+//! ## Shared state & lock ordering
+//!
+//! Deferred-init handles (`session_manager`, `workspace_dir`, `config_path`,
+//! `skill_manager`, `provider_registry`) are wired by the daemon after
+//! construction and never change afterwards, so they use `OnceLock` —
+//! lock-free reads, no `RwLock<Option<_>>` nesting. The remaining mutable
+//! maps use `parking_lot::RwLock`.
+//!
+//! Lock-ordering rule (to avoid deadlocks): acquire `connections` before
+//! `session_owners`; never hold either across an `.await`. The `skill_manager`
+//! inner `RwLock` is a leaf — take it last and release it before touching the
+//! connection maps.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -11,6 +24,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::{Mutex as SyncMutex, RwLock};
+use std::sync::OnceLock;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
@@ -58,18 +72,20 @@ pub struct ClientChannel {
     connections: Arc<RwLock<HashMap<String, ClientConnection>>>,
     /// Reverse map: session_key → connection_id.
     session_owners: Arc<RwLock<HashMap<String, String>>>,
-    /// Session manager for management API (set after construction).
-    session_manager: Arc<RwLock<Option<Arc<crate::agents::SessionManager>>>>,
+    /// Session manager for management API (set once after construction).
+    session_manager: Arc<OnceLock<Arc<crate::agents::SessionManager>>>,
     /// Tool specs for management API (set after construction).
     tool_specs: Arc<RwLock<Vec<crate::providers::capability_tool::ToolSpec>>>,
-    /// Workspace directory for memory API (set after construction).
-    workspace_dir: Arc<RwLock<Option<std::path::PathBuf>>>,
-    /// Config file path for config read/write API (set after construction).
-    config_path: Arc<RwLock<Option<std::path::PathBuf>>>,
-    /// Skill manager for skills API (set after construction).
-    skill_manager: Arc<RwLock<Option<Arc<RwLock<crate::agents::SkillManager>>>>>,
-    /// Service registry for models API (set after construction).
-    provider_registry: Arc<RwLock<Option<Arc<dyn crate::providers::ProviderRegistry>>>>,
+    /// Workspace directory for memory API (set once after construction).
+    workspace_dir: Arc<OnceLock<std::path::PathBuf>>,
+    /// Config file path for config read/write API (set once after construction).
+    config_path: Arc<OnceLock<std::path::PathBuf>>,
+    /// Skill manager for skills API (set once after construction). The
+    /// inner `RwLock` stays — skills reload at runtime; only the outer
+    /// deferred-init wrapper is flattened from `RwLock<Option<_>>`.
+    skill_manager: Arc<OnceLock<Arc<RwLock<crate::agents::SkillManager>>>>,
+    /// Service registry for models API (set once after construction).
+    provider_registry: Arc<OnceLock<Arc<dyn crate::providers::ProviderRegistry>>>,
 }
 
 impl ClientChannel {
@@ -83,12 +99,12 @@ impl ClientChannel {
             stream_contexts: Arc::new(RwLock::new(HashMap::new())),
             connections: Arc::new(RwLock::new(HashMap::new())),
             session_owners: Arc::new(RwLock::new(HashMap::new())),
-            session_manager: Arc::new(RwLock::new(None)),
+            session_manager: Arc::new(OnceLock::new()),
             tool_specs: Arc::new(RwLock::new(Vec::new())),
-            workspace_dir: Arc::new(RwLock::new(None)),
-            config_path: Arc::new(RwLock::new(None)),
-            skill_manager: Arc::new(RwLock::new(None)),
-            provider_registry: Arc::new(RwLock::new(None)),
+            workspace_dir: Arc::new(OnceLock::new()),
+            config_path: Arc::new(OnceLock::new()),
+            skill_manager: Arc::new(OnceLock::new()),
+            provider_registry: Arc::new(OnceLock::new()),
         }
     }
 
@@ -100,7 +116,7 @@ impl ClientChannel {
 
     /// Set the session manager (called from daemon.rs after construction).
     pub fn set_session_manager(&self, sm: Arc<crate::agents::SessionManager>) {
-        *self.session_manager.write() = Some(sm);
+        let _ = self.session_manager.set(sm);
     }
 
     /// Set the tool specs list (called from daemon.rs after construction).
@@ -110,22 +126,22 @@ impl ClientChannel {
 
     /// Set the workspace directory (called from daemon.rs after construction).
     pub fn set_workspace_dir(&self, dir: std::path::PathBuf) {
-        *self.workspace_dir.write() = Some(dir);
+        let _ = self.workspace_dir.set(dir);
     }
 
     /// Set the config file path (called from daemon.rs after construction).
     pub fn set_config_path(&self, path: std::path::PathBuf) {
-        *self.config_path.write() = Some(path);
+        let _ = self.config_path.set(path);
     }
 
     /// Set the skill manager (called from daemon.rs after construction).
     pub fn set_skill_manager(&self, sm: Arc<RwLock<crate::agents::SkillManager>>) {
-        *self.skill_manager.write() = Some(sm);
+        let _ = self.skill_manager.set(sm);
     }
 
     /// Set the service registry (called from daemon.rs after construction).
     pub fn set_provider_registry(&self, sr: Arc<dyn crate::providers::ProviderRegistry>) {
-        *self.provider_registry.write() = Some(sr);
+        let _ = self.provider_registry.set(sr);
     }
 
     /// Start the WebSocket server (spawns a background task).
@@ -690,12 +706,12 @@ impl Drop for ClientTurnStream {
 struct ApiContext<'a> {
     /// Session-manager scope key (channel:account:sender), stable across reconnects.
     user_id: &'a str,
-    session_manager: &'a Arc<RwLock<Option<Arc<crate::agents::SessionManager>>>>,
+    session_manager: &'a Arc<OnceLock<Arc<crate::agents::SessionManager>>>,
     tool_specs: &'a Arc<RwLock<Vec<crate::providers::capability_tool::ToolSpec>>>,
-    workspace_dir: &'a Arc<RwLock<Option<std::path::PathBuf>>>,
-    config_path: &'a Arc<RwLock<Option<std::path::PathBuf>>>,
-    skill_manager: &'a Arc<RwLock<Option<Arc<RwLock<crate::agents::SkillManager>>>>>,
-    provider_registry: &'a Arc<RwLock<Option<Arc<dyn crate::providers::ProviderRegistry>>>>,
+    workspace_dir: &'a Arc<OnceLock<std::path::PathBuf>>,
+    config_path: &'a Arc<OnceLock<std::path::PathBuf>>,
+    skill_manager: &'a Arc<OnceLock<Arc<RwLock<crate::agents::SkillManager>>>>,
+    provider_registry: &'a Arc<OnceLock<Arc<dyn crate::providers::ProviderRegistry>>>,
 }
 
 /// Route a management API request and return a JSON response string.
@@ -705,8 +721,7 @@ fn handle_api_request(
     params: &serde_json::Value,
     ctx: &ApiContext<'_>,
 ) -> String {
-    let guard = ctx.session_manager.read();
-    let sm = match guard.as_ref() {
+    let sm = match ctx.session_manager.get() {
         Some(sm) => sm,
         None => {
             return serde_json::json!({
@@ -868,8 +883,7 @@ fn handle_api_request(
         }
 
         "memory.list" => {
-            let dir_guard = ctx.workspace_dir.read();
-            let result = match dir_guard.as_ref() {
+            let result = match ctx.workspace_dir.get() {
                 Some(dir) => {
                     let memory_dir = dir.join("memory");
                     let files = crate::memory::scan_memory_files(&memory_dir);
@@ -896,7 +910,6 @@ fn handle_api_request(
                     "error": "workspace directory not configured"
                 }).to_string(),
             };
-            drop(dir_guard);
             result
         }
 
@@ -909,8 +922,7 @@ fn handle_api_request(
                 return serde_json::json!({ "type": "api_error", "id": id, "error": "invalid filename" }).to_string();
             }
             let content = params["content"].as_str().unwrap_or("");
-            let dir_guard = ctx.workspace_dir.read();
-            let result = match dir_guard.as_ref() {
+            let result = match ctx.workspace_dir.get() {
                 Some(dir) => {
                     let memory_dir = dir.join("memory");
                     let _ = std::fs::create_dir_all(&memory_dir);
@@ -922,7 +934,6 @@ fn handle_api_request(
                 }
                 None => serde_json::json!({ "type": "api_error", "id": id, "error": "workspace directory not configured" }).to_string(),
             };
-            drop(dir_guard);
             result
         }
 
@@ -934,8 +945,7 @@ fn handle_api_request(
             if filename.contains('/') || filename.contains('\\') || filename.starts_with('.') {
                 return serde_json::json!({ "type": "api_error", "id": id, "error": "invalid filename" }).to_string();
             }
-            let dir_guard = ctx.workspace_dir.read();
-            let result = match dir_guard.as_ref() {
+            let result = match ctx.workspace_dir.get() {
                 Some(dir) => {
                     let path = dir.join("memory").join(filename);
                     match std::fs::remove_file(&path) {
@@ -945,7 +955,6 @@ fn handle_api_request(
                 }
                 None => serde_json::json!({ "type": "api_error", "id": id, "error": "workspace directory not configured" }).to_string(),
             };
-            drop(dir_guard);
             result
         }
 
@@ -968,8 +977,7 @@ fn handle_api_request(
                     "error": "invalid filename"
                 }).to_string();
             }
-            let dir_guard = ctx.workspace_dir.read();
-            let result = match dir_guard.as_ref() {
+            let result = match ctx.workspace_dir.get() {
                 Some(dir) => {
                     let path = dir.join("memory").join(filename);
                     match std::fs::read_to_string(&path) {
@@ -991,28 +999,26 @@ fn handle_api_request(
                     "error": "workspace directory not configured"
                 }).to_string(),
             };
-            drop(dir_guard);
             result
         }
 
         "config.get" => {
             let specs = ctx.tool_specs.read();
-            let ws_dir = ctx.workspace_dir.read();
-            let cfg_path = ctx.config_path.read();
+            let ws_dir = ctx.workspace_dir.get();
+            let cfg_path = ctx.config_path.get();
             serde_json::json!({
                 "type": "api_response",
                 "id": id,
                 "result": {
                     "tool_count": specs.len(),
-                    "workspace_dir": ws_dir.as_ref().map(|p| p.to_string_lossy().to_string()),
-                    "config_path": cfg_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+                    "workspace_dir": ws_dir.map(|p| p.to_string_lossy().to_string()),
+                    "config_path": cfg_path.map(|p| p.to_string_lossy().to_string()),
                 }
             }).to_string()
         }
 
         "config.get_raw" => {
-            let cfg_guard = ctx.config_path.read();
-            match cfg_guard.as_ref() {
+            match ctx.config_path.get() {
                 Some(path) => match std::fs::read_to_string(path) {
                     Ok(content) => serde_json::json!({
                         "type": "api_response",
@@ -1033,8 +1039,7 @@ fn handle_api_request(
                 Some(s) => s,
                 None => return serde_json::json!({ "type": "api_error", "id": id, "error": "missing content parameter" }).to_string(),
             };
-            let cfg_guard = ctx.config_path.read();
-            match cfg_guard.as_ref() {
+            match ctx.config_path.get() {
                 Some(path) => match std::fs::write(path, content) {
                     Ok(()) => serde_json::json!({ "type": "api_response", "id": id, "result": null }).to_string(),
                     Err(e) => serde_json::json!({ "type": "api_error", "id": id, "error": format!("failed to save config: {}", e) }).to_string(),
@@ -1063,8 +1068,7 @@ fn handle_api_request(
         }
 
         "skills.list" => {
-            let guard = ctx.skill_manager.read();
-            let result: Vec<serde_json::Value> = match guard.as_ref() {
+            let result: Vec<serde_json::Value> = match ctx.skill_manager.get() {
                 Some(mgr_arc) => {
                     let mgr = mgr_arc.read();
                     mgr.skills_iter()
@@ -1097,8 +1101,7 @@ fn handle_api_request(
         }
 
         "models.list" => {
-            let guard = ctx.provider_registry.read();
-            match guard.as_ref() {
+            match ctx.provider_registry.get() {
                 Some(reg) => {
                     let model_ids = reg.get_chat_routing_models();
                     let active = sm.get_session_override(user_id).model

@@ -1,4 +1,5 @@
-//! Orchestrator — Application Service that connects channels and agent loops.
+//! Orchestrator — Application Service that connects channels and per-turn
+//! `Agent::run` dispatch.
 //!
 //! This is the core Application Service in DDD terms:
 //! - Receives messages from Interface (Channel) adapters
@@ -22,16 +23,18 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::agents::session::{SessionManager, PersistHook, BackendPersistHook};
+use crate::agents::orchestrator_scheduled::{run_cron_task, run_heartbeat_task};
 
+/// Buffer size for the unified `OrchestratorEvent` channel. Fixed (not
+/// config-exposed) on purpose: this is an internal backpressure bound, not
+/// an operator-tunable knob. The meaningful knobs (tool timeout, compaction
+/// threshold, loop-breaker limits) live in `[agent]`/`[context]` config.
 const CHANNEL_QUEUE_SIZE: usize = 100;
 
-// ── User-facing message strings ────────────────────────────────────────────────
-const MSG_NO_PENDING_RETRY: &str = "没有待重试的消息，请重新发送。";
-const MSG_ABORT_ACK: &str = "已取消";
-const MSG_TURN_FAILED: &str = "⚠️ 处理超时，未收到模型回复。";
-const MSG_INCOMPLETE_TURN: &str = "⚠️ 检测到上次请求未处理完成（可能是服务重启）。\n\n请选择重试或放弃。";
-const BTN_RETRY: &str = "🔄 重试";
-const BTN_ABORT: &str = "✖ 放弃";
+// User-facing message strings live in `user_messages` (single presentation seam).
+use crate::agents::user_messages::{
+    BTN_ABORT, BTN_RETRY, MSG_ABORT_ACK, MSG_INCOMPLETE_TURN, MSG_NO_PENDING_RETRY, MSG_TURN_FAILED,
+};
 
 /// Internal enum for the run loop's select.
 enum ChannelEvent {
@@ -68,7 +71,7 @@ pub type ChannelMsgSender = mpsc::Sender<((String, String), ChannelMessage)>;
 
 /// Orchestrator — Application Service for message routing and session lifecycle.
 ///
-/// Coordinates the flow: Channel → Session → AgentLoop → Channel.
+/// Coordinates the flow: Channel → Session → Agent::run → Channel.
 /// Does NOT depend on any Infrastructure concrete types.
 pub struct Orchestrator {
     /// Channels, keyed by (channel_type, account_id).
@@ -91,10 +94,8 @@ pub struct Orchestrator {
     /// `AskUserTool` (same `Arc<AskRouter>`) so the register/fulfill loop
     /// closes through a single inbox.
     ask_router: Arc<crate::agents::AskRouter>,
-    /// AgentRuntime for `Agent::run` (RFC v2 §三.A). Held alongside
-    /// the legacy `agent` field — E29 will eventually swap the main-
-    /// loop dispatch onto Agent + agent_runtime, then H45 deletes the
-    /// legacy fields.
+    /// AgentRuntime for the per-turn `Agent::run` path (RFC v2 §三.A).
+    /// Cloned into each spawned turn task.
     agent_runtime: crate::agents::AgentRuntime,
     /// Delegation manager (shared with DelegateTaskTool via handler).
     delegator: Option<Arc<DelegationCoordinator>>,
@@ -179,10 +180,7 @@ pub struct OrchestratorParts {
     /// `Arc<AskRouter>`). The orchestrator's inbound dispatch calls
     /// `ask_router.fulfill(session.id, msg)` to wake any pending ask.
     pub ask_router: Arc<crate::agents::AskRouter>,
-    /// AgentRuntime for the new `Agent::run` per-turn path. Coexists
-    /// with `agent` (legacy AgentLoop factory) until E29 swaps the
-    /// orchestrator's main-loop dispatch over to Agent::run and H45
-    /// deletes AgentLoop.
+    /// AgentRuntime for the `Agent::run` per-turn path.
     pub agent_runtime: crate::agents::AgentRuntime,
     /// Workspace directory for persisting runtime state.
     pub workspace_dir: std::path::PathBuf,
@@ -377,7 +375,7 @@ impl Orchestrator {
         self.startup_recover_sessions();
         self.startup_recover_subagents(&unfinished_subagents, &self.delegator);
 
-        // E29: unify the three event sources (user messages / delegation /
+        // Unify the three event sources (user messages / delegation /
         // scheduler) onto a single mpsc<OrchestratorEvent>. Adapter tasks
         // pump from each source channel; the main loop selects on the
         // unified channel + shutdown. AskReply variant is reserved for
@@ -510,10 +508,9 @@ impl Orchestrator {
         Ok(())
     }
 
-    /// Dispatch for the existing `ChannelEvent` variants. Kept as a private
-    /// helper so the E29 main-loop migration to `OrchestratorEvent` can
-    /// reuse the well-tested 400-line inbound dispatch logic verbatim
-    /// rather than rewriting it inline.
+    /// Dispatch for the `ChannelEvent` variants. Kept as a private helper
+    /// so the `OrchestratorEvent` main loop reuses the inbound dispatch
+    /// logic verbatim rather than inlining it.
     async fn handle_channel_event(&self, event: ChannelEvent) {
         let channels = self.channels.clone();
         match event {
@@ -550,7 +547,7 @@ impl Orchestrator {
 
 
                 // Check if this is a retry/abort callback from an EmptyResponse prompt.
-                // E29 final: pending_retry lives on SessionContext. For
+                // pending_retry lives on SessionContext. For
                 // retry, we extract the saved text and rewrite the
                 // incoming msg.content to it — then fall through to the
                 // standard dispatch below so the regular Agent path
@@ -616,8 +613,8 @@ impl Orchestrator {
                 }
 
                 // Check for an incomplete turn loaded from a previous crash/SIGKILL.
-                // E29 final: read incomplete_turn from SessionContext.session
-                // and stash the orphaned user message on SessionContext.pending_retry.
+                // Read incomplete_turn from SessionContext.session and stash
+                // the orphaned user message on SessionContext.pending_retry.
                 {
                     let session_ctx = self.session_context_for(&sk);
                     if let Ok(mut session) = session_ctx.session.try_lock() {
@@ -1129,217 +1126,6 @@ pub(crate) fn is_silent_ok(response: &str, prefix: &str) -> bool {
     // Don't use contains() — a response with real content should never be silenced
     // just because it happens to mention the marker.
     trimmed == marker
-}
-
-/// Execute one scheduled turn (heartbeat / cron) via Agent. Shared
-/// helper extracted from run_heartbeat_task / run_cron_task. Returns
-/// the assistant's text response, or an Err.
-///
-/// `session_key` is a routing_key — synthetic ("_heartbeat_<uuid>") for
-/// heartbeats, real-looking for cron. The SessionContext comes from
-/// `SessionManager.get_or_create_context` or, on first use, is built
-/// with `session_override.run_mode = Background` so the prompt builder
-/// knows this is unattended work.
-async fn run_scheduled_turn(
-    orch: &Orchestrator,
-    session_key: &str,
-    prompt: &str,
-    model_override: Option<String>,
-) -> anyhow::Result<String> {
-    // Get-or-create the SessionContext, forcing Background run_mode on
-    // first materialization. Per-call model override is applied on
-    // every invocation so cron jobs that change `model` mid-stream are
-    // honored on the next turn.
-    let model_for_init = model_override.clone();
-    let session_ctx = orch.session_manager.get_or_create_context_with(
-        session_key,
-        move |session| {
-            session.session_override.run_mode =
-                Some(crate::config::agent::RunMode::Background);
-            if let Some(m) = model_for_init {
-                session.session_override.model = Some(m);
-            }
-        },
-    );
-    if let Some(ref m) = model_override {
-        let mut session = session_ctx.session.lock().await;
-        session.session_override.model = Some(m.clone());
-    }
-
-    // Synthetic ChannelMessage so process_turn drives the same code path
-    // as user inbound turns. No channel — scheduled output is delivered
-    // by the caller via `send_to_target_internal` after process_turn
-    // returns.
-    let inbound = ChannelMessage {
-        id: format!("scheduled:{}", session_key),
-        sender: format!("scheduler:{}", session_key),
-        reply_target: String::new(),
-        content: prompt.to_string(),
-        timestamp: chrono::Utc::now().timestamp() as u64,
-        thread_ts: None,
-        interruption_scope_id: None,
-        attachments: Vec::new(),
-        image_urls: None,
-        image_base64: None,
-    };
-    let runtime = orch.agent_runtime.clone();
-    session_ctx
-        .process_turn(inbound, None, runtime)
-        .await
-        .map(|tr| tr.text)
-}
-
-/// Execute a heartbeat turn as an independent spawned task.
-async fn run_heartbeat_task(
-    orch: Arc<Orchestrator>,
-    target_channel: Option<String>,
-    target_account: Option<String>,
-    prompt: String,
-    due: Vec<super::heartbeat_tasks::HeartbeatTask>,
-    mut state: super::heartbeat_tasks::HeartbeatState,
-    state_path: std::path::PathBuf,
-) {
-    let session_key = format!("_heartbeat_{}", uuid::Uuid::new_v4());
-    let result = run_scheduled_turn(&orch, &session_key, &prompt, None).await;
-
-    // Update task state on success.
-    if result.is_ok() {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        for task in &due {
-            state.last_run.insert(task.name.clone(), now_ms);
-        }
-        state.save(&state_path);
-    }
-
-    match result {
-        Ok(response) if is_silent_ok(&response, "heartbeat") => {
-            tracing::debug!("heartbeat: nothing needs attention");
-        }
-        Ok(response) if !response.trim().is_empty() => {
-            send_to_target_internal(&orch, target_channel, target_account, &response).await;
-        }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::warn!(err = %e, "heartbeat run failed");
-        }
-    }
-}
-
-/// Execute a cron job turn as an independent spawned task.
-#[allow(clippy::too_many_arguments)]
-async fn run_cron_task(
-    orch: Arc<Orchestrator>,
-    session_key: String,
-    prompt: String,
-    target_channel: Option<String>,
-    target_account: Option<String>,
-    job_id: String,
-    _delivery: Option<crate::agents::scheduling::cron_types::DeliveryConfig>,
-    _enabled_tools: Option<Vec<String>>,
-    _disabled_tools: Option<Vec<String>>,
-    model: Option<String>,
-    _provider: Option<String>,
-) {
-    let start = std::time::Instant::now();
-    let result = run_scheduled_turn(&orch, &session_key, &prompt, model.clone()).await;
-    let duration_ms = start.elapsed().as_millis() as u64;
-
-    // Build run record and mark result in scheduler.
-    let record = match &result {
-        Ok(response) => {
-            crate::agents::scheduling::cron_types::RunRecord::now(
-                crate::agents::scheduling::cron_types::RunStatus::Ok,
-            ).with_duration(duration_ms).with_output_preview(response)
-        }
-        Err(e) => {
-            let err_str = e.to_string();
-            tracing::warn!(session_key = %session_key, err = %err_str, "cron job failed");
-            crate::agents::scheduling::cron_types::RunRecord::now(
-                crate::agents::scheduling::cron_types::RunStatus::Error,
-            ).with_duration(duration_ms).with_error(err_str)
-        }
-    };
-
-    // Record run result in scheduler (returns failure alert message if needed).
-    let failure_alert = if let Some(ref scheduler) = orch.scheduler {
-        scheduler.mark_run_result(&job_id, record)
-    } else {
-        None
-    };
-
-    // Send output to target channel (on success with non-empty output).
-    if let Ok(ref response) = result {
-        if !response.trim().is_empty() {
-            send_to_target_internal(&orch, target_channel.clone(), target_account.clone(), response).await;
-        }
-    }
-
-    // Send failure alert to channel if generated.
-    if let Some(alert_msg) = failure_alert {
-        tracing::warn!(job_id = %job_id, alert = %alert_msg, "sending failure alert");
-        send_to_target_internal(&orch, target_channel, target_account, &alert_msg).await;
-    }
-}
-
-/// Send a response to the configured target channel (used by heartbeat).
-async fn send_to_target_internal(
-    orch: &Orchestrator,
-    target_channel: Option<String>,
-    target_account: Option<String>,
-    content: &str,
-) {
-    let (ch_type, acc_id) = match (target_channel, target_account) {
-        (Some(ch), Some(acc)) => (ch, acc),
-        (Some(ch), None) => (ch, "default".to_string()),
-        (None, _) => {
-            // Resolve from scheduler.last_channel (set by handle_channel_event).
-            let last = match orch.scheduler.as_ref() {
-                Some(s) => s.last_channel.lock().await.clone(),
-                None => None,
-            };
-            match last {
-                Some(ref key) => match key.split_once(':') {
-                    Some((ch, acc)) => (ch.to_string(), acc.to_string()),
-                    None => {
-                        tracing::warn!(key = %key, "invalid last_channel format");
-                        return;
-                    }
-                },
-                None => {
-                    tracing::warn!("no target channel for scheduled response");
-                    return;
-                }
-            }
-        }
-    };
-
-    let channel = match orch.channels.get(&(ch_type.clone(), acc_id.clone())) {
-        Some(ch) => ch.clone(),
-        None => {
-            tracing::warn!(channel = %ch_type, account = %acc_id, "target channel not found");
-            return;
-        }
-    };
-
-    // Resolve recipient from scheduler.last_recipient.
-    let recipient = match orch.scheduler.as_ref() {
-        Some(s) => s.last_recipient.lock().await.clone().unwrap_or_default(),
-        None => String::new(),
-    };
-
-    let target = crate::channels::SendTarget::new(recipient);
-    if let Err(e) = channel
-        .send_payload(
-            &target,
-            &crate::channels::MessagePayload::text(content.to_string()),
-        )
-        .await
-    {
-        tracing::warn!(channel = %ch_type, account = %acc_id, err = %e, "failed to send scheduled response");
-    }
 }
 
 #[cfg(test)]

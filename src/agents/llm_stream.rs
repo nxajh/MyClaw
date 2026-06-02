@@ -1,7 +1,9 @@
 //! LLM stream helpers — timeout constants and chunk-reading utilities.
 //!
-//! RFC v2 §六.A: the stream-first-chunk timeout becomes a per-call hardcoded
-//! constant; per-agent override is removed.
+//! RFC v2 §六.A: the stream timeouts are deliberately hardcoded constants,
+//! NOT config-exposed. Per-agent overrides were intentionally removed —
+//! these bound provider/network stalls and are not an operator knob. Tune
+//! them here if upstream model latencies change.
 
 use anyhow::{anyhow, Result};
 use futures::StreamExt;

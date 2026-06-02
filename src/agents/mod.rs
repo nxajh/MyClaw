@@ -11,6 +11,8 @@ pub mod recovery;
 mod delegation;
 pub mod loop_breaker;
 mod orchestrator;
+mod orchestrator_scheduled;
+mod user_messages;
 mod prompt;
 pub mod session;
 mod tool_registry;

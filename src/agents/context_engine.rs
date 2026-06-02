@@ -73,6 +73,13 @@ impl ContextEngine {
         self.compact_threshold
     }
 
+    /// Configured timezone offset in hours, sourced from the shared
+    /// `ResourceProvider` (`[prompt] timezone_offset`). Used by the
+    /// per-turn attachment diff for date injection.
+    pub fn timezone_offset(&self) -> i32 {
+        self.resources.timezone_offset()
+    }
+
     /// True if the supplied token count has crossed the compaction
     /// threshold for `context_window`. Caller passes
     /// `session.token_tracker.total_tokens()` — the engine is

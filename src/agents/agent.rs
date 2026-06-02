@@ -1,27 +1,13 @@
-//! `Agent` — RFC v2 §三.A "what the agent *is*" (the config) separated
-//! from "what it has access to" (the [`AgentRuntime`]).
+//! `Agent` — "what the agent *is*" (its config) separated from "what it
+//! has access to" (the [`AgentRuntime`]).
 //!
-//! C17 + C18 (partial): this struct + `Agent::run` replace the old
-//! `AgentLoop` per-session handle. The body here is the minimum-viable
-//! port — happy-path text + tool-call iteration with persistence and
-//! token tracking. The pieces still living in `agent_impl/` and used by
-//! the legacy `AgentLoop`:
-//!
-//! - **Compaction** — `ContextEngine` is held but `should_compact` is
-//!   never checked here. Wire it in once Agent.run is the orchestrator's
-//!   primary entry point.
-//! - **Streaming events** — non-streaming today; the LLM stream is
-//!   collected via `llm_stream::read_to_string`. Once `Session.channel`
-//!   is wired in production callers, add `channel.push_event` for
-//!   per-chunk deltas.
-//! - **Recovery / loop-breaker** — caller (orchestrator) still owns
-//!   recovery detection. Per-turn LoopBreaker uses `runtime.loop_breaker_defaults`.
-//! - **Images / attachments / hot-reload** — not yet plumbed; AgentLoop
-//!   still does these via `request_builder.rs`.
-//!
-//! The legacy `AgentLoop` continues to operate in parallel; deletion
-//! happens in H45 once orchestrator (E29) switches its main loop to
-//! `Agent::run`.
+//! `Agent::run` is the orchestrator's per-turn entry point. It drives the
+//! LLM stream, executes tool calls, applies the per-turn loop-breaker,
+//! performs context compaction via [`ContextEngine`] when the token count
+//! crosses the threshold, and persists history after each step. When the
+//! session has a streaming channel attached, per-chunk `TurnEvent`s
+//! (`Chunk` / `Thinking` / `ToolCall` / `ToolResult`) are pushed to the
+//! optional `TurnStream`.
 
 use std::sync::Arc;
 
@@ -31,6 +17,7 @@ use futures_util::StreamExt;
 
 use crate::agents::error::AgentError;
 use crate::agents::loop_breaker::LoopBreak;
+use crate::agents::tokens::estimate_tokens;
 use crate::agents::session::Session;
 use crate::agents::turn::{TurnContext, TurnResult};
 use crate::agents::turn_event::TurnEvent;
@@ -607,13 +594,6 @@ impl Agent {
             })
             .collect()
     }
-}
-
-/// Char-count → token estimate. Matches `agent_impl::types::estimate_tokens`
-/// (~4 bytes/token), kept here so `agent.rs` doesn't pull
-/// `agent_impl/` internals.
-fn estimate_tokens(text: &str) -> u64 {
-    (text.len() as u64).div_ceil(4)
 }
 
 /// Persist `session.history.last()` via `session.persist` and write the

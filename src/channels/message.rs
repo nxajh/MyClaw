@@ -544,7 +544,9 @@ impl DedupState {
     /// Check if an update ID has been seen, and record it if not.
     /// Returns true if the ID was already seen (should skip), false if new.
     pub fn check_and_record(&self, id: &str) -> bool {
-        let mut inner = self.inner.lock().unwrap();
+        // Poison-recover: the critical section never panics, and a poisoned
+        // dedup cache must not cascade-crash the inbound path of a daemon.
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if inner.seen.contains(id) {
             return true;
         }

@@ -912,11 +912,9 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // ask_router was built above (before build_tools) so AskUserTool can
     // register with the same instance the orchestrator fulfills from.
 
-    // E30 final: build AgentRuntime to hand to the orchestrator. Today
-    // the orchestrator's main loop still constructs AgentLoop per
-    // session via `agent.loop_for_with_persist`; the AgentRuntime field
-    // sits in parallel so E29 can flip the dispatch over without
-    // having to re-thread plumbing first.
+    // Build the AgentRuntime handed to the orchestrator: the shared
+    // infrastructure bundle (providers, tools, skills, agents,
+    // context_engine, executors) that every per-turn `Agent::run` reads.
     let agent_runtime = {
         // Build the ResourceProvider once so ContextEngine can hold it as
         // a shared resource (rather than rebuilding per turn).

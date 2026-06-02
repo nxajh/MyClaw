@@ -1,7 +1,7 @@
 //! `DelegationCoordinator` — creates and runs specialized sub-agents on demand.
 //!
 //! RFC v2 §三.D: implements [`AgentDelegator`](crate::agents::AgentDelegator) by
-//! creating temporary `AgentLoop` instances with restricted tool sets and
+//! running `Agent::run` invocations with restricted tool sets and
 //! specialized system prompts. Also provides `delegate_async` for non-blocking
 //! background execution.
 //!
@@ -23,7 +23,7 @@
 //! ephemerally (no history is saved).
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use dashmap::DashMap;
 use tokio::sync::mpsc;
@@ -50,17 +50,20 @@ pub struct DelegationCoordinator {
     session_manager: Arc<SessionManager>,
     /// Root directory for git worktrees (when isolation = worktree).
     worktrees_root: PathBuf,
-    /// Parent AgentRuntime, installed by the daemon after both this
-    /// coordinator and the runtime have been built. `delegate` reads
-    /// the runtime from here and passes it (with workspace_dir
-    /// overlaid when worktree-isolated) to `SessionContext::process_turn`.
-    runtime_cell: Arc<parking_lot::RwLock<Option<crate::agents::AgentRuntime>>>,
+    /// Parent AgentRuntime, set exactly once by the daemon after both this
+    /// coordinator and the runtime have been built (they form a
+    /// construction cycle: runtime → tools → DelegateTaskTool →
+    /// coordinator → runtime). `delegate` reads the runtime from here and
+    /// passes it (with workspace_dir overlaid when worktree-isolated) to
+    /// `SessionContext::process_turn`. `OnceLock` encodes the set-once
+    /// contract and gives lock-free reads on the hot delegate path.
+    runtime_cell: Arc<OnceLock<crate::agents::AgentRuntime>>,
     /// In-flight background delegations (task_id → JoinHandle). Powers
     /// `/agent_list` (read snapshot) and `/agent_kill` (abort by id).
     running: Arc<DashMap<String, JoinHandle<()>>>,
-    /// Sender for `DelegationEvent`s emitted when background
-    /// delegations complete. Installed by daemon via `set_event_sender`.
-    event_tx_cell: Arc<parking_lot::RwLock<Option<mpsc::Sender<DelegationEvent>>>>,
+    /// Sender for `DelegationEvent`s, set once by the daemon via
+    /// `set_event_sender` when wiring the orchestrator's `delegation_rx`.
+    event_tx_cell: Arc<OnceLock<mpsc::Sender<DelegationEvent>>>,
 }
 
 impl DelegationCoordinator {
@@ -73,9 +76,9 @@ impl DelegationCoordinator {
             configs,
             session_manager,
             worktrees_root,
-            runtime_cell: Arc::new(parking_lot::RwLock::new(None)),
+            runtime_cell: Arc::new(OnceLock::new()),
             running: Arc::new(DashMap::new()),
-            event_tx_cell: Arc::new(parking_lot::RwLock::new(None)),
+            event_tx_cell: Arc::new(OnceLock::new()),
         }
     }
 
@@ -84,13 +87,15 @@ impl DelegationCoordinator {
     /// constructed (chicken-egg: runtime construction needs the
     /// AgentRegistry which the coordinator also references).
     pub fn set_runtime(&self, runtime: crate::agents::AgentRuntime) {
-        *self.runtime_cell.write() = Some(runtime);
+        // Set-once; a second call (should not happen) is ignored.
+        let _ = self.runtime_cell.set(runtime);
     }
 
     /// Install the mpsc sender for `DelegationEvent`s. Called by daemon
     /// when wiring the orchestrator's `delegation_rx` receiver.
     pub fn set_event_sender(&self, tx: mpsc::Sender<DelegationEvent>) {
-        *self.event_tx_cell.write() = Some(tx);
+        // Set-once; a second call (should not happen) is ignored.
+        let _ = self.event_tx_cell.set(tx);
     }
 
     /// Get a clone of the installed event sender, if any. Used by
@@ -98,7 +103,7 @@ impl DelegationCoordinator {
     /// `DelegationEvent::Completed` / `Failed` to the orchestrator
     /// event loop.
     pub fn event_sender(&self) -> Option<mpsc::Sender<DelegationEvent>> {
-        self.event_tx_cell.read().clone()
+        self.event_tx_cell.get().cloned()
     }
 
     /// Snapshot of currently-running background task ids.
@@ -118,8 +123,8 @@ impl DelegationCoordinator {
 
     fn runtime(&self) -> anyhow::Result<crate::agents::AgentRuntime> {
         self.runtime_cell
-            .read()
-            .clone()
+            .get()
+            .cloned()
             .ok_or_else(|| anyhow::anyhow!("DelegationCoordinator: runtime not installed"))
     }
 
