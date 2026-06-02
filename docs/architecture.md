@@ -1,6 +1,6 @@
 # MyClaw 架构文档
 
-> 自动生成自源码结构提取，覆盖全部 172 个 Rust 源文件。
+> 自动生成自源码结构提取，覆盖全部 174 个 Rust 源文件。
 
 ## 目录
 
@@ -8,7 +8,7 @@
 |---|---|---|
 | `main.rs / lib.rs / daemon.rs` | — | 入口与工具 |
 | `signal / hot_switch / sys_info / str_utils` | — | 入口与工具 |
-| `agents/` | 50 | 智能体系统：Agent 运行循环、Turn 管理、Session 管理、上下文引擎、工具执行、调度器、子代理委派 |
+| `agents/` | 52 | 智能体系统：Agent 运行循环、Turn 管理、Session 管理、上下文引擎、工具执行、调度器、子代理委派 |
 | `channels/` | 15 | 消息通道：多平台适配（Telegram/QQBot/微信/浏览器 Client）、消息分块、流式推送、安全策略 |
 | `cli/` | 14 | 命令行界面：myclaw chat/status/reload/restart/stop/update/config/doctor/tools/tui/completion/exec 子命令 |
 | `config/` | 9 | 配置系统：TOML 配置解析、Agent/Channel/Provider/Routing/Scheduler/MCP/SubAgent 配置结构 |
@@ -288,10 +288,6 @@ pub struct Agent {
 ```
 
 ```rust
-fn estimate_tokens(text: &str) -> u64
-```
-
-```rust
 fn persist_last(session: &mut Session)
 ```
 
@@ -345,6 +341,14 @@ async fn collect_stream_accepts_thinking_with_signature()
 
 ```rust
 async fn collect_stream_accepts_no_thinking()
+```
+
+```rust
+async fn collect_stream_rejects_truncated_stream()
+```
+
+```rust
+async fn collect_stream_propagates_provider_error()
 ```
 
 #### `agents/agent_registry.rs`
@@ -540,7 +544,7 @@ fn date_reinjects_after_compaction()
 
 **结构体** `CompactionResult`:
 ```rust
-pub struct CompactionResult {
+pub(crate) struct CompactionResult {
   pub compact_start: usize,
   pub compact_end: usize,
   pub summary: String,
@@ -652,13 +656,13 @@ pub struct DelegationCoordinator {
   /// coordinator and the runtime have been built. `delegate` reads
   /// the runtime from here and passes it (with workspace_dir
   /// overlaid when worktree-isolated) to `SessionContext::process_turn`.
-  runtime_cell: Arc<parking_lot::RwLock<Option<crate::agents::AgentRuntime>>>,
+  runtime_cell: Arc<std::sync::OnceLock<crate::agents::AgentRuntime>>,
   /// In-flight background delegations (task_id → JoinHandle). Powers
   /// `/agent_list` (read snapshot) and `/agent_kill` (abort by id).
   running: Arc<DashMap<String, JoinHandle<()>>>,
   /// Sender for `DelegationEvent`s emitted when background
   /// delegations complete. Installed by daemon via `set_event_sender`.
-  event_tx_cell: Arc<parking_lot::RwLock<Option<mpsc::Sender<DelegationEvent>>>>,
+  event_tx_cell: Arc<std::sync::OnceLock<mpsc::Sender<DelegationEvent>>>,
 }
 ```
 
@@ -718,7 +722,7 @@ pub enum AgentError {
   source: anyhow::Error,
   },
   /// An LLM provider error (network, auth, rate-limit, etc.).
-  // ... 28 more variants
+  // ... 6 more variants
 }
 ```
 
@@ -775,7 +779,8 @@ pub enum LoopBreakReason {
   /// Hard limit exceeded.
   MaxCalls {
   count: usize,
-  // ... 2 more variants
+  limit: usize,
+  },
 }
 ```
 
@@ -1024,30 +1029,6 @@ async fn connect_empty_is_connected_but_empty()
 const CHANNEL_QUEUE_SIZE: usize = 100
 ```
 
-```rust
-const MSG_NO_PENDING_RETRY: &str = "没有待重试的消息，请重新发送。"
-```
-
-```rust
-const MSG_ABORT_ACK: &str = "已取消"
-```
-
-```rust
-const MSG_TURN_FAILED: &str = "⚠️ 处理超时，未收到模型回复。"
-```
-
-```rust
-const MSG_INCOMPLETE_TURN: &str = "⚠️ 检测到上次请求未处理完成（可能是服务重启）。\n\n请选择重试或放弃。"
-```
-
-```rust
-const BTN_RETRY: &str = "🔄 重试"
-```
-
-```rust
-const BTN_ABORT: &str = "✖ 放弃"
-```
-
 **枚举** `ChannelEvent`:
 ```rust
 priv enum ChannelEvent {
@@ -1201,23 +1182,27 @@ pub(crate) fn is_silent_ok(response: &str, prefix: &str) -> bool
 ```
 
 ```rust
-async fn run_scheduled_turn(
+fn test_session_key()
+```
+
+#### `agents/orchestrator_scheduled.rs`
+
+**用途**: Orchestrator 的调度派发——心跳 / Cron 作为独立 spawn 任务驱动一次合成 turn（与用户入站 turn 同一路径），并将输出投递到目标 channel。从 `orchestrator.rs` 抽出，通过其公开访问器读取私有状态。
+
+```rust
+pub(crate) async fn run_scheduled_turn(
 ```
 
 ```rust
-async fn run_heartbeat_task(
+pub(crate) async fn run_heartbeat_task(
 ```
 
 ```rust
-async fn run_cron_task(
+pub(crate) async fn run_cron_task(
 ```
 
 ```rust
 async fn send_to_target_internal(
-```
-
-```rust
-fn test_session_key()
 ```
 
 #### `agents/orchestrator_event.rs`
@@ -1245,7 +1230,7 @@ pub enum OrchestratorEvent {
   /// that originated the question (RFC v2: indexed by session_id, not by
   /// routing_key, so cross-channel ask_user works for sub-agents).
   AskReply {
-  // ... 5 more variants
+  // ... 1 more variant
 }
 ```
 
@@ -1447,6 +1432,7 @@ pub struct ResourceProvider {
 **Impl** `impl ResourceProvider`:
 ```rust
   pub fn new(
+  pub fn timezone_offset(&self) -> i32
 ```
 
 #### `agents/runtime.rs`
@@ -1703,7 +1689,7 @@ pub enum TurnEvent {
   #[serde(rename = "cancelled")]
   Cancelled { partial: String },
   /// Turn 完成（最终事件，包含完整文本）
-  // ... 8 more variants
+  // ... 3 more variants
 }
 ```
 
@@ -1717,6 +1703,34 @@ fn serialize_tool_call()
 
 ```rust
 fn serialize_cancelled()
+```
+
+#### `agents/user_messages.rs`
+
+**用途**: Orchestrator 发出的面向用户的文案字符串（重试 / 放弃提示、超时通知），集中于此以便与编排逻辑分离，并作为未来 i18n 的单一接缝。
+
+```rust
+pub const MSG_NO_PENDING_RETRY: &str = "没有待重试的消息，请重新发送。"
+```
+
+```rust
+pub const MSG_ABORT_ACK: &str = "已取消"
+```
+
+```rust
+pub const MSG_TURN_FAILED: &str = "⚠️ 处理超时，未收到模型回复。"
+```
+
+```rust
+pub const MSG_INCOMPLETE_TURN: &str = "⚠️ 检测到上次请求未处理完成（可能是服务重启）。\n\n请选择重试或放弃。"
+```
+
+```rust
+pub const BTN_RETRY: &str = "🔄 重试"
+```
+
+```rust
+pub const BTN_ABORT: &str = "✖ 放弃"
 ```
 
 #### `agents/user_profile.rs`
@@ -2237,7 +2251,7 @@ pub struct JobEntry {
   pub next_run_at: Option<String>,
   /// ISO 8601 timestamp of job creation.
   #[serde(default)]
-  // ... 47 more fields
+  // ... 17 more fields
 }
 ```
 
@@ -2970,7 +2984,7 @@ pub struct Session {
   /// Last incoming ChannelMessage. Carries sender, reply_target, attachments,
   /// images. Persisted so startup recovery can reconstruct the routing
   /// context and resume an interrupted turn. RFC v2 §三.A replaces the old
-  // ... 22 more fields
+  // ... 5 more fields
 }
 ```
 
@@ -3251,17 +3265,17 @@ pub struct ClientChannel {
   /// Reverse map: session_key → connection_id.
   session_owners: Arc<RwLock<HashMap<String, String>>>,
   /// Session manager for management API (set after construction).
-  session_manager: Arc<RwLock<Option<Arc<crate::agents::SessionManager>>>>,
+  session_manager: Arc<OnceLock<Arc<crate::agents::SessionManager>>>,
   /// Tool specs for management API (set after construction).
   tool_specs: Arc<RwLock<Vec<crate::providers::capability_tool::ToolSpec>>>,
   /// Workspace directory for memory API (set after construction).
-  workspace_dir: Arc<RwLock<Option<std::path::PathBuf>>>,
+  workspace_dir: Arc<OnceLock<std::path::PathBuf>>,
   /// Config file path for config read/write API (set after construction).
-  config_path: Arc<RwLock<Option<std::path::PathBuf>>>,
+  config_path: Arc<OnceLock<std::path::PathBuf>>,
   /// Skill manager for skills API (set after construction).
-  skill_manager: Arc<RwLock<Option<Arc<RwLock<crate::agents::SkillManager>>>>>,
+  skill_manager: Arc<OnceLock<Arc<RwLock<crate::agents::SkillManager>>>>,
   /// Service registry for models API (set after construction).
-  provider_registry: Arc<RwLock<Option<Arc<dyn crate::providers::ProviderRegistry>>>>,
+  provider_registry: Arc<OnceLock<Arc<dyn crate::providers::ProviderRegistry>>>,
 }
 ```
 
@@ -3315,15 +3329,15 @@ pub struct ClientTurnStream {
 
 **结构体** `ApiContext`:
 ```rust
-priv struct ApiContext {
+priv struct ApiContext<'a> {
   /// Session-manager scope key (channel:account:sender), stable across reconnects.
   user_id: &'a str,
-  session_manager: &'a Arc<RwLock<Option<Arc<crate::agents::SessionManager>>>>,
+  session_manager: &'a Arc<OnceLock<Arc<crate::agents::SessionManager>>>,
   tool_specs: &'a Arc<RwLock<Vec<crate::providers::capability_tool::ToolSpec>>>,
-  workspace_dir: &'a Arc<RwLock<Option<std::path::PathBuf>>>,
-  config_path: &'a Arc<RwLock<Option<std::path::PathBuf>>>,
-  skill_manager: &'a Arc<RwLock<Option<Arc<RwLock<crate::agents::SkillManager>>>>>,
-  provider_registry: &'a Arc<RwLock<Option<Arc<dyn crate::providers::ProviderRegistry>>>>,
+  workspace_dir: &'a Arc<OnceLock<std::path::PathBuf>>,
+  config_path: &'a Arc<OnceLock<std::path::PathBuf>>,
+  skill_manager: &'a Arc<OnceLock<Arc<RwLock<crate::agents::SkillManager>>>>,
+  provider_registry: &'a Arc<OnceLock<Arc<dyn crate::providers::ProviderRegistry>>>,
 }
 ```
 
@@ -5112,7 +5126,7 @@ pub enum Commands {
   #[arg(short, long)]
   print: bool,
   },
-  // ... 57 more variants
+  // ... 12 more variants
 }
 ```
 
@@ -5347,7 +5361,7 @@ pub struct TelegramAccountConfig {
   pub workspace_dir: Option<String>,
   /// Stall watchdog threshold in seconds. Send "still thinking" message if typing exceeds this.
   /// Set to 0 to disable.
-  // ... 5 more fields
+  // ... 2 more fields
 }
 ```
 
@@ -5621,7 +5635,7 @@ priv struct RawConfig {
   /// System prompt configuration (`[prompt]`).
   #[serde(default)]
   prompt: PromptConfig,
-  // ... 9 more fields
+  // ... 3 more fields
 }
 ```
 
@@ -5804,7 +5818,7 @@ pub struct ProviderConfig {
   pub tts: Option<CapabilitySection>,
   /// Speech-to-text capability section.
   #[serde(default)]
-  // ... 7 more fields
+  // ... 3 more fields
 }
 ```
 
@@ -7583,7 +7597,7 @@ pub enum ErrorCategory {
   ContextOverflow,
   /// Request payload too large (413).
   PayloadTooLarge,
-  // ... 2 more variants
+  // ... 1 more variants
 }
 ```
 
@@ -7615,7 +7629,7 @@ pub enum FailoverReason {
   PayloadTooLarge,
   /// Model not found (404) — fallback to different model.
   ModelNotFound,
-  // ... 4 more variants
+  // ... 2 more variants
 }
 ```
 
@@ -9010,7 +9024,7 @@ priv struct SessionMeta {
   /// the older standalone `last_reply_target` field.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   last_message: Option<crate::channels::ChannelMessage>,
-  // ... 7 more fields
+  // ... 2 more fields
 }
 ```
 

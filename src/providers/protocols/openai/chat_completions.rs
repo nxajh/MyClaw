@@ -82,6 +82,11 @@ impl ChatProvider for OpenAiChatCompletionsClient {
 
             let mut saw_tool_call = false;
             let mut sse_stop_reason: Option<StopReason> = None;
+            // True once the server sends the `[DONE]` SSE sentinel. Together
+            // with `sse_stop_reason` (set from a `finish_reason` chunk) this
+            // distinguishes a clean completion from a mid-stream connection
+            // close (which yields neither).
+            let mut saw_done_sentinel = false;
             let mut buffer = String::new();
             let mut utf8_buf = Vec::new();
             let mut stream = resp.bytes_stream();
@@ -113,6 +118,9 @@ impl ChatProvider for OpenAiChatCompletionsClient {
                 while let Some(pos) = buffer.find('\n') {
                     let line = buffer[..pos].to_string();
                     buffer.drain(..=pos);
+                    if line.trim().strip_prefix("data:").map(str::trim) == Some("[DONE]") {
+                        saw_done_sentinel = true;
+                    }
                     let events = parse_openai_sse(&line);
                     for ev in events {
                         match ev {
@@ -133,16 +141,30 @@ impl ChatProvider for OpenAiChatCompletionsClient {
             // Determine final stop reason: prefer the SSE-reported reason (which carries
             // MaxTokens / ContentFilter), but override with ToolUse when tool calls were
             // made and the provider reported "stop" instead of "tool_calls".
-            let final_reason = match sse_stop_reason {
-                Some(StopReason::ToolUse) => StopReason::ToolUse,
-                Some(r) if saw_tool_call => {
-                    tracing::debug!(?r, "overriding SSE stop reason with ToolUse (saw tool call events)");
-                    StopReason::ToolUse
-                }
-                Some(r) => r,
-                None => if saw_tool_call { StopReason::ToolUse } else { StopReason::EndTurn },
-            };
-            let _ = tx.send(StreamEvent::Done { reason: final_reason }).await;
+            // A clean completion requires an authoritative end marker: a
+            // `finish_reason` chunk or the `[DONE]` sentinel. Without either,
+            // the connection was closed mid-response — emit an error rather
+            // than a silent, truncated success.
+            if sse_stop_reason.is_some() || saw_done_sentinel {
+                let final_reason = match sse_stop_reason {
+                    Some(StopReason::ToolUse) => StopReason::ToolUse,
+                    Some(r) if saw_tool_call => {
+                        tracing::debug!(?r, "overriding SSE stop reason with ToolUse (saw tool call events)");
+                        StopReason::ToolUse
+                    }
+                    Some(r) => r,
+                    None => if saw_tool_call { StopReason::ToolUse } else { StopReason::EndTurn },
+                };
+                let _ = tx.send(StreamEvent::Done { reason: final_reason }).await;
+            } else {
+                let _ = tx
+                    .send(StreamEvent::Error(
+                        "stream closed before completion (no finish_reason / [DONE]; \
+                         likely upstream truncation)"
+                            .to_string(),
+                    ))
+                    .await;
+            }
         });
 
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))

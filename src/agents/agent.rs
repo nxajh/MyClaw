@@ -1,27 +1,13 @@
-//! `Agent` — RFC v2 §三.A "what the agent *is*" (the config) separated
-//! from "what it has access to" (the [`AgentRuntime`]).
+//! `Agent` — "what the agent *is*" (its config) separated from "what it
+//! has access to" (the [`AgentRuntime`]).
 //!
-//! C17 + C18 (partial): this struct + `Agent::run` replace the old
-//! `AgentLoop` per-session handle. The body here is the minimum-viable
-//! port — happy-path text + tool-call iteration with persistence and
-//! token tracking. The pieces still living in `agent_impl/` and used by
-//! the legacy `AgentLoop`:
-//!
-//! - **Compaction** — `ContextEngine` is held but `should_compact` is
-//!   never checked here. Wire it in once Agent.run is the orchestrator's
-//!   primary entry point.
-//! - **Streaming events** — non-streaming today; the LLM stream is
-//!   collected via `llm_stream::read_to_string`. Once `Session.channel`
-//!   is wired in production callers, add `channel.push_event` for
-//!   per-chunk deltas.
-//! - **Recovery / loop-breaker** — caller (orchestrator) still owns
-//!   recovery detection. Per-turn LoopBreaker uses `runtime.loop_breaker_defaults`.
-//! - **Images / attachments / hot-reload** — not yet plumbed; AgentLoop
-//!   still does these via `request_builder.rs`.
-//!
-//! The legacy `AgentLoop` continues to operate in parallel; deletion
-//! happens in H45 once orchestrator (E29) switches its main loop to
-//! `Agent::run`.
+//! `Agent::run` is the orchestrator's per-turn entry point. It drives the
+//! LLM stream, executes tool calls, applies the per-turn loop-breaker,
+//! performs context compaction via [`ContextEngine`] when the token count
+//! crosses the threshold, and persists history after each step. When the
+//! session has a streaming channel attached, per-chunk `TurnEvent`s
+//! (`Chunk` / `Thinking` / `ToolCall` / `ToolResult`) are pushed to the
+//! optional `TurnStream`.
 
 use std::sync::Arc;
 
@@ -31,6 +17,7 @@ use futures_util::StreamExt;
 
 use crate::agents::error::AgentError;
 use crate::agents::loop_breaker::LoopBreak;
+use crate::agents::tokens::estimate_tokens;
 use crate::agents::session::Session;
 use crate::agents::turn::{TurnContext, TurnResult};
 use crate::agents::turn_event::TurnEvent;
@@ -609,13 +596,6 @@ impl Agent {
     }
 }
 
-/// Char-count → token estimate. Matches `agent_impl::types::estimate_tokens`
-/// (~4 bytes/token), kept here so `agent.rs` doesn't pull
-/// `agent_impl/` internals.
-fn estimate_tokens(text: &str) -> u64 {
-    (text.len() as u64).div_ceil(4)
-}
-
 /// Persist `session.history.last()` via `session.persist` and write the
 /// returned backend ID into `session.message_ids.last_mut()`. Mirrors the
 /// legacy `AgentLoop` pattern — without the id-capture, message_ids stays
@@ -698,11 +678,10 @@ async fn collect_stream(
     let mut reasoning_content: Option<String> = None;
     let mut thinking_signature: Option<String> = None;
     let mut tool_calls: Vec<ToolCall> = Vec::new();
-    let mut stop_reason = StopReason::EndTurn;
     let mut usage: Option<crate::providers::ChatUsage> = None;
     let mut received_first_chunk = false;
 
-    loop {
+    let stop_reason = loop {
         let event_opt = if !received_first_chunk {
             match tokio::time::timeout(
                 crate::agents::llm_stream::STREAM_FIRST_CHUNK_TIMEOUT,
@@ -717,7 +696,21 @@ async fn collect_stream(
                 ),
             }
         } else {
-            stream.next().await
+            // Bound mid-stream stalls: once data has started flowing, a long
+            // silence means a broken/hung connection (distinct from a slow
+            // cold start, which the first-chunk timeout covers).
+            match tokio::time::timeout(
+                crate::agents::llm_stream::STREAM_CHUNK_INTERVAL_TIMEOUT,
+                stream.next(),
+            )
+            .await
+            {
+                Ok(ev) => ev,
+                Err(_) => anyhow::bail!(
+                    "stream stalled: no chunk for {}s mid-response",
+                    crate::agents::llm_stream::STREAM_CHUNK_INTERVAL_TIMEOUT.as_secs()
+                ),
+            }
         };
 
         let event = match event_opt {
@@ -725,7 +718,13 @@ async fn collect_stream(
                 received_first_chunk = true;
                 e
             }
-            None => break, // stream ended without explicit Done
+            // The stream ended without a terminal `Done`/`Error`/`HttpError`.
+            // A well-behaved provider always sends one; reaching here means the
+            // connection was closed mid-response. Fail the turn instead of
+            // persisting a truncated reply as if it were complete.
+            None => anyhow::bail!(
+                "stream ended without a completion marker (provider truncated the response)"
+            ),
         };
 
         match event {
@@ -785,16 +784,13 @@ async fn collect_stream(
                     usage = Some(u);
                 }
             }
-            StreamEvent::Done { reason } => {
-                stop_reason = reason;
-                break;
-            }
+            StreamEvent::Done { reason } => break reason,
             StreamEvent::HttpError { status, message } => {
                 return Err(crate::providers::ProviderHttpError { status, message }.into());
             }
             StreamEvent::Error(e) => anyhow::bail!("stream error: {}", e),
         }
-    }
+    };
 
     Ok(CollectedResponse {
         text,
@@ -902,5 +898,39 @@ mod tests {
         };
         assert!(resp.reasoning_content.is_none());
         assert!(resp.thinking_signature.is_none());
+    }
+
+    #[tokio::test]
+    async fn collect_stream_rejects_truncated_stream() {
+        use crate::providers::StreamEvent;
+
+        // Stream ends with content but no terminal Done/Error — i.e. the
+        // provider connection was closed mid-response. collect_stream must
+        // fail the turn rather than persist the partial text as complete.
+        let s = events_to_stream(vec![
+            StreamEvent::Delta { text: "中方".into() },
+        ]);
+        let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
+        assert!(
+            collect_stream(s, &mut turn_stream).await.is_err(),
+            "truncated stream (no completion marker) must error"
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_stream_propagates_provider_error() {
+        use crate::providers::StreamEvent;
+
+        // A provider that detects truncation emits StreamEvent::Error after
+        // the partial deltas; that must surface as a turn failure.
+        let s = events_to_stream(vec![
+            StreamEvent::Delta { text: "partial".into() },
+            StreamEvent::Error("stream closed before completion".into()),
+        ]);
+        let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
+        assert!(
+            collect_stream(s, &mut turn_stream).await.is_err(),
+            "provider Error must fail the turn"
+        );
     }
 }

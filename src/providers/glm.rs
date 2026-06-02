@@ -101,6 +101,12 @@ impl ChatProvider for GlmProvider {
             }
 
             let mut saw_tool_call = false;
+            // Tracks whether the server sent an authoritative end marker — a
+            // `finish_reason` chunk (which `parse_glm_sse` turns into a `Done`)
+            // or the `[DONE]` sentinel. If the byte stream ends with neither,
+            // the connection was closed mid-response and must not be reported
+            // as a clean completion.
+            let mut saw_terminal = false;
             let mut buffer = String::new();
             let mut utf8_buf = Vec::new();
             let mut stream = resp.bytes_stream();
@@ -132,17 +138,34 @@ impl ChatProvider for GlmProvider {
                 while let Some(pos) = buffer.find('\n') {
                     let line = buffer[..pos].to_string();
                     buffer.drain(..=pos);
+                    // The `[DONE]` sentinel marks a clean server-side close.
+                    if line.trim().strip_prefix("data:").map(str::trim) == Some("[DONE]") {
+                        saw_terminal = true;
+                    }
                     let parsed = parse_glm_sse(&line, &mut saw_tool_call);
                     if let Some(events) = parsed {
                         for ev in events {
+                            if matches!(ev, StreamEvent::Done { .. }) {
+                                saw_terminal = true;
+                            }
                             let _ = tx.send(ev).await;
                         }
                     }
                 }
             }
-            // GLM may report finish_reason="stop" even when tool calls were present.
-            let final_reason = if saw_tool_call { StopReason::ToolUse } else { StopReason::EndTurn };
-            let _ = tx.send(StreamEvent::Done { reason: final_reason }).await;
+            // The byte stream ended. If we never saw a finish_reason or `[DONE]`,
+            // GLM closed the connection mid-response (e.g. server-side request
+            // time budget exhausted during a long prefill). Surface it as an
+            // error instead of a silent, truncated "success".
+            if !saw_terminal {
+                let _ = tx
+                    .send(StreamEvent::Error(
+                        "GLM stream closed before completion (no finish_reason / [DONE]; \
+                         likely server-side truncation)"
+                            .to_string(),
+                    ))
+                    .await;
+            }
         });
 
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))

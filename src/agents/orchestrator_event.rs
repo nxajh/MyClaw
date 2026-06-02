@@ -2,14 +2,9 @@
 //!
 //! RFC v2 §三.C: the orchestrator's main loop selects across inbound channel
 //! messages, scheduler ticks, delegation completions, and ask-user replies.
-//! Today these arrive on three separate mpsc receivers and the main loop
-//! handles each branch with custom code. Folding them into one enum gives
-//! tests a single injection point (`tx.send(OrchestratorEvent::*)`) and
-//! makes the dispatch logic linear.
-//!
-//! This enum is added as scaffolding here — the orchestrator main loop will
-//! switch to consuming it in E29 once the surrounding types (AskRouter,
-//! DelegationCoordinator) are in place.
+//! Adapter tasks fan each source into a single `mpsc<OrchestratorEvent>`
+//! (see `Orchestrator::run`), so the dispatch logic is linear and tests
+//! have a single injection point (`tx.send(OrchestratorEvent::*)`).
 
 use crate::agents::DelegationEvent;
 use crate::channels::ChannelMessage;

@@ -1,7 +1,9 @@
 //! LLM stream helpers — timeout constants and chunk-reading utilities.
 //!
-//! RFC v2 §六.A: the stream-first-chunk timeout becomes a per-call hardcoded
-//! constant; per-agent override is removed.
+//! RFC v2 §六.A: the stream timeouts are deliberately hardcoded constants,
+//! NOT config-exposed. Per-agent overrides were intentionally removed —
+//! these bound provider/network stalls and are not an operator knob. Tune
+//! them here if upstream model latencies change.
 
 use anyhow::{anyhow, Result};
 use futures::StreamExt;
@@ -51,6 +53,12 @@ pub async fn read_to_string(stream: BoxStream<StreamEvent>) -> Result<String> {
         match read_next(&mut s, STREAM_CHUNK_INTERVAL_TIMEOUT).await? {
             Some(StreamEvent::Delta { text: delta }) => text.push_str(&delta),
             Some(StreamEvent::Done { .. }) => break,
+            // A truncated provider stream surfaces as Error/HttpError; don't
+            // silently return a partial summary as if it were complete.
+            Some(StreamEvent::Error(e)) => return Err(anyhow!("stream error: {e}")),
+            Some(StreamEvent::HttpError { status, message }) => {
+                return Err(anyhow!("stream HTTP {status}: {message}"));
+            }
             Some(_) => {}
             None => break,
         }
