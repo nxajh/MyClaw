@@ -343,6 +343,14 @@ async fn collect_stream_accepts_thinking_with_signature()
 async fn collect_stream_accepts_no_thinking()
 ```
 
+```rust
+async fn collect_stream_rejects_truncated_stream()
+```
+
+```rust
+async fn collect_stream_propagates_provider_error()
+```
+
 #### `agents/agent_registry.rs`
 
 **结构体** `AgentRegistry`:
