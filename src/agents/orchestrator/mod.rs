@@ -10,6 +10,8 @@
 //! is done in the Composition Root (orchestration/orchestrator main.rs + daemon.rs),
 //! not here. This struct receives fully-assembled components via its constructor.
 
+mod delegation;
+mod inbound;
 mod recovery;
 mod scheduled;
 mod turn;
@@ -19,13 +21,11 @@ pub mod key;
 
 pub use ctx::OrchestratorCtx;
 pub use event::OrchestratorEvent;
-pub use key::SessionKey;
 
 use anyhow::Context;
 use crate::agents::delegation::DelegationEvent;
 use crate::agents::DelegationCoordinator;
-use crate::agents::SessionContext;
-use crate::channels::{Channel, ChannelMessage, InlineButton};
+use crate::channels::{Channel, ChannelMessage};
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,17 +41,6 @@ use scheduled::{run_cron_task, run_heartbeat_task};
 /// an operator-tunable knob. The meaningful knobs (tool timeout, compaction
 /// threshold, loop-breaker limits) live in `[agent]`/`[context]` config.
 const CHANNEL_QUEUE_SIZE: usize = 100;
-
-// User-facing message strings live in `user_messages` (single presentation seam).
-use crate::agents::user_messages::{
-    BTN_ABORT, BTN_RETRY, MSG_ABORT_ACK, MSG_INCOMPLETE_TURN, MSG_NO_PENDING_RETRY, MSG_TURN_FAILED,
-};
-
-/// Internal enum for the run loop's select.
-enum ChannelEvent {
-    UserMessage(((String, String), ChannelMessage)),
-    Delegation(DelegationEvent),
-}
 
 /// Events from the Scheduler (heartbeat ticks, cron triggers).
 #[derive(Debug)]
@@ -262,19 +251,6 @@ impl Orchestrator {
         })
     }
 
-    /// Get or create the `SessionContext` for a routing_key.
-    ///
-    /// First call for a routing_key loads the Session from SessionManager
-    /// (which reads/restores from backend), wraps it in `SessionContext`,
-    /// and caches the result. Subsequent calls return the same `Arc`.
-    ///
-    /// The session's transient `persist` and `channel` fields are NOT
-    /// populated here — callers wire them per-turn before locking the
-    /// session to call `Agent::run`.
-    fn session_context_for(&self, sk: &str) -> Arc<SessionContext> {
-        self.ctx.session_manager.get_or_create_context(sk)
-    }
-
     /// Main message loop. Consumes self.msg_rx.
     /// Call from the Composition Root; blocks until shutdown.
     ///
@@ -427,12 +403,10 @@ impl Orchestrator {
                     }
                 }
                 OrchestratorEvent::Inbound { channel_type, account_id, message: msg } => {
-                    let event = ChannelEvent::UserMessage(((channel_type, account_id), msg));
-                    self.handle_channel_event(event).await;
+                    inbound::dispatch(&self.ctx, (channel_type, account_id), msg).await;
                 }
                 OrchestratorEvent::Delegation(event) => {
-                    let event = ChannelEvent::Delegation(event);
-                    self.handle_channel_event(event).await;
+                    delegation::wake(&self.ctx, event).await;
                 }
             }
         }
@@ -450,251 +424,6 @@ impl Orchestrator {
         Ok(())
     }
 
-    /// Dispatch for the `ChannelEvent` variants. Kept as a private helper
-    /// so the `OrchestratorEvent` main loop reuses the inbound dispatch
-    /// logic verbatim rather than inlining it.
-    async fn handle_channel_event(&self, event: ChannelEvent) {
-        let channels = self.ctx.channels.clone();
-        match event {
-            ChannelEvent::UserMessage(((channel_type, account_id), mut msg)) => {
-                // Tell the Scheduler about this user message so cron /
-                // heartbeat jobs with `target = "last"` know where to
-                // deliver their output. No-op when scheduler is disabled.
-                if let Some(ref scheduler) = self.ctx.scheduler {
-                    let channel_key = format!("{}:{}", channel_type, account_id);
-                    scheduler.record_user_message(&channel_key, &msg.reply_target).await;
-                }
-
-                let sk = SessionKey::new(&channel_type, &account_id, &msg.sender).to_string();
-                let channel_key = (channel_type.clone(), account_id.clone());
-
-                // RFC v2 §三.B: check the AskRouter first (indexed by
-                // session.id, registered by AskUserTool). If it fulfilled
-                // an outstanding ask, the inbound message is consumed and
-                // no fresh turn is spawned.
-                {
-                    let session_id = self
-                        .ctx
-                        .session_manager
-                        .get_or_create(&sk)
-                        .id
-                        .clone();
-                    if self.ctx.ask_router.fulfill(&session_id, msg.clone()) {
-                        tracing::debug!(
-                            session = %session_id,
-                            "ask_router fulfilled pending ask, consuming inbound"
-                        );
-                        return;
-                    }
-                }
-
-
-                // Check if this is a retry/abort callback from an EmptyResponse prompt.
-                // pending_retry lives on SessionContext. For
-                // retry, we extract the saved text and rewrite the
-                // incoming msg.content to it — then fall through to the
-                // standard dispatch below so the regular Agent path
-                // handles it. For abort, we clear pending_retry and
-                // ack inline.
-                // RFC §11 Phase 5: structured CallbackAction parsing
-                // replaces the ad-hoc "__retry:" / "__abort:" prefix check.
-                let callback_action = crate::channels::CallbackAction::parse(&msg.content);
-                if matches!(
-                    callback_action,
-                    Some(
-                        crate::channels::CallbackAction::Retry { .. }
-                            | crate::channels::CallbackAction::Abort { .. }
-                    )
-                ) {
-                    let is_retry =
-                        matches!(callback_action, Some(crate::channels::CallbackAction::Retry { .. }));
-                    let reply_target = msg.reply_target.clone();
-
-                    let channel: Option<Arc<dyn Channel>> = {
-                        channels.get(&channel_key).map(|r| r.clone())
-                    };
-                    let channel = match channel {
-                        Some(c) => c,
-                        None => return,
-                    };
-
-                    let session_ctx = self.session_context_for(&sk);
-                    let pending = if is_retry {
-                        session_ctx.pending_retry.lock().await.take()
-                    } else {
-                        *session_ctx.pending_retry.lock().await = None;
-                        None
-                    };
-
-                    if is_retry {
-                        match pending {
-                            Some(user_msg) => {
-                                // Rewrite content and fall through.
-                                msg.content = user_msg;
-                            }
-                            None => {
-                                let target = crate::channels::SendTarget::new(reply_target.clone());
-                                let _ = channel
-                                    .send_payload(
-                                        &target,
-                                        &crate::channels::MessagePayload::text(MSG_NO_PENDING_RETRY),
-                                    )
-                                    .await;
-                                return;
-                            }
-                        }
-                    } else {
-                        let target = crate::channels::SendTarget::new(reply_target.clone());
-                        let _ = channel
-                            .send_payload(
-                                &target,
-                                &crate::channels::MessagePayload::text(MSG_ABORT_ACK),
-                            )
-                            .await;
-                        return;
-                    }
-                }
-
-                // Check for an incomplete turn loaded from a previous crash/SIGKILL.
-                // Read incomplete_turn from SessionContext.session and stash
-                // the orphaned user message on SessionContext.pending_retry.
-                {
-                    let session_ctx = self.session_context_for(&sk);
-                    if let Ok(mut session) = session_ctx.session.try_lock() {
-                        if session.incomplete_turn {
-                            session.incomplete_turn = false;
-
-                            let last_user_msg = session.history.last()
-                                .filter(|m| m.role == "user")
-                                .map(|m| m.text_content().to_string())
-                                .unwrap_or_default();
-                            *session_ctx.pending_retry.lock().await = Some(last_user_msg.clone());
-                            drop(session);
-
-                            let channel = match channels.get(&channel_key).map(|r| r.clone()) {
-                                Some(c) => c,
-                                None => return,
-                            };
-                            let (target, payload) = retry_abort_prompt(
-                                MSG_INCOMPLETE_TURN,
-                                &sk,
-                                msg.reply_target.clone(),
-                                Some(msg.id.clone()),
-                            );
-                            if let Err(e) = channel.send_payload(&target, &payload).await {
-                                error!(session = %sk, err = %e, "failed to send incomplete-turn prompt");
-                            }
-                            return;
-                        }
-                    }
-                }
-
-                let content = msg.content.clone();
-                let image_urls = msg.image_urls.clone();
-                let image_base64 = msg.image_base64.clone();
-                let reply_target = msg.reply_target.clone();
-                let reply_to_id = Some(msg.id.clone());
-
-                // Intercept slash commands before reaching agent loop.
-                if let Some((cmd, cmd_args)) = super::commands::parse_command(&content) {
-                    if super::commands::is_known_command(cmd) {
-                        let sk_cmd        = sk.clone();
-                        let cmd_owned     = cmd.to_string();
-                        let cmd_args_owned = cmd_args.to_string();
-                        let session_ctx_cmd = self.ctx.session_manager.get_context(&sk);
-                        let registry_cmd  = Arc::clone(&self.ctx.agent_runtime.providers);
-                        let sm_cmd        = self.ctx.session_manager.clone();
-                        let runtime_cmd   = self.ctx.agent_runtime.clone();
-                        let channel_cmd   = channels.get(&channel_key).map(|r| r.clone());
-                        let rt_cmd        = reply_target.clone();
-                        let rid_cmd       = reply_to_id.clone();
-
-                        tokio::spawn(async move {
-                            let cmd_ctx = super::commands::CommandContext {
-                                user_id:        &sk_cmd,
-                                registry:       &registry_cmd,
-                                session_manager: &sm_cmd,
-                                runtime:        &runtime_cmd,
-                                session_ctx:    session_ctx_cmd.as_ref(),
-                            };
-                            if let Some(response) = super::commands::dispatch(
-                                &cmd_owned, &cmd_args_owned, cmd_ctx,
-                            ).await {
-                                if let Some(channel) = channel_cmd {
-                                    let mut target = crate::channels::SendTarget::new(rt_cmd);
-                                    target.thread_id = rid_cmd;
-                                    if let Err(e) = channel
-                                        .send_payload(
-                                            &target,
-                                            &crate::channels::MessagePayload::text(response),
-                                        )
-                                        .await
-                                    {
-                                        error!(session = %sk_cmd, err = %e,
-                                            "command response send failed");
-                                    }
-                                }
-                            }
-                        });
-                        return;
-                    }
-                }
-
-                // B12: store full inbound ChannelMessage on session.
-                {
-                    let mut session = self.ctx.session_manager.get_or_create(&sk);
-                    session.record_inbound(msg.clone());
-                }
-                if let Err(e) = self.ctx.session_manager.backend().save_last_message(&sk, &msg) {
-                    tracing::warn!(session = %sk, err = %e, "failed to persist last_message");
-                }
-
-                let channel = match channels.get(&channel_key).map(|r| r.clone()) {
-                    Some(c) => c,
-                    None => return,
-                };
-
-                // Dispatch via SessionContext.process_turn — the canonical
-                // RFC v2 per-turn entry point. Spawn on a background task so
-                // the main event loop is not blocked by the LLM round-trip.
-                let session_ctx = self.ctx.session_manager.get_or_create_context(&sk);
-                let runtime = self.ctx.agent_runtime.clone();
-                let inbound_msg = msg.clone();
-                let _ = (image_urls, image_base64, reply_to_id, content);
-
-                tokio::spawn(async move {
-                    // image_urls / image_base64 are attached via
-                    // `session.last_message` (recorded via `record_inbound`
-                    // upstream); Agent.run reads them from there.
-                    // reply_to_id is unused — channels send replies in-line
-                    // without thread context for now.
-                    // Successful turns: process_turn does the fallback
-                    // `channel.send(text)` internally per RFC §三.B. We
-                    // only handle the error notice here.
-                    let result = session_ctx
-                        .process_turn(inbound_msg, Some(channel.clone()), runtime)
-                        .await;
-                    if result.is_err() {
-                        let target = crate::channels::SendTarget::new(reply_target);
-                        let _ = channel
-                            .send_payload(
-                                &target,
-                                &crate::channels::MessagePayload::text(MSG_TURN_FAILED),
-                            )
-                            .await;
-                    }
-                });
-
-            }
-            ChannelEvent::Delegation(event) => {
-                // handle_delegation_event re-enters handle_channel_event with
-                // a synthetic Inbound message; the standard Agent dispatch
-                // (including its own tokio::spawn for the turn) takes it
-                // from there.
-                self.handle_delegation_event(event).await;
-            }
-        }
-    }
 
     /// Handle a scheduler event (from the Scheduler task via mpsc).
     /// Dispatch scheduler events by spawning independent tasks.
@@ -780,118 +509,6 @@ impl Orchestrator {
     }
 }
 
-// ── retry_abort_prompt ────────────────────────────────────────────────────────
-
-/// Build a `(SendTarget, MessagePayload::Interactive)` pair for the
-/// **Retry / Abort** inline buttons prompt (RFC §6.2 / Phase 2).
-///
-/// The callback data is prefixed with `__retry:` / `__abort:` and a
-/// 32-char prefix of the session key so it fits within Telegram's
-/// 64-byte limit.
-fn retry_abort_prompt(
-    content: impl Into<String>,
-    sk: &str,
-    reply_target: impl Into<String>,
-    thread_ts: Option<String>,
-) -> (crate::channels::SendTarget, crate::channels::MessagePayload) {
-    let sk_prefix: String = sk.chars().take(32).collect();
-    let mut target = crate::channels::SendTarget::new(reply_target);
-    target.thread_id = thread_ts;
-    let payload = crate::channels::MessagePayload::Interactive {
-        text: content.into(),
-        buttons: vec![
-            InlineButton {
-                label: BTN_RETRY.to_string(),
-                callback_data: crate::channels::CallbackAction::Retry {
-                    session_key_prefix: sk_prefix.clone(),
-                }
-                .serialize(),
-            },
-            InlineButton {
-                label: BTN_ABORT.to_string(),
-                callback_data: crate::channels::CallbackAction::Abort {
-                    session_key_prefix: sk_prefix,
-                }
-                .serialize(),
-            },
-        ],
-    };
-    (target, payload)
-}
-
-impl Orchestrator {
-    /// Wake the parent agent on a `DelegationEvent` (sub-agent completion
-    /// or failure). The synthesized system notification becomes a user
-    /// message on the parent session; Agent.run handles the rest.
-    ///
-    /// Returns a boxed future because this function calls back into
-    /// `handle_channel_event`, and Rust requires recursive async fns to
-    /// be boxed.
-    fn handle_delegation_event<'a>(
-        &'a self,
-        event: DelegationEvent,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(self.handle_delegation_event_inner(event))
-    }
-
-    async fn handle_delegation_event_inner(&self, event: DelegationEvent) {
-        let (task_id, parent_session_id, reply_target, content) = match event {
-            DelegationEvent::Completed { task_id, parent_session_id, reply_target, summary, duration_secs } => {
-                tracing::info!(task_id = %task_id, duration_secs, "delegation completed, waking main agent");
-                let content = format!(
-                    "[系统通知] 子代理已完成后台任务 (task_id: {}, 耗时: {}s)，结果如下：\n{}",
-                    task_id, duration_secs, summary
-                );
-                (task_id, parent_session_id, reply_target, content)
-            }
-            DelegationEvent::Failed { task_id, parent_session_id, reply_target, error } => {
-                tracing::warn!(task_id = %task_id, "delegation failed, waking main agent");
-                let content = format!(
-                    "[系统通知] 子代理后台任务失败 (task_id: {})，错误：\n{}",
-                    task_id, error
-                );
-                (task_id, parent_session_id, reply_target, content)
-            }
-        };
-
-        // Synthesize the delegation message as a full ChannelMessage so the
-        // dispatch path is structurally identical to a real inbound. The
-        // standard handle_channel_event Inbound arm runs Agent.
-        //
-        // handle_channel_event recomputes the session key from `msg.sender`,
-        // so the synthetic.sender must equal the parent's original sender —
-        // otherwise the synthetic message lands on a fresh session
-        // ("channel:account:system") instead of the user's parent session.
-        let (ct, ac, parent_sender) = match SessionKey::parse(&parent_session_id) {
-            Some(k) => (k.channel, k.account, k.sender),
-            None => {
-                tracing::warn!(parent = %parent_session_id, "invalid session key in delegation event");
-                return;
-            }
-        };
-        // Verify channel exists (warn-and-skip if not) — handle_channel_event
-        // will look it up again from self.ctx.channels, but failing fast here gives
-        // a clearer log line.
-        if self.ctx.channels.get(&(ct.clone(), ac.clone())).is_none() {
-            tracing::warn!(parent = %parent_session_id, "channel for delegation event not found");
-            return;
-        }
-        let synthetic = ChannelMessage {
-            id: format!("delegation:{}", task_id),
-            sender: parent_sender,
-            reply_target,
-            content,
-            timestamp: chrono::Utc::now().timestamp() as u64,
-            thread_ts: None,
-            interruption_scope_id: None,
-            attachments: Vec::new(),
-            image_urls: None,
-            image_base64: None,
-        };
-        self.handle_channel_event(ChannelEvent::UserMessage(((ct, ac), synthetic))).await;
-    }
-}
-
 /// Check if a response is a silent "nothing to do" signal (used by heartbeat).
 pub(crate) fn is_silent_ok(response: &str, prefix: &str) -> bool {
     let trimmed = response.trim().to_lowercase();
@@ -909,7 +526,7 @@ mod tests {
     #[test]
     fn test_session_key() {
         assert_eq!(
-            SessionKey::new("wechat", "default", "o9cq80zXpSX1Hz0ph_QNs591k4PA").to_string(),
+            key::SessionKey::new("wechat", "default", "o9cq80zXpSX1Hz0ph_QNs591k4PA").to_string(),
             "wechat:default:o9cq80zXpSX1Hz0ph_QNs591k4PA"
         );
     }
