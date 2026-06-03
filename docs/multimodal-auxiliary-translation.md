@@ -5,7 +5,7 @@
 > **v2 修订（基于代码评审）**：
 > - 修正辅助翻译的流式消费（`ChatProvider::chat()` 返回 `BoxStream`，须经 `ChatResponse::from_stream()` 聚合；`stream` 恒为 `true`）
 > - 引入**描述缓存**保证多轮追问正确性（历史图片复用描述而非一律降级为 `[image]`）
-> - 辅助模型选择改为**显式配置优先、自动发现兜底**（`[routing.image_aux]`），避免成本不可控
+> - 辅助模型选择**只在用户显式声明的集合内**筛选（`[routing.image_aux]` 覆盖 → `[routing.chat]` 链 → 占位符降级），不做全局自动发现，与 MyClaw「显式路由」哲学一致
 > - 模块按 **modality 泛型化**（`ModalitySpec`），audio/video 不再重复核心逻辑
 > - `find_chat_model_with_modality` 基于现有公开 trait 方法实现，不触碰私有字段
 > - 移除冗余 `supports_audio_input/video_input`，统一为 `supports_input(modality)`；并行翻译纳入核心
@@ -134,7 +134,8 @@ strategy = "fallback"
 models = ["deepseek-v3", "gpt-4o-mini"]
 ```
 
-运行时从 registry 中查找支持特定 modality 的已注册 Chat 模型即可，零配置新增。
+运行时从**已配置的 `[routing.chat]` 链**中查找支持特定 modality 的模型即可（§4.2）——
+候选集是用户显式声明的，不扫描全局，零额外配置。
 
 ### 3.3 辅助翻译 = 临时 Chat 调用（流式）
 
@@ -240,37 +241,41 @@ impl ChatModelConfig {
 
 ### 4.2 新增方法：`find_chat_model_with_modality()`
 
-选择辅助模型时**显式配置优先、自动发现兜底**，避免「零配置」自动挑中昂贵模型导致成本/延迟不可控。
-优先级：
+**设计原则：候选集必须落在用户已显式授权的范围内**，与 MyClaw 一以贯之的「显式路由」
+哲学保持一致（`get_chat_provider` 在 `[routing.chat]` 缺失时直接 error，全代码库无任何自动发现）。
+因此辅助模型选择**不扫描全局已注册模型**，只在用户显式声明的集合里筛：
 
-1. **显式配置** `[routing.<modality>_aux]`（可选，见 §4.6）—— 用户指定专用辅助模型
-2. **chat 路由链**中支持该 modality 的模型 —— 复用主链已注册的视觉模型
-3. **任意已注册** chat 模型中支持该 modality 的 —— 最后兜底
+1. **显式覆盖** `[routing.image_aux]`（可选，见 §4.6）—— 多视觉模型时指定最优辅助模型
+2. **默认**：`[routing.chat]` 链中支持该 modality 的模型 —— 复用用户已声明的 `models = [...]`
+3. 都没有 → 返回 `None` → **优雅降级为占位符**（辅助翻译是增强非必需，不 error，也不全局扫描）
+
+> 不做「从所有已注册模型里自动挑一个」：那会选到用户未放进路由链的模型（越权）、
+> 多模型时不可预测、且引入代码库中唯一的隐式魔法。零额外配置由「复用已有 chat 链」达成，
+> 而非全局发现。
 
 实现完全基于 `ProviderRegistry` 的**现有公开方法**，不触碰私有 `chat_providers` 字段：
 
 ```rust
 // src/registry/mod.rs — impl ProviderRegistry for Registry
 
-/// Find a registered chat model that supports the given input modality.
-/// Prefers an explicitly-configured auxiliary model, then the chat routing
-/// chain, then any registered chat model. Returns None if none qualifies.
+/// Find a chat model that supports the given input modality, searching only
+/// the user-declared set: an explicit `[routing.<modality>_aux]` override
+/// first, then the `[routing.chat]` fallback chain. Returns None (caller
+/// degrades to a placeholder) when neither yields a capable model — we never
+/// scan all registered models, matching MyClaw's explicit-routing philosophy.
 fn find_chat_model_with_modality(
     &self,
     modality: Modality,
 ) -> Option<(Arc<dyn ChatProvider>, String)> {
-    // 候选 model_id 列表，按优先级排列
+    // 候选 model_id，按优先级排列；二者皆为用户显式声明的集合
     let mut candidates: Vec<String> = Vec::new();
-    // 1. 显式配置的辅助模型（如有）
+    // 1. 显式 aux 覆盖（如配置）
     if let Some(id) = self.aux_model_for(modality) {
         candidates.push(id);
     }
-    // 2. chat 路由链
+    // 2. chat 路由链（用户在 [routing.chat] models = [...] 中显式列出）
     candidates.extend(self.get_chat_routing_models());
-    // 3. 所有已注册 chat 模型
-    for summary in self.get_all_provider_summaries() {
-        candidates.extend(summary.chat_models);
-    }
+    // （刻意不加：全局 get_all_provider_summaries 扫描）
 
     for model_id in candidates {
         let supports = self
@@ -288,9 +293,7 @@ fn find_chat_model_with_modality(
 }
 ```
 
-> `aux_model_for(modality)` 是 Registry 内部小助手，从 §4.6 的可选路由配置读取；
-> 无配置时返回 `None`，逻辑自然落到优先级 2/3。
-> 候选列表可能含重复 id，但首个命中即返回，重复无害；如需严格可加 `seen` 去重。
+> `aux_model_for(modality)` 从 §4.6 的可选配置读取；无配置时返回 `None`，逻辑自然落到优先级 2。
 
 ### 4.3 新增模块：`modality_adapter`
 
@@ -605,11 +608,11 @@ fn find_chat_model_with_modality(
 
 ### 4.6 可选配置：`[routing.<modality>_aux]`
 
-辅助模型选择默认走自动发现（§4.2 优先级 2/3），**无需任何配置即可工作**。
-但允许用户显式指定，以控制成本/延迟/质量：
+辅助模型默认复用 `[routing.chat]` 链（§4.2 优先级 2），**无需任何配置即可工作**。
+仅当用户有多个视觉模型、想指定其中某个作辅助（控制成本/延迟/质量）时才需要：
 
 ```toml
-# 可选：为图片理解指定专用辅助模型（不配则自动发现）
+# 可选：为图片理解指定专用辅助模型（不配则复用 [routing.chat] 链中的视觉模型）
 [routing.image_aux]
 models = ["gpt-4o-mini"]
 
@@ -618,8 +621,13 @@ models = ["gpt-4o-mini"]
 # models = ["gpt-4o-audio"]
 ```
 
-复用现有 `RoutingConfig`（`HashMap<String, RouteEntry>`）结构，新增 `image_aux` / `audio_aux` /
-`video_aux` 几个约定键即可，无需新增配置类型。`aux_model_for(modality)` 读取对应键的首个 model。
+**实现注意**：现有 `RoutingConfig.get()`（`routing.rs:52`）只接受 `Capability` 枚举，键硬编码为
+7 个 capability，**读不出 `image_aux` 这类约定键**。底层虽是 `HashMap<String, RouteEntry>`，
+但需为 `RoutingConfig` 新增一个按字符串键查询的方法（如 `get_by_key("image_aux")`），
+`aux_model_for(modality)` 借此读取首个 model。这是相对原 RFC「复用即可」说法的一处实现修正。
+
+> 鉴于多视觉模型场景在当前并不常见，§4.6 整体可作为 **Phase 1.5** 推迟：v1 先只做优先级 2
+> （复用 chat 链）+ 占位符降级，零新增配置；待真有「指定辅助模型」需求再加此键，符合 YAGNI。
 
 ### 4.7 描述缓存挂载点
 
@@ -671,7 +679,7 @@ adapt_history_media():  历史 messages 中的 ImageUrl
   ├─ 缓存命中 → "[图片描述]: ..."（复用，多轮追问可答）
   └─ 缓存未命中 → "[image]"
 adapt_pending_media():  当轮新图片（来自 last_message 快照）
-  ├─ 找到辅助视觉模型（[routing.image_aux] 优先，否则自动发现）
+  ├─ 找到辅助视觉模型（[routing.image_aux] 覆盖 → [routing.chat] 链中的视觉模型）
   ├─ 查缓存 → miss 则流式 Chat 调用 from_stream() → 写缓存
   ├─ 多图并行 join_all
   └─ 注入最后一条 user 消息: "[图片描述]: 一张包含...的图片"
@@ -718,7 +726,8 @@ Turn 2: 用户切换到 DeepSeek V3（不支持视觉），并追问 history[0] 
 | 项目 | 原因 |
 |------|------|
 | 不新增 Capability 枚举 | 图片理解是 Chat 的 input modality，不是独立能力 |
-| 不强制新增配置块 | 自动发现默认即可工作；`[routing.image_aux]` 仅为可选的显式控制 |
+| 不强制新增配置块 | 默认复用 `[routing.chat]` 链即可工作；`[routing.image_aux]` 仅为可选覆盖 |
+| 不做全局自动发现 | 候选集限定在用户显式声明的路由内，符合 MyClaw 显式路由哲学，行为可预测 |
 | 不修改持久化历史 | 所有变换在 clone 层进行 |
 | 不在辅助翻译时发历史消息 | 避免协议兼容性问题，图片描述是自包含的 |
 | 不保留图片 URL | LLM 无法访问 URL，且多数 CDN 链接会过期 |
@@ -778,7 +787,8 @@ if !primary_config.supports_input(Modality::Audio) {
 8. **Compaction 回归**：验证 `strip_images()` 行为不变
 9. **多图并行**：多张图片 `join_all` 并行翻译，结果顺序与注入文案编号一致
 10. **辅助模型失败**：单图失败 → `[translation failed]`，不影响其他图片（graceful degradation）
-11. **显式 aux 配置**：`[routing.image_aux]` 指定模型时，验证优先于自动发现选中
+11. **显式 aux 覆盖**：配置 `[routing.image_aux]` 时验证优先于 `[routing.chat]` 链选中
+12. **候选集边界**：注册但未列入 `[routing.chat]` / `image_aux` 的视觉模型，验证**不会**被选为辅助模型
 
 ## 10. 变更清单
 
@@ -787,7 +797,7 @@ if !primary_config.supports_input(Modality::Audio) {
 | `src/providers/capability.rs` | 新增方法 | 仅 `supports_input(modality)`（`supports_image_input()` 已存在） |
 | `src/providers/provider_registry.rs` | 新增方法 | `find_chat_model_with_modality()`（可为 trait 默认方法） |
 | `src/registry/mod.rs` | 新增实现 | `aux_model_for(modality)`（读 `[routing.*_aux]`）；如不用默认方法则实现 `find_chat_model_with_modality()` |
-| `src/config/routing.rs` | 可选新增键 | 约定键 `image_aux` / `audio_aux` / `video_aux`（复用 `RouteEntry`） |
+| `src/config/routing.rs` | 可选（Phase 1.5） | 新增 `get_by_key(&str)` 以读取约定键 `image_aux` 等（`get()` 仅认 Capability 键）；v1 可不做 |
 | `src/agents/modality_adapter.rs` | **新增文件** | `ModalitySpec` / `DescriptionCache` / `translate_part`（流式）/ `adapt_history_media` / `adapt_pending_media` |
 | `src/agents/runtime.rs` | 新增字段 | `description_cache: Arc<dyn DescriptionCache>` 单例 |
 | `src/agents/agent.rs` | 修改 | `run()` 集成 `adapt_history_media` + 当轮分叉 `adapt_pending_media` |
