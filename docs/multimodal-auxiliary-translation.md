@@ -339,6 +339,10 @@ fn find_chat_model_with_modality(
 ```
 
 > `aux_model_for(modality)` 从 §4.6 的可选配置读取；无配置时返回 `None`，逻辑自然落到优先级 2。
+>
+> **实现注记（与上面伪代码的差异）**：按 §4.6 / T0.4「不做 per-modality aux 键」的结论，
+> 落地的默认实现**只保留优先级 2**——直接遍历 `[routing.chat]` 链，不构造 `candidates`、
+> 不调用 `aux_model_for`（已删除）。优先级 1 的 override 留待将来按 §4.6「单一理解模型」方向加。
 
 ### 4.3 新增模块：`modality_adapter`
 
@@ -658,18 +662,20 @@ if media.is_empty() {
 // src/providers/provider_registry.rs — 新增一个 trait 方法
 
 /// Find a registered chat model that supports the given input modality.
-/// Default-implemented in terms of existing trait methods
-/// (get_chat_routing_models / get_all_provider_summaries /
-///  get_chat_model_config / get_chat_provider_by_model), so the Registry
-/// impl needs no access to private fields.
+/// Default-implemented in terms of existing public trait methods
+/// (get_chat_routing_models / get_chat_model_config /
+///  get_chat_provider_by_model), so the Registry impl needs no access to
+/// private fields. Walks only the [routing.chat] chain — no global discovery.
 fn find_chat_model_with_modality(
     &self,
     modality: Modality,
 ) -> Option<(Arc<dyn ChatProvider>, String)>;
 ```
 
-> 可作为 **trait 默认方法**实现（§4.2 的逻辑全部基于已有公开方法），各实现者零额外样板。
-> 仅显式 aux 配置查询 `aux_model_for` 需要具体实现读取 §4.6 的配置。
+> **实现为 trait 默认方法**（§4.2 的逻辑全部基于已有公开方法），各实现者零额外样板，`Registry`
+> 直接复用。**不做全局发现**：默认实现刻意只遍历 `[routing.chat]` 链，不调用
+> `get_all_provider_summaries`。§4.6 的 per-modality aux 覆盖按 T0.4「不做」结论未引入，
+> 故无需 `aux_model_for` 这类包装方法。
 
 ### 4.6 可选配置：`[routing.<modality>_aux]`
 
@@ -708,7 +714,7 @@ models = ["gpt-4o-mini"]
 >
 > 依据：多模态模型通常一并支持多种输入（`ChatModelConfig.input: Vec<Modality>`，如 GPT-4o=图+音、
 > Gemini 2.5=图+音+视频），故一个模型即可覆盖多模态理解，无需 per-modality 拆分。该逻辑仍落在
-> `find_chat_model_with_modality` / `aux_model_for` 这一唯一接缝上（在链遍历前插一次「override 是否
+> `find_chat_model_with_modality` 这一唯一接缝上（在链遍历前插一次「override 是否
 > 支持该模态」的查找），现在不做也不会锁死。
 
 ### 4.7 描述缓存挂载点
@@ -877,7 +883,7 @@ if !primary_config.supports_input(Modality::Audio) {
 |------|---------|------|
 | `src/providers/capability.rs` | 新增方法 | 仅 `supports_input(modality)`（`supports_image_input()` 已存在） |
 | `src/providers/provider_registry.rs` | 新增方法 | `find_chat_model_with_modality()`（可为 trait 默认方法） |
-| `src/registry/mod.rs` | 新增实现 | `aux_model_for(modality)`（读 `[routing.*_aux]`）；如不用默认方法则实现 `find_chat_model_with_modality()` |
+| `src/registry/mod.rs` | 复用默认方法 | `Registry` 经 trait 默认实现获得 `find_chat_model_with_modality()`（只遍历 `[routing.chat]` 链）；不单设 `aux_model_for` 包装（曾实现后按 §4.6 删除，避免死代码） |
 | `src/config/routing.rs` | 可选（Phase 1.5） | 新增 `get_by_key(&str)` 以读取约定键 `image_aux` 等（`get()` 仅认 Capability 键）；v1 可不做 |
 | `src/agents/modality_adapter.rs` | **新增文件** | `ModalitySpec` / `DescriptionCache` / `translate_part`（流式）/ `adapt_history_media` / `adapt_pending_media` |
 | `src/agents/runtime.rs` | 新增字段 | `description_cache: Arc<dyn DescriptionCache>` 单例 |
@@ -1077,8 +1083,11 @@ blob 在两种情况下变成孤儿，需回收：
 blob 外置的文件改动已并入 §10 主变更清单（`capability_chat.rs` 新增 `ImageRef` 变体、
 `json_file.rs` 的 externalize/hydrate/GC、`Cargo.toml` 的 `base64`），作为 v1 范围的一部分。
 
-> 注意：`strip_images`、渲染层、§4.3 adapt 层、`fingerprint`、`InMemoryBackend` **均不改**——
-> 这是「持久化边界表示」选型的核心收益。`InMemoryBackend` 无磁盘、不外置，天然正确。
+> 注意：`strip_images`、渲染层因 `ContentPart` 是穷尽匹配，各需补**一个平凡的 `ImageRef`
+> 防御分支**（render → `unreachable!("disk-only; hydrate before render")`、strip → `[image]`），
+> 但**无逻辑变更**——正常路径下 `ImageRef` 在 `load_messages` 即被 hydrate 回 `ImageB64`，永不抵达。
+> §4.3 adapt 层、`fingerprint`、`InMemoryBackend` **完全不改**——这是「持久化边界表示」选型的核心收益。
+> `InMemoryBackend` 无磁盘、不外置，天然正确。
 
 ## 12. 实现路线与任务清单
 
@@ -1094,7 +1103,7 @@ blob 外置的文件改动已并入 §10 主变更清单（`capability_chat.rs` 
 | G2 | 多轮追问历史图片仍可答 | Turn N 发图、N+1 追问 → 复用缓存描述，非 `[image]` |
 | G3 | 切回视觉模型能用原图 | 历史图持久化在 history，视觉模型轮原生使用原图 |
 | G4 | 持久化图片不撑爆 `history.jsonl` | 大 b64 外置为 blob，行内只存 `ImageRef` |
-| G5 | 零侵入现有渲染/压缩链路 | 渲染层、`strip_images`、`fingerprint`、`InMemoryBackend` 不改 |
+| G5 | 近零侵入现有渲染/压缩链路 | 渲染层、`strip_images` 因 `ContentPart` 穷尽匹配各加一个**平凡的 `ImageRef` 防御 arm**（render→`unreachable!`、strip→`[image]`），无逻辑变更；`fingerprint`、adapt 层、`InMemoryBackend` 完全不改 |
 | G6 | 模态可扩展 | audio/video 仅加 `ModalitySpec`，核心逻辑不重复 |
 
 ### 12.2 分阶段任务
@@ -1102,7 +1111,7 @@ blob 外置的文件改动已并入 §10 主变更清单（`capability_chat.rs` 
 #### Stage 0 — 能力查询基建（无依赖，可先行）
 - [x] **T0.1** `capability.rs`：加 `supports_input(modality)`（`supports_image_input` 已存在）
 - [x] **T0.2** `provider_registry.rs`：加 trait 方法 `find_chat_model_with_modality()`（可默认实现）
-- [x] **T0.3** `registry/mod.rs`：实现 `aux_model_for(modality)`（读 `[routing.*_aux]`，无配置返回 `None`）
+- [x] **T0.3** `registry/mod.rs`：`Registry` 复用 trait 默认 `find_chat_model_with_modality`（只走 `[routing.chat]` 链）；不单设 `aux_model_for`（按 §4.6 删除以避免死代码）
 - [x] ~~**T0.4**（可选）`config/routing.rs`：`get_by_key(&str)` 读约定键 `image_aux`~~ —
   **不做（YAGNI）**：默认复用 `[routing.chat]` 链已零配置可用，静态全局键价值低；
   若将来需要可控性，采用 §4.6 记录的「单一理解模型」方向而非此静态键。
@@ -1149,7 +1158,7 @@ blob 外置的文件改动已并入 §10 主变更清单（`capability_chat.rs` 
 >   `adapt_does_not_select_unrouted_vision_model`（T4.5 候选集边界：注册但未入路由的视觉模型
 >   不被选为 aux）。
 > - **唯一未做项**：T0.4（静态 `[routing.*_aux]` 键）按 §4.6 评审结论**不做（YAGNI）**；
->   `aux_model_for` 复用 `[routing.chat]` 链。若将来要可控性，走 §4.6 的「单一理解模型」方向。
+>   `find_chat_model_with_modality` 复用 `[routing.chat]` 链。若将来要可控性，走 §4.6 的「单一理解模型」方向。
 
 ### 12.3 依赖与关键路径
 
@@ -1170,7 +1179,7 @@ Stage 1 ─┴────────────┴─→ Stage 3 ─→ Stage
 | 任务 | architecture.md 章节 | 更新内容 |
 |------|---------------------|---------|
 | T0.1 | `## providers/` → `#### providers/capability.rs` | 新增 `supports_input` 方法签名 |
-| T0.2 / T0.3 | `## providers/` / `## registry/` | `find_chat_model_with_modality` / `aux_model_for` |
+| T0.2 / T0.3 | `## providers/` / `## registry/` | `find_chat_model_with_modality`（trait 默认方法，`Registry` 复用；无 `aux_model_for` 包装） |
 | T0.4 | `## config/` | `RoutingConfig::get_by_key` |
 | T1.1 | `## providers/` → `#### providers/capability_chat.rs` | `ContentPart::ImageRef` 变体 |
 | T1.2–T1.5 | `## storage/` → `#### storage/json_file.rs` | blob 布局、externalize/hydrate/GC、`blobs/` 目录 |

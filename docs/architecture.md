@@ -9038,12 +9038,11 @@ pub struct Registry {
 
 **Impl** `impl Registry`:
 ```rust
-  // Resolves the auxiliary chat model for translating `modality` to text when
-  // the primary model lacks it. Candidate set stays within user-declared
-  // routing: an explicit `[routing.<modality>_aux]` override (TODO §4.6) takes
-  // precedence, otherwise the `[routing.chat]` chain is searched via
-  // find_chat_model_with_modality. Returns None when nothing suitable is declared.
-  pub fn aux_model_for(&self, modality: crate::providers::capability::Modality) -> Option<(Arc<dyn ChatProvider>, String)>
+  // Auxiliary-model resolution for non-text modalities reuses the
+  // `ProviderRegistry::find_chat_model_with_modality` trait default (walks the
+  // `[routing.chat]` chain only, no global discovery). No dedicated
+  // `aux_model_for` wrapper — per the multimodal RFC §4.6 the per-modality
+  // override is not implemented, so the wrapper would be dead code.
   fn route_capability<T: ?Sized + Send + Sync>(
 ```
 
