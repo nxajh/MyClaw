@@ -11,11 +11,14 @@
 //! not here. This struct receives fully-assembled components via its constructor.
 
 mod scheduled;
+mod turn;
 pub mod event;
 pub mod key;
 
 pub use event::OrchestratorEvent;
 pub use key::{SessionKey, SubAgentKey};
+
+use turn::ResolvedTurn;
 
 use anyhow::Context;
 use crate::agents::delegation::DelegationEvent;
@@ -838,7 +841,6 @@ impl Orchestrator {
             let persist_backend = Arc::clone(self.session_manager.backend());
             let channels = self.channels.clone();
             let runtime = self.agent_runtime.clone();
-            let prompt_config_base = self.agent_runtime.defaults.prompt.clone();
             let persist_hook: Arc<dyn PersistHook> = Arc::new(
                 BackendPersistHook::new(Arc::clone(self.session_manager.backend()))
             );
@@ -848,25 +850,8 @@ impl Orchestrator {
                 let mut session = session_ctx.session.lock().await;
                 session.persist = Some(persist_hook.clone());
 
-                let session_override = session.session_override.clone();
-                let mut prompt_config = prompt_config_base.clone();
-                if let Some(pm) = session_override.permission_mode {
-                    prompt_config.permission_mode = pm;
-                }
-                if let Some(rm) = session_override.run_mode {
-                    prompt_config.run_mode = rm;
-                }
-                let system_prompt = runtime.build_system_prompt(&prompt_config);
-
-                let thinking = session_override.to_thinking_config();
-                let model_id = session_override.model.as_deref();
-                let turn_ctx = crate::agents::TurnContext {
-                    system_prompt: &system_prompt,
-                    model_id,
-                    thinking: thinking.as_ref(),
-                    permission_mode: prompt_config.permission_mode,
-                    run_mode: prompt_config.run_mode,
-                };
+                let resolved = ResolvedTurn::resolve(&session, &runtime);
+                let turn_ctx = resolved.turn_context();
 
                 match session_ctx.agent.run_recovery(&mut session, turn_ctx, &runtime).await {
                     Ok(Some(tr)) if !tr.text.is_empty() => {
@@ -931,7 +916,6 @@ impl Orchestrator {
             let sa_reply_target = sa.reply_target.clone();
             let dm = delegator.clone();
             let runtime = self.agent_runtime.clone();
-            let prompt_config_base = self.agent_runtime.defaults.prompt.clone();
             let persist_hook: Arc<dyn PersistHook> = Arc::new(
                 BackendPersistHook::new(Arc::clone(self.session_manager.backend()))
             );
@@ -941,24 +925,8 @@ impl Orchestrator {
                 let mut session = session_ctx.session.lock().await;
                 session.persist = Some(persist_hook.clone());
 
-                let session_override = session.session_override.clone();
-                let mut prompt_config = prompt_config_base.clone();
-                if let Some(pm) = session_override.permission_mode {
-                    prompt_config.permission_mode = pm;
-                }
-                if let Some(rm) = session_override.run_mode {
-                    prompt_config.run_mode = rm;
-                }
-                let system_prompt = runtime.build_system_prompt(&prompt_config);
-                let thinking = session_override.to_thinking_config();
-                let model_id = session_override.model.as_deref();
-                let turn_ctx = crate::agents::TurnContext {
-                    system_prompt: &system_prompt,
-                    model_id,
-                    thinking: thinking.as_ref(),
-                    permission_mode: prompt_config.permission_mode,
-                    run_mode: prompt_config.run_mode,
-                };
+                let resolved = ResolvedTurn::resolve(&session, &runtime);
+                let turn_ctx = resolved.turn_context();
 
                 match session_ctx.agent.run_recovery(&mut session, turn_ctx, &runtime).await {
                     Ok(Some(tr)) if !tr.text.is_empty() => {
