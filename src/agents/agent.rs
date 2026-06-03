@@ -119,24 +119,19 @@ impl Agent {
         let permission_mode = turn_ctx.permission_mode;
         let mut empty_response_retries: usize = 0;
         const MAX_EMPTY_RETRIES: usize = 3;
-        // Image attachment: snapshot URLs / base64 from session.last_message
-        // and only attach on the *first* LLM call of the turn — subsequent
-        // iterations rebuild `messages` from history which already carries
-        // the attached parts.
-        let pending_image_urls: Option<Vec<String>> = session
-            .last_message
-            .as_ref()
-            .and_then(|m| m.image_urls.clone());
-        let pending_image_b64: Option<Vec<String>> = session
-            .last_message
-            .as_ref()
-            .and_then(|m| m.image_base64.clone());
-        let mut images_attached = false;
+        // Current-turn images are persisted into history (add_user_with_media),
+        // so the `messages` clone above already carries them on the last user
+        // message. Vision models use those parts natively; non-vision models
+        // get media normalized to text by `adapt_media_for_model` (historical
+        // images → cached description/placeholder, current turn → auxiliary
+        // translation). Adaptation runs on the cloned `messages` only and never
+        // mutates persistent history.
         let model_supports_images = runtime
             .providers
             .get_chat_model_config(&model_id)
             .map(|cfg| cfg.supports_image_input())
             .unwrap_or(false);
+        adapt_media_for_model(&mut messages, runtime, model_supports_images).await;
 
         loop {
             // Shutdown checkpoint between LLM calls (mirrors AgentLoop chat_loop).
@@ -164,34 +159,6 @@ impl Agent {
                     });
                 }
             }
-
-            // Attach pending images to the last user message on the
-            // first iteration only. Skipped silently for non-vision
-            // models so the LLM doesn't see unsupported parts.
-            if !images_attached && model_supports_images {
-                if let Some(last_user) =
-                    messages.iter_mut().rev().find(|m| m.role == "user")
-                {
-                    if let Some(urls) = pending_image_urls.as_ref() {
-                        for url in urls {
-                            last_user.parts.push(ContentPart::ImageUrl {
-                                url: url.clone(),
-                                detail: crate::providers::ImageDetail::Auto,
-                            });
-                        }
-                    }
-                    if let Some(b64s) = pending_image_b64.as_ref() {
-                        for b64 in b64s {
-                            last_user.parts.push(ContentPart::ImageB64 {
-                                b64_json: b64.clone(),
-                                media_type: None,
-                                detail: crate::providers::ImageDetail::Auto,
-                            });
-                        }
-                    }
-                }
-            }
-            images_attached = true;
 
             let thinking = turn_ctx.thinking.cloned();
             let req = ChatRequest {
@@ -304,6 +271,12 @@ impl Agent {
                                     .chain(session.history.iter().cloned())
                                     .collect();
                                     crate::agents::session::sanitize_history(&mut messages);
+                                    adapt_media_for_model(
+                                        &mut messages,
+                                        runtime,
+                                        model_supports_images,
+                                    )
+                                    .await;
                                     tracing::info!(
                                         summary_tokens = result.summary_tokens,
                                         removed_tokens = result.removed_tokens,
@@ -593,6 +566,36 @@ impl Agent {
                 false
             })
             .collect()
+    }
+}
+
+/// Normalize non-text media in the cloned `messages` when the primary model
+/// lacks image input. No-op for vision models — the `messages` clone already
+/// carries native `ImageUrl/ImageB64` parts from history. For non-vision
+/// models: historical images (every message except the current turn's last
+/// user message) reuse a cached description or degrade to a placeholder via
+/// `adapt_history_media`; the current turn's images are translated by an
+/// auxiliary vision model via `adapt_last_turn_media`. Operates on the clone
+/// only — persistent history is never mutated.
+async fn adapt_media_for_model(
+    messages: &mut Vec<ChatMessage>,
+    runtime: &AgentRuntime,
+    model_supports_images: bool,
+) {
+    if model_supports_images {
+        return;
+    }
+    use crate::agents::modality_adapter::{self, IMAGE_SPEC};
+    let cache = &*runtime.description_cache;
+    let last_user_idx = messages.iter().rposition(|m| m.role == "user");
+    modality_adapter::adapt_history_media(messages, &IMAGE_SPEC, cache, last_user_idx);
+    if let Some(idx) = last_user_idx {
+        let aux = runtime
+            .providers
+            .find_chat_model_with_modality(crate::providers::capability::Modality::Image);
+        let aux_ref = aux.as_ref().map(|(p, id)| (p, id.as_str()));
+        modality_adapter::adapt_last_turn_media(&mut messages[idx], &IMAGE_SPEC, aux_ref, cache)
+            .await;
     }
 }
 
