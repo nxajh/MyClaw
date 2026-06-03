@@ -10,15 +10,14 @@
 //! is done in the Composition Root (orchestration/orchestrator main.rs + daemon.rs),
 //! not here. This struct receives fully-assembled components via its constructor.
 
+mod recovery;
 mod scheduled;
 mod turn;
 pub mod event;
 pub mod key;
 
 pub use event::OrchestratorEvent;
-pub use key::{SessionKey, SubAgentKey};
-
-use turn::ResolvedTurn;
+pub use key::SessionKey;
 
 use anyhow::Context;
 use crate::agents::delegation::DelegationEvent;
@@ -32,7 +31,7 @@ use tokio::sync::{mpsc, Mutex as TokioMutex};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::agents::session::{SessionManager, PersistHook, BackendPersistHook};
+use crate::agents::session::SessionManager;
 use scheduled::{run_cron_task, run_heartbeat_task};
 
 /// Buffer size for the unified `OrchestratorEvent` channel. Fixed (not
@@ -131,7 +130,7 @@ pub struct SharedSessions {
 /// Return `true` if the session history ends with an incomplete tool execution:
 /// either trailing tool-result messages, or assistant tool_calls whose IDs have
 /// no matching tool-result — indicating the turn was interrupted mid-execution.
-fn history_has_incomplete_turn(history: &[crate::providers::capability_chat::ChatMessage]) -> bool {
+pub(super) fn history_has_incomplete_turn(history: &[crate::providers::capability_chat::ChatMessage]) -> bool {
     let mut completed_ids = std::collections::HashSet::new();
     let mut has_trailing_tools = false;
     let mut found_pending = false;
@@ -366,8 +365,13 @@ impl Orchestrator {
         // Sessions register a SessionContext synchronously; the recovery
         // LLM work spawns into background tasks so the event loop starts
         // without blocking.
-        self.startup_recover_sessions();
-        self.startup_recover_subagents(&unfinished_subagents, &self.delegator);
+        recovery::run_startup(
+            &self.session_manager,
+            &self.agent_runtime,
+            &self.channels,
+            &unfinished_subagents,
+            &self.delegator,
+        );
 
         // Unify the three event sources (user messages / delegation /
         // scheduler) onto a single mpsc<OrchestratorEvent>. Adapter tasks
@@ -818,140 +822,6 @@ impl Orchestrator {
                     provider,
                 ));
             }
-        }
-    }
-
-    /// Scan all persisted sessions for incomplete turns and resume them.
-    ///
-    /// Registers each session's actor synchronously (so new messages can be
-    /// queued immediately), then spawns the LLM recovery work in background
-    /// tasks so the event loop starts without waiting for them to finish.
-    fn startup_recover_sessions(&self) {
-        let all_sessions = self.session_manager.list_all_sessions();
-        for session_info in &all_sessions {
-            let sk = &session_info.owner;
-            let session_snap = self.session_manager.get_or_create(sk);
-            let history = &session_snap.history;
-            if history.is_empty() || !history_has_incomplete_turn(history) {
-                continue;
-            }
-            tracing::info!(session = %sk, "startup recovery: found incomplete turn, spawning background task");
-            let session_ctx = self.session_context_for(sk);
-            let sk_owned = sk.clone();
-            let persist_backend = Arc::clone(self.session_manager.backend());
-            let channels = self.channels.clone();
-            let runtime = self.agent_runtime.clone();
-            let persist_hook: Arc<dyn PersistHook> = Arc::new(
-                BackendPersistHook::new(Arc::clone(self.session_manager.backend()))
-            );
-
-            tokio::spawn(async move {
-                let _turn_guard = session_ctx.turn_lock.lock().await;
-                let mut session = session_ctx.session.lock().await;
-                session.persist = Some(persist_hook.clone());
-
-                let resolved = ResolvedTurn::resolve(&session, &runtime);
-                let turn_ctx = resolved.turn_context();
-
-                match session_ctx.agent.run_recovery(&mut session, turn_ctx, &runtime).await {
-                    Ok(Some(tr)) if !tr.text.is_empty() => {
-                        tracing::info!(session = %sk_owned, "startup recovery: turn completed");
-                        let recipient = persist_backend.load_last_message(&sk_owned)
-                            .map(|m| m.reply_target)
-                            .unwrap_or_else(|| {
-                                SessionKey::parse(&sk_owned)
-                                    .map(|k| k.sender)
-                                    .unwrap_or_default()
-                            });
-                        if let Some(key) = SessionKey::parse(&sk_owned) {
-                            if let Some(channel) = channels.get(&key.account_key()).map(|r| r.clone()) {
-                                let target = crate::channels::SendTarget::new(&recipient);
-                                if let Err(e) = channel
-                                    .send_payload(
-                                        &target,
-                                        &crate::channels::MessagePayload::text(&tr.text),
-                                    )
-                                    .await
-                                {
-                                    tracing::warn!(session = %sk_owned, err = %e, "startup recovery: failed to send response");
-                                }
-                            }
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!(session = %sk_owned, err = %e, "startup recovery failed");
-                    }
-                }
-
-                session.persist = None;
-            });
-        }
-    }
-
-    /// Recover sub-agents that were interrupted by a previous daemon shutdown.
-    ///
-    /// Registers each sub-agent actor synchronously, then spawns the LLM
-    /// recovery work in background tasks (same pattern as startup_recover_sessions).
-    fn startup_recover_subagents(
-        &self,
-        unfinished: &[crate::agents::UnfinishedSubAgent],
-        delegator: &Option<Arc<DelegationCoordinator>>,
-    ) {
-        for sa in unfinished {
-            if sa.sub_session_id.is_empty() || sa.session_key.is_empty() {
-                tracing::debug!(task_id = %sa.task_id, "sub-agent recovery: skipping (no session_id or session_key)");
-                continue;
-            }
-            let sub_sk = SubAgentKey::new(&sa.agent_name, &sa.sub_session_id).to_string();
-            let session_snap = self.session_manager.get_or_create(&sub_sk);
-            let history = &session_snap.history;
-            if history.is_empty() || !history_has_incomplete_turn(history) {
-                continue;
-            }
-            tracing::info!(task_id = %sa.task_id, agent = %sa.agent_name, "sub-agent startup recovery: found incomplete turn, spawning background task");
-            let session_ctx = self.session_context_for(&sub_sk);
-            let task_id = sa.task_id.clone();
-            let session_key = sa.session_key.clone();
-            let sa_reply_target = sa.reply_target.clone();
-            let dm = delegator.clone();
-            let runtime = self.agent_runtime.clone();
-            let persist_hook: Arc<dyn PersistHook> = Arc::new(
-                BackendPersistHook::new(Arc::clone(self.session_manager.backend()))
-            );
-
-            tokio::spawn(async move {
-                let _turn_guard = session_ctx.turn_lock.lock().await;
-                let mut session = session_ctx.session.lock().await;
-                session.persist = Some(persist_hook.clone());
-
-                let resolved = ResolvedTurn::resolve(&session, &runtime);
-                let turn_ctx = resolved.turn_context();
-
-                match session_ctx.agent.run_recovery(&mut session, turn_ctx, &runtime).await {
-                    Ok(Some(tr)) if !tr.text.is_empty() => {
-                        tracing::info!(task_id = %task_id, "sub-agent startup recovery: turn completed");
-                        if let Some(dm) = dm {
-                            if let Some(tx) = dm.event_sender() {
-                                let _ = tx.send(DelegationEvent::Completed {
-                                    task_id,
-                                    parent_session_id: session_key,
-                                    reply_target: sa_reply_target,
-                                    summary: tr.text,
-                                    duration_secs: 0,
-                                }).await;
-                            }
-                        }
-                    }
-                    Ok(_) => {
-                        tracing::debug!(task_id = %task_id, "sub-agent startup recovery: no recovery needed");
-                    }
-                    Err(e) => {
-                        tracing::warn!(task_id = %task_id, err = %e, "sub-agent startup recovery failed");
-                    }
-                }
-                session.persist = None;
-            });
         }
     }
 
