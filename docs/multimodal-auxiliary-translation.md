@@ -691,8 +691,25 @@ models = ["gpt-4o-mini"]
 但需为 `RoutingConfig` 新增一个按字符串键查询的方法（如 `get_by_key("image_aux")`），
 `aux_model_for(modality)` 借此读取首个 model。这是相对原 RFC「复用即可」说法的一处实现修正。
 
-> 鉴于多视觉模型场景在当前并不常见，§4.6 整体可作为 **Phase 1.5** 推迟：v1 先只做优先级 2
-> （复用 chat 链）+ 占位符降级，零新增配置；待真有「指定辅助模型」需求再加此键，符合 YAGNI。
+> **v1 决定：不做静态 `[routing.<modality>_aux]` 键（YAGNI）。** 默认复用 `[routing.chat]` 链
+> （§4.2 优先级 2）+ 占位符降级已零配置可用，且主模型 `/model` override 已覆盖高价值场景
+> （把视觉模型设为主模型即走原生路径，根本不经 aux）。唯一未覆盖的是「主模型非视觉、且想指定
+> 由哪个视觉模型做理解」这一小众场景。
+>
+> **若将来要加可控性，方向是「单一理解模型」而非 per-modality override。** 评审结论：
+> 按模态分别指定（`image_aux`/`audio_aux`/`video_aux`）UX 差——用户要管理多个旋钮，不像
+> `/model` 一句话搞定。更优的设计是让用户指定**一个** understanding model，系统按模态自动路由：
+>
+> ```
+> understanding_model = "gpt-4o"        // 单一旋钮（会话级 SessionOverride 或全局配置）
+> 对每个入站模态 M:
+>   understanding_model 支持 M ? 用它 : 回退 [routing.chat] 链中支持 M 的模型 : 占位符
+> ```
+>
+> 依据：多模态模型通常一并支持多种输入（`ChatModelConfig.input: Vec<Modality>`，如 GPT-4o=图+音、
+> Gemini 2.5=图+音+视频），故一个模型即可覆盖多模态理解，无需 per-modality 拆分。该逻辑仍落在
+> `find_chat_model_with_modality` / `aux_model_for` 这一唯一接缝上（在链遍历前插一次「override 是否
+> 支持该模态」的查找），现在不做也不会锁死。
 
 ### 4.7 描述缓存挂载点
 
@@ -1086,7 +1103,9 @@ blob 外置的文件改动已并入 §10 主变更清单（`capability_chat.rs` 
 - [x] **T0.1** `capability.rs`：加 `supports_input(modality)`（`supports_image_input` 已存在）
 - [x] **T0.2** `provider_registry.rs`：加 trait 方法 `find_chat_model_with_modality()`（可默认实现）
 - [x] **T0.3** `registry/mod.rs`：实现 `aux_model_for(modality)`（读 `[routing.*_aux]`，无配置返回 `None`）
-- [ ] **T0.4**（可选 / Phase 1.5）`config/routing.rs`：`get_by_key(&str)` 读约定键 `image_aux`
+- [x] ~~**T0.4**（可选）`config/routing.rs`：`get_by_key(&str)` 读约定键 `image_aux`~~ —
+  **不做（YAGNI）**：默认复用 `[routing.chat]` 链已零配置可用，静态全局键价值低；
+  若将来需要可控性，采用 §4.6 记录的「单一理解模型」方向而非此静态键。
 
 #### Stage 1 — 持久化 + blob 外置（核心数据流，G3/G4）
 - [x] **T1.1** `capability_chat.rs`：新增 `ContentPart::ImageRef { hash, media_type, detail }`（仅磁盘表示）
@@ -1129,8 +1148,8 @@ blob 外置的文件改动已并入 §10 主变更清单（`capability_chat.rs` 
 >   `adapt_placeholder_without_aux`（T4.2 无 aux 优雅占位）、
 >   `adapt_does_not_select_unrouted_vision_model`（T4.5 候选集边界：注册但未入路由的视觉模型
 >   不被选为 aux）。
-> - **唯一延后**：T0.4（`[routing.*_aux]` 显式覆盖键）按 §4.6 推迟，`aux_model_for` 暂回退到
->   `[routing.chat]` 链。
+> - **唯一未做项**：T0.4（静态 `[routing.*_aux]` 键）按 §4.6 评审结论**不做（YAGNI）**；
+>   `aux_model_for` 复用 `[routing.chat]` 链。若将来要可控性，走 §4.6 的「单一理解模型」方向。
 
 ### 12.3 依赖与关键路径
 
