@@ -208,17 +208,23 @@ value = 翻译得到的文本描述
 - **成本可控** —— 每张图只翻译一次（同一图片跨轮 / 多次出现都命中缓存）
 - **可切回视觉模型** —— history 中 `ImageUrl` 原样保留
 
-缓存作用域：进程级 + **磁盘持久化**两层（`PersistentDescriptionCache`）——热层是有界 LRU，
-冷层是内容寻址的 `workspace/descriptions/{sha256}.txt`（与 `workspace/sessions/` 平级，跨会话共享）。
+缓存作用域：`(session_id, 内容 sha256)` 两层（`PersistentDescriptionCache`）——热层是按
+`(session, key)` 隔离的有界 LRU，冷层是**每会话**的内容寻址文件
+`sessions/{id}/descriptions/{sha256}.txt`（即该会话 `blobs/` 的**兄弟目录**）。
 写穿透（put 同时落盘）、读穿透（热层 miss 时读盘并回填）、原子写（temp + rename）。
-key 为内容 sha256，与会话无关，天然可跨会话复用。
 Hermes 的 `_anthropic_image_fallback_cache` 是同一思路。
 
-> **为何要落盘**：图片字节已通过 blob 外置持久化（§11.8），但描述若只在内存里，进程重启或 LRU
-> 淘汰后非视觉模型会丢失全部历史图片描述、退化为 `[image]`,并在该图再次作为当轮出现时重复调用辅助
-> 模型翻译。持久化描述把「已落盘的 blob」与「描述缓存」两侧补齐：理解结果跨重启可用，翻译成本只付一次。
-> 冷层有意不设上限——每条仅几 KB 文本且内容寻址(相同图片不重复)，增长极慢;将来可加「无 live blob
-> 即清扫」的 GC，但缺它也正确。`daemon` 注入该实现;CLI 单次命令(`cmd_exec`/`cmd_chat`)与测试仍用纯内存 LRU。
+> **为何要落盘、且为何 per-session**：图片字节已通过 blob 外置持久化（§11.8），但描述若只在内存里，
+> 进程重启或 LRU 淘汰后非视觉模型会丢失全部历史图片描述、退化为 `[image]`，并在该图再次作为当轮出现
+> 时重复调用辅助模型翻译。持久化描述把「已落盘的 blob」与「描述缓存」两侧补齐：理解结果跨重启可用，
+> 翻译成本只付一次。**与 blob 同处会话目录**是关键：`delete_session` 用 `remove_dir_all` 删整个
+> `sessions/{id}/`，描述随 blob 一同回收，**不留全局孤儿**——这正是 blob 已采用的 per-session 约定，
+> 描述跟随同一规则保持一致。代价是同图描述在多会话间会各存一份（与 blob 同样的取舍）。
+>
+> 冷层在会话存活期内不设上限（每条仅几 KB 内容寻址文本，增长极慢）；它**未**挂进 §11.8 的逐轮 blob
+> mark-and-sweep：该 sweep 以 blob 的「解码字节 sha256」为键，而描述以「b64 指纹」为键，且 b64 外置后
+> 不在磁盘上——所以会话内不做 sweep，回收点是会话删除。`daemon` 注入该实现并传入 sessions 根目录;
+> CLI 单次命令(`cmd_exec`/`cmd_chat`)与测试仍用纯内存 `LruDescriptionCache`。
 
 ### 3.5 消息变换发生在 clone 层
 

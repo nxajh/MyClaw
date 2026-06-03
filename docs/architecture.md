@@ -1552,11 +1552,13 @@ pub async fn translate_part(
   part: &ContentPart,
   spec: &ModalitySpec,
   cache: &dyn DescriptionCache,
+  session_id: &str,
 ) -> anyhow::Result<String>
 pub fn adapt_history_media(
   messages: &mut [ChatMessage],
   spec: &ModalitySpec,
   cache: &dyn DescriptionCache,
+  session_id: &str,
   skip_idx: Option<usize>,
 ) // historical media → cached description or placeholder; never calls aux model
 pub async fn adapt_last_turn_media(
@@ -1564,6 +1566,7 @@ pub async fn adapt_last_turn_media(
   spec: &ModalitySpec,
   aux: Option<(&Arc<dyn ChatProvider>, &str)>,
   cache: &dyn DescriptionCache,
+  session_id: &str,
 ) // current-turn media → one combined (numbered) description; degrades gracefully
 ```
 
@@ -1573,24 +1576,28 @@ aggregates via `ChatResponse::from_stream(stream).await?`, takes `.text`, and
 caches it under the fingerprint. `adapt_last_turn_media` translates a
 message's media parts in parallel via `futures_util::future::join_all`.
 
-**trait** `DescriptionCache` — process-wide fingerprint → description cache:
+**trait** `DescriptionCache` — `(session_id, fingerprint)` → description cache:
 ```rust
 pub trait DescriptionCache: Send + Sync {
-  fn get(&self, key: &str) -> Option<String>;
-  fn put(&self, key: String, value: String);
+  fn get(&self, session_id: &str, key: &str) -> Option<String>;
+  fn put(&self, session_id: &str, key: String, value: String);
 }
 ```
 
 **结构体** `LruDescriptionCache` — `Mutex<lru::LruCache<String, String>>`-backed
-default impl (`new(capacity)` / `Default` = 512 entries). Used by CLI one-shot
-commands and tests.
+in-memory impl, keyed by a `(session_id, key)` composite (`new(capacity)` /
+`Default` = 512 entries). Used by CLI one-shot commands and tests.
 
 **结构体** `PersistentDescriptionCache` — two-tier impl: bounded LRU hot tier +
-content-addressed on-disk cold tier under `dir` (write-through + read-through,
-atomic temp+rename). `open(dir, capacity)`. The daemon installs it at
-`workspace/descriptions/` so image descriptions survive restarts and LRU
-eviction (a non-vision model recovers historical-image descriptions without
-re-invoking the auxiliary model — parallel to how blobs persist image bytes).
+**per-session** content-addressed on-disk cold tier at
+`{sessions_root}/{session_id}/descriptions/{key}.txt` (a sibling of that
+session's `blobs/`; write-through + read-through, atomic temp+rename).
+`open(sessions_root, capacity)`. The daemon installs it over `workspace/sessions`
+so image descriptions survive restarts and LRU eviction (a non-vision model
+recovers historical-image descriptions without re-invoking the auxiliary model —
+parallel to how blobs persist image bytes) and are reclaimed with the session on
+delete. Not wired into the per-rotation blob sweep (keyed by b64 fingerprint, not
+the decoded-bytes blob hash); session deletion is the reclamation point.
 
 #### `agents/session_context.rs`
 

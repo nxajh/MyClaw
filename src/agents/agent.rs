@@ -131,7 +131,7 @@ impl Agent {
             .get_chat_model_config(&model_id)
             .map(|cfg| cfg.supports_image_input())
             .unwrap_or(false);
-        adapt_media_for_model(&mut messages, runtime, model_supports_images).await;
+        adapt_media_for_model(&mut messages, runtime, &session.id, model_supports_images).await;
 
         loop {
             // Shutdown checkpoint between LLM calls (mirrors AgentLoop chat_loop).
@@ -274,6 +274,7 @@ impl Agent {
                                     adapt_media_for_model(
                                         &mut messages,
                                         runtime,
+                                        &session.id,
                                         model_supports_images,
                                     )
                                     .await;
@@ -580,6 +581,7 @@ impl Agent {
 async fn adapt_media_for_model(
     messages: &mut Vec<ChatMessage>,
     runtime: &AgentRuntime,
+    session_id: &str,
     model_supports_images: bool,
 ) {
     if model_supports_images {
@@ -588,14 +590,20 @@ async fn adapt_media_for_model(
     use crate::agents::modality_adapter::{self, IMAGE_SPEC};
     let cache = &*runtime.description_cache;
     let last_user_idx = messages.iter().rposition(|m| m.role == "user");
-    modality_adapter::adapt_history_media(messages, &IMAGE_SPEC, cache, last_user_idx);
+    modality_adapter::adapt_history_media(messages, &IMAGE_SPEC, cache, session_id, last_user_idx);
     if let Some(idx) = last_user_idx {
         let aux = runtime
             .providers
             .find_chat_model_with_modality(crate::providers::capability::Modality::Image);
         let aux_ref = aux.as_ref().map(|(p, id)| (p, id.as_str()));
-        modality_adapter::adapt_last_turn_media(&mut messages[idx], &IMAGE_SPEC, aux_ref, cache)
-            .await;
+        modality_adapter::adapt_last_turn_media(
+            &mut messages[idx],
+            &IMAGE_SPEC,
+            aux_ref,
+            cache,
+            session_id,
+        )
+        .await;
     }
 }
 
@@ -1086,7 +1094,7 @@ mod tests {
         let runtime = runtime_with(Arc::new(reg));
         let mut messages = vec![user_with_image("AAAA", "what is this?")];
 
-        adapt_media_for_model(&mut messages, &runtime, /* model_supports_images */ true).await;
+        adapt_media_for_model(&mut messages, &runtime, "test-session", /* model_supports_images */ true).await;
 
         assert!(has_image(&messages[0]), "vision model must keep the image part");
         let imgs = messages[0]
@@ -1109,7 +1117,7 @@ mod tests {
         let runtime = runtime_with(Arc::new(reg));
         let mut messages = vec![user_with_image("AAAA", "what is this?")];
 
-        adapt_media_for_model(&mut messages, &runtime, false).await;
+        adapt_media_for_model(&mut messages, &runtime, "test-session", false).await;
 
         assert!(!has_image(&messages[0]), "image must be replaced by text for non-vision model");
         let text = joined_text(&messages[0]);
@@ -1125,7 +1133,7 @@ mod tests {
         let runtime = runtime_with(Arc::new(reg));
         let mut messages = vec![user_with_image("AAAA", "describe")];
 
-        adapt_media_for_model(&mut messages, &runtime, false).await;
+        adapt_media_for_model(&mut messages, &runtime, "test-session", false).await;
 
         assert!(!has_image(&messages[0]), "image must be replaced even without an aux model");
         assert!(!joined_text(&messages[0]).is_empty(), "a placeholder text must remain");
@@ -1148,7 +1156,7 @@ mod tests {
         let runtime = runtime_with(Arc::new(reg));
         let mut messages = vec![user_with_image("AAAA", "describe")];
 
-        adapt_media_for_model(&mut messages, &runtime, false).await;
+        adapt_media_for_model(&mut messages, &runtime, "test-session", false).await;
 
         assert!(!has_image(&messages[0]));
         let text = joined_text(&messages[0]);

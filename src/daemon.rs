@@ -948,13 +948,14 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             prompt: prompt_config,
         };
 
-        // Persist auxiliary-model image descriptions under `workspace/descriptions/`
-        // (content-addressed, process-wide — parallel to `workspace/sessions/`).
-        // Survives restarts so non-vision models recover historical-image
-        // descriptions without re-invoking the auxiliary model.
+        // Persist auxiliary-model image descriptions per-session at
+        // `workspace/sessions/{id}/descriptions/` (a sibling of that session's
+        // `blobs/`). Survives restarts so non-vision models recover
+        // historical-image descriptions without re-invoking the auxiliary model,
+        // and is reclaimed together with the session when it is deleted.
         let description_cache = Arc::new(
             crate::agents::modality_adapter::PersistentDescriptionCache::open(
-                config.workspace_dir.join("descriptions"),
+                config.workspace_dir.join("sessions"),
                 512,
             ),
         );

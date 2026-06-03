@@ -70,18 +70,29 @@ pub fn fingerprint(part: &ContentPart) -> Option<String> {
 
 // ── Description cache (T2.2) ───────────────────────────────────────────────────
 
-/// Process-wide cache: content fingerprint → text description.
-/// Shared via the runtime so it survives across turns and sessions.
+/// Cache: `(session_id, content fingerprint)` → text description.
+///
+/// `session_id`-scoped so a persisted description lives alongside the session's
+/// image blobs and is reclaimed with the session (see [`PersistentDescriptionCache`]).
+/// The key is a content sha256, so within a session a description is
+/// content-addressed and never needs explicit invalidation (the same media
+/// content always yields the same description).
 pub trait DescriptionCache: Send + Sync {
-    /// Look up a cached description by fingerprint key.
-    fn get(&self, key: &str) -> Option<String>;
-    /// Store a description for a fingerprint key.
-    fn put(&self, key: String, value: String);
+    /// Look up a cached description for `session_id` by fingerprint key.
+    fn get(&self, session_id: &str, key: &str) -> Option<String>;
+    /// Store a description for `session_id` under a fingerprint key.
+    fn put(&self, session_id: &str, key: String, value: String);
 }
 
-/// LRU-backed [`DescriptionCache`]. The cache key is a content sha256, so the
-/// description is content-addressed and never needs explicit invalidation
-/// (the same media content always yields the same description).
+/// In-memory `(session, key)` composite for the LRU tiers. Sessions are isolated
+/// (no cross-session sharing) so each session persists its own descriptions.
+fn hot_key(session_id: &str, key: &str) -> String {
+    // NUL separator: never appears in a session id or a sha256 hex key.
+    format!("{session_id}\0{key}")
+}
+
+/// LRU-backed in-memory [`DescriptionCache`]. Used by CLI one-shot commands and
+/// tests, where cross-restart persistence is unnecessary.
 pub struct LruDescriptionCache {
     inner: Mutex<lru::LruCache<String, String>>,
 }
@@ -104,81 +115,96 @@ impl Default for LruDescriptionCache {
 }
 
 impl DescriptionCache for LruDescriptionCache {
-    fn get(&self, key: &str) -> Option<String> {
+    fn get(&self, session_id: &str, key: &str) -> Option<String> {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        guard.get(key).cloned()
+        guard.get(&hot_key(session_id, key)).cloned()
     }
 
-    fn put(&self, key: String, value: String) {
+    fn put(&self, session_id: &str, key: String, value: String) {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        guard.put(key, value);
+        guard.put(hot_key(session_id, &key), value);
     }
 }
 
 /// Two-tier [`DescriptionCache`]: a bounded in-memory LRU hot tier backed by a
-/// content-addressed on-disk cold tier under `dir`. The key is the same content
-/// fingerprint as [`LruDescriptionCache`], so descriptions survive process
-/// restarts and hot-tier eviction — a non-vision model recovers historical-image
-/// descriptions without re-invoking the auxiliary model, mirroring how the image
-/// bytes themselves are persisted as content-addressed blobs (`storage::json_file`).
+/// per-session, content-addressed on-disk cold tier. Descriptions live next to
+/// the session's image blobs at `{sessions_root}/{session_id}/descriptions/{key}.txt`
+/// (a sibling of `.../blobs/`), so they:
 ///
-/// The cold tier is intentionally unbounded: each entry is a few KB of text and
-/// content-addressed (identical media never duplicates), so growth is slow. A
-/// future pass can sweep entries with no live blob; the store is correct without it.
+/// * **survive restarts and hot-tier eviction** — a non-vision model recovers
+///   historical-image descriptions without re-invoking the auxiliary model, just
+///   as `storage::json_file` re-hydrates the image bytes from blobs; and
+/// * **are reclaimed with the session** — deleting a session `remove_dir_all`s
+///   its directory, taking blobs *and* descriptions with it (no global orphans).
+///
+/// Within a live session the cold tier is unbounded (each entry is a few KB of
+/// content-addressed text — slow growth). It is not wired into the per-rotation
+/// blob mark-and-sweep: that sweep is keyed by the decoded-bytes blob hash, while
+/// descriptions are keyed by the b64 fingerprint, and the b64 is not on disk after
+/// externalization. Session deletion is the reclamation point.
 pub struct PersistentDescriptionCache {
     hot: Mutex<lru::LruCache<String, String>>,
-    dir: PathBuf,
+    sessions_root: PathBuf,
 }
 
 impl PersistentDescriptionCache {
-    /// Open (or create) the cold-tier directory at `dir`, with a `capacity`-entry
-    /// in-memory hot tier (clamped to >= 1). A directory-creation failure is
-    /// logged and tolerated — the cache then behaves as a memory-only LRU.
-    pub fn open(dir: impl Into<PathBuf>, capacity: usize) -> Self {
-        let dir = dir.into();
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            tracing::warn!(
-                path = %dir.display(), err = %e,
-                "failed to create description cache dir; running memory-only"
-            );
-        }
+    /// Build over the sessions root (the directory that holds per-session
+    /// subdirectories — the same path passed to the session backend), with a
+    /// `capacity`-entry in-memory hot tier (clamped to >= 1). Per-session cold-tier
+    /// directories are created lazily on first write.
+    pub fn open(sessions_root: impl Into<PathBuf>, capacity: usize) -> Self {
         let cap = NonZeroUsize::new(capacity.max(1)).expect("capacity >= 1");
         Self {
             hot: Mutex::new(lru::LruCache::new(cap)),
-            dir,
+            sessions_root: sessions_root.into(),
         }
     }
 
-    /// Cold-tier file path for `key`. The key is a sha256 hex string, so it is
-    /// always a safe single-segment filename.
-    fn path_for(&self, key: &str) -> PathBuf {
-        self.dir.join(format!("{key}.txt"))
+    /// Per-session cold-tier directory (sibling of the session's `blobs/`).
+    fn dir_for(&self, session_id: &str) -> PathBuf {
+        self.sessions_root.join(session_id).join("descriptions")
+    }
+
+    /// Cold-tier file path for `(session_id, key)`. The key is a sha256 hex
+    /// string, so it is always a safe single-segment filename.
+    fn path_for(&self, session_id: &str, key: &str) -> PathBuf {
+        self.dir_for(session_id).join(format!("{key}.txt"))
     }
 }
 
 impl DescriptionCache for PersistentDescriptionCache {
-    fn get(&self, key: &str) -> Option<String> {
+    fn get(&self, session_id: &str, key: &str) -> Option<String> {
+        let hk = hot_key(session_id, key);
         {
             let mut guard = self.hot.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(hit) = guard.get(key) {
+            if let Some(hit) = guard.get(&hk) {
                 return Some(hit.clone());
             }
         }
         // Cold-tier read-through: a hit warms the hot tier for next time.
-        let text = std::fs::read_to_string(self.path_for(key)).ok()?;
+        let text = std::fs::read_to_string(self.path_for(session_id, key)).ok()?;
         let mut guard = self.hot.lock().unwrap_or_else(|e| e.into_inner());
-        guard.put(key.to_string(), text.clone());
+        guard.put(hk, text.clone());
         Some(text)
     }
 
-    fn put(&self, key: String, value: String) {
+    fn put(&self, session_id: &str, key: String, value: String) {
         {
             let mut guard = self.hot.lock().unwrap_or_else(|e| e.into_inner());
-            guard.put(key.clone(), value.clone());
+            guard.put(hot_key(session_id, &key), value.clone());
         }
         // Write-through, atomic (temp + rename) so a partial write can never be
-        // read back as a truncated description.
-        let path = self.path_for(&key);
+        // read back as a truncated description. The per-session dir is created lazily.
+        let path = self.path_for(session_id, &key);
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::warn!(
+                    path = %parent.display(), err = %e,
+                    "failed to create description dir; hot-tier only"
+                );
+                return;
+            }
+        }
         let tmp = path.with_extension("tmp");
         let written =
             std::fs::write(&tmp, value.as_bytes()).and_then(|_| std::fs::rename(&tmp, &path));
@@ -203,9 +229,10 @@ pub async fn translate_part(
     part: &ContentPart,
     spec: &ModalitySpec,
     cache: &dyn DescriptionCache,
+    session_id: &str,
 ) -> anyhow::Result<String> {
     if let Some(key) = fingerprint(part) {
-        if let Some(hit) = cache.get(&key) {
+        if let Some(hit) = cache.get(session_id, &key) {
             return Ok(hit);
         }
     }
@@ -238,7 +265,7 @@ pub async fn translate_part(
     let text = resp.text;
 
     if let Some(key) = fingerprint(part) {
-        cache.put(key, text.clone());
+        cache.put(session_id, key, text.clone());
     }
     Ok(text)
 }
@@ -255,6 +282,7 @@ pub fn adapt_history_media(
     messages: &mut [ChatMessage],
     spec: &ModalitySpec,
     cache: &dyn DescriptionCache,
+    session_id: &str,
     skip_idx: Option<usize>,
 ) {
     for (i, msg) in messages.iter_mut().enumerate() {
@@ -266,7 +294,7 @@ pub fn adapt_history_media(
                 continue;
             }
             let replacement = fingerprint(part)
-                .and_then(|k| cache.get(&k))
+                .and_then(|k| cache.get(session_id, &k))
                 .map(|desc| format!("[{}描述]: {}", spec.label, desc))
                 .unwrap_or_else(|| spec.placeholder.to_string());
             *part = ContentPart::Text { text: replacement };
@@ -289,6 +317,7 @@ pub async fn adapt_last_turn_media(
     spec: &ModalitySpec,
     aux: Option<(&Arc<dyn ChatProvider>, &str)>,
     cache: &dyn DescriptionCache,
+    session_id: &str,
 ) {
     // Collect this message's media parts of the target modality.
     let media: Vec<ContentPart> = msg
@@ -309,7 +338,7 @@ pub async fn adapt_last_turn_media(
             // Parallel translation — multiple media don't serialize latency.
             let futs = media
                 .iter()
-                .map(|part| translate_part(provider.as_ref(), model_id, part, spec, cache));
+                .map(|part| translate_part(provider.as_ref(), model_id, part, spec, cache, session_id));
             let results = futures_util::future::join_all(futs).await;
 
             let descriptions: Vec<String> = results
@@ -401,14 +430,14 @@ mod tests {
         let cache = LruDescriptionCache::new(8);
         let part = img("https://example.com/cat.jpg");
 
-        let out = translate_part(&provider, "m", &part, &IMAGE_SPEC, &cache)
+        let out = translate_part(&provider, "m", &part, &IMAGE_SPEC, &cache, "s1")
             .await
             .unwrap();
         assert_eq!(out, "a cat");
         assert_eq!(*calls.lock().unwrap(), 1);
 
         // Second call hits the cache; provider is not invoked again.
-        let out2 = translate_part(&provider, "m", &part, &IMAGE_SPEC, &cache)
+        let out2 = translate_part(&provider, "m", &part, &IMAGE_SPEC, &cache, "s1")
             .await
             .unwrap();
         assert_eq!(out2, "a cat");
@@ -416,7 +445,9 @@ mod tests {
 
         // And the cache holds it under the fingerprint.
         let key = fingerprint(&part).unwrap();
-        assert_eq!(cache.get(&key).as_deref(), Some("a cat"));
+        assert_eq!(cache.get("s1", &key).as_deref(), Some("a cat"));
+        // A different session does not see it (sessions are isolated).
+        assert_eq!(cache.get("s2", &key), None);
     }
 
     #[tokio::test]
@@ -444,6 +475,7 @@ mod tests {
             &IMAGE_SPEC,
             Some((&provider, "m")),
             &cache,
+            "s1",
         )
         .await;
 
@@ -471,7 +503,7 @@ mod tests {
             is_error: None,
         };
 
-        adapt_last_turn_media(&mut msg, &IMAGE_SPEC, None, &cache).await;
+        adapt_last_turn_media(&mut msg, &IMAGE_SPEC, None, &cache, "s1").await;
         assert_eq!(msg.parts.len(), 1);
         assert!(matches!(&msg.parts[0], ContentPart::Text { text } if text.contains("no image model available")));
     }
@@ -480,7 +512,7 @@ mod tests {
     fn adapt_history_reuses_cache_else_placeholder() {
         let cache = LruDescriptionCache::new(8);
         let part = img("https://a/1.jpg");
-        cache.put(fingerprint(&part).unwrap(), "cached desc".into());
+        cache.put("s1", fingerprint(&part).unwrap(), "cached desc".into());
 
         let mut messages = vec![
             ChatMessage {
@@ -501,7 +533,7 @@ mod tests {
             },
         ];
 
-        adapt_history_media(&mut messages, &IMAGE_SPEC, &cache, None);
+        adapt_history_media(&mut messages, &IMAGE_SPEC, &cache, "s1", None);
 
         assert!(matches!(&messages[0].parts[0], ContentPart::Text { text } if text == "[图片描述]: cached desc"));
         assert!(matches!(&messages[1].parts[0], ContentPart::Text { text } if text == "[image]"));
@@ -518,51 +550,63 @@ mod tests {
             tool_calls: None,
             is_error: None,
         }];
-        adapt_history_media(&mut messages, &IMAGE_SPEC, &cache, Some(0));
+        adapt_history_media(&mut messages, &IMAGE_SPEC, &cache, "s1", Some(0));
         // Untouched: still the raw image part.
         assert!(matches!(&messages[0].parts[0], ContentPart::ImageUrl { .. }));
     }
 
     #[test]
     fn persistent_cache_survives_reopen() {
-        let dir = tempfile::tempdir().unwrap();
+        // `dir` stands in for the sessions root; descriptions land under
+        // `{root}/{session}/descriptions/`.
+        let root = tempfile::tempdir().unwrap();
         let key = "deadbeef".to_string();
 
         // Write through the first instance, then drop it (simulates shutdown).
         {
-            let cache = PersistentDescriptionCache::open(dir.path(), 8);
-            assert_eq!(cache.get(&key), None);
-            cache.put(key.clone(), "a red bicycle".into());
-            assert_eq!(cache.get(&key).as_deref(), Some("a red bicycle"));
+            let cache = PersistentDescriptionCache::open(root.path(), 8);
+            assert_eq!(cache.get("s1", &key), None);
+            cache.put("s1", key.clone(), "a red bicycle".into());
+            assert_eq!(cache.get("s1", &key).as_deref(), Some("a red bicycle"));
         }
+
+        // The cold file lives in the session's own directory (sibling of blobs/).
+        assert!(root
+            .path()
+            .join("s1")
+            .join("descriptions")
+            .join(format!("{key}.txt"))
+            .exists());
 
         // A fresh instance with an empty hot tier still finds it on disk —
         // this is the across-restart recovery the in-memory LRU could not give.
-        let reopened = PersistentDescriptionCache::open(dir.path(), 8);
-        assert_eq!(reopened.get(&key).as_deref(), Some("a red bicycle"));
+        let reopened = PersistentDescriptionCache::open(root.path(), 8);
+        assert_eq!(reopened.get("s1", &key).as_deref(), Some("a red bicycle"));
         // The read-through warmed the hot tier (second get also succeeds).
-        assert_eq!(reopened.get(&key).as_deref(), Some("a red bicycle"));
+        assert_eq!(reopened.get("s1", &key).as_deref(), Some("a red bicycle"));
+        // Another session is isolated — its cold dir was never written.
+        assert_eq!(reopened.get("s2", &key), None);
     }
 
     #[test]
     fn persistent_cache_miss_is_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let cache = PersistentDescriptionCache::open(dir.path(), 8);
-        assert_eq!(cache.get("never-written"), None);
+        let root = tempfile::tempdir().unwrap();
+        let cache = PersistentDescriptionCache::open(root.path(), 8);
+        assert_eq!(cache.get("s1", "never-written"), None);
     }
 
     #[test]
     fn persistent_cache_drives_history_reuse_after_reopen() {
         // End-to-end: a description persisted on one run is reused by
         // `adapt_history_media` on the next, instead of degrading to "[image]".
-        let dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
         let part = img("https://a/photo.jpg");
         let key = fingerprint(&part).unwrap();
         {
-            let cache = PersistentDescriptionCache::open(dir.path(), 8);
-            cache.put(key, "a mountain lake".into());
+            let cache = PersistentDescriptionCache::open(root.path(), 8);
+            cache.put("s1", key, "a mountain lake".into());
         }
-        let cache = PersistentDescriptionCache::open(dir.path(), 8);
+        let cache = PersistentDescriptionCache::open(root.path(), 8);
         let mut messages = vec![ChatMessage {
             role: "user".into(),
             parts: vec![part],
@@ -571,7 +615,7 @@ mod tests {
             tool_calls: None,
             is_error: None,
         }];
-        adapt_history_media(&mut messages, &IMAGE_SPEC, &cache, None);
+        adapt_history_media(&mut messages, &IMAGE_SPEC, &cache, "s1", None);
         match &messages[0].parts[0] {
             ContentPart::Text { text } => {
                 assert!(text.contains("a mountain lake"), "got: {text}");
