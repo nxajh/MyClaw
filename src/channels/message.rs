@@ -593,19 +593,25 @@ pub fn split_message_chunk(message: &str, limit: usize, unit: LenUnit) -> Vec<St
 
     let mut chunks = Vec::new();
     let mut remaining = message;
-    // True when the previous chunk ended inside an open ``` fence, so this
-    // chunk must reopen it.
+    // Set when the previous chunk ended inside an open ``` fence: reopen it.
     let mut carry_open = false;
+    // Set when the previous chunk ended inside a table body: repeat the
+    // "header\ndelimiter\n" so the continuation still renders as a table.
+    let mut table_carry: Option<String> = None;
 
     while !remaining.is_empty() {
-        // Reserve room at the front for a reopening fence when continuing a
-        // code block, so the emitted chunk still fits within `limit`.
-        let reopen = if carry_open { "```\n" } else { "" };
-        let content_limit = limit.saturating_sub(measure(reopen, unit));
+        // Front matter repeated on this chunk (reopened fence or table header),
+        // reserved out of the budget so the emitted chunk still fits `limit`.
+        let prefix: String = if carry_open {
+            "```\n".to_string()
+        } else {
+            table_carry.clone().unwrap_or_default()
+        };
+        let content_limit = limit.saturating_sub(measure(&prefix, unit));
 
         if measure(remaining, unit) <= content_limit {
-            let mut chunk = String::with_capacity(reopen.len() + remaining.len());
-            chunk.push_str(reopen);
+            let mut chunk = String::with_capacity(prefix.len() + remaining.len());
+            chunk.push_str(&prefix);
             chunk.push_str(remaining.trim_end());
             chunks.push(chunk);
             break;
@@ -619,16 +625,24 @@ pub fn split_message_chunk(message: &str, limit: usize, unit: LenUnit) -> Vec<St
             .unwrap_or(remaining.len());
         let (head, rest) = remaining.split_at(byte_pos);
 
-        let mut chunk = String::with_capacity(reopen.len() + head.len() + 4);
-        chunk.push_str(reopen);
+        let mut chunk = String::with_capacity(prefix.len() + head.len() + 4);
+        chunk.push_str(&prefix);
         chunk.push_str(head.trim_end());
         if split.in_code_block {
             // Close the fence here; the next chunk reopens it.
             chunk.push_str("\n```");
         }
-        chunks.push(chunk);
 
         carry_open = split.in_code_block;
+        // A table left open by this cut is repeated on the next chunk (never
+        // while inside a code block — fences take precedence).
+        table_carry = if carry_open {
+            None
+        } else {
+            open_table_header(&chunk, rest)
+        };
+        chunks.push(chunk);
+
         // Leading whitespace is significant indentation inside a code block,
         // so only strip it between plain-text chunks.
         remaining = if carry_open {
@@ -639,6 +653,69 @@ pub fn split_message_chunk(message: &str, limit: usize, unit: LenUnit) -> Vec<St
     }
 
     chunks
+}
+
+/// A markdown table row contains at least one `|`.
+fn is_table_row(line: &str) -> bool {
+    let t = line.trim();
+    !t.is_empty() && t.contains('|')
+}
+
+/// A markdown table delimiter row, e.g. `| --- | :--: |` — only `|`, `-`, `:`,
+/// and whitespace, with at least one `-`.
+fn is_table_delimiter(line: &str) -> bool {
+    let t = line.trim();
+    if t.is_empty() {
+        return false;
+    }
+    let mut has_dash = false;
+    for c in t.chars() {
+        match c {
+            '-' => has_dash = true,
+            '|' | ':' | ' ' | '\t' => {}
+            _ => return false,
+        }
+    }
+    has_dash
+}
+
+/// If `chunk` ends inside a table body that continues in `rest`, return the
+/// "header\ndelimiter\n" to repeat on the next chunk so it still renders as a
+/// table. Returns `None` when no table is open across the cut.
+fn open_table_header(chunk: &str, rest: &str) -> Option<String> {
+    // The continuation must itself begin with a table row.
+    let next = rest.lines().find(|l| !l.trim().is_empty())?;
+    if !is_table_row(next) {
+        return None;
+    }
+
+    let mut header: Option<&str> = None;
+    let mut delimiter: Option<&str> = None;
+    let mut in_table = false;
+    let mut prev: Option<&str> = None;
+    for line in chunk.lines() {
+        if in_table && !is_table_row(line) {
+            in_table = false;
+            header = None;
+            delimiter = None;
+        }
+        if !in_table {
+            if let Some(p) = prev {
+                if is_table_delimiter(line) && is_table_row(p) {
+                    in_table = true;
+                    header = Some(p);
+                    delimiter = Some(line);
+                }
+            }
+        }
+        prev = Some(line);
+    }
+
+    if in_table {
+        Some(format!("{}\n{}\n", header?, delimiter?))
+    } else {
+        None
+    }
 }
 
 /// Backwards-compatible wrapper: split by codepoints.
@@ -964,6 +1041,41 @@ mod tests {
                 !squashed.contains("``````"),
                 "empty code block emitted in chunk: {c:?}"
             );
+        }
+    }
+
+    #[test]
+    fn split_table_repeats_header_on_continuation() {
+        // A table longer than the limit must be split so every continuation
+        // chunk repeats the header + delimiter rows (so it still renders as a
+        // table on channels like QQBot that support markdown tables).
+        let limit = 120;
+        let mut body = String::new();
+        for n in 0..40 {
+            body.push_str(&format!("| row {n} | value {n} |\n"));
+        }
+        let msg = format!("| Name | Value |\n| --- | --- |\n{body}");
+        let chunks = split_message_chunk(&msg, limit, LenUnit::Codepoints);
+        assert!(chunks.len() > 1, "expected the table to be split");
+        assert_within(&chunks, limit, LenUnit::Codepoints);
+        for (i, c) in chunks.iter().enumerate() {
+            assert!(
+                c.contains("| Name | Value |") && c.lines().any(is_table_delimiter),
+                "chunk {i} missing repeated table header/delimiter: {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn open_table_header_ignores_non_tables() {
+        // Plain prose that merely exceeds the limit must not be mistaken for a
+        // table.
+        let limit = 50;
+        let msg = "just a long paragraph of words ".repeat(10);
+        let chunks = split_message_chunk(&msg, limit, LenUnit::Codepoints);
+        assert_within(&chunks, limit, LenUnit::Codepoints);
+        for c in &chunks {
+            assert!(!c.lines().any(is_table_delimiter), "spurious delimiter: {c:?}");
         }
     }
 
