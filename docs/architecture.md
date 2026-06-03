@@ -298,7 +298,7 @@ fn persist_last(session: &mut Session)
 //   图片(IMAGE_SPEC)：仅当 !model_supports_images 时适配（视觉模型用原生 ImageB64）
 // 在初次构建 messages 后、以及每次 compaction 重建后各调用一次。
 async fn adapt_media_for_model(
-    messages: &mut Vec<ChatMessage>,
+    messages: &mut [ChatMessage],
     runtime: &AgentRuntime,
     session_id: &str,
     model_supports_images: bool,

@@ -579,7 +579,7 @@ impl Agent {
 /// auxiliary vision model via `adapt_last_turn_media`. Operates on the clone
 /// only — persistent history is never mutated.
 async fn adapt_media_for_model(
-    messages: &mut Vec<ChatMessage>,
+    messages: &mut [ChatMessage],
     runtime: &AgentRuntime,
     session_id: &str,
     model_supports_images: bool,
