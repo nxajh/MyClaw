@@ -1,0 +1,172 @@
+//! Startup recovery: resume turns interrupted by a previous crash / SIGKILL.
+//!
+//! Both persisted user sessions and unfinished sub-agents are recovered the
+//! same way — lock the turn, replay via `Agent::run_recovery`, then deliver
+//! the result. The two used to be near-identical copy-pasted functions; the
+//! only real difference is *where the recovered output goes*, captured here by
+//! [`CompletionSink`].
+
+use std::sync::Arc;
+
+use super::key::{SessionKey, SubAgentKey};
+use super::turn::ResolvedTurn;
+use crate::agents::session::{BackendPersistHook, PersistHook, SessionManager};
+use crate::agents::{
+    AgentRuntime, DelegationCoordinator, DelegationEvent, SessionContext, UnfinishedSubAgent,
+};
+use crate::storage::SessionBackend;
+
+/// Where a recovered turn's output goes.
+enum CompletionSink {
+    /// Persisted user session: deliver the recovered text back to its channel.
+    Channel {
+        key: String,
+        backend: Arc<dyn SessionBackend>,
+        channels: super::ctx::ChannelRegistry,
+    },
+    /// Sub-agent session: emit `DelegationEvent::Completed` to wake the parent.
+    Delegate {
+        task_id: String,
+        parent_session_id: String,
+        reply_target: String,
+        delegator: Option<Arc<DelegationCoordinator>>,
+    },
+}
+
+impl CompletionSink {
+    async fn deliver(self, text: String) {
+        match self {
+            CompletionSink::Channel { key, backend, channels } => {
+                let recipient = backend
+                    .load_last_message(&key)
+                    .map(|m| m.reply_target)
+                    .unwrap_or_else(|| {
+                        SessionKey::parse(&key).map(|k| k.sender).unwrap_or_default()
+                    });
+                let Some(parsed) = SessionKey::parse(&key) else { return };
+                let Some(channel) = channels.get(&parsed.account_key()) else {
+                    return;
+                };
+                let target = crate::channels::SendTarget::new(&recipient);
+                if let Err(e) = channel
+                    .send_payload(&target, &crate::channels::MessagePayload::text(&text))
+                    .await
+                {
+                    tracing::warn!(session = %key, err = %e, "startup recovery: failed to send response");
+                }
+            }
+            CompletionSink::Delegate { task_id, parent_session_id, reply_target, delegator } => {
+                if let Some(dm) = delegator {
+                    if let Some(tx) = dm.event_sender() {
+                        let _ = tx
+                            .send(DelegationEvent::Completed {
+                                task_id,
+                                parent_session_id,
+                                reply_target,
+                                summary: text,
+                                duration_secs: 0,
+                            })
+                            .await;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Spawn the recovery turn for one session. The LLM work runs in the
+/// background so the event loop starts without blocking.
+fn spawn_recovery(
+    session_ctx: Arc<SessionContext>,
+    runtime: AgentRuntime,
+    backend: Arc<dyn SessionBackend>,
+    label: &'static str,
+    id: String,
+    sink: CompletionSink,
+) {
+    let persist_hook: Arc<dyn PersistHook> = Arc::new(BackendPersistHook::new(backend));
+    tokio::spawn(async move {
+        let _turn_guard = session_ctx.turn_lock.lock().await;
+        let mut session = session_ctx.session.lock().await;
+        session.persist = Some(persist_hook.clone());
+
+        let resolved = ResolvedTurn::resolve(&session, &runtime);
+        let turn_ctx = resolved.turn_context();
+
+        match session_ctx.agent.run_recovery(&mut session, turn_ctx, &runtime).await {
+            Ok(Some(tr)) if !tr.text.is_empty() => {
+                tracing::info!(id = %id, "{label}: turn completed");
+                sink.deliver(tr.text).await;
+            }
+            Ok(_) => {
+                tracing::debug!(id = %id, "{label}: no recovery needed");
+            }
+            Err(e) => {
+                tracing::warn!(id = %id, err = %e, "{label} failed");
+            }
+        }
+
+        session.persist = None;
+    });
+}
+
+/// Scan persisted user sessions and unfinished sub-agents for incomplete turns
+/// and resume them. SessionContexts are registered synchronously (so new
+/// messages can queue immediately); the LLM recovery work spawns in the
+/// background.
+pub(super) fn run_startup(
+    sessions: &Arc<SessionManager>,
+    runtime: &AgentRuntime,
+    channels: &super::ctx::ChannelRegistry,
+    unfinished: &[UnfinishedSubAgent],
+    delegator: &Option<Arc<DelegationCoordinator>>,
+) {
+    for info in sessions.list_all_sessions() {
+        let key = info.owner;
+        let snap = sessions.get_or_create(&key);
+        if snap.history.is_empty() || !super::history_has_incomplete_turn(&snap.history) {
+            continue;
+        }
+        tracing::info!(session = %key, "startup recovery: found incomplete turn, spawning background task");
+        let session_ctx = sessions.get_or_create_context(&key);
+        spawn_recovery(
+            session_ctx,
+            runtime.clone(),
+            Arc::clone(sessions.backend()),
+            "startup recovery",
+            key.clone(),
+            CompletionSink::Channel {
+                key,
+                backend: Arc::clone(sessions.backend()),
+                channels: channels.clone(),
+            },
+        );
+    }
+
+    for sa in unfinished {
+        if sa.sub_session_id.is_empty() || sa.session_key.is_empty() {
+            tracing::debug!(task_id = %sa.task_id, "sub-agent recovery: skipping (no session_id or session_key)");
+            continue;
+        }
+        let sub_sk = SubAgentKey::new(&sa.agent_name, &sa.sub_session_id).to_string();
+        let snap = sessions.get_or_create(&sub_sk);
+        if snap.history.is_empty() || !super::history_has_incomplete_turn(&snap.history) {
+            continue;
+        }
+        tracing::info!(task_id = %sa.task_id, agent = %sa.agent_name, "sub-agent startup recovery: found incomplete turn, spawning background task");
+        let session_ctx = sessions.get_or_create_context(&sub_sk);
+        spawn_recovery(
+            session_ctx,
+            runtime.clone(),
+            Arc::clone(sessions.backend()),
+            "sub-agent startup recovery",
+            sa.task_id.clone(),
+            CompletionSink::Delegate {
+                task_id: sa.task_id.clone(),
+                parent_session_id: sa.session_key.clone(),
+                reply_target: sa.reply_target.clone(),
+                delegator: delegator.clone(),
+            },
+        );
+    }
+}

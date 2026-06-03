@@ -314,18 +314,14 @@ impl Scheduler {
                             target = %j.target,
                             "cron job triggered"
                         );
-                        let _ = self.event_tx.send(SchedulerEvent::Cron {
+                        let _ = self.event_tx.send(SchedulerEvent::Cron(crate::agents::orchestrator::CronTrigger {
                             session_key: format!("_cron_{}", j.id),
                             prompt: j.prompt.clone(),
                             target_channel: parse_target_channel(&j.target),
                             target_account: parse_target_account(&j.target),
                             job_id: j.id.clone(),
-                            delivery: j.delivery.clone(),
-                            enabled_tools: j.enabled_tools.clone(),
-                            disabled_tools: j.disabled_tools.clone(),
                             model: j.model.clone(),
-                            provider: j.provider.clone(),
-                        }).await;
+                        })).await;
                         due_job_ids.push(j.id.clone());
                     }
 
@@ -895,15 +891,13 @@ fn generate_id() -> String {
 
 // ── Webhook app state ──────────────────────────────────────────────────────
 
-/// Axum app state for the webhook server. Holds an `Arc<Orchestrator>`
-/// so handlers can reach the shared SessionManager / AgentRuntime /
-/// channel map via accessor methods, plus the webhook-specific
-/// timezone for cron parsing.
+/// Axum app state for the webhook server. Holds the shared
+/// [`OrchestratorCtx`](crate::agents::OrchestratorCtx) (SessionManager /
+/// AgentRuntime / channel map / scheduler) plus the webhook-specific timezone
+/// for cron parsing.
 pub struct WebhookContext {
-    /// Shared Orchestrator. Webhook handlers reach for
-    /// `orchestrator.session_manager()`, `agent_runtime()`,
-    /// `channels()`, `persist_backend()`, and the `last_channel` field.
-    pub orchestrator: Arc<crate::agents::Orchestrator>,
+    /// Shared orchestrator dependency bundle.
+    pub ctx: Arc<crate::agents::OrchestratorCtx>,
     /// Timezone string used for cron evaluation in the webhook server.
     pub timezone: String,
 }
@@ -990,40 +984,16 @@ fn parse_hhmm(s: &str) -> Option<u32> {
 
 // ── Webhook execution helpers ──────────────────────────────────────────────
 
-/// Execute one webhook turn via `SessionContext::process_turn`. Same
-/// unified entry point as the orchestrator's run_scheduled_turn —
-/// scheduled output (no channel during the turn) is dispatched by the
-/// webhook caller via `send_to_target` after this returns.
+/// Execute one webhook turn. Delegates to the orchestrator's shared
+/// `run_scheduled_turn` (the single scheduled-turn entry point) — scheduled
+/// output (no channel during the turn) is dispatched by the webhook caller via
+/// `send_to_target` after this returns.
 pub async fn run_scheduled_task(
     ctx: &WebhookContext,
     session_key: &str,
     prompt: &str,
 ) -> anyhow::Result<String> {
-    let session_ctx = ctx.orchestrator.session_manager().get_or_create_context_with(
-        session_key,
-        |session| {
-            session.session_override.run_mode =
-                Some(crate::config::agent::RunMode::Background);
-        },
-    );
-
-    let inbound = crate::channels::ChannelMessage {
-        id: format!("webhook:{}", session_key),
-        sender: format!("webhook:{}", session_key),
-        reply_target: String::new(),
-        content: prompt.to_string(),
-        timestamp: chrono::Utc::now().timestamp() as u64,
-        thread_ts: None,
-        interruption_scope_id: None,
-        attachments: Vec::new(),
-        image_urls: None,
-        image_base64: None,
-    };
-    let runtime = ctx.orchestrator.agent_runtime().clone();
-    session_ctx
-        .process_turn(inbound, None, runtime)
-        .await
-        .map(|tr| tr.text)
+    crate::agents::orchestrator::run_scheduled_turn(&ctx.ctx, session_key, prompt, None).await
 }
 
 
@@ -1032,7 +1002,7 @@ pub async fn send_to_target(ctx: &WebhookContext, target: &str, content: &str) {
     let (ch_type, acc_id) = match target {
         "none" => return,
         "last" => {
-            let last: Option<String> = match ctx.orchestrator.scheduler() {
+            let last: Option<String> = match ctx.ctx.scheduler.as_ref() {
                 Some(s) => s.last_channel.lock().await.clone(),
                 None => None,
             };
@@ -1059,7 +1029,7 @@ pub async fn send_to_target(ctx: &WebhookContext, target: &str, content: &str) {
         }
     };
 
-    let channel = match ctx.orchestrator.channels().get(&(ch_type.clone(), acc_id.clone())) {
+    let channel = match ctx.ctx.channels.get(&(ch_type.clone(), acc_id.clone())) {
         Some(ch) => ch.clone(),
         None => {
             tracing::warn!(channel = %ch_type, account = %acc_id, "target channel not found");

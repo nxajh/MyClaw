@@ -25,7 +25,7 @@ pub enum OrchestratorEvent {
     /// Scheduler fired — either a heartbeat tick or a cron job. Carried
     /// verbatim from the existing `SchedulerEvent` shape so the switch is
     /// a one-line conversion in E29.
-    Scheduled(super::orchestrator::SchedulerEvent),
+    Scheduled(super::SchedulerEvent),
 
     /// Background sub-agent finished. The orchestrator synthesizes a
     /// `ChannelMessage` from this event and feeds it back into the parent
