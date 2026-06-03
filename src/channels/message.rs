@@ -598,16 +598,26 @@ pub fn split_message_chunk(message: &str, limit: usize, unit: LenUnit) -> Vec<St
     // Set when the previous chunk ended inside a table body: repeat the
     // "header\ndelimiter\n" so the continuation still renders as a table.
     let mut table_carry: Option<String> = None;
+    // Inline markers (`**`/`~~`/`` ` ``) open across the previous cut, reopened
+    // at the start of this chunk.
+    let mut inline_carry: Vec<Marker> = Vec::new();
+    // Worst-case room for inline closers appended to a chunk ("**" + "~~" + "`").
+    let inline_reserve = measure("**~~`", unit);
 
     while !remaining.is_empty() {
-        // Front matter repeated on this chunk (reopened fence or table header),
-        // reserved out of the budget so the emitted chunk still fits `limit`.
-        let prefix: String = if carry_open {
+        // Front matter repeated on this chunk (reopened fence or table header,
+        // then any reopened inline markers), reserved out of the budget so the
+        // emitted chunk still fits `limit`.
+        let block_prefix: String = if carry_open {
             "```\n".to_string()
         } else {
             table_carry.clone().unwrap_or_default()
         };
-        let content_limit = limit.saturating_sub(measure(&prefix, unit));
+        let inline_reopen: String = inline_carry.iter().map(|m| m.token()).collect();
+        let prefix = format!("{block_prefix}{inline_reopen}");
+        let content_limit = limit
+            .saturating_sub(measure(&prefix, unit))
+            .saturating_sub(inline_reserve);
 
         if measure(remaining, unit) <= content_limit {
             let mut chunk = String::with_capacity(prefix.len() + remaining.len());
@@ -617,7 +627,7 @@ pub fn split_message_chunk(message: &str, limit: usize, unit: LenUnit) -> Vec<St
             break;
         }
 
-        let split = find_split_point(remaining, content_limit, unit, carry_open);
+        let split = find_split_point(remaining, content_limit, unit, carry_open, &inline_carry);
         let byte_pos = remaining
             .char_indices()
             .nth(split.index)
@@ -625,22 +635,26 @@ pub fn split_message_chunk(message: &str, limit: usize, unit: LenUnit) -> Vec<St
             .unwrap_or(remaining.len());
         let (head, rest) = remaining.split_at(byte_pos);
 
-        let mut chunk = String::with_capacity(prefix.len() + head.len() + 4);
+        let mut chunk = String::with_capacity(prefix.len() + head.len() + 8);
         chunk.push_str(&prefix);
         chunk.push_str(head.trim_end());
-        if split.in_code_block {
-            // Close the fence here; the next chunk reopens it.
-            chunk.push_str("\n```");
-        }
 
         carry_open = split.in_code_block;
-        // A table left open by this cut is repeated on the next chunk (never
-        // while inside a code block — fences take precedence).
-        table_carry = if carry_open {
-            None
+        if carry_open {
+            // Close the fence here; the next chunk reopens it.
+            chunk.push_str("\n```");
+            table_carry = None;
+            inline_carry = Vec::new();
         } else {
-            open_table_header(&chunk, rest)
-        };
+            // Close any open inline markers (innermost first) so this chunk is
+            // self-contained; reopen them on the next chunk.
+            for m in split.markers.iter().rev() {
+                chunk.push_str(m.token());
+            }
+            inline_carry = split.markers;
+            // A table left open by this cut is repeated on the next chunk.
+            table_carry = open_table_header(&chunk, rest);
+        }
         chunks.push(chunk);
 
         // Leading whitespace is significant indentation inside a code block,
@@ -742,6 +756,133 @@ fn char_cost(c: char, unit: LenUnit) -> usize {
     }
 }
 
+/// How far back to scan for a link enclosing the cut point.
+const LINK_SCAN_WINDOW: usize = 4096;
+
+/// Paired inline markdown markers that the splitter balances across chunks.
+/// Single-character `*`/`_` italic is intentionally excluded: it is ambiguous
+/// and replicating the renderer's heuristic risks mis-emphasizing plain text.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Marker {
+    Bold,
+    Strike,
+    Code,
+}
+
+impl Marker {
+    fn token(self) -> &'static str {
+        match self {
+            Marker::Bold => "**",
+            Marker::Strike => "~~",
+            Marker::Code => "`",
+        }
+    }
+}
+
+fn toggle_marker(stack: &mut Vec<Marker>, m: Marker) {
+    if let Some(pos) = stack.iter().rposition(|&t| t == m) {
+        stack.remove(pos);
+    } else {
+        stack.push(m);
+    }
+}
+
+/// Inline markers (`**`, `~~`, single `` ` ``) left open at codepoint index
+/// `upto`, in the order opened. `start` is the marker state at the beginning of
+/// `chars` (markers carried over from a previous chunk). Markers inside fenced
+/// code blocks are ignored; inside an inline-code span only a closing `` ` `` is
+/// recognized.
+fn open_inline_markers(chars: &[char], upto: usize, start: &[Marker]) -> Vec<Marker> {
+    let len = chars.len();
+    let upto = upto.min(len);
+    let mut stack: Vec<Marker> = start.to_vec();
+    let mut in_fenced = false;
+    let mut i = 0;
+    while i < upto {
+        if i + 2 < len && chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
+            in_fenced = !in_fenced;
+            i += 3;
+            continue;
+        }
+        if in_fenced {
+            i += 1;
+            continue;
+        }
+        // Inside an inline-code span only a backtick (closing it) matters.
+        if stack.last() == Some(&Marker::Code) {
+            if chars[i] == '`' {
+                stack.pop();
+            }
+            i += 1;
+            continue;
+        }
+        if i + 1 < len && chars[i] == '~' && chars[i + 1] == '~' {
+            toggle_marker(&mut stack, Marker::Strike);
+            i += 2;
+            continue;
+        }
+        if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
+            toggle_marker(&mut stack, Marker::Bold);
+            i += 2;
+            continue;
+        }
+        if chars[i] == '`' {
+            stack.push(Marker::Code);
+            i += 1;
+            continue;
+        }
+        i += 1;
+    }
+    stack
+}
+
+/// Parse a `[text](url)` link starting at `start` (where `chars[start] == '['`),
+/// returning the exclusive end index just past `)`. Link text and URL may not
+/// span a newline.
+fn parse_link_end(chars: &[char], start: usize) -> Option<usize> {
+    let len = chars.len();
+    let mut i = start + 1;
+    while i < len && chars[i] != ']' {
+        if chars[i] == '\n' {
+            return None;
+        }
+        i += 1;
+    }
+    if i >= len || i + 1 >= len || chars[i + 1] != '(' {
+        return None;
+    }
+    let mut j = i + 2;
+    while j < len && chars[j] != ')' {
+        if chars[j] == '\n' {
+            return None;
+        }
+        j += 1;
+    }
+    if j >= len {
+        return None;
+    }
+    Some(j + 1)
+}
+
+/// If codepoint `index` falls strictly inside a `[text](url)` link, return that
+/// link's start so the caller can cut before it instead of breaking it.
+fn link_start_before(chars: &[char], index: usize) -> Option<usize> {
+    let lo = index.saturating_sub(LINK_SCAN_WINDOW);
+    let mut p = index.min(chars.len());
+    while p > lo {
+        p -= 1;
+        if chars[p] != '[' {
+            continue;
+        }
+        if let Some(end) = parse_link_end(chars, p) {
+            if p < index && index < end {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
 /// Result of choosing where to split a chunk.
 struct SplitPoint {
     /// Codepoint index in `text` at which to cut.
@@ -749,6 +890,9 @@ struct SplitPoint {
     /// Whether the cut lands inside an open ``` fence — so the chunk needs a
     /// closing fence and the remainder a reopening one.
     in_code_block: bool,
+    /// Inline markers open at the cut (non-code only), in open order, so the
+    /// caller can close them on this chunk and reopen them on the next.
+    markers: Vec<Marker>,
 }
 
 /// Find the best position to split text, preferring natural boundaries while
@@ -757,7 +901,13 @@ struct SplitPoint {
 ///
 /// When the chosen cut lands inside a code block, room for a closing "\n```"
 /// fence is reserved so the caller can append it and still fit within `limit`.
-fn find_split_point(text: &str, limit: usize, unit: LenUnit, start_in_block: bool) -> SplitPoint {
+fn find_split_point(
+    text: &str,
+    limit: usize,
+    unit: LenUnit,
+    start_in_block: bool,
+    start_markers: &[Marker],
+) -> SplitPoint {
     let chars: Vec<char> = text.chars().collect();
     let len = chars.len();
 
@@ -858,7 +1008,22 @@ fn find_split_point(text: &str, limit: usize, unit: LenUnit, start_in_block: boo
         }
     }
 
-    SplitPoint { index, in_code_block }
+    let mut markers = Vec::new();
+    if !in_code_block {
+        // Don't cut inside a [text](url) link — move the cut before it.
+        if let Some(a) = link_start_before(&chars, index) {
+            if a > 0 {
+                index = a;
+            }
+        }
+        markers = open_inline_markers(&chars, index, start_markers);
+    }
+
+    SplitPoint {
+        index,
+        in_code_block,
+        markers,
+    }
 }
 
 /// Find the last occurrence of a character pattern in the slice.
@@ -1077,6 +1242,39 @@ mod tests {
         for c in &chunks {
             assert!(!c.lines().any(is_table_delimiter), "spurious delimiter: {c:?}");
         }
+    }
+
+    #[test]
+    fn split_balances_bold_across_chunks() {
+        // A single long bolded run (no paragraph breaks) forces a mid-span cut.
+        // Each chunk must keep `**` balanced so QQBot/Wechat render it right.
+        let limit = 60;
+        let msg = format!("**{}**", "alpha ".repeat(50));
+        let chunks = split_message_chunk(&msg, limit, LenUnit::Codepoints);
+        assert!(chunks.len() > 1, "expected the bold run to be split");
+        assert_within(&chunks, limit, LenUnit::Codepoints);
+        for c in &chunks {
+            assert_eq!(
+                c.matches("**").count() % 2,
+                0,
+                "unbalanced bold in chunk: {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn split_keeps_links_intact() {
+        // A cut that would land inside a link must move before it so the link
+        // survives whole in one chunk.
+        let limit = 80;
+        let link = "[click the documentation here](http://example.com/a/very/long/path)";
+        let msg = format!("{} {link} and then more trailing text here", "word ".repeat(12));
+        let chunks = split_message_chunk(&msg, limit, LenUnit::Codepoints);
+        assert_within(&chunks, limit, LenUnit::Codepoints);
+        assert!(
+            chunks.iter().any(|c| c.contains(link)),
+            "link was split across chunks: {chunks:?}"
+        );
     }
 
     #[test]
