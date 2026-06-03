@@ -1255,14 +1255,20 @@ Telegram 语音(voice/audio)
 
 ### 13.3 渠道摄入状态
 
-摄入约定通用：任一 channel 只要往 `ChannelMessage.attachments` 填 `MediaAttachment{ mime:"audio/*" }`，
-`session_context` 即自动转 `AudioB64`。
+摄入有两条路：① **优先用渠道原生 ASR 文本**（免下载、免 STT，最准）；② 无原生文本时才往
+`ChannelMessage.attachments` 填 `MediaAttachment{ mime:"audio/*" }`，由 `session_context` 转 `AudioB64`
+交辅助 STT 模型转写。
 
-- **Telegram**：✅ `voice`/`audio` → `download_file_bytes` → 附件（mime 默认 `audio/ogg`）。
-- **QQ**：✅ inbound `attachments[content_type∈{audio,voice}]` → 在 listen loop 内
-  `download_audio_attachments` 拉字节 → 附件。注意 QQ 语音多为 **SILK/AMR**，主流 STT 模型不收，
-  通常会优雅降级为 `[audio]`（除非配了支持该编码的音频模型）。
-- **WeChat**：✗ 当前 `IlinkMessage` 协议只解析文本项，未暴露语音字段；接入需先补 ilink 语音消息 schema。
+- **Telegram**：✅ `voice`/`audio` → `download_file_bytes` → 附件（mime 默认 `audio/ogg`）。Telegram 无
+  原生转写，走路径②。
+- **QQ**：✅ `ingest_voice_attachments`（listen loop 内）对 `content_type∈{audio,voice}` 的附件：
+  先取 QQ 原生 `asr_refer_text` 注入 `content`（路径①）；空时退而下 `voice_wav_url`(WAV，STT 友好) →
+  附件（路径②）。
+- **WeChat**：✅ iLink 语音 = item `type==3` 的 `voice_item`，自带原生 ASR `text`，直接作为
+  `InboundContent::Text` 流入（路径①）。SILK 媒体经 AES-128-ECB 加密、未下载/解码——有原生转写即无需。
+
+> 字段名（`asr_refer_text`/`voice_wav_url`、`voice_item.text`/type 3）依据逆向 SDK 与第三方实现，
+> 官方文档站对抓取器返回 403、未取一手；缺字段一律优雅降级，不报错。落地建议对实际 inbound payload 复核。
 
 ### 13.4 未覆盖
 

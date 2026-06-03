@@ -426,17 +426,18 @@ impl QQBotChannel {
         })
     }
 
-    /// Download any audio/voice attachments from a raw inbound `data` payload
-    /// into `msg.attachments` as `audio/*` MediaAttachments. The modality adapter
-    /// then transcribes them to text via the auxiliary speech-to-text model
-    /// (same generic contract as Telegram voice).
+    /// Ingest voice/audio attachments from a raw inbound `data` payload.
     ///
-    /// Note: QQ voice is commonly SILK/AMR-encoded, which mainstream STT models
-    /// don't accept — transcription only succeeds if the configured audio model
-    /// handles that codec, otherwise it degrades to a "[audio]" placeholder.
-    /// Image attachments stay URL-based (handled in `parse_*`); only audio needs
-    /// byte download because the pipeline carries audio as base64, not URLs.
-    async fn download_audio_attachments(
+    /// QQ provides a native ASR transcription (`asr_refer_text`) on voice
+    /// attachments — prefer it (free, accurate, no download). Otherwise fall back
+    /// to downloading the WAV rendition (`voice_wav_url`, STT-friendly) or the raw
+    /// attachment `url`, attaching the bytes as an `audio/*` MediaAttachment for
+    /// the auxiliary speech-to-text model to transcribe.
+    ///
+    /// Field names (`asr_refer_text`, `voice_wav_url`) are per the QQ v2 voice
+    /// attachment schema; missing fields degrade gracefully (text dropped / no
+    /// attachment) rather than erroring.
+    async fn ingest_voice_attachments(
         &self,
         data: &serde_json::Value,
         msg: &mut ChannelMessage,
@@ -450,8 +451,30 @@ impl QQBotChannel {
             if !(ctype == "audio" || ctype == "voice" || ctype.starts_with("audio")) {
                 continue;
             }
-            let Some(url) = att.get("url").and_then(|v| v.as_str()) else { continue };
-            // QQ attachment URLs sometimes omit the scheme.
+
+            // 1) Prefer QQ's built-in ASR transcription — no download needed.
+            let asr = att
+                .get("asr_refer_text")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            if let Some(text) = asr {
+                if msg.content.trim().is_empty() {
+                    msg.content = text.to_string();
+                } else {
+                    msg.content = format!("{}\n[语音] {}", msg.content, text);
+                }
+                continue;
+            }
+
+            // 2) Fall back to a downloadable rendition: WAV (STT-friendly) then raw.
+            let (url, default_mime) = match att.get("voice_wav_url").and_then(|v| v.as_str()) {
+                Some(w) => (w, "audio/wav"),
+                None => match att.get("url").and_then(|v| v.as_str()) {
+                    Some(u) => (u, "audio/ogg"),
+                    None => continue,
+                },
+            };
             let full_url = if url.starts_with("http") {
                 url.to_string()
             } else {
@@ -477,24 +500,10 @@ impl QQBotChannel {
                     continue;
                 }
             };
-            // Best-effort MIME: use content_type if it's a full type, else map a
-            // bare token / URL extension, defaulting to ogg.
             let mime = if ctype.contains('/') {
                 ctype.to_string()
             } else {
-                let ext = full_url
-                    .split('?')
-                    .next()
-                    .and_then(|p| p.rsplit('.').next())
-                    .map(|e| e.to_ascii_lowercase());
-                match ext.as_deref() {
-                    Some("silk") => "audio/silk".to_string(),
-                    Some("amr") => "audio/amr".to_string(),
-                    Some("mp3") => "audio/mpeg".to_string(),
-                    Some("wav") => "audio/wav".to_string(),
-                    Some("m4a") => "audio/mp4".to_string(),
-                    _ => "audio/ogg".to_string(),
-                }
+                default_mime.to_string()
             };
             let file_name = att
                 .get("filename")
@@ -1405,9 +1414,9 @@ impl QQBotChannel {
                             return None;
                         }
 
-                        // Download voice/audio attachments → AudioB64 (transcribed
-                        // downstream by the auxiliary speech-to-text model).
-                        self.download_audio_attachments(&payload.d, &mut channel_msg).await;
+                        // Voice/audio: use QQ's native ASR text when present, else
+                        // attach downloaded bytes for the auxiliary STT model.
+                        self.ingest_voice_attachments(&payload.d, &mut channel_msg).await;
 
                         if tx.send(channel_msg.clone()).await.is_err() {
                             warn!("channel receiver dropped, stopping listen");
