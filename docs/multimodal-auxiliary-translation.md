@@ -1112,21 +1112,25 @@ blob 外置的文件改动已并入 §10 主变更清单（`capability_chat.rs` 
 - [x] **T3.4** `Cargo.toml`：`sha2` / `lru` / `base64` 依赖确认
 
 #### Stage 4 — 测试（覆盖 §9 + §11.6）
-- [ ] **T4.1** 回归：视觉模型流程不受影响
-- [ ] **T4.2** 非视觉 + 有/无辅助模型：转述 / 占位符
+- [x] **T4.1** 回归：视觉模型流程不受影响
+- [x] **T4.2** 非视觉 + 有/无辅助模型：转述 / 占位符
 - [x] **T4.3** 多轮缓存命中、跨会话去重（fingerprint 仅调一次）
 - [x] **T4.4** blob：往返一致、内联阈值、去重单文件、GC 回收孤儿、缺失降级
-- [ ] **T4.5** 多图并行顺序、辅助失败 graceful、候选集边界（未入路由不被选）
+- [x] **T4.5** 多图并行顺序、辅助失败 graceful、候选集边界（未入路由不被选）
 
-> **测试覆盖现状**：模块级单测已落地——Stage 1 的 5 个 blob 测试（往返/阈值/去重/GC/缺失降级，
-> 对应 T4.4 ✅）、Stage 2 的 5 个 adapter 测试（流式聚合+写缓存、缓存命中跳过 provider 调用、
-> `join_all` 顺序与编号合并、无 aux 占位降级、`adapt_history_media` 的缓存-vs-占位+`skip_idx`，
-> 对应 T4.3 ✅ 及 T4.2/T4.5 的适配层逻辑）。**延后**：T4.1/T4.2/T4.5 的 `agent.rs::run()`
-> 端到端用例（视觉模型不重复附图、非视觉整链转述、候选集边界）需要一个可复用的 mock
-> `ProviderRegistry` + `AgentRuntime` 测试骨架（当前 `NullRegistry`/`test_runtime` 是 orchestrator
-> 私有 `#[cfg(test)]`，未导出）。Stage 3 的 `adapt_media_for_model` 是薄胶水层、其底层两函数已被
-> 上述单测覆盖，且图片重复已通过删除旧快照路径从结构上消除，故端到端用例作为紧后续补齐。
-> T0.4（`[routing.*_aux]` 显式覆盖键）仍按 §4.6 推迟，`aux_model_for` 暂回退到 `[routing.chat]` 链。
+> **测试覆盖现状**：全部就绪，共 **445 lib 测试通过**。
+> - 模块级：Stage 1 的 5 个 blob 测试（往返/阈值/去重/GC/缺失降级 → T4.4）、Stage 2 的 5 个
+>   adapter 测试（流式聚合+写缓存、缓存命中跳过 provider 调用、`join_all` 顺序与编号合并、
+>   无 aux 占位降级、`adapt_history_media` 缓存-vs-占位+`skip_idx` → T4.3）。
+> - 端到端（`agent.rs` 测试模块，4 个 `adapt_media_for_model` 用例，经自带的可配置 mock
+>   `ProviderRegistry`+`ChatProvider` 驱动**真实**的 `find_chat_model_with_modality`）：
+>   `adapt_noop_for_vision_model`（T4.1 视觉模型 no-op、图片不重复）、
+>   `adapt_translates_current_turn_with_aux`（T4.2 非视觉经 aux 转述、原文本保留）、
+>   `adapt_placeholder_without_aux`（T4.2 无 aux 优雅占位）、
+>   `adapt_does_not_select_unrouted_vision_model`（T4.5 候选集边界：注册但未入路由的视觉模型
+>   不被选为 aux）。
+> - **唯一延后**：T0.4（`[routing.*_aux]` 显式覆盖键）按 §4.6 推迟，`aux_model_for` 暂回退到
+>   `[routing.chat]` 链。
 
 ### 12.3 依赖与关键路径
 
