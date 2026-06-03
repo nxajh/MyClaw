@@ -1,6 +1,6 @@
 # MyClaw 架构文档
 
-> 自动生成自源码结构提取，覆盖全部 174 个 Rust 源文件。
+> 自动生成自源码结构提取，覆盖全部 181 个 Rust 源文件。
 
 ## 目录
 
@@ -8,7 +8,7 @@
 |---|---|---|
 | `main.rs / lib.rs / daemon.rs` | — | 入口与工具 |
 | `signal / hot_switch / sys_info / str_utils` | — | 入口与工具 |
-| `agents/` | 52 | 智能体系统：Agent 运行循环、Turn 管理、Session 管理、上下文引擎、工具执行、调度器、子代理委派 |
+| `agents/` | 59 | 智能体系统：Agent 运行循环、Turn 管理、Session 管理、上下文引擎、工具执行、调度器、子代理委派、Orchestrator 事件编排(责任链 inbound) |
 | `channels/` | 15 | 消息通道：多平台适配（Telegram/QQBot/微信/浏览器 Client）、消息分块、流式推送、安全策略 |
 | `cli/` | 14 | 命令行界面：myclaw chat/status/reload/restart/stop/update/config/doctor/tools/tui/completion/exec 子命令 |
 | `config/` | 9 | 配置系统：TOML 配置解析、Agent/Channel/Provider/Routing/Scheduler/MCP/SubAgent 配置结构 |
@@ -1023,41 +1023,32 @@ async fn connect_empty_is_connected_but_empty()
 
 #### `agents/mod.rs`
 
-#### `agents/orchestrator.rs`
+#### `agents/orchestrator/mod.rs`
+
+**用途**: Orchestrator 运行时与装配。`run(self)` 把三事件源(入站 / 调度 / 委派)合流为单一 `Stream<OrchestratorEvent>` 并分派;`new()` 从 `OrchestratorParts` 组装出 `OrchestratorCtx` 依赖包。模块组的入口,re-export `OrchestratorCtx` / `ChannelRegistry` / `OrchestratorEvent`。
 
 ```rust
 const CHANNEL_QUEUE_SIZE: usize = 100
+pub(crate) use scheduled::run_scheduled_turn;
 ```
 
-**枚举** `ChannelEvent`:
+**结构体** `CronTrigger`(替代旧 `SchedulerEvent::Cron` 的 11 字段;只保留 cron turn 实际消费的 6 个):
 ```rust
-priv enum ChannelEvent {
-  UserMessage(((String, String), ChannelMessage)),
-  Delegation(DelegationEvent),
+pub struct CronTrigger {
+  pub session_key: String,
+  pub prompt: String,
+  pub target_channel: Option<String>,
+  pub target_account: Option<String>,
+  pub job_id: String,
+  pub model: Option<String>,
 }
 ```
 
 **枚举** `SchedulerEvent`:
 ```rust
 pub enum SchedulerEvent {
-  /// Heartbeat tick — run agent with heartbeat prompt.
-  Heartbeat {
-  target_channel: Option<String>,
-  target_account: Option<String>,
-  },
-  /// Cron job matched — run agent with specific prompt.
-  Cron {
-  session_key: String,
-  prompt: String,
-  target_channel: Option<String>,
-  target_account: Option<String>,
-  job_id: String,
-  delivery: Option<crate::agents::scheduling::cron_types::DeliveryConfig>,
-  enabled_tools: Option<Vec<String>>,
-  disabled_tools: Option<Vec<String>>,
-  model: Option<String>,
-  provider: Option<String>,
-  },
+  Heartbeat { target_channel: Option<String>, target_account: Option<String> },
+  Cron(CronTrigger),
 }
 ```
 
@@ -1065,84 +1056,28 @@ pub enum SchedulerEvent {
 pub type ChannelMsgSender = mpsc::Sender<((String, String), ChannelMessage)>
 ```
 
-**结构体** `Orchestrator`:
+**结构体** `Orchestrator`(只独占"消费一次"的 receiver / handle;依赖在 `ctx`):
 ```rust
 pub struct Orchestrator {
-  /// Channels, keyed by (channel_type, account_id).
-  channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
-  /// SessionManager owns the SessionContext table — see
-  /// `SessionManager::get_or_create_context`. The Orchestrator no longer
-  /// keeps its own copy; reach for `session_manager.get_context(rk)` or
-  /// `get_or_create_context(rk)` instead.
-  session_manager: Arc<SessionManager>,
-  /// The message receiver, owned and consumed by run().
-  #[allow(clippy::type_complexity)]
-  msg_rx: Arc<TokioMutex<Option<mpsc::Receiver<((String, String), ChannelMessage)>>>>,
-  /// Listener task handles — taken and awaited on shutdown.
-  /// Wrapped in a TokioMutex so `shutdown_listeners(&self)` can drain
-  /// them without requiring `&mut self` (which would block the
-  /// `Arc<Self>` sharing pattern that scheduler dispatch relies on).
-  listener_handles: Arc<TokioMutex<Vec<JoinHandle<()>>>>,
-  /// AskRouter (RFC v2 §三.B): indexed by session.id, fulfilled by inbound
-  /// messages ahead of process_turn. Shared with the daemon-built
-  /// `AskUserTool` (same `Arc<AskRouter>`) so the register/fulfill loop
-  /// closes through a single inbox.
-  ask_router: Arc<crate::agents::AskRouter>,
-  /// AgentRuntime for `Agent::run` (RFC v2 §三.A). Held alongside
-  /// the legacy `agent` field — E29 will eventually swap the main-
-  /// loop dispatch onto Agent + agent_runtime, then H45 deletes the
-  /// legacy fields.
-  agent_runtime: crate::agents::AgentRuntime,
-  /// Delegation manager (shared with DelegateTaskTool via handler).
-  delegator: Option<Arc<DelegationCoordinator>>,
-  /// Delegation event receiver.
-  delegation_rx: Arc<TokioMutex<Option<mpsc::Receiver<DelegationEvent>>>>,
-  /// Scheduler event receiver (heartbeat ticks, cron triggers).
-  // ... 3 more fields
+  ctx: Arc<OrchestratorCtx>,
+  msg_rx: Option<mpsc::Receiver<((String, String), ChannelMessage)>>,
+  listener_handles: Vec<JoinHandle<()>>,        // run() 返回前 abort
+  delegation_rx: Option<mpsc::Receiver<DelegationEvent>>,
+  scheduler_rx: Option<mpsc::Receiver<SchedulerEvent>>,
 }
 ```
 
-**结构体** `SharedSessions`:
-```rust
-pub struct SharedSessions {
-  /// AgentRuntime for Agent dispatch in webhook tasks.
-  pub agent_runtime: crate::agents::AgentRuntime,
-  pub channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
-}
-```
-
-```rust
-fn parse_session_key(sk: &str) -> Option<(&str, &str, &str)>
-```
-
-```rust
-fn history_has_incomplete_turn(history: &[crate::providers::capability_chat::ChatMessage]) -> bool
-```
-
-**结构体** `OrchestratorParts`:
+**结构体** `OrchestratorParts`(组装根 daemon.rs 的入参,装配缝;保留长字段名):
 ```rust
 pub struct OrchestratorParts {
   pub session_manager: Arc<SessionManager>,
-  /// Pre-built channels: (channel_type, account_id, channel_instance).
   pub channels: Vec<(String, String, Arc<dyn Channel>)>,
-  /// Delegation manager (conditional — only when sub-agents are configured).
   pub delegator: Option<Arc<DelegationCoordinator>>,
-  /// Delegation event receiver (conditional).
   pub delegation_rx: Option<mpsc::Receiver<DelegationEvent>>,
-  /// Scheduler event receiver (heartbeat ticks, cron triggers from Scheduler task).
   pub scheduler_rx: Option<mpsc::Receiver<SchedulerEvent>>,
-  /// AskRouter shared with the daemon-built `AskUserTool` (same
-  /// `Arc<AskRouter>`). The orchestrator's inbound dispatch calls
-  /// `ask_router.fulfill(session.id, msg)` to wake any pending ask.
   pub ask_router: Arc<crate::agents::AskRouter>,
-  /// AgentRuntime for the new `Agent::run` per-turn path. Coexists
-  /// with `agent` (legacy AgentLoop factory) until E29 swaps the
-  /// orchestrator's main-loop dispatch over to Agent::run and H45
-  /// deletes AgentLoop.
   pub agent_runtime: crate::agents::AgentRuntime,
-  /// Workspace directory for persisting runtime state.
   pub workspace_dir: std::path::PathBuf,
-  /// Shared scheduler for run result tracking and auto-delete.
   pub scheduler: Option<crate::agents::SharedScheduler>,
 }
 ```
@@ -1150,89 +1085,152 @@ pub struct OrchestratorParts {
 **Impl** `impl Orchestrator`:
 ```rust
   pub fn new(parts: OrchestratorParts) -> (Self, ChannelMsgSender)
-  pub fn shared(&self) -> SharedSessions
-  pub fn session_manager(&self) -> &Arc<SessionManager>
-  pub fn agent_runtime(&self) -> &crate::agents::AgentRuntime
-  pub fn channels(&self) -> &Arc<DashMap<(String, String), Arc<dyn Channel>>>
-  pub fn persist_backend(&self) -> &Arc<dyn crate::storage::SessionBackend>
-  pub fn scheduler(&self) -> Option<&crate::agents::SharedScheduler>
-  fn spawn_listener(
-  fn session_key(channel_type: &str, account_id: &str, sender: &str) -> String
-  fn session_context_for(&self, sk: &str) -> Arc<SessionContext>
-  pub async fn run(
-  async fn handle_channel_event(&self, event: ChannelEvent)
-  async fn handle_scheduler_event(self: Arc<Self>, event: SchedulerEvent)
-  fn startup_recover_sessions(&self)
-  fn startup_recover_subagents(
-  pub async fn shutdown_listeners(&self)
+  pub fn ctx(&self) -> &Arc<OrchestratorCtx>          // webhook / daemon 取依赖包
+  fn spawn_listener(channel_type: String, account_id: String, channel: Arc<dyn Channel>, msg_tx: Arc<ChannelMsgSender>) -> JoinHandle<()>
+  pub async fn run(self, shutdown_rx: watch::Receiver<bool>, unfinished: Vec<UnfinishedSubAgent>) -> anyhow::Result<()>
+  async fn handle_scheduler_event(&self, event: SchedulerEvent)
 ```
 
 ```rust
-fn retry_abort_prompt(
-```
-
-**Impl** `impl Orchestrator`:
-```rust
-  fn handle_delegation_event<'a>(
-  async fn handle_delegation_event_inner(&self, event: DelegationEvent)
-```
-
-```rust
+pub(super) fn history_has_incomplete_turn(history: &[ChatMessage]) -> bool
 pub(crate) fn is_silent_ok(response: &str, prefix: &str) -> bool
 ```
 
+#### `agents/orchestrator/ctx.rs`
+
+**用途**: `OrchestratorCtx` —— 共享依赖包(全 `Arc`,随便 clone),与"运行时"`Orchestrator` 分离;长寿命 spawn 任务持 `Arc<OrchestratorCtx>` 而非 `Arc<Orchestrator>`。`ChannelRegistry` 封装裸 `Arc<DashMap>`,统一查表。
+
+**结构体** `ChannelRegistry`:
 ```rust
-fn test_session_key()
-```
-
-#### `agents/orchestrator_scheduled.rs`
-
-**用途**: Orchestrator 的调度派发——心跳 / Cron 作为独立 spawn 任务驱动一次合成 turn（与用户入站 turn 同一路径），并将输出投递到目标 channel。从 `orchestrator.rs` 抽出，通过其公开访问器读取私有状态。
-
-```rust
-pub(crate) async fn run_scheduled_turn(
-```
-
-```rust
-pub(crate) async fn run_heartbeat_task(
-```
-
-```rust
-pub(crate) async fn run_cron_task(
-```
-
-```rust
-async fn send_to_target_internal(
-```
-
-#### `agents/orchestrator_event.rs`
-
-**枚举** `OrchestratorEvent`:
-```rust
-pub enum OrchestratorEvent {
-  /// A user message arrived on a channel. `account_key` identifies which
-  /// (channel_type, account_id) pair received it, since one channel kind
-  /// can have multiple accounts (e.g. two Telegram bots).
-  Inbound {
-  channel_type: String,
-  account_id: String,
-  message: ChannelMessage,
-  },
-  /// Scheduler fired — either a heartbeat tick or a cron job. Carried
-  /// verbatim from the existing `SchedulerEvent` shape so the switch is
-  /// a one-line conversion in E29.
-  Scheduled(super::orchestrator::SchedulerEvent),
-  /// Background sub-agent finished. The orchestrator synthesizes a
-  /// `ChannelMessage` from this event and feeds it back into the parent
-  /// session so the LLM can react.
-  Delegation(DelegationEvent),
-  /// Reply to an outstanding `ask_user` call. Tagged with the session_id
-  /// that originated the question (RFC v2: indexed by session_id, not by
-  /// routing_key, so cross-channel ask_user works for sub-agents).
-  AskReply {
-  // ... 1 more variant
+pub struct ChannelRegistry { inner: Arc<DashMap<(String, String), Arc<dyn Channel>>> }
+impl ChannelRegistry {
+  pub fn new() -> Self
+  pub fn insert(&self, account: (String, String), channel: Arc<dyn Channel>)
+  pub fn get(&self, account: &(String, String)) -> Option<Arc<dyn Channel>>
+  pub fn get_by_key(&self, key: &SessionKey) -> Option<Arc<dyn Channel>>
+  pub fn len(&self) -> usize
+  pub fn is_empty(&self) -> bool
 }
 ```
+
+**结构体** `OrchestratorCtx`:
+```rust
+pub struct OrchestratorCtx {
+  pub channels: ChannelRegistry,
+  pub sessions: Arc<SessionManager>,
+  pub ask: Arc<AskRouter>,
+  pub runtime: AgentRuntime,
+  pub delegator: Option<Arc<DelegationCoordinator>>,
+  pub scheduler: Option<SharedScheduler>,
+}
+impl OrchestratorCtx {
+  pub fn session_context_for(&self, sk: &str) -> Arc<SessionContext>
+  pub fn channel(&self, account: &(String, String)) -> Option<Arc<dyn Channel>>
+}
+```
+
+#### `agents/orchestrator/key.rs`
+
+**用途**: 会话键值类型,取代散落的 `splitn(3, ':')` / `format!("{}:{}:{}")`。`splitn` 仅存在于 `SessionKey::parse`。
+
+```rust
+pub struct SessionKey { pub channel: String, pub account: String, pub sender: String }
+impl SessionKey {
+  pub fn new(channel: impl Into<String>, account: impl Into<String>, sender: impl Into<String>) -> Self
+  pub fn parse(s: &str) -> Option<Self>
+  pub fn account_key(&self) -> (String, String)
+}
+impl fmt::Display for SessionKey   // "ct:ac:sender"
+
+/// 子代理键是 2 段,单独建模
+pub struct SubAgentKey { pub agent: String, pub sub_session: String }
+impl SubAgentKey { pub fn new(agent: impl Into<String>, sub_session: impl Into<String>) -> Self }
+impl fmt::Display for SubAgentKey  // "agent:sub_session"
+```
+
+#### `agents/orchestrator/event.rs`
+
+**枚举** `OrchestratorEvent`(`run()` 的统一事件类型):
+```rust
+pub enum OrchestratorEvent {
+  Inbound { channel_type: String, account_id: String, message: ChannelMessage },
+  Scheduled(super::SchedulerEvent),
+  Delegation(DelegationEvent),
+  AskReply { session_id: String, reply: ChannelMessage },
+  Shutdown,
+}
+```
+
+#### `agents/orchestrator/turn.rs`
+
+**用途**: per-turn 参数解析的单一归属——把 `session_override` 叠加到运行时默认,产出系统提示 / thinking / model。消除 recovery 等处的重复组装。
+
+```rust
+pub struct ResolvedTurn {
+  pub system_prompt: String,
+  pub thinking: Option<ThinkingConfig>,
+  pub model: Option<String>,
+  pub permission_mode: PermissionMode,
+  pub run_mode: RunMode,
+}
+impl ResolvedTurn {
+  pub fn resolve(session: &Session, runtime: &AgentRuntime) -> Self
+  pub fn turn_context(&self) -> TurnContext<'_>
+}
+```
+
+#### `agents/orchestrator/inbound.rs`
+
+**用途**: 入站用户消息的责任链。每个拦截器返回 `Flow::Stop`(已消费)或 `Flow::Next(msg)`(透传,可改写);终端 `DispatchTurn` 经 `dispatch_turn` spawn `process_turn`。链顺序:ask-reply → callback → crash-recovery → slash-command → dispatch-turn。
+
+```rust
+enum Flow { Stop, Next(ChannelMessage) }
+
+trait Interceptor: Send + Sync {
+  fn name(&self) -> &'static str;
+  async fn handle(&self, ctx: &OrchestratorCtx, key: &SessionKey, msg: ChannelMessage) -> Flow;
+}
+// 拦截器单元结构:AskReply / Callback / CrashRecovery / SlashCommand / DispatchTurn
+fn chain() -> [&'static dyn Interceptor; 5]
+
+pub(super) async fn dispatch(ctx: &OrchestratorCtx, account: (String, String), msg: ChannelMessage)
+pub(super) async fn dispatch_turn(ctx: &OrchestratorCtx, key: &SessionKey, msg: ChannelMessage)
+pub(super) fn retry_abort_prompt(content: impl Into<String>, sk: &str, reply_target: impl Into<String>, thread_ts: Option<String>) -> (SendTarget, MessagePayload)
+```
+
+#### `agents/orchestrator/delegation.rs`
+
+**用途**: 子代理完成 / 失败的"系统唤醒"——合成系统通知消息,经 `inbound::dispatch_turn` 直接驱动父会话一次 turn,**不**伪造 inbound 跑完整拦截链。
+
+```rust
+pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent)
+```
+
+#### `agents/orchestrator/recovery.rs`
+
+**用途**: 启动恢复——崩溃 / SIGKILL 中断的 turn 重放。普通会话与子代理统一为 `spawn_recovery` + `CompletionSink`(投递去向的唯一差异)。
+
+```rust
+enum CompletionSink {
+  Channel { key: String, backend: Arc<dyn SessionBackend>, channels: ChannelRegistry },
+  Delegate { task_id: String, parent_session_id: String, reply_target: String, delegator: Option<Arc<DelegationCoordinator>> },
+}
+fn spawn_recovery(session_ctx: Arc<SessionContext>, runtime: AgentRuntime, backend: Arc<dyn SessionBackend>, label: &'static str, id: String, sink: CompletionSink)
+pub(super) fn run_startup(sessions: &Arc<SessionManager>, runtime: &AgentRuntime, channels: &ChannelRegistry, unfinished: &[UnfinishedSubAgent], delegator: &Option<Arc<DelegationCoordinator>>)
+```
+
+#### `agents/orchestrator/scheduled.rs`
+
+**用途**: 调度 turn 派发。心跳 / Cron 作为独立 spawn 任务,经 `run_scheduled_turn` 驱动一次合成 turn(与用户入站 turn 同一 `process_turn` 路径),输出投递到目标 channel。`run_scheduled_turn` 亦被 webhook(`scheduler.rs`)复用,消除重复。
+
+```rust
+pub(crate) async fn run_scheduled_turn(orch: &OrchestratorCtx, session_key: &str, prompt: &str, model_override: Option<String>) -> anyhow::Result<String>
+pub(crate) async fn run_heartbeat_task(orch: Arc<OrchestratorCtx>, target_channel: Option<String>, target_account: Option<String>, prompt: String, due: Vec<HeartbeatTask>, state: HeartbeatState, state_path: PathBuf)
+pub(crate) async fn run_cron_task(orch: Arc<OrchestratorCtx>, trigger: super::CronTrigger)
+async fn send_to_target_internal(orch: &OrchestratorCtx, target_channel: Option<String>, target_account: Option<String>, content: &str)
+```
+
+> `agents/orchestrator/test_support.rs` 为 `#[cfg(test)]` 测试夹具:可注入 mock 的 `OrchestratorCtx`(内存 SessionManager + no-op ProviderRegistry/AgentRuntime + 记录式 `MockChannel`),供 inbound 拦截器单测使用。
 
 #### `agents/prompt.rs`
 
@@ -2393,10 +2391,10 @@ fn generate_id() -> String
 **结构体** `WebhookContext`:
 ```rust
 pub struct WebhookContext {
-  /// Shared Orchestrator. Webhook handlers reach for
-  /// `orchestrator.session_manager()`, `agent_runtime()`,
-  /// `channels()`, `persist_backend()`, and the `last_channel` field.
-  pub orchestrator: Arc<crate::agents::Orchestrator>,
+  /// Shared orchestrator dependency bundle (sessions / runtime / channels /
+  /// scheduler). Webhook handlers reach for `ctx.sessions`, `ctx.runtime`,
+  /// `ctx.channels`, `ctx.scheduler` directly.
+  pub ctx: Arc<crate::agents::OrchestratorCtx>,
   /// Timezone string used for cron evaluation in the webhook server.
   pub timezone: String,
 }
