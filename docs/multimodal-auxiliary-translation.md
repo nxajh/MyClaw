@@ -6,7 +6,8 @@
 > - **当轮图片持久化进 `session.history`**：v2 的「clone 历史 → 适配媒体 → 缓存复用描述」整套设计，**隐含前提是历史里真有图片 parts**。但现状代码 `Session::add_user()` 只把**文本**写入 history，原始图片仅短暂存在于 `session.last_message`，turn 结束即弃（见 §1.1 现状修正）。本版把当轮图片作为 `ContentPart::ImageUrl/ImageB64` 一并持久化进 history，使 v2 的 clone 层与缓存方案真正成立。
 > - 由此**简化** `agent.rs`：不再「从 `last_message` 快照临时拼回图片」。history 自带图片，`messages = clone(history)` 天然携带，当轮 vs 历史由**位置**（最后一条 user 消息 vs 更早消息）区分，无需启发式。
 > - 持久化图片**优于 OpenClaw 纯文本模式**：OpenClaw 把图片转文本后丢弃原图，切回视觉模型即失去原始内容；MyClaw 保留原图 + 缓存描述，做到「视觉模型用原图、非视觉模型用缓存描述」两全。
-> - 新增 **§11 持久化体积与已知风险**：b64 内联图体积、URL 过期、与 compaction `strip_images` 的协作、token 计账、prompt injection、测试策略——前几版口头列举的待细化点在此落定。
+> - **blob 外置纳入 v1**（§11.8）：大 b64 字节落盘到 `sessions/{id}/blobs/`，`history.jsonl` 行内只存 `ImageRef { hash }`，读取时 hydrate 回 `ImageB64`。`ImageRef` 只存在于磁盘，内存始终是 `ImageB64`，故渲染/adapt/缓存层零改动。与图片持久化是同一条写路径的两步。
+> - 新增 **§11 持久化体积与已知风险**：blob 外置、URL 过期、与 compaction `strip_images`/GC 的协作、token 计账、prompt injection、测试策略——前几版口头列举的待细化点在此落定。
 >
 > **v2 修订（基于代码评审）**：
 > - 修正辅助翻译的流式消费（`ChatProvider::chat()` 返回 `BoxStream`，须经 `ChatResponse::from_stream()` 聚合；`stream` 恒为 `true`）
@@ -241,6 +242,11 @@ Layer 3: 协议渲染 render_*_body()                       [已有]
 作为 `ContentPart::ImageUrl/ImageB64` 一并放进那条 user 消息的 `parts`。`persist_hook`
 （`session_context.rs:181`）随即把这条**含图片的** `ChatMessage` 写入 `history.jsonl`
 （`ContentPart` 已是 `Serialize`，天然可落盘）。
+
+> **写入即外置（v1）**：为避免大 b64 撑爆 `history.jsonl`，落盘这一步由 `JsonFileBackend`
+> 把超阈值的 `ImageB64` 字节外置到 `blobs/`、行内只留 `ImageRef { hash }`，读取时再 hydrate
+> 回 `ImageB64`。`ImageRef` **只存在于磁盘**，内存中 `session.history` 始终是 `ImageB64`，
+> 故渲染/adapt/缓存层无感。持久化（本节）与外置（§11.8）是同一条写路径上的两步，v1 一并实现。
 
 **为什么这是正确修法，而不仅是优化**：
 
@@ -841,7 +847,7 @@ if !primary_config.supports_input(Modality::Audio) {
 4. **历史中含图片 + 切换到非视觉模型（缓存未命中）**：验证历史图片被替换为 `[image]`
 5. **多轮追问（缓存命中）**：Turn N 非视觉模型翻译某图 → Turn N+1 追问该图 → 验证历史图片复用 `[图片描述]: ...` 而非 `[image]`
 6. **缓存去重**：同一图片（相同 URL / b64）多次出现 / 跨会话 → 验证辅助模型仅被调用一次（fingerprint 命中）
-7. **持久化验证**：验证所有变换不影响 `history.jsonl`，`ImageUrl` 原样保留
+7. **持久化验证**：clone 层的媒体变换不写回——`load_messages` 后图片 parts 与持久化前一致（大图经 `ImageRef` 外置后 hydrate 回等价 `ImageB64`，见 §11.6 blob 往返）
 8. **Compaction 回归**：验证 `strip_images()` 行为不变
 9. **多图并行**：多张图片 `join_all` 并行翻译，结果顺序与注入文案编号一致
 10. **辅助模型失败**：单图失败 → `[translation failed]`，不影响其他图片（graceful degradation）
@@ -862,7 +868,9 @@ if !primary_config.supports_input(Modality::Audio) {
 | `src/agents/session_context.rs` | 修改 | `process_turn` 由 `last_message` 构造媒体 parts，走 `add_user_with_media`；持久化随之带图 |
 | `src/agents/agent.rs` | 修改 | `run()` 集成 `adapt_history_media(skip)` + `adapt_last_turn_media`；**删除**从 `last_message` 快照拼回图片的旧逻辑 |
 | `src/agents/mod.rs` | 修改 | 声明 `mod modality_adapter` |
-| `Cargo.toml` | 依赖 | `sha2`（指纹）、`lru`（缓存）；`futures-util` 已在用 |
+| `src/providers/capability_chat.rs` | 新增变体 | `ContentPart::ImageRef { hash, media_type, detail }`——blob 外置的磁盘表示（§11.8） |
+| `src/storage/json_file.rs` | 修改 | `append_message` 前 `externalize`、`load_messages`/recovery 后 `hydrate`；`write_blob`/`read_blob`；`rotate_history`/`truncate_messages` 收尾 GC（§11.8） |
+| `Cargo.toml` | 依赖 | `sha2`（指纹/blob 名）、`lru`（缓存）、`base64`（blob 编解码，多半已在用）；`futures-util` 已在用 |
 
 ## 11. 持久化体积与已知风险
 
@@ -874,10 +882,11 @@ if !primary_config.supports_input(Modality::Audio) {
   加载/反序列化变慢。
 - **URL 图**：只是字符串链接，体积可忽略。
 - **缓解**：
-  1. **依赖现有 compaction**：`strip_images()`（§1.1）在压缩时把图片→`[image]`，长程历史的
-     b64 体积会被自然回收，只有近窗口保留原图——上限可控。
-  2. **blob 外置**（Phase 1.5，详见 §11.8）：b64 字节落盘到 session 目录下的 `blobs/`，
-     `history.jsonl` 只存引用句柄（`ContentPart::ImageRef { hash }`），加载时取回。
+  1. **blob 外置（v1 主策略，详见 §11.8）**：大于阈值的 b64 字节落盘到 session 目录下的
+     `blobs/`，`history.jsonl` 只存引用句柄（`ContentPart::ImageRef { hash }`），加载时取回。
+     这从根本上消除 `history.jsonl` 的 b64 膨胀与解析变慢。
+  2. **compaction 兜底**：`strip_images()`（§1.1）在压缩时把图片→`[image]`，长程历史的图片
+     连同其 blob 一并被回收（§11.8.5 GC），与 blob 外置叠加，进一步收紧上限。
   3. **入站即转引用**：若渠道给的是可下载 URL，优先持久化 URL 而非 b64，体积更小。
 
 ### 11.2 URL 过期
@@ -914,17 +923,23 @@ if !primary_config.supports_input(Modality::Audio) {
 - 辅助翻译走真实 `ChatProvider::chat()` 流式接口，单测需 **mock provider**：返回固定
   `BoxStream<StreamEvent>`，验证 `from_stream()` 聚合、缓存写入、并行 `join_all` 顺序。
 - 持久化测试：构造含图 `ChannelMessage` → `process_turn` → 断言 `history.jsonl` 那条 user 消息
-  含 `ImageUrl` part（§9 测试 7 强化）。
-- 体积回归：可加一个「b64 大图持久化后 compaction 能回收」的测试，锚定 §11.1 缓解方案 1。
+  含图片 part（§9 测试 7 强化）。
+- **blob 往返**：大 b64 图 `append_message` → 断言 `history.jsonl` 行内是 `ImageRef`、`blobs/{hash}.bin`
+  已生成；再 `load_messages` → 断言 hydrate 回 `ImageB64` 且字节与原图一致（§11.8.3/4）。
+- **内联阈值**：≤阈值的小图持久化后仍为内联 `ImageB64`，不产生 blob 文件。
+- **blob 去重**：同图在会话内多次出现 → 断言 `blobs/` 只有一个文件（content-addressed 幂等）。
+- **blob GC**：`strip_images` + `rotate_history` 后 → 断言被剥离图的孤儿 blob 已删除、仍被引用的保留（§11.8.5）。
+- **blob 缺失容错**：删掉 blob 文件后 `load_messages` → 断言降级为 `[image unavailable]`，加载不失败。
 
 ### 11.7 UX 可见性
 
 - 非视觉模型回答基于描述而非原图时，用户可能不知情。可选：在回复或日志中标注
   「（图片经辅助模型 X 转述）」，便于用户判断可信度。属可选增强，不阻塞 v1。
 
-### 11.8 Blob 外置详细设计（Phase 1.5）
+### 11.8 Blob 外置详细设计（v1 纳入）
 
 解决 §11.1 的 b64 膨胀：把图片字节从 `history.jsonl` 移到旁路 blob 文件，行内只留哈希引用。
+**v1 即随图片持久化（§3.6）一并落地**——二者本就是同一条写路径上的两步。
 
 #### 11.8.1 核心判断：ImageRef 是「持久化边界表示」，不是内存表示
 
@@ -1040,13 +1055,10 @@ blob 在两种情况下变成孤儿，需回收：
 > 则 GC 的「存活集合」需并入归档段的引用。若归档不外置，则归档前需先 hydrate 回 b64（体积回潮）——
 > 故推荐归档也走 ImageRef。
 
-#### 11.8.6 变更清单增量（相对 §10）
+#### 11.8.6 涉及文件
 
-| 文件 | 变更 | 说明 |
-|------|------|------|
-| `src/providers/capability_chat.rs` | 新增变体 | `ContentPart::ImageRef { hash, media_type, detail }`（仅磁盘出现） |
-| `src/storage/json_file.rs` | 修改 | `append_message` 前 `externalize`；`load_messages`/recovery 后 `hydrate`；`write_blob`/`read_blob`；`rotate_history`/`truncate_messages` 收尾 GC |
-| `Cargo.toml` | 依赖 | `base64`（多半已在用）；`sha2` 已由 §10 引入 |
+blob 外置的文件改动已并入 §10 主变更清单（`capability_chat.rs` 新增 `ImageRef` 变体、
+`json_file.rs` 的 externalize/hydrate/GC、`Cargo.toml` 的 `base64`），作为 v1 范围的一部分。
 
 > 注意：`strip_images`、渲染层、§4.3 adapt 层、`fingerprint`、`InMemoryBackend` **均不改**——
 > 这是「持久化边界表示」选型的核心收益。`InMemoryBackend` 无磁盘、不外置，天然正确。
