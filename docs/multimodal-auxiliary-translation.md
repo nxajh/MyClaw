@@ -208,23 +208,31 @@ value = 翻译得到的文本描述
 - **成本可控** —— 每张图只翻译一次（同一图片跨轮 / 多次出现都命中缓存）
 - **可切回视觉模型** —— history 中 `ImageUrl` 原样保留
 
-缓存作用域：`(session_id, 内容 sha256)` 两层（`PersistentDescriptionCache`）——热层是按
+缓存作用域：`(session_id, 内容指纹)` 两层（`PersistentDescriptionCache`）——热层是按
 `(session, key)` 隔离的有界 LRU，冷层是**每会话**的内容寻址文件
-`sessions/{id}/descriptions/{sha256}.txt`（即该会话 `blobs/` 的**兄弟目录**）。
+`sessions/{id}/descriptions/{hash}.txt`（即该会话 `blobs/` 的**兄弟目录**）。
 写穿透（put 同时落盘）、读穿透（热层 miss 时读盘并回填）、原子写（temp + rename）。
 Hermes 的 `_anthropic_image_fallback_cache` 是同一思路。
 
+> **内容指纹 = blob hash（解码字节 sha256）**：描述键、`blobs/{hash}.bin` 文件名、`ImageRef.hash`
+> 三者是**同一个值**（统一在 `ContentPart::content_fingerprint` + `sha256_hex` 单一实现里，不会漂移）。
+> 这带来两个好处:① 指纹在 `ImageB64 ⇄ ImageRef` 外置/hydrate 之间、以及 b64 重新编码往返之间**不变**,
+> 故一轮持久化的描述下一轮仍能命中(修掉了原「按 b64 字符串哈希」对 b64 规范化的脆弱性);
+> ② 描述键空间与 blob 键空间一致,使描述能**挂进同一套 mark-and-sweep**。
+>
 > **为何要落盘、且为何 per-session**：图片字节已通过 blob 外置持久化（§11.8），但描述若只在内存里，
 > 进程重启或 LRU 淘汰后非视觉模型会丢失全部历史图片描述、退化为 `[image]`，并在该图再次作为当轮出现
 > 时重复调用辅助模型翻译。持久化描述把「已落盘的 blob」与「描述缓存」两侧补齐：理解结果跨重启可用，
-> 翻译成本只付一次。**与 blob 同处会话目录**是关键：`delete_session` 用 `remove_dir_all` 删整个
-> `sessions/{id}/`，描述随 blob 一同回收，**不留全局孤儿**——这正是 blob 已采用的 per-session 约定，
-> 描述跟随同一规则保持一致。代价是同图描述在多会话间会各存一份（与 blob 同样的取舍）。
+> 翻译成本只付一次。**与 blob 同处会话目录**：`delete_session` 用 `remove_dir_all` 删整个
+> `sessions/{id}/`，描述随 blob 一同回收，**不留全局孤儿**——与 blob 的 per-session 约定一致。
+> 代价是同图描述在多会话间各存一份（与 blob 同样的取舍）。
 >
-> 冷层在会话存活期内不设上限（每条仅几 KB 内容寻址文本，增长极慢）；它**未**挂进 §11.8 的逐轮 blob
-> mark-and-sweep：该 sweep 以 blob 的「解码字节 sha256」为键，而描述以「b64 指纹」为键，且 b64 外置后
-> 不在磁盘上——所以会话内不做 sweep，回收点是会话删除。`daemon` 注入该实现并传入 sessions 根目录;
-> CLI 单次命令(`cmd_exec`/`cmd_chat`)与测试仍用纯内存 `LruDescriptionCache`。
+> **GC**：rotation 与 `truncate_messages` 的 mark-and-sweep 现在**同时清扫** `blobs/*.bin` 和
+> `descriptions/*.txt`——blob 的 live 集是存活消息里的 `ImageRef.hash`,描述的 live 集是存活消息里
+> **全部**媒体 part 的 `content_fingerprint`(含内联 `ImageB64`、外置 `ImageRef`、`ImageUrl`,是 blob
+> 集的超集,故内联小图的描述不会被误删)。被 compaction 丢弃的图片,其描述在下次 rotation/truncate 即回收;
+> 会话删除则一次性清空。`daemon` 注入该实现并传入 sessions 根目录;CLI 单次命令(`cmd_exec`/`cmd_chat`)
+> 与测试仍用纯内存 `LruDescriptionCache`。
 
 ### 3.5 消息变换发生在 clone 层
 

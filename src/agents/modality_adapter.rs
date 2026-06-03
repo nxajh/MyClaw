@@ -15,7 +15,6 @@ use crate::providers::capability::Modality;
 use crate::providers::capability_chat::{
     ChatMessage, ChatProvider, ChatRequest, ChatResponse, ContentPart,
 };
-use sha2::{Digest, Sha256};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -56,16 +55,13 @@ pub fn part_matches(part: &ContentPart, modality: &Modality) -> bool {
     }
 }
 
-/// Content fingerprint used as the description-cache key.
-/// URL images key on the URL; base64 images key on the payload bytes.
-/// Returns `None` for non-media parts (which have no stable identity to cache).
+/// Content fingerprint used as the description-cache key — the part's
+/// content-addressed identity (decoded-bytes SHA-256 for images, invariant
+/// across `ImageB64 ⇄ ImageRef` and matching `blobs/{hash}.bin`). Delegates to
+/// [`ContentPart::content_fingerprint`] so the cache key, the blob filename, and
+/// the description-sweep key are all the same value. `None` for non-media parts.
 pub fn fingerprint(part: &ContentPart) -> Option<String> {
-    let seed = match part {
-        ContentPart::ImageUrl { url, .. } => url.as_str(),
-        ContentPart::ImageB64 { b64_json, .. } => b64_json.as_str(),
-        _ => return None,
-    };
-    Some(format!("{:x}", Sha256::digest(seed.as_bytes())))
+    part.content_fingerprint()
 }
 
 // ── Description cache (T2.2) ───────────────────────────────────────────────────
@@ -623,5 +619,33 @@ mod tests {
             }
             other => panic!("expected reused description text, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn fingerprint_invariant_across_externalization() {
+        use crate::providers::capability_chat::sha256_hex;
+        use base64::Engine;
+        let bytes = vec![42u8; 256];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let hash = sha256_hex(&bytes);
+
+        let inline = ContentPart::ImageB64 {
+            b64_json: b64,
+            media_type: None,
+            detail: ImageDetail::Auto,
+        };
+        let externalized = ContentPart::ImageRef {
+            hash: hash.clone(),
+            media_type: None,
+            detail: ImageDetail::Auto,
+        };
+
+        // The fingerprint is the decoded-bytes sha256 (== the blob hash), so it
+        // is the same whether the part is inline or externalized — this is what
+        // lets a cache key persisted before externalization still match, and the
+        // description sweep recognize a live image in either form.
+        assert_eq!(fingerprint(&inline).as_deref(), Some(hash.as_str()));
+        assert_eq!(fingerprint(&externalized).as_deref(), Some(hash.as_str()));
+        assert_eq!(fingerprint(&inline), fingerprint(&externalized));
     }
 }

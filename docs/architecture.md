@@ -1545,7 +1545,7 @@ pub const IMAGE_SPEC: ModalitySpec; // image spec, label "图片", placeholder "
 **自由函数**:
 ```rust
 pub fn part_matches(part: &ContentPart, modality: &Modality) -> bool
-pub fn fingerprint(part: &ContentPart) -> Option<String> // sha256 hex of url / b64
+pub fn fingerprint(part: &ContentPart) -> Option<String> // → ContentPart::content_fingerprint (decoded-bytes sha256 == blob hash)
 pub async fn translate_part(
   provider: &dyn ChatProvider,
   model_id: &str,
@@ -1596,8 +1596,11 @@ session's `blobs/`; write-through + read-through, atomic temp+rename).
 so image descriptions survive restarts and LRU eviction (a non-vision model
 recovers historical-image descriptions without re-invoking the auxiliary model —
 parallel to how blobs persist image bytes) and are reclaimed with the session on
-delete. Not wired into the per-rotation blob sweep (keyed by b64 fingerprint, not
-the decoded-bytes blob hash); session deletion is the reclamation point.
+delete. Keyed by `ContentPart::content_fingerprint` (decoded-bytes sha256 == the
+blob hash), so descriptions share the blob mark-and-sweep: `rotate_history` and
+`truncate_messages` sweep `descriptions/*.txt` against the content fingerprints of
+all live media (a superset of the live blob hashes — inline `ImageB64`, `ImageRef`,
+and `ImageUrl`), reclaiming descriptions of compaction-dropped images in-session.
 
 #### `agents/session_context.rs`
 
@@ -7311,6 +7314,18 @@ pub enum ImageDetail {
 }
 ```
 
+**Impl** `ContentPart` + free fn:
+```rust
+impl ContentPart {
+  // 内容指纹：图片用解码字节 sha256（== blobs/{hash}.bin 文件名 == ImageRef.hash），
+  // 故跨 ImageB64⇄ImageRef 外化/hydrate 与 b64 重编码往返均不变；URL 用 url 哈希；
+  // 不可解码 b64 退化为哈希原串；非媒体 part → None。用作描述缓存键 + 描述 GC 键。
+  pub fn content_fingerprint(&self) -> Option<String>
+}
+// 内容哈希单一实现，blob 存储与内容指纹共用以杜绝漂移：
+pub fn sha256_hex(bytes: &[u8]) -> String
+```
+
 **结构体** `ChatMessage`:
 ```rust
 pub struct ChatMessage {
@@ -9127,9 +9142,13 @@ pub struct RoutingConfig {
 `ImageRef` 读取 blob → 重新编码回 `ImageB64`；blob 缺失/损坏时降级为
 `Text { "[image unavailable]" }`，不会让整次加载失败。
 `write_blob` 幂等（文件已存在则跳过 = 内容寻址去重），`read_blob` 读取原始字节。
-blob GC：`rotate_history` 与 `truncate_messages` 写入存活消息后做 mark-and-sweep
-——收集存活段（以及外化的 archive 段，见 `archived_blob_hashes`）引用的全部
-`ImageRef.hash`，删除不在集合内的 `blobs/*.bin`。archive 段同样被外化。
+GC：`rotate_history` 与 `truncate_messages` 写入存活消息后做 mark-and-sweep,
+**同时清扫 blob 与描述**——`extend_archived_live_sets` 单次扫描 archive 段填充两个 live 集:
+`collect_blob_hashes`(存活消息的 `ImageRef.hash` → `sweep_blobs` 删孤儿 `blobs/*.bin`)
+与 `collect_description_keys`(存活消息**全部**媒体 part 的 `content_fingerprint` →
+`sweep_descriptions` 删孤儿 `descriptions/*.txt`)。描述键 = 内容指纹 = blob hash(`sha256_hex`),
+故描述 live 集是 blob live 集的超集(含内联 `ImageB64`/`ImageUrl`),内联小图描述不会被误删。
+archive 段同样被外化。
 
 **结构体** `SessionMeta`:
 ```rust
@@ -9199,7 +9218,7 @@ pub struct JsonFileBackend {
   fn generate_session_id() -> String
   fn read_history_with_ids(&self, session_id: &str) -> Vec<(i64, ChatMessage)>  // hydrate 后返回
   fn meta_to_info(meta: &SessionMeta) -> SessionInfo
-  fn rotate_history_impl(  // 重新 externalize 存活消息 + sweep 孤儿 blob
+  fn rotate_history_impl(  // 重新 externalize 存活消息 + sweep 孤儿 blob/description
   // ── 图片 blob 存储 ──
   fn blobs_dir(&self, session_id: &str) -> PathBuf
   fn blob_path(&self, session_id: &str, hash: &str) -> PathBuf
@@ -9207,8 +9226,10 @@ pub struct JsonFileBackend {
   fn read_blob(&self, session_id: &str, hash: &str) -> std::io::Result<Vec<u8>>
   fn externalize(&self, session_id: &str, message: &ChatMessage) -> std::io::Result<ChatMessage>
   fn hydrate(&self, session_id: &str, message: &ChatMessage) -> ChatMessage
-  fn sweep_blobs(&self, session_id: &str, live: &HashSet<String>)  // mark-and-sweep GC
-  fn archived_blob_hashes(&self, session_id: &str) -> HashSet<String>
+  fn sweep_blobs(&self, session_id: &str, live: &HashSet<String>)         // mark-and-sweep blobs/*.bin
+  fn sweep_descriptions(&self, session_id: &str, live: &HashSet<String>)  // mark-and-sweep descriptions/*.txt
+  fn extend_archived_live_sets(&self, session_id: &str, blob_hashes: &mut HashSet<String>, desc_keys: &mut HashSet<String>)
+// free fns: collect_blob_hashes(msg, set) / collect_description_keys(msg, set)
 ```
 
 **Impl** `impl SessionBackend for JsonFileBackend`:

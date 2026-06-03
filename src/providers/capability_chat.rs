@@ -1,6 +1,7 @@
 //! Chat capability: streaming chat interface.
 
 use async_trait::async_trait;
+use base64::Engine;
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
@@ -57,6 +58,46 @@ pub enum ImageDetail {
     Auto,
     Low,
     High,
+}
+
+/// Lowercase hex SHA-256 of `bytes`. Single source of truth shared by content
+/// fingerprints ([`ContentPart::content_fingerprint`]) and the image blob store
+/// (`storage::json_file`), so an image's content hash never drifts between the
+/// two and `ImageB64`/`ImageRef`/`blobs/{hash}.bin` all agree.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+impl ContentPart {
+    /// Stable content fingerprint identifying this part's media payload — used
+    /// both as the auxiliary-description cache key and to GC persisted
+    /// descriptions against live history.
+    ///
+    /// For images the key is the **decoded-bytes** SHA-256 (lowercase hex),
+    /// identical to the `blobs/{hash}.bin` filename and to `ImageRef.hash`. The
+    /// fingerprint is therefore invariant across externalization and hydration
+    /// (`ImageB64 ⇄ ImageRef`) and across a base64 re-encoding round-trip, so a
+    /// description persisted on one run is still found on the next regardless of
+    /// b64 canonicalization. URL images key on the URL; undecodable base64 falls
+    /// back to hashing the raw string (such parts stay inline, never
+    /// externalized, so the fallback is self-consistent). Non-media parts have no
+    /// stable identity and return `None`.
+    pub fn content_fingerprint(&self) -> Option<String> {
+        match self {
+            ContentPart::ImageUrl { url, .. } => Some(sha256_hex(url.as_bytes())),
+            ContentPart::ImageB64 { b64_json, .. } => Some(
+                match base64::engine::general_purpose::STANDARD.decode(b64_json.as_bytes()) {
+                    Ok(bytes) => sha256_hex(&bytes),
+                    Err(_) => sha256_hex(b64_json.as_bytes()),
+                },
+            ),
+            ContentPart::ImageRef { hash, .. } => Some(hash.clone()),
+            ContentPart::Text { .. } | ContentPart::Thinking { .. } => None,
+        }
+    }
 }
 
 /// Chat message.
