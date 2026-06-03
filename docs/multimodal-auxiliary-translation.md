@@ -1,6 +1,12 @@
 # MyClaw 多模态辅助翻译方案
 
-> RFC v2 · 2026-06-03
+> RFC v3 · 2026-06-03
+>
+> **v3 修订（修正 v2 的数据流前提）**：
+> - **当轮图片持久化进 `session.history`**：v2 的「clone 历史 → 适配媒体 → 缓存复用描述」整套设计，**隐含前提是历史里真有图片 parts**。但现状代码 `Session::add_user()` 只把**文本**写入 history，原始图片仅短暂存在于 `session.last_message`，turn 结束即弃（见 §1.1 现状修正）。本版把当轮图片作为 `ContentPart::ImageUrl/ImageB64` 一并持久化进 history，使 v2 的 clone 层与缓存方案真正成立。
+> - 由此**简化** `agent.rs`：不再「从 `last_message` 快照临时拼回图片」。history 自带图片，`messages = clone(history)` 天然携带，当轮 vs 历史由**位置**（最后一条 user 消息 vs 更早消息）区分，无需启发式。
+> - 持久化图片**优于 OpenClaw 纯文本模式**：OpenClaw 把图片转文本后丢弃原图，切回视觉模型即失去原始内容；MyClaw 保留原图 + 缓存描述，做到「视觉模型用原图、非视觉模型用缓存描述」两全。
+> - 新增 **§11 持久化体积与已知风险**：b64 内联图体积、URL 过期、与 compaction `strip_images` 的协作、token 计账、prompt injection、测试策略——前几版口头列举的待细化点在此落定。
 >
 > **v2 修订（基于代码评审）**：
 > - 修正辅助翻译的流式消费（`ChatProvider::chat()` 返回 `BoxStream`，须经 `ChatResponse::from_stream()` 聚合；`stream` 恒为 `true`）
@@ -21,8 +27,16 @@ MyClaw 的多模态基础设施已部分就绪：
 - `Capability` 枚举覆盖 `Chat / ImageGeneration / TextToSpeech / SpeechToText / VideoGeneration / Search`
 - `RoutingConfig` 为每种 Capability 提供独立路由（`[routing.speech_to_text]` 等）
 - `agent.rs` 已实现 `model_supports_images` 检查，视觉模型可原生接收图片
-- `ContentPart` 枚举支持 `ImageUrl / ImageB64 / Thinking` 等多种内容类型
+- `ContentPart` 枚举支持 `ImageUrl / ImageB64 / Thinking` 等多种内容类型（且 `Serialize/Deserialize`，可落盘）
 - `context_engine.rs` 的 compaction 流程有 `strip_images()` 将图片替换为 `[image]`
+
+> **关键现状修正（v3）**：当轮图片**目前不进 history**。`process_turn`（`session_context.rs:119/180`）
+> 先 `record_inbound(msg)` 把完整 `ChannelMessage`（含 `image_urls/image_base64`）存进
+> `session.last_message`，再 `add_user(text)` —— 而 `add_user`（`session/types.rs:203`）只
+> `push(ChatMessage::user_text(text))`，**只存文本**。视觉模型靠 `agent.rs` 从 `last_message`
+> **快照**临时把图片拼回 messages；turn 结束后 history 里那条 user 消息**没有图片**。
+> 因此 v2 设想的「历史图片以 `ImageUrl` 存在于 clone 出的 messages」在当前代码下**并不成立**——
+> 历史里根本没有图片可供缓存复用或切回视觉模型原生使用。v3 修正这一数据流。
 
 ### 1.2 缺失
 
@@ -166,8 +180,9 @@ let description = resp.text;
 
 > **这不是可选优化，而是多轮对话的正确性前提。**
 
-辅助翻译的结果**不持久化**（持久化 history 必须保留原始 `ImageUrl`，以便切回视觉模型时仍能原生使用）。
-若历史图片一律简单替换为 `[image]`，会丢失追问能力：
+辅助翻译的**结果**（文本描述）不写回 history —— history 持久化的是**原始 `ImageUrl/ImageB64`**
+（v3 起当轮图片真正进 history，见 §3.6），以便切回视觉模型时仍能原生使用。描述只活在缓存与 clone 层。
+若历史图片在 clone 层一律简单替换为 `[image]`，会丢失追问能力：
 
 ```
 Turn N:   用户发图 → 翻译为 "[图片描述]: 穿红衬衫的人..."（仅存在于 clone 层）
@@ -197,23 +212,47 @@ Hermes 的 `_anthropic_image_fallback_cache` 是同一思路。
 
 ### 3.5 消息变换发生在 clone 层
 
-当轮图片来自 `session.last_message.image_urls / image_base64` 快照，**在 messages 层注入**，
-不写回持久化 history。历史图片才以 `ContentPart::ImageUrl/ImageB64` 存在于 clone 出的 messages 中。
-这让"当轮 vs 历史"的区分天然成立，无需启发式猜测。
+v3 起，**当轮与历史图片都以 `ContentPart::ImageUrl/ImageB64` 驻留在 history**（§3.6），
+故 `messages = clone(history)` 天然携带全部图片。所有媒体变换只在这份 clone 上进行，
+**永不写回持久化 history**。"当轮 vs 历史"由**位置**区分——最后一条 user 消息是当轮、更早的是历史
+——无需快照拼接，也无需启发式猜测。
 
 ```
-Layer 1: 持久化历史 (history.jsonl) — 永不修改
+Layer 1: 持久化历史 (history.jsonl) — 永不修改；含原始 ImageUrl/B64（v3）
          ↓ session.history.iter().cloned()
 Layer 2: messages: Vec<ChatMessage> — clone，可修改
-         ↓ sanitize_history()                    [已有]
-         ↓ adapt_history_media()  历史图片→缓存复用/占位符   [新增]
-         ↓ 主模型支持？
-         │   ├─ 是：附加 ImageUrl/B64 parts（当轮原生）      [已有]
-         │   └─ 否：adapt_pending_media() 当轮图片→辅助翻译注入 [新增]
-Layer 3: 协议渲染 render_*_body()                [已有]
+         ↓ sanitize_history()                          [已有]
+         ↓ 主模型支持图片？
+         │   ├─ 是：保持 ImageUrl/B64 parts 原样（当轮+历史均原生）   [已有/简化]
+         │   └─ 否：
+         │        adapt_history_media()   非末条 user 的图片→缓存复用/占位符  [新增]
+         │        adapt_pending_media()    末条 user 的图片→辅助翻译注入       [新增]
+Layer 3: 协议渲染 render_*_body()                       [已有]
 ```
 
 和 Hermes 的 `copy.deepcopy(api_messages)` 是同一思路。
+
+### 3.6 当轮图片持久化进 history（v3 核心修正）
+
+> 把图片本身存下来，而非只在内存里转一次文本。
+
+**改动点**：`Session::add_user` 增加一条携带媒体的入口（如 `add_user_with_media`），
+`process_turn` 在记录当轮 user 消息时，把 `last_message` 的 `image_urls/image_base64`
+作为 `ContentPart::ImageUrl/ImageB64` 一并放进那条 user 消息的 `parts`。`persist_hook`
+（`session_context.rs:181`）随即把这条**含图片的** `ChatMessage` 写入 `history.jsonl`
+（`ContentPart` 已是 `Serialize`，天然可落盘）。
+
+**为什么这是正确修法，而不仅是优化**：
+
+| 维度 | 现状（图片不进 history） | v3（图片持久化） |
+|------|------------------------|-----------------|
+| v2 的 clone 层/缓存方案 | 前提不成立（历史无图） | **成立**——历史真有图可复用/原生用 |
+| 切回视觉模型 | 历史图已丢，无法原生使用 | 原图在 history，**原生使用** |
+| 多轮追问（非视觉模型） | 历史无图，无从翻译 | 历史图在，**缓存复用描述**可答 |
+| agent.rs 复杂度 | 需从 `last_message` 快照拼回 | **简化**：clone 即带图，删快照逻辑 |
+| 对比 OpenClaw 纯文本模式 | —— | **更优**：OpenClaw 转文本即弃原图，切回视觉模型无原图；MyClaw 两全 |
+
+代价（持久化体积、URL 过期）与缓解见 **§11**。
 
 ## 4. 详细设计
 
@@ -431,17 +470,22 @@ async fn translate_part(
 #### 4.3.4 历史媒体：缓存复用 / 占位符
 
 ```rust
-/// Replace historical media parts (everything except the current turn,
-/// which is handled by `adapt_pending_media`). Reuses a cached description
-/// when available so follow-up questions still work; otherwise degrades to
-/// the placeholder. Never calls the auxiliary model (no new translation for
-/// stale context — cache hits are free, misses are not worth a round-trip).
+/// Replace historical media parts (everything except the current turn at
+/// `skip_idx`, which is handled by `adapt_last_turn_media`). Reuses a cached
+/// description when available so follow-up questions still work; otherwise
+/// degrades to the placeholder. Never calls the auxiliary model (no new
+/// translation for stale context — cache hits are free, misses are not worth
+/// a round-trip).
 pub fn adapt_history_media(
     messages: &mut [ChatMessage],
     spec: &ModalitySpec,
     cache: &dyn DescriptionCache,
+    skip_idx: Option<usize>,
 ) {
-    for msg in messages.iter_mut() {
+    for (i, msg) in messages.iter_mut().enumerate() {
+        if Some(i) == skip_idx {
+            continue;   // 当轮消息留给 adapt_last_turn_media
+        }
         for part in msg.parts.iter_mut() {
             if !part_matches(part, spec.modality) {
                 continue;
@@ -458,8 +502,9 @@ pub fn adapt_history_media(
 
 #### 4.3.5 当轮媒体：翻译并注入
 
-当轮图片由 `agent.rs` 从 `session.last_message` 快照提供（见 §4.4），尚未进入 `parts`，
-所以这里直接产出要注入的文本，由调用方 push 到最后一条 user 消息：
+v3 起当轮图片已作为 parts 驻留在 messages 末条 user 消息（§3.6），调用方把这些媒体 parts
+切片传入；本函数产出一个文本 `ContentPart`，由调用方**替换掉**末条消息里的媒体 parts
+（而非另存快照再插空）：
 
 ```rust
 /// Translate current-turn media to a single text block to inject into the
@@ -525,67 +570,81 @@ pub async fn adapt_pending_media(
 
 ### 4.4 修改 `agent.rs`：集成模态适配
 
-集成点与现有代码的两个事实对齐：
-- **历史图片**在 clone 出的 `messages` 的 `parts` 里 → 用 `adapt_history_media` 处理（缓存复用/占位符）
-- **当轮图片**来自 `session.last_message.image_urls / image_base64` 快照（`agent.rs:126-133`），
-  主模型支持时附加原生 parts（现有逻辑），不支持时改走 `adapt_pending_media` 注入文本
+v3 起图片已驻留 history（§3.6），集成大幅简化为两件事：
+
+- **主模型支持图片**：`messages = clone(history)` 已带全部 `ImageUrl/B64` parts → **保持原样**，
+  不再需要从 `last_message` 快照拼回（删除原 `agent.rs:126-133` 那段附加逻辑）。
+- **主模型不支持**：对 clone 出的 messages 做媒体适配——**末条 user 消息**的图片是当轮
+  （`adapt_pending_media` 翻译注入），**更早**消息的图片是历史（`adapt_history_media`
+  缓存复用/占位符）。
 
 ```rust
 // src/agents/agent.rs — run() 方法中
 
-// 现有代码：构建 messages
+// 构建 messages：history 已含 ImageUrl/B64 parts（v3）
 let mut messages: Vec<ChatMessage> = std::iter::once(system_msg.clone())
     .chain(session.history.iter().cloned())
     .collect();
 crate::agents::session::sanitize_history(&mut messages);
 
-let cache = runtime.description_cache.as_ref();   // §4.7 挂在 AgentRuntime 上
-
-// ===== 新增 1：历史图片适配（无论主模型是否支持，统一规范化历史）=====
-// 仅当主模型不支持图片时才需要把历史 ImageUrl 文本化；支持时保持原样。
 if !model_supports_images {
+    let cache = runtime.description_cache.as_ref();   // §4.7 挂在 AgentRuntime 上
+
+    // 定位末条 user 消息的下标 = 当轮；其余 user 消息的图片为历史。
+    let last_user_idx = messages
+        .iter()
+        .rposition(|m| m.role == "user");
+
+    // ===== 历史图片：缓存复用 / 占位符（不调用辅助模型）=====
     modality_adapter::adapt_history_media(
         &mut messages,
         &modality_adapter::IMAGE_SPEC,
         cache,
+        last_user_idx,   // 跳过此下标，留给 adapt_pending_media
     );
-}
-// ===== 结束 1 =====
-```
 
-当轮图片的分叉发生在原有的「图片附加」处：
-
-```rust
-// 现有代码：图片附加（仅在主模型支持时）—— 保持不变
-if !images_attached {
-    if model_supports_images {
-        // ... 现有逻辑不变：把 pending ImageUrl/B64 push 到最后一条 user 消息
-    } else {
-        // ===== 新增 2：主模型不支持 → 当轮图片辅助翻译注入 =====
+    // ===== 当轮图片：辅助翻译注入 =====
+    if let Some(idx) = last_user_idx {
         let aux = runtime.providers.find_chat_model_with_modality(Modality::Image);
         let aux_ref = aux.as_ref().map(|(p, id)| (p, id.as_str()));
-
-        // 把 pending 快照拼成 ContentPart 列表供翻译
-        let pending_parts = build_pending_parts(&pending_image_urls, &pending_image_b64);
-        if let Some(injected) = modality_adapter::adapt_pending_media(
-            &pending_parts,
+        modality_adapter::adapt_last_turn_media(
+            &mut messages[idx],
             &modality_adapter::IMAGE_SPEC,
             aux_ref,
             cache,
-        ).await {
-            if let Some(last_user) = messages.iter_mut().rev().find(|m| m.role == "user") {
-                last_user.parts.insert(0, injected);
-            }
-        }
-        // ===== 结束 2 =====
+        ).await;
     }
 }
-images_attached = true;
+// 主模型支持图片时：什么都不做，原生 parts 直接渲染。
 ```
 
-> `build_pending_parts` 把 `Vec<String>` URL / base64 还原为 `ContentPart::ImageUrl/ImageB64`
-> （`media_type: None`, `detail: Auto`），与现有附加逻辑构造的 part 完全一致，从而 fingerprint
-> 一致、缓存可跨「视觉模型轮」与「非视觉模型轮」命中。
+> `adapt_history_media` 增加一个 `skip_idx: Option<usize>` 参数跳过当轮消息；
+> `adapt_last_turn_media` 是 §4.3.5 `adapt_pending_media` 的就地版本：在传入的那条 user 消息上，
+> 收集其媒体 parts → 翻译 → 用产出的文本 part **替换**这些媒体 parts（保留原有 `Text` parts）。
+> 因当轮图片本就是 history 里构造的同一个 `ContentPart`，fingerprint 天然一致——缓存可跨
+> 「视觉模型轮」与「非视觉模型轮」命中，无需 `build_pending_parts` 重建。
+
+**持久化入口**（`session_context.rs` + `session/types.rs`）：
+
+```rust
+// session/types.rs — 新增携带媒体的入口
+pub fn add_user_with_media(&mut self, text: String, media: Vec<ContentPart>) {
+    let mut parts = Vec::with_capacity(media.len() + 1);
+    parts.extend(media);                       // ImageUrl/B64 在前
+    parts.push(ContentPart::Text { text });    // 文本在后
+    self.history.push(ChatMessage { role: "user".into(), parts, ..Default::default() });
+    self.message_ids.push(0);
+}
+
+// session_context.rs process_turn — 用 last_message 的图片构造媒体 parts
+let media = build_media_parts(&session.last_message);   // image_urls/base64 → ContentPart
+if media.is_empty() {
+    session.add_user(user_content);
+} else {
+    session.add_user_with_media(user_content, media);
+}
+// persist_hook 随后把这条含图片的消息写入 history.jsonl（不变）
+```
 
 ### 4.5 ProviderRegistry trait 扩展
 
@@ -649,18 +708,16 @@ pub description_cache: Arc<dyn DescriptionCache>,
 ```
 用户发图 + 文本
     ↓
-session.add_user(text)
-session.last_message.image_urls = [url]
+add_user_with_media(text, [ImageUrl])   ← 图片进 history（v3）
+persist_hook → history.jsonl 含 ImageUrl
     ↓
-messages = clone(history)
+messages = clone(history)   ← 已带 ImageUrl parts
     ↓
 model_supports_images = true
     ↓
-附加 ImageUrl parts 到最后一条 user 消息
+保持 parts 原样（无需快照拼接）
     ↓
 render → API（带图片）
-    ↓
-持久化：history 中完整保存 ImageUrl parts
 ```
 
 ### 5.2 主模型不支持图片（新增流程）
@@ -668,25 +725,26 @@ render → API（带图片）
 ```
 用户发图 + 文本
     ↓
-session.add_user(text)
-session.last_message.image_urls = [url]
+add_user_with_media(text, [ImageUrl])   ← 图片进 history（v3）
+persist_hook → history.jsonl 含 ImageUrl
     ↓
-messages = clone(history)
+messages = clone(history)   ← 已带 ImageUrl parts（当轮+历史）
     ↓
 model_supports_images = false
     ↓
-adapt_history_media():  历史 messages 中的 ImageUrl
+last_user_idx = 末条 user 消息下标
+adapt_history_media(skip=last_user_idx):  更早消息里的 ImageUrl
   ├─ 缓存命中 → "[图片描述]: ..."（复用，多轮追问可答）
   └─ 缓存未命中 → "[image]"
-adapt_pending_media():  当轮新图片（来自 last_message 快照）
+adapt_last_turn_media(messages[last_user_idx]):  当轮新图片（已在该消息 parts 内）
   ├─ 找到辅助视觉模型（[routing.image_aux] 覆盖 → [routing.chat] 链中的视觉模型）
   ├─ 查缓存 → miss 则流式 Chat 调用 from_stream() → 写缓存
   ├─ 多图并行 join_all
-  └─ 注入最后一条 user 消息: "[图片描述]: 一张包含...的图片"
+  └─ 用文本 part 替换该消息的图片 parts: "[图片描述]: 一张包含...的图片"
     ↓
 render → API（纯文本）
     ↓
-持久化：history 中仍然完整保存 ImageUrl parts（不变）
+持久化：history.jsonl 中 ImageUrl parts 始终保留（clone 层变换不写回）
 ```
 
 ### 5.3 切换模型场景
@@ -800,6 +858,66 @@ if !primary_config.supports_input(Modality::Audio) {
 | `src/config/routing.rs` | 可选（Phase 1.5） | 新增 `get_by_key(&str)` 以读取约定键 `image_aux` 等（`get()` 仅认 Capability 键）；v1 可不做 |
 | `src/agents/modality_adapter.rs` | **新增文件** | `ModalitySpec` / `DescriptionCache` / `translate_part`（流式）/ `adapt_history_media` / `adapt_pending_media` |
 | `src/agents/runtime.rs` | 新增字段 | `description_cache: Arc<dyn DescriptionCache>` 单例 |
-| `src/agents/agent.rs` | 修改 | `run()` 集成 `adapt_history_media` + 当轮分叉 `adapt_pending_media` |
+| `src/agents/session/types.rs` | **新增方法** | `add_user_with_media(text, Vec<ContentPart>)`——当轮图片进 history（§3.6） |
+| `src/agents/session_context.rs` | 修改 | `process_turn` 由 `last_message` 构造媒体 parts，走 `add_user_with_media`；持久化随之带图 |
+| `src/agents/agent.rs` | 修改 | `run()` 集成 `adapt_history_media(skip)` + `adapt_last_turn_media`；**删除**从 `last_message` 快照拼回图片的旧逻辑 |
 | `src/agents/mod.rs` | 修改 | 声明 `mod modality_adapter` |
 | `Cargo.toml` | 依赖 | `sha2`（指纹）、`lru`（缓存）；`futures-util` 已在用 |
+
+## 11. 持久化体积与已知风险
+
+把图片存进 history 带来正确性收益（§3.6），也引入需要明确处理的代价。逐项列出，含缓解策略。
+
+### 11.1 持久化体积（主要代价）
+
+- **b64 内联图**：一张图常达数 MB，base64 后更大。直接写进 `history.jsonl` 会显著膨胀历史文件，
+  加载/反序列化变慢。
+- **URL 图**：只是字符串链接，体积可忽略。
+- **缓解**：
+  1. **依赖现有 compaction**：`strip_images()`（§1.1）在压缩时把图片→`[image]`，长程历史的
+     b64 体积会被自然回收，只有近窗口保留原图——上限可控。
+  2. **可选 blob 外置**（Phase 1.5+）：b64 落盘到单独的 blob 存储，history 里存引用句柄
+     （`ContentPart::ImageRef { hash }`），加载时按需取回。本 RFC 不强制，先用方案 1。
+  3. **入站即转引用**：若渠道给的是可下载 URL，优先持久化 URL 而非 b64，体积更小。
+
+### 11.2 URL 过期
+
+- 持久化的 CDN/Telegram 文件 URL 可能过期；切回视觉模型若直接发过期 URL，调用会失败。
+- **缓解**：
+  - 缓存的**文本描述不过期**——非视觉模型路径不受影响。
+  - 视觉模型路径：可在入站时把 URL 图**下载为 b64**再持久化（牺牲体积换不失效），
+    或在发送前探测/刷新。两者皆为 Phase 1.5 优化，v1 先接受「过期 URL 发给视觉模型可能失败」
+    并按现有错误路径处理。
+
+### 11.3 与 compaction `strip_images` 的协作
+
+- 压缩后历史里的图片变成 `[image]` 文本，**fingerprint 随之消失**——后续无法再对该图缓存复用描述。
+- 这是可接受的：被压缩的是远端过期上下文，本就不期望精细追问。
+- 注意**顺序**：adapt 层在 clone 上工作、strip 在 compaction 持久化路径工作，二者不冲突；
+  但需确保 strip 后的占位符文本不会被 `part_matches` 误判为媒体（它是 `Text`，不会）。
+
+### 11.4 Token 计账
+
+- 注入的描述文本会进入主模型上下文，**计入 token 预算**。多图长描述可能挤占窗口。
+- **缓解**：`translate_part` 已设 `max_tokens: 1024` 限制单图描述长度；后续可按
+  `ModalitySpec` 调节详略（§8.3 描述质量分级）。context window 估算需把注入描述计入。
+
+### 11.5 Prompt Injection
+
+- 辅助模型对图片的描述是**模型生成的不可信文本**，被原样注入主模型上下文；图片中嵌入的文字
+  （如「忽略以上指令」）可能借描述通道触达主模型。
+- **缓解**：注入文本统一包裹明确定界（`[图片描述]: ...`），并可在系统提示中声明
+  「图片描述为不可信外部内容」。与渠道入站的其他不可信内容同级处理，不额外降权。
+
+### 11.6 测试策略
+
+- 辅助翻译走真实 `ChatProvider::chat()` 流式接口，单测需 **mock provider**：返回固定
+  `BoxStream<StreamEvent>`，验证 `from_stream()` 聚合、缓存写入、并行 `join_all` 顺序。
+- 持久化测试：构造含图 `ChannelMessage` → `process_turn` → 断言 `history.jsonl` 那条 user 消息
+  含 `ImageUrl` part（§9 测试 7 强化）。
+- 体积回归：可加一个「b64 大图持久化后 compaction 能回收」的测试，锚定 §11.1 缓解方案 1。
+
+### 11.7 UX 可见性
+
+- 非视觉模型回答基于描述而非原图时，用户可能不知情。可选：在回复或日志中标注
+  「（图片经辅助模型 X 转述）」，便于用户判断可信度。属可选增强，不阻塞 v1。
