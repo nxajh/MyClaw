@@ -158,7 +158,9 @@ impl PersistentDescriptionCache {
 
     /// Per-session cold-tier directory (sibling of the session's `blobs/`).
     fn dir_for(&self, session_id: &str) -> PathBuf {
-        self.sessions_root.join(session_id).join("descriptions")
+        self.sessions_root
+            .join(session_id)
+            .join(crate::storage::SESSION_DESCRIPTIONS_DIR)
     }
 
     /// Cold-tier file path for `(session_id, key)`. The key is a sha256 hex
@@ -570,7 +572,7 @@ mod tests {
         assert!(root
             .path()
             .join("s1")
-            .join("descriptions")
+            .join(crate::storage::SESSION_DESCRIPTIONS_DIR)
             .join(format!("{key}.txt"))
             .exists());
 

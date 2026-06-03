@@ -411,7 +411,7 @@ impl JsonFileBackend {
     /// `PersistentDescriptionCache`; this is the in-session reclamation point for
     /// images dropped by compaction (full reclamation happens on session delete).
     fn sweep_descriptions(&self, session_id: &str, live: &HashSet<String>) {
-        let dir = self.session_dir(session_id).join("descriptions");
+        let dir = self.session_dir(session_id).join(crate::storage::SESSION_DESCRIPTIONS_DIR);
         let Ok(entries) = fs::read_dir(&dir) else { return; };
         for entry in entries.filter_map(|e| e.ok()) {
             let name = entry.file_name().to_string_lossy().to_string();
@@ -943,7 +943,7 @@ mod tests {
         // Simulate PersistentDescriptionCache having persisted a description for
         // each image, keyed by content fingerprint (== decoded-bytes sha256 ==
         // blob hash, so it matches the on-disk ImageRef the sweep sees).
-        let desc_dir = backend.session_dir(&sid).join("descriptions");
+        let desc_dir = backend.session_dir(&sid).join(crate::storage::SESSION_DESCRIPTIONS_DIR);
         fs::create_dir_all(&desc_dir).unwrap();
         let key_a = sha256_hex(&raw_a);
         let key_b = sha256_hex(&raw_b);
