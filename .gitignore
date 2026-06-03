@@ -12,3 +12,6 @@ myclaw
 *.prev
 # Debug / session logs
 *.jsonl
+
+# Claude Code agent worktrees (transient, never track)
+.claude/worktrees/
