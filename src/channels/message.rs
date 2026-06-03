@@ -714,6 +714,24 @@ fn find_split_point(text: &str, limit: usize, unit: LenUnit, start_in_block: boo
         open
     };
 
+    // Codepoint index of the first backtick of the fence currently open at
+    // `pos`, or None if `pos` is not inside a block.
+    let open_fence_start = |pos: usize| -> Option<usize> {
+        let mut open = start_in_block;
+        let mut start = if start_in_block { Some(0usize) } else { None };
+        let mut i = 0;
+        while i < pos {
+            if i + 2 < len && chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
+                open = !open;
+                start = if open { Some(i) } else { None };
+                i += 3;
+                continue;
+            }
+            i += 1;
+        }
+        if open { start } else { None }
+    };
+
     // Best natural boundary within [0, cap]; hard cut at cap as last resort.
     let boundary_within = |cap: usize| -> usize {
         if let Some(pos) = find_last_pattern(&chars[..cap], &['\n', '\n']) {
@@ -738,6 +756,28 @@ fn find_split_point(text: &str, limit: usize, unit: LenUnit, start_in_block: boo
         if chunk_cost + fence_cost > limit {
             index = boundary_within(cap_for(limit.saturating_sub(fence_cost)).max(1));
             in_code_block = in_block_at(index);
+        }
+    }
+
+    if in_code_block {
+        // Avoid emitting a degenerate empty code block: if the fence opened at
+        // the tail of this chunk with no real body before the cut, split
+        // *before* the fence so the whole block moves to the next chunk.
+        if let Some(f) = open_fence_start(index) {
+            if f > 0 {
+                // Body begins after the opening fence's own line (```lang\n).
+                let mut b = (f + 3).min(index);
+                while b < index && chars[b] != '\n' {
+                    b += 1;
+                }
+                if b < index {
+                    b += 1; // skip the newline after the opening fence
+                }
+                if chars[b..index].iter().all(|c| c.is_whitespace()) {
+                    index = f;
+                    in_code_block = false;
+                }
+            }
         }
     }
 
@@ -904,6 +944,26 @@ mod tests {
         assert_within(&chunks, limit, LenUnit::Codepoints);
         for c in &chunks {
             assert!(fences_balanced(c), "unbalanced fences in chunk: {c:?}");
+        }
+    }
+
+    #[test]
+    fn split_does_not_emit_empty_code_block() {
+        // Prefix nearly fills the limit, then a code block starts. The splitter
+        // must break BEFORE the fence rather than opening an empty block at the
+        // tail of the first chunk.
+        let limit = 100;
+        let msg = format!("{}\n```\ncode body here\n```\nafter", "x".repeat(90));
+        let chunks = split_message_chunk(&msg, limit, LenUnit::Codepoints);
+        assert_within(&chunks, limit, LenUnit::Codepoints);
+        for c in &chunks {
+            assert!(fences_balanced(c), "unbalanced fences: {c:?}");
+            // No chunk should contain an empty fenced block.
+            let squashed = c.replace(['\n', ' ', '\t'], "");
+            assert!(
+                !squashed.contains("``````"),
+                "empty code block emitted in chunk: {c:?}"
+            );
         }
     }
 
