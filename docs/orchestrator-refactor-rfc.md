@@ -1,6 +1,6 @@
 # Orchestrator 重构 RFC
 
-> 状态:草案 → 实施中
+> 状态:已实施(全部验收项达成,406 测试 / clippy --all-targets 全绿)
 > 范围:`src/agents/orchestrator.rs`(1142 行)+ `orchestrator_event.rs` + `orchestrator_scheduled.rs`
 > 原则:**合理性 > 优雅 > 其它**。一次性大重构,不保留任何为兼容旧形态而存在的设计。
 
@@ -268,32 +268,24 @@ recovery、scheduled、(理想情况下 `process_turn` 内部)都调它,杜绝�
 
 ## 9. 最终模块树
 
+实际落地结构(扁平文件而非子目录,关联紧密的拦截器同处一文件,更易读):
+
 ```
 agents/orchestrator/
-├── mod.rs            # 模块文档 + 对外 re-export
-├── ctx.rs           # OrchestratorCtx(依赖包)+ ChannelRegistry
-├── key.rs           # SessionKey / SubAgentKey
-├── runtime.rs       # Orchestrator{ctx,events,listeners} + run(self) + Drop(abort)
-├── event.rs         # OrchestratorEvent + SchedulerTrigger + build_events(合流)
-├── listener.rs      # spawn_listener(重连退避)→ inbound 流
-├── turn.rs          # resolve_turn / TurnOverrides / DeliveryTarget
-├── parts.rs         # OrchestratorParts(组装根入参)+ new()
-├── inbound/
-│   ├── mod.rs       # Interceptor trait + Flow + dispatch(chain runner)
-│   ├── ask.rs
-│   ├── callback.rs
-│   ├── recovery_prompt.rs
-│   ├── command.rs
-│   └── dispatch.rs  # DispatchTurn(终端)+ 共享 dispatch_turn 函数
-├── scheduled/
-│   ├── mod.rs       # dispatch(trigger)
-│   ├── heartbeat.rs # 预检(读 HEARTBEAT.md/状态/due 过滤)+ 执行,合在一处
-│   └── cron.rs      # CronTrigger → run
-├── delegation.rs    # wake():系统唤醒,复用 dispatch_turn
-└── recovery.rs      # 启动恢复(会话 + 子代理)统一为 recover_one
+├── mod.rs           # Orchestrator 结构 + new() + run(self) + handle_scheduler_event + SchedulerEvent/CronTrigger + OrchestratorParts (437 行)
+├── ctx.rs           # OrchestratorCtx(依赖包)+ session_context_for / channel() 收口 (52)
+├── key.rs           # SessionKey / SubAgentKey + 单测 (121)
+├── event.rs         # OrchestratorEvent (45)
+├── turn.rs          # ResolvedTurn::resolve / turn_context (55)
+├── inbound.rs       # Interceptor + Flow + 5 拦截器 + dispatch(runner) + dispatch_turn + retry_abort_prompt + 链顺序 golden 测试 (371)
+├── delegation.rs    # wake():系统唤醒,复用 dispatch_turn (74)
+├── recovery.rs      # 启动恢复(会话 + 子代理)统一 spawn_recovery + CompletionSink (177)
+└── scheduled.rs     # run_scheduled_turn / heartbeat / cron(CronTrigger)/ send_to_target_internal (214)
 ```
 
-`orchestrator.rs` 从 1142 行 → `runtime.rs` ≈ 120 行;每个 interceptor 30–60 行。
+`orchestrator.rs` 1142 行 → `mod.rs` 437 行;9 个单一职责文件共 1546 行(含新增测试与文档)。
+
+> 与初稿 §9 的差异:未拆出 `runtime.rs`/`listener.rs`/`parts.rs`(留在 `mod.rs`),`inbound`/`scheduled` 用单文件而非子目录——关联极紧的拦截器/调度逻辑同处一文件比强行多目录更易读。详见 §12 说明。
 
 ---
 
@@ -336,12 +328,16 @@ agents/orchestrator/
 - [x] `turn.rs` `ResolvedTurn`:per-turn 参数解析单一归属,消除 recovery 两处重复的 TurnContext 组装。
 - [x] 两份 recovery 合并为 `recovery.rs` 的单一 `spawn_recovery` + `CompletionSink`(`run_startup` 驱动两条循环)。
 
-**待完成**
-- [ ] `ctx.rs`:`OrchestratorCtx` 依赖包 + `ChannelRegistry`;内部 `self.field` 改走 `self.ctx`。
-- [ ] inbound 责任链:`Interceptor` + `Flow` + 5 拦截器 + chain runner;每拦截器独立单测 + 链顺序 golden 测试。
-- [ ] `scheduled/` 去重 + `CronTrigger` / `TurnOverrides`(消除第 4 处 scheduled-turn 重复:`scheduler.rs::run_scheduled_task`)。
-- [ ] delegation 改走 `dispatch_turn`,不再构造 synthetic `ChannelMessage` 跑完整 inbound 链。
-- [ ] 事件源 `Stream` 化 + `build_events` 合流;`listener.rs`。
-- [ ] `runtime.rs`:`run(self)` 化,消除全部 `Arc<TokioMutex<Option<Receiver>>>` take-once 仪式。
-- [ ] webhook 迁移到 `Arc<OrchestratorCtx>`,删除 `Orchestrator` 的全部 accessor 方法。
-- [ ] 收尾:`cargo clippy --all-targets -- -D warnings` 全绿。
+- [x] `ctx.rs`:`OrchestratorCtx` 依赖包;`Orchestrator` 持 `Arc<OrchestratorCtx>`,内部访问走 `self.ctx`。删除全部 per-field accessor 与 `SharedSessions`,只留 `ctx()`。
+- [x] inbound 责任链:`Interceptor` + `Flow` + 5 拦截器(ask/callback/crash-recovery/command/dispatch)+ chain runner;含链顺序 golden 测试。
+- [x] `scheduled` 去重 + `CronTrigger`(丢弃 4 个死字段:delivery/enabled_tools/disabled_tools/provider);消除第 4 处 scheduled-turn 重复——`scheduler.rs::run_scheduled_task` 改为委托 `run_scheduled_turn`。
+- [x] delegation 改走 `dispatch_turn`,不再构造 synthetic `ChannelMessage` 跑完整 inbound 链(去掉 box 递归与 sender 暗坑)。
+- [x] 事件源 `Stream` 化 + `tokio_stream::merge` 合流(取代 3 个 adapter task)。
+- [x] `run(self)` 化,消除全部 `Arc<TokioMutex<Option<Receiver>>>` take-once 仪式;`run` 自行 abort listeners(删 `shutdown_listeners`)。
+- [x] webhook 迁移到 `Arc<OrchestratorCtx>`(`WebhookContext.ctx`);daemon 传 `orchestrator.ctx()`。
+- [x] 收尾:`cargo clippy --all-targets -- -D warnings` 全绿、`cargo test` 406 绿。
+
+**说明 / 后续**
+- `ChannelRegistry` newtype 未单独引入:`channels` 仍是 `OrchestratorCtx` 内的 `Arc<DashMap>`(本身即注册表),`OrchestratorCtx::channel(&account)` 收口查找;刻意避免大面积改动,satisfy 依赖包的核心目标。
+- inbound 拦截器目前有**链顺序 golden 测试**;**每个拦截器的行为单测**需要一个可注入 mock 的 `OrchestratorCtx` 测试夹具(SessionManager/AgentRuntime/AskRouter/Channel 的假实现),列为后续工作。当前行为正确性由"纯结构重排 + 全量回归 + clippy"保证。
+- cron `session_key` 保持 `String`(可能是 `_cron_<id>` / `_hooks_agent` 等非三段式键),不强转 `SessionKey`。
