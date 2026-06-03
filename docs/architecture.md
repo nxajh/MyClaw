@@ -1582,7 +1582,15 @@ pub trait DescriptionCache: Send + Sync {
 ```
 
 **结构体** `LruDescriptionCache` — `Mutex<lru::LruCache<String, String>>`-backed
-default impl (`new(capacity)` / `Default` = 512 entries).
+default impl (`new(capacity)` / `Default` = 512 entries). Used by CLI one-shot
+commands and tests.
+
+**结构体** `PersistentDescriptionCache` — two-tier impl: bounded LRU hot tier +
+content-addressed on-disk cold tier under `dir` (write-through + read-through,
+atomic temp+rename). `open(dir, capacity)`. The daemon installs it at
+`workspace/descriptions/` so image descriptions survive restarts and LRU
+eviction (a non-vision model recovers historical-image descriptions without
+re-invoking the auxiliary model — parallel to how blobs persist image bytes).
 
 #### `agents/session_context.rs`
 

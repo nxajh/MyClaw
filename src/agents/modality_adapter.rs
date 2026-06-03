@@ -17,6 +17,7 @@ use crate::providers::capability_chat::{
 };
 use sha2::{Digest, Sha256};
 use std::num::NonZeroUsize;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 // ── Modality spec + media fingerprint (T2.1) ──────────────────────────────────
@@ -111,6 +112,83 @@ impl DescriptionCache for LruDescriptionCache {
     fn put(&self, key: String, value: String) {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.put(key, value);
+    }
+}
+
+/// Two-tier [`DescriptionCache`]: a bounded in-memory LRU hot tier backed by a
+/// content-addressed on-disk cold tier under `dir`. The key is the same content
+/// fingerprint as [`LruDescriptionCache`], so descriptions survive process
+/// restarts and hot-tier eviction — a non-vision model recovers historical-image
+/// descriptions without re-invoking the auxiliary model, mirroring how the image
+/// bytes themselves are persisted as content-addressed blobs (`storage::json_file`).
+///
+/// The cold tier is intentionally unbounded: each entry is a few KB of text and
+/// content-addressed (identical media never duplicates), so growth is slow. A
+/// future pass can sweep entries with no live blob; the store is correct without it.
+pub struct PersistentDescriptionCache {
+    hot: Mutex<lru::LruCache<String, String>>,
+    dir: PathBuf,
+}
+
+impl PersistentDescriptionCache {
+    /// Open (or create) the cold-tier directory at `dir`, with a `capacity`-entry
+    /// in-memory hot tier (clamped to >= 1). A directory-creation failure is
+    /// logged and tolerated — the cache then behaves as a memory-only LRU.
+    pub fn open(dir: impl Into<PathBuf>, capacity: usize) -> Self {
+        let dir = dir.into();
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            tracing::warn!(
+                path = %dir.display(), err = %e,
+                "failed to create description cache dir; running memory-only"
+            );
+        }
+        let cap = NonZeroUsize::new(capacity.max(1)).expect("capacity >= 1");
+        Self {
+            hot: Mutex::new(lru::LruCache::new(cap)),
+            dir,
+        }
+    }
+
+    /// Cold-tier file path for `key`. The key is a sha256 hex string, so it is
+    /// always a safe single-segment filename.
+    fn path_for(&self, key: &str) -> PathBuf {
+        self.dir.join(format!("{key}.txt"))
+    }
+}
+
+impl DescriptionCache for PersistentDescriptionCache {
+    fn get(&self, key: &str) -> Option<String> {
+        {
+            let mut guard = self.hot.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(hit) = guard.get(key) {
+                return Some(hit.clone());
+            }
+        }
+        // Cold-tier read-through: a hit warms the hot tier for next time.
+        let text = std::fs::read_to_string(self.path_for(key)).ok()?;
+        let mut guard = self.hot.lock().unwrap_or_else(|e| e.into_inner());
+        guard.put(key.to_string(), text.clone());
+        Some(text)
+    }
+
+    fn put(&self, key: String, value: String) {
+        {
+            let mut guard = self.hot.lock().unwrap_or_else(|e| e.into_inner());
+            guard.put(key.clone(), value.clone());
+        }
+        // Write-through, atomic (temp + rename) so a partial write can never be
+        // read back as a truncated description.
+        let path = self.path_for(&key);
+        let tmp = path.with_extension("tmp");
+        let written =
+            std::fs::write(&tmp, value.as_bytes()).and_then(|_| std::fs::rename(&tmp, &path));
+        if let Err(e) = written {
+            tracing::warn!(
+                path = %path.display(), err = %e,
+                "failed to persist description; hot-tier only"
+            );
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 }
 
@@ -443,5 +521,63 @@ mod tests {
         adapt_history_media(&mut messages, &IMAGE_SPEC, &cache, Some(0));
         // Untouched: still the raw image part.
         assert!(matches!(&messages[0].parts[0], ContentPart::ImageUrl { .. }));
+    }
+
+    #[test]
+    fn persistent_cache_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = "deadbeef".to_string();
+
+        // Write through the first instance, then drop it (simulates shutdown).
+        {
+            let cache = PersistentDescriptionCache::open(dir.path(), 8);
+            assert_eq!(cache.get(&key), None);
+            cache.put(key.clone(), "a red bicycle".into());
+            assert_eq!(cache.get(&key).as_deref(), Some("a red bicycle"));
+        }
+
+        // A fresh instance with an empty hot tier still finds it on disk —
+        // this is the across-restart recovery the in-memory LRU could not give.
+        let reopened = PersistentDescriptionCache::open(dir.path(), 8);
+        assert_eq!(reopened.get(&key).as_deref(), Some("a red bicycle"));
+        // The read-through warmed the hot tier (second get also succeeds).
+        assert_eq!(reopened.get(&key).as_deref(), Some("a red bicycle"));
+    }
+
+    #[test]
+    fn persistent_cache_miss_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = PersistentDescriptionCache::open(dir.path(), 8);
+        assert_eq!(cache.get("never-written"), None);
+    }
+
+    #[test]
+    fn persistent_cache_drives_history_reuse_after_reopen() {
+        // End-to-end: a description persisted on one run is reused by
+        // `adapt_history_media` on the next, instead of degrading to "[image]".
+        let dir = tempfile::tempdir().unwrap();
+        let part = img("https://a/photo.jpg");
+        let key = fingerprint(&part).unwrap();
+        {
+            let cache = PersistentDescriptionCache::open(dir.path(), 8);
+            cache.put(key, "a mountain lake".into());
+        }
+        let cache = PersistentDescriptionCache::open(dir.path(), 8);
+        let mut messages = vec![ChatMessage {
+            role: "user".into(),
+            parts: vec![part],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            is_error: None,
+        }];
+        adapt_history_media(&mut messages, &IMAGE_SPEC, &cache, None);
+        match &messages[0].parts[0] {
+            ContentPart::Text { text } => {
+                assert!(text.contains("a mountain lake"), "got: {text}");
+                assert!(!text.contains("[image]"), "should not degrade: {text}");
+            }
+            other => panic!("expected reused description text, got {other:?}"),
+        }
     }
 }
