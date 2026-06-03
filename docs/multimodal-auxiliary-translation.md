@@ -1062,3 +1062,90 @@ blob 外置的文件改动已并入 §10 主变更清单（`capability_chat.rs` 
 
 > 注意：`strip_images`、渲染层、§4.3 adapt 层、`fingerprint`、`InMemoryBackend` **均不改**——
 > 这是「持久化边界表示」选型的核心收益。`InMemoryBackend` 无磁盘、不外置，天然正确。
+
+## 12. 实现路线与任务清单
+
+> **执行约定（重要）**：每完成一个任务，必须**同步更新 `docs/architecture.md`** 对应模块章节
+> （新增类型/方法/字段、改动的数据流），并勾选下方复选框。架构文档与代码同提交，不滞后。
+> 见 §12.4 的「任务 → architecture.md 章节」映射。
+
+### 12.1 目标（验收标准）
+
+| # | 目标 | 衡量标准 |
+|---|------|---------|
+| G1 | 非视觉主模型也能"看懂"图片 | DeepSeek V3 收图 → 辅助模型转述 → 能回答图片相关问题 |
+| G2 | 多轮追问历史图片仍可答 | Turn N 发图、N+1 追问 → 复用缓存描述，非 `[image]` |
+| G3 | 切回视觉模型能用原图 | 历史图持久化在 history，视觉模型轮原生使用原图 |
+| G4 | 持久化图片不撑爆 `history.jsonl` | 大 b64 外置为 blob，行内只存 `ImageRef` |
+| G5 | 零侵入现有渲染/压缩链路 | 渲染层、`strip_images`、`fingerprint`、`InMemoryBackend` 不改 |
+| G6 | 模态可扩展 | audio/video 仅加 `ModalitySpec`，核心逻辑不重复 |
+
+### 12.2 分阶段任务
+
+#### Stage 0 — 能力查询基建（无依赖，可先行）
+- [ ] **T0.1** `capability.rs`：加 `supports_input(modality)`（`supports_image_input` 已存在）
+- [ ] **T0.2** `provider_registry.rs`：加 trait 方法 `find_chat_model_with_modality()`（可默认实现）
+- [ ] **T0.3** `registry/mod.rs`：实现 `aux_model_for(modality)`（读 `[routing.*_aux]`，无配置返回 `None`）
+- [ ] **T0.4**（可选 / Phase 1.5）`config/routing.rs`：`get_by_key(&str)` 读约定键 `image_aux`
+
+#### Stage 1 — 持久化 + blob 外置（核心数据流，G3/G4）
+- [ ] **T1.1** `capability_chat.rs`：新增 `ContentPart::ImageRef { hash, media_type, detail }`（仅磁盘表示）
+- [ ] **T1.2** `json_file.rs`：`write_blob` / `read_blob`（`sessions/{id}/blobs/{sha256}.bin`）
+- [ ] **T1.3** `json_file.rs`：`append_message` 前 `externalize`（大 `ImageB64`→`ImageRef`+写 blob，阈值 8KB）
+- [ ] **T1.4** `json_file.rs`：`load_messages`/recovery 后 `hydrate`（`ImageRef`→`ImageB64`；缺失→`[image unavailable]`）
+- [ ] **T1.5** `json_file.rs`：`rotate_history` / `truncate_messages` 收尾 blob GC（标记-清扫）
+- [ ] **T1.6** `session/types.rs`：`add_user_with_media(text, Vec<ContentPart>)`
+- [ ] **T1.7** `session_context.rs`：`process_turn` 由 `last_message` 构造媒体 parts → 走 `add_user_with_media`
+
+#### Stage 2 — 模态适配模块（G1/G2/G6）
+- [ ] **T2.1** 新建 `modality_adapter.rs`：`ModalitySpec` + `IMAGE_SPEC`、`part_matches`、`fingerprint`
+- [ ] **T2.2** `DescriptionCache` trait + LRU 实现
+- [ ] **T2.3** `runtime.rs`：挂 `description_cache: Arc<dyn DescriptionCache>` 单例
+- [ ] **T2.4** `translate_part`：流式 `chat()` → `ChatResponse::from_stream()`，查/写缓存
+- [ ] **T2.5** `adapt_history_media(messages, spec, cache, skip_idx)`：缓存复用/占位符，不调辅助模型
+- [ ] **T2.6** `adapt_last_turn_media(&mut msg, spec, aux, cache)`：并行 `join_all` 翻译末条 user 图，替换 parts
+
+#### Stage 3 — agent.rs 集成 + 收尾（G5）
+- [ ] **T3.1** `agent.rs`：`model_supports_images == false` 分支接 `adapt_history_media(skip)` + `adapt_last_turn_media`
+- [ ] **T3.2** `agent.rs`：**删除**从 `last_message` 快照拼回图片的旧逻辑（history 已带图）
+- [ ] **T3.3** `agents/mod.rs`：声明 `mod modality_adapter`
+- [ ] **T3.4** `Cargo.toml`：`sha2` / `lru` / `base64` 依赖确认
+
+#### Stage 4 — 测试（覆盖 §9 + §11.6）
+- [ ] **T4.1** 回归：视觉模型流程不受影响
+- [ ] **T4.2** 非视觉 + 有/无辅助模型：转述 / 占位符
+- [ ] **T4.3** 多轮缓存命中、跨会话去重（fingerprint 仅调一次）
+- [ ] **T4.4** blob：往返一致、内联阈值、去重单文件、GC 回收孤儿、缺失降级
+- [ ] **T4.5** 多图并行顺序、辅助失败 graceful、候选集边界（未入路由不被选）
+
+### 12.3 依赖与关键路径
+
+```
+Stage 0 ─┐
+         ├─→ Stage 2 ─┐
+Stage 1 ─┴────────────┴─→ Stage 3 ─→ Stage 4
+```
+
+- **可并行**：Stage 0 / 1 / 2 相互独立，可同时开工
+- **关键路径**：Stage 1（数据流最深、改动最广）→ Stage 3 集成
+- **最小可演示里程碑**：Stage 0 + 2 + 3（不含 blob）即跑通 G1/G2；Stage 1 补 G3/G4
+
+### 12.4 任务 → `architecture.md` 同步映射
+
+每个任务完成时，更新 `docs/architecture.md` 中对应模块章节：
+
+| 任务 | architecture.md 章节 | 更新内容 |
+|------|---------------------|---------|
+| T0.1 | `## providers/` → `#### providers/capability.rs` | 新增 `supports_input` 方法签名 |
+| T0.2 / T0.3 | `## providers/` / `## registry/` | `find_chat_model_with_modality` / `aux_model_for` |
+| T0.4 | `## config/` | `RoutingConfig::get_by_key` |
+| T1.1 | `## providers/` → `#### providers/capability_chat.rs` | `ContentPart::ImageRef` 变体 |
+| T1.2–T1.5 | `## storage/` → `#### storage/json_file.rs` | blob 布局、externalize/hydrate/GC、`blobs/` 目录 |
+| T1.6 / T1.7 | `## agents/` → `agents/session`、`agent.rs` | `add_user_with_media`、`process_turn` 持久化带图 |
+| T2.1–T2.6 | `## agents/`（新增 `agents/modality_adapter.rs` 小节） | 整个新模块的类型与函数 |
+| T2.3 | `## agents/` → `runtime.rs` / `AgentRuntime` | 新增 `description_cache` 字段 |
+| T3.1–T3.3 | `## agents/` → `#### agents/agent.rs`、`mod.rs` | 集成点、删除快照逻辑、模块声明 |
+| 全部 | `## 模块依赖关系图` | 若新增跨模块依赖（如 `agents` → `modality_adapter`）需更新依赖图 |
+
+> **DoD（任务完成定义）**：代码改动 + 单测通过 + `architecture.md` 对应章节已更新 + 本节复选框勾选，
+> 四者齐全方算完成。架构文档滞后视为任务未完成。
