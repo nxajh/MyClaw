@@ -581,8 +581,11 @@ impl DedupState {
 /// 3. Space (word boundary)
 /// 4. Hard cut at limit (last resort)
 ///
-/// Preserves code blocks by extending past the limit to the closing fence
-/// when possible.
+/// `limit` is a hard cap: every returned chunk measures `<= limit` units.
+/// When a split lands inside a ``` code block, the chunk is given a closing
+/// fence and the remainder a reopening fence, so each chunk is independently
+/// valid markdown without overflowing the limit. (The fence overhead is
+/// budgeted into the cut, so the closed/reopened chunks still fit.)
 pub fn split_message_chunk(message: &str, limit: usize, unit: LenUnit) -> Vec<String> {
     if measure(message, unit) <= limit {
         return vec![message.to_string()];
@@ -590,22 +593,49 @@ pub fn split_message_chunk(message: &str, limit: usize, unit: LenUnit) -> Vec<St
 
     let mut chunks = Vec::new();
     let mut remaining = message;
+    // True when the previous chunk ended inside an open ``` fence, so this
+    // chunk must reopen it.
+    let mut carry_open = false;
 
     while !remaining.is_empty() {
-        if measure(remaining, unit) <= limit {
-            chunks.push(remaining.to_string());
+        // Reserve room at the front for a reopening fence when continuing a
+        // code block, so the emitted chunk still fits within `limit`.
+        let reopen = if carry_open { "```\n" } else { "" };
+        let content_limit = limit.saturating_sub(measure(reopen, unit));
+
+        if measure(remaining, unit) <= content_limit {
+            let mut chunk = String::with_capacity(reopen.len() + remaining.len());
+            chunk.push_str(reopen);
+            chunk.push_str(remaining.trim_end());
+            chunks.push(chunk);
             break;
         }
 
-        let split_char_pos = find_split_point(remaining, limit, unit);
+        let split = find_split_point(remaining, content_limit, unit, carry_open);
         let byte_pos = remaining
             .char_indices()
-            .nth(split_char_pos)
+            .nth(split.index)
             .map(|(i, _)| i)
             .unwrap_or(remaining.len());
-        let (chunk, rest) = remaining.split_at(byte_pos);
-        chunks.push(chunk.trim_end().to_string());
-        remaining = rest.trim_start_matches([' ', '\t']);
+        let (head, rest) = remaining.split_at(byte_pos);
+
+        let mut chunk = String::with_capacity(reopen.len() + head.len() + 4);
+        chunk.push_str(reopen);
+        chunk.push_str(head.trim_end());
+        if split.in_code_block {
+            // Close the fence here; the next chunk reopens it.
+            chunk.push_str("\n```");
+        }
+        chunks.push(chunk);
+
+        carry_open = split.in_code_block;
+        // Leading whitespace is significant indentation inside a code block,
+        // so only strip it between plain-text chunks.
+        remaining = if carry_open {
+            rest
+        } else {
+            rest.trim_start_matches([' ', '\t'])
+        };
     }
 
     chunks
@@ -635,20 +665,32 @@ fn char_cost(c: char, unit: LenUnit) -> usize {
     }
 }
 
-/// Find the best position to split text, preferring natural boundaries.
-/// Returns a codepoint index.
-fn find_split_point(text: &str, limit: usize, unit: LenUnit) -> usize {
+/// Result of choosing where to split a chunk.
+struct SplitPoint {
+    /// Codepoint index in `text` at which to cut.
+    index: usize,
+    /// Whether the cut lands inside an open ``` fence — so the chunk needs a
+    /// closing fence and the remainder a reopening one.
+    in_code_block: bool,
+}
+
+/// Find the best position to split text, preferring natural boundaries while
+/// never exceeding `limit` units. `start_in_block` is the fence state at the
+/// start of `text` (true when continuing a code block from a prior chunk).
+///
+/// When the chosen cut lands inside a code block, room for a closing "\n```"
+/// fence is reserved so the caller can append it and still fit within `limit`.
+fn find_split_point(text: &str, limit: usize, unit: LenUnit, start_in_block: bool) -> SplitPoint {
     let chars: Vec<char> = text.chars().collect();
     let len = chars.len();
 
-    // Convert unit-limit into a codepoint cap: largest k such that the cost
-    // of chars[..k] is <= limit.
-    let cap = {
+    // Largest codepoint count whose cumulative cost is <= budget.
+    let cap_for = |budget: usize| -> usize {
         let mut acc = 0usize;
         let mut k = 0;
         for &c in &chars {
             let cost = char_cost(c, unit);
-            if acc + cost > limit {
+            if acc + cost > budget {
                 break;
             }
             acc += cost;
@@ -657,50 +699,49 @@ fn find_split_point(text: &str, limit: usize, unit: LenUnit) -> usize {
         k.min(len)
     };
 
-    // Detect whether the cap lands inside a code block; if so, try to extend
-    // past the closing fence (over the unit budget by design).
-    let mut in_code_block = false;
-    let mut i = 0;
-    while i < cap {
-        if i + 2 < len && chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
-            in_code_block = !in_code_block;
-            i += 3;
-            continue;
+    // Whether codepoint index `pos` lies inside an open ``` fence.
+    let in_block_at = |pos: usize| -> bool {
+        let mut open = start_in_block;
+        let mut i = 0;
+        while i < pos {
+            if i + 2 < len && chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
+                open = !open;
+                i += 3;
+                continue;
+            }
+            i += 1;
         }
-        i += 1;
-    }
+        open
+    };
+
+    // Best natural boundary within [0, cap]; hard cut at cap as last resort.
+    let boundary_within = |cap: usize| -> usize {
+        if let Some(pos) = find_last_pattern(&chars[..cap], &['\n', '\n']) {
+            pos + 2
+        } else if let Some(pos) = find_last_char(&chars[..cap], '\n') {
+            pos + 1
+        } else if let Some(pos) = find_last_char(&chars[..cap], ' ') {
+            pos + 1
+        } else {
+            cap.max(1)
+        }
+    };
+
+    let mut index = boundary_within(cap_for(limit));
+    let mut in_code_block = in_block_at(index);
+
     if in_code_block {
-        // Extend past the closing fence so the code block stays in one chunk —
-        // but only within a bounded budget. Without a cap, a very long (or
-        // unterminated) code block would push the chunk arbitrarily far past
-        // `limit` and trip Telegram's hard 4096-unit ceiling downstream. If the
-        // closing fence is farther than the allowance, give up extending and
-        // fall through to the normal split points within `cap`.
-        let max_extra = (limit / 5).min(512);
-        let mut extra = 0usize;
-        let mut j = cap;
-        while j + 2 < len {
-            if chars[j] == '`' && chars[j + 1] == '`' && chars[j + 2] == '`' {
-                return (j + 3).min(len);
-            }
-            extra += char_cost(chars[j], unit);
-            if extra > max_extra {
-                break;
-            }
-            j += 1;
+        // The chunk will get a closing "\n```" appended — make room for it so
+        // chunk content + fence still fits within `limit`.
+        let fence_cost = measure("\n```", unit);
+        let chunk_cost: usize = chars[..index].iter().map(|&c| char_cost(c, unit)).sum();
+        if chunk_cost + fence_cost > limit {
+            index = boundary_within(cap_for(limit.saturating_sub(fence_cost)).max(1));
+            in_code_block = in_block_at(index);
         }
     }
 
-    if let Some(pos) = find_last_pattern(&chars[..cap], &['\n', '\n']) {
-        return pos + 2;
-    }
-    if let Some(pos) = find_last_char(&chars[..cap], '\n') {
-        return pos + 1;
-    }
-    if let Some(pos) = find_last_char(&chars[..cap], ' ') {
-        return pos + 1;
-    }
-    cap.max(1)
+    SplitPoint { index, in_code_block }
 }
 
 /// Find the last occurrence of a character pattern in the slice.
@@ -801,52 +842,78 @@ mod tests {
         chunks.iter().map(|c| measure(c, unit)).max().unwrap_or(0)
     }
 
-    #[test]
-    fn split_keeps_short_code_block_intact() {
-        // A code block that closes just past the limit should be kept whole
-        // (extension is within the allowance), so the chunk slightly exceeds
-        // the limit but contains the full, balanced fence.
-        let limit = 100;
-        let prefix = "x".repeat(90);
-        let msg = format!("{prefix}\n```\ncode body here\n```\nafter");
-        let chunks = split_message_chunk(&msg, limit, LenUnit::Codepoints);
-        // First chunk should contain a balanced pair of fences.
-        let fences = chunks[0].matches("```").count();
-        assert_eq!(fences % 2, 0, "code block left unbalanced: {:?}", chunks[0]);
+    fn assert_within(chunks: &[String], limit: usize, unit: LenUnit) {
+        for c in chunks {
+            assert!(
+                measure(c, unit) <= limit,
+                "chunk exceeded hard limit {limit}: {} units in {c:?}",
+                measure(c, unit)
+            );
+        }
+    }
+
+    fn fences_balanced(chunk: &str) -> bool {
+        chunk.matches("```").count() % 2 == 0
     }
 
     #[test]
-    fn split_bounds_unterminated_code_block() {
-        // An unterminated (or very long) code block must NOT cause the chunk
-        // to grow without bound — it must stay within limit + allowance.
-        let limit = 100;
-        let allowance = (limit / 5).min(512); // mirror find_split_point
-        let prefix = "x".repeat(90);
-        let huge = "a".repeat(5000);
-        let msg = format!("{prefix}\n```\n{huge}"); // never closes
-        let chunks = split_message_chunk(&msg, limit, LenUnit::Codepoints);
-        assert!(
-            max_units(&chunks, LenUnit::Codepoints) <= limit + allowance,
-            "chunk exceeded bounded budget: max={}",
-            max_units(&chunks, LenUnit::Codepoints)
-        );
+    fn split_plain_text_never_exceeds_limit() {
+        let msg = "lorem ipsum dolor sit amet ".repeat(50);
+        for limit in [20usize, 50, 100, 137] {
+            let chunks = split_message_chunk(&msg, limit, LenUnit::Codepoints);
+            assert_within(&chunks, limit, LenUnit::Codepoints);
+        }
     }
 
     #[test]
-    fn split_bounds_far_closing_fence() {
-        // Closing fence exists but is far beyond the allowance: the splitter
-        // should give up extending and split within the normal cap instead of
-        // overshooting all the way to the distant fence.
+    fn split_code_block_within_limit_and_balanced() {
+        // A code block that straddles the limit must be split — each chunk stays
+        // within the hard limit AND keeps its fences balanced.
         let limit = 100;
-        let allowance = (limit / 5).min(512);
-        let prefix = "x".repeat(90);
-        let huge = "a".repeat(5000);
-        let msg = format!("{prefix}\n```\n{huge}\n```\ntail");
+        let code = "let x = 1;\n".repeat(60);
+        let msg = format!("intro paragraph here\n```rust\n{code}```\nepilogue text");
         let chunks = split_message_chunk(&msg, limit, LenUnit::Codepoints);
-        assert!(
-            max_units(&chunks, LenUnit::Codepoints) <= limit + allowance,
-            "chunk overshot to distant fence: max={}",
-            max_units(&chunks, LenUnit::Codepoints)
-        );
+        assert!(chunks.len() > 1, "expected the code block to be split");
+        assert_within(&chunks, limit, LenUnit::Codepoints);
+        for c in &chunks {
+            assert!(fences_balanced(c), "unbalanced fences in chunk: {c:?}");
+        }
+        // Code content survives the split (fences/newlines aside).
+        let rejoined: String = chunks.iter().map(|c| c.as_str()).collect();
+        assert!(rejoined.contains("let x = 1;"));
+    }
+
+    #[test]
+    fn split_unterminated_code_block_within_limit() {
+        // An unterminated (or very long) code block must never push a chunk past
+        // the hard limit.
+        let limit = 80;
+        let huge = "a".repeat(5000);
+        let msg = format!("head\n```\n{huge}"); // never closes
+        let chunks = split_message_chunk(&msg, limit, LenUnit::Codepoints);
+        assert_within(&chunks, limit, LenUnit::Codepoints);
+        assert!(max_units(&chunks, LenUnit::Codepoints) <= limit);
+    }
+
+    #[test]
+    fn split_far_closing_fence_within_limit() {
+        let limit = 100;
+        let huge = "a".repeat(5000);
+        let msg = format!("{}\n```\n{huge}\n```\ntail", "x".repeat(90));
+        let chunks = split_message_chunk(&msg, limit, LenUnit::Codepoints);
+        assert_within(&chunks, limit, LenUnit::Codepoints);
+        for c in &chunks {
+            assert!(fences_balanced(c), "unbalanced fences in chunk: {c:?}");
+        }
+    }
+
+    #[test]
+    fn split_utf16_emoji_within_limit() {
+        // Emoji cost 2 UTF-16 units each — the splitter must count units, not
+        // codepoints, and never exceed the limit.
+        let limit = 50;
+        let msg = "😀".repeat(100);
+        let chunks = split_message_chunk(&msg, limit, LenUnit::Utf16Units);
+        assert_within(&chunks, limit, LenUnit::Utf16Units);
     }
 }
