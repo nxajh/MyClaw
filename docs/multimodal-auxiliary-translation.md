@@ -876,8 +876,8 @@ if !primary_config.supports_input(Modality::Audio) {
 - **缓解**：
   1. **依赖现有 compaction**：`strip_images()`（§1.1）在压缩时把图片→`[image]`，长程历史的
      b64 体积会被自然回收，只有近窗口保留原图——上限可控。
-  2. **可选 blob 外置**（Phase 1.5+）：b64 落盘到单独的 blob 存储，history 里存引用句柄
-     （`ContentPart::ImageRef { hash }`），加载时按需取回。本 RFC 不强制，先用方案 1。
+  2. **blob 外置**（Phase 1.5，详见 §11.8）：b64 字节落盘到 session 目录下的 `blobs/`，
+     `history.jsonl` 只存引用句柄（`ContentPart::ImageRef { hash }`），加载时取回。
   3. **入站即转引用**：若渠道给的是可下载 URL，优先持久化 URL 而非 b64，体积更小。
 
 ### 11.2 URL 过期
@@ -921,3 +921,132 @@ if !primary_config.supports_input(Modality::Audio) {
 
 - 非视觉模型回答基于描述而非原图时，用户可能不知情。可选：在回复或日志中标注
   「（图片经辅助模型 X 转述）」，便于用户判断可信度。属可选增强，不阻塞 v1。
+
+### 11.8 Blob 外置详细设计（Phase 1.5）
+
+解决 §11.1 的 b64 膨胀：把图片字节从 `history.jsonl` 移到旁路 blob 文件，行内只留哈希引用。
+
+#### 11.8.1 核心判断：ImageRef 是「持久化边界表示」，不是内存表示
+
+现有存储（`src/storage/json_file.rs`）布局已经很适配：
+
+```
+{workspace}/sessions/{session_id}/
+  history.jsonl          # 每行一个 ChatMessage JSON，append-only；行号=message id
+  meta.json
+  archive/history.NNNN.jsonl   # compaction 时归档的旧段
+```
+
+`ContentPart` 是 `#[serde(tag = "type")]`，渲染层（`protocols/openai|anthropic/
+chat_message_rendering.rs`）、`strip_images`、§4.3 的 adapt 层、§4.3.1 的 `fingerprint`
+**全都直接消费 `ImageB64`**。若让 `ImageRef` 在内存中流通，这些点都得改——成本高、易漏。
+
+**因此 `ImageRef` 只活在磁盘上**：内存里的 `session.history` 永远是 `ImageB64`（hydrated），
+转换收敛在 `JsonFileBackend` 的**写/读两个方法**里。除 backend 外，全代码库看不到 `ImageRef`，
+渲染/adapt/fingerprint/strip **零改动**。这正是 §11.1 目标（磁盘体积 + 解析速度）的精确解，
+而非更激进的「运行时省内存」（后者由 compaction 已经兜底）。
+
+```
+内存 (session.history / clone messages):   只有 ImageB64 / ImageUrl
+        ↑ load: ImageRef → 读 blob → ImageB64      ↓ persist: ImageB64 → 写 blob → ImageRef
+磁盘 (history.jsonl):                       ImageB64(小图内联) / ImageRef(大图引用) / ImageUrl
+```
+
+#### 11.8.2 新增 ContentPart 变体
+
+```rust
+// src/providers/capability_chat.rs — 仅持久化边界出现，#[serde(tag="type")] 自动得到
+// {"type":"image_ref","hash":"...","media_type":"image/png","detail":"auto"}
+ImageRef {
+    /// sha256(图片字节) 的十六进制；同时是 blob 文件名与缓存 fingerprint。
+    hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    media_type: Option<String>,
+    detail: ImageDetail,
+},
+```
+
+> `hash` 复用为 §4.3.1 fingerprint 的 key（对 b64 内容取 sha256），保证 blob 文件名、缓存 key、
+> 内存 `ImageB64` 三者指纹一致——外置不破坏缓存命中。
+
+#### 11.8.3 落盘布局与写路径
+
+```
+{session_id}/blobs/{sha256}.bin     # 原始图片字节（解码后的二进制，非 base64）
+```
+
+`JsonFileBackend::append_message` 在序列化前做一次 `externalize`：
+
+```rust
+const INLINE_MAX: usize = 8 * 1024;   // 阈值：≤8KB 的小图仍内联，省得为缩略图建 blob
+
+fn externalize(&self, session_id: &str, msg: &ChatMessage) -> ChatMessage {
+    let mut out = msg.clone();
+    for part in out.parts.iter_mut() {
+        if let ContentPart::ImageB64 { b64_json, media_type, detail } = part {
+            if b64_json.len() <= INLINE_MAX { continue; }       // 小图内联
+            let bytes = base64::decode(b64_json).unwrap_or_default();
+            let hash = format!("{:x}", Sha256::digest(&bytes));
+            self.write_blob(session_id, &hash, &bytes);          // 幂等：存在则跳过（天然去重）
+            *part = ContentPart::ImageRef { hash, media_type: media_type.take(), detail: *detail };
+        }
+    }
+    out
+}
+```
+
+`write_blob` 幂等：文件已存在即不重写——**同图在会话内只存一份**（按内容 sha256 去重）。
+作用域选 **per-session**：清理免费（`delete_session` 已 `remove_dir_all` 整个目录）；
+跨会话全局去重留作后续（需引用计数 GC，复杂度不值当）。
+
+#### 11.8.4 读路径（hydrate）
+
+`load_messages`（及 recovery、archive 读取）读出每行后做一次 `hydrate`：
+
+```rust
+fn hydrate(&self, session_id: &str, msg: &mut ChatMessage) {
+    for part in msg.parts.iter_mut() {
+        if let ContentPart::ImageRef { hash, media_type, detail } = part {
+            match self.read_blob(session_id, hash) {                 // {id}/blobs/{hash}.bin
+                Ok(bytes) => *part = ContentPart::ImageB64 {
+                    b64_json: base64::encode(&bytes),
+                    media_type: media_type.take(),
+                    detail: *detail,
+                },
+                Err(_) => *part = ContentPart::Text {                // blob 缺失：降级占位
+                    text: "[image unavailable]".into(),
+                },
+            }
+        }
+    }
+}
+```
+
+> blob 缺失（手动删档/损坏）降级为占位文本，不让整条历史加载失败——与 §11.2 URL 过期同等容错。
+
+#### 11.8.5 Blob GC
+
+blob 在两种情况下变成孤儿，需回收：
+
+1. **Compaction/rotation**：`strip_images` 把 `ImageB64`→`[image]`，旧段 `rotate_history` 归档后，
+   被剥离的图不再被任何存活消息引用。
+2. **truncate_messages**（turn 回滚）：截断掉的消息引用的 blob 可能孤立。
+
+**策略**：在 `rotate_history` / `truncate_messages` 收尾处做一次**标记-清扫**——
+扫描存活消息（含归档段，若归档也外置）收集所有 `ImageRef.hash` 集合，
+删除 `blobs/` 中不在集合内的文件。简单、无需引用计数；blob 数量级小，全扫成本可忽略。
+
+> 归档段（`archive/history.NNNN.jsonl`）是否也外置：建议**是**（归档恰恰是大体积重灾区），
+> 则 GC 的「存活集合」需并入归档段的引用。若归档不外置，则归档前需先 hydrate 回 b64（体积回潮）——
+> 故推荐归档也走 ImageRef。
+
+#### 11.8.6 变更清单增量（相对 §10）
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `src/providers/capability_chat.rs` | 新增变体 | `ContentPart::ImageRef { hash, media_type, detail }`（仅磁盘出现） |
+| `src/storage/json_file.rs` | 修改 | `append_message` 前 `externalize`；`load_messages`/recovery 后 `hydrate`；`write_blob`/`read_blob`；`rotate_history`/`truncate_messages` 收尾 GC |
+| `Cargo.toml` | 依赖 | `base64`（多半已在用）；`sha2` 已由 §10 引入 |
+
+> 注意：`strip_images`、渲染层、§4.3 adapt 层、`fingerprint`、`InMemoryBackend` **均不改**——
+> 这是「持久化边界表示」选型的核心收益。`InMemoryBackend` 无磁盘、不外置，天然正确。
