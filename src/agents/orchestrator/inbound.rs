@@ -351,6 +351,9 @@ pub(super) fn retry_abort_prompt(
 mod tests {
     use super::*;
 
+    use super::super::test_support::{inbound_msg, test_ctx, MockChannel};
+    use std::time::Duration;
+
     /// Golden test: the inbound chain order is load-bearing (ask-reply must run
     /// before callback before dispatch, etc.). Pin it so reordering is a
     /// deliberate, reviewed change.
@@ -367,5 +370,136 @@ mod tests {
                 "dispatch_turn",
             ]
         );
+    }
+
+    fn key() -> SessionKey {
+        SessionKey::new("tg", "acc", "user1")
+    }
+
+    fn with_channel(ch: Arc<MockChannel>) -> OrchestratorCtx {
+        let dyn_ch: Arc<dyn Channel> = ch;
+        test_ctx(vec![(("tg".into(), "acc".into()), dyn_ch)])
+    }
+
+    fn next_content(flow: Flow) -> Option<String> {
+        match flow {
+            Flow::Next(m) => Some(m.content),
+            Flow::Stop => None,
+        }
+    }
+
+    // ── AskReply ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn ask_reply_passes_through_when_no_pending_ask() {
+        let ctx = test_ctx(vec![]);
+        let flow = AskReply.handle(&ctx, &key(), inbound_msg("user1", "hi")).await;
+        assert_eq!(next_content(flow).as_deref(), Some("hi"));
+    }
+
+    #[tokio::test]
+    async fn ask_reply_consumes_inbound_when_ask_pending() {
+        let ctx = test_ctx(vec![]);
+        let k = key();
+        let session_id = ctx.session_manager.get_or_create(&k.to_string()).id.clone();
+
+        // Register an outstanding ask for this session.
+        let router = ctx.ask_router.clone();
+        let sid = session_id.clone();
+        let waiter = tokio::spawn(async move { router.wait_for_reply(&sid, Duration::from_secs(5)).await });
+        tokio::task::yield_now().await;
+
+        let flow = AskReply.handle(&ctx, &k, inbound_msg("user1", "the answer")).await;
+        assert!(matches!(flow, Flow::Stop), "pending ask should consume the inbound");
+        assert_eq!(waiter.await.unwrap().unwrap().content, "the answer");
+    }
+
+    // ── Callback (retry / abort) ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn callback_non_callback_passes_through() {
+        let ctx = test_ctx(vec![]);
+        let flow = Callback.handle(&ctx, &key(), inbound_msg("user1", "ordinary text")).await;
+        assert_eq!(next_content(flow).as_deref(), Some("ordinary text"));
+    }
+
+    #[tokio::test]
+    async fn callback_abort_acks_and_stops() {
+        let ch = MockChannel::new();
+        let ctx = with_channel(ch.clone());
+        let content = CallbackAction::Abort { session_key_prefix: "x".into() }.serialize();
+        let flow = Callback.handle(&ctx, &key(), inbound_msg("user1", &content)).await;
+        assert!(matches!(flow, Flow::Stop));
+        assert!(ch.texts().iter().any(|t| t == MSG_ABORT_ACK));
+    }
+
+    #[tokio::test]
+    async fn callback_retry_with_pending_rewrites_content() {
+        let ch = MockChannel::new();
+        let ctx = with_channel(ch.clone());
+        let k = key();
+        *ctx.session_context_for(&k.to_string()).pending_retry.lock().await =
+            Some("original question".into());
+
+        let content = CallbackAction::Retry { session_key_prefix: "x".into() }.serialize();
+        let flow = Callback.handle(&ctx, &k, inbound_msg("user1", &content)).await;
+        // Retry falls through with the saved text substituted in.
+        assert_eq!(next_content(flow).as_deref(), Some("original question"));
+    }
+
+    #[tokio::test]
+    async fn callback_retry_without_pending_notifies_and_stops() {
+        let ch = MockChannel::new();
+        let ctx = with_channel(ch.clone());
+        let content = CallbackAction::Retry { session_key_prefix: "x".into() }.serialize();
+        let flow = Callback.handle(&ctx, &key(), inbound_msg("user1", &content)).await;
+        assert!(matches!(flow, Flow::Stop));
+        assert!(ch.texts().iter().any(|t| t == MSG_NO_PENDING_RETRY));
+    }
+
+    // ── CrashRecovery ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn crash_recovery_passes_through_when_turn_complete() {
+        let ctx = test_ctx(vec![]);
+        let flow = CrashRecovery.handle(&ctx, &key(), inbound_msg("user1", "hi")).await;
+        assert_eq!(next_content(flow).as_deref(), Some("hi"));
+    }
+
+    #[tokio::test]
+    async fn crash_recovery_prompts_with_buttons_when_incomplete() {
+        let ch = MockChannel::new();
+        let ctx = with_channel(ch.clone());
+        let k = key();
+        ctx.session_context_for(&k.to_string()).session.lock().await.incomplete_turn = true;
+
+        let flow = CrashRecovery.handle(&ctx, &k, inbound_msg("user1", "hi")).await;
+        assert!(matches!(flow, Flow::Stop));
+        // The incomplete-turn prompt is an Interactive payload (retry + abort).
+        let sent = ch.sent.lock().unwrap();
+        assert!(sent.iter().any(|m| m.inline_buttons.as_ref().is_some_and(|b| b.len() == 2)));
+    }
+
+    // ── retry_abort_prompt helper ─────────────────────────────────────────
+
+    #[test]
+    fn retry_abort_prompt_truncates_long_session_key() {
+        let long_sk = "telegram:account:".to_string() + &"u".repeat(100);
+        let (_target, payload) = retry_abort_prompt("turn interrupted", &long_sk, "rt", None);
+        let MessagePayload::Interactive { buttons, .. } = payload else {
+            panic!("expected Interactive payload");
+        };
+        assert_eq!(buttons.len(), 2);
+        // Callback data embeds a <=32-char session-key prefix (Telegram's
+        // 64-byte callback_data limit).
+        for b in &buttons {
+            let action = CallbackAction::parse(&b.callback_data).expect("parseable callback");
+            let prefix = match action {
+                CallbackAction::Retry { session_key_prefix } => session_key_prefix,
+                CallbackAction::Abort { session_key_prefix } => session_key_prefix,
+                _ => panic!("expected retry/abort"),
+            };
+            assert_eq!(prefix.chars().count(), 32);
+        }
     }
 }
