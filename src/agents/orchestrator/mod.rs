@@ -10,10 +10,15 @@
 //! is done in the Composition Root (orchestration/orchestrator main.rs + daemon.rs),
 //! not here. This struct receives fully-assembled components via its constructor.
 
+mod scheduled;
+pub mod event;
+
+pub use event::OrchestratorEvent;
+
 use anyhow::Context;
 use crate::agents::delegation::DelegationEvent;
 use crate::agents::DelegationCoordinator;
-use crate::agents::{OrchestratorEvent, SessionContext};
+use crate::agents::SessionContext;
 use crate::channels::{Channel, ChannelMessage, InlineButton};
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -23,7 +28,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::agents::session::{SessionManager, PersistHook, BackendPersistHook};
-use crate::agents::orchestrator_scheduled::{run_cron_task, run_heartbeat_task};
+use scheduled::{run_cron_task, run_heartbeat_task};
 
 /// Buffer size for the unified `OrchestratorEvent` channel. Fixed (not
 /// config-exposed) on purpose: this is an internal backpressure bound, not

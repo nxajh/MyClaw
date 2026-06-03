@@ -1,4 +1,4 @@
-//! Scheduled-turn dispatch for the [`Orchestrator`](super::orchestrator::Orchestrator).
+//! Scheduled-turn dispatch for the [`Orchestrator`](super::Orchestrator).
 //!
 //! Heartbeat ticks and cron jobs run as independent spawned tasks that
 //! drive a synthetic turn through `SessionContext::process_turn` (the same
@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use super::orchestrator::{is_silent_ok, Orchestrator};
+use super::{is_silent_ok, Orchestrator};
 use crate::channels::ChannelMessage;
 
 /// Run a scheduled turn for `session_key` with `prompt`, forcing Background
@@ -70,8 +70,8 @@ pub(crate) async fn run_heartbeat_task(
     target_channel: Option<String>,
     target_account: Option<String>,
     prompt: String,
-    due: Vec<super::heartbeat_tasks::HeartbeatTask>,
-    mut state: super::heartbeat_tasks::HeartbeatState,
+    due: Vec<crate::agents::heartbeat_tasks::HeartbeatTask>,
+    mut state: crate::agents::heartbeat_tasks::HeartbeatState,
     state_path: std::path::PathBuf,
 ) {
     let session_key = format!("_heartbeat_{}", uuid::Uuid::new_v4());
