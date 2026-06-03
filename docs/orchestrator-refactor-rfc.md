@@ -326,12 +326,22 @@ agents/orchestrator/
 
 ---
 
-## 12. 验收标准
+## 12. 验收标准与进度
 
-- [ ] `orchestrator.rs` / `orchestrator_event.rs` / `orchestrator_scheduled.rs` 删除,代之以 `orchestrator/` 模块组。
-- [ ] 无任何 `Arc<TokioMutex<Option<Receiver>>>`;`run` 签名为 `async fn run(self, ...)`。
-- [ ] 无裸会话键字符串解析(`splitn(3, ':')` 仅存在于 `SessionKey::parse`)。
-- [ ] delegation 不再构造 synthetic `ChannelMessage` 走完整 inbound 链。
-- [ ] 两份 recovery 合并为单一 `recover_one`。
-- [ ] 每个 inbound 拦截器有独立单测;inbound 链顺序有 golden 测试。
-- [ ] `cargo clippy --all-targets -- -D warnings` 与 `cargo test` 全绿。
+实施按 §10 顺序分步落地,每步保持 `cargo build` / `cargo test` 绿、独立提交。
+
+**已完成**
+- [x] `orchestrator/` 目录模块组建立(`orchestrator.rs` / `_event.rs` / `_scheduled.rs` → `orchestrator/{mod,event,scheduled}.rs`)。
+- [x] `SessionKey` / `SubAgentKey` 值类型;`splitn(3, ':')` 仅存在于 `SessionKey::parse`,裸 `format!("{}:{}:{}")` 会话键消除。
+- [x] `turn.rs` `ResolvedTurn`:per-turn 参数解析单一归属,消除 recovery 两处重复的 TurnContext 组装。
+- [x] 两份 recovery 合并为 `recovery.rs` 的单一 `spawn_recovery` + `CompletionSink`(`run_startup` 驱动两条循环)。
+
+**待完成**
+- [ ] `ctx.rs`:`OrchestratorCtx` 依赖包 + `ChannelRegistry`;内部 `self.field` 改走 `self.ctx`。
+- [ ] inbound 责任链:`Interceptor` + `Flow` + 5 拦截器 + chain runner;每拦截器独立单测 + 链顺序 golden 测试。
+- [ ] `scheduled/` 去重 + `CronTrigger` / `TurnOverrides`(消除第 4 处 scheduled-turn 重复:`scheduler.rs::run_scheduled_task`)。
+- [ ] delegation 改走 `dispatch_turn`,不再构造 synthetic `ChannelMessage` 跑完整 inbound 链。
+- [ ] 事件源 `Stream` 化 + `build_events` 合流;`listener.rs`。
+- [ ] `runtime.rs`:`run(self)` 化,消除全部 `Arc<TokioMutex<Option<Receiver>>>` take-once 仪式。
+- [ ] webhook 迁移到 `Arc<OrchestratorCtx>`,删除 `Orchestrator` 的全部 accessor 方法。
+- [ ] 收尾:`cargo clippy --all-targets -- -D warnings` 全绿。
