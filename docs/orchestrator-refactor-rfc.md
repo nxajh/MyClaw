@@ -1,6 +1,6 @@
 # Orchestrator 重构 RFC
 
-> 状态:已实施(全部验收项达成,406 测试 / clippy --all-targets 全绿)
+> 状态:已实施(全部验收项达成,415 测试 / clippy --all-targets -D warnings 全绿)
 > 范围:`src/agents/orchestrator.rs`(1142 行)+ `orchestrator_event.rs` + `orchestrator_scheduled.rs`
 > 原则:**合理性 > 优雅 > 其它**。一次性大重构,不保留任何为兼容旧形态而存在的设计。
 
@@ -20,7 +20,7 @@
 | 4 | **230 行 inbound 巨函数**:8 件事挤在一个 `match` 臂 | 514–745 | 显式责任链(Interceptor pipeline) |
 | 5 | **recovery 两份近乎复制粘贴**,唯一差别是"完成后投递到哪" | 835–997 | 一个 `recover_one` + 完成 sink |
 | 6 | **delegation 伪造 ChannelMessage 再递归回灌**,需 box 递归、还有"sender 必须等于父 sender"暗坑 | 1056–1118 | delegation 直接调共享 `dispatch_turn`,不伪造 inbound |
-| 7 | **字符串当类型**:`splitn(3,':')` / `format!("{}:{}:{}")` / 11 字段的 `SchedulerEvent::Cron` / `run_cron_task` 11 位置参数 | 122、324、55–66、811 | 引入 `SessionKey`、`CronTrigger`、`TurnOverrides` 值类型 |
+| 7 | **字符串当类型**:`splitn(3,':')` / `format!("{}:{}:{}")` / 11 字段的 `SchedulerEvent::Cron` / `run_cron_task` 11 位置参数 | 122、324、55–66、811 | 引入 `SessionKey`/`SubAgentKey` 值类型、`CronTrigger`(并丢弃 4 个死字段) |
 
 ---
 
@@ -56,28 +56,37 @@ Orchestrator      运行时:独占"只能消费一次"的资源(合流后的事�
 - `run` 按值消费 `self`,receiver 直接 move 进合流流 —— **坏味道 2、3 一起消失**;
 - webhook server 当前靠 `orchestrator.session_manager()` / `.channels()` / `.scheduler()` 这些 accessor 拿东西 —— 这些字段**正好就是 `OrchestratorCtx`**。组装根(daemon.rs)直接持有 `Arc<OrchestratorCtx>`,同时交给 webhook 和 orchestrator。**全部 accessor 方法删除**。
 
+**实测落地形态**(与初稿草图的差异见下方注):
+
 ```rust
+// ctx.rs —— 保留原字段名(self.X → self.ctx.X 纯前缀,churn 最小)
 pub struct OrchestratorCtx {
-    pub sessions:   Arc<SessionManager>,
-    pub runtime:    AgentRuntime,
-    pub channels:   ChannelRegistry,          // 包一层,不再裸 DashMap
-    pub ask:        Arc<AskRouter>,
-    pub scheduler:  Option<SharedScheduler>,
-    pub delegator:  Option<Arc<DelegationCoordinator>>,
+    pub channels:        Arc<DashMap<(String,String), Arc<dyn Channel>>>,
+    pub session_manager: Arc<SessionManager>,
+    pub ask_router:      Arc<AskRouter>,
+    pub agent_runtime:   AgentRuntime,
+    pub delegator:       Option<Arc<DelegationCoordinator>>,
+    pub scheduler:       Option<SharedScheduler>,
+}
+impl OrchestratorCtx {
+    pub fn session_context_for(&self, sk: &str) -> Arc<SessionContext>;
+    pub fn channel(&self, account: &(String,String)) -> Option<Arc<dyn Channel>>; // 查表收口
 }
 
+// mod.rs —— 运行时只独占"消费一次"的 receiver / handle;事件流在 run() 内合流(不作字段存储)
 pub struct Orchestrator {
-    ctx:       Arc<OrchestratorCtx>,
-    events:    BoxStream<'static, OrchestratorEvent>,  // 已合流
-    listeners: Vec<JoinHandle<()>>,                    // Drop 时 abort
+    ctx:              Arc<OrchestratorCtx>,
+    msg_rx:           Option<mpsc::Receiver<((String,String), ChannelMessage)>>,
+    listener_handles: Vec<JoinHandle<()>>,            // run() 返回前 abort
+    delegation_rx:    Option<mpsc::Receiver<DelegationEvent>>,
+    scheduler_rx:     Option<mpsc::Receiver<SchedulerEvent>>,
 }
-
 impl Orchestrator {
-    pub async fn run(self, shutdown: watch::Receiver<bool>) -> Result<()>;
+    pub async fn run(self, shutdown: watch::Receiver<bool>, unfinished: Vec<UnfinishedSubAgent>) -> Result<()>;
 }
 ```
 
-`ChannelRegistry` 包裹裸 `Arc<DashMap<(String,String), Arc<dyn Channel>>>`,提供 `get(&SessionKey)`,收口散落各处的 `channels.get(&(ct.clone(), ac.clone()))`。
+> **与初稿草图的两处差异**(刻意,见 §12):①字段名保留原样(`session_manager`/`agent_runtime`/`ask_router`)而非 `sessions`/`runtime`/`ask`——纯 `self.` → `self.ctx.` 前缀替换,改动面最小;②`channels` 仍为裸 `Arc<DashMap>`(本身即注册表),未引入 `ChannelRegistry` newtype,查表由 `OrchestratorCtx::channel()` 收口;③合流后的事件流是 `run()` 内的局部变量,不是 `events` 字段。
 
 ---
 
@@ -90,7 +99,7 @@ impl Orchestrator {
 pub struct SessionKey { pub channel: String, pub account: String, pub sender: String }
 impl SessionKey {
     pub fn parse(s: &str) -> Option<Self>;
-    pub fn account_key(&self) -> (String, String);   // ChannelRegistry 查表用
+    pub fn account_key(&self) -> (String, String);   // 频道查表用 (OrchestratorCtx::channel)
 }
 impl Display for SessionKey;  // "ct:ac:sender"
 
@@ -100,69 +109,81 @@ pub struct SubAgentKey { pub agent: String, pub sub_session: String }
 
 `parse_session_key` / `Self::session_key` / 所有 `splitn(3,':')` 与 `format!("{}:{}:{}")` 全部删除。delegation 那个"synthetic.sender 必须等于父 sender"的暗坑(原 1087 行注释)随之消失 —— 我们传 `SessionKey` 值,不再把键塞进伪造消息字段里再解析回来。
 
-调度事件同步去字符串化:
+调度事件同步去字符串化(**实测落地形态**):
 
 ```rust
+// event.rs
 pub enum OrchestratorEvent {
-    Inbound { account: (String, String), msg: ChannelMessage },
-    Tick(SchedulerTrigger),       // Heartbeat | Cron(CronTrigger)
+    Inbound { channel_type: String, account_id: String, message: ChannelMessage },
+    Scheduled(SchedulerEvent),                 // Heartbeat | Cron(CronTrigger)
     Delegation(DelegationEvent),
     AskReply { session_id: String, reply: ChannelMessage },
+    Shutdown,
 }
 
+// mod.rs
+pub enum SchedulerEvent { Heartbeat { target_channel: Option<String>, target_account: Option<String> }, Cron(CronTrigger) }
+
 pub struct CronTrigger {          // 替掉 11 字段的 SchedulerEvent::Cron
-    pub key: SessionKey,
+    pub session_key: String,      // 可能是 `_cron_<id>` 等非三段式键 → 不强转 SessionKey
     pub prompt: String,
-    pub target: DeliveryTarget,   // Option<channel> + Option<account> 收成一个
+    pub target_channel: Option<String>,
+    pub target_account: Option<String>,
     pub job_id: String,
-    pub delivery: Option<DeliveryConfig>,
-    pub overrides: TurnOverrides, // model/provider/enabled_tools/disabled_tools 收成一个
+    pub model: Option<String>,
 }
 ```
 
 `run_cron_task` 的 11 个位置参数随之坍缩成 `run_cron_task(ctx, trigger)`。
 
+> **与初稿草图的差异**(刻意):①`Inbound` 用展开的 `channel_type/account_id/message` 而非 `account` 元组;事件枚举名沿用既有 `SchedulerEvent`(非 `Tick(SchedulerTrigger)`),并保留 `Shutdown` 变体。②`CronTrigger` 直接**丢弃** 4 个一路死传的字段(delivery/enabled_tools/disabled_tools/provider),不引入 `DeliveryTarget`/`TurnOverrides` 聚合类型;`session_key` 保持 `String`。
+
 ---
 
-## 5. 事件循环:合流,不手搓
+## 5. 事件循环:合流,不手搓(**实测落地形态**)
+
+合流在 `run()` 内就地完成(`tokio_stream::StreamExt::merge`),不抽 `build_events` 自由函数、不存 `events` 字段:
 
 ```rust
-pub async fn run(mut self, mut shutdown: watch::Receiver<bool>) -> Result<()> {
-    Recovery::run_startup(&self.ctx);          // §8:恢复,fire-and-forget spawn
+pub async fn run(mut self, mut shutdown_rx, unfinished) -> anyhow::Result<()> {
+    let rx = self.msg_rx.take()?;
+    recovery::run_startup(&self.ctx.session_manager, &self.ctx.agent_runtime,
+                          &self.ctx.channels, &unfinished, &self.ctx.delegator);
+
+    // 三事件源 → 单一 Stream<OrchestratorEvent>,merge 合流(无 adapter task)
+    let mut events: Pin<Box<dyn Stream<Item = OrchestratorEvent> + Send>> =
+        Box::pin(ReceiverStream::new(rx).map(|((ct, ac), msg)|
+            OrchestratorEvent::Inbound { channel_type: ct, account_id: ac, message: msg }));
+    if let Some(drx) = self.delegation_rx.take() {
+        events = Box::pin(events.merge(ReceiverStream::new(drx).map(OrchestratorEvent::Delegation)));
+    }
+    if let Some(srx) = self.scheduler_rx.take() {
+        events = Box::pin(events.merge(ReceiverStream::new(srx).map(OrchestratorEvent::Scheduled)));
+    }
 
     loop {
-        let ev = tokio::select! {
-            biased;
-            _ = shutdown.changed() => break,
-            ev = self.events.next() => match ev { Some(e) => e, None => break },
+        if *shutdown_rx.borrow() || crate::is_shutting_down() { break; }   // 热切换检查点
+        let event = tokio::select! {
+            ev = events.next() => match ev { Some(e) => e, None => break },
+            _ = shutdown_rx.changed() => break,
         };
-        if *shutdown.borrow() || crate::is_shutting_down() { break; }   // 热切换检查点
-        match ev {
-            OrchestratorEvent::Inbound { account, msg } => Inbound::dispatch(&self.ctx, account, msg).await,
-            OrchestratorEvent::Delegation(e)            => Delegation::wake(&self.ctx, e).await,
-            OrchestratorEvent::Tick(t)                  => Scheduled::dispatch(self.ctx.clone(), t),
-            OrchestratorEvent::AskReply { session_id, reply } => { self.ctx.ask.fulfill(&session_id, reply); }
+        match event {
+            OrchestratorEvent::Inbound { channel_type, account_id, message } =>
+                inbound::dispatch(&self.ctx, (channel_type, account_id), message).await,
+            OrchestratorEvent::Delegation(e) => delegation::wake(&self.ctx, e).await,
+            OrchestratorEvent::Scheduled(e)  => self.handle_scheduler_event(e).await,
+            OrchestratorEvent::AskReply { session_id, reply } => { self.ctx.ask_router.fulfill(&session_id, reply); }
+            OrchestratorEvent::Shutdown => break,
         }
     }
-    Ok(())   // self drop → listeners abort
-}
-```
-
-`self.events` 由 `event.rs` 合流:
-
-```rust
-fn build_events(
-    inbound_rx: mpsc::Receiver<((String,String), ChannelMessage)>,
-    sched_rx:   Option<mpsc::Receiver<SchedulerTrigger>>,
-    deleg_rx:   Option<mpsc::Receiver<DelegationEvent>>,
-) -> BoxStream<'static, OrchestratorEvent> {
-    let inbound = ReceiverStream::new(inbound_rx).map(|(a, m)| OrchestratorEvent::Inbound { account: a, msg: m });
-    // sched/deleg 为 None 时用 stream::empty();select_all 合流
-    select_all([inbound.boxed(), ticks, deleg]).boxed()
+    for h in self.listener_handles.drain(..) { h.abort(); }   // self 拥有 listeners
+    Ok(())
 }
 ```
 
 → 不再有 3 个 adapter task、不再 clone `event_tx`、不再末尾 `.abort()` 三连。
+
+> 差异:合流内联在 `run()`(非 `build_events` 自由函数 + `select_all`);调度分派走 `self.handle_scheduler_event`(`&self`,deps 在 ctx)。
 
 ---
 
@@ -291,19 +312,18 @@ agents/orchestrator/
 
 ## 10. 落地清单(实施顺序)
 
-虽是一次性大重构,内部仍按依赖顺序分步推进,每步保持 `cargo build` 可过:
+一次性大重构,内部按依赖顺序分步落地,**每步独立提交、保持 `cargo build`/`cargo test` 绿**(实际提交顺序):
 
-1. **`key.rs`**:`SessionKey` / `SubAgentKey` + 单测(纯函数,零依赖,先落)。
-2. **`ctx.rs`**:`OrchestratorCtx` + `ChannelRegistry`。
-3. **`event.rs` / `listener.rs`**:`OrchestratorEvent` + `SchedulerTrigger` + 合流 + listener 流。
-4. **`turn.rs`**:`resolve_turn` / `TurnOverrides` / `DeliveryTarget`。
-5. **`inbound/`**:`Interceptor` + `Flow` + 5 个拦截器 + chain runner,逐拦截器补单测。
-6. **`scheduled/`**:heartbeat 预检+执行合并;cron 用 `CronTrigger`。
-7. **`delegation.rs` / `recovery.rs`**:wake 走 `dispatch_turn`;recovery 合并为 `recover_one`。
-8. **`runtime.rs` / `parts.rs`**:`Orchestrator` + `run(self)` + `new()`。
-9. **删除旧文件**:`orchestrator.rs` / `orchestrator_event.rs` / `orchestrator_scheduled.rs`。
-10. **改 `mod.rs` 与调用方**:`daemon.rs`、webhook server 改用 `Arc<OrchestratorCtx>`,删 accessor。
-11. **全量验证**:`cargo clippy --all-targets -- -D warnings` + `cargo test` 全绿。
+1. 目录化:`orchestrator.rs` → `orchestrator/{mod,event,scheduled}.rs`(纯机械)。
+2. **`key.rs`**:`SessionKey` / `SubAgentKey` + 单测;替换全部裸键解析。
+3. **`turn.rs`**:`ResolvedTurn::resolve` —— 消除 recovery 两处 TurnContext 组装重复。
+4. **`recovery.rs`**:两份 recovery 合并为 `spawn_recovery` + `CompletionSink` + `run_startup`。
+5. **`ctx.rs`**:`OrchestratorCtx` 依赖包;`self.X` → `self.ctx.X`;删 accessor 与 `SharedSessions`;scheduled / webhook(`WebhookContext.ctx`)/ daemon 改用 `Arc<OrchestratorCtx>`。
+6. **`inbound.rs` + `delegation.rs`**:`Interceptor`/`Flow`/5 拦截器/chain runner + `dispatch_turn`;delegation 走 `dispatch_turn`;删 `handle_channel_event` 等;链顺序 golden 测试。
+7. **`run(self)` + 合流**:receiver/handle 改 owned;`tokio_stream::merge`;删 take-once 仪式与 `shutdown_listeners`;daemon 去 `Arc`。
+8. **`CronTrigger` + webhook 去重**:折叠 `SchedulerEvent::Cron`(丢 4 死字段);`run_scheduled_task` 委托 `run_scheduled_turn`。
+9. **`test_support.rs` + 拦截器行为单测**:可注入 mock 的 `OrchestratorCtx` 夹具。
+10. **全量验证**:`cargo clippy --all-targets -- -D warnings` + `cargo test`(415)全绿。
 
 ---
 
@@ -329,15 +349,15 @@ agents/orchestrator/
 - [x] 两份 recovery 合并为 `recovery.rs` 的单一 `spawn_recovery` + `CompletionSink`(`run_startup` 驱动两条循环)。
 
 - [x] `ctx.rs`:`OrchestratorCtx` 依赖包;`Orchestrator` 持 `Arc<OrchestratorCtx>`,内部访问走 `self.ctx`。删除全部 per-field accessor 与 `SharedSessions`,只留 `ctx()`。
-- [x] inbound 责任链:`Interceptor` + `Flow` + 5 拦截器(ask/callback/crash-recovery/command/dispatch)+ chain runner;含链顺序 golden 测试。
+- [x] inbound 责任链:`Interceptor` + `Flow` + 5 拦截器(ask/callback/crash-recovery/command/dispatch)+ chain runner;含链顺序 golden 测试 + 各拦截器行为单测(`test_support.rs` 提供可 mock 的 `OrchestratorCtx`)。
 - [x] `scheduled` 去重 + `CronTrigger`(丢弃 4 个死字段:delivery/enabled_tools/disabled_tools/provider);消除第 4 处 scheduled-turn 重复——`scheduler.rs::run_scheduled_task` 改为委托 `run_scheduled_turn`。
 - [x] delegation 改走 `dispatch_turn`,不再构造 synthetic `ChannelMessage` 跑完整 inbound 链(去掉 box 递归与 sender 暗坑)。
 - [x] 事件源 `Stream` 化 + `tokio_stream::merge` 合流(取代 3 个 adapter task)。
 - [x] `run(self)` 化,消除全部 `Arc<TokioMutex<Option<Receiver>>>` take-once 仪式;`run` 自行 abort listeners(删 `shutdown_listeners`)。
 - [x] webhook 迁移到 `Arc<OrchestratorCtx>`(`WebhookContext.ctx`);daemon 传 `orchestrator.ctx()`。
-- [x] 收尾:`cargo clippy --all-targets -- -D warnings` 全绿、`cargo test` 406 绿。
+- [x] 收尾:`cargo clippy --all-targets -- -D warnings` 全绿、`cargo test` 415 绿。
 
 **说明 / 后续**
 - `ChannelRegistry` newtype 未单独引入:`channels` 仍是 `OrchestratorCtx` 内的 `Arc<DashMap>`(本身即注册表),`OrchestratorCtx::channel(&account)` 收口查找;刻意避免大面积改动,satisfy 依赖包的核心目标。
-- inbound 拦截器目前有**链顺序 golden 测试**;**每个拦截器的行为单测**需要一个可注入 mock 的 `OrchestratorCtx` 测试夹具(SessionManager/AgentRuntime/AskRouter/Channel 的假实现),列为后续工作。当前行为正确性由"纯结构重排 + 全量回归 + clippy"保证。
+- inbound 拦截器测试已落地:`test_support.rs` 提供可注入 mock 的 `OrchestratorCtx`(内存 `SessionManager` + 全新 `AskRouter` + no-op `ProviderRegistry`/`AgentRuntime` + 记录式 `MockChannel`)。覆盖 ask-reply / callback(retry 改写、abort ack、无 pending 通知)/ crash-recovery / `retry_abort_prompt` 32 字符前缀截断;链顺序由 golden 测试钉死。**`slash_command` / `dispatch_turn` 终端**会 spawn `process_turn`(走 LLM),其行为单测需要真实 provider,留作后续(端到端层面)。
 - cron `session_key` 保持 `String`(可能是 `_cron_<id>` / `_hooks_agent` 等非三段式键),不强转 `SessionKey`。
