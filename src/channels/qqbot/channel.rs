@@ -426,6 +426,89 @@ impl QQBotChannel {
         })
     }
 
+    /// Download any audio/voice attachments from a raw inbound `data` payload
+    /// into `msg.attachments` as `audio/*` MediaAttachments. The modality adapter
+    /// then transcribes them to text via the auxiliary speech-to-text model
+    /// (same generic contract as Telegram voice).
+    ///
+    /// Note: QQ voice is commonly SILK/AMR-encoded, which mainstream STT models
+    /// don't accept — transcription only succeeds if the configured audio model
+    /// handles that codec, otherwise it degrades to a "[audio]" placeholder.
+    /// Image attachments stay URL-based (handled in `parse_*`); only audio needs
+    /// byte download because the pipeline carries audio as base64, not URLs.
+    async fn download_audio_attachments(
+        &self,
+        data: &serde_json::Value,
+        msg: &mut ChannelMessage,
+    ) {
+        let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) else {
+            return;
+        };
+        for att in attachments {
+            let ctype = att.get("content_type").and_then(|v| v.as_str()).unwrap_or("");
+            // QQ marks voice/audio attachments with a "voice"/"audio" content_type.
+            if !(ctype == "audio" || ctype == "voice" || ctype.starts_with("audio")) {
+                continue;
+            }
+            let Some(url) = att.get("url").and_then(|v| v.as_str()) else { continue };
+            // QQ attachment URLs sometimes omit the scheme.
+            let full_url = if url.starts_with("http") {
+                url.to_string()
+            } else {
+                format!("https://{url}")
+            };
+            let resp = match self
+                .http_client
+                .get(&full_url)
+                .send()
+                .await
+                .and_then(|r| r.error_for_status())
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!("qqbot: audio download failed for {full_url}: {e}");
+                    continue;
+                }
+            };
+            let bytes = match resp.bytes().await {
+                Ok(b) => b,
+                Err(e) => {
+                    warn!("qqbot: reading audio bytes failed for {full_url}: {e}");
+                    continue;
+                }
+            };
+            // Best-effort MIME: use content_type if it's a full type, else map a
+            // bare token / URL extension, defaulting to ogg.
+            let mime = if ctype.contains('/') {
+                ctype.to_string()
+            } else {
+                let ext = full_url
+                    .split('?')
+                    .next()
+                    .and_then(|p| p.rsplit('.').next())
+                    .map(|e| e.to_ascii_lowercase());
+                match ext.as_deref() {
+                    Some("silk") => "audio/silk".to_string(),
+                    Some("amr") => "audio/amr".to_string(),
+                    Some("mp3") => "audio/mpeg".to_string(),
+                    Some("wav") => "audio/wav".to_string(),
+                    Some("m4a") => "audio/mp4".to_string(),
+                    _ => "audio/ogg".to_string(),
+                }
+            };
+            let file_name = att
+                .get("filename")
+                .and_then(|v| v.as_str())
+                .unwrap_or("voice")
+                .to_string();
+            msg.attachments.push(crate::channels::message::MediaAttachment {
+                file_name,
+                data: bytes.to_vec(),
+                mime_type: Some(mime),
+            });
+        }
+    }
+
     /// Build a markdown message body for QQ Bot API.
     /// Build a plain-text message body (msg_type=0).
     /// Required for active messages where markdown (msg_type=2) is not supported.
@@ -1314,13 +1397,17 @@ impl QQBotChannel {
                         _ => {}
                     }
                     // User messages
-                    if let Some(channel_msg) = self.handle_dispatch(event_type, &payload.d) {
+                    if let Some(mut channel_msg) = self.handle_dispatch(event_type, &payload.d) {
                         // Bot- prefixed slash commands — intercept before orchestrator
                         let msg_id = payload.d.get("id").and_then(|v| v.as_str()).unwrap_or("");
                         if self.try_bot_command(&channel_msg.content, &channel_msg.reply_target, msg_id).await {
                             debug!(msg_id = %channel_msg.id, "bot command handled, skipping orchestrator");
                             return None;
                         }
+
+                        // Download voice/audio attachments → AudioB64 (transcribed
+                        // downstream by the auxiliary speech-to-text model).
+                        self.download_audio_attachments(&payload.d, &mut channel_msg).await;
 
                         if tx.send(channel_msg.clone()).await.is_err() {
                             warn!("channel receiver dropped, stopping listen");

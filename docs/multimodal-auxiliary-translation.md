@@ -1253,9 +1253,18 @@ Telegram 语音(voice/audio)
 - **配置**：用户在 chat 路由链中声明一个 `input = ["text","audio"]` 的模型（如 `gpt-4o-audio`，见 §config
   示例）即作为 STT aux 被 `find_chat_model_with_modality(Audio)` 选中。
 
-### 13.3 未覆盖
+### 13.3 渠道摄入状态
+
+摄入约定通用：任一 channel 只要往 `ChannelMessage.attachments` 填 `MediaAttachment{ mime:"audio/*" }`，
+`session_context` 即自动转 `AudioB64`。
+
+- **Telegram**：✅ `voice`/`audio` → `download_file_bytes` → 附件（mime 默认 `audio/ogg`）。
+- **QQ**：✅ inbound `attachments[content_type∈{audio,voice}]` → 在 listen loop 内
+  `download_audio_attachments` 拉字节 → 附件。注意 QQ 语音多为 **SILK/AMR**，主流 STT 模型不收，
+  通常会优雅降级为 `[audio]`（除非配了支持该编码的音频模型）。
+- **WeChat**：✗ 当前 `IlinkMessage` 协议只解析文本项，未暴露语音字段；接入需先补 ilink 语音消息 schema。
+
+### 13.4 未覆盖
 
 - 视频（`VIDEO_SPEC`/`ContentPart::Video*`）未做——单次 chat aux 无法「看」视频，需抽帧或视频原生模型。
 - 非 OpenAI 协议的音频输入未实现（Anthropic Messages / GLM 无此能力）。
-- Telegram 以外渠道的语音摄入（wechat/qq）未接，但 `MediaAttachment{mime:"audio/*"}` 的摄入约定已通用，
-  补其他渠道只需在各自 channel 填充音频附件。
