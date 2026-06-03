@@ -581,8 +581,11 @@ impl DedupState {
 /// 3. Space (word boundary)
 /// 4. Hard cut at limit (last resort)
 ///
-/// Preserves code blocks by extending past the limit to the closing fence
-/// when possible.
+/// `limit` is a hard cap: every returned chunk measures `<= limit` units.
+/// When a split lands inside a ``` code block, the chunk is given a closing
+/// fence and the remainder a reopening fence, so each chunk is independently
+/// valid markdown without overflowing the limit. (The fence overhead is
+/// budgeted into the cut, so the closed/reopened chunks still fit.)
 pub fn split_message_chunk(message: &str, limit: usize, unit: LenUnit) -> Vec<String> {
     if measure(message, unit) <= limit {
         return vec![message.to_string()];
@@ -590,25 +593,143 @@ pub fn split_message_chunk(message: &str, limit: usize, unit: LenUnit) -> Vec<St
 
     let mut chunks = Vec::new();
     let mut remaining = message;
+    // Set when the previous chunk ended inside an open ``` fence: reopen it.
+    let mut carry_open = false;
+    // Set when the previous chunk ended inside a table body: repeat the
+    // "header\ndelimiter\n" so the continuation still renders as a table.
+    let mut table_carry: Option<String> = None;
+    // Inline markers (`**`/`~~`/`` ` ``) open across the previous cut, reopened
+    // at the start of this chunk.
+    let mut inline_carry: Vec<Marker> = Vec::new();
+    // Worst-case room for inline closers appended to a chunk ("**" + "~~" + "`").
+    let inline_reserve = measure("**~~`", unit);
 
     while !remaining.is_empty() {
-        if measure(remaining, unit) <= limit {
-            chunks.push(remaining.to_string());
+        // Front matter repeated on this chunk (reopened fence or table header,
+        // then any reopened inline markers), reserved out of the budget so the
+        // emitted chunk still fits `limit`.
+        let block_prefix: String = if carry_open {
+            "```\n".to_string()
+        } else {
+            table_carry.clone().unwrap_or_default()
+        };
+        let inline_reopen: String = inline_carry.iter().map(|m| m.token()).collect();
+        let prefix = format!("{block_prefix}{inline_reopen}");
+        let content_limit = limit
+            .saturating_sub(measure(&prefix, unit))
+            .saturating_sub(inline_reserve);
+
+        if measure(remaining, unit) <= content_limit {
+            let mut chunk = String::with_capacity(prefix.len() + remaining.len());
+            chunk.push_str(&prefix);
+            chunk.push_str(remaining.trim_end());
+            chunks.push(chunk);
             break;
         }
 
-        let split_char_pos = find_split_point(remaining, limit, unit);
+        let split = find_split_point(remaining, content_limit, unit, carry_open, &inline_carry);
         let byte_pos = remaining
             .char_indices()
-            .nth(split_char_pos)
+            .nth(split.index)
             .map(|(i, _)| i)
             .unwrap_or(remaining.len());
-        let (chunk, rest) = remaining.split_at(byte_pos);
-        chunks.push(chunk.trim_end().to_string());
-        remaining = rest.trim_start_matches([' ', '\t']);
+        let (head, rest) = remaining.split_at(byte_pos);
+
+        let mut chunk = String::with_capacity(prefix.len() + head.len() + 8);
+        chunk.push_str(&prefix);
+        chunk.push_str(head.trim_end());
+
+        carry_open = split.in_code_block;
+        if carry_open {
+            // Close the fence here; the next chunk reopens it.
+            chunk.push_str("\n```");
+            table_carry = None;
+            inline_carry = Vec::new();
+        } else {
+            // Close any open inline markers (innermost first) so this chunk is
+            // self-contained; reopen them on the next chunk.
+            for m in split.markers.iter().rev() {
+                chunk.push_str(m.token());
+            }
+            inline_carry = split.markers;
+            // A table left open by this cut is repeated on the next chunk.
+            table_carry = open_table_header(&chunk, rest);
+        }
+        chunks.push(chunk);
+
+        // Leading whitespace is significant indentation inside a code block,
+        // so only strip it between plain-text chunks.
+        remaining = if carry_open {
+            rest
+        } else {
+            rest.trim_start_matches([' ', '\t'])
+        };
     }
 
     chunks
+}
+
+/// A markdown table row contains at least one `|`.
+fn is_table_row(line: &str) -> bool {
+    let t = line.trim();
+    !t.is_empty() && t.contains('|')
+}
+
+/// A markdown table delimiter row, e.g. `| --- | :--: |` — only `|`, `-`, `:`,
+/// and whitespace, with at least one `-`.
+fn is_table_delimiter(line: &str) -> bool {
+    let t = line.trim();
+    if t.is_empty() {
+        return false;
+    }
+    let mut has_dash = false;
+    for c in t.chars() {
+        match c {
+            '-' => has_dash = true,
+            '|' | ':' | ' ' | '\t' => {}
+            _ => return false,
+        }
+    }
+    has_dash
+}
+
+/// If `chunk` ends inside a table body that continues in `rest`, return the
+/// "header\ndelimiter\n" to repeat on the next chunk so it still renders as a
+/// table. Returns `None` when no table is open across the cut.
+fn open_table_header(chunk: &str, rest: &str) -> Option<String> {
+    // The continuation must itself begin with a table row.
+    let next = rest.lines().find(|l| !l.trim().is_empty())?;
+    if !is_table_row(next) {
+        return None;
+    }
+
+    let mut header: Option<&str> = None;
+    let mut delimiter: Option<&str> = None;
+    let mut in_table = false;
+    let mut prev: Option<&str> = None;
+    for line in chunk.lines() {
+        if in_table && !is_table_row(line) {
+            in_table = false;
+            header = None;
+            delimiter = None;
+        }
+        if !in_table {
+            if let Some(p) = prev {
+                if is_table_delimiter(line) && is_table_row(p) {
+                    in_table = true;
+                    header = Some(p);
+                    delimiter = Some(line);
+                }
+            }
+        }
+        prev = Some(line);
+    }
+
+    if in_table {
+        Some(format!("{}\n{}\n", header?, delimiter?))
+    } else {
+        None
+    }
 }
 
 /// Backwards-compatible wrapper: split by codepoints.
@@ -635,20 +756,168 @@ fn char_cost(c: char, unit: LenUnit) -> usize {
     }
 }
 
-/// Find the best position to split text, preferring natural boundaries.
-/// Returns a codepoint index.
-fn find_split_point(text: &str, limit: usize, unit: LenUnit) -> usize {
+/// How far back to scan for a link enclosing the cut point.
+const LINK_SCAN_WINDOW: usize = 4096;
+
+/// Paired inline markdown markers that the splitter balances across chunks.
+/// Single-character `*`/`_` italic is intentionally excluded: it is ambiguous
+/// and replicating the renderer's heuristic risks mis-emphasizing plain text.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Marker {
+    Bold,
+    Strike,
+    Code,
+}
+
+impl Marker {
+    fn token(self) -> &'static str {
+        match self {
+            Marker::Bold => "**",
+            Marker::Strike => "~~",
+            Marker::Code => "`",
+        }
+    }
+}
+
+fn toggle_marker(stack: &mut Vec<Marker>, m: Marker) {
+    if let Some(pos) = stack.iter().rposition(|&t| t == m) {
+        stack.remove(pos);
+    } else {
+        stack.push(m);
+    }
+}
+
+/// Inline markers (`**`, `~~`, single `` ` ``) left open at codepoint index
+/// `upto`, in the order opened. `start` is the marker state at the beginning of
+/// `chars` (markers carried over from a previous chunk). Markers inside fenced
+/// code blocks are ignored; inside an inline-code span only a closing `` ` `` is
+/// recognized.
+fn open_inline_markers(chars: &[char], upto: usize, start: &[Marker]) -> Vec<Marker> {
+    let len = chars.len();
+    let upto = upto.min(len);
+    let mut stack: Vec<Marker> = start.to_vec();
+    let mut in_fenced = false;
+    let mut i = 0;
+    while i < upto {
+        if i + 2 < len && chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
+            in_fenced = !in_fenced;
+            i += 3;
+            continue;
+        }
+        if in_fenced {
+            i += 1;
+            continue;
+        }
+        // Inside an inline-code span only a backtick (closing it) matters.
+        if stack.last() == Some(&Marker::Code) {
+            if chars[i] == '`' {
+                stack.pop();
+            }
+            i += 1;
+            continue;
+        }
+        if i + 1 < len && chars[i] == '~' && chars[i + 1] == '~' {
+            toggle_marker(&mut stack, Marker::Strike);
+            i += 2;
+            continue;
+        }
+        if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
+            toggle_marker(&mut stack, Marker::Bold);
+            i += 2;
+            continue;
+        }
+        if chars[i] == '`' {
+            stack.push(Marker::Code);
+            i += 1;
+            continue;
+        }
+        i += 1;
+    }
+    stack
+}
+
+/// Parse a `[text](url)` link starting at `start` (where `chars[start] == '['`),
+/// returning the exclusive end index just past `)`. Link text and URL may not
+/// span a newline.
+fn parse_link_end(chars: &[char], start: usize) -> Option<usize> {
+    let len = chars.len();
+    let mut i = start + 1;
+    while i < len && chars[i] != ']' {
+        if chars[i] == '\n' {
+            return None;
+        }
+        i += 1;
+    }
+    if i >= len || i + 1 >= len || chars[i + 1] != '(' {
+        return None;
+    }
+    let mut j = i + 2;
+    while j < len && chars[j] != ')' {
+        if chars[j] == '\n' {
+            return None;
+        }
+        j += 1;
+    }
+    if j >= len {
+        return None;
+    }
+    Some(j + 1)
+}
+
+/// If codepoint `index` falls strictly inside a `[text](url)` link, return that
+/// link's start so the caller can cut before it instead of breaking it.
+fn link_start_before(chars: &[char], index: usize) -> Option<usize> {
+    let lo = index.saturating_sub(LINK_SCAN_WINDOW);
+    let mut p = index.min(chars.len());
+    while p > lo {
+        p -= 1;
+        if chars[p] != '[' {
+            continue;
+        }
+        if let Some(end) = parse_link_end(chars, p) {
+            if p < index && index < end {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// Result of choosing where to split a chunk.
+struct SplitPoint {
+    /// Codepoint index in `text` at which to cut.
+    index: usize,
+    /// Whether the cut lands inside an open ``` fence — so the chunk needs a
+    /// closing fence and the remainder a reopening one.
+    in_code_block: bool,
+    /// Inline markers open at the cut (non-code only), in open order, so the
+    /// caller can close them on this chunk and reopen them on the next.
+    markers: Vec<Marker>,
+}
+
+/// Find the best position to split text, preferring natural boundaries while
+/// never exceeding `limit` units. `start_in_block` is the fence state at the
+/// start of `text` (true when continuing a code block from a prior chunk).
+///
+/// When the chosen cut lands inside a code block, room for a closing "\n```"
+/// fence is reserved so the caller can append it and still fit within `limit`.
+fn find_split_point(
+    text: &str,
+    limit: usize,
+    unit: LenUnit,
+    start_in_block: bool,
+    start_markers: &[Marker],
+) -> SplitPoint {
     let chars: Vec<char> = text.chars().collect();
     let len = chars.len();
 
-    // Convert unit-limit into a codepoint cap: largest k such that the cost
-    // of chars[..k] is <= limit.
-    let cap = {
+    // Largest codepoint count whose cumulative cost is <= budget.
+    let cap_for = |budget: usize| -> usize {
         let mut acc = 0usize;
         let mut k = 0;
         for &c in &chars {
             let cost = char_cost(c, unit);
-            if acc + cost > limit {
+            if acc + cost > budget {
                 break;
             }
             acc += cost;
@@ -657,38 +926,104 @@ fn find_split_point(text: &str, limit: usize, unit: LenUnit) -> usize {
         k.min(len)
     };
 
-    // Detect whether the cap lands inside a code block; if so, try to extend
-    // past the closing fence (over the unit budget by design).
-    let mut in_code_block = false;
-    let mut i = 0;
-    while i < cap {
-        if i + 2 < len && chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
-            in_code_block = !in_code_block;
-            i += 3;
-            continue;
-        }
-        i += 1;
-    }
-    if in_code_block {
-        let mut j = cap;
-        while j + 2 < len {
-            if chars[j] == '`' && chars[j + 1] == '`' && chars[j + 2] == '`' {
-                return (j + 3).min(len);
+    // Whether codepoint index `pos` lies inside an open ``` fence.
+    let in_block_at = |pos: usize| -> bool {
+        let mut open = start_in_block;
+        let mut i = 0;
+        while i < pos {
+            if i + 2 < len && chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
+                open = !open;
+                i += 3;
+                continue;
             }
-            j += 1;
+            i += 1;
+        }
+        open
+    };
+
+    // Codepoint index of the first backtick of the fence currently open at
+    // `pos`, or None if `pos` is not inside a block.
+    let open_fence_start = |pos: usize| -> Option<usize> {
+        let mut open = start_in_block;
+        let mut start = if start_in_block { Some(0usize) } else { None };
+        let mut i = 0;
+        while i < pos {
+            if i + 2 < len && chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
+                open = !open;
+                start = if open { Some(i) } else { None };
+                i += 3;
+                continue;
+            }
+            i += 1;
+        }
+        if open { start } else { None }
+    };
+
+    // Best natural boundary within [0, cap]; hard cut at cap as last resort.
+    let boundary_within = |cap: usize| -> usize {
+        if let Some(pos) = find_last_pattern(&chars[..cap], &['\n', '\n']) {
+            pos + 2
+        } else if let Some(pos) = find_last_char(&chars[..cap], '\n') {
+            pos + 1
+        } else if let Some(pos) = find_last_char(&chars[..cap], ' ') {
+            pos + 1
+        } else {
+            cap.max(1)
+        }
+    };
+
+    let mut index = boundary_within(cap_for(limit));
+    let mut in_code_block = in_block_at(index);
+
+    if in_code_block {
+        // The chunk will get a closing "\n```" appended — make room for it so
+        // chunk content + fence still fits within `limit`.
+        let fence_cost = measure("\n```", unit);
+        let chunk_cost: usize = chars[..index].iter().map(|&c| char_cost(c, unit)).sum();
+        if chunk_cost + fence_cost > limit {
+            index = boundary_within(cap_for(limit.saturating_sub(fence_cost)).max(1));
+            in_code_block = in_block_at(index);
         }
     }
 
-    if let Some(pos) = find_last_pattern(&chars[..cap], &['\n', '\n']) {
-        return pos + 2;
+    if in_code_block {
+        // Avoid emitting a degenerate empty code block: if the fence opened at
+        // the tail of this chunk with no real body before the cut, split
+        // *before* the fence so the whole block moves to the next chunk.
+        if let Some(f) = open_fence_start(index) {
+            if f > 0 {
+                // Body begins after the opening fence's own line (```lang\n).
+                let mut b = (f + 3).min(index);
+                while b < index && chars[b] != '\n' {
+                    b += 1;
+                }
+                if b < index {
+                    b += 1; // skip the newline after the opening fence
+                }
+                if chars[b..index].iter().all(|c| c.is_whitespace()) {
+                    index = f;
+                    in_code_block = false;
+                }
+            }
+        }
     }
-    if let Some(pos) = find_last_char(&chars[..cap], '\n') {
-        return pos + 1;
+
+    let mut markers = Vec::new();
+    if !in_code_block {
+        // Don't cut inside a [text](url) link — move the cut before it.
+        if let Some(a) = link_start_before(&chars, index) {
+            if a > 0 {
+                index = a;
+            }
+        }
+        markers = open_inline_markers(&chars, index, start_markers);
     }
-    if let Some(pos) = find_last_char(&chars[..cap], ' ') {
-        return pos + 1;
+
+    SplitPoint {
+        index,
+        in_code_block,
+        markers,
     }
-    cap.max(1)
 }
 
 /// Find the last occurrence of a character pattern in the slice.
@@ -783,5 +1118,172 @@ mod tests {
         }
         // Re-record the most recent id — must still be deduped
         assert!(d.check_and_record("id-149"));
+    }
+
+    fn max_units(chunks: &[String], unit: LenUnit) -> usize {
+        chunks.iter().map(|c| measure(c, unit)).max().unwrap_or(0)
+    }
+
+    fn assert_within(chunks: &[String], limit: usize, unit: LenUnit) {
+        for c in chunks {
+            assert!(
+                measure(c, unit) <= limit,
+                "chunk exceeded hard limit {limit}: {} units in {c:?}",
+                measure(c, unit)
+            );
+        }
+    }
+
+    fn fences_balanced(chunk: &str) -> bool {
+        chunk.matches("```").count() % 2 == 0
+    }
+
+    #[test]
+    fn split_plain_text_never_exceeds_limit() {
+        let msg = "lorem ipsum dolor sit amet ".repeat(50);
+        for limit in [20usize, 50, 100, 137] {
+            let chunks = split_message_chunk(&msg, limit, LenUnit::Codepoints);
+            assert_within(&chunks, limit, LenUnit::Codepoints);
+        }
+    }
+
+    #[test]
+    fn split_code_block_within_limit_and_balanced() {
+        // A code block that straddles the limit must be split — each chunk stays
+        // within the hard limit AND keeps its fences balanced.
+        let limit = 100;
+        let code = "let x = 1;\n".repeat(60);
+        let msg = format!("intro paragraph here\n```rust\n{code}```\nepilogue text");
+        let chunks = split_message_chunk(&msg, limit, LenUnit::Codepoints);
+        assert!(chunks.len() > 1, "expected the code block to be split");
+        assert_within(&chunks, limit, LenUnit::Codepoints);
+        for c in &chunks {
+            assert!(fences_balanced(c), "unbalanced fences in chunk: {c:?}");
+        }
+        // Code content survives the split (fences/newlines aside).
+        let rejoined: String = chunks.iter().map(|c| c.as_str()).collect();
+        assert!(rejoined.contains("let x = 1;"));
+    }
+
+    #[test]
+    fn split_unterminated_code_block_within_limit() {
+        // An unterminated (or very long) code block must never push a chunk past
+        // the hard limit.
+        let limit = 80;
+        let huge = "a".repeat(5000);
+        let msg = format!("head\n```\n{huge}"); // never closes
+        let chunks = split_message_chunk(&msg, limit, LenUnit::Codepoints);
+        assert_within(&chunks, limit, LenUnit::Codepoints);
+        assert!(max_units(&chunks, LenUnit::Codepoints) <= limit);
+    }
+
+    #[test]
+    fn split_far_closing_fence_within_limit() {
+        let limit = 100;
+        let huge = "a".repeat(5000);
+        let msg = format!("{}\n```\n{huge}\n```\ntail", "x".repeat(90));
+        let chunks = split_message_chunk(&msg, limit, LenUnit::Codepoints);
+        assert_within(&chunks, limit, LenUnit::Codepoints);
+        for c in &chunks {
+            assert!(fences_balanced(c), "unbalanced fences in chunk: {c:?}");
+        }
+    }
+
+    #[test]
+    fn split_does_not_emit_empty_code_block() {
+        // Prefix nearly fills the limit, then a code block starts. The splitter
+        // must break BEFORE the fence rather than opening an empty block at the
+        // tail of the first chunk.
+        let limit = 100;
+        let msg = format!("{}\n```\ncode body here\n```\nafter", "x".repeat(90));
+        let chunks = split_message_chunk(&msg, limit, LenUnit::Codepoints);
+        assert_within(&chunks, limit, LenUnit::Codepoints);
+        for c in &chunks {
+            assert!(fences_balanced(c), "unbalanced fences: {c:?}");
+            // No chunk should contain an empty fenced block.
+            let squashed = c.replace(['\n', ' ', '\t'], "");
+            assert!(
+                !squashed.contains("``````"),
+                "empty code block emitted in chunk: {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn split_table_repeats_header_on_continuation() {
+        // A table longer than the limit must be split so every continuation
+        // chunk repeats the header + delimiter rows (so it still renders as a
+        // table on channels like QQBot that support markdown tables).
+        let limit = 120;
+        let mut body = String::new();
+        for n in 0..40 {
+            body.push_str(&format!("| row {n} | value {n} |\n"));
+        }
+        let msg = format!("| Name | Value |\n| --- | --- |\n{body}");
+        let chunks = split_message_chunk(&msg, limit, LenUnit::Codepoints);
+        assert!(chunks.len() > 1, "expected the table to be split");
+        assert_within(&chunks, limit, LenUnit::Codepoints);
+        for (i, c) in chunks.iter().enumerate() {
+            assert!(
+                c.contains("| Name | Value |") && c.lines().any(is_table_delimiter),
+                "chunk {i} missing repeated table header/delimiter: {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn open_table_header_ignores_non_tables() {
+        // Plain prose that merely exceeds the limit must not be mistaken for a
+        // table.
+        let limit = 50;
+        let msg = "just a long paragraph of words ".repeat(10);
+        let chunks = split_message_chunk(&msg, limit, LenUnit::Codepoints);
+        assert_within(&chunks, limit, LenUnit::Codepoints);
+        for c in &chunks {
+            assert!(!c.lines().any(is_table_delimiter), "spurious delimiter: {c:?}");
+        }
+    }
+
+    #[test]
+    fn split_balances_bold_across_chunks() {
+        // A single long bolded run (no paragraph breaks) forces a mid-span cut.
+        // Each chunk must keep `**` balanced so QQBot/Wechat render it right.
+        let limit = 60;
+        let msg = format!("**{}**", "alpha ".repeat(50));
+        let chunks = split_message_chunk(&msg, limit, LenUnit::Codepoints);
+        assert!(chunks.len() > 1, "expected the bold run to be split");
+        assert_within(&chunks, limit, LenUnit::Codepoints);
+        for c in &chunks {
+            assert_eq!(
+                c.matches("**").count() % 2,
+                0,
+                "unbalanced bold in chunk: {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn split_keeps_links_intact() {
+        // A cut that would land inside a link must move before it so the link
+        // survives whole in one chunk.
+        let limit = 80;
+        let link = "[click the documentation here](http://example.com/a/very/long/path)";
+        let msg = format!("{} {link} and then more trailing text here", "word ".repeat(12));
+        let chunks = split_message_chunk(&msg, limit, LenUnit::Codepoints);
+        assert_within(&chunks, limit, LenUnit::Codepoints);
+        assert!(
+            chunks.iter().any(|c| c.contains(link)),
+            "link was split across chunks: {chunks:?}"
+        );
+    }
+
+    #[test]
+    fn split_utf16_emoji_within_limit() {
+        // Emoji cost 2 UTF-16 units each — the splitter must count units, not
+        // codepoints, and never exceed the limit.
+        let limit = 50;
+        let msg = "😀".repeat(100);
+        let chunks = split_message_chunk(&msg, limit, LenUnit::Utf16Units);
+        assert_within(&chunks, limit, LenUnit::Utf16Units);
     }
 }

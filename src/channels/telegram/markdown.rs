@@ -13,6 +13,56 @@ pub fn escape_html(text: &str) -> String {
     out
 }
 
+/// Inline formatting tags. Managed with a stack so the emitted HTML is always
+/// properly nested, even when the markdown markers overlap
+/// (e.g. `~~a **b~~ c**`), which Telegram's HTML parser would otherwise reject.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tag {
+    Bold,
+    Italic,
+    Strike,
+}
+
+impl Tag {
+    fn open(self) -> &'static str {
+        match self {
+            Tag::Bold => "<b>",
+            Tag::Italic => "<i>",
+            Tag::Strike => "<s>",
+        }
+    }
+    fn close(self) -> &'static str {
+        match self {
+            Tag::Bold => "</b>",
+            Tag::Italic => "</i>",
+            Tag::Strike => "</s>",
+        }
+    }
+}
+
+fn open_tag(stack: &mut Vec<Tag>, out: &mut String, tag: Tag) {
+    stack.push(tag);
+    out.push_str(tag.open());
+}
+
+/// Close `tag`, temporarily closing and reopening any tags stacked above it so
+/// the result stays properly nested.
+fn close_tag(stack: &mut Vec<Tag>, out: &mut String, tag: Tag) {
+    let Some(pos) = stack.iter().rposition(|&t| t == tag) else {
+        return;
+    };
+    let above = stack.split_off(pos + 1);
+    for &t in above.iter().rev() {
+        out.push_str(t.close());
+    }
+    out.push_str(tag.close());
+    stack.pop(); // remove the target tag itself
+    for &t in &above {
+        out.push_str(t.open());
+        stack.push(t);
+    }
+}
+
 /// Convert LLM Markdown output to Telegram-supported HTML.
 ///
 /// Supports: bold, italic, strikethrough, inline code, code blocks (with optional language),
@@ -22,10 +72,8 @@ pub fn escape_html(text: &str) -> String {
 pub fn markdown_to_telegram_html(markdown: &str) -> String {
     let mut out = String::with_capacity(markdown.len() * 2);
 
-    // Tracks which inline formatting tags are currently open.
-    let mut bold = false;
-    let mut italic = false;
-    let mut strike = false;
+    // Stack of currently-open inline tags, kept properly nested.
+    let mut stack: Vec<Tag> = Vec::new();
 
     let chars: Vec<char> = markdown.chars().collect();
     let len = chars.len();
@@ -191,12 +239,10 @@ pub fn markdown_to_telegram_html(markdown: &str) -> String {
 
         // ── Strikethrough (~~) ──────────────────────────────────────────
         if i + 1 < len && chars[i] == '~' && chars[i + 1] == '~' {
-            if strike {
-                out.push_str("</s>");
-                strike = false;
+            if stack.contains(&Tag::Strike) {
+                close_tag(&mut stack, &mut out, Tag::Strike);
             } else {
-                out.push_str("<s>");
-                strike = true;
+                open_tag(&mut stack, &mut out, Tag::Strike);
             }
             i += 2;
             continue;
@@ -204,12 +250,10 @@ pub fn markdown_to_telegram_html(markdown: &str) -> String {
 
         // ── Bold (**) ───────────────────────────────────────────────────
         if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
-            if bold {
-                out.push_str("</b>");
-                bold = false;
+            if stack.contains(&Tag::Bold) {
+                close_tag(&mut stack, &mut out, Tag::Bold);
             } else {
-                out.push_str("<b>");
-                bold = true;
+                open_tag(&mut stack, &mut out, Tag::Bold);
             }
             i += 2;
             continue;
@@ -218,24 +262,22 @@ pub fn markdown_to_telegram_html(markdown: &str) -> String {
         // ── Italic (* or _) ─────────────────────────────────────────────
         // Must be preceded by whitespace/start and followed by non-whitespace,
         // or preceded by non-whitespace and followed by whitespace/end.
-        if (chars[i] == '*' || chars[i] == '_') && !bold {
+        if (chars[i] == '*' || chars[i] == '_') && !stack.contains(&Tag::Bold) {
             let prev_ok = i == 0
                 || chars[i - 1].is_whitespace()
                 || chars[i - 1].is_ascii_punctuation();
             let next_ok = i + 1 < len && !chars[i + 1].is_whitespace();
 
-            if italic {
+            if stack.contains(&Tag::Italic) {
                 // Closing: must be preceded by non-whitespace.
                 let prev_non_ws = i > 0 && !chars[i - 1].is_whitespace();
                 if prev_non_ws {
-                    out.push_str("</i>");
-                    italic = false;
+                    close_tag(&mut stack, &mut out, Tag::Italic);
                     i += 1;
                     continue;
                 }
             } else if prev_ok && next_ok {
-                out.push_str("<i>");
-                italic = true;
+                open_tag(&mut stack, &mut out, Tag::Italic);
                 i += 1;
                 continue;
             }
@@ -252,16 +294,91 @@ pub fn markdown_to_telegram_html(markdown: &str) -> String {
         i += 1;
     }
 
-    // Close any tags still open at the end.
-    if strike {
-        out.push_str("</s>");
-    }
-    if italic {
-        out.push_str("</i>");
-    }
-    if bold {
-        out.push_str("</b>");
+    // Close any tags still open at the end, innermost first.
+    while let Some(t) = stack.pop() {
+        out.push_str(t.close());
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that all `<b>/<i>/<s>` tags in `html` are properly nested (a
+    /// closing tag always matches the most recently opened one).
+    fn tags_well_nested(html: &str) -> bool {
+        let mut stack: Vec<&str> = Vec::new();
+        let bytes = html.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'<' {
+                if let Some(close) = html[i..].find('>') {
+                    let tag = &html[i..i + close + 1];
+                    match tag {
+                        "<b>" | "<i>" | "<s>" => stack.push(tag),
+                        "</b>" | "</i>" | "</s>" => {
+                            let want = match tag {
+                                "</b>" => "<b>",
+                                "</i>" => "<i>",
+                                _ => "<s>",
+                            };
+                            match stack.pop() {
+                                Some(top) if top == want => {}
+                                _ => return false,
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += close + 1;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        stack.is_empty()
+    }
+
+    #[test]
+    fn basic_emphasis() {
+        assert_eq!(markdown_to_telegram_html("**bold**"), "<b>bold</b>");
+        assert_eq!(markdown_to_telegram_html("~~gone~~"), "<s>gone</s>");
+        assert_eq!(markdown_to_telegram_html("a *it* b"), "a <i>it</i> b");
+    }
+
+    #[test]
+    fn nested_emphasis_is_well_formed() {
+        let html = markdown_to_telegram_html("~~strike **bold** more~~");
+        assert!(tags_well_nested(&html), "not well nested: {html}");
+        assert_eq!(html, "<s>strike <b>bold</b> more</s>");
+    }
+
+    #[test]
+    fn overlapping_markers_are_reanchored() {
+        // Overlapping (improperly nested) markdown must still yield valid,
+        // properly-nested HTML via close-and-reopen.
+        let html = markdown_to_telegram_html("~~a **b~~ c**");
+        assert!(tags_well_nested(&html), "not well nested: {html}");
+    }
+
+    #[test]
+    fn unclosed_tags_auto_close() {
+        let html = markdown_to_telegram_html("**bold and ~~strike");
+        assert!(tags_well_nested(&html), "not well nested: {html}");
+    }
+
+    #[test]
+    fn code_block_preserved() {
+        let html = markdown_to_telegram_html("```\nlet x = 1;\n```");
+        assert_eq!(html, "<pre>let x = 1;</pre>");
+    }
+
+    #[test]
+    fn link_rendered() {
+        assert_eq!(
+            markdown_to_telegram_html("[hi](http://e.com)"),
+            "<a href=\"http://e.com\">hi</a>"
+        );
+    }
 }

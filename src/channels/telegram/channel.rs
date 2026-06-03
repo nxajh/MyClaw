@@ -420,18 +420,24 @@ impl TelegramChannel {
                 limit = MAX_MESSAGE_LENGTH,
                 "plain text exceeds Telegram limit, truncating"
             );
+            // Reserve room for the suffix so that truncated body + suffix
+            // still fits within MAX_MESSAGE_LENGTH (Telegram counts UTF-16
+            // units; the suffix is ASCII so its char count == UTF-16 units).
+            const TRUNCATION_SUFFIX: &str = "\n\n[... message truncated ...]";
+            let suffix_units = TRUNCATION_SUFFIX.encode_utf16().count();
+            let body_limit = MAX_MESSAGE_LENGTH.saturating_sub(suffix_units);
             let mut acc = 0usize;
             let mut end_byte = text.len();
             for (i, ch) in text.char_indices() {
                 let cost = ch.len_utf16();
-                if acc + cost > MAX_MESSAGE_LENGTH {
+                if acc + cost > body_limit {
                     end_byte = i;
                     break;
                 }
                 acc += cost;
             }
             let mut truncated = text[..end_byte].to_string();
-            truncated.push_str("\n\n[... message truncated ...]");
+            truncated.push_str(TRUNCATION_SUFFIX);
             truncated
         } else {
             text.to_string()
