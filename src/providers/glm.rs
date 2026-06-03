@@ -211,6 +211,15 @@ fn build_glm_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                     "type": "image_url",
                     "image_url": { "url": format!("data:image;base64,{}", b64_json), "detail": format!("{:?}", detail).to_lowercase() }
                 })),
+                ContentPart::ImageRef { .. } => {
+                    unreachable!("ImageRef is disk-only; hydrate before render")
+                }
+                // GLM chat has no audio input; degrade rather than panic if this
+                // model is (mis)routed as the audio aux (AudioRef stays disk-only).
+                ContentPart::AudioB64 { .. } => Some(json!({ "type": "text", "text": "[audio]" })),
+                ContentPart::AudioRef { .. } => {
+                    unreachable!("AudioRef is disk-only; hydrate before render")
+                }
                 ContentPart::Thinking { .. } => None,
             }).collect();
 

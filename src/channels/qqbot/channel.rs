@@ -426,6 +426,90 @@ impl QQBotChannel {
         })
     }
 
+    /// Ingest voice/audio attachments from a raw inbound `data` payload.
+    ///
+    /// Per the official QQ v2 schema, an inbound voice attachment is
+    /// `{ content_type: "voice", url, filename, size }` and the file is SILK —
+    /// there is NO native ASR/transcription field. We download `url` and attach
+    /// it as `audio/silk` for the auxiliary STT model. Note SILK is rejected by
+    /// most STT models, so this commonly degrades to a "[audio]" placeholder
+    /// unless a SILK-capable audio model is configured.
+    ///
+    /// As a zero-cost best effort we also read `asr_refer_text` first: it is NOT
+    /// in the official schema, but some gateways/proxies inject a transcription
+    /// there — when present we use it and skip the download.
+    async fn ingest_voice_attachments(
+        &self,
+        data: &serde_json::Value,
+        msg: &mut ChannelMessage,
+    ) {
+        let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) else {
+            return;
+        };
+        for att in attachments {
+            let ctype = att.get("content_type").and_then(|v| v.as_str()).unwrap_or("");
+            // Official: content_type == "voice". Accept "audio"/"audio/*" too.
+            if !(ctype == "voice" || ctype == "audio" || ctype.starts_with("audio")) {
+                continue;
+            }
+
+            // Best-effort, non-official: a proxy-injected transcription.
+            let asr = att
+                .get("asr_refer_text")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            if let Some(text) = asr {
+                if msg.content.trim().is_empty() {
+                    msg.content = text.to_string();
+                } else {
+                    msg.content = format!("{}\n[语音] {}", msg.content, text);
+                }
+                continue;
+            }
+
+            // Official path: download the SILK voice file referenced by `url`.
+            let Some(url) = att.get("url").and_then(|v| v.as_str()) else { continue };
+            let full_url = if url.starts_with("http") {
+                url.to_string()
+            } else {
+                format!("https://{url}")
+            };
+            let resp = match self
+                .http_client
+                .get(&full_url)
+                .send()
+                .await
+                .and_then(|r| r.error_for_status())
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!("qqbot: audio download failed for {full_url}: {e}");
+                    continue;
+                }
+            };
+            let bytes = match resp.bytes().await {
+                Ok(b) => b,
+                Err(e) => {
+                    warn!("qqbot: reading audio bytes failed for {full_url}: {e}");
+                    continue;
+                }
+            };
+            // QQ voice files are SILK (official: 语音=silk); "voice" is not a MIME.
+            let mime = if ctype.contains('/') { ctype.to_string() } else { "audio/silk".to_string() };
+            let file_name = att
+                .get("filename")
+                .and_then(|v| v.as_str())
+                .unwrap_or("voice")
+                .to_string();
+            msg.attachments.push(crate::channels::message::MediaAttachment {
+                file_name,
+                data: bytes.to_vec(),
+                mime_type: Some(mime),
+            });
+        }
+    }
+
     /// Build a markdown message body for QQ Bot API.
     /// Build a plain-text message body (msg_type=0).
     /// Required for active messages where markdown (msg_type=2) is not supported.
@@ -1314,13 +1398,17 @@ impl QQBotChannel {
                         _ => {}
                     }
                     // User messages
-                    if let Some(channel_msg) = self.handle_dispatch(event_type, &payload.d) {
+                    if let Some(mut channel_msg) = self.handle_dispatch(event_type, &payload.d) {
                         // Bot- prefixed slash commands — intercept before orchestrator
                         let msg_id = payload.d.get("id").and_then(|v| v.as_str()).unwrap_or("");
                         if self.try_bot_command(&channel_msg.content, &channel_msg.reply_target, msg_id).await {
                             debug!(msg_id = %channel_msg.id, "bot command handled, skipping orchestrator");
                             return None;
                         }
+
+                        // Voice/audio: use QQ's native ASR text when present, else
+                        // attach downloaded bytes for the auxiliary STT model.
+                        self.ingest_voice_attachments(&payload.d, &mut channel_msg).await;
 
                         if tx.send(channel_msg.clone()).await.is_err() {
                             warn!("channel receiver dropped, stopping listen");

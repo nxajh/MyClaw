@@ -43,6 +43,10 @@ pub struct Message {
     #[serde(default)]
     pub photo: Option<Vec<PhotoSize>>,
     #[serde(default)]
+    pub voice: Option<Voice>,
+    #[serde(default)]
+    pub audio: Option<Audio>,
+    #[serde(default)]
     pub forward_from: Option<User>,
     #[serde(default)]
     pub forward_from_chat: Option<Chat>,
@@ -52,6 +56,24 @@ pub struct Message {
     pub forward_date: Option<i64>,
     #[serde(default)]
     pub reply_to_message: Option<Box<Message>>,
+}
+
+/// Telegram voice message (OGG/Opus). `mime_type` is usually "audio/ogg".
+#[derive(Debug, Clone, Deserialize)]
+pub struct Voice {
+    #[serde(default)]
+    pub file_id: String,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+}
+
+/// Telegram audio (music/file). Carries an explicit MIME type when known.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Audio {
+    #[serde(default)]
+    pub file_id: String,
+    #[serde(default)]
+    pub mime_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -26,6 +26,7 @@ pub mod session_context;
 pub mod agent_registry;
 pub mod ask_router;
 pub mod runtime;
+pub mod modality_adapter;
 pub mod user_profile;
 
 /// Scheduling: cron jobs, webhooks, heartbeat scheduler.

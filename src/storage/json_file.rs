@@ -21,15 +21,38 @@
 //! Compaction state (version, token estimate) lives in `meta.json`; there is
 //! no separate `compaction.json`.  The summary message text is stored as a
 //! regular line in `history.jsonl` and does not need to be reconstructed.
+//!
+//! ## Image blob externalization (multimodal Stage 1)
+//!
+//! Large inline images bloat `history.jsonl` (base64 is huge and appears on
+//! every line that carries the message).  To keep the JSONL compact and
+//! deduplicate identical images, `append_message` *externalizes* each large
+//! `ContentPart::ImageB64` into a content-addressed blob under
+//! `sessions/{session_id}/blobs/{sha256}.bin` (raw decoded bytes) and replaces
+//! the part with a `ContentPart::ImageRef { hash, .. }`.  `load_messages` (and
+//! every other history read path) *hydrates* `ImageRef` back into `ImageB64`
+//! by reading the blob, so the in-memory render path never sees `ImageRef`.
+//!
+//! Blob lifecycle is mark-and-sweep: on `rotate_history` / `truncate_messages`
+//! we collect the set of `ImageRef.hash` referenced by surviving (and archived)
+//! messages and delete any `blobs/*.bin` not in that set.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
+use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::providers::capability_chat::sha256_hex;
+use crate::providers::ContentPart;
 use crate::storage::{ChatMessage, SessionBackend, SessionInfo, SummaryRecord};
+
+/// Inline `ImageB64` parts whose base64 string is at most this many bytes stay
+/// inline in `history.jsonl`; larger ones are externalized into a blob.
+const INLINE_IMAGE_MAX_B64_LEN: usize = 8 * 1024;
 
 // ── On-disk types ─────────────────────────────────────────────────────────────
 
@@ -166,6 +189,9 @@ impl JsonFileBackend {
 
     /// Read all (line_number, ChatMessage) pairs from the active history.jsonl.
     /// Line numbers are 1-based and reset to 1 after each rotation.
+    ///
+    /// Every message is hydrated (`ImageRef` → `ImageB64`) before being returned
+    /// so callers never observe the disk-only `ImageRef` variant.
     fn read_history_with_ids(&self, session_id: &str) -> Vec<(i64, ChatMessage)> {
         let path = self.history_path(session_id);
         let Ok(f) = fs::File::open(&path) else { return vec![]; };
@@ -177,6 +203,7 @@ impl JsonFileBackend {
                 let line = line.trim();
                 if line.is_empty() { return None; }
                 let msg: ChatMessage = serde_json::from_str(line).ok()?;
+                let msg = self.hydrate(session_id, &msg);
                 Some(((i + 1) as i64, msg))
             })
             .collect()
@@ -214,22 +241,271 @@ impl JsonFileBackend {
             fs::rename(&history_path, archive_dir.join(archive_name))?;
         }
 
-        // Write surviving messages to the new active segment.
+        // Write surviving messages to the new active segment. Re-externalize so
+        // large images live as blobs + `ImageRef` again (the `surviving` slice
+        // arrives hydrated from the read path). Track both the live blob hashes
+        // (for the `*.bin` sweep) and the live description keys (for the `*.txt`
+        // sweep) so we can drop orphans afterwards. Description keys are computed
+        // from the *hydrated* `msg` (before externalization, while the b64 is
+        // present); externalization is fingerprint-invariant so the key is the
+        // same either way.
+        let mut live_hashes: HashSet<String> = HashSet::new();
+        let mut live_desc: HashSet<String> = HashSet::new();
         if !surviving.is_empty() {
             let mut f = fs::File::create(&history_path)?;
             for (_, msg) in surviving {
-                let json = serde_json::to_string(msg).map_err(std::io::Error::other)?;
+                collect_description_keys(msg, &mut live_desc);
+                let msg = self.externalize(session_id, msg)?;
+                collect_blob_hashes(&msg, &mut live_hashes);
+                let json = serde_json::to_string(&msg).map_err(std::io::Error::other)?;
                 writeln!(f, "{json}")?;
             }
             f.flush()?;
             f.sync_all()?;
         }
 
+        // Archived segments are externalized too; keep their blobs + descriptions
+        // alive. One scan fills both live sets.
+        self.extend_archived_live_sets(session_id, &mut live_hashes, &mut live_desc);
+        // Mark-and-sweep: drop any blob / description not referenced by a live
+        // message.
+        self.sweep_blobs(session_id, &live_hashes);
+        self.sweep_descriptions(session_id, &live_desc);
+
         // Line numbers restart at 1; update the counter to match the new file.
         meta.message_count = surviving.len();
         meta.segment += 1;
         self.write_meta(&meta)?;
         Ok(())
+    }
+
+    // ── Image blob store ──────────────────────────────────────────────────────
+
+    fn blobs_dir(&self, session_id: &str) -> PathBuf {
+        self.session_dir(session_id).join("blobs")
+    }
+
+    fn blob_path(&self, session_id: &str, hash: &str) -> PathBuf {
+        self.blobs_dir(session_id).join(format!("{hash}.bin"))
+    }
+
+    /// Write `bytes` to `blobs/{hash}.bin`. Content-addressed and idempotent:
+    /// if the blob already exists the write is skipped (dedup).
+    fn write_blob(&self, session_id: &str, hash: &str, bytes: &[u8]) -> std::io::Result<()> {
+        let path = self.blob_path(session_id, hash);
+        if path.exists() {
+            return Ok(()); // already present — content-addressed dedup
+        }
+        let dir = self.blobs_dir(session_id);
+        fs::create_dir_all(&dir)?;
+        // Atomic: write to a temp file then rename so a partial write can never
+        // masquerade as a complete (and wrongly-hashed) blob.
+        let tmp = path.with_extension("bin.tmp");
+        {
+            let mut f = fs::File::create(&tmp)?;
+            f.write_all(bytes)?;
+            f.flush()?;
+        }
+        fs::rename(&tmp, &path)?;
+        Ok(())
+    }
+
+    /// Read the raw decoded bytes of `blobs/{hash}.bin`.
+    fn read_blob(&self, session_id: &str, hash: &str) -> std::io::Result<Vec<u8>> {
+        fs::read(self.blob_path(session_id, hash))
+    }
+
+    /// Externalize large inline media (`ImageB64` / `AudioB64`) before
+    /// serialization.
+    ///
+    /// For each inline-media part whose base64 length exceeds
+    /// `INLINE_IMAGE_MAX_B64_LEN`, decode the bytes, hash them (sha256), write the
+    /// blob, and replace the part with the matching `*Ref { hash, .. }`. Small
+    /// payloads stay inline. Returns an externalized clone (input never mutated).
+    fn externalize(&self, session_id: &str, message: &ChatMessage) -> std::io::Result<ChatMessage> {
+        // Fast path: nothing large to externalize.
+        let needs = message.parts.iter().any(|p| {
+            matches!(
+                p,
+                ContentPart::ImageB64 { b64_json, .. } | ContentPart::AudioB64 { b64_json, .. }
+                    if b64_json.len() > INLINE_IMAGE_MAX_B64_LEN
+            )
+        });
+        if !needs {
+            return Ok(message.clone());
+        }
+
+        let mut out = message.clone();
+        for part in &mut out.parts {
+            // Peek at the payload; skip non-media and small inline parts.
+            let b64 = match part {
+                ContentPart::ImageB64 { b64_json, .. } | ContentPart::AudioB64 { b64_json, .. }
+                    if b64_json.len() > INLINE_IMAGE_MAX_B64_LEN =>
+                {
+                    b64_json.clone()
+                }
+                _ => continue,
+            };
+            let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) else {
+                // Undecodable base64: leave inline rather than lose data.
+                continue;
+            };
+            let hash = sha256_hex(&bytes);
+            self.write_blob(session_id, &hash, &bytes)?;
+            *part = match part {
+                ContentPart::ImageB64 { media_type, detail, .. } => ContentPart::ImageRef {
+                    hash,
+                    media_type: media_type.take(),
+                    detail: *detail,
+                },
+                ContentPart::AudioB64 { media_type, .. } => ContentPart::AudioRef {
+                    hash,
+                    media_type: media_type.take(),
+                },
+                _ => unreachable!("filtered to inline media above"),
+            };
+        }
+        Ok(out)
+    }
+
+    /// Hydrate externalized media (`ImageRef` / `AudioRef`) after deserialization.
+    ///
+    /// For each ref, read the blob and replace it with the inline `*B64` form
+    /// carrying the re-encoded base64. A missing or corrupt blob degrades to a
+    /// `Text { "[image unavailable]" / "[audio unavailable]" }` placeholder so a
+    /// single lost blob never fails the whole history load. Returns a hydrated
+    /// clone.
+    fn hydrate(&self, session_id: &str, message: &ChatMessage) -> ChatMessage {
+        let needs = message
+            .parts
+            .iter()
+            .any(|p| matches!(p, ContentPart::ImageRef { .. } | ContentPart::AudioRef { .. }));
+        if !needs {
+            return message.clone();
+        }
+        let mut out = message.clone();
+        for part in &mut out.parts {
+            let hash = match part {
+                ContentPart::ImageRef { hash, .. } | ContentPart::AudioRef { hash, .. } => {
+                    hash.clone()
+                }
+                _ => continue,
+            };
+            match self.read_blob(session_id, &hash) {
+                Ok(bytes) => {
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                    *part = match part {
+                        ContentPart::ImageRef { media_type, detail, .. } => ContentPart::ImageB64 {
+                            b64_json: b64,
+                            media_type: media_type.take(),
+                            detail: *detail,
+                        },
+                        ContentPart::AudioRef { media_type, .. } => ContentPart::AudioB64 {
+                            b64_json: b64,
+                            media_type: media_type.take(),
+                        },
+                        _ => unreachable!("filtered to *Ref above"),
+                    };
+                }
+                Err(e) => {
+                    let placeholder = if matches!(part, ContentPart::AudioRef { .. }) {
+                        "[audio unavailable]"
+                    } else {
+                        "[image unavailable]"
+                    };
+                    tracing::warn!(
+                        session_id, hash = %hash, err = %e,
+                        "media blob missing/corrupt; degrading to placeholder"
+                    );
+                    *part = ContentPart::Text { text: placeholder.into() };
+                }
+            }
+        }
+        out
+    }
+
+    /// Mark-and-sweep blob GC: delete any `blobs/*.bin` whose hash is not
+    /// referenced by a `live` message. `live` should include both surviving
+    /// active messages and any archived segments that are also externalized.
+    fn sweep_blobs(&self, session_id: &str, live: &HashSet<String>) {
+        let dir = self.blobs_dir(session_id);
+        let Ok(entries) = fs::read_dir(&dir) else { return; };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(hash) = name.strip_suffix(".bin") else { continue; };
+            if !live.contains(hash) {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    /// Mark-and-sweep description GC: delete any `descriptions/*.txt` whose key
+    /// is not in `live` (the content fingerprints of all live media). Mirrors
+    /// [`sweep_blobs`]; `*.tmp` write-through scratch files are ignored (they do
+    /// not end in `.txt`). The descriptions dir is written by
+    /// `PersistentDescriptionCache`; this is the in-session reclamation point for
+    /// images dropped by compaction (full reclamation happens on session delete).
+    fn sweep_descriptions(&self, session_id: &str, live: &HashSet<String>) {
+        let dir = self.session_dir(session_id).join(crate::storage::SESSION_DESCRIPTIONS_DIR);
+        let Ok(entries) = fs::read_dir(&dir) else { return; };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(key) = name.strip_suffix(".txt") else { continue; };
+            if !live.contains(key) {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    /// Scan the archive segments once, extending both live sets: `blob_hashes`
+    /// with every `ImageRef.hash` (for the `*.bin` sweep) and `desc_keys` with
+    /// every media part's content fingerprint (for the `*.txt` sweep). Archived
+    /// segments are externalized the same way as the active segment, so their
+    /// referenced blobs and descriptions must be kept alive too.
+    fn extend_archived_live_sets(
+        &self,
+        session_id: &str,
+        blob_hashes: &mut HashSet<String>,
+        desc_keys: &mut HashSet<String>,
+    ) {
+        let archive_dir = self.archive_dir(session_id);
+        let Ok(entries) = fs::read_dir(&archive_dir) else { return; };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let Ok(f) = fs::File::open(entry.path()) else { continue; };
+            for line in BufReader::new(f).lines().map_while(Result::ok) {
+                let line = line.trim();
+                if line.is_empty() { continue; }
+                let Ok(msg) = serde_json::from_str::<ChatMessage>(line) else { continue; };
+                collect_blob_hashes(&msg, blob_hashes);
+                collect_description_keys(&msg, desc_keys);
+            }
+        }
+    }
+}
+
+/// Append every `ImageRef.hash` in `msg` into `set` — the live set for the
+/// blob (`*.bin`) sweep. Only externalized images have a blob, so inline
+/// `ImageB64` parts are intentionally excluded here.
+fn collect_blob_hashes(msg: &ChatMessage, set: &mut HashSet<String>) {
+    for part in &msg.parts {
+        if let ContentPart::ImageRef { hash, .. } | ContentPart::AudioRef { hash, .. } = part {
+            set.insert(hash.clone());
+        }
+    }
+}
+
+/// Append the content fingerprint of every media part in `msg` into `set` — the
+/// live set for the description (`*.txt`) sweep. Unlike [`collect_blob_hashes`]
+/// this covers *all* live images (inline `ImageB64`, externalized `ImageRef`,
+/// and `ImageUrl`), since a small inline image still has a cached description
+/// that must not be swept. `content_fingerprint` yields the same key for an
+/// image whether it is inline or externalized, so this is a superset of the
+/// blob-hash set.
+fn collect_description_keys(msg: &ChatMessage, set: &mut HashSet<String>) {
+    for part in &msg.parts {
+        if let Some(key) = part.content_fingerprint() {
+            set.insert(key);
+        }
     }
 }
 
@@ -357,7 +633,10 @@ impl SessionBackend for JsonFileBackend {
         })?;
         let new_id = (meta.message_count as i64) + 1;
 
-        let json = serde_json::to_string(message).map_err(std::io::Error::other)?;
+        // Externalize large inline images into content-addressed blobs and
+        // persist the lightweight `ImageRef` form instead.
+        let message = self.externalize(session_id, message)?;
+        let json = serde_json::to_string(&message).map_err(std::io::Error::other)?;
         let path = self.history_path(session_id);
         let mut f = fs::OpenOptions::new().create(true).append(true).open(&path)?;
         writeln!(f, "{json}")?;
@@ -405,13 +684,31 @@ impl SessionBackend for JsonFileBackend {
         if keep_count >= lines.len() {
             return Ok(()); // nothing to truncate
         }
+        let kept: Vec<&str> = lines.into_iter().take(keep_count).collect();
         let new_content = if keep_count == 0 {
             String::new()
         } else {
-            let kept: Vec<&str> = lines.into_iter().take(keep_count).collect();
             kept.join("\n") + "\n"
         };
         fs::write(&path, new_content)?;
+
+        // Mark-and-sweep blob + description GC over the surviving (kept) lines +
+        // archives. The kept lines are the on-disk (externalized) form, so
+        // `content_fingerprint` reads `ImageRef.hash` directly and decodes any
+        // inline `ImageB64` — yielding the same description keys either way.
+        let mut live_hashes: HashSet<String> = HashSet::new();
+        let mut live_desc: HashSet<String> = HashSet::new();
+        for line in &kept {
+            let line = line.trim();
+            if line.is_empty() { continue; }
+            if let Ok(msg) = serde_json::from_str::<ChatMessage>(line) {
+                collect_blob_hashes(&msg, &mut live_hashes);
+                collect_description_keys(&msg, &mut live_desc);
+            }
+        }
+        self.extend_archived_live_sets(session_id, &mut live_hashes, &mut live_desc);
+        self.sweep_blobs(session_id, &live_hashes);
+        self.sweep_descriptions(session_id, &live_desc);
 
         if let Some(mut meta) = self.read_meta(session_id) {
             meta.message_count = keep_count;
@@ -563,5 +860,196 @@ impl SessionBackend for JsonFileBackend {
 
     fn load_parent_session_id(&self, session_id: &str) -> Option<String> {
         self.read_meta(session_id)?.parent_session_id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::{ChatMessage, ContentPart, ImageDetail};
+
+    fn b64_of(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    /// Build a JsonFileBackend rooted in a fresh temp dir with one session.
+    fn backend_with_session() -> (tempfile::TempDir, JsonFileBackend, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = JsonFileBackend::open(dir.path()).unwrap();
+        let info = backend.create_session("owner", None).unwrap();
+        (dir, backend, info.id)
+    }
+
+    fn img_msg(b64: String) -> ChatMessage {
+        ChatMessage {
+            role: "user".into(),
+            parts: vec![
+                ContentPart::ImageB64 { b64_json: b64, media_type: Some("image/png".into()), detail: ImageDetail::Auto },
+                ContentPart::Text { text: "hello".into() },
+            ],
+            name: None, tool_call_id: None, tool_calls: None, is_error: None,
+        }
+    }
+
+    #[test]
+    fn blob_roundtrip_externalize_hydrate() {
+        let (_dir, backend, sid) = backend_with_session();
+        // A large image (> threshold) round-trips through blob + hydrate.
+        let raw = vec![7u8; 16 * 1024];
+        let b64 = b64_of(&raw);
+        backend.append_message(&sid, &img_msg(b64.clone())).unwrap();
+
+        // On-disk line must NOT contain the base64 payload (externalized).
+        let line = fs::read_to_string(backend.history_path(&sid)).unwrap();
+        assert!(line.contains("image_ref"), "expected ImageRef on disk: {line}");
+        assert!(!line.contains(&b64), "base64 must not be inline on disk");
+
+        // Loading hydrates back to the original ImageB64.
+        let loaded = backend.load_messages(&sid);
+        assert_eq!(loaded.len(), 1);
+        match &loaded[0].parts[0] {
+            ContentPart::ImageB64 { b64_json, media_type, .. } => {
+                assert_eq!(b64_json, &b64);
+                assert_eq!(media_type.as_deref(), Some("image/png"));
+            }
+            other => panic!("expected hydrated ImageB64, got {other:?}"),
+        }
+    }
+
+    fn audio_msg(b64: String) -> ChatMessage {
+        ChatMessage {
+            role: "user".into(),
+            parts: vec![
+                ContentPart::AudioB64 { b64_json: b64, media_type: Some("audio/ogg".into()) },
+                ContentPart::Text { text: "transcribe".into() },
+            ],
+            name: None, tool_call_id: None, tool_calls: None, is_error: None,
+        }
+    }
+
+    #[test]
+    fn audio_blob_roundtrip_externalize_hydrate() {
+        let (_dir, backend, sid) = backend_with_session();
+        // A large audio payload round-trips through blob + hydrate, same as images.
+        let raw = vec![11u8; 16 * 1024];
+        let b64 = b64_of(&raw);
+        backend.append_message(&sid, &audio_msg(b64.clone())).unwrap();
+
+        let line = fs::read_to_string(backend.history_path(&sid)).unwrap();
+        assert!(line.contains("audio_ref"), "expected AudioRef on disk: {line}");
+        assert!(!line.contains(&b64), "base64 must not be inline on disk");
+
+        let loaded = backend.load_messages(&sid);
+        assert_eq!(loaded.len(), 1);
+        match &loaded[0].parts[0] {
+            ContentPart::AudioB64 { b64_json, media_type } => {
+                assert_eq!(b64_json, &b64);
+                assert_eq!(media_type.as_deref(), Some("audio/ogg"));
+            }
+            other => panic!("expected hydrated AudioB64, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn small_image_stays_inline() {
+        let (_dir, backend, sid) = backend_with_session();
+        let raw = vec![1u8; 64]; // tiny -> base64 well under 8KB
+        let b64 = b64_of(&raw);
+        backend.append_message(&sid, &img_msg(b64.clone())).unwrap();
+
+        let line = fs::read_to_string(backend.history_path(&sid)).unwrap();
+        assert!(line.contains("image_b64"), "small image should stay inline: {line}");
+        assert!(!line.contains("image_ref"));
+        // No blob written.
+        assert!(!backend.blobs_dir(&sid).exists() ||
+            fs::read_dir(backend.blobs_dir(&sid)).map(|mut e| e.next().is_none()).unwrap_or(true));
+    }
+
+    #[test]
+    fn dedup_writes_single_blob() {
+        let (_dir, backend, sid) = backend_with_session();
+        let raw = vec![9u8; 20 * 1024];
+        let b64 = b64_of(&raw);
+        // Append the same large image twice.
+        backend.append_message(&sid, &img_msg(b64.clone())).unwrap();
+        backend.append_message(&sid, &img_msg(b64.clone())).unwrap();
+
+        let blobs: Vec<_> = fs::read_dir(backend.blobs_dir(&sid)).unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map(|x| x == "bin").unwrap_or(false))
+            .collect();
+        assert_eq!(blobs.len(), 1, "identical images must dedup to one blob");
+    }
+
+    #[test]
+    fn gc_sweeps_orphan_blobs_on_truncate() {
+        let (_dir, backend, sid) = backend_with_session();
+        let raw_a = vec![2u8; 20 * 1024];
+        let raw_b = vec![3u8; 20 * 1024];
+        backend.append_message(&sid, &img_msg(b64_of(&raw_a))).unwrap();
+        backend.append_message(&sid, &img_msg(b64_of(&raw_b))).unwrap();
+
+        let count_blobs = |b: &JsonFileBackend| fs::read_dir(b.blobs_dir(&sid))
+            .map(|e| e.filter_map(|x| x.ok())
+                .filter(|x| x.path().extension().map(|y| y == "bin").unwrap_or(false))
+                .count())
+            .unwrap_or(0);
+        assert_eq!(count_blobs(&backend), 2);
+
+        // Keep only the first message; the second image's blob is orphaned.
+        backend.truncate_messages(&sid, 1).unwrap();
+        assert_eq!(count_blobs(&backend), 1, "orphan blob should be swept");
+    }
+
+    #[test]
+    fn gc_sweeps_orphan_descriptions_on_truncate() {
+        let (_dir, backend, sid) = backend_with_session();
+        let raw_a = vec![2u8; 20 * 1024];
+        let raw_b = vec![3u8; 20 * 1024];
+        backend.append_message(&sid, &img_msg(b64_of(&raw_a))).unwrap();
+        backend.append_message(&sid, &img_msg(b64_of(&raw_b))).unwrap();
+
+        // Simulate PersistentDescriptionCache having persisted a description for
+        // each image, keyed by content fingerprint (== decoded-bytes sha256 ==
+        // blob hash, so it matches the on-disk ImageRef the sweep sees).
+        let desc_dir = backend.session_dir(&sid).join(crate::storage::SESSION_DESCRIPTIONS_DIR);
+        fs::create_dir_all(&desc_dir).unwrap();
+        let key_a = sha256_hex(&raw_a);
+        let key_b = sha256_hex(&raw_b);
+        fs::write(desc_dir.join(format!("{key_a}.txt")), "desc a").unwrap();
+        fs::write(desc_dir.join(format!("{key_b}.txt")), "desc b").unwrap();
+
+        // Keep only the first message; image B's description is now orphaned.
+        backend.truncate_messages(&sid, 1).unwrap();
+
+        assert!(
+            desc_dir.join(format!("{key_a}.txt")).exists(),
+            "description of a live image must be kept"
+        );
+        assert!(
+            !desc_dir.join(format!("{key_b}.txt")).exists(),
+            "description of a dropped image must be swept"
+        );
+    }
+
+    #[test]
+    fn missing_blob_degrades_to_placeholder() {
+        let (_dir, backend, sid) = backend_with_session();
+        let raw = vec![5u8; 20 * 1024];
+        backend.append_message(&sid, &img_msg(b64_of(&raw))).unwrap();
+
+        // Delete every blob to simulate corruption/loss.
+        for e in fs::read_dir(backend.blobs_dir(&sid)).unwrap().filter_map(|e| e.ok()) {
+            fs::remove_file(e.path()).unwrap();
+        }
+
+        let loaded = backend.load_messages(&sid);
+        assert_eq!(loaded.len(), 1);
+        match &loaded[0].parts[0] {
+            ContentPart::Text { text } => assert_eq!(text, "[image unavailable]"),
+            other => panic!("expected placeholder text, got {other:?}"),
+        }
+        // The trailing text part must survive too.
+        assert!(matches!(&loaded[0].parts[1], ContentPart::Text { text } if text == "hello"));
     }
 }

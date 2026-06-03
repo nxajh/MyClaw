@@ -292,6 +292,25 @@ fn persist_last(session: &mut Session)
 ```
 
 ```rust
+// 在 clone 出的 messages 上把媒体规范化为文本（每模态走 adapt_modality(spec)：
+// 历史媒体→缓存复用/占位符，当轮媒体→辅助模型转述/转写）。永不修改持久化 history。
+//   音频(AUDIO_SPEC)：始终适配（chat 协议无法承载音频，即便音频模型也转写）
+//   图片(IMAGE_SPEC)：仅当 !model_supports_images 时适配（视觉模型用原生 ImageB64）
+// 在初次构建 messages 后、以及每次 compaction 重建后各调用一次。
+async fn adapt_media_for_model(
+    messages: &mut [ChatMessage],
+    runtime: &AgentRuntime,
+    session_id: &str,
+    model_supports_images: bool,
+)
+async fn adapt_modality(messages, runtime, session_id, spec: &ModalitySpec) // 单模态历史+当轮适配
+```
+
+> 多模态：当轮图片由 `session_context::process_turn` 经 `add_user_with_media` 持久化进
+> history，故 `run()` 的 `messages` clone 已天然携带图片；旧的「从 `last_message` 快照拼回图片」
+> 路径已删除（否则视觉模型会重复附图）。非视觉模型的媒体适配见 `agents/modality_adapter.rs`。
+
+```rust
 fn last_user_text(session: &Session) -> String
 ```
 
@@ -1483,6 +1502,13 @@ pub struct AgentRuntime {
   /// (the tool writes timestamps on rate-limit; `/status` reads them
   /// to render ⏱️ markers next to cooled-down providers).
   pub search_cooldown: Option<Arc<SearchProviderCooldown>>,
+  /// Content-addressed cache of media-fingerprint → text description,
+  /// shared with the modality adapter (`agents/modality_adapter.rs`).
+  /// Survives across turns/sessions so historical media can reuse a
+  /// description instead of degrading to a placeholder. `new()` installs
+  /// an in-memory `LruDescriptionCache`; override via
+  /// `with_description_cache`.
+  pub description_cache: Arc<dyn DescriptionCache>,
 }
 ```
 
@@ -1490,10 +1516,94 @@ pub struct AgentRuntime {
 ```rust
   pub fn new(
   pub fn with_defaults(mut self, defaults: RuntimeDefaults) -> Self
+  pub fn with_description_cache(mut self, cache: Arc<dyn DescriptionCache>) -> Self
   pub fn with_mcp_manager(mut self, mcp: Arc<McpManager>) -> Self
   pub fn with_search_cooldown(mut self, cooldown: Arc<SearchProviderCooldown>) -> Self
   pub fn build_system_prompt(&self, prompt_config: &SystemPromptConfig) -> String
 ```
+
+#### `agents/modality_adapter.rs`
+
+Modality adaptation layer — translates non-text modalities (image, and in
+later phases audio/video) to text when the primary chat model does not
+support them natively. Operates on cloned messages only (never mutates
+persistent history) and is **registry-free**: the auxiliary `ChatProvider`
+is passed in by the caller. Translation results are cached by content
+fingerprint (sha256 of URL / base64 payload) so historical media can reuse a
+description rather than degrading to a placeholder. See
+`docs/multimodal-auxiliary-translation.md` §3.3, §4.3, §4.7.
+
+**结构体** `ModalitySpec` — static description of how to adapt one modality:
+```rust
+pub struct ModalitySpec {
+  pub modality: Modality,        // input modality this spec adapts
+  pub prompt: &'static str,      // prompt sent to the auxiliary model
+  pub label: &'static str,       // label for the injected text, e.g. "图片"
+  pub placeholder: &'static str, // text used when no description is available
+}
+pub const IMAGE_SPEC: ModalitySpec; // image, label "图片", placeholder "[image]"
+pub const AUDIO_SPEC: ModalitySpec; // audio transcription, label "音频", placeholder "[audio]"
+```
+
+**自由函数**:
+```rust
+pub fn part_matches(part: &ContentPart, modality: &Modality) -> bool // Image: ImageUrl/ImageB64; Audio: AudioB64
+pub fn fingerprint(part: &ContentPart) -> Option<String> // → ContentPart::content_fingerprint (decoded-bytes sha256 == blob hash)
+pub async fn translate_part(
+  provider: &dyn ChatProvider,
+  model_id: &str,
+  part: &ContentPart,
+  spec: &ModalitySpec,
+  cache: &dyn DescriptionCache,
+  session_id: &str,
+) -> anyhow::Result<String>
+pub fn adapt_history_media(
+  messages: &mut [ChatMessage],
+  spec: &ModalitySpec,
+  cache: &dyn DescriptionCache,
+  session_id: &str,
+  skip_idx: Option<usize>,
+) // historical media → cached description or placeholder; never calls aux model
+pub async fn adapt_last_turn_media(
+  msg: &mut ChatMessage,
+  spec: &ModalitySpec,
+  aux: Option<(&Arc<dyn ChatProvider>, &str)>,
+  cache: &dyn DescriptionCache,
+  session_id: &str,
+) // current-turn media → one combined (numbered) description; degrades gracefully
+```
+
+`translate_part` builds a single self-contained user message (media part +
+`spec.prompt`), issues a streaming `provider.chat(req)` (`stream = true`),
+aggregates via `ChatResponse::from_stream(stream).await?`, takes `.text`, and
+caches it under the fingerprint. `adapt_last_turn_media` translates a
+message's media parts in parallel via `futures_util::future::join_all`.
+
+**trait** `DescriptionCache` — `(session_id, fingerprint)` → description cache:
+```rust
+pub trait DescriptionCache: Send + Sync {
+  fn get(&self, session_id: &str, key: &str) -> Option<String>;
+  fn put(&self, session_id: &str, key: String, value: String);
+}
+```
+
+**结构体** `LruDescriptionCache` — `Mutex<lru::LruCache<String, String>>`-backed
+in-memory impl, keyed by a `(session_id, key)` composite (`new(capacity)` /
+`Default` = 512 entries). Used by CLI one-shot commands and tests.
+
+**结构体** `PersistentDescriptionCache` — two-tier impl: bounded LRU hot tier +
+**per-session** content-addressed on-disk cold tier at
+`{sessions_root}/{session_id}/descriptions/{key}.txt` (a sibling of that
+session's `blobs/`; write-through + read-through, atomic temp+rename).
+`open(sessions_root, capacity)`. The daemon installs it over `workspace/sessions`
+so image descriptions survive restarts and LRU eviction (a non-vision model
+recovers historical-image descriptions without re-invoking the auxiliary model —
+parallel to how blobs persist image bytes) and are reclaimed with the session on
+delete. Keyed by `ContentPart::content_fingerprint` (decoded-bytes sha256 == the
+blob hash), so descriptions share the blob mark-and-sweep: `rotate_history` and
+`truncate_messages` sweep `descriptions/*.txt` against the content fingerprints of
+all live media (a superset of the live blob hashes — inline `ImageB64`, `ImageRef`,
+and `ImageUrl`), reclaiming descriptions of compaction-dropped images in-session.
 
 #### `agents/session_context.rs`
 
@@ -1531,7 +1641,9 @@ pub struct SessionContext {
   pub fn new(session: Session, agent: Arc<Agent>) -> Self
   pub fn with_profile(session: Session, agent: Arc<Agent>, profile: Arc<UserProfile>) -> Self
   pub async fn session_snapshot(&self) -> Session
-  pub async fn process_turn(
+  pub async fn process_turn(  // 从 last_message.image_urls/image_base64 构建媒体
+                             // parts，非空时调 add_user_with_media（否则 add_user）；
+                             // persist_hook 随后持久化携带图片的消息（externalize 生效）
 ```
 
 #### `agents/tokens.rs`
@@ -3005,6 +3117,7 @@ pub struct Session {
   pub fn reply_target(&self) -> Option<&str>
   pub fn record_inbound(&mut self, msg: ChannelMessage)
   pub fn add_user(&mut self, text: String)
+  pub fn add_user_with_media(&mut self, text: String, media: Vec<ContentPart>)  // 媒体在前 + Text 在后
   pub fn add_user_text(&mut self, text: String)
   pub fn add_assistant(&mut self, text: String)
   pub fn add_assistant_text(&mut self, text: String)
@@ -7133,6 +7246,7 @@ pub struct ChatModelConfig {
 **Impl** `impl ChatModelConfig`:
 ```rust
   pub fn supports_image_input(&self) -> bool
+  pub fn supports_input(&self, modality: Modality) -> bool
 ```
 
 **结构体** `EmbeddingModelConfig`:
@@ -7166,6 +7280,24 @@ pub enum ContentPart {
   media_type: Option<String>,
   detail: ImageDetail,
   },
+  /// On-disk reference to an externalized image blob (content-addressed by
+  /// SHA-256 of the decoded bytes). EXISTS ONLY in persisted `history.jsonl`:
+  /// `json_file::append_message` externalizes large `ImageB64` parts into
+  /// `blobs/{sha256}.bin` + `ImageRef`; `load_messages` hydrates them back to
+  /// `ImageB64` before the in-memory render path. Protocol renderers
+  /// (OpenAI/Anthropic/GLM) treat it as `unreachable!` — it must never be
+  /// rendered directly.
+  ImageRef {
+  hash: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  media_type: Option<String>,
+  detail: ImageDetail,
+  },
+  // 音频：与 Image* 同构（无 detail）。AudioB64 内存态、AudioRef 落盘态。
+  // 音频对每个模型都转写成文本，故只在「作为 STT aux 模型的输入」时抵达渲染器
+  // （OpenAI 渲染为 input_audio 块；Anthropic/GLM 降级为 [audio] 文本；AudioRef 一律 unreachable!）。
+  AudioB64 { b64_json: String, media_type: Option<String> },
+  AudioRef { hash: String, media_type: Option<String> },
   /// Extended thinking block — stored in message history so it can be
   /// re-sent to the model on subsequent turns (Anthropic protocol requires
   /// the model to see its own reasoning, including the opaque signature).
@@ -7188,6 +7320,18 @@ pub enum ImageDetail {
   Low,
   High,
 }
+```
+
+**Impl** `ContentPart` + free fn:
+```rust
+impl ContentPart {
+  // 内容指纹：图片用解码字节 sha256（== blobs/{hash}.bin 文件名 == ImageRef.hash），
+  // 故跨 ImageB64⇄ImageRef 外化/hydrate 与 b64 重编码往返均不变；URL 用 url 哈希；
+  // 不可解码 b64 退化为哈希原串；非媒体 part → None。用作描述缓存键 + 描述 GC 键。
+  pub fn content_fingerprint(&self) -> Option<String>
+}
+// 内容哈希单一实现，blob 存储与内容指纹共用以杜绝漂移：
+pub fn sha256_hex(bytes: &[u8]) -> String
 ```
 
 **结构体** `ChatMessage`:
@@ -8449,6 +8593,9 @@ pub trait ProviderRegistry {
   fn get_chat_provider_by_model(&self, model_id: &str) -> Option<(Arc<dyn ChatProvider>, String)>
   fn get_chat_routing_models(&self) -> Vec<String>
   fn get_all_provider_summaries(&self) -> Vec<ProviderSummary>
+  // Default method: searches the user-declared chat routing chain for a model
+  // whose ChatModelConfig.input contains `modality` (no global auto-discovery).
+  fn find_chat_model_with_modality(&self, modality: Modality) -> Option<(Arc<dyn ChatProvider>, String)>
 }
 ```
 
@@ -8929,6 +9076,11 @@ pub struct Registry {
 
 **Impl** `impl Registry`:
 ```rust
+  // Auxiliary-model resolution for non-text modalities reuses the
+  // `ProviderRegistry::find_chat_model_with_modality` trait default (walks the
+  // `[routing.chat]` chain only, no global discovery). No dedicated
+  // `aux_model_for` wrapper — per the multimodal RFC §4.6 the per-modality
+  // override is not implemented, so the wrapper would be dead code.
   fn route_capability<T: ?Sized + Send + Sync>(
 ```
 
@@ -8988,6 +9140,23 @@ pub struct RoutingConfig {
 **模块说明**: 存储后端：JSON 文件存储、Session 持久化、共享/私有 KV 存储
 
 #### `storage/json_file.rs`
+
+**图片 blob 外化 (多模态 Stage 1)**: 大尺寸内联图片会膨胀 `history.jsonl`。
+`append_message` 在序列化前 **externalize**：每个 base64 长度 > 8KB 的
+`ContentPart::ImageB64` 被解码 → `sha256(bytes)` → 写入内容寻址 blob
+`sessions/{session_id}/blobs/{sha256}.bin`（原始解码字节），并替换为
+`ImageRef { hash, media_type, detail }`；小图（≤8KB）保持内联。
+`load_messages` / `read_history_with_ids` 在反序列化后 **hydrate**：每个
+`ImageRef` 读取 blob → 重新编码回 `ImageB64`；blob 缺失/损坏时降级为
+`Text { "[image unavailable]" }`，不会让整次加载失败。
+`write_blob` 幂等（文件已存在则跳过 = 内容寻址去重），`read_blob` 读取原始字节。
+GC：`rotate_history` 与 `truncate_messages` 写入存活消息后做 mark-and-sweep,
+**同时清扫 blob 与描述**——`extend_archived_live_sets` 单次扫描 archive 段填充两个 live 集:
+`collect_blob_hashes`(存活消息的 `ImageRef.hash` → `sweep_blobs` 删孤儿 `blobs/*.bin`)
+与 `collect_description_keys`(存活消息**全部**媒体 part 的 `content_fingerprint` →
+`sweep_descriptions` 删孤儿 `descriptions/*.txt`)。描述键 = 内容指纹 = blob hash(`sha256_hex`),
+故描述 live 集是 blob live 集的超集(含内联 `ImageB64`/`ImageUrl`),内联小图描述不会被误删。
+archive 段同样被外化。
 
 **结构体** `SessionMeta`:
 ```rust
@@ -9055,9 +9224,20 @@ pub struct JsonFileBackend {
   fn read_active(&self) -> ActiveMap
   fn write_active(&self, map: &ActiveMap) -> std::io::Result<()>
   fn generate_session_id() -> String
-  fn read_history_with_ids(&self, session_id: &str) -> Vec<(i64, ChatMessage)>
+  fn read_history_with_ids(&self, session_id: &str) -> Vec<(i64, ChatMessage)>  // hydrate 后返回
   fn meta_to_info(meta: &SessionMeta) -> SessionInfo
-  fn rotate_history_impl(
+  fn rotate_history_impl(  // 重新 externalize 存活消息 + sweep 孤儿 blob/description
+  // ── 图片 blob 存储 ──
+  fn blobs_dir(&self, session_id: &str) -> PathBuf
+  fn blob_path(&self, session_id: &str, hash: &str) -> PathBuf
+  fn write_blob(&self, session_id: &str, hash: &str, bytes: &[u8]) -> std::io::Result<()>  // 幂等去重
+  fn read_blob(&self, session_id: &str, hash: &str) -> std::io::Result<Vec<u8>>
+  fn externalize(&self, session_id: &str, message: &ChatMessage) -> std::io::Result<ChatMessage>
+  fn hydrate(&self, session_id: &str, message: &ChatMessage) -> ChatMessage
+  fn sweep_blobs(&self, session_id: &str, live: &HashSet<String>)         // mark-and-sweep blobs/*.bin
+  fn sweep_descriptions(&self, session_id: &str, live: &HashSet<String>)  // mark-and-sweep descriptions/*.txt
+  fn extend_archived_live_sets(&self, session_id: &str, blob_hashes: &mut HashSet<String>, desc_keys: &mut HashSet<String>)
+// free fns: collect_blob_hashes(msg, set) / collect_description_keys(msg, set)
 ```
 
 **Impl** `impl SessionBackend for JsonFileBackend`:

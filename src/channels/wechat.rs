@@ -52,6 +52,7 @@ const MAX_CONSECUTIVE_ERRORS: u32 = 10;
 const MESSAGE_TYPE_BOT: i64 = 2;
 const MESSAGE_STATE_FINISH: i64 = 2;
 const ITEM_TYPE_TEXT: i64 = 1;
+const ITEM_TYPE_VOICE: i64 = 3;
 const TYPING_STATUS_TYPING: i64 = 1;
 const TYPING_STATUS_CANCEL: i64 = 2;
 
@@ -169,10 +170,22 @@ struct MessageItem {
     item_type: i64,
     #[serde(default)]
     text_item: Option<TextItem>,
+    #[serde(default)]
+    voice_item: Option<VoiceItem>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct TextItem {
+    #[serde(default)]
+    text: String,
+}
+
+/// Inbound voice item (`type == 3`). WeChat ships a native ASR transcription in
+/// `text`; we use it directly as the message body (the SILK media in `media` is
+/// AES-encrypted and not downloaded). Other fields (encoding/duration) are
+/// ignored.
+#[derive(Debug, Clone, Deserialize)]
+struct VoiceItem {
     #[serde(default)]
     text: String,
 }
@@ -518,6 +531,13 @@ fn parse_inbound(msg: &IlinkMessage) -> InboundEvent {
         Some(first) if first.item_type == ITEM_TYPE_TEXT => {
             InboundContent::Text(first.text_item.as_ref().map(|t| t.text.clone()).unwrap_or_default())
         }
+        // Voice: use WeChat's native ASR transcription as the text body.
+        Some(first) if first.item_type == ITEM_TYPE_VOICE => {
+            match first.voice_item.as_ref().map(|v| v.text.clone()).unwrap_or_default() {
+                t if t.trim().is_empty() => InboundContent::Unknown,
+                t => InboundContent::Text(t),
+            }
+        }
         _ => InboundContent::Unknown,
     };
 
@@ -826,7 +846,7 @@ mod tests {
             group_id: String::new(),
             message_type: 1,
             message_state: 2,
-            list: vec![MessageItem { item_type: ITEM_TYPE_TEXT, text_item: Some(TextItem { text: "hello".into() }) }],
+            list: vec![MessageItem { item_type: ITEM_TYPE_TEXT, text_item: Some(TextItem { text: "hello".into() }), voice_item: None }],
             context_token: "ctx_tok".into(),
         };
         let event = parse_inbound(&msg);
@@ -834,6 +854,50 @@ mod tests {
         assert_eq!(event.chat_id, "user1");
         assert!(!event.is_group);
         match event.content { InboundContent::Text(t) => assert_eq!(t, "hello"), _ => panic!("expected text") }
+    }
+
+    #[test]
+    fn test_parse_voice_uses_native_asr_text() {
+        let msg = IlinkMessage {
+            from_user_id: "user1".into(),
+            to_user_id: "bot1".into(),
+            client_id: "cid_voice".into(),
+            create_time_ms: 2000,
+            group_id: String::new(),
+            message_type: 1,
+            message_state: 2,
+            list: vec![MessageItem {
+                item_type: ITEM_TYPE_VOICE,
+                text_item: None,
+                voice_item: Some(VoiceItem { text: "转写出来的内容".into() }),
+            }],
+            context_token: String::new(),
+        };
+        let event = parse_inbound(&msg);
+        match event.content {
+            InboundContent::Text(t) => assert_eq!(t, "转写出来的内容"),
+            _ => panic!("expected voice ASR text"),
+        }
+    }
+
+    #[test]
+    fn test_parse_voice_without_asr_is_unknown() {
+        let msg = IlinkMessage {
+            from_user_id: "user1".into(),
+            to_user_id: "bot1".into(),
+            client_id: "cid_voice2".into(),
+            create_time_ms: 2001,
+            group_id: String::new(),
+            message_type: 1,
+            message_state: 2,
+            list: vec![MessageItem {
+                item_type: ITEM_TYPE_VOICE,
+                text_item: None,
+                voice_item: Some(VoiceItem { text: "   ".into() }),
+            }],
+            context_token: String::new(),
+        };
+        assert!(matches!(parse_inbound(&msg).content, InboundContent::Unknown));
     }
 
     #[test]

@@ -119,24 +119,19 @@ impl Agent {
         let permission_mode = turn_ctx.permission_mode;
         let mut empty_response_retries: usize = 0;
         const MAX_EMPTY_RETRIES: usize = 3;
-        // Image attachment: snapshot URLs / base64 from session.last_message
-        // and only attach on the *first* LLM call of the turn — subsequent
-        // iterations rebuild `messages` from history which already carries
-        // the attached parts.
-        let pending_image_urls: Option<Vec<String>> = session
-            .last_message
-            .as_ref()
-            .and_then(|m| m.image_urls.clone());
-        let pending_image_b64: Option<Vec<String>> = session
-            .last_message
-            .as_ref()
-            .and_then(|m| m.image_base64.clone());
-        let mut images_attached = false;
+        // Current-turn images are persisted into history (add_user_with_media),
+        // so the `messages` clone above already carries them on the last user
+        // message. Vision models use those parts natively; non-vision models
+        // get media normalized to text by `adapt_media_for_model` (historical
+        // images → cached description/placeholder, current turn → auxiliary
+        // translation). Adaptation runs on the cloned `messages` only and never
+        // mutates persistent history.
         let model_supports_images = runtime
             .providers
             .get_chat_model_config(&model_id)
             .map(|cfg| cfg.supports_image_input())
             .unwrap_or(false);
+        adapt_media_for_model(&mut messages, runtime, &session.id, model_supports_images).await;
 
         loop {
             // Shutdown checkpoint between LLM calls (mirrors AgentLoop chat_loop).
@@ -164,34 +159,6 @@ impl Agent {
                     });
                 }
             }
-
-            // Attach pending images to the last user message on the
-            // first iteration only. Skipped silently for non-vision
-            // models so the LLM doesn't see unsupported parts.
-            if !images_attached && model_supports_images {
-                if let Some(last_user) =
-                    messages.iter_mut().rev().find(|m| m.role == "user")
-                {
-                    if let Some(urls) = pending_image_urls.as_ref() {
-                        for url in urls {
-                            last_user.parts.push(ContentPart::ImageUrl {
-                                url: url.clone(),
-                                detail: crate::providers::ImageDetail::Auto,
-                            });
-                        }
-                    }
-                    if let Some(b64s) = pending_image_b64.as_ref() {
-                        for b64 in b64s {
-                            last_user.parts.push(ContentPart::ImageB64 {
-                                b64_json: b64.clone(),
-                                media_type: None,
-                                detail: crate::providers::ImageDetail::Auto,
-                            });
-                        }
-                    }
-                }
-            }
-            images_attached = true;
 
             let thinking = turn_ctx.thinking.cloned();
             let req = ChatRequest {
@@ -304,6 +271,13 @@ impl Agent {
                                     .chain(session.history.iter().cloned())
                                     .collect();
                                     crate::agents::session::sanitize_history(&mut messages);
+                                    adapt_media_for_model(
+                                        &mut messages,
+                                        runtime,
+                                        &session.id,
+                                        model_supports_images,
+                                    )
+                                    .await;
                                     tracing::info!(
                                         summary_tokens = result.summary_tokens,
                                         removed_tokens = result.removed_tokens,
@@ -593,6 +567,53 @@ impl Agent {
                 false
             })
             .collect()
+    }
+}
+
+/// Normalize non-text media in the cloned `messages` when the primary model
+/// lacks image input. No-op for vision models — the `messages` clone already
+/// carries native `ImageUrl/ImageB64` parts from history. For non-vision
+/// models: historical images (every message except the current turn's last
+/// user message) reuse a cached description or degrade to a placeholder via
+/// `adapt_history_media`; the current turn's images are translated by an
+/// auxiliary vision model via `adapt_last_turn_media`. Operates on the clone
+/// only — persistent history is never mutated.
+async fn adapt_media_for_model(
+    messages: &mut [ChatMessage],
+    runtime: &AgentRuntime,
+    session_id: &str,
+    model_supports_images: bool,
+) {
+    use crate::agents::modality_adapter::{AUDIO_SPEC, IMAGE_SPEC};
+    // Audio is always adapted: chat protocols can't carry audio natively, so even
+    // an "audio-capable" primary model receives a text transcription. Images are
+    // adapted only when the model can't take them natively.
+    adapt_modality(messages, runtime, session_id, &AUDIO_SPEC).await;
+    if !model_supports_images {
+        adapt_modality(messages, runtime, session_id, &IMAGE_SPEC).await;
+    }
+}
+
+/// Adapt one modality across the cloned `messages`: historical media reuse a
+/// cached description (or degrade to the placeholder); the current turn's media
+/// is translated by the modality's auxiliary model. No-op when nothing matches.
+async fn adapt_modality(
+    messages: &mut [ChatMessage],
+    runtime: &AgentRuntime,
+    session_id: &str,
+    spec: &crate::agents::modality_adapter::ModalitySpec,
+) {
+    use crate::agents::modality_adapter;
+    let cache = &*runtime.description_cache;
+    let last_user_idx = messages.iter().rposition(|m| m.role == "user");
+    modality_adapter::adapt_history_media(messages, spec, cache, session_id, last_user_idx);
+    if let Some(idx) = last_user_idx {
+        let aux = runtime
+            .providers
+            .find_chat_model_with_modality(spec.modality.clone());
+        let aux_ref = aux.as_ref().map(|(p, id)| (p, id.as_str()));
+        modality_adapter::adapt_last_turn_media(&mut messages[idx], spec, aux_ref, cache, session_id)
+            .await;
     }
 }
 
@@ -931,6 +952,227 @@ mod tests {
         assert!(
             collect_stream(s, &mut turn_stream).await.is_err(),
             "provider Error must fail the turn"
+        );
+    }
+
+    // ── Stage 4: end-to-end media adaptation (adapt_media_for_model) ──────────
+    // A configurable mock ProviderRegistry + ChatProvider drive the real
+    // `find_chat_model_with_modality` default impl, so these tests exercise the
+    // actual candidate-selection and adaptation wiring, not a re-implementation.
+
+    use crate::providers::{
+        Capability as Cap, ChatModelConfig, ChatProvider, EmbeddingProvider,
+        ImageGenerationProvider, ProviderRegistry, ProviderSummary, SearchProvider, SttProvider,
+        TtsProvider, VideoGenerationProvider,
+    };
+    use crate::providers::capability::Modality;
+    use crate::providers::ImageDetail;
+    use std::collections::HashMap;
+
+    /// Streams back a single fixed Delta — stands in for an auxiliary vision
+    /// model translating an image to a text description.
+    struct MockChatProvider {
+        reply: String,
+    }
+    impl ChatProvider for MockChatProvider {
+        fn chat(&self, _req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
+            Ok(events_to_stream(vec![
+                StreamEvent::Delta { text: self.reply.clone() },
+                StreamEvent::Done { reason: StopReason::EndTurn },
+            ]))
+        }
+    }
+
+    /// Registry whose chat-model configs, routing chain, and per-model providers
+    /// are all explicitly supplied. Everything else bails like NullRegistry.
+    struct MockRegistry {
+        configs: HashMap<String, ChatModelConfig>,
+        routing: Vec<String>,
+        providers: HashMap<String, Arc<dyn ChatProvider>>,
+    }
+    #[rustfmt::skip]
+    impl ProviderRegistry for MockRegistry {
+        fn get_chat_model_config(&self, m: &str) -> anyhow::Result<&ChatModelConfig> {
+            self.configs.get(m).ok_or_else(|| anyhow::anyhow!("no config for {m}"))
+        }
+        fn get_chat_routing_models(&self) -> Vec<String> { self.routing.clone() }
+        fn get_chat_provider_by_model(&self, m: &str) -> Option<(Arc<dyn ChatProvider>, String)> {
+            self.providers.get(m).map(|p| (Arc::clone(p), m.to_string()))
+        }
+        fn get_chat_provider(&self, _c: Cap) -> anyhow::Result<(Arc<dyn ChatProvider>, String)> { anyhow::bail!("stub") }
+        fn get_chat_provider_with_hint(&self, _c: Cap, _h: Option<&str>) -> anyhow::Result<(Arc<dyn ChatProvider>, String)> { anyhow::bail!("stub") }
+        fn get_chat_fallback_chain(&self, _c: Cap) -> anyhow::Result<Vec<(Arc<dyn ChatProvider>, String)>> { anyhow::bail!("stub") }
+        fn get_embedding_provider(&self) -> anyhow::Result<(Arc<dyn EmbeddingProvider>, String)> { anyhow::bail!("stub") }
+        fn get_image_provider(&self) -> anyhow::Result<(Arc<dyn ImageGenerationProvider>, String)> { anyhow::bail!("stub") }
+        fn get_tts_provider(&self) -> anyhow::Result<(Arc<dyn TtsProvider>, String)> { anyhow::bail!("stub") }
+        fn get_video_provider(&self) -> anyhow::Result<(Arc<dyn VideoGenerationProvider>, String)> { anyhow::bail!("stub") }
+        fn get_search_provider(&self) -> anyhow::Result<(Arc<dyn SearchProvider>, String)> { anyhow::bail!("stub") }
+        fn get_search_fallback_chain(&self) -> anyhow::Result<Vec<(Arc<dyn SearchProvider>, String, String)>> { anyhow::bail!("stub") }
+        fn get_stt_provider(&self) -> anyhow::Result<(Arc<dyn SttProvider>, String)> { anyhow::bail!("stub") }
+        fn get_all_provider_summaries(&self) -> Vec<ProviderSummary> { Vec::new() }
+    }
+
+    fn vision_cfg() -> ChatModelConfig {
+        ChatModelConfig {
+            input: vec![Modality::Text, Modality::Image],
+            output: vec![Modality::Text],
+            context_window: None,
+            max_output_tokens: None,
+            pricing: None,
+            reasoning: false,
+        }
+    }
+    fn text_cfg() -> ChatModelConfig {
+        ChatModelConfig {
+            input: vec![Modality::Text],
+            output: vec![Modality::Text],
+            context_window: None,
+            max_output_tokens: None,
+            pricing: None,
+            reasoning: false,
+        }
+    }
+
+    /// Build an `AgentRuntime` over the given registry (test-only recipe).
+    fn runtime_with(providers: Arc<dyn ProviderRegistry>) -> AgentRuntime {
+        use parking_lot::RwLock;
+        let tools = Arc::new(crate::agents::ToolRegistry::new());
+        let skills = Arc::new(RwLock::new(crate::agents::SkillManager::new()));
+        let agents = Arc::new(crate::agents::AgentRegistry::default());
+        let resources = crate::agents::resource_provider::ResourceProvider::new(
+            Arc::clone(&skills),
+            Arc::clone(&agents),
+            Vec::new(),
+            std::path::PathBuf::new(),
+            std::path::PathBuf::new(),
+            String::new(),
+            0,
+        );
+        let context_engine = Arc::new(crate::agents::context_engine::ContextEngine::new(
+            &crate::config::agent::ContextConfig::default(),
+            Arc::clone(&providers),
+            resources,
+            Arc::clone(&tools),
+        ));
+        let tool_executor = Arc::new(crate::agents::tool_executor::ToolExecutor::new(30));
+        let loop_breaker = Arc::new(crate::agents::LoopBreaker::new(
+            crate::agents::LoopBreakerConfig::default(),
+        ));
+        AgentRuntime::new(
+            providers, tools, skills, agents, context_engine, tool_executor, loop_breaker,
+        )
+    }
+
+    fn user_with_image(b64: &str, text: &str) -> ChatMessage {
+        ChatMessage {
+            role: "user".into(),
+            parts: vec![
+                ContentPart::ImageB64 { b64_json: b64.into(), media_type: None, detail: ImageDetail::Auto },
+                ContentPart::Text { text: text.into() },
+            ],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            is_error: None,
+        }
+    }
+
+    fn has_image(m: &ChatMessage) -> bool {
+        m.parts.iter().any(|p| {
+            matches!(
+                p,
+                ContentPart::ImageUrl { .. } | ContentPart::ImageB64 { .. } | ContentPart::ImageRef { .. }
+            )
+        })
+    }
+    fn joined_text(m: &ChatMessage) -> String {
+        m.parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// T4.1 — vision model: adaptation is a no-op; the image part is preserved
+    /// exactly (no duplication, no text substitution).
+    #[tokio::test]
+    async fn adapt_noop_for_vision_model() {
+        let reg = MockRegistry { configs: HashMap::new(), routing: vec![], providers: HashMap::new() };
+        let runtime = runtime_with(Arc::new(reg));
+        let mut messages = vec![user_with_image("AAAA", "what is this?")];
+
+        adapt_media_for_model(&mut messages, &runtime, "test-session", /* model_supports_images */ true).await;
+
+        assert!(has_image(&messages[0]), "vision model must keep the image part");
+        let imgs = messages[0]
+            .parts
+            .iter()
+            .filter(|p| matches!(p, ContentPart::ImageB64 { .. }))
+            .count();
+        assert_eq!(imgs, 1, "image must not be duplicated");
+    }
+
+    /// T4.2a — non-vision model with an auxiliary vision model in the routing
+    /// chain: the current-turn image is translated to text via the aux model.
+    #[tokio::test]
+    async fn adapt_translates_current_turn_with_aux() {
+        let mut configs = HashMap::new();
+        configs.insert("aux".to_string(), vision_cfg());
+        let mut providers: HashMap<String, Arc<dyn ChatProvider>> = HashMap::new();
+        providers.insert("aux".to_string(), Arc::new(MockChatProvider { reply: "A RED CAT".into() }));
+        let reg = MockRegistry { configs, routing: vec!["aux".into()], providers };
+        let runtime = runtime_with(Arc::new(reg));
+        let mut messages = vec![user_with_image("AAAA", "what is this?")];
+
+        adapt_media_for_model(&mut messages, &runtime, "test-session", false).await;
+
+        assert!(!has_image(&messages[0]), "image must be replaced by text for non-vision model");
+        let text = joined_text(&messages[0]);
+        assert!(text.contains("A RED CAT"), "aux description must be injected: {text}");
+        assert!(text.contains("what is this?"), "original user text must be preserved: {text}");
+    }
+
+    /// T4.2b — non-vision model with NO auxiliary model: graceful placeholder,
+    /// never a panic, image removed.
+    #[tokio::test]
+    async fn adapt_placeholder_without_aux() {
+        let reg = MockRegistry { configs: HashMap::new(), routing: vec![], providers: HashMap::new() };
+        let runtime = runtime_with(Arc::new(reg));
+        let mut messages = vec![user_with_image("AAAA", "describe")];
+
+        adapt_media_for_model(&mut messages, &runtime, "test-session", false).await;
+
+        assert!(!has_image(&messages[0]), "image must be replaced even without an aux model");
+        assert!(!joined_text(&messages[0]).is_empty(), "a placeholder text must remain");
+    }
+
+    /// T4.5 — candidate-set boundary: a vision-capable model that is registered
+    /// but NOT in the routing chain must NOT be selected as the aux model. The
+    /// only routed model is text-only, so selection yields None → placeholder,
+    /// and the un-routed model's provider is never invoked.
+    #[tokio::test]
+    async fn adapt_does_not_select_unrouted_vision_model() {
+        let mut configs = HashMap::new();
+        configs.insert("chat-only".to_string(), text_cfg());
+        configs.insert("vision-unrouted".to_string(), vision_cfg());
+        let mut providers: HashMap<String, Arc<dyn ChatProvider>> = HashMap::new();
+        providers
+            .insert("vision-unrouted".to_string(), Arc::new(MockChatProvider { reply: "LEAKED".into() }));
+        // routing lists only the text-only model.
+        let reg = MockRegistry { configs, routing: vec!["chat-only".into()], providers };
+        let runtime = runtime_with(Arc::new(reg));
+        let mut messages = vec![user_with_image("AAAA", "describe")];
+
+        adapt_media_for_model(&mut messages, &runtime, "test-session", false).await;
+
+        assert!(!has_image(&messages[0]));
+        let text = joined_text(&messages[0]);
+        assert!(
+            !text.contains("LEAKED"),
+            "un-routed vision model must never be selected as aux: {text}"
         );
     }
 }
