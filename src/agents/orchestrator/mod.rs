@@ -21,7 +21,7 @@ pub mod ctx;
 pub mod event;
 pub mod key;
 
-pub use ctx::OrchestratorCtx;
+pub use ctx::{ChannelRegistry, OrchestratorCtx};
 pub use event::OrchestratorEvent;
 pub(crate) use scheduled::run_scheduled_turn;
 
@@ -29,7 +29,6 @@ use anyhow::Context;
 use crate::agents::delegation::DelegationEvent;
 use crate::agents::DelegationCoordinator;
 use crate::channels::{Channel, ChannelMessage};
-use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -160,7 +159,7 @@ impl Orchestrator {
         let (msg_tx, msg_rx) = mpsc::channel(CHANNEL_QUEUE_SIZE);
         let msg_tx = Arc::new(msg_tx);
 
-        let channels_map: Arc<DashMap<(String, String), Arc<dyn Channel>>> = Arc::new(DashMap::new());
+        let channels = ChannelRegistry::new();
         let mut listener_handles = Vec::new();
 
         for (channel_type, account_id, channel) in &parts.channels {
@@ -170,20 +169,20 @@ impl Orchestrator {
                 Arc::clone(channel),
                 Arc::clone(&msg_tx),
             );
-            channels_map.insert((channel_type.clone(), account_id.clone()), Arc::clone(channel));
+            channels.insert((channel_type.clone(), account_id.clone()), Arc::clone(channel));
             listener_handles.push(handle);
             info!(channel = %channel_type, account = %account_id, "listener started");
         }
 
-        if channels_map.is_empty() {
+        if channels.is_empty() {
             warn!("no channels enabled");
         }
 
         let ctx = Arc::new(OrchestratorCtx {
-            channels: channels_map,
-            session_manager: parts.session_manager,
-            ask_router: parts.ask_router,
-            agent_runtime: parts.agent_runtime,
+            channels,
+            sessions: parts.session_manager,
+            ask: parts.ask_router,
+            runtime: parts.agent_runtime,
             delegator: parts.delegator,
             scheduler: parts.scheduler,
         });
@@ -274,8 +273,8 @@ impl Orchestrator {
         // LLM work spawns into background tasks so the event loop starts
         // without blocking.
         recovery::run_startup(
-            &self.ctx.session_manager,
-            &self.ctx.agent_runtime,
+            &self.ctx.sessions,
+            &self.ctx.runtime,
             &self.ctx.channels,
             &unfinished_subagents,
             &self.ctx.delegator,
@@ -330,7 +329,7 @@ impl Orchestrator {
                     // normal mechanism; the AskReply variant exists for
                     // future explicit routing (e.g. webhook-delivered
                     // replies). For now log and discard if unfulfilled.
-                    if !self.ctx.ask_router.fulfill(&session_id, reply) {
+                    if !self.ctx.ask.fulfill(&session_id, reply) {
                         tracing::warn!(session = %session_id, "AskReply for unknown session");
                     }
                 }

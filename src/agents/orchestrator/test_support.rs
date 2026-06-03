@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use parking_lot::RwLock;
 
-use super::ctx::OrchestratorCtx;
+use super::ctx::{ChannelRegistry, OrchestratorCtx};
 use crate::agents::context_engine::ContextEngine;
 use crate::agents::resource_provider::ResourceProvider;
 use crate::agents::session::SessionManager;
@@ -23,7 +23,6 @@ use crate::providers::{
     ProviderRegistry, ProviderSummary, SearchProvider, SttProvider, TtsProvider,
     VideoGenerationProvider,
 };
-use dashmap::DashMap;
 use tokio::sync::mpsc;
 
 /// A `Channel` that records every `SendMessage` it is handed. `send_payload`'s
@@ -123,15 +122,15 @@ fn test_runtime() -> AgentRuntime {
 pub(crate) fn test_ctx(
     channels: Vec<((String, String), Arc<dyn Channel>)>,
 ) -> OrchestratorCtx {
-    let map: DashMap<(String, String), Arc<dyn Channel>> = DashMap::new();
+    let registry = ChannelRegistry::new();
     for (k, ch) in channels {
-        map.insert(k, ch);
+        registry.insert(k, ch);
     }
     OrchestratorCtx {
-        channels: Arc::new(map),
-        session_manager: Arc::new(SessionManager::default()),
-        ask_router: Arc::new(AskRouter::new()),
-        agent_runtime: test_runtime(),
+        channels: registry,
+        sessions: Arc::new(SessionManager::default()),
+        ask: Arc::new(AskRouter::new()),
+        runtime: test_runtime(),
         delegator: None,
         scheduler: None,
     }

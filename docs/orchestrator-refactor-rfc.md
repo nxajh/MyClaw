@@ -56,21 +56,29 @@ Orchestrator      运行时:独占"只能消费一次"的资源(合流后的事�
 - `run` 按值消费 `self`,receiver 直接 move 进合流流 —— **坏味道 2、3 一起消失**;
 - webhook server 当前靠 `orchestrator.session_manager()` / `.channels()` / `.scheduler()` 这些 accessor 拿东西 —— 这些字段**正好就是 `OrchestratorCtx`**。组装根(daemon.rs)直接持有 `Arc<OrchestratorCtx>`,同时交给 webhook 和 orchestrator。**全部 accessor 方法删除**。
 
-**实测落地形态**(与初稿草图的差异见下方注):
+**实测落地形态**:
 
 ```rust
-// ctx.rs —— 保留原字段名(self.X → self.ctx.X 纯前缀,churn 最小)
+// ctx.rs —— 短名依赖包;channels 用 ChannelRegistry newtype 收口查表
+pub struct ChannelRegistry { inner: Arc<DashMap<(String,String), Arc<dyn Channel>>> }
+impl ChannelRegistry {
+    pub fn insert(&self, account: (String,String), ch: Arc<dyn Channel>);
+    pub fn get(&self, account: &(String,String)) -> Option<Arc<dyn Channel>>;
+    pub fn get_by_key(&self, key: &SessionKey) -> Option<Arc<dyn Channel>>;
+    pub fn len(&self) -> usize; pub fn is_empty(&self) -> bool;
+}
+
 pub struct OrchestratorCtx {
-    pub channels:        Arc<DashMap<(String,String), Arc<dyn Channel>>>,
-    pub session_manager: Arc<SessionManager>,
-    pub ask_router:      Arc<AskRouter>,
-    pub agent_runtime:   AgentRuntime,
-    pub delegator:       Option<Arc<DelegationCoordinator>>,
-    pub scheduler:       Option<SharedScheduler>,
+    pub channels:  ChannelRegistry,
+    pub sessions:  Arc<SessionManager>,
+    pub ask:       Arc<AskRouter>,
+    pub runtime:   AgentRuntime,
+    pub delegator: Option<Arc<DelegationCoordinator>>,
+    pub scheduler: Option<SharedScheduler>,
 }
 impl OrchestratorCtx {
     pub fn session_context_for(&self, sk: &str) -> Arc<SessionContext>;
-    pub fn channel(&self, account: &(String,String)) -> Option<Arc<dyn Channel>>; // 查表收口
+    pub fn channel(&self, account: &(String,String)) -> Option<Arc<dyn Channel>>; // → channels.get
 }
 
 // mod.rs —— 运行时只独占"消费一次"的 receiver / handle;事件流在 run() 内合流(不作字段存储)
@@ -86,7 +94,7 @@ impl Orchestrator {
 }
 ```
 
-> **与初稿草图的两处差异**(刻意,见 §12):①字段名保留原样(`session_manager`/`agent_runtime`/`ask_router`)而非 `sessions`/`runtime`/`ask`——纯 `self.` → `self.ctx.` 前缀替换,改动面最小;②`channels` 仍为裸 `Arc<DashMap>`(本身即注册表),未引入 `ChannelRegistry` newtype,查表由 `OrchestratorCtx::channel()` 收口;③合流后的事件流是 `run()` 内的局部变量,不是 `events` 字段。
+> 与初稿草图唯一的(刻意)差异:合流后的事件流是 `run()` 内的局部变量,不是 `events` 字段(`run(self)` 要按值 move 三个 receiver,存字段反而做不到)。字段短名 `sessions/runtime/ask` 与 `ChannelRegistry` newtype 均已按设计落地。
 
 ---
 
@@ -358,6 +366,6 @@ agents/orchestrator/
 - [x] 收尾:`cargo clippy --all-targets -- -D warnings` 全绿、`cargo test` 415 绿。
 
 **说明 / 后续**
-- `ChannelRegistry` newtype 未单独引入:`channels` 仍是 `OrchestratorCtx` 内的 `Arc<DashMap>`(本身即注册表),`OrchestratorCtx::channel(&account)` 收口查找;刻意避免大面积改动,satisfy 依赖包的核心目标。
+- `ChannelRegistry` newtype 已落地:`channels` 用它封装裸 `Arc<DashMap>`,查表统一走 `get` / `get_by_key`,杜绝散落的裸 `DashMap` 访问。`OrchestratorCtx` 字段亦采用短名 `sessions/runtime/ask`(回到初稿设计,非"按实际保留")。
 - inbound 拦截器测试已落地:`test_support.rs` 提供可注入 mock 的 `OrchestratorCtx`(内存 `SessionManager` + 全新 `AskRouter` + no-op `ProviderRegistry`/`AgentRuntime` + 记录式 `MockChannel`)。覆盖 ask-reply / callback(retry 改写、abort ack、无 pending 通知)/ crash-recovery / `retry_abort_prompt` 32 字符前缀截断;链顺序由 golden 测试钉死。**`slash_command` / `dispatch_turn` 终端**会 spawn `process_turn`(走 LLM),其行为单测需要真实 provider,留作后续(端到端层面)。
 - cron `session_key` 保持 `String`(可能是 `_cron_<id>` / `_hooks_agent` 等非三段式键),不强转 `SessionKey`。

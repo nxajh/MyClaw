@@ -84,8 +84,8 @@ impl Interceptor for AskReply {
         "ask_reply"
     }
     async fn handle(&self, ctx: &OrchestratorCtx, key: &SessionKey, msg: ChannelMessage) -> Flow {
-        let session_id = ctx.session_manager.get_or_create(&key.to_string()).id.clone();
-        if ctx.ask_router.fulfill(&session_id, msg.clone()) {
+        let session_id = ctx.sessions.get_or_create(&key.to_string()).id.clone();
+        if ctx.ask.fulfill(&session_id, msg.clone()) {
             tracing::debug!(session = %session_id, "ask_router fulfilled pending ask, consuming inbound");
             Flow::Stop
         } else {
@@ -217,10 +217,10 @@ impl Interceptor for SlashCommand {
         let sk = key.to_string();
         let cmd_owned = cmd.to_string();
         let cmd_args_owned = cmd_args.to_string();
-        let session_ctx_cmd = ctx.session_manager.get_context(&sk);
-        let registry_cmd = Arc::clone(&ctx.agent_runtime.providers);
-        let sm_cmd = ctx.session_manager.clone();
-        let runtime_cmd = ctx.agent_runtime.clone();
+        let session_ctx_cmd = ctx.sessions.get_context(&sk);
+        let registry_cmd = Arc::clone(&ctx.runtime.providers);
+        let sm_cmd = ctx.sessions.clone();
+        let runtime_cmd = ctx.runtime.clone();
         let channel_cmd = ctx.channel(&key.account_key());
         let rt_cmd = msg.reply_target.clone();
         let rid_cmd = Some(msg.id.clone());
@@ -273,10 +273,10 @@ pub(super) async fn dispatch_turn(ctx: &OrchestratorCtx, key: &SessionKey, msg: 
 
     // B12: store the full inbound ChannelMessage on the session.
     {
-        let mut session = ctx.session_manager.get_or_create(&sk);
+        let mut session = ctx.sessions.get_or_create(&sk);
         session.record_inbound(msg.clone());
     }
-    if let Err(e) = ctx.session_manager.backend().save_last_message(&sk, &msg) {
+    if let Err(e) = ctx.sessions.backend().save_last_message(&sk, &msg) {
         tracing::warn!(session = %sk, err = %e, "failed to persist last_message");
     }
 
@@ -289,8 +289,8 @@ pub(super) async fn dispatch_turn(ctx: &OrchestratorCtx, key: &SessionKey, msg: 
     // entry point. Spawn on a background task so the event loop is not blocked
     // by the LLM round-trip. image_urls / image_base64 ride along on
     // `session.last_message` (recorded above); Agent.run reads them from there.
-    let session_ctx = ctx.session_manager.get_or_create_context(&sk);
-    let runtime = ctx.agent_runtime.clone();
+    let session_ctx = ctx.sessions.get_or_create_context(&sk);
+    let runtime = ctx.runtime.clone();
     let reply_target = msg.reply_target.clone();
 
     tokio::spawn(async move {
@@ -401,10 +401,10 @@ mod tests {
     async fn ask_reply_consumes_inbound_when_ask_pending() {
         let ctx = test_ctx(vec![]);
         let k = key();
-        let session_id = ctx.session_manager.get_or_create(&k.to_string()).id.clone();
+        let session_id = ctx.sessions.get_or_create(&k.to_string()).id.clone();
 
         // Register an outstanding ask for this session.
-        let router = ctx.ask_router.clone();
+        let router = ctx.ask.clone();
         let sid = session_id.clone();
         let waiter = tokio::spawn(async move { router.wait_for_reply(&sid, Duration::from_secs(5)).await });
         tokio::task::yield_now().await;

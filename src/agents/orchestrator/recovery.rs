@@ -8,18 +8,13 @@
 
 use std::sync::Arc;
 
-use dashmap::DashMap;
-
 use super::key::{SessionKey, SubAgentKey};
 use super::turn::ResolvedTurn;
 use crate::agents::session::{BackendPersistHook, PersistHook, SessionManager};
 use crate::agents::{
     AgentRuntime, DelegationCoordinator, DelegationEvent, SessionContext, UnfinishedSubAgent,
 };
-use crate::channels::Channel;
 use crate::storage::SessionBackend;
-
-type ChannelMap = Arc<DashMap<(String, String), Arc<dyn Channel>>>;
 
 /// Where a recovered turn's output goes.
 enum CompletionSink {
@@ -27,7 +22,7 @@ enum CompletionSink {
     Channel {
         key: String,
         backend: Arc<dyn SessionBackend>,
-        channels: ChannelMap,
+        channels: super::ctx::ChannelRegistry,
     },
     /// Sub-agent session: emit `DelegationEvent::Completed` to wake the parent.
     Delegate {
@@ -49,7 +44,7 @@ impl CompletionSink {
                         SessionKey::parse(&key).map(|k| k.sender).unwrap_or_default()
                     });
                 let Some(parsed) = SessionKey::parse(&key) else { return };
-                let Some(channel) = channels.get(&parsed.account_key()).map(|r| r.clone()) else {
+                let Some(channel) = channels.get(&parsed.account_key()) else {
                     return;
                 };
                 let target = crate::channels::SendTarget::new(&recipient);
@@ -122,7 +117,7 @@ fn spawn_recovery(
 pub(super) fn run_startup(
     sessions: &Arc<SessionManager>,
     runtime: &AgentRuntime,
-    channels: &ChannelMap,
+    channels: &super::ctx::ChannelRegistry,
     unfinished: &[UnfinishedSubAgent],
     delegator: &Option<Arc<DelegationCoordinator>>,
 ) {

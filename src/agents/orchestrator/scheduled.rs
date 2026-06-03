@@ -26,7 +26,7 @@ pub(crate) async fn run_scheduled_turn(
     // every invocation so cron jobs that change `model` mid-stream are
     // honored on the next turn.
     let model_for_init = model_override.clone();
-    let session_ctx = orch.session_manager.get_or_create_context_with(
+    let session_ctx = orch.sessions.get_or_create_context_with(
         session_key,
         move |session| {
             session.session_override.run_mode =
@@ -57,7 +57,7 @@ pub(crate) async fn run_scheduled_turn(
         image_urls: None,
         image_base64: None,
     };
-    let runtime = orch.agent_runtime.clone();
+    let runtime = orch.runtime.clone();
     session_ctx
         .process_turn(inbound, None, runtime)
         .await

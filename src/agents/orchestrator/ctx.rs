@@ -14,21 +14,60 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 
+use super::key::SessionKey;
 use crate::agents::{AgentRuntime, AskRouter, DelegationCoordinator, SessionContext};
 use crate::channels::Channel;
 
+/// The set of live channels, keyed by `(channel_type, account_id)`.
+///
+/// A thin newtype over the underlying map so lookups go through a typed seam
+/// (`get` / `get_by_key`) instead of raw `DashMap` access scattered across the
+/// codebase. Cheap to clone (the map is behind an `Arc`).
+#[derive(Clone, Default)]
+pub struct ChannelRegistry {
+    inner: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
+}
+
+impl ChannelRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&self, account: (String, String), channel: Arc<dyn Channel>) {
+        self.inner.insert(account, channel);
+    }
+
+    /// Look up a channel by its `(channel_type, account_id)` pair.
+    pub fn get(&self, account: &(String, String)) -> Option<Arc<dyn Channel>> {
+        self.inner.get(account).map(|r| r.clone())
+    }
+
+    /// Look up the channel that owns `key`'s session.
+    pub fn get_by_key(&self, key: &SessionKey) -> Option<Arc<dyn Channel>> {
+        self.get(&key.account_key())
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+}
+
 /// Shared, cheaply-clonable dependencies used across the orchestrator.
 pub struct OrchestratorCtx {
-    /// Channels, keyed by (channel_type, account_id).
-    pub channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
+    /// Live channels, keyed by (channel_type, account_id).
+    pub channels: ChannelRegistry,
     /// SessionManager owns the SessionContext table (1:1 invariant).
-    pub session_manager: Arc<crate::agents::session::SessionManager>,
+    pub sessions: Arc<crate::agents::session::SessionManager>,
     /// AskRouter (RFC v2 §三.B): indexed by session.id, fulfilled by inbound
     /// messages ahead of process_turn. Shared with the daemon-built
     /// `AskUserTool`.
-    pub ask_router: Arc<AskRouter>,
+    pub ask: Arc<AskRouter>,
     /// AgentRuntime for the per-turn `Agent::run` path. Cloned into each turn.
-    pub agent_runtime: AgentRuntime,
+    pub runtime: AgentRuntime,
     /// Delegation manager (shared with DelegateTaskTool via handler).
     pub delegator: Option<Arc<DelegationCoordinator>>,
     /// Shared scheduler for run-result tracking from cron tasks.
@@ -42,11 +81,11 @@ impl OrchestratorCtx {
     /// backend), wraps it in a `SessionContext`, and caches it; later calls
     /// return the same `Arc`.
     pub fn session_context_for(&self, sk: &str) -> Arc<SessionContext> {
-        self.session_manager.get_or_create_context(sk)
+        self.sessions.get_or_create_context(sk)
     }
 
     /// Look up a channel by its (channel_type, account_id) pair.
     pub fn channel(&self, account: &(String, String)) -> Option<Arc<dyn Channel>> {
-        self.channels.get(account).map(|r| r.clone())
+        self.channels.get(account)
     }
 }
