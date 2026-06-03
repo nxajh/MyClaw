@@ -314,18 +314,14 @@ impl Scheduler {
                             target = %j.target,
                             "cron job triggered"
                         );
-                        let _ = self.event_tx.send(SchedulerEvent::Cron {
+                        let _ = self.event_tx.send(SchedulerEvent::Cron(crate::agents::orchestrator::CronTrigger {
                             session_key: format!("_cron_{}", j.id),
                             prompt: j.prompt.clone(),
                             target_channel: parse_target_channel(&j.target),
                             target_account: parse_target_account(&j.target),
                             job_id: j.id.clone(),
-                            delivery: j.delivery.clone(),
-                            enabled_tools: j.enabled_tools.clone(),
-                            disabled_tools: j.disabled_tools.clone(),
                             model: j.model.clone(),
-                            provider: j.provider.clone(),
-                        }).await;
+                        })).await;
                         due_job_ids.push(j.id.clone());
                     }
 
@@ -988,40 +984,16 @@ fn parse_hhmm(s: &str) -> Option<u32> {
 
 // ── Webhook execution helpers ──────────────────────────────────────────────
 
-/// Execute one webhook turn via `SessionContext::process_turn`. Same
-/// unified entry point as the orchestrator's run_scheduled_turn —
-/// scheduled output (no channel during the turn) is dispatched by the
-/// webhook caller via `send_to_target` after this returns.
+/// Execute one webhook turn. Delegates to the orchestrator's shared
+/// `run_scheduled_turn` (the single scheduled-turn entry point) — scheduled
+/// output (no channel during the turn) is dispatched by the webhook caller via
+/// `send_to_target` after this returns.
 pub async fn run_scheduled_task(
     ctx: &WebhookContext,
     session_key: &str,
     prompt: &str,
 ) -> anyhow::Result<String> {
-    let session_ctx = ctx.ctx.session_manager.get_or_create_context_with(
-        session_key,
-        |session| {
-            session.session_override.run_mode =
-                Some(crate::config::agent::RunMode::Background);
-        },
-    );
-
-    let inbound = crate::channels::ChannelMessage {
-        id: format!("webhook:{}", session_key),
-        sender: format!("webhook:{}", session_key),
-        reply_target: String::new(),
-        content: prompt.to_string(),
-        timestamp: chrono::Utc::now().timestamp() as u64,
-        thread_ts: None,
-        interruption_scope_id: None,
-        attachments: Vec::new(),
-        image_urls: None,
-        image_base64: None,
-    };
-    let runtime = ctx.ctx.agent_runtime.clone();
-    session_ctx
-        .process_turn(inbound, None, runtime)
-        .await
-        .map(|tr| tr.text)
+    crate::agents::orchestrator::run_scheduled_turn(&ctx.ctx, session_key, prompt, None).await
 }
 
 

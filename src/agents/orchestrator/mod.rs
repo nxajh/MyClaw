@@ -21,6 +21,7 @@ pub mod key;
 
 pub use ctx::OrchestratorCtx;
 pub use event::OrchestratorEvent;
+pub(crate) use scheduled::run_scheduled_turn;
 
 use anyhow::Context;
 use crate::agents::delegation::DelegationEvent;
@@ -42,6 +43,19 @@ use scheduled::{run_cron_task, run_heartbeat_task};
 /// threshold, loop-breaker limits) live in `[agent]`/`[context]` config.
 const CHANNEL_QUEUE_SIZE: usize = 100;
 
+/// A cron job that fired and needs a turn run. The fields the scheduled path
+/// actually consumes — delivery/enabled_tools/disabled_tools/provider, which
+/// the cron turn ignores, are deliberately not carried here.
+#[derive(Debug)]
+pub struct CronTrigger {
+    pub session_key: String,
+    pub prompt: String,
+    pub target_channel: Option<String>,
+    pub target_account: Option<String>,
+    pub job_id: String,
+    pub model: Option<String>,
+}
+
 /// Events from the Scheduler (heartbeat ticks, cron triggers).
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -52,18 +66,7 @@ pub enum SchedulerEvent {
         target_account: Option<String>,
     },
     /// Cron job matched — run agent with specific prompt.
-    Cron {
-        session_key: String,
-        prompt: String,
-        target_channel: Option<String>,
-        target_account: Option<String>,
-        job_id: String,
-        delivery: Option<crate::agents::scheduling::cron_types::DeliveryConfig>,
-        enabled_tools: Option<Vec<String>>,
-        disabled_tools: Option<Vec<String>>,
-        model: Option<String>,
-        provider: Option<String>,
-    },
+    Cron(CronTrigger),
 }
 
 /// Type alias for the channel message sender.
@@ -402,21 +405,9 @@ impl Orchestrator {
                     state_path.to_path_buf(),
                 ));
             }
-            SchedulerEvent::Cron { session_key, prompt, target_channel, target_account, job_id, delivery, enabled_tools, disabled_tools, model, provider } => {
-                tracing::debug!(session_key = %session_key, "cron job triggered (from scheduler)");
-                tokio::spawn(run_cron_task(
-                    self.ctx.clone(),
-                    session_key,
-                    prompt,
-                    target_channel,
-                    target_account,
-                    job_id,
-                    delivery,
-                    enabled_tools,
-                    disabled_tools,
-                    model,
-                    provider,
-                ));
+            SchedulerEvent::Cron(trigger) => {
+                tracing::debug!(session_key = %trigger.session_key, "cron job triggered (from scheduler)");
+                tokio::spawn(run_cron_task(self.ctx.clone(), trigger));
             }
         }
     }

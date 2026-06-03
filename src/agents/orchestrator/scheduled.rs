@@ -104,20 +104,16 @@ pub(crate) async fn run_heartbeat_task(
 }
 
 /// Execute a cron job turn as an independent spawned task.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_cron_task(
-    orch: Arc<OrchestratorCtx>,
-    session_key: String,
-    prompt: String,
-    target_channel: Option<String>,
-    target_account: Option<String>,
-    job_id: String,
-    _delivery: Option<crate::agents::scheduling::cron_types::DeliveryConfig>,
-    _enabled_tools: Option<Vec<String>>,
-    _disabled_tools: Option<Vec<String>>,
-    model: Option<String>,
-    _provider: Option<String>,
-) {
+pub(crate) async fn run_cron_task(orch: Arc<OrchestratorCtx>, trigger: super::CronTrigger) {
+    let super::CronTrigger {
+        session_key,
+        prompt,
+        target_channel,
+        target_account,
+        job_id,
+        model,
+    } = trigger;
+
     let start = std::time::Instant::now();
     let result = run_scheduled_turn(&orch, &session_key, &prompt, model.clone()).await;
     let duration_ms = start.elapsed().as_millis() as u64;
