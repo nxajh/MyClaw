@@ -985,7 +985,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // ── Launch ─────────────────────────────────────────────────────────────
 
     let (orchestrator, _msg_tx) = Orchestrator::new(parts);
-    let orchestrator = Arc::new(orchestrator);
 
     // H57: AgentLoop is gone; the ClientChannel's previous loop_registry +
     // evict_loop dance to flush stale per-session AgentLoop instances on
@@ -1124,12 +1123,11 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         }
     }
 
-    // Run the message dispatch loop (blocks until shutdown).
-    Arc::clone(&orchestrator).run(shutdown_rx, unfinished_subagents).await.context("orchestrator run error")?;
+    // Run the message dispatch loop (blocks until shutdown). `run` consumes the
+    // orchestrator and aborts its listener tasks before returning.
+    orchestrator.run(shutdown_rx, unfinished_subagents).await.context("orchestrator run error")?;
 
-    // Graceful shutdown.
-    tracing::debug!("dispatch loop ended, shutting down listeners");
-    orchestrator.shutdown_listeners().await;
+    tracing::debug!("dispatch loop ended, listeners aborted");
 
     // ── Hot switch: fork+execv new binary, inherit listen socket ──────────
     // When SIGUSR1 set the shutdown flag (triggered by `myclaw update`), the

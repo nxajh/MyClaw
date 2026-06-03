@@ -29,7 +29,7 @@ use crate::channels::{Channel, ChannelMessage};
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex as TokioMutex};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
@@ -77,18 +77,15 @@ pub struct Orchestrator {
     /// Shared dependency bundle (channels, sessions, runtime, ask, scheduler,
     /// delegator). Cloned into spawned tasks that must outlive a single turn.
     ctx: Arc<OrchestratorCtx>,
-    /// The message receiver, owned and consumed by run().
+    /// Inbound user-message receiver. Consumed by `run(self)`.
     #[allow(clippy::type_complexity)]
-    msg_rx: Arc<TokioMutex<Option<mpsc::Receiver<((String, String), ChannelMessage)>>>>,
-    /// Listener task handles — taken and awaited on shutdown.
-    /// Wrapped in a TokioMutex so `shutdown_listeners(&self)` can drain
-    /// them without requiring `&mut self` (which would block the
-    /// `Arc<Self>` sharing pattern that scheduler dispatch relies on).
-    listener_handles: Arc<TokioMutex<Vec<JoinHandle<()>>>>,
-    /// Delegation event receiver.
-    delegation_rx: Arc<TokioMutex<Option<mpsc::Receiver<DelegationEvent>>>>,
-    /// Scheduler event receiver (heartbeat ticks, cron triggers).
-    scheduler_rx: Arc<TokioMutex<Option<mpsc::Receiver<SchedulerEvent>>>>,
+    msg_rx: Option<mpsc::Receiver<((String, String), ChannelMessage)>>,
+    /// Listener task handles — aborted when `run` returns (it owns `self`).
+    listener_handles: Vec<JoinHandle<()>>,
+    /// Delegation event receiver (None when sub-agents are disabled).
+    delegation_rx: Option<mpsc::Receiver<DelegationEvent>>,
+    /// Scheduler event receiver (None when scheduling is disabled).
+    scheduler_rx: Option<mpsc::Receiver<SchedulerEvent>>,
 }
 
 /// Return `true` if the session history ends with an incomplete tool execution:
@@ -188,10 +185,10 @@ impl Orchestrator {
 
         let orchestrator = Orchestrator {
             ctx,
-            msg_rx: Arc::new(TokioMutex::new(Some(msg_rx))),
-            listener_handles: Arc::new(TokioMutex::new(listener_handles)),
-            delegation_rx: Arc::new(TokioMutex::new(parts.delegation_rx)),
-            scheduler_rx: Arc::new(TokioMutex::new(parts.scheduler_rx)),
+            msg_rx: Some(msg_rx),
+            listener_handles,
+            delegation_rx: parts.delegation_rx,
+            scheduler_rx: parts.scheduler_rx,
         };
 
         info!(channels = orchestrator.ctx.channels.len(), "orchestrator initialized");
@@ -258,28 +255,14 @@ impl Orchestrator {
     /// (heartbeat / cron) can hold an Arc reference to the orchestrator
     /// for the duration of the LLM round-trip.
     pub async fn run(
-        self: Arc<Self>,
+        mut self,
         mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
         unfinished_subagents: Vec<crate::agents::UnfinishedSubAgent>,
     ) -> anyhow::Result<()> {
-        let rx = {
-            let mut guard = self.msg_rx.lock().await;
-            guard.take().context("run() already called or msg_rx was None")?
-        };
+        use tokio_stream::wrappers::ReceiverStream;
+        use tokio_stream::{Stream, StreamExt};
 
-        // Take the delegation event receiver if available.
-        let mut delegation_rx = {
-            let mut guard = self.delegation_rx.lock().await;
-            guard.take()
-        };
-
-        // Take the scheduler event receiver if available.
-        let mut scheduler_rx = {
-            let mut guard = self.scheduler_rx.lock().await;
-            guard.take()
-        };
-
-        let mut rx = rx;
+        let rx = self.msg_rx.take().context("run() already called or msg_rx was None")?;
 
         // ── Startup recovery ──────────────────────────────────────────────
         // Sessions register a SessionContext synchronously; the recovery
@@ -293,91 +276,35 @@ impl Orchestrator {
             &self.ctx.delegator,
         );
 
-        // Unify the three event sources (user messages / delegation /
-        // scheduler) onto a single mpsc<OrchestratorEvent>. Adapter tasks
-        // pump from each source channel; the main loop selects on the
-        // unified channel + shutdown. AskReply variant is reserved for
-        // future ask_router wiring inside Agent.run.
-        let (event_tx, mut event_rx) = mpsc::channel::<OrchestratorEvent>(CHANNEL_QUEUE_SIZE);
-
-        // Adapter: user messages → Inbound
-        let inbound_handle = {
-            let event_tx = event_tx.clone();
-            tokio::spawn(async move {
-                while let Some(((ct, ac), msg)) = rx.recv().await {
-                    if event_tx
-                        .send(OrchestratorEvent::Inbound {
-                            channel_type: ct,
-                            account_id: ac,
-                            message: msg,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            })
-        };
-
-        // Adapter: delegation events → Delegation
-        let delegation_handle = if let Some(mut drx) = delegation_rx.take() {
-            let event_tx = event_tx.clone();
-            Some(tokio::spawn(async move {
-                while let Some(e) = drx.recv().await {
-                    if event_tx
-                        .send(OrchestratorEvent::Delegation(e))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            }))
-        } else {
-            None
-        };
-
-        // Adapter: scheduler events → Scheduled
-        let scheduler_handle = if let Some(mut srx) = scheduler_rx.take() {
-            let event_tx = event_tx.clone();
-            Some(tokio::spawn(async move {
-                while let Some(e) = srx.recv().await {
-                    if event_tx
-                        .send(OrchestratorEvent::Scheduled(e))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            }))
-        } else {
-            None
-        };
-
-        // Drop our local copy of the sender; the three adapters hold clones.
-        // When all adapters exit (all source channels closed), event_rx.recv()
-        // returns None and the main loop breaks.
-        drop(event_tx);
+        // Merge the event sources (user messages / delegation / scheduler)
+        // into a single stream. No adapter tasks / manual fan-in: each source
+        // is a Stream<OrchestratorEvent> and `merge` interleaves them.
+        let mut events: std::pin::Pin<Box<dyn Stream<Item = OrchestratorEvent> + Send>> = Box::pin(
+            ReceiverStream::new(rx).map(|((ct, ac), msg)| OrchestratorEvent::Inbound {
+                channel_type: ct,
+                account_id: ac,
+                message: msg,
+            }),
+        );
+        if let Some(drx) = self.delegation_rx.take() {
+            events = Box::pin(events.merge(ReceiverStream::new(drx).map(OrchestratorEvent::Delegation)));
+        }
+        if let Some(srx) = self.scheduler_rx.take() {
+            events = Box::pin(events.merge(ReceiverStream::new(srx).map(OrchestratorEvent::Scheduled)));
+        }
 
         loop {
-            if *shutdown_rx.borrow() {
+            // Hot switch checkpoint: SIGUSR1 set the flag — exit loop so
+            // daemon.rs can trigger fork+execv.
+            if *shutdown_rx.borrow() || crate::is_shutting_down() {
                 tracing::debug!("shutdown requested, exiting message loop");
                 break;
             }
 
-            // Hot switch checkpoint: SIGUSR1 set the flag — exit loop so
-            // daemon.rs can trigger fork+execv.
-            if crate::is_shutting_down() {
-                tracing::debug!("shutdown flag detected in orchestrator, exiting for hot switch");
-                break;
-            }
-
             let event = tokio::select! {
-                ev = event_rx.recv() => match ev {
+                ev = events.next() => match ev {
                     Some(e) => e,
-                    None => break, // all adapters exited
+                    None => break, // all sources closed
                 },
                 _ = shutdown_rx.changed() => {
                     tracing::info!("shutdown signal received");
@@ -387,7 +314,7 @@ impl Orchestrator {
 
             match event {
                 OrchestratorEvent::Scheduled(e) => {
-                    Arc::clone(&self).handle_scheduler_event(e).await;
+                    self.handle_scheduler_event(e).await;
                 }
                 OrchestratorEvent::Shutdown => {
                     tracing::info!("OrchestratorEvent::Shutdown received");
@@ -411,15 +338,10 @@ impl Orchestrator {
             }
         }
 
-        // Abort adapter tasks so they don't outlive the orchestrator.
-        inbound_handle.abort();
-        if let Some(h) = delegation_handle {
+        // `self` owns the listeners; abort them as it drops.
+        for h in self.listener_handles.drain(..) {
             h.abort();
         }
-        if let Some(h) = scheduler_handle {
-            h.abort();
-        }
-
         info!("all listeners stopped, exiting");
         Ok(())
     }
@@ -429,7 +351,7 @@ impl Orchestrator {
     /// Dispatch scheduler events by spawning independent tasks.
     /// Pre-flight checks (file read, parse, due filter) run inline to avoid
     /// unnecessary task creation; the actual LLM execution is spawned.
-    async fn handle_scheduler_event(self: Arc<Self>, event: SchedulerEvent) {
+    async fn handle_scheduler_event(&self, event: SchedulerEvent) {
         match event {
             SchedulerEvent::Heartbeat { target_channel, target_account } => {
                 tracing::debug!("heartbeat triggered (from scheduler)");
@@ -497,15 +419,6 @@ impl Orchestrator {
                 ));
             }
         }
-    }
-
-    /// Abort all listener handles (call after run() returns).
-    pub async fn shutdown_listeners(&self) {
-        let handles = std::mem::take(&mut *self.listener_handles.lock().await);
-        for h in handles {
-            h.abort();
-        }
-        tracing::debug!("all listener tasks aborted");
     }
 }
 
