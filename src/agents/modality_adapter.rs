@@ -41,7 +41,18 @@ pub const IMAGE_SPEC: ModalitySpec = ModalitySpec {
     label: "图片",
     placeholder: "[image]",
 };
-// Phase 2/3: const AUDIO_SPEC / VIDEO_SPEC — same struct, different fields.
+
+/// Audio adaptation spec — transcribe speech to text. Unlike images, audio is
+/// adapted for *every* model (chat protocols cannot carry audio natively), via
+/// an auxiliary speech-to-text model declared in the chat routing chain.
+pub const AUDIO_SPEC: ModalitySpec = ModalitySpec {
+    modality: Modality::Audio,
+    prompt: "Transcribe this audio to text verbatim. Output only the spoken \
+             content, with no commentary.",
+    label: "音频",
+    placeholder: "[audio]",
+};
+// Phase 3: const VIDEO_SPEC — same struct, different fields.
 
 /// Whether a part carries media of the given modality.
 pub fn part_matches(part: &ContentPart, modality: &Modality) -> bool {
@@ -50,7 +61,9 @@ pub fn part_matches(part: &ContentPart, modality: &Modality) -> bool {
             part,
             ContentPart::ImageUrl { .. } | ContentPart::ImageB64 { .. }
         ),
-        // Phase 2/3: Audio / Video parts once ContentPart gains them.
+        // Inline audio only; AudioRef is disk-only (hydrated before adapt runs).
+        Modality::Audio => matches!(part, ContentPart::AudioB64 { .. }),
+        // Video parts once ContentPart gains them.
         _ => false,
     }
 }
@@ -621,6 +634,47 @@ mod tests {
             }
             other => panic!("expected reused description text, got {other:?}"),
         }
+    }
+
+    fn audio(b64: &str) -> ContentPart {
+        ContentPart::AudioB64 { b64_json: b64.into(), media_type: Some("audio/ogg".into()) }
+    }
+
+    #[test]
+    fn part_matches_audio_only_matches_audio() {
+        assert!(part_matches(&audio("AAAA"), &Modality::Audio));
+        assert!(!part_matches(&img("https://a/1.jpg"), &Modality::Audio));
+        assert!(!part_matches(&audio("AAAA"), &Modality::Image));
+    }
+
+    #[tokio::test]
+    async fn adapt_last_turn_transcribes_audio() {
+        let provider: Arc<dyn ChatProvider> = Arc::new(MockProvider {
+            reply: "hello world".into(),
+            calls: Arc::new(Mutex::new(0)),
+        });
+        let cache = LruDescriptionCache::new(8);
+        let mut msg = ChatMessage {
+            role: "user".into(),
+            parts: vec![audio("AAAA"), ContentPart::Text { text: "what did I say?".into() }],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            is_error: None,
+        };
+
+        adapt_last_turn_media(&mut msg, &AUDIO_SPEC, Some((&provider, "m")), &cache, "s1").await;
+
+        // Audio part → one transcription text part; the user's text is preserved.
+        assert_eq!(msg.parts.len(), 2);
+        match &msg.parts[0] {
+            ContentPart::Text { text } => assert!(
+                text.contains("[音频描述]: hello world"),
+                "got: {text}"
+            ),
+            other => panic!("expected transcription text, got {other:?}"),
+        }
+        assert!(matches!(&msg.parts[1], ContentPart::Text { text } if text == "what did I say?"));
     }
 
     #[test]

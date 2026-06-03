@@ -584,26 +584,36 @@ async fn adapt_media_for_model(
     session_id: &str,
     model_supports_images: bool,
 ) {
-    if model_supports_images {
-        return;
+    use crate::agents::modality_adapter::{AUDIO_SPEC, IMAGE_SPEC};
+    // Audio is always adapted: chat protocols can't carry audio natively, so even
+    // an "audio-capable" primary model receives a text transcription. Images are
+    // adapted only when the model can't take them natively.
+    adapt_modality(messages, runtime, session_id, &AUDIO_SPEC).await;
+    if !model_supports_images {
+        adapt_modality(messages, runtime, session_id, &IMAGE_SPEC).await;
     }
-    use crate::agents::modality_adapter::{self, IMAGE_SPEC};
+}
+
+/// Adapt one modality across the cloned `messages`: historical media reuse a
+/// cached description (or degrade to the placeholder); the current turn's media
+/// is translated by the modality's auxiliary model. No-op when nothing matches.
+async fn adapt_modality(
+    messages: &mut [ChatMessage],
+    runtime: &AgentRuntime,
+    session_id: &str,
+    spec: &crate::agents::modality_adapter::ModalitySpec,
+) {
+    use crate::agents::modality_adapter;
     let cache = &*runtime.description_cache;
     let last_user_idx = messages.iter().rposition(|m| m.role == "user");
-    modality_adapter::adapt_history_media(messages, &IMAGE_SPEC, cache, session_id, last_user_idx);
+    modality_adapter::adapt_history_media(messages, spec, cache, session_id, last_user_idx);
     if let Some(idx) = last_user_idx {
         let aux = runtime
             .providers
-            .find_chat_model_with_modality(crate::providers::capability::Modality::Image);
+            .find_chat_model_with_modality(spec.modality.clone());
         let aux_ref = aux.as_ref().map(|(p, id)| (p, id.as_str()));
-        modality_adapter::adapt_last_turn_media(
-            &mut messages[idx],
-            &IMAGE_SPEC,
-            aux_ref,
-            cache,
-            session_id,
-        )
-        .await;
+        modality_adapter::adapt_last_turn_media(&mut messages[idx], spec, aux_ref, cache, session_id)
+            .await;
     }
 }
 

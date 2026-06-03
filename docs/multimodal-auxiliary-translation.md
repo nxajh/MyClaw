@@ -47,6 +47,8 @@ MyClaw 的多模态基础设施已部分就绪：
 - **音频**：`Modality::Audio` 已声明但无任何处理逻辑
 - **视频**：同上
 
+> **实现状态更新**：图片与**音频**均已端到端落地（见下文「§13 音频管线」）。视频仍未做。
+
 用户在 Telegram 发送图片给 DeepSeek V3 时，主模型看不到图片内容，无法回答相关问题。
 
 ## 2. 行业调研
@@ -409,7 +411,8 @@ const IMAGE_SPEC: ModalitySpec = ModalitySpec {
     label: "图片",
     placeholder: "[image]",
 };
-// Phase 2/3: const AUDIO_SPEC / VIDEO_SPEC — same struct, different fields.
+// AUDIO_SPEC (已实现): prompt 为转写指令, label "音频", placeholder "[audio]".
+// VIDEO_SPEC 仍待做 —— same struct, different fields.
 
 /// Whether a part carries media of the given modality.
 fn part_matches(part: &ContentPart, modality: Modality) -> bool {
@@ -1214,3 +1217,45 @@ Stage 1 ─┴────────────┴─→ Stage 3 ─→ Stage
 
 > **DoD（任务完成定义）**：代码改动 + 单测通过 + `architecture.md` 对应章节已更新 + 本节复选框勾选，
 > 四者齐全方算完成。架构文档滞后视为任务未完成。
+
+---
+
+## §13 音频管线（已实现）
+
+图片之后，音频按同一「辅助翻译到文本」范式端到端落地。关键区别：**主流 chat 协议无法承载音频**，
+所以音频对**每个**主模型都转写成文本（不像图片只在非视觉模型时适配）。
+
+### 13.1 数据流
+
+```
+Telegram 语音(voice/audio)
+  → download_file_bytes → ChannelMessage.attachments: MediaAttachment{ data, mime_type="audio/ogg" }
+  → session_context 摄入：mime 以 "audio/" 开头的附件 → ContentPart::AudioB64{ b64, media_type }
+  → add_user_with_media → 持久化（externalize：大音频 → blobs/{hash}.bin + AudioRef）
+  → 每轮 adapt_media_for_model：AUDIO_SPEC 始终适配
+       · 历史音频：复用缓存的转写文本，否则降级 "[audio]"
+       · 当轮音频：经 find_chat_model_with_modality(Audio) 选出的 STT aux 模型转写
+  → 主模型只看到 "[音频描述]: <转写文本>"
+```
+
+### 13.2 关键设计点
+
+- **ContentPart**：新增 `AudioB64`（内存态）/ `AudioRef`（磁盘态），与 `ImageB64`/`ImageRef` 同构。
+  存储 externalize/hydrate/sweep、`content_fingerprint`、token 估算全部泛化覆盖音频（blob 键 = 解码字节
+  sha256，与图片共用 `sha256_hex`）。
+- **渲染**：音频只在它作为 **aux 转写模型的输入**时抵达渲染器。**OpenAI 协议**渲染 `AudioB64` 为
+  `input_audio` 块（`format` 由 `audio_format_hint(media_type)` 映射，如 ogg/mp3/wav）；Anthropic/GLM
+  无音频输入，降级为 `[audio]` 文本而非 panic；`AudioRef` 一律 `unreachable!`（落盘态，渲染前必已 hydrate）。
+- **始终适配**：`adapt_media_for_model` 先无条件跑 `AUDIO_SPEC`，再在 `!model_supports_images` 时跑
+  `IMAGE_SPEC`。两者由 `adapt_modality(spec)` 复用同一历史/当轮逻辑。
+- **优雅降级**：无 STT aux 路由时音频 → `[audio — no audio model available]`；转写失败 → `[translation failed]`；
+  音频 blob 丢失 → `[audio unavailable]`。任一失败都不 panic、不阻断整轮。
+- **配置**：用户在 chat 路由链中声明一个 `input = ["text","audio"]` 的模型（如 `gpt-4o-audio`，见 §config
+  示例）即作为 STT aux 被 `find_chat_model_with_modality(Audio)` 选中。
+
+### 13.3 未覆盖
+
+- 视频（`VIDEO_SPEC`/`ContentPart::Video*`）未做——单次 chat aux 无法「看」视频，需抽帧或视频原生模型。
+- 非 OpenAI 协议的音频输入未实现（Anthropic Messages / GLM 无此能力）。
+- Telegram 以外渠道的语音摄入（wechat/qq）未接，但 `MediaAttachment{mime:"audio/*"}` 的摄入约定已通用，
+  补其他渠道只需在各自 channel 填充音频附件。

@@ -22,6 +22,9 @@ pub fn estimate_message_tokens(msg: &ChatMessage) -> u64 {
             // ImageRef is a disk-only placeholder; if encountered it represents
             // an (un-hydrated) image — charge the same flat cost as an image.
             ContentPart::ImageRef { .. } => 800,
+            // Audio is adapted to text before a model sees it; if a raw audio
+            // part is still present, charge a flat cost like an image.
+            ContentPart::AudioB64 { .. } | ContentPart::AudioRef { .. } => 800,
             ContentPart::Thinking { thinking, .. } => estimate_tokens(thinking),
         };
     }

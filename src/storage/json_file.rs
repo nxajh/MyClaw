@@ -315,74 +315,109 @@ impl JsonFileBackend {
         fs::read(self.blob_path(session_id, hash))
     }
 
-    /// Externalize large inline images in `message` before serialization.
+    /// Externalize large inline media (`ImageB64` / `AudioB64`) before
+    /// serialization.
     ///
-    /// For each `ImageB64` whose base64 length exceeds `INLINE_IMAGE_MAX_B64_LEN`,
-    /// decode the bytes, hash them (sha256), write the blob, and replace the part
-    /// with `ImageRef { hash, media_type, detail }`. Small images stay inline.
-    /// Returns an externalized clone (the input is never mutated).
+    /// For each inline-media part whose base64 length exceeds
+    /// `INLINE_IMAGE_MAX_B64_LEN`, decode the bytes, hash them (sha256), write the
+    /// blob, and replace the part with the matching `*Ref { hash, .. }`. Small
+    /// payloads stay inline. Returns an externalized clone (input never mutated).
     fn externalize(&self, session_id: &str, message: &ChatMessage) -> std::io::Result<ChatMessage> {
-        // Fast path: nothing to externalize.
-        let needs = message.parts.iter().any(|p| matches!(
-            p,
-            ContentPart::ImageB64 { b64_json, .. } if b64_json.len() > INLINE_IMAGE_MAX_B64_LEN
-        ));
+        // Fast path: nothing large to externalize.
+        let needs = message.parts.iter().any(|p| {
+            matches!(
+                p,
+                ContentPart::ImageB64 { b64_json, .. } | ContentPart::AudioB64 { b64_json, .. }
+                    if b64_json.len() > INLINE_IMAGE_MAX_B64_LEN
+            )
+        });
         if !needs {
             return Ok(message.clone());
         }
 
         let mut out = message.clone();
         for part in &mut out.parts {
-            if let ContentPart::ImageB64 { b64_json, media_type, detail } = part {
-                if b64_json.len() <= INLINE_IMAGE_MAX_B64_LEN {
-                    continue; // small image stays inline
+            // Peek at the payload; skip non-media and small inline parts.
+            let b64 = match part {
+                ContentPart::ImageB64 { b64_json, .. } | ContentPart::AudioB64 { b64_json, .. }
+                    if b64_json.len() > INLINE_IMAGE_MAX_B64_LEN =>
+                {
+                    b64_json.clone()
                 }
-                let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64_json.as_bytes())
-                else {
-                    // Undecodable base64: leave inline rather than lose data.
-                    continue;
-                };
-                let hash = sha256_hex(&bytes);
-                self.write_blob(session_id, &hash, &bytes)?;
-                *part = ContentPart::ImageRef {
+                _ => continue,
+            };
+            let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) else {
+                // Undecodable base64: leave inline rather than lose data.
+                continue;
+            };
+            let hash = sha256_hex(&bytes);
+            self.write_blob(session_id, &hash, &bytes)?;
+            *part = match part {
+                ContentPart::ImageB64 { media_type, detail, .. } => ContentPart::ImageRef {
                     hash,
                     media_type: media_type.take(),
                     detail: *detail,
-                };
-            }
+                },
+                ContentPart::AudioB64 { media_type, .. } => ContentPart::AudioRef {
+                    hash,
+                    media_type: media_type.take(),
+                },
+                _ => unreachable!("filtered to inline media above"),
+            };
         }
         Ok(out)
     }
 
-    /// Hydrate externalized images in `message` after deserialization.
+    /// Hydrate externalized media (`ImageRef` / `AudioRef`) after deserialization.
     ///
-    /// For each `ImageRef`, read the blob and replace it with an `ImageB64`
+    /// For each ref, read the blob and replace it with the inline `*B64` form
     /// carrying the re-encoded base64. A missing or corrupt blob degrades to a
-    /// `Text { text: "[image unavailable]" }` placeholder so a single lost blob
-    /// never fails the whole history load. Returns a hydrated clone.
+    /// `Text { "[image unavailable]" / "[audio unavailable]" }` placeholder so a
+    /// single lost blob never fails the whole history load. Returns a hydrated
+    /// clone.
     fn hydrate(&self, session_id: &str, message: &ChatMessage) -> ChatMessage {
-        if !message.parts.iter().any(|p| matches!(p, ContentPart::ImageRef { .. })) {
+        let needs = message
+            .parts
+            .iter()
+            .any(|p| matches!(p, ContentPart::ImageRef { .. } | ContentPart::AudioRef { .. }));
+        if !needs {
             return message.clone();
         }
         let mut out = message.clone();
         for part in &mut out.parts {
-            if let ContentPart::ImageRef { hash, media_type, detail } = part {
-                match self.read_blob(session_id, hash) {
-                    Ok(bytes) => {
-                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                        *part = ContentPart::ImageB64 {
+            let hash = match part {
+                ContentPart::ImageRef { hash, .. } | ContentPart::AudioRef { hash, .. } => {
+                    hash.clone()
+                }
+                _ => continue,
+            };
+            match self.read_blob(session_id, &hash) {
+                Ok(bytes) => {
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                    *part = match part {
+                        ContentPart::ImageRef { media_type, detail, .. } => ContentPart::ImageB64 {
                             b64_json: b64,
                             media_type: media_type.take(),
                             detail: *detail,
-                        };
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            session_id, hash = %hash, err = %e,
-                            "image blob missing/corrupt; degrading to placeholder"
-                        );
-                        *part = ContentPart::Text { text: "[image unavailable]".into() };
-                    }
+                        },
+                        ContentPart::AudioRef { media_type, .. } => ContentPart::AudioB64 {
+                            b64_json: b64,
+                            media_type: media_type.take(),
+                        },
+                        _ => unreachable!("filtered to *Ref above"),
+                    };
+                }
+                Err(e) => {
+                    let placeholder = if matches!(part, ContentPart::AudioRef { .. }) {
+                        "[audio unavailable]"
+                    } else {
+                        "[image unavailable]"
+                    };
+                    tracing::warn!(
+                        session_id, hash = %hash, err = %e,
+                        "media blob missing/corrupt; degrading to placeholder"
+                    );
+                    *part = ContentPart::Text { text: placeholder.into() };
                 }
             }
         }
@@ -453,7 +488,7 @@ impl JsonFileBackend {
 /// `ImageB64` parts are intentionally excluded here.
 fn collect_blob_hashes(msg: &ChatMessage, set: &mut HashSet<String>) {
     for part in &msg.parts {
-        if let ContentPart::ImageRef { hash, .. } = part {
+        if let ContentPart::ImageRef { hash, .. } | ContentPart::AudioRef { hash, .. } = part {
             set.insert(hash.clone());
         }
     }
@@ -878,6 +913,40 @@ mod tests {
                 assert_eq!(media_type.as_deref(), Some("image/png"));
             }
             other => panic!("expected hydrated ImageB64, got {other:?}"),
+        }
+    }
+
+    fn audio_msg(b64: String) -> ChatMessage {
+        ChatMessage {
+            role: "user".into(),
+            parts: vec![
+                ContentPart::AudioB64 { b64_json: b64, media_type: Some("audio/ogg".into()) },
+                ContentPart::Text { text: "transcribe".into() },
+            ],
+            name: None, tool_call_id: None, tool_calls: None, is_error: None,
+        }
+    }
+
+    #[test]
+    fn audio_blob_roundtrip_externalize_hydrate() {
+        let (_dir, backend, sid) = backend_with_session();
+        // A large audio payload round-trips through blob + hydrate, same as images.
+        let raw = vec![11u8; 16 * 1024];
+        let b64 = b64_of(&raw);
+        backend.append_message(&sid, &audio_msg(b64.clone())).unwrap();
+
+        let line = fs::read_to_string(backend.history_path(&sid)).unwrap();
+        assert!(line.contains("audio_ref"), "expected AudioRef on disk: {line}");
+        assert!(!line.contains(&b64), "base64 must not be inline on disk");
+
+        let loaded = backend.load_messages(&sid);
+        assert_eq!(loaded.len(), 1);
+        match &loaded[0].parts[0] {
+            ContentPart::AudioB64 { b64_json, media_type } => {
+                assert_eq!(b64_json, &b64);
+                assert_eq!(media_type.as_deref(), Some("audio/ogg"));
+            }
+            other => panic!("expected hydrated AudioB64, got {other:?}"),
         }
     }
 

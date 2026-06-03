@@ -38,6 +38,27 @@ pub enum ContentPart {
         media_type: Option<String>,
         detail: ImageDetail,
     },
+    /// Inline base64 audio (e.g. a voice message). Like `ImageB64` this is the
+    /// in-memory form; `json_file` externalizes large payloads to `AudioRef` on
+    /// disk. Audio is ALWAYS adapted to text before reaching a model — chat
+    /// protocols cannot carry audio — so protocol renderers never observe it
+    /// (see the `unreachable!` arms in the body builders).
+    AudioB64 {
+        b64_json: String,
+        /// MIME type of the audio (e.g. "audio/ogg"). When absent the auxiliary
+        /// transcription model infers it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        media_type: Option<String>,
+    },
+    /// On-disk reference to an externalized audio blob (content-addressed by
+    /// SHA-256 of the decoded bytes). Persisted-history only; `load_messages`
+    /// hydrates it back into `AudioB64` — the same contract as `ImageRef`.
+    AudioRef {
+        /// Lowercase hex SHA-256 of the decoded audio bytes; the blob filename.
+        hash: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        media_type: Option<String>,
+    },
     /// Extended thinking block — stored in message history so it can be
     /// re-sent to the model on subsequent turns (Anthropic protocol requires
     /// the model to see its own reasoning, including the opaque signature).
@@ -88,15 +109,25 @@ impl ContentPart {
     pub fn content_fingerprint(&self) -> Option<String> {
         match self {
             ContentPart::ImageUrl { url, .. } => Some(sha256_hex(url.as_bytes())),
-            ContentPart::ImageB64 { b64_json, .. } => Some(
-                match base64::engine::general_purpose::STANDARD.decode(b64_json.as_bytes()) {
-                    Ok(bytes) => sha256_hex(&bytes),
-                    Err(_) => sha256_hex(b64_json.as_bytes()),
-                },
-            ),
-            ContentPart::ImageRef { hash, .. } => Some(hash.clone()),
+            ContentPart::ImageB64 { b64_json, .. } | ContentPart::AudioB64 { b64_json, .. } => {
+                Some(b64_fingerprint(b64_json))
+            }
+            ContentPart::ImageRef { hash, .. } | ContentPart::AudioRef { hash, .. } => {
+                Some(hash.clone())
+            }
             ContentPart::Text { .. } | ContentPart::Thinking { .. } => None,
         }
+    }
+}
+
+/// Content fingerprint of a base64 media payload: the SHA-256 of the *decoded*
+/// bytes (== `blobs/{hash}.bin` and the externalized `*Ref.hash`), with a
+/// fallback to hashing the raw string for undecodable input (which stays inline,
+/// never externalized, so the fallback is self-consistent).
+fn b64_fingerprint(b64: &str) -> String {
+    match base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
+        Ok(bytes) => sha256_hex(&bytes),
+        Err(_) => sha256_hex(b64.as_bytes()),
     }
 }
 

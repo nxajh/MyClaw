@@ -76,6 +76,16 @@ pub fn render_anthropic_messages<'a>(req: &ChatRequest<'a>) -> RenderedAnthropic
                     crate::providers::ContentPart::ImageRef { .. } => {
                         unreachable!("ImageRef is disk-only; hydrate before render")
                     }
+                    // Anthropic Messages API has no audio input. Audio reaching
+                    // here means this model was (mis)routed as the audio aux —
+                    // degrade to a text marker rather than panic; the adapter
+                    // then surfaces a failed/placeholder transcription.
+                    crate::providers::ContentPart::AudioB64 { .. } => {
+                        Some(serde_json::json!({"type": "text", "text": "[audio]"}))
+                    }
+                    crate::providers::ContentPart::AudioRef { .. } => {
+                        unreachable!("AudioRef is disk-only; hydrate before render")
+                    }
                     crate::providers::ContentPart::Thinking { thinking, signature } => {
                         // Anthropic Messages API requires every thinking block to
                         // carry a `signature`; sending one without (e.g. because

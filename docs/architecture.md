@@ -292,16 +292,18 @@ fn persist_last(session: &mut Session)
 ```
 
 ```rust
-// 当主模型不支持图片输入时，在 clone 出的 messages 上把媒体规范化为文本：
-//   历史图片（除当轮末条 user 消息外）→ adapt_history_media 缓存复用/占位符
-//   当轮图片（末条 user 消息）→ adapt_last_turn_media 经辅助视觉模型转述
-// 视觉模型为 no-op（messages 已携带原生 ImageUrl/ImageB64）。永不修改持久化 history。
+// 在 clone 出的 messages 上把媒体规范化为文本（每模态走 adapt_modality(spec)：
+// 历史媒体→缓存复用/占位符，当轮媒体→辅助模型转述/转写）。永不修改持久化 history。
+//   音频(AUDIO_SPEC)：始终适配（chat 协议无法承载音频，即便音频模型也转写）
+//   图片(IMAGE_SPEC)：仅当 !model_supports_images 时适配（视觉模型用原生 ImageB64）
 // 在初次构建 messages 后、以及每次 compaction 重建后各调用一次。
 async fn adapt_media_for_model(
     messages: &mut Vec<ChatMessage>,
     runtime: &AgentRuntime,
+    session_id: &str,
     model_supports_images: bool,
 )
+async fn adapt_modality(messages, runtime, session_id, spec: &ModalitySpec) // 单模态历史+当轮适配
 ```
 
 > 多模态：当轮图片由 `session_context::process_turn` 经 `add_user_with_media` 持久化进
@@ -1539,12 +1541,13 @@ pub struct ModalitySpec {
   pub label: &'static str,       // label for the injected text, e.g. "图片"
   pub placeholder: &'static str, // text used when no description is available
 }
-pub const IMAGE_SPEC: ModalitySpec; // image spec, label "图片", placeholder "[image]"
+pub const IMAGE_SPEC: ModalitySpec; // image, label "图片", placeholder "[image]"
+pub const AUDIO_SPEC: ModalitySpec; // audio transcription, label "音频", placeholder "[audio]"
 ```
 
 **自由函数**:
 ```rust
-pub fn part_matches(part: &ContentPart, modality: &Modality) -> bool
+pub fn part_matches(part: &ContentPart, modality: &Modality) -> bool // Image: ImageUrl/ImageB64; Audio: AudioB64
 pub fn fingerprint(part: &ContentPart) -> Option<String> // → ContentPart::content_fingerprint (decoded-bytes sha256 == blob hash)
 pub async fn translate_part(
   provider: &dyn ChatProvider,
@@ -7290,6 +7293,11 @@ pub enum ContentPart {
   media_type: Option<String>,
   detail: ImageDetail,
   },
+  // 音频：与 Image* 同构（无 detail）。AudioB64 内存态、AudioRef 落盘态。
+  // 音频对每个模型都转写成文本，故只在「作为 STT aux 模型的输入」时抵达渲染器
+  // （OpenAI 渲染为 input_audio 块；Anthropic/GLM 降级为 [audio] 文本；AudioRef 一律 unreachable!）。
+  AudioB64 { b64_json: String, media_type: Option<String> },
+  AudioRef { hash: String, media_type: Option<String> },
   /// Extended thinking block — stored in message history so it can be
   /// re-sent to the model on subsequent turns (Anthropic protocol requires
   /// the model to see its own reasoning, including the opaque signature).

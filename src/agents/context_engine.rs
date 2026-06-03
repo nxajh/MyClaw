@@ -402,6 +402,10 @@ fn strip_images(msg: &ChatMessage) -> ChatMessage {
         // ImageRef is disk-only and should be hydrated before reaching here,
         // but treat it like any other image just in case.
         ContentPart::ImageRef { .. } => ContentPart::Text { text: "[image]".into() },
+        // Audio is normally adapted to text upstream; collapse any stray part too.
+        ContentPart::AudioB64 { .. } | ContentPart::AudioRef { .. } => {
+            ContentPart::Text { text: "[audio]".into() }
+        }
         other => other,
     }).collect();
     cleaned

@@ -202,6 +202,23 @@ impl SessionContext {
                         });
                     }
                 }
+                // Audio attachments (e.g. Telegram voice) become `AudioB64`
+                // parts; the modality adapter transcribes them to text via the
+                // auxiliary speech-to-text model before any model sees them.
+                use base64::Engine as _;
+                for att in &msg.attachments {
+                    let is_audio = att
+                        .mime_type
+                        .as_deref()
+                        .map(|m| m.starts_with("audio/"))
+                        .unwrap_or(false);
+                    if is_audio {
+                        parts.push(ContentPart::AudioB64 {
+                            b64_json: base64::engine::general_purpose::STANDARD.encode(&att.data),
+                            media_type: att.mime_type.clone(),
+                        });
+                    }
+                }
             }
             parts
         };

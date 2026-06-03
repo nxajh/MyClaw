@@ -14,6 +14,23 @@ fn detect_image_media_type(b64: &str) -> &'static str {
     else                              { "image/jpeg" }
 }
 
+/// Map an audio MIME type to the OpenAI `input_audio.format` token. OpenAI
+/// accepts a short codec name ("wav", "mp3", ...) rather than a MIME type.
+/// Falls back to "wav" when the type is absent or unrecognized; an unsupported
+/// codec simply makes the transcription call fail, which the modality adapter
+/// already degrades gracefully.
+fn audio_format_hint(media_type: Option<&str>) -> &'static str {
+    match media_type.map(|m| m.trim().to_ascii_lowercase()) {
+        Some(m) if m.contains("mpeg") || m.contains("mp3") => "mp3",
+        Some(m) if m.contains("ogg") || m.contains("opus") || m.contains("oga") => "ogg",
+        Some(m) if m.contains("wav") || m.contains("x-wav") || m.contains("wave") => "wav",
+        Some(m) if m.contains("webm") => "webm",
+        Some(m) if m.contains("m4a") || m.contains("mp4") || m.contains("aac") => "m4a",
+        Some(m) if m.contains("flac") => "flac",
+        _ => "wav",
+    }
+}
+
 /// Build the request body for the OpenAI Chat Completions API.
 ///
 /// Per the latest OpenAI documentation:
@@ -43,6 +60,20 @@ pub fn render_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                 }
                 ContentPart::ImageRef { .. } => {
                     unreachable!("ImageRef is disk-only; hydrate before render")
+                }
+                // `input_audio` content block (gpt-4o-audio family / OpenAI-
+                // compatible STT models). Reached only when this model is the
+                // auxiliary transcription model — the primary model never sees
+                // audio because the modality adapter transcribes it to text first.
+                ContentPart::AudioB64 { b64_json, media_type } => Some(json!({
+                    "type": "input_audio",
+                    "input_audio": {
+                        "data": b64_json,
+                        "format": audio_format_hint(media_type.as_deref()),
+                    }
+                })),
+                ContentPart::AudioRef { .. } => {
+                    unreachable!("AudioRef is disk-only; hydrate before render")
                 }
                 ContentPart::Thinking { .. } => None,
             }).collect();
@@ -121,4 +152,51 @@ pub fn render_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
     }
 
     body
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::capability_chat::ChatMessage;
+
+    #[test]
+    fn audio_format_hint_maps_common_mimes() {
+        assert_eq!(audio_format_hint(Some("audio/ogg")), "ogg");
+        assert_eq!(audio_format_hint(Some("audio/mpeg")), "mp3");
+        assert_eq!(audio_format_hint(Some("audio/wav")), "wav");
+        assert_eq!(audio_format_hint(Some("audio/webm")), "webm");
+        assert_eq!(audio_format_hint(None), "wav");
+        assert_eq!(audio_format_hint(Some("application/octet-stream")), "wav");
+    }
+
+    #[test]
+    fn renders_audio_as_input_audio_block() {
+        let messages = [ChatMessage {
+            role: "user".into(),
+            parts: vec![ContentPart::AudioB64 {
+                b64_json: "QUJD".into(),
+                media_type: Some("audio/ogg".into()),
+            }],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            is_error: None,
+        }];
+        let req = ChatRequest {
+            model: "m",
+            messages: &messages,
+            temperature: None,
+            max_tokens: None,
+            thinking: None,
+            stop: None,
+            seed: None,
+            tools: None,
+            stream: true,
+        };
+        let body = render_openai_chat_body(&req);
+        // A lone non-text part is rendered as the content object directly.
+        let block = &body["messages"][0]["content"];
+        assert_eq!(block["type"], "input_audio");
+        assert_eq!(block["input_audio"]["data"], "QUJD");
+        assert_eq!(block["input_audio"]["format"], "ogg");
+    }
 }

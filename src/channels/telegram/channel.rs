@@ -567,7 +567,7 @@ impl TelegramChannel {
     }
 
     /// Download a Telegram file by file_id and return its base64-encoded content.
-    async fn download_file_base64(&self, file_id: &str) -> anyhow::Result<String> {
+    async fn download_file_bytes(&self, file_id: &str) -> anyhow::Result<Vec<u8>> {
         // Step 1: Get the file_path from Telegram.
         let client = self.http_client();
         let url = format!("{}?file_id={}", self.api_url("getFile"), file_id);
@@ -594,9 +594,11 @@ impl TelegramChannel {
                 file_resp.status()
             );
         }
-        let bytes = file_resp.bytes().await?;
+        Ok(file_resp.bytes().await?.to_vec())
+    }
 
-        // Step 3: Encode to base64.
+    async fn download_file_base64(&self, file_id: &str) -> anyhow::Result<String> {
+        let bytes = self.download_file_bytes(file_id).await?;
         use base64::Engine;
         Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
     }
@@ -1150,6 +1152,7 @@ impl TelegramChannel {
 
                 let mut content = self.parse_message_content(&msg);
                 let mut image_base64: Option<Vec<String>> = None;
+                let mut attachments: Vec<crate::channels::message::MediaAttachment> = vec![];
 
                 // Handle photo messages: download the largest photo as base64
                 if let Some(photos) = &msg.photo {
@@ -1172,6 +1175,40 @@ impl TelegramChannel {
                     }
                 }
 
+                // Handle voice / audio messages: download as a generic audio
+                // attachment. The modality adapter transcribes it to text via an
+                // auxiliary speech-to-text model (see `AUDIO_SPEC`).
+                if let Some(voice) = &msg.voice {
+                    match self.download_file_bytes(&voice.file_id).await {
+                        Ok(data) => attachments.push(crate::channels::message::MediaAttachment {
+                            file_name: format!("voice-{}.ogg", voice.file_id),
+                            data,
+                            mime_type: Some(
+                                voice.mime_type.clone().unwrap_or_else(|| "audio/ogg".to_string()),
+                            ),
+                        }),
+                        Err(e) => warn!("Telegram download failed for voice {}: {e}", voice.file_id),
+                    }
+                    if content.is_empty() {
+                        content = msg.caption.clone().unwrap_or_else(|| "[语音]".to_string());
+                    }
+                }
+                if let Some(audio) = &msg.audio {
+                    match self.download_file_bytes(&audio.file_id).await {
+                        Ok(data) => attachments.push(crate::channels::message::MediaAttachment {
+                            file_name: format!("audio-{}", audio.file_id),
+                            data,
+                            mime_type: Some(
+                                audio.mime_type.clone().unwrap_or_else(|| "audio/mpeg".to_string()),
+                            ),
+                        }),
+                        Err(e) => warn!("Telegram download failed for audio {}: {e}", audio.file_id),
+                    }
+                    if content.is_empty() {
+                        content = msg.caption.clone().unwrap_or_else(|| "[音频]".to_string());
+                    }
+                }
+
                 let channel_msg = ChannelMessage {
                     id: update_id,
                     sender: sender_username
@@ -1187,7 +1224,7 @@ impl TelegramChannel {
                     timestamp: chrono::Utc::now().timestamp_millis() as u64,
                     thread_ts: msg.message_thread_id.map(|id| id.to_string()),
                     interruption_scope_id: None,
-                    attachments: vec![],
+                    attachments,
                     image_urls: None,
                     image_base64,
                 };
@@ -1651,6 +1688,8 @@ mod tests {
             text: Some("hello".into()),
             caption: None,
             photo: None,
+            voice: None,
+            audio: None,
             forward_from: Some(User {
                 id: 42,
                 username: Some("bob".into()),
@@ -1682,6 +1721,8 @@ mod tests {
             text: Some("news".into()),
             caption: None,
             photo: None,
+            voice: None,
+            audio: None,
             forward_from: None,
             forward_from_chat: Some(Chat {
                 id: -1_001_234_567_890_i64,
@@ -1714,6 +1755,8 @@ mod tests {
             text: Some("secret".into()),
             caption: None,
             photo: None,
+            voice: None,
+            audio: None,
             forward_from: None,
             forward_from_chat: None,
             forward_sender_name: Some("Hidden User".into()),
@@ -1745,6 +1788,8 @@ mod tests {
             text: Some("hello".into()),
             caption: None,
             photo: None,
+            voice: None,
+            audio: None,
             forward_from: None,
             forward_from_chat: None,
             forward_sender_name: None,
