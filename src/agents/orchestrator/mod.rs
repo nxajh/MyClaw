@@ -12,8 +12,10 @@
 
 mod scheduled;
 pub mod event;
+pub mod key;
 
 pub use event::OrchestratorEvent;
+pub use key::{SessionKey, SubAgentKey};
 
 use anyhow::Context;
 use crate::agents::delegation::DelegationEvent;
@@ -121,18 +123,6 @@ pub struct SharedSessions {
     /// AgentRuntime for Agent dispatch in webhook tasks.
     pub agent_runtime: crate::agents::AgentRuntime,
     pub channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
-}
-
-/// Parse a session key like "telegram:ops:12345" into (channel_type, account_id, sender).
-fn parse_session_key(sk: &str) -> Option<(&str, &str, &str)> {
-    let mut parts = sk.splitn(3, ':');
-    let channel_type = parts.next()?;
-    let account_id = parts.next()?;
-    let sender = parts.next()?;
-    if channel_type.is_empty() || account_id.is_empty() || sender.is_empty() {
-        return None;
-    }
-    Some((channel_type, account_id, sender))
 }
 
 /// Return `true` if the session history ends with an incomplete tool execution:
@@ -324,10 +314,6 @@ impl Orchestrator {
                 backoff = (backoff * 2).min(Duration::from_secs(60));
             }
         })
-    }
-
-    fn session_key(channel_type: &str, account_id: &str, sender: &str) -> String {
-        format!("{}:{}:{}", channel_type, account_id, sender)
     }
 
     /// Get or create the `SessionContext` for a routing_key.
@@ -528,7 +514,7 @@ impl Orchestrator {
                     scheduler.record_user_message(&channel_key, &msg.reply_target).await;
                 }
 
-                let sk = Self::session_key(&channel_type, &account_id, &msg.sender);
+                let sk = SessionKey::new(&channel_type, &account_id, &msg.sender).to_string();
                 let channel_key = (channel_type.clone(), account_id.clone());
 
                 // RFC v2 §三.B: check the AskRouter first (indexed by
@@ -888,12 +874,12 @@ impl Orchestrator {
                         let recipient = persist_backend.load_last_message(&sk_owned)
                             .map(|m| m.reply_target)
                             .unwrap_or_else(|| {
-                                parse_session_key(&sk_owned)
-                                    .map(|(_, _, sender)| sender.to_string())
+                                SessionKey::parse(&sk_owned)
+                                    .map(|k| k.sender)
                                     .unwrap_or_default()
                             });
-                        if let Some((ch_type, acc_id, _)) = parse_session_key(&sk_owned) {
-                            if let Some(channel) = channels.get(&(ch_type.to_string(), acc_id.to_string())).map(|r| r.clone()) {
+                        if let Some(key) = SessionKey::parse(&sk_owned) {
+                            if let Some(channel) = channels.get(&key.account_key()).map(|r| r.clone()) {
                                 let target = crate::channels::SendTarget::new(&recipient);
                                 if let Err(e) = channel
                                     .send_payload(
@@ -932,7 +918,7 @@ impl Orchestrator {
                 tracing::debug!(task_id = %sa.task_id, "sub-agent recovery: skipping (no session_id or session_key)");
                 continue;
             }
-            let sub_sk = format!("{}:{}", sa.agent_name, sa.sub_session_id);
+            let sub_sk = SubAgentKey::new(&sa.agent_name, &sa.sub_session_id).to_string();
             let session_snap = self.session_manager.get_or_create(&sub_sk);
             let history = &session_snap.history;
             if history.is_empty() || !history_has_incomplete_turn(history) {
@@ -1093,8 +1079,8 @@ impl Orchestrator {
         // so the synthetic.sender must equal the parent's original sender —
         // otherwise the synthetic message lands on a fresh session
         // ("channel:account:system") instead of the user's parent session.
-        let (ct, ac, parent_sender) = match parse_session_key(&parent_session_id) {
-            Some(t) => (t.0.to_string(), t.1.to_string(), t.2.to_string()),
+        let (ct, ac, parent_sender) = match SessionKey::parse(&parent_session_id) {
+            Some(k) => (k.channel, k.account, k.sender),
             None => {
                 tracing::warn!(parent = %parent_session_id, "invalid session key in delegation event");
                 return;
@@ -1140,7 +1126,7 @@ mod tests {
     #[test]
     fn test_session_key() {
         assert_eq!(
-            Orchestrator::session_key("wechat", "default", "o9cq80zXpSX1Hz0ph_QNs591k4PA"),
+            SessionKey::new("wechat", "default", "o9cq80zXpSX1Hz0ph_QNs591k4PA").to_string(),
             "wechat:default:o9cq80zXpSX1Hz0ph_QNs591k4PA"
         );
     }
