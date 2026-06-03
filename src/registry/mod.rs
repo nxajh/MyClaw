@@ -541,6 +541,28 @@ impl ProviderRegistry for Registry {
 }
 
 impl Registry {
+    /// Resolve the auxiliary chat model used to translate `modality` to text
+    /// when the primary chat model does not support it natively.
+    ///
+    /// The candidate set is restricted to user-declared routing: an explicit
+    /// `[routing.<modality>_aux]` override (when present) takes precedence,
+    /// otherwise the `[routing.chat]` fallback chain is searched for a model
+    /// whose `ChatModelConfig.input` contains `modality`. No global model
+    /// auto-discovery is performed.
+    ///
+    /// Returns `None` when no suitable model is declared.
+    pub fn aux_model_for(
+        &self,
+        modality: crate::providers::capability::Modality,
+    ) -> Option<(Arc<dyn ChatProvider>, String)> {
+        // TODO §4.6: read the optional `[routing.<modality>_aux]` override.
+        // The registry-level RoutingConfig is a flat struct that does not yet
+        // carry the `*_aux` keys, so the override is unavailable here and we
+        // fall back to the user-declared chat routing chain. When the override
+        // plumbing lands, prefer it over the chat chain below.
+        self.find_chat_model_with_modality(modality)
+    }
+
     fn route_capability<T: ?Sized + Send + Sync>(
         &self,
         capability: Capability,

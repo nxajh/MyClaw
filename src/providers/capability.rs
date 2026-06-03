@@ -134,6 +134,11 @@ impl ChatModelConfig {
     pub fn supports_image_input(&self) -> bool {
         self.input.contains(&Modality::Image)
     }
+
+    /// Whether the model supports the given input modality.
+    pub fn supports_input(&self, modality: Modality) -> bool {
+        self.input.contains(&modality)
+    }
 }
 
 /// Configuration for an embedding model.

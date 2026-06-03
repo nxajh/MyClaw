@@ -1,7 +1,7 @@
 //! ProviderRegistry trait: the single routing point for all provider capabilities.
 
 use std::sync::Arc;
-use super::capability::{Capability, ChatModelConfig};
+use super::capability::{Capability, ChatModelConfig, Modality};
 use super::capability_chat::ChatProvider;
 use super::capability_embedding::EmbeddingProvider;
 use super::image::ImageGenerationProvider;
@@ -47,4 +47,30 @@ pub trait ProviderRegistry: Send + Sync {
 
     /// Get summaries for all registered providers (name, chat models, search models).
     fn get_all_provider_summaries(&self) -> Vec<ProviderSummary>;
+
+    /// Find a registered chat model that supports the given input modality.
+    ///
+    /// The candidate set stays within user-declared routing: the chat fallback
+    /// chain (`[routing.chat]`) is searched in order, and the first model whose
+    /// `ChatModelConfig.input` contains `modality` is returned. No global model
+    /// auto-discovery is performed.
+    ///
+    /// Default implementation built on the public trait methods
+    /// (`get_chat_routing_models` / `get_chat_model_config` /
+    /// `get_chat_provider_by_model`).
+    fn find_chat_model_with_modality(
+        &self,
+        modality: Modality,
+    ) -> Option<(Arc<dyn ChatProvider>, String)> {
+        for model_id in self.get_chat_routing_models() {
+            if let Ok(cfg) = self.get_chat_model_config(&model_id) {
+                if cfg.supports_input(modality.clone()) {
+                    if let Some(found) = self.get_chat_provider_by_model(&model_id) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
+    }
 }

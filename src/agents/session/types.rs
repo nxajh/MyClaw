@@ -205,6 +205,29 @@ impl Session {
         self.message_ids.push(0);
     }
 
+    /// Append a user message carrying media parts (images, etc.) followed by the
+    /// text. Media parts are placed first, then a trailing `Text` part, matching
+    /// the ordering most chat protocols expect. Mirrors [`Session::add_user`]:
+    /// pushes the message and an unassigned (`0`) message-id slot.
+    pub fn add_user_with_media(
+        &mut self,
+        text: String,
+        media: Vec<crate::providers::ContentPart>,
+    ) {
+        use crate::providers::ContentPart;
+        let mut parts = media;
+        parts.push(ContentPart::Text { text });
+        self.history.push(ChatMessage {
+            role: "user".to_string(),
+            parts,
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            is_error: None,
+        });
+        self.message_ids.push(0);
+    }
+
     /// Deprecated alias for [`Session::add_user`]. Kept so 40+ existing call
     /// sites compile during the C18 migration window; new code should call
     /// `add_user`.

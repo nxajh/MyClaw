@@ -177,7 +177,39 @@ impl SessionContext {
             Some(rem) => format!("{}\n\n{}", rem, content),
             None => content,
         };
-        session.add_user(user_content);
+        // Build media (image) content parts from the inbound message so the
+        // image-bearing user message is recorded in history (and externalized
+        // by the persist hook below). `image_urls` and `image_base64` come from
+        // the channel's `ChannelMessage`.
+        let media_parts: Vec<crate::providers::ContentPart> = {
+            use crate::providers::{ContentPart, ImageDetail};
+            let mut parts = Vec::new();
+            if let Some(msg) = session.last_message.as_ref() {
+                if let Some(urls) = msg.image_urls.as_ref() {
+                    for url in urls {
+                        parts.push(ContentPart::ImageUrl {
+                            url: url.clone(),
+                            detail: ImageDetail::Auto,
+                        });
+                    }
+                }
+                if let Some(b64s) = msg.image_base64.as_ref() {
+                    for b64 in b64s {
+                        parts.push(ContentPart::ImageB64 {
+                            b64_json: b64.clone(),
+                            media_type: None,
+                            detail: ImageDetail::Auto,
+                        });
+                    }
+                }
+            }
+            parts
+        };
+        if media_parts.is_empty() {
+            session.add_user(user_content);
+        } else {
+            session.add_user_with_media(user_content, media_parts);
+        }
         if let Some(ref hook) = persist_hook {
             if let Some(last) = session.history.last().cloned() {
                 if let Some(id) = hook.persist_message(&session.id, &last) {

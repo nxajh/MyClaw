@@ -399,6 +399,9 @@ fn strip_images(msg: &ChatMessage) -> ChatMessage {
     cleaned.parts = cleaned.parts.into_iter().map(|part| match part {
         ContentPart::ImageUrl { .. } => ContentPart::Text { text: "[image]".into() },
         ContentPart::ImageB64 { .. } => ContentPart::Text { text: "[image]".into() },
+        // ImageRef is disk-only and should be hydrated before reaching here,
+        // but treat it like any other image just in case.
+        ContentPart::ImageRef { .. } => ContentPart::Text { text: "[image]".into() },
         other => other,
     }).collect();
     cleaned

@@ -41,6 +41,9 @@ pub fn render_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                         }
                     }))
                 }
+                ContentPart::ImageRef { .. } => {
+                    unreachable!("ImageRef is disk-only; hydrate before render")
+                }
                 ContentPart::Thinking { .. } => None,
             }).collect();
 

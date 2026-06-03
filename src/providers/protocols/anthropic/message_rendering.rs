@@ -73,6 +73,9 @@ pub fn render_anthropic_messages<'a>(req: &ChatRequest<'a>) -> RenderedAnthropic
                             "type": "base64", "media_type": mime, "data": b64_json,
                         }}))
                     }
+                    crate::providers::ContentPart::ImageRef { .. } => {
+                        unreachable!("ImageRef is disk-only; hydrate before render")
+                    }
                     crate::providers::ContentPart::Thinking { thinking, signature } => {
                         // Anthropic Messages API requires every thinking block to
                         // carry a `signature`; sending one without (e.g. because

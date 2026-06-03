@@ -21,6 +21,22 @@ pub enum ContentPart {
         media_type: Option<String>,
         detail: ImageDetail,
     },
+    /// On-disk reference to an externalized image blob (content-addressed by
+    /// SHA-256 of the decoded bytes). This variant exists ONLY in persisted
+    /// history (`history.jsonl`): `append_message` externalizes large
+    /// `ImageB64` parts into `blobs/{sha256}.bin` and replaces them with
+    /// `ImageRef`; `load_messages` hydrates them back into `ImageB64` before
+    /// the messages ever reach the in-memory render path. It must therefore
+    /// NEVER be observed by a protocol renderer — see the `unreachable!` arms
+    /// in the OpenAI/Anthropic/GLM body builders.
+    ImageRef {
+        /// Lowercase hex SHA-256 of the decoded image bytes; the blob filename.
+        hash: String,
+        /// MIME type carried through from the original `ImageB64`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        media_type: Option<String>,
+        detail: ImageDetail,
+    },
     /// Extended thinking block — stored in message history so it can be
     /// re-sent to the model on subsequent turns (Anthropic protocol requires
     /// the model to see its own reasoning, including the opaque signature).

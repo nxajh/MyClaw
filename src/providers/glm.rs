@@ -211,6 +211,9 @@ fn build_glm_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                     "type": "image_url",
                     "image_url": { "url": format!("data:image;base64,{}", b64_json), "detail": format!("{:?}", detail).to_lowercase() }
                 })),
+                ContentPart::ImageRef { .. } => {
+                    unreachable!("ImageRef is disk-only; hydrate before render")
+                }
                 ContentPart::Thinking { .. } => None,
             }).collect();
 

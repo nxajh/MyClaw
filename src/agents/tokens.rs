@@ -19,6 +19,9 @@ pub fn estimate_message_tokens(msg: &ChatMessage) -> u64 {
             ContentPart::Text { text } => estimate_tokens(text),
             ContentPart::ImageUrl { .. } => 800,
             ContentPart::ImageB64 { .. } => 800,
+            // ImageRef is a disk-only placeholder; if encountered it represents
+            // an (un-hydrated) image — charge the same flat cost as an image.
+            ContentPart::ImageRef { .. } => 800,
             ContentPart::Thinking { thinking, .. } => estimate_tokens(thinking),
         };
     }

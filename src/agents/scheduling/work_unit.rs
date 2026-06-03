@@ -100,6 +100,8 @@ fn estimate_msg_tokens(msg: &ChatMessage) -> u64 {
         ContentPart::Text { text } => text.len(),
         ContentPart::Thinking { thinking, .. } => thinking.len(),
         ContentPart::ImageUrl { .. } | ContentPart::ImageB64 { .. } => 400,
+        // Disk-only image placeholder; charge the same flat image cost.
+        ContentPart::ImageRef { .. } => 400,
     }).sum();
     let tool_len: usize = msg.tool_calls.as_ref().map_or(0, |tcs| {
         tcs.iter().map(|tc| tc.arguments.len() + 32).sum()
