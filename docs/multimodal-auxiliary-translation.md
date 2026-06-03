@@ -1261,14 +1261,17 @@ Telegram 语音(voice/audio)
 
 - **Telegram**：✅ `voice`/`audio` → `download_file_bytes` → 附件（mime 默认 `audio/ogg`）。Telegram 无
   原生转写，走路径②。
-- **QQ**：✅ `ingest_voice_attachments`（listen loop 内）对 `content_type∈{audio,voice}` 的附件：
-  先取 QQ 原生 `asr_refer_text` 注入 `content`（路径①）；空时退而下 `voice_wav_url`(WAV，STT 友好) →
-  附件（路径②）。
+- **QQ**：✅ 官方 schema(`tencent-connect/bot-docs`)的 inbound 语音附件为
+  `{ content_type:"voice", url, filename, size }`，文件是 **SILK**，**无任何原生 ASR 字段**。
+  `ingest_voice_attachments`(listen loop 内)下载 `url` → 附件(mime `audio/silk`)走路径②；SILK 多被
+  主流 STT 拒收，故通常优雅降级为 `[audio]`，除非配了支持 SILK 的音频模型。另机会性读取
+  `asr_refer_text`（**非官方**、个别网关注入）作为路径①——存在即用，缺失即走下载。
 - **WeChat**：✅ iLink 语音 = item `type==3` 的 `voice_item`，自带原生 ASR `text`，直接作为
   `InboundContent::Text` 流入（路径①）。SILK 媒体经 AES-128-ECB 加密、未下载/解码——有原生转写即无需。
 
-> 字段名（`asr_refer_text`/`voice_wav_url`、`voice_item.text`/type 3）依据逆向 SDK 与第三方实现，
-> 官方文档站对抓取器返回 403、未取一手；缺字段一律优雅降级，不报错。落地建议对实际 inbound payload 复核。
+> 字段依据：QQ 为**官方文档**（GitHub 镜像 `tencent-connect/bot-docs`，官网对抓取器 403）；
+> WeChat iLink 为逆向 SDK 互证（photon-hq `types.ts`、weixin-ilink）。`asr_refer_text`/`voice_wav_url`
+> 属第三方实现、非 QQ 官方，已降级为机会性读取。缺字段一律优雅降级、不报错。
 
 ### 13.4 未覆盖
 

@@ -428,15 +428,16 @@ impl QQBotChannel {
 
     /// Ingest voice/audio attachments from a raw inbound `data` payload.
     ///
-    /// QQ provides a native ASR transcription (`asr_refer_text`) on voice
-    /// attachments — prefer it (free, accurate, no download). Otherwise fall back
-    /// to downloading the WAV rendition (`voice_wav_url`, STT-friendly) or the raw
-    /// attachment `url`, attaching the bytes as an `audio/*` MediaAttachment for
-    /// the auxiliary speech-to-text model to transcribe.
+    /// Per the official QQ v2 schema, an inbound voice attachment is
+    /// `{ content_type: "voice", url, filename, size }` and the file is SILK —
+    /// there is NO native ASR/transcription field. We download `url` and attach
+    /// it as `audio/silk` for the auxiliary STT model. Note SILK is rejected by
+    /// most STT models, so this commonly degrades to a "[audio]" placeholder
+    /// unless a SILK-capable audio model is configured.
     ///
-    /// Field names (`asr_refer_text`, `voice_wav_url`) are per the QQ v2 voice
-    /// attachment schema; missing fields degrade gracefully (text dropped / no
-    /// attachment) rather than erroring.
+    /// As a zero-cost best effort we also read `asr_refer_text` first: it is NOT
+    /// in the official schema, but some gateways/proxies inject a transcription
+    /// there — when present we use it and skip the download.
     async fn ingest_voice_attachments(
         &self,
         data: &serde_json::Value,
@@ -447,12 +448,12 @@ impl QQBotChannel {
         };
         for att in attachments {
             let ctype = att.get("content_type").and_then(|v| v.as_str()).unwrap_or("");
-            // QQ marks voice/audio attachments with a "voice"/"audio" content_type.
-            if !(ctype == "audio" || ctype == "voice" || ctype.starts_with("audio")) {
+            // Official: content_type == "voice". Accept "audio"/"audio/*" too.
+            if !(ctype == "voice" || ctype == "audio" || ctype.starts_with("audio")) {
                 continue;
             }
 
-            // 1) Prefer QQ's built-in ASR transcription — no download needed.
+            // Best-effort, non-official: a proxy-injected transcription.
             let asr = att
                 .get("asr_refer_text")
                 .and_then(|v| v.as_str())
@@ -467,14 +468,8 @@ impl QQBotChannel {
                 continue;
             }
 
-            // 2) Fall back to a downloadable rendition: WAV (STT-friendly) then raw.
-            let (url, default_mime) = match att.get("voice_wav_url").and_then(|v| v.as_str()) {
-                Some(w) => (w, "audio/wav"),
-                None => match att.get("url").and_then(|v| v.as_str()) {
-                    Some(u) => (u, "audio/ogg"),
-                    None => continue,
-                },
-            };
+            // Official path: download the SILK voice file referenced by `url`.
+            let Some(url) = att.get("url").and_then(|v| v.as_str()) else { continue };
             let full_url = if url.starts_with("http") {
                 url.to_string()
             } else {
@@ -500,11 +495,8 @@ impl QQBotChannel {
                     continue;
                 }
             };
-            let mime = if ctype.contains('/') {
-                ctype.to_string()
-            } else {
-                default_mime.to_string()
-            };
+            // QQ voice files are SILK (official: 语音=silk); "voice" is not a MIME.
+            let mime = if ctype.contains('/') { ctype.to_string() } else { "audio/silk".to_string() };
             let file_name = att
                 .get("filename")
                 .and_then(|v| v.as_str())
