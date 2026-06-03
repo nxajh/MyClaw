@@ -1000,7 +1000,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         let wh_dir = config.workspace_dir.join("webhooks");
         let wh_jobs = crate::agents::load_webhook_jobs(&wh_dir);
         let wh_ctx = Arc::new(crate::agents::WebhookContext {
-            orchestrator: Arc::clone(&orchestrator),
+            ctx: Arc::clone(orchestrator.ctx()),
             timezone: tz_name.clone(),
         });
         let wh_config = scheduler_config.webhook.clone();

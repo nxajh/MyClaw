@@ -13,9 +13,11 @@
 mod recovery;
 mod scheduled;
 mod turn;
+pub mod ctx;
 pub mod event;
 pub mod key;
 
+pub use ctx::OrchestratorCtx;
 pub use event::OrchestratorEvent;
 pub use key::SessionKey;
 
@@ -83,13 +85,9 @@ pub type ChannelMsgSender = mpsc::Sender<((String, String), ChannelMessage)>;
 /// Coordinates the flow: Channel → Session → Agent::run → Channel.
 /// Does NOT depend on any Infrastructure concrete types.
 pub struct Orchestrator {
-    /// Channels, keyed by (channel_type, account_id).
-    channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
-    /// SessionManager owns the SessionContext table — see
-    /// `SessionManager::get_or_create_context`. The Orchestrator no longer
-    /// keeps its own copy; reach for `session_manager.get_context(rk)` or
-    /// `get_or_create_context(rk)` instead.
-    session_manager: Arc<SessionManager>,
+    /// Shared dependency bundle (channels, sessions, runtime, ask, scheduler,
+    /// delegator). Cloned into spawned tasks that must outlive a single turn.
+    ctx: Arc<OrchestratorCtx>,
     /// The message receiver, owned and consumed by run().
     #[allow(clippy::type_complexity)]
     msg_rx: Arc<TokioMutex<Option<mpsc::Receiver<((String, String), ChannelMessage)>>>>,
@@ -98,33 +96,10 @@ pub struct Orchestrator {
     /// them without requiring `&mut self` (which would block the
     /// `Arc<Self>` sharing pattern that scheduler dispatch relies on).
     listener_handles: Arc<TokioMutex<Vec<JoinHandle<()>>>>,
-    /// AskRouter (RFC v2 §三.B): indexed by session.id, fulfilled by inbound
-    /// messages ahead of process_turn. Shared with the daemon-built
-    /// `AskUserTool` (same `Arc<AskRouter>`) so the register/fulfill loop
-    /// closes through a single inbox.
-    ask_router: Arc<crate::agents::AskRouter>,
-    /// AgentRuntime for the per-turn `Agent::run` path (RFC v2 §三.A).
-    /// Cloned into each spawned turn task.
-    agent_runtime: crate::agents::AgentRuntime,
-    /// Delegation manager (shared with DelegateTaskTool via handler).
-    delegator: Option<Arc<DelegationCoordinator>>,
     /// Delegation event receiver.
     delegation_rx: Arc<TokioMutex<Option<mpsc::Receiver<DelegationEvent>>>>,
     /// Scheduler event receiver (heartbeat ticks, cron triggers).
     scheduler_rx: Arc<TokioMutex<Option<mpsc::Receiver<SchedulerEvent>>>>,
-    /// Shared scheduler for run result tracking from cron tasks.
-    scheduler: Option<crate::agents::SharedScheduler>,
-}
-
-/// Resources shared between Orchestrator and scheduler tasks.
-///
-/// SessionContext lookup now lives on `SessionManager` (1:1 invariant);
-/// callers that previously held an `Arc<DashMap<_, Arc<SessionContext>>>`
-/// reach for `session_manager.get_or_create_context(rk)` instead.
-pub struct SharedSessions {
-    /// AgentRuntime for Agent dispatch in webhook tasks.
-    pub agent_runtime: crate::agents::AgentRuntime,
-    pub channels: Arc<DashMap<(String, String), Arc<dyn Channel>>>,
 }
 
 /// Return `true` if the session history ends with an incomplete tool execution:
@@ -213,63 +188,32 @@ impl Orchestrator {
             warn!("no channels enabled");
         }
 
-        let orchestrator = Orchestrator {
+        let ctx = Arc::new(OrchestratorCtx {
             channels: channels_map,
             session_manager: parts.session_manager,
-            msg_rx: Arc::new(TokioMutex::new(Some(msg_rx))),
-            listener_handles: Arc::new(TokioMutex::new(listener_handles)),
             ask_router: parts.ask_router,
             agent_runtime: parts.agent_runtime,
             delegator: parts.delegator,
+            scheduler: parts.scheduler,
+        });
+
+        let orchestrator = Orchestrator {
+            ctx,
+            msg_rx: Arc::new(TokioMutex::new(Some(msg_rx))),
+            listener_handles: Arc::new(TokioMutex::new(listener_handles)),
             delegation_rx: Arc::new(TokioMutex::new(parts.delegation_rx)),
             scheduler_rx: Arc::new(TokioMutex::new(parts.scheduler_rx)),
-            scheduler: parts.scheduler,
         };
 
-        info!(channels = orchestrator.channels.len(), "orchestrator initialized");
+        info!(channels = orchestrator.ctx.channels.len(), "orchestrator initialized");
         (orchestrator, (*msg_tx).clone())
     }
 
-    /// Get shared resources for scheduler tasks.
-    pub fn shared(&self) -> SharedSessions {
-        SharedSessions {
-            agent_runtime: self.agent_runtime.clone(),
-            channels: self.channels.clone(),
-        }
-    }
-
-    /// Accessor for the webhook server's axum app state. Avoids
-    /// exposing the field directly while still letting the webhook
-    /// task reach the manager via `orchestrator.session_manager()`.
-    pub fn session_manager(&self) -> &Arc<SessionManager> {
-        &self.session_manager
-    }
-
-    /// Accessor for the AgentRuntime — used by the webhook server's
-    /// per-request Agent dispatch.
-    pub fn agent_runtime(&self) -> &crate::agents::AgentRuntime {
-        &self.agent_runtime
-    }
-
-    /// Accessor for the channels map — used by the webhook server to
-    /// resolve `target_channel:account` references at delivery time.
-    #[allow(clippy::type_complexity)]
-    pub fn channels(&self) -> &Arc<DashMap<(String, String), Arc<dyn Channel>>> {
-        &self.channels
-    }
-
-    /// Accessor for the persisted session backend (the BackendPersistHook
-    /// constructor target). Used by the webhook server to materialize a
-    /// persist hook for in-flight scheduled turns.
-    pub fn persist_backend(&self) -> &Arc<dyn crate::storage::SessionBackend> {
-        self.session_manager.backend()
-    }
-
-    /// Accessor for the shared Scheduler (if scheduling is enabled).
-    /// Webhook handlers reach through this to read
-    /// `scheduler.last_channel` / `last_recipient` for `target = "last"`.
-    pub fn scheduler(&self) -> Option<&crate::agents::SharedScheduler> {
-        self.scheduler.as_ref()
+    /// The shared dependency bundle. The webhook server and other long-lived
+    /// consumers hold this `Arc` directly instead of going through per-field
+    /// accessor methods.
+    pub fn ctx(&self) -> &Arc<OrchestratorCtx> {
+        &self.ctx
     }
 
     fn spawn_listener(
@@ -328,7 +272,7 @@ impl Orchestrator {
     /// populated here — callers wire them per-turn before locking the
     /// session to call `Agent::run`.
     fn session_context_for(&self, sk: &str) -> Arc<SessionContext> {
-        self.session_manager.get_or_create_context(sk)
+        self.ctx.session_manager.get_or_create_context(sk)
     }
 
     /// Main message loop. Consumes self.msg_rx.
@@ -366,11 +310,11 @@ impl Orchestrator {
         // LLM work spawns into background tasks so the event loop starts
         // without blocking.
         recovery::run_startup(
-            &self.session_manager,
-            &self.agent_runtime,
-            &self.channels,
+            &self.ctx.session_manager,
+            &self.ctx.agent_runtime,
+            &self.ctx.channels,
             &unfinished_subagents,
-            &self.delegator,
+            &self.ctx.delegator,
         );
 
         // Unify the three event sources (user messages / delegation /
@@ -478,7 +422,7 @@ impl Orchestrator {
                     // normal mechanism; the AskReply variant exists for
                     // future explicit routing (e.g. webhook-delivered
                     // replies). For now log and discard if unfulfilled.
-                    if !self.ask_router.fulfill(&session_id, reply) {
+                    if !self.ctx.ask_router.fulfill(&session_id, reply) {
                         tracing::warn!(session = %session_id, "AskReply for unknown session");
                     }
                 }
@@ -510,13 +454,13 @@ impl Orchestrator {
     /// so the `OrchestratorEvent` main loop reuses the inbound dispatch
     /// logic verbatim rather than inlining it.
     async fn handle_channel_event(&self, event: ChannelEvent) {
-        let channels = self.channels.clone();
+        let channels = self.ctx.channels.clone();
         match event {
             ChannelEvent::UserMessage(((channel_type, account_id), mut msg)) => {
                 // Tell the Scheduler about this user message so cron /
                 // heartbeat jobs with `target = "last"` know where to
                 // deliver their output. No-op when scheduler is disabled.
-                if let Some(ref scheduler) = self.scheduler {
+                if let Some(ref scheduler) = self.ctx.scheduler {
                     let channel_key = format!("{}:{}", channel_type, account_id);
                     scheduler.record_user_message(&channel_key, &msg.reply_target).await;
                 }
@@ -530,11 +474,12 @@ impl Orchestrator {
                 // no fresh turn is spawned.
                 {
                     let session_id = self
+                        .ctx
                         .session_manager
                         .get_or_create(&sk)
                         .id
                         .clone();
-                    if self.ask_router.fulfill(&session_id, msg.clone()) {
+                    if self.ctx.ask_router.fulfill(&session_id, msg.clone()) {
                         tracing::debug!(
                             session = %session_id,
                             "ask_router fulfilled pending ask, consuming inbound"
@@ -656,10 +601,10 @@ impl Orchestrator {
                         let sk_cmd        = sk.clone();
                         let cmd_owned     = cmd.to_string();
                         let cmd_args_owned = cmd_args.to_string();
-                        let session_ctx_cmd = self.session_manager.get_context(&sk);
-                        let registry_cmd  = Arc::clone(&self.agent_runtime.providers);
-                        let sm_cmd        = self.session_manager.clone();
-                        let runtime_cmd   = self.agent_runtime.clone();
+                        let session_ctx_cmd = self.ctx.session_manager.get_context(&sk);
+                        let registry_cmd  = Arc::clone(&self.ctx.agent_runtime.providers);
+                        let sm_cmd        = self.ctx.session_manager.clone();
+                        let runtime_cmd   = self.ctx.agent_runtime.clone();
                         let channel_cmd   = channels.get(&channel_key).map(|r| r.clone());
                         let rt_cmd        = reply_target.clone();
                         let rid_cmd       = reply_to_id.clone();
@@ -697,10 +642,10 @@ impl Orchestrator {
 
                 // B12: store full inbound ChannelMessage on session.
                 {
-                    let mut session = self.session_manager.get_or_create(&sk);
+                    let mut session = self.ctx.session_manager.get_or_create(&sk);
                     session.record_inbound(msg.clone());
                 }
-                if let Err(e) = self.session_manager.backend().save_last_message(&sk, &msg) {
+                if let Err(e) = self.ctx.session_manager.backend().save_last_message(&sk, &msg) {
                     tracing::warn!(session = %sk, err = %e, "failed to persist last_message");
                 }
 
@@ -712,8 +657,8 @@ impl Orchestrator {
                 // Dispatch via SessionContext.process_turn — the canonical
                 // RFC v2 per-turn entry point. Spawn on a background task so
                 // the main event loop is not blocked by the LLM round-trip.
-                let session_ctx = self.session_manager.get_or_create_context(&sk);
-                let runtime = self.agent_runtime.clone();
+                let session_ctx = self.ctx.session_manager.get_or_create_context(&sk);
+                let runtime = self.ctx.agent_runtime.clone();
                 let inbound_msg = msg.clone();
                 let _ = (image_urls, image_base64, reply_to_id, content);
 
@@ -797,7 +742,7 @@ impl Orchestrator {
 
                 // Spawn: LLM execution runs independently of the main loop.
                 tokio::spawn(run_heartbeat_task(
-                    Arc::clone(&self),
+                    self.ctx.clone(),
                     target_channel,
                     target_account,
                     prompt,
@@ -809,7 +754,7 @@ impl Orchestrator {
             SchedulerEvent::Cron { session_key, prompt, target_channel, target_account, job_id, delivery, enabled_tools, disabled_tools, model, provider } => {
                 tracing::debug!(session_key = %session_key, "cron job triggered (from scheduler)");
                 tokio::spawn(run_cron_task(
-                    Arc::clone(&self),
+                    self.ctx.clone(),
                     session_key,
                     prompt,
                     target_channel,
@@ -925,9 +870,9 @@ impl Orchestrator {
             }
         };
         // Verify channel exists (warn-and-skip if not) — handle_channel_event
-        // will look it up again from self.channels, but failing fast here gives
+        // will look it up again from self.ctx.channels, but failing fast here gives
         // a clearer log line.
-        if self.channels.get(&(ct.clone(), ac.clone())).is_none() {
+        if self.ctx.channels.get(&(ct.clone(), ac.clone())).is_none() {
             tracing::warn!(parent = %parent_session_id, "channel for delegation event not found");
             return;
         }

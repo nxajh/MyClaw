@@ -9,14 +9,14 @@
 
 use std::sync::Arc;
 
-use super::{is_silent_ok, Orchestrator};
+use super::{is_silent_ok, OrchestratorCtx};
 use crate::channels::ChannelMessage;
 
 /// Run a scheduled turn for `session_key` with `prompt`, forcing Background
 /// run_mode and applying an optional per-call model override. Returns the
 /// turn's text; delivery is handled by the caller.
 pub(crate) async fn run_scheduled_turn(
-    orch: &Orchestrator,
+    orch: &OrchestratorCtx,
     session_key: &str,
     prompt: &str,
     model_override: Option<String>,
@@ -26,7 +26,7 @@ pub(crate) async fn run_scheduled_turn(
     // every invocation so cron jobs that change `model` mid-stream are
     // honored on the next turn.
     let model_for_init = model_override.clone();
-    let session_ctx = orch.session_manager().get_or_create_context_with(
+    let session_ctx = orch.session_manager.get_or_create_context_with(
         session_key,
         move |session| {
             session.session_override.run_mode =
@@ -57,7 +57,7 @@ pub(crate) async fn run_scheduled_turn(
         image_urls: None,
         image_base64: None,
     };
-    let runtime = orch.agent_runtime().clone();
+    let runtime = orch.agent_runtime.clone();
     session_ctx
         .process_turn(inbound, None, runtime)
         .await
@@ -66,7 +66,7 @@ pub(crate) async fn run_scheduled_turn(
 
 /// Execute a heartbeat turn as an independent spawned task.
 pub(crate) async fn run_heartbeat_task(
-    orch: Arc<Orchestrator>,
+    orch: Arc<OrchestratorCtx>,
     target_channel: Option<String>,
     target_account: Option<String>,
     prompt: String,
@@ -106,7 +106,7 @@ pub(crate) async fn run_heartbeat_task(
 /// Execute a cron job turn as an independent spawned task.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_cron_task(
-    orch: Arc<Orchestrator>,
+    orch: Arc<OrchestratorCtx>,
     session_key: String,
     prompt: String,
     target_channel: Option<String>,
@@ -139,7 +139,7 @@ pub(crate) async fn run_cron_task(
     };
 
     // Record run result in scheduler (returns failure alert message if needed).
-    let failure_alert = if let Some(scheduler) = orch.scheduler() {
+    let failure_alert = if let Some(scheduler) = orch.scheduler.as_ref() {
         scheduler.mark_run_result(&job_id, record)
     } else {
         None
@@ -161,7 +161,7 @@ pub(crate) async fn run_cron_task(
 
 /// Send a response to the configured target channel (used by heartbeat/cron).
 async fn send_to_target_internal(
-    orch: &Orchestrator,
+    orch: &OrchestratorCtx,
     target_channel: Option<String>,
     target_account: Option<String>,
     content: &str,
@@ -171,7 +171,7 @@ async fn send_to_target_internal(
         (Some(ch), None) => (ch, "default".to_string()),
         (None, _) => {
             // Resolve from scheduler.last_channel (set by handle_channel_event).
-            let last = match orch.scheduler() {
+            let last = match orch.scheduler.as_ref() {
                 Some(s) => s.last_channel.lock().await.clone(),
                 None => None,
             };
@@ -191,7 +191,7 @@ async fn send_to_target_internal(
         }
     };
 
-    let channel = match orch.channels().get(&(ch_type.clone(), acc_id.clone())) {
+    let channel = match orch.channels.get(&(ch_type.clone(), acc_id.clone())) {
         Some(ch) => ch.clone(),
         None => {
             tracing::warn!(channel = %ch_type, account = %acc_id, "target channel not found");
@@ -200,7 +200,7 @@ async fn send_to_target_internal(
     };
 
     // Resolve recipient from scheduler.last_recipient.
-    let recipient = match orch.scheduler() {
+    let recipient = match orch.scheduler.as_ref() {
         Some(s) => s.last_recipient.lock().await.clone().unwrap_or_default(),
         None => String::new(),
     };
