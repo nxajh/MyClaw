@@ -1083,40 +1083,50 @@ blob 外置的文件改动已并入 §10 主变更清单（`capability_chat.rs` 
 ### 12.2 分阶段任务
 
 #### Stage 0 — 能力查询基建（无依赖，可先行）
-- [ ] **T0.1** `capability.rs`：加 `supports_input(modality)`（`supports_image_input` 已存在）
-- [ ] **T0.2** `provider_registry.rs`：加 trait 方法 `find_chat_model_with_modality()`（可默认实现）
-- [ ] **T0.3** `registry/mod.rs`：实现 `aux_model_for(modality)`（读 `[routing.*_aux]`，无配置返回 `None`）
+- [x] **T0.1** `capability.rs`：加 `supports_input(modality)`（`supports_image_input` 已存在）
+- [x] **T0.2** `provider_registry.rs`：加 trait 方法 `find_chat_model_with_modality()`（可默认实现）
+- [x] **T0.3** `registry/mod.rs`：实现 `aux_model_for(modality)`（读 `[routing.*_aux]`，无配置返回 `None`）
 - [ ] **T0.4**（可选 / Phase 1.5）`config/routing.rs`：`get_by_key(&str)` 读约定键 `image_aux`
 
 #### Stage 1 — 持久化 + blob 外置（核心数据流，G3/G4）
-- [ ] **T1.1** `capability_chat.rs`：新增 `ContentPart::ImageRef { hash, media_type, detail }`（仅磁盘表示）
-- [ ] **T1.2** `json_file.rs`：`write_blob` / `read_blob`（`sessions/{id}/blobs/{sha256}.bin`）
-- [ ] **T1.3** `json_file.rs`：`append_message` 前 `externalize`（大 `ImageB64`→`ImageRef`+写 blob，阈值 8KB）
-- [ ] **T1.4** `json_file.rs`：`load_messages`/recovery 后 `hydrate`（`ImageRef`→`ImageB64`；缺失→`[image unavailable]`）
-- [ ] **T1.5** `json_file.rs`：`rotate_history` / `truncate_messages` 收尾 blob GC（标记-清扫）
-- [ ] **T1.6** `session/types.rs`：`add_user_with_media(text, Vec<ContentPart>)`
-- [ ] **T1.7** `session_context.rs`：`process_turn` 由 `last_message` 构造媒体 parts → 走 `add_user_with_media`
+- [x] **T1.1** `capability_chat.rs`：新增 `ContentPart::ImageRef { hash, media_type, detail }`（仅磁盘表示）
+- [x] **T1.2** `json_file.rs`：`write_blob` / `read_blob`（`sessions/{id}/blobs/{sha256}.bin`）
+- [x] **T1.3** `json_file.rs`：`append_message` 前 `externalize`（大 `ImageB64`→`ImageRef`+写 blob，阈值 8KB）
+- [x] **T1.4** `json_file.rs`：`load_messages`/recovery 后 `hydrate`（`ImageRef`→`ImageB64`；缺失→`[image unavailable]`）
+- [x] **T1.5** `json_file.rs`：`rotate_history` / `truncate_messages` 收尾 blob GC（标记-清扫）
+- [x] **T1.6** `session/types.rs`：`add_user_with_media(text, Vec<ContentPart>)`
+- [x] **T1.7** `session_context.rs`：`process_turn` 由 `last_message` 构造媒体 parts → 走 `add_user_with_media`
 
 #### Stage 2 — 模态适配模块（G1/G2/G6）
-- [ ] **T2.1** 新建 `modality_adapter.rs`：`ModalitySpec` + `IMAGE_SPEC`、`part_matches`、`fingerprint`
-- [ ] **T2.2** `DescriptionCache` trait + LRU 实现
-- [ ] **T2.3** `runtime.rs`：挂 `description_cache: Arc<dyn DescriptionCache>` 单例
-- [ ] **T2.4** `translate_part`：流式 `chat()` → `ChatResponse::from_stream()`，查/写缓存
-- [ ] **T2.5** `adapt_history_media(messages, spec, cache, skip_idx)`：缓存复用/占位符，不调辅助模型
-- [ ] **T2.6** `adapt_last_turn_media(&mut msg, spec, aux, cache)`：并行 `join_all` 翻译末条 user 图，替换 parts
+- [x] **T2.1** 新建 `modality_adapter.rs`：`ModalitySpec` + `IMAGE_SPEC`、`part_matches`、`fingerprint`
+- [x] **T2.2** `DescriptionCache` trait + LRU 实现
+- [x] **T2.3** `runtime.rs`：挂 `description_cache: Arc<dyn DescriptionCache>` 单例
+- [x] **T2.4** `translate_part`：流式 `chat()` → `ChatResponse::from_stream()`，查/写缓存
+- [x] **T2.5** `adapt_history_media(messages, spec, cache, skip_idx)`：缓存复用/占位符，不调辅助模型
+- [x] **T2.6** `adapt_last_turn_media(&mut msg, spec, aux, cache)`：并行 `join_all` 翻译末条 user 图，替换 parts
 
 #### Stage 3 — agent.rs 集成 + 收尾（G5）
-- [ ] **T3.1** `agent.rs`：`model_supports_images == false` 分支接 `adapt_history_media(skip)` + `adapt_last_turn_media`
-- [ ] **T3.2** `agent.rs`：**删除**从 `last_message` 快照拼回图片的旧逻辑（history 已带图）
-- [ ] **T3.3** `agents/mod.rs`：声明 `mod modality_adapter`
-- [ ] **T3.4** `Cargo.toml`：`sha2` / `lru` / `base64` 依赖确认
+- [x] **T3.1** `agent.rs`：`model_supports_images == false` 分支接 `adapt_history_media(skip)` + `adapt_last_turn_media`
+- [x] **T3.2** `agent.rs`：**删除**从 `last_message` 快照拼回图片的旧逻辑（history 已带图）
+- [x] **T3.3** `agents/mod.rs`：声明 `mod modality_adapter`
+- [x] **T3.4** `Cargo.toml`：`sha2` / `lru` / `base64` 依赖确认
 
 #### Stage 4 — 测试（覆盖 §9 + §11.6）
 - [ ] **T4.1** 回归：视觉模型流程不受影响
 - [ ] **T4.2** 非视觉 + 有/无辅助模型：转述 / 占位符
-- [ ] **T4.3** 多轮缓存命中、跨会话去重（fingerprint 仅调一次）
-- [ ] **T4.4** blob：往返一致、内联阈值、去重单文件、GC 回收孤儿、缺失降级
+- [x] **T4.3** 多轮缓存命中、跨会话去重（fingerprint 仅调一次）
+- [x] **T4.4** blob：往返一致、内联阈值、去重单文件、GC 回收孤儿、缺失降级
 - [ ] **T4.5** 多图并行顺序、辅助失败 graceful、候选集边界（未入路由不被选）
+
+> **测试覆盖现状**：模块级单测已落地——Stage 1 的 5 个 blob 测试（往返/阈值/去重/GC/缺失降级，
+> 对应 T4.4 ✅）、Stage 2 的 5 个 adapter 测试（流式聚合+写缓存、缓存命中跳过 provider 调用、
+> `join_all` 顺序与编号合并、无 aux 占位降级、`adapt_history_media` 的缓存-vs-占位+`skip_idx`，
+> 对应 T4.3 ✅ 及 T4.2/T4.5 的适配层逻辑）。**延后**：T4.1/T4.2/T4.5 的 `agent.rs::run()`
+> 端到端用例（视觉模型不重复附图、非视觉整链转述、候选集边界）需要一个可复用的 mock
+> `ProviderRegistry` + `AgentRuntime` 测试骨架（当前 `NullRegistry`/`test_runtime` 是 orchestrator
+> 私有 `#[cfg(test)]`，未导出）。Stage 3 的 `adapt_media_for_model` 是薄胶水层、其底层两函数已被
+> 上述单测覆盖，且图片重复已通过删除旧快照路径从结构上消除，故端到端用例作为紧后续补齐。
+> T0.4（`[routing.*_aux]` 显式覆盖键）仍按 §4.6 推迟，`aux_model_for` 暂回退到 `[routing.chat]` 链。
 
 ### 12.3 依赖与关键路径
 

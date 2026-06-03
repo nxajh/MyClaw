@@ -292,6 +292,23 @@ fn persist_last(session: &mut Session)
 ```
 
 ```rust
+// 当主模型不支持图片输入时，在 clone 出的 messages 上把媒体规范化为文本：
+//   历史图片（除当轮末条 user 消息外）→ adapt_history_media 缓存复用/占位符
+//   当轮图片（末条 user 消息）→ adapt_last_turn_media 经辅助视觉模型转述
+// 视觉模型为 no-op（messages 已携带原生 ImageUrl/ImageB64）。永不修改持久化 history。
+// 在初次构建 messages 后、以及每次 compaction 重建后各调用一次。
+async fn adapt_media_for_model(
+    messages: &mut Vec<ChatMessage>,
+    runtime: &AgentRuntime,
+    model_supports_images: bool,
+)
+```
+
+> 多模态：当轮图片由 `session_context::process_turn` 经 `add_user_with_media` 持久化进
+> history，故 `run()` 的 `messages` clone 已天然携带图片；旧的「从 `last_message` 快照拼回图片」
+> 路径已删除（否则视觉模型会重复附图）。非视觉模型的媒体适配见 `agents/modality_adapter.rs`。
+
+```rust
 fn last_user_text(session: &Session) -> String
 ```
 
