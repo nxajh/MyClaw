@@ -586,6 +586,14 @@ pub struct ContextEngine {
 }
 ```
 
+> **压缩时序与解耦（重要）**：压缩判断**刻意与 usage tracker 解耦**——`agent.rs::run` 在
+> **发送前**调 `maybe_compact(.., force=false)`，阈值判定用 `estimate_history_tokens(系统提示+history)`
+> 这个 **per-request 直接估算**，而非 `token_tracker.total_tokens()`。这样即便 tracker 偏低
+> （例如重启后恢复了陈旧的持久 total），也不会放行越界请求；tracker 退回它的本职——usage
+> 上报/展示/持久化。若 provider 仍回 `StopReason::ContextOverflow`，则 `maybe_compact(.., force=true)`
+> 强制压缩并重试（上限 `MAX_OVERFLOW_RETRIES`）；压缩无法再减则回一条明确提示而非静默放弃。
+> 旧的"仅在 API 返回后基于 tracker 判定压缩"已被发送前闸门取代。
+
 **Impl** `impl ContextEngine`:
 ```rust
   pub fn new(
@@ -1828,7 +1836,12 @@ pub const MSG_ABORT_ACK: &str = "已取消"
 ```
 
 ```rust
-pub const MSG_TURN_FAILED: &str = "⚠️ 处理超时，未收到模型回复。"
+pub const MSG_TURN_FAILED: &str = "⚠️ 处理超时，未收到模型回复。" // 兜底；具体错误见下
+// 把失败 turn 的错误映射成区分类型的用户文案，而非一律“处理超时”。
+// 优先 downcast ProviderHttpError（带真实 status）：5xx→服务不可用、429→过于频繁、
+// 413/400-too-long→消息过长、400→格式错误；否则按错误串兜底：CHAIN_EXHAUSTED→多模型不可用、
+// timeout/stalled/truncated→响应超时、connection/broken pipe→网络中断。inbound 错误通知调用它。
+pub fn user_facing_error_message(err: &anyhow::Error) -> String
 ```
 
 ```rust
@@ -7408,6 +7421,11 @@ pub enum StopReason {
   ContentFilter,
   ToolUse,
   Timeout,
+  // Provider rejected the request as over the context window (empty body).
+  // Mapped from GLM `model_context_window_exceeded` etc. via
+  // `is_context_overflow_reason()`. Agent forces a compaction + retry instead
+  // of misreading it as EndTurn and blindly retrying an empty response.
+  ContextOverflow,
 }
 ```
 
@@ -8025,6 +8043,24 @@ fn record_cooldown(
 ```rust
   fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>>
 ```
+
+#### `providers/retry.rs`
+
+**结构体** `RetryChatProvider`（`providers/retry.rs`）— 装饰单个 provider/model，瞬时错误
+（`ServerError`/`Overloaded`/`Timeout`：502/503/504/连接断开）时**重试同一模型**（短指数退避
+500ms/1s/2s…，不沿用分类器的分钟级 cooldown）。与 `FallbackChatProvider`（切换到**别的**模型）正交。
+仅当尚未吐出任何内容时才重试，避免重复输出。
+
+```rust
+pub struct RetryChatProvider { inner: Arc<dyn ChatProvider>, model_id: String, max_retries: usize }
+pub fn new(inner, model_id, max_retries) -> Self
+impl ChatProvider for RetryChatProvider { fn chat(..) }
+```
+
+> **路由（`agent.rs::run`）**：无 override → `get_chat_provider(Chat)` 取 `FallbackChatProvider`
+> （跨模型 failover）。有 `session_override.model`（`/model`）→ `get_chat_provider_by_model` 取裸
+> provider，**再包一层 `RetryChatProvider`**：用户选定的模型遇到 502 等瞬时错误**重试该模型**，
+> **不**切换到别的模型。`get_chat_provider_by_model` 本身不变（vision / STT aux 仍要精确直连）。
 
 #### `providers/glm.rs`
 

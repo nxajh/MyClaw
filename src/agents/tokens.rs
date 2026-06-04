@@ -42,6 +42,20 @@ pub fn estimate_message_tokens(msg: &ChatMessage) -> u64 {
     tokens
 }
 
+/// Estimate the total prompt tokens for a system prompt + full history — i.e.
+/// the size of what an LLM request actually carries. Used both to seed/reconcile
+/// the [`TokenTracker`] and as a tracker-independent pre-send compaction guard.
+pub fn estimate_history_tokens(system_prompt: &str, history: &[ChatMessage]) -> u64 {
+    let mut total = 0u64;
+    if !system_prompt.is_empty() {
+        total += estimate_tokens(system_prompt) + 4;
+    }
+    for msg in history {
+        total += estimate_message_tokens(msg);
+    }
+    total
+}
+
 /// Token usage tracker — combines precise API-reported usage with
 /// estimated pending tokens. Lives on `Session.token_tracker`.
 #[derive(Debug, Clone, Default)]
@@ -73,12 +87,7 @@ impl TokenTracker {
     /// message in the history. Used at turn start when no prior API usage
     /// has been recorded yet (fresh session or post-restart).
     pub fn seed_from_history(&mut self, system_prompt: &str, history: &[ChatMessage]) {
-        if !system_prompt.is_empty() {
-            self.record_pending(estimate_tokens(system_prompt) + 4);
-        }
-        for msg in history {
-            self.record_pending(estimate_message_tokens(msg));
-        }
+        self.record_pending(estimate_history_tokens(system_prompt, history));
     }
 
     pub fn total_tokens(&self) -> u64 {
@@ -121,4 +130,20 @@ pub fn is_write_tool(name: &str) -> bool {
             | "agent_kill"
             | "http"
     )
+}
+
+#[cfg(test)]
+mod tracker_tests {
+    use super::*;
+
+    #[test]
+    fn estimate_history_tokens_counts_system_and_messages() {
+        let history = vec![
+            ChatMessage::user_text("hello there"),
+            ChatMessage::assistant_text("hi"),
+        ];
+        let est = estimate_history_tokens("you are a bot", &history);
+        // Strictly greater than the system prompt alone + nonzero per message.
+        assert!(est > estimate_tokens("you are a bot"));
+    }
 }

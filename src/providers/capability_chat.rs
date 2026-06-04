@@ -233,6 +233,19 @@ pub enum StopReason {
     ContentFilter,
     ToolUse,
     Timeout,
+    /// The request exceeded the model's context window (the provider rejected it
+    /// rather than completing). Distinct from `EndTurn` so the agent can force a
+    /// compaction and retry instead of treating the empty body as a normal stop.
+    ContextOverflow,
+}
+
+/// True when a provider `finish_reason` string signals a context-window
+/// overflow (e.g. GLM's `model_context_window_exceeded`). Kept protocol-agnostic
+/// so every renderer maps these to [`StopReason::ContextOverflow`] uniformly.
+/// Note: a plain `"length"` (output-token cap) is NOT an overflow.
+pub fn is_context_overflow_reason(reason: &str) -> bool {
+    let r = reason.to_ascii_lowercase();
+    r.contains("context") && (r.contains("exceed") || r.contains("window") || r.contains("overflow"))
 }
 
 /// Token usage for a chat response.
@@ -403,4 +416,25 @@ impl ChatResponse {
 pub trait ChatProvider: Send + Sync {
     /// Start a streaming chat. Non-streaming callers collect via ChatResponse::from_stream().
     fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>>;
+}
+
+#[cfg(test)]
+mod overflow_reason_tests {
+    use super::is_context_overflow_reason;
+
+    #[test]
+    fn classifies_overflow_strings() {
+        assert!(is_context_overflow_reason("model_context_window_exceeded"));
+        assert!(is_context_overflow_reason("context_length_exceeded"));
+        assert!(is_context_overflow_reason("CONTEXT_WINDOW_OVERFLOW"));
+    }
+
+    #[test]
+    fn rejects_normal_stop_reasons() {
+        // `length` (output cap) and `stop` must NOT be treated as overflow.
+        assert!(!is_context_overflow_reason("length"));
+        assert!(!is_context_overflow_reason("stop"));
+        assert!(!is_context_overflow_reason("tool_calls"));
+        assert!(!is_context_overflow_reason("content_filter"));
+    }
 }

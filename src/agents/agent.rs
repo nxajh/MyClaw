@@ -17,13 +17,14 @@ use futures_util::StreamExt;
 
 use crate::agents::error::AgentError;
 use crate::agents::loop_breaker::LoopBreak;
-use crate::agents::tokens::estimate_tokens;
+use crate::agents::tokens::{estimate_history_tokens, estimate_tokens};
+use crate::agents::context_engine::ContextEngine;
 use crate::agents::session::Session;
 use crate::agents::turn::{TurnContext, TurnResult};
 use crate::agents::turn_event::TurnEvent;
 use crate::agents::AgentRuntime;
 use crate::config::sub_agent::SubAgentConfig;
-use crate::providers::capability_chat::{ChatMessage, ChatRequest, StopReason, ToolSpec};
+use crate::providers::capability_chat::{ChatMessage, ChatProvider, ChatRequest, StopReason, ToolSpec};
 use crate::providers::{BoxStream, Capability, ContentPart, StreamEvent, ToolCall};
 
 /// "An agent" — just its config (name, system prompt fragment, three
@@ -74,11 +75,25 @@ impl Agent {
             .collect();
 
         // Resolve provider + model.
+        //
+        // - No override → the Chat fallback wrapper (fans out across the
+        //   configured chain on transient errors).
+        // - Override (`/model`) → the raw per-model provider, but wrapped in
+        //   `RetryChatProvider` so a 502/timeout/connection-drop is retried on
+        //   the SAME chosen model rather than failing the turn. We intentionally
+        //   do NOT fall back to a different model here — the user picked this one.
+        const OVERRIDE_RETRIES: usize = 3;
         let (provider, model_id) = match turn_ctx.model_id {
-            Some(m) => runtime
-                .providers
-                .get_chat_provider_by_model(m)
-                .ok_or_else(|| anyhow::anyhow!("model '{}' not found in registry", m))?,
+            Some(m) => {
+                let (p, id) = runtime
+                    .providers
+                    .get_chat_provider_by_model(m)
+                    .ok_or_else(|| anyhow::anyhow!("model '{}' not found in registry", m))?;
+                let retrying: Arc<dyn ChatProvider> = Arc::new(
+                    crate::providers::RetryChatProvider::new(p, id.clone(), OVERRIDE_RETRIES),
+                );
+                (retrying, id)
+            }
             None => runtime.providers.get_chat_provider(Capability::Chat)?,
         };
 
@@ -101,9 +116,10 @@ impl Agent {
         // tracking lives solely on `Session.token_tracker`; ContextEngine
         // only carries threshold/retain_units + summarizer state.
         let context = &runtime.context_engine;
-        // Seed Session.token_tracker from history when fresh — restart
-        // restoration is handled by SessionManager (it loads the
-        // persisted total directly into the tracker on session load).
+        // Seed Session.token_tracker from history when fresh (display/usage only).
+        // The compaction decision does NOT read the tracker — it uses a direct
+        // per-request estimate in `maybe_compact` — so a stale tracker restored on
+        // restart can no longer suppress compaction.
         if session.token_tracker.is_fresh() {
             session.token_tracker.seed_from_history(turn_ctx.system_prompt, &session.history);
         }
@@ -119,6 +135,8 @@ impl Agent {
         let permission_mode = turn_ctx.permission_mode;
         let mut empty_response_retries: usize = 0;
         const MAX_EMPTY_RETRIES: usize = 3;
+        let mut overflow_retries: usize = 0;
+        const MAX_OVERFLOW_RETRIES: usize = 3;
         // Current-turn images are persisted into history (add_user_with_media),
         // so the `messages` clone above already carries them on the last user
         // message. Vision models use those parts natively; non-vision models
@@ -160,6 +178,26 @@ impl Agent {
                 }
             }
 
+            // Pre-send compaction guard: compact BEFORE the request when the
+            // history we're about to send is over threshold. Driven by a direct
+            // history estimate (not the token tracker) so a stale/under-counted
+            // tracker can't let an over-window request through. This is the real
+            // fix for the "974 msgs sent at 31k tracked → context overflow" bug.
+            if let Some(compacted) = maybe_compact(
+                context,
+                session,
+                runtime,
+                turn_ctx.system_prompt,
+                &model_id,
+                &tool_specs,
+                model_supports_images,
+                false,
+            )
+            .await
+            {
+                messages = compacted;
+            }
+
             let thinking = turn_ctx.thinking.cloned();
             let req = ChatRequest {
                 model: &model_id,
@@ -176,11 +214,10 @@ impl Agent {
             let stream = provider.chat(req)?;
             let response = collect_stream(stream, &mut session.turn_stream).await?;
 
-            // Update Session.token_tracker from the API response. Target
-            // architecture: tokens are tracked solely on the Session (so
-            // they survive restarts via `last_total_tokens`); ContextEngine
-            // reads the count via `should_compact(total, window)` instead
-            // of keeping its own copy.
+            // Update Session.token_tracker from the API response. The tracker is
+            // the source of truth for *usage reporting* (display + persistence,
+            // surviving restarts); it is intentionally NOT the input to the
+            // compaction decision — `maybe_compact` sizes the request directly.
             if let Some(ref usage) = response.usage {
                 let input = usage.input_tokens.unwrap_or(0);
                 let output = usage.output_tokens.unwrap_or(0);
@@ -191,104 +228,55 @@ impl Agent {
                 }
             }
 
-            // Compaction trigger. Read context_window for the active model
-            // and ask ContextEngine if we should compact. The actual
-            // summarizer call is deferred — execute_compaction needs the
-            // tool_specs slice + the session's full state, which agent.rs
-            // already has. Failures are logged and the turn continues
-            // (AgentLoop has the same forgive-and-proceed policy).
-            if let Ok(cfg) = runtime.providers.get_chat_model_config(&model_id) {
-                if let Some(window) = cfg.context_window {
-                    let total = session.token_tracker.total_tokens();
-                    if context.should_compact(total, window) {
-                        tracing::info!(
-                            session = %session.id,
-                            total,
-                            window,
-                            "context threshold crossed, attempting compaction"
+            // Context-overflow backstop. The provider rejected the request as
+            // too large (empty body, mapped to `ContextOverflow` instead of a
+            // misleading `EndTurn`). This only happens if the pre-send guard's
+            // estimate undershot the real token count; force a compaction and
+            // retry rather than blindly re-sending the same over-window request.
+            if response.stop_reason == StopReason::ContextOverflow {
+                overflow_retries += 1;
+                let recovered = if overflow_retries <= MAX_OVERFLOW_RETRIES {
+                    maybe_compact(
+                        context,
+                        session,
+                        runtime,
+                        turn_ctx.system_prompt,
+                        &model_id,
+                        &tool_specs,
+                        model_supports_images,
+                        true, // force: bypass the threshold, we know it overflowed
+                    )
+                    .await
+                } else {
+                    None
+                };
+                match recovered {
+                    Some(compacted) => {
+                        messages = compacted;
+                        tracing::warn!(
+                            attempt = overflow_retries,
+                            "context overflow reported by provider; compacted and retrying"
                         );
-                        let sys_prompt_tokens = estimate_tokens(turn_ctx.system_prompt);
-                        let tool_spec_tokens: u64 = tool_specs
-                            .iter()
-                            .map(|s| {
-                                estimate_tokens(&s.name)
-                                    + s.description.as_deref().map_or(0, estimate_tokens)
-                                    + estimate_tokens(&s.input_schema.to_string())
-                                    + 8
-                            })
-                            .sum();
-                        if let Some(boundary) = context.compaction_boundary(
-                            &session.history,
-                            window,
-                            sys_prompt_tokens,
-                            tool_spec_tokens,
-                        ) {
-                            // Snapshot history for the summarizer (which reads
-                            // a slice). We pass the *current* session to the
-                            // memory tools inside the summarizer.
-                            let history_snap: Vec<ChatMessage> = session.history.to_vec();
-                            match context
-                                .execute_compaction(
-                                    &history_snap,
-                                    turn_ctx.system_prompt,
-                                    &tool_specs,
-                                    boundary,
-                                    &model_id,
-                                    session,
-                                )
-                                .await
-                            {
-                                Ok(result) => {
-                                    let version = session.compact_version + 1;
-                                    let summary_prefix = "[CONTEXT COMPACTION — REFERENCE ONLY] ";
-                                    let summary_msg = ChatMessage::user_text(format!(
-                                        "{}{}",
-                                        summary_prefix, result.summary
-                                    ));
-                                    let last_compacted_id = session
-                                        .message_ids
-                                        .get(boundary.saturating_sub(1))
-                                        .copied()
-                                        .unwrap_or(0);
-                                    session.apply_compaction(
-                                        result.compact_start,
-                                        result.compact_end,
-                                        summary_msg,
-                                        version,
-                                        last_compacted_id,
-                                        result.summary_tokens,
-                                    );
-                                    session.token_tracker.adjust_for_compaction(
-                                        result.removed_tokens,
-                                        result.summary_tokens,
-                                    );
-                                    // Rebuild the in-flight `messages` slice
-                                    // so the next LLM call sees the compacted
-                                    // history.
-                                    messages = std::iter::once(ChatMessage::system_text(
-                                        turn_ctx.system_prompt,
-                                    ))
-                                    .chain(session.history.iter().cloned())
-                                    .collect();
-                                    crate::agents::session::sanitize_history(&mut messages);
-                                    adapt_media_for_model(
-                                        &mut messages,
-                                        runtime,
-                                        &session.id,
-                                        model_supports_images,
-                                    )
-                                    .await;
-                                    tracing::info!(
-                                        summary_tokens = result.summary_tokens,
-                                        removed_tokens = result.removed_tokens,
-                                        "compaction completed"
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::warn!(err = %e, "compaction failed, continuing");
-                                }
-                            }
-                        }
+                        continue;
+                    }
+                    None => {
+                        // Can't reduce further (history already minimal) or out of
+                        // attempts — surface a clear message instead of silently
+                        // giving up like the empty-response path would.
+                        tracing::warn!(
+                            attempt = overflow_retries,
+                            "context overflow and compaction could not recover; giving up"
+                        );
+                        let msg = "⚠️ 当前对话已超出该模型的上下文上限，压缩后仍无法容纳。\
+                            请使用 /new 开启新会话，或精简后重试。"
+                            .to_string();
+                        session.add_assistant(msg.clone());
+                        persist_last(session);
+                        return Ok(TurnResult {
+                            text: msg,
+                            stop_reason: StopReason::ContextOverflow,
+                            pending_retry: None,
+                        });
                     }
                 }
             }
@@ -634,6 +622,103 @@ fn persist_last(session: &mut Session) {
     if let Some(id) = hook.persist_message(&session.id, &msg) {
         if let Some(slot) = session.message_ids.last_mut() {
             *slot = id;
+        }
+    }
+}
+
+/// Compact `session.history` when it's over (or `force`d past) the model's
+/// context threshold, returning the rebuilt `messages` prefix on success.
+///
+/// Called as a pre-send guard each loop iteration and as the context-overflow
+/// backstop. The threshold decision uses a direct history estimate
+/// (`estimate_history_tokens`) rather than the token tracker, so a stale or
+/// under-counted tracker can't let an over-window request slip through. Returns
+/// `None` when no compaction was needed (`!force`) or none was possible (no
+/// boundary / summarizer error).
+#[allow(clippy::too_many_arguments)]
+async fn maybe_compact(
+    context: &ContextEngine,
+    session: &mut Session,
+    runtime: &AgentRuntime,
+    system_prompt: &str,
+    model_id: &str,
+    tool_specs: &[ToolSpec],
+    model_supports_images: bool,
+    force: bool,
+) -> Option<Vec<ChatMessage>> {
+    let cfg = runtime.providers.get_chat_model_config(model_id).ok()?;
+    let window = cfg.context_window?;
+    let estimate = estimate_history_tokens(system_prompt, &session.history);
+    if !force && !context.should_compact(estimate, window) {
+        return None;
+    }
+
+    let sys_prompt_tokens = estimate_tokens(system_prompt);
+    let tool_spec_tokens: u64 = tool_specs
+        .iter()
+        .map(|s| {
+            estimate_tokens(&s.name)
+                + s.description.as_deref().map_or(0, estimate_tokens)
+                + estimate_tokens(&s.input_schema.to_string())
+                + 8
+        })
+        .sum();
+    let boundary =
+        context.compaction_boundary(&session.history, window, sys_prompt_tokens, tool_spec_tokens)?;
+
+    // Snapshot history for the summarizer (which reads a slice); the live
+    // session is passed through for the memory tools inside the summarizer.
+    let history_snap: Vec<ChatMessage> = session.history.to_vec();
+    match context
+        .execute_compaction(
+            &history_snap,
+            system_prompt,
+            tool_specs,
+            boundary,
+            model_id,
+            session,
+        )
+        .await
+    {
+        Ok(result) => {
+            let version = session.compact_version + 1;
+            let summary_prefix = "[CONTEXT COMPACTION — REFERENCE ONLY] ";
+            let summary_msg =
+                ChatMessage::user_text(format!("{}{}", summary_prefix, result.summary));
+            let last_compacted_id = session
+                .message_ids
+                .get(boundary.saturating_sub(1))
+                .copied()
+                .unwrap_or(0);
+            session.apply_compaction(
+                result.compact_start,
+                result.compact_end,
+                summary_msg,
+                version,
+                last_compacted_id,
+                result.summary_tokens,
+            );
+            session
+                .token_tracker
+                .adjust_for_compaction(result.removed_tokens, result.summary_tokens);
+            let mut messages: Vec<ChatMessage> =
+                std::iter::once(ChatMessage::system_text(system_prompt))
+                    .chain(session.history.iter().cloned())
+                    .collect();
+            crate::agents::session::sanitize_history(&mut messages);
+            adapt_media_for_model(&mut messages, runtime, &session.id, model_supports_images).await;
+            tracing::info!(
+                summary_tokens = result.summary_tokens,
+                removed_tokens = result.removed_tokens,
+                estimate,
+                window,
+                "compaction completed"
+            );
+            Some(messages)
+        }
+        Err(e) => {
+            tracing::warn!(err = %e, "compaction failed, continuing");
+            None
         }
     }
 }
