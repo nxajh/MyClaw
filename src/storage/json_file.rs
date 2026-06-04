@@ -243,18 +243,12 @@ impl JsonFileBackend {
 
         // Write surviving messages to the new active segment. Re-externalize so
         // large images live as blobs + `ImageRef` again (the `surviving` slice
-        // arrives hydrated from the read path). Track both the live blob hashes
-        // (for the `*.bin` sweep) and the live description keys (for the `*.txt`
-        // sweep) so we can drop orphans afterwards. Description keys are computed
-        // from the *hydrated* `msg` (before externalization, while the b64 is
-        // present); externalization is fingerprint-invariant so the key is the
-        // same either way.
+        // arrives hydrated from the read path). Track the live blob hashes for
+        // the `*.bin` sweep so we can drop orphans afterwards.
         let mut live_hashes: HashSet<String> = HashSet::new();
-        let mut live_desc: HashSet<String> = HashSet::new();
         if !surviving.is_empty() {
             let mut f = fs::File::create(&history_path)?;
             for (_, msg) in surviving {
-                collect_description_keys(msg, &mut live_desc);
                 let msg = self.externalize(session_id, msg)?;
                 collect_blob_hashes(&msg, &mut live_hashes);
                 let json = serde_json::to_string(&msg).map_err(std::io::Error::other)?;
@@ -264,13 +258,10 @@ impl JsonFileBackend {
             f.sync_all()?;
         }
 
-        // Archived segments are externalized too; keep their blobs + descriptions
-        // alive. One scan fills both live sets.
-        self.extend_archived_live_sets(session_id, &mut live_hashes, &mut live_desc);
-        // Mark-and-sweep: drop any blob / description not referenced by a live
-        // message.
+        // Archived segments are externalized too; keep their blobs alive.
+        self.extend_archived_live_sets(session_id, &mut live_hashes);
+        // Mark-and-sweep: drop any blob not referenced by a live message.
         self.sweep_blobs(session_id, &live_hashes);
-        self.sweep_descriptions(session_id, &live_desc);
 
         // Line numbers restart at 1; update the counter to match the new file.
         meta.message_count = surviving.len();
@@ -439,35 +430,11 @@ impl JsonFileBackend {
         }
     }
 
-    /// Mark-and-sweep description GC: delete any `descriptions/*.txt` whose key
-    /// is not in `live` (the content fingerprints of all live media). Mirrors
-    /// [`sweep_blobs`]; `*.tmp` write-through scratch files are ignored (they do
-    /// not end in `.txt`). The descriptions dir is written by
-    /// `PersistentDescriptionCache`; this is the in-session reclamation point for
-    /// images dropped by compaction (full reclamation happens on session delete).
-    fn sweep_descriptions(&self, session_id: &str, live: &HashSet<String>) {
-        let dir = self.session_dir(session_id).join(crate::storage::SESSION_DESCRIPTIONS_DIR);
-        let Ok(entries) = fs::read_dir(&dir) else { return; };
-        for entry in entries.filter_map(|e| e.ok()) {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let Some(key) = name.strip_suffix(".txt") else { continue; };
-            if !live.contains(key) {
-                let _ = fs::remove_file(entry.path());
-            }
-        }
-    }
-
-    /// Scan the archive segments once, extending both live sets: `blob_hashes`
-    /// with every `ImageRef.hash` (for the `*.bin` sweep) and `desc_keys` with
-    /// every media part's content fingerprint (for the `*.txt` sweep). Archived
-    /// segments are externalized the same way as the active segment, so their
-    /// referenced blobs and descriptions must be kept alive too.
-    fn extend_archived_live_sets(
-        &self,
-        session_id: &str,
-        blob_hashes: &mut HashSet<String>,
-        desc_keys: &mut HashSet<String>,
-    ) {
+    /// Scan the archive segments once, extending `blob_hashes` with every
+    /// `ImageRef.hash` (for the `*.bin` sweep). Archived segments are
+    /// externalized the same way as the active segment, so their referenced
+    /// blobs must be kept alive too.
+    fn extend_archived_live_sets(&self, session_id: &str, blob_hashes: &mut HashSet<String>) {
         let archive_dir = self.archive_dir(session_id);
         let Ok(entries) = fs::read_dir(&archive_dir) else { return; };
         for entry in entries.filter_map(|e| e.ok()) {
@@ -477,7 +444,6 @@ impl JsonFileBackend {
                 if line.is_empty() { continue; }
                 let Ok(msg) = serde_json::from_str::<ChatMessage>(line) else { continue; };
                 collect_blob_hashes(&msg, blob_hashes);
-                collect_description_keys(&msg, desc_keys);
             }
         }
     }
@@ -490,21 +456,6 @@ fn collect_blob_hashes(msg: &ChatMessage, set: &mut HashSet<String>) {
     for part in &msg.parts {
         if let ContentPart::ImageRef { hash, .. } | ContentPart::AudioRef { hash, .. } = part {
             set.insert(hash.clone());
-        }
-    }
-}
-
-/// Append the content fingerprint of every media part in `msg` into `set` — the
-/// live set for the description (`*.txt`) sweep. Unlike [`collect_blob_hashes`]
-/// this covers *all* live images (inline `ImageB64`, externalized `ImageRef`,
-/// and `ImageUrl`), since a small inline image still has a cached description
-/// that must not be swept. `content_fingerprint` yields the same key for an
-/// image whether it is inline or externalized, so this is a superset of the
-/// blob-hash set.
-fn collect_description_keys(msg: &ChatMessage, set: &mut HashSet<String>) {
-    for part in &msg.parts {
-        if let Some(key) = part.content_fingerprint() {
-            set.insert(key);
         }
     }
 }
@@ -692,23 +643,17 @@ impl SessionBackend for JsonFileBackend {
         };
         fs::write(&path, new_content)?;
 
-        // Mark-and-sweep blob + description GC over the surviving (kept) lines +
-        // archives. The kept lines are the on-disk (externalized) form, so
-        // `content_fingerprint` reads `ImageRef.hash` directly and decodes any
-        // inline `ImageB64` — yielding the same description keys either way.
+        // Mark-and-sweep blob GC over the surviving (kept) lines + archives.
         let mut live_hashes: HashSet<String> = HashSet::new();
-        let mut live_desc: HashSet<String> = HashSet::new();
         for line in &kept {
             let line = line.trim();
             if line.is_empty() { continue; }
             if let Ok(msg) = serde_json::from_str::<ChatMessage>(line) {
                 collect_blob_hashes(&msg, &mut live_hashes);
-                collect_description_keys(&msg, &mut live_desc);
             }
         }
-        self.extend_archived_live_sets(session_id, &mut live_hashes, &mut live_desc);
+        self.extend_archived_live_sets(session_id, &mut live_hashes);
         self.sweep_blobs(session_id, &live_hashes);
-        self.sweep_descriptions(session_id, &live_desc);
 
         if let Some(mut meta) = self.read_meta(session_id) {
             meta.message_count = keep_count;
@@ -999,37 +944,6 @@ mod tests {
         // Keep only the first message; the second image's blob is orphaned.
         backend.truncate_messages(&sid, 1).unwrap();
         assert_eq!(count_blobs(&backend), 1, "orphan blob should be swept");
-    }
-
-    #[test]
-    fn gc_sweeps_orphan_descriptions_on_truncate() {
-        let (_dir, backend, sid) = backend_with_session();
-        let raw_a = vec![2u8; 20 * 1024];
-        let raw_b = vec![3u8; 20 * 1024];
-        backend.append_message(&sid, &img_msg(b64_of(&raw_a))).unwrap();
-        backend.append_message(&sid, &img_msg(b64_of(&raw_b))).unwrap();
-
-        // Simulate PersistentDescriptionCache having persisted a description for
-        // each image, keyed by content fingerprint (== decoded-bytes sha256 ==
-        // blob hash, so it matches the on-disk ImageRef the sweep sees).
-        let desc_dir = backend.session_dir(&sid).join(crate::storage::SESSION_DESCRIPTIONS_DIR);
-        fs::create_dir_all(&desc_dir).unwrap();
-        let key_a = sha256_hex(&raw_a);
-        let key_b = sha256_hex(&raw_b);
-        fs::write(desc_dir.join(format!("{key_a}.txt")), "desc a").unwrap();
-        fs::write(desc_dir.join(format!("{key_b}.txt")), "desc b").unwrap();
-
-        // Keep only the first message; image B's description is now orphaned.
-        backend.truncate_messages(&sid, 1).unwrap();
-
-        assert!(
-            desc_dir.join(format!("{key_a}.txt")).exists(),
-            "description of a live image must be kept"
-        );
-        assert!(
-            !desc_dir.join(format!("{key_b}.txt")).exists(),
-            "description of a dropped image must be swept"
-        );
     }
 
     #[test]
