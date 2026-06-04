@@ -1176,8 +1176,8 @@ impl TelegramChannel {
                 }
 
                 // Handle voice / audio messages: download as a generic audio
-                // attachment. The modality adapter transcribes it to text via an
-                // auxiliary speech-to-text model (see `AUDIO_SPEC`).
+                // attachment. A text-only model reaches it on demand via the
+                // `hear_audio` tool (the provider lowers it to a `[语音 #N]` marker).
                 if let Some(voice) = &msg.voice {
                     match self.download_file_bytes(&voice.file_id).await {
                         Ok(data) => attachments.push(crate::channels::message::MediaAttachment {

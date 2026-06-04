@@ -318,8 +318,20 @@ impl RoutingConfig {
 
 impl Registry {
     pub fn register_chat(&mut self, provider: Box<dyn ChatProvider>, model_id: String, model_config: crate::providers::capability::ChatModelConfig) {
+        use crate::providers::capability::Modality;
+        // Wrap every per-model provider so it lowers media this model can't take
+        // natively (image/audio → `[图片 #N]`/`[语音 #N]` markers) right before the
+        // wire. Done here, at the single per-model construction point, so the
+        // fallback chain, `/model` override, and aux tool-calls all inherit the
+        // same per-model lowering and the agent only ever sends the canonical form.
+        let caps = crate::providers::MediaCaps {
+            image: model_config.supports_input(Modality::Image),
+            audio: model_config.supports_input(Modality::Audio),
+        };
+        let wrapped: Arc<dyn ChatProvider> =
+            Arc::new(crate::providers::MediaLoweringProvider::new(provider.into(), caps));
         self.chat_model_configs.insert(model_id.clone(), model_config);
-        self.chat_providers.insert(model_id, provider.into());
+        self.chat_providers.insert(model_id, wrapped);
     }
 
     pub fn register_embedding(&mut self, provider: Box<dyn EmbeddingProvider>, model_id: String) {

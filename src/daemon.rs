@@ -948,18 +948,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             prompt: prompt_config,
         };
 
-        // Persist auxiliary-model image descriptions per-session at
-        // `workspace/sessions/{id}/descriptions/` (a sibling of that session's
-        // `blobs/`). Survives restarts so non-vision models recover
-        // historical-image descriptions without re-invoking the auxiliary model,
-        // and is reclaimed together with the session when it is deleted.
-        let description_cache = Arc::new(
-            crate::agents::modality_adapter::PersistentDescriptionCache::open(
-                config.workspace_dir.join("sessions"),
-                512,
-            ),
-        );
-
         crate::agents::AgentRuntime::new(
             Arc::clone(&registry_arc),
             Arc::clone(&tools_arc),
@@ -972,7 +960,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         .with_defaults(defaults)
         .with_mcp_manager(Arc::clone(&mcp_manager_arc))
         .with_search_cooldown(Arc::clone(&search_cooldown))
-        .with_description_cache(description_cache)
     };
 
     // DelegationCoordinator was constructed before the runtime existed

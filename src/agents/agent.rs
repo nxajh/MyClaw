@@ -59,11 +59,11 @@ impl Agent {
         runtime: &AgentRuntime,
     ) -> Result<TurnResult> {
         // Resolve filtered tool view from runtime + per-agent config.
-        let allowed_tools = self.allowed_tools(runtime);
+        let mut allowed_tools = self.allowed_tools(runtime);
         // Convert capability_tool::ToolSpec → capability_chat::ToolSpec
         // (the LLM request type). Same fields, different module homes —
         // a unification candidate for a separate cleanup.
-        let tool_specs: Vec<ToolSpec> = allowed_tools
+        let mut tool_specs: Vec<ToolSpec> = allowed_tools
             .iter()
             .map(|t| {
                 let s = t.spec();
@@ -138,19 +138,44 @@ impl Agent {
         const MAX_EMPTY_RETRIES: usize = 3;
         let mut overflow_retries: usize = 0;
         const MAX_OVERFLOW_RETRIES: usize = 3;
-        // Current-turn images are persisted into history (add_user_with_media),
-        // so the `messages` clone above already carries them on the last user
-        // message. Vision models use those parts natively; non-vision models
-        // get media normalized to text by `adapt_media_for_model` (historical
-        // images → cached description/placeholder, current turn → auxiliary
-        // translation). Adaptation runs on the cloned `messages` only and never
-        // mutates persistent history.
-        let model_supports_images = runtime
-            .providers
-            .get_chat_model_config(&model_id)
-            .map(|cfg| cfg.supports_image_input())
-            .unwrap_or(false);
-        adapt_media_for_model(&mut messages, runtime, &session.id, model_supports_images).await;
+        // Media (images, audio) is lowered per concrete model inside the provider
+        // layer (each chat provider is wrapped in `MediaLoweringProvider`): a
+        // vision model gets the real image, a text-only model gets a `[图片 #N]`
+        // marker (and likewise `[语音 #N]` for audio). The
+        // agent sends the canonical format — real images and audio — and never
+        // pre-renders them, so whichever model the fallback/override actually
+        // serves with sees the right thing. It only owns the retrieval tools
+        // (advertise + execute in the loop, since retrieval is a multi-round,
+        // model-calling concern): `view_image` for `[图片 #N]`, `hear_audio` for
+        // `[语音 #N]`.
+        //
+        // Advertise each tool when its aux model exists in the chain AND this turn
+        // carries that media or history already references the tool (the latter
+        // keeps it present across a /model switch so prior calls don't become
+        // orphan tool calls the provider would reject).
+        use crate::providers::capability::Modality;
+        advertise_media_tool(
+            &mut tool_specs,
+            &mut allowed_tools,
+            runtime.providers.as_ref(),
+            Modality::Image,
+            history_has_images(&session.history)
+                || history_has_tool_calls(&session.history, "view_image"),
+            || Arc::new(crate::tools::ViewImageTool::new(Arc::clone(&runtime.providers))),
+        );
+        advertise_media_tool(
+            &mut tool_specs,
+            &mut allowed_tools,
+            runtime.providers.as_ref(),
+            Modality::Audio,
+            history_has_audio(&session.history)
+                || history_has_tool_calls(&session.history, "hear_audio"),
+            || Arc::new(crate::tools::HearAudioTool::new(Arc::clone(&runtime.providers))),
+        );
+        // If a media tool isn't declared this turn but history references it, fold
+        // those calls to text so no orphan tool call reaches the provider.
+        fold_absent_media_tool(&mut messages, &tool_specs, "view_image", "图片查看结果");
+        fold_absent_media_tool(&mut messages, &tool_specs, "hear_audio", "语音内容");
 
         loop {
             // Shutdown checkpoint between LLM calls (mirrors AgentLoop chat_loop).
@@ -193,7 +218,6 @@ impl Agent {
                 turn_ctx.system_prompt,
                 &model_id,
                 &tool_specs,
-                model_supports_images,
                 false,
             )
             .await
@@ -246,7 +270,6 @@ impl Agent {
                         turn_ctx.system_prompt,
                         &model_id,
                         &tool_specs,
-                        model_supports_images,
                         true, // force: bypass the threshold, we know it overflowed
                     )
                     .await
@@ -561,51 +584,113 @@ impl Agent {
     }
 }
 
-/// Normalize non-text media in the cloned `messages` when the primary model
-/// lacks image input. No-op for vision models — the `messages` clone already
-/// carries native `ImageUrl/ImageB64` parts from history. For non-vision
-/// models: historical images (every message except the current turn's last
-/// user message) reuse a cached description or degrade to a placeholder via
-/// `adapt_history_media`; the current turn's images are translated by an
-/// auxiliary vision model via `adapt_last_turn_media`. Operates on the clone
-/// only — persistent history is never mutated.
-async fn adapt_media_for_model(
-    messages: &mut [ChatMessage],
-    runtime: &AgentRuntime,
-    session_id: &str,
-    model_supports_images: bool,
-) {
-    use crate::agents::modality_adapter::{AUDIO_SPEC, IMAGE_SPEC};
-    // Audio is always adapted: chat protocols can't carry audio natively, so even
-    // an "audio-capable" primary model receives a text transcription. Images are
-    // adapted only when the model can't take them natively.
-    adapt_modality(messages, runtime, session_id, &AUDIO_SPEC).await;
-    if !model_supports_images {
-        adapt_modality(messages, runtime, session_id, &IMAGE_SPEC).await;
-    }
+/// True if any message in `history` carries an image part.
+fn history_has_images(history: &[ChatMessage]) -> bool {
+    history.iter().any(|m| {
+        m.parts
+            .iter()
+            .any(|p| matches!(p, ContentPart::ImageB64 { .. } | ContentPart::ImageUrl { .. }))
+    })
 }
 
-/// Adapt one modality across the cloned `messages`: historical media reuse a
-/// cached description (or degrade to the placeholder); the current turn's media
-/// is translated by the modality's auxiliary model. No-op when nothing matches.
-async fn adapt_modality(
-    messages: &mut [ChatMessage],
-    runtime: &AgentRuntime,
-    session_id: &str,
-    spec: &crate::agents::modality_adapter::ModalitySpec,
+/// True if any message in `history` carries an audio part.
+fn history_has_audio(history: &[ChatMessage]) -> bool {
+    history
+        .iter()
+        .any(|m| m.parts.iter().any(|p| matches!(p, ContentPart::AudioB64 { .. })))
+}
+
+/// True if `history` contains a prior tool call named `name`. Used to keep a
+/// media-retrieval tool present after a model switch so those calls don't become
+/// orphan tool calls (declared in history but absent from the request's tools).
+fn history_has_tool_calls(history: &[ChatMessage], name: &str) -> bool {
+    history.iter().any(|m| {
+        m.role == "assistant"
+            && m.tool_calls
+                .as_ref()
+                .is_some_and(|tcs| tcs.iter().any(|tc| tc.name == name))
+    })
+}
+
+/// Advertise (and make dispatchable) a media-retrieval tool when `want` (this
+/// turn carries that media or history references the tool) AND its aux model
+/// exists in the chain. The tool is only constructed when it will be offered.
+fn advertise_media_tool(
+    tool_specs: &mut Vec<ToolSpec>,
+    allowed_tools: &mut Vec<Arc<dyn crate::providers::Tool>>,
+    providers: &dyn crate::providers::ProviderRegistry,
+    modality: crate::providers::capability::Modality,
+    want: bool,
+    make: impl FnOnce() -> Arc<dyn crate::providers::Tool>,
 ) {
-    use crate::agents::modality_adapter;
-    let cache = &*runtime.description_cache;
-    let last_user_idx = messages.iter().rposition(|m| m.role == "user");
-    modality_adapter::adapt_history_media(messages, spec, cache, session_id, last_user_idx);
-    if let Some(idx) = last_user_idx {
-        let aux = runtime
-            .providers
-            .find_chat_model_with_modality(spec.modality.clone());
-        let aux_ref = aux.as_ref().map(|(p, id)| (p, id.as_str()));
-        modality_adapter::adapt_last_turn_media(&mut messages[idx], spec, aux_ref, cache, session_id)
-            .await;
+    if !want || providers.find_chat_model_with_modality(modality).is_none() {
+        return;
     }
+    let tool = make();
+    tool_specs.push(ToolSpec {
+        name: tool.name().to_string(),
+        description: Some(tool.description().to_string()),
+        input_schema: tool.parameters_schema(),
+    });
+    allowed_tools.push(tool);
+}
+
+/// Backstop for a rare edge (e.g. config hot-reload drops the aux model
+/// mid-session): if the request won't declare `tool_name` but history still
+/// references it, fold each such call + its result into inline `[label]: …` text
+/// on the calling assistant message and drop the tool-result message, so no
+/// orphan tool call survives to be rejected by the provider. No-op when the tool
+/// is declared. Operates on the cloned `messages` only.
+fn fold_absent_media_tool(
+    messages: &mut Vec<ChatMessage>,
+    tool_specs: &[ToolSpec],
+    tool_name: &str,
+    label: &str,
+) {
+    if tool_specs.iter().any(|t| t.name == tool_name) {
+        return;
+    }
+    let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for m in messages.iter() {
+        if m.role == "assistant" {
+            if let Some(tcs) = &m.tool_calls {
+                for tc in tcs.iter().filter(|tc| tc.name == tool_name) {
+                    ids.insert(tc.id.clone());
+                }
+            }
+        }
+    }
+    if ids.is_empty() {
+        return;
+    }
+    let mut results: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for m in messages.iter() {
+        if m.role == "tool" {
+            if let Some(id) = &m.tool_call_id {
+                if ids.contains(id) {
+                    results.insert(id.clone(), m.text_content());
+                }
+            }
+        }
+    }
+    for m in messages.iter_mut() {
+        if m.role != "assistant" {
+            continue;
+        }
+        let Some(tcs) = m.tool_calls.take() else { continue };
+        let (mine, rest): (Vec<_>, Vec<_>) = tcs.into_iter().partition(|tc| tc.name == tool_name);
+        m.tool_calls = if rest.is_empty() { None } else { Some(rest) };
+        for tc in mine {
+            if let Some(out) = results.get(&tc.id) {
+                if !out.is_empty() {
+                    m.parts.push(ContentPart::Text { text: format!("[{label}]: {out}") });
+                }
+            }
+        }
+    }
+    messages.retain(|m| {
+        !(m.role == "tool" && m.tool_call_id.as_ref().is_some_and(|id| ids.contains(id)))
+    });
 }
 
 /// Persist `session.history.last()` via `session.persist` and write the
@@ -646,7 +731,6 @@ async fn maybe_compact(
     system_prompt: &str,
     model_id: &str,
     tool_specs: &[ToolSpec],
-    model_supports_images: bool,
     force: bool,
 ) -> Option<Vec<ChatMessage>> {
     let cfg = runtime.providers.get_chat_model_config(model_id).ok()?;
@@ -734,7 +818,8 @@ async fn maybe_compact(
                     .chain(session.history.iter().cloned())
                     .collect();
             crate::agents::session::sanitize_history(&mut messages);
-            adapt_media_for_model(&mut messages, runtime, &session.id, model_supports_images).await;
+            fold_absent_media_tool(&mut messages, tool_specs, "view_image", "图片查看结果");
+            fold_absent_media_tool(&mut messages, tool_specs, "hear_audio", "语音内容");
             tracing::info!(
                 summary_tokens = result.summary_tokens,
                 removed_tokens = result.removed_tokens,
@@ -775,7 +860,6 @@ async fn compact_until_fit(
     system_prompt: &str,
     model_id: &str,
     tool_specs: &[ToolSpec],
-    model_supports_images: bool,
     force: bool,
 ) -> Option<Vec<ChatMessage>> {
     const MAX_PASSES: usize = 10;
@@ -789,7 +873,6 @@ async fn compact_until_fit(
             system_prompt,
             model_id,
             tool_specs,
-            model_supports_images,
             force_pass,
         )
         .await
@@ -992,6 +1075,108 @@ mod tests {
     use crate::agents::session::Session;
     use crate::config::sub_agent::SubAgentConfig;
 
+    fn img_msg(b64: &str) -> ChatMessage {
+        let mut m = ChatMessage::user_text("");
+        m.parts = vec![
+            ContentPart::Text { text: "看图".into() },
+            ContentPart::ImageB64 {
+                b64_json: b64.into(),
+                media_type: None,
+                detail: crate::providers::ImageDetail::Auto,
+            },
+        ];
+        m
+    }
+
+    #[test]
+    fn history_has_images_detects_image_parts() {
+        assert!(!history_has_images(&[ChatMessage::user_text("hi")]));
+        assert!(history_has_images(&[img_msg("AAA")]));
+    }
+
+    #[test]
+    fn fold_view_image_inlines_results_when_tool_absent() {
+        let mut asst = ChatMessage::assistant_text("让我看看");
+        asst.tool_calls = Some(vec![ToolCall {
+            id: "c1".into(),
+            name: "view_image".into(),
+            arguments: "{}".into(),
+        }]);
+        let mut tool_res = ChatMessage::text("tool", "一只红色的猫");
+        tool_res.tool_call_id = Some("c1".into());
+        let mut messages = vec![ChatMessage::user_text("这是什么"), asst, tool_res];
+
+        // No view_image in tool_specs → fold.
+        fold_absent_media_tool(&mut messages, &[], "view_image", "图片查看结果");
+
+        assert!(
+            !messages.iter().any(|m| m.role == "tool"),
+            "tool-result message must be dropped"
+        );
+        assert!(
+            messages.iter().all(|m| m
+                .tool_calls
+                .as_ref()
+                .map(|tcs| tcs.iter().all(|tc| tc.name != "view_image"))
+                .unwrap_or(true)),
+            "no view_image tool call may survive"
+        );
+        let folded = messages
+            .iter()
+            .flat_map(|m| &m.parts)
+            .filter_map(|p| match p {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .any(|t| t.contains("一只红色的猫"));
+        assert!(folded, "result text must be inlined onto the assistant message");
+    }
+
+    #[test]
+    fn fold_view_image_is_noop_when_tool_present() {
+        let mut asst = ChatMessage::assistant_text("");
+        asst.tool_calls = Some(vec![ToolCall {
+            id: "c1".into(),
+            name: "view_image".into(),
+            arguments: "{}".into(),
+        }]);
+        let mut messages = vec![asst];
+        let specs = vec![ToolSpec {
+            name: "view_image".into(),
+            description: None,
+            input_schema: serde_json::json!({}),
+        }];
+        fold_absent_media_tool(&mut messages, &specs, "view_image", "图片查看结果");
+        // Tool declared → calls preserved untouched.
+        assert!(messages[0]
+            .tool_calls
+            .as_ref()
+            .is_some_and(|tcs| tcs.iter().any(|tc| tc.name == "view_image")));
+    }
+
+    #[test]
+    fn history_has_tool_calls_detects_prior_tool_use() {
+        let mut asst = ChatMessage::assistant_text("");
+        asst.tool_calls = Some(vec![ToolCall {
+            id: "c1".into(),
+            name: "view_image".into(),
+            arguments: "{}".into(),
+        }]);
+        assert!(history_has_tool_calls(&[asst], "view_image"));
+
+        let mut other = ChatMessage::assistant_text("");
+        other.tool_calls = Some(vec![ToolCall {
+            id: "c2".into(),
+            name: "calculator".into(),
+            arguments: "{}".into(),
+        }]);
+        assert!(!history_has_tool_calls(&[other], "view_image"));
+        assert!(!history_has_tool_calls(&[ChatMessage::user_text("hi")], "view_image"));
+    }
+
+    // (Image placeholdering moved to `providers::media::lower_media_for`, which
+    // owns its own unit tests; the agent no longer renders images.)
+
     fn empty_config() -> SubAgentConfig {
         SubAgentConfig {
             name: "test".into(),
@@ -1118,224 +1303,4 @@ mod tests {
         );
     }
 
-    // ── Stage 4: end-to-end media adaptation (adapt_media_for_model) ──────────
-    // A configurable mock ProviderRegistry + ChatProvider drive the real
-    // `find_chat_model_with_modality` default impl, so these tests exercise the
-    // actual candidate-selection and adaptation wiring, not a re-implementation.
-
-    use crate::providers::{
-        Capability as Cap, ChatModelConfig, ChatProvider, EmbeddingProvider,
-        ImageGenerationProvider, ProviderRegistry, ProviderSummary, SearchProvider, SttProvider,
-        TtsProvider, VideoGenerationProvider,
-    };
-    use crate::providers::capability::Modality;
-    use crate::providers::ImageDetail;
-    use std::collections::HashMap;
-
-    /// Streams back a single fixed Delta — stands in for an auxiliary vision
-    /// model translating an image to a text description.
-    struct MockChatProvider {
-        reply: String,
-    }
-    impl ChatProvider for MockChatProvider {
-        fn chat(&self, _req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
-            Ok(events_to_stream(vec![
-                StreamEvent::Delta { text: self.reply.clone() },
-                StreamEvent::Done { reason: StopReason::EndTurn },
-            ]))
-        }
-    }
-
-    /// Registry whose chat-model configs, routing chain, and per-model providers
-    /// are all explicitly supplied. Everything else bails like NullRegistry.
-    struct MockRegistry {
-        configs: HashMap<String, ChatModelConfig>,
-        routing: Vec<String>,
-        providers: HashMap<String, Arc<dyn ChatProvider>>,
-    }
-    #[rustfmt::skip]
-    impl ProviderRegistry for MockRegistry {
-        fn get_chat_model_config(&self, m: &str) -> anyhow::Result<&ChatModelConfig> {
-            self.configs.get(m).ok_or_else(|| anyhow::anyhow!("no config for {m}"))
-        }
-        fn get_chat_routing_models(&self) -> Vec<String> { self.routing.clone() }
-        fn get_chat_provider_by_model(&self, m: &str) -> Option<(Arc<dyn ChatProvider>, String)> {
-            self.providers.get(m).map(|p| (Arc::clone(p), m.to_string()))
-        }
-        fn get_chat_provider(&self, _c: Cap) -> anyhow::Result<(Arc<dyn ChatProvider>, String)> { anyhow::bail!("stub") }
-        fn get_chat_provider_with_hint(&self, _c: Cap, _h: Option<&str>) -> anyhow::Result<(Arc<dyn ChatProvider>, String)> { anyhow::bail!("stub") }
-        fn get_chat_fallback_chain(&self, _c: Cap) -> anyhow::Result<Vec<(Arc<dyn ChatProvider>, String)>> { anyhow::bail!("stub") }
-        fn get_embedding_provider(&self) -> anyhow::Result<(Arc<dyn EmbeddingProvider>, String)> { anyhow::bail!("stub") }
-        fn get_image_provider(&self) -> anyhow::Result<(Arc<dyn ImageGenerationProvider>, String)> { anyhow::bail!("stub") }
-        fn get_tts_provider(&self) -> anyhow::Result<(Arc<dyn TtsProvider>, String)> { anyhow::bail!("stub") }
-        fn get_video_provider(&self) -> anyhow::Result<(Arc<dyn VideoGenerationProvider>, String)> { anyhow::bail!("stub") }
-        fn get_search_provider(&self) -> anyhow::Result<(Arc<dyn SearchProvider>, String)> { anyhow::bail!("stub") }
-        fn get_search_fallback_chain(&self) -> anyhow::Result<Vec<(Arc<dyn SearchProvider>, String, String)>> { anyhow::bail!("stub") }
-        fn get_stt_provider(&self) -> anyhow::Result<(Arc<dyn SttProvider>, String)> { anyhow::bail!("stub") }
-        fn get_all_provider_summaries(&self) -> Vec<ProviderSummary> { Vec::new() }
-    }
-
-    fn vision_cfg() -> ChatModelConfig {
-        ChatModelConfig {
-            input: vec![Modality::Text, Modality::Image],
-            output: vec![Modality::Text],
-            context_window: None,
-            max_output_tokens: None,
-            pricing: None,
-            reasoning: false,
-        }
-    }
-    fn text_cfg() -> ChatModelConfig {
-        ChatModelConfig {
-            input: vec![Modality::Text],
-            output: vec![Modality::Text],
-            context_window: None,
-            max_output_tokens: None,
-            pricing: None,
-            reasoning: false,
-        }
-    }
-
-    /// Build an `AgentRuntime` over the given registry (test-only recipe).
-    fn runtime_with(providers: Arc<dyn ProviderRegistry>) -> AgentRuntime {
-        use parking_lot::RwLock;
-        let tools = Arc::new(crate::agents::ToolRegistry::new());
-        let skills = Arc::new(RwLock::new(crate::agents::SkillManager::new()));
-        let agents = Arc::new(crate::agents::AgentRegistry::default());
-        let resources = crate::agents::resource_provider::ResourceProvider::new(
-            Arc::clone(&skills),
-            Arc::clone(&agents),
-            Vec::new(),
-            std::path::PathBuf::new(),
-            std::path::PathBuf::new(),
-            String::new(),
-            0,
-        );
-        let context_engine = Arc::new(crate::agents::context_engine::ContextEngine::new(
-            &crate::config::agent::ContextConfig::default(),
-            Arc::clone(&providers),
-            resources,
-            Arc::clone(&tools),
-        ));
-        let tool_executor = Arc::new(crate::agents::tool_executor::ToolExecutor::new(30));
-        let loop_breaker = Arc::new(crate::agents::LoopBreaker::new(
-            crate::agents::LoopBreakerConfig::default(),
-        ));
-        AgentRuntime::new(
-            providers, tools, skills, agents, context_engine, tool_executor, loop_breaker,
-        )
-    }
-
-    fn user_with_image(b64: &str, text: &str) -> ChatMessage {
-        ChatMessage {
-            role: "user".into(),
-            parts: vec![
-                ContentPart::ImageB64 { b64_json: b64.into(), media_type: None, detail: ImageDetail::Auto },
-                ContentPart::Text { text: text.into() },
-            ],
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-            is_error: None,
-        }
-    }
-
-    fn has_image(m: &ChatMessage) -> bool {
-        m.parts.iter().any(|p| {
-            matches!(
-                p,
-                ContentPart::ImageUrl { .. } | ContentPart::ImageB64 { .. } | ContentPart::ImageRef { .. }
-            )
-        })
-    }
-    fn joined_text(m: &ChatMessage) -> String {
-        m.parts
-            .iter()
-            .filter_map(|p| match p {
-                ContentPart::Text { text } => Some(text.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    /// T4.1 — vision model: adaptation is a no-op; the image part is preserved
-    /// exactly (no duplication, no text substitution).
-    #[tokio::test]
-    async fn adapt_noop_for_vision_model() {
-        let reg = MockRegistry { configs: HashMap::new(), routing: vec![], providers: HashMap::new() };
-        let runtime = runtime_with(Arc::new(reg));
-        let mut messages = vec![user_with_image("AAAA", "what is this?")];
-
-        adapt_media_for_model(&mut messages, &runtime, "test-session", /* model_supports_images */ true).await;
-
-        assert!(has_image(&messages[0]), "vision model must keep the image part");
-        let imgs = messages[0]
-            .parts
-            .iter()
-            .filter(|p| matches!(p, ContentPart::ImageB64 { .. }))
-            .count();
-        assert_eq!(imgs, 1, "image must not be duplicated");
-    }
-
-    /// T4.2a — non-vision model with an auxiliary vision model in the routing
-    /// chain: the current-turn image is translated to text via the aux model.
-    #[tokio::test]
-    async fn adapt_translates_current_turn_with_aux() {
-        let mut configs = HashMap::new();
-        configs.insert("aux".to_string(), vision_cfg());
-        let mut providers: HashMap<String, Arc<dyn ChatProvider>> = HashMap::new();
-        providers.insert("aux".to_string(), Arc::new(MockChatProvider { reply: "A RED CAT".into() }));
-        let reg = MockRegistry { configs, routing: vec!["aux".into()], providers };
-        let runtime = runtime_with(Arc::new(reg));
-        let mut messages = vec![user_with_image("AAAA", "what is this?")];
-
-        adapt_media_for_model(&mut messages, &runtime, "test-session", false).await;
-
-        assert!(!has_image(&messages[0]), "image must be replaced by text for non-vision model");
-        let text = joined_text(&messages[0]);
-        assert!(text.contains("A RED CAT"), "aux description must be injected: {text}");
-        assert!(text.contains("what is this?"), "original user text must be preserved: {text}");
-    }
-
-    /// T4.2b — non-vision model with NO auxiliary model: graceful placeholder,
-    /// never a panic, image removed.
-    #[tokio::test]
-    async fn adapt_placeholder_without_aux() {
-        let reg = MockRegistry { configs: HashMap::new(), routing: vec![], providers: HashMap::new() };
-        let runtime = runtime_with(Arc::new(reg));
-        let mut messages = vec![user_with_image("AAAA", "describe")];
-
-        adapt_media_for_model(&mut messages, &runtime, "test-session", false).await;
-
-        assert!(!has_image(&messages[0]), "image must be replaced even without an aux model");
-        assert!(!joined_text(&messages[0]).is_empty(), "a placeholder text must remain");
-    }
-
-    /// T4.5 — candidate-set boundary: a vision-capable model that is registered
-    /// but NOT in the routing chain must NOT be selected as the aux model. The
-    /// only routed model is text-only, so selection yields None → placeholder,
-    /// and the un-routed model's provider is never invoked.
-    #[tokio::test]
-    async fn adapt_does_not_select_unrouted_vision_model() {
-        let mut configs = HashMap::new();
-        configs.insert("chat-only".to_string(), text_cfg());
-        configs.insert("vision-unrouted".to_string(), vision_cfg());
-        let mut providers: HashMap<String, Arc<dyn ChatProvider>> = HashMap::new();
-        providers
-            .insert("vision-unrouted".to_string(), Arc::new(MockChatProvider { reply: "LEAKED".into() }));
-        // routing lists only the text-only model.
-        let reg = MockRegistry { configs, routing: vec!["chat-only".into()], providers };
-        let runtime = runtime_with(Arc::new(reg));
-        let mut messages = vec![user_with_image("AAAA", "describe")];
-
-        adapt_media_for_model(&mut messages, &runtime, "test-session", false).await;
-
-        assert!(!has_image(&messages[0]));
-        let text = joined_text(&messages[0]);
-        assert!(
-            !text.contains("LEAKED"),
-            "un-routed vision model must never be selected as aux: {text}"
-        );
-    }
 }
