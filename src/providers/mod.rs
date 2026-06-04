@@ -46,6 +46,7 @@ pub mod glm;
 pub mod google;
 pub mod http;
 pub mod kimi;
+pub mod media;
 pub mod minimax;
 pub mod openai;
 pub mod provider_factory;
@@ -55,6 +56,7 @@ pub mod shared;
 pub mod xiaomi;
 
 pub use fallback::FallbackChatProvider;
+pub use media::{audio_marker, image_marker, lower_media_for, MediaCaps, MediaLoweringProvider};
 pub use retry::RetryChatProvider;
 pub use credential_pool::{CredentialPool, CredentialEntry, CredentialStatus, RotationStrategy, SharedCredentialPool};
 pub use anthropic::AnthropicProvider;
