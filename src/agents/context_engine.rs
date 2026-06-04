@@ -64,7 +64,7 @@ impl ContextEngine {
             registry,
             resources,
             memory_executor: MemoryToolExecutor::new(tools),
-            max_rounds: 16,
+            max_rounds: 30,
         }
     }
 
