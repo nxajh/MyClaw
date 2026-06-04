@@ -221,7 +221,16 @@ impl QQBotChannel {
         }
         match event_type {
             "C2C_MESSAGE_CREATE" => {
-                let msg = self.parse_c2c_message(data)?;
+                let msg = match self.parse_c2c_message(data) {
+                    Some(m) => m,
+                    None => {
+                        tracing::warn!(
+                            data = %data,
+                            "C2C_MESSAGE_CREATE: parse returned None, message dropped"
+                        );
+                        return None;
+                    }
+                };
                 if self.dedup.check_and_record(&msg.id) {
                     debug!(msg_id = %msg.id, "duplicate C2C message, skipping");
                     return None;
@@ -229,10 +238,29 @@ impl QQBotChannel {
                 if !apply_auth(self, &msg.sender, crate::channels::MessageScope::Direct) {
                     return None;
                 }
+                if let Some(ref urls) = msg.image_urls {
+                    if !urls.is_empty() {
+                        tracing::info!(
+                            msg_id = %msg.id,
+                            images = urls.len(),
+                            content_len = msg.content.len(),
+                            "C2C message with image attachments received"
+                        );
+                    }
+                }
                 Some(msg)
             }
             "GROUP_AT_MESSAGE_CREATE" => {
-                let msg = self.parse_group_message(data)?;
+                let msg = match self.parse_group_message(data) {
+                    Some(m) => m,
+                    None => {
+                        tracing::warn!(
+                            data = %data,
+                            "GROUP_AT_MESSAGE_CREATE: parse returned None, message dropped"
+                        );
+                        return None;
+                    }
+                };
                 if self.dedup.check_and_record(&msg.id) {
                     debug!(msg_id = %msg.id, "duplicate group message, skipping");
                     return None;
@@ -345,10 +373,13 @@ impl QQBotChannel {
     fn parse_c2c_message(&self, data: &serde_json::Value) -> Option<ChannelMessage> {
         let author = data.get("author")?;
         let user_openid = author.get("user_openid")?.as_str()?;
-        let content = data.get("content")?.as_str()?;
+        // content may be absent or empty for image-only messages — don't bail on it
+        let content = data.get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         let msg_id = data.get("id")?.as_str()?;
-
-        let cleaned_content = content.trim().to_string();
 
         // Parse image URLs from attachments.
         let image_urls = if let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) {
@@ -370,7 +401,7 @@ impl QQBotChannel {
             id: msg_id.to_string(),
             sender: user_openid.to_string(),
             reply_target: format!("c2c:{}", user_openid),
-            content: cleaned_content,
+            content,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -388,10 +419,12 @@ impl QQBotChannel {
         let author = data.get("author")?;
         let member_openid = author.get("member_openid")?.as_str()?;
         let group_openid = data.get("group_openid")?.as_str()?;
-        let content = data.get("content")?.as_str()?;
+        let content = data.get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         let msg_id = data.get("id")?.as_str()?;
-
-        let cleaned_content = content.trim().to_string();
 
         // Parse image URLs from attachments.
         let image_urls = if let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) {
@@ -413,7 +446,7 @@ impl QQBotChannel {
             id: msg_id.to_string(),
             sender: member_openid.to_string(),
             reply_target: format!("group:{}", group_openid),
-            content: cleaned_content,
+            content,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()

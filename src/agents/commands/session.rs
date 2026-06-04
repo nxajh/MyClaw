@@ -121,6 +121,27 @@ pub async fn cmd_compact(ctx: CommandContext<'_>) -> String {
                 result.summary_tokens,
             );
             session.token_tracker.adjust_for_compaction(result.removed_tokens, result.summary_tokens);
+            // Persist compaction to disk (same as maybe_compact in agent.rs).
+            if let Some(ref hook) = session.persist {
+                hook.save_compaction(&session.id, &crate::storage::SummaryRecord {
+                    id: 0,
+                    version,
+                    summary: result.summary.clone(),
+                    up_to_message: last_compacted_id,
+                    token_estimate: Some(result.summary_tokens),
+                    created_at: chrono::Utc::now(),
+                });
+                let surviving: Vec<(i64, crate::providers::ChatMessage)> = session
+                    .message_ids
+                    .iter()
+                    .zip(session.history.iter())
+                    .map(|(&id, msg)| (id, msg.clone()))
+                    .collect();
+                hook.rotate_history(&session.id, &surviving);
+                for (i, id) in session.message_ids.iter_mut().enumerate() {
+                    *id = (i + 1) as i64;
+                }
+            }
             let total = session.token_tracker.total_tokens();
             format!("✅ 上下文压缩完成，当前 token: {}", total)
         }
