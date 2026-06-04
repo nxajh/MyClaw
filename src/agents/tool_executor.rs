@@ -72,7 +72,7 @@ impl ToolExecutor {
         args: serde_json::Value,
         session: &Session,
     ) -> anyhow::Result<ToolResult> {
-        let raw = if self.timeout_secs > 0 {
+        let raw = if self.timeout_secs > 0 && !tool.blocks_on_human() {
             let timeout = Duration::from_secs(self.timeout_secs);
             tokio::time::timeout(timeout, tool.execute(args, session))
                 .await
@@ -82,6 +82,9 @@ impl ToolExecutor {
                     error: Some("timeout".to_string()),
                 }))?
         } else {
+            // No timeout: either disabled globally, or a human-blocking tool
+            // (`ask_user`) whose wait is bounded by a real reply / interruption,
+            // not an arbitrary timer.
             tool.execute(args, session).await?
         };
 

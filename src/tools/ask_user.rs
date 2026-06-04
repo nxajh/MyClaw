@@ -7,7 +7,6 @@
 //! dispatch fulfills the wait via `AskRouter::fulfill(session_id, ...)`.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -15,10 +14,6 @@ use serde_json::json;
 use crate::agents::ask_router::AskRouter;
 use crate::channels::{MessagePayload, SendTarget};
 use crate::providers::{Tool, ToolResult};
-
-/// Mirror of `Orchestrator::ASK_USER_TIMEOUT`. Kept here so the tool is
-/// self-contained.
-const ASK_USER_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub struct AskUserTool {
     router: Arc<AskRouter>,
@@ -58,6 +53,12 @@ impl Tool for AskUserTool {
 
     fn max_output_tokens(&self) -> usize {
         1_000
+    }
+
+    /// `ask_user` waits on a human — exempt it from the executor's generic
+    /// per-tool timeout (which is a watchdog for runaway compute tools).
+    fn blocks_on_human(&self) -> bool {
+        true
     }
 
     async fn execute(
@@ -113,11 +114,7 @@ impl Tool for AskUserTool {
         // Register with the router and await the user's reply, keyed by
         // session.id (cross-channel sub-agents would route by session, not
         // routing_key, after future delegation work).
-        let reply = match self
-            .router
-            .wait_for_reply(&session.id, ASK_USER_TIMEOUT)
-            .await
-        {
+        let reply = match self.router.wait_for_reply(&session.id).await {
             Ok(m) => m,
             Err(e) => {
                 return Ok(ToolResult {
