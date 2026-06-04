@@ -26,6 +26,7 @@ use crate::agents::AgentRuntime;
 use crate::config::sub_agent::SubAgentConfig;
 use crate::providers::capability_chat::{ChatMessage, ChatProvider, ChatRequest, StopReason, ToolSpec};
 use crate::providers::{BoxStream, Capability, ContentPart, StreamEvent, ToolCall};
+use crate::storage::SummaryRecord;
 
 /// "An agent" — just its config (name, system prompt fragment, three
 /// capability filters, optional model override). Everything else lives
@@ -701,6 +702,31 @@ async fn maybe_compact(
             session
                 .token_tracker
                 .adjust_for_compaction(result.removed_tokens, result.summary_tokens);
+            // Persist compaction to disk: save summary metadata to meta.json
+            // and archive the old history segment (rotate_history writes surviving
+            // messages to a fresh history.jsonl so the next restart loads the
+            // compacted state instead of the full un-compacted history).
+            if let Some(ref hook) = session.persist {
+                hook.save_compaction(&session.id, &SummaryRecord {
+                    id: 0,
+                    version,
+                    summary: result.summary.clone(),
+                    up_to_message: last_compacted_id,
+                    token_estimate: Some(result.summary_tokens),
+                    created_at: chrono::Utc::now(),
+                });
+                let surviving: Vec<(i64, ChatMessage)> = session
+                    .message_ids
+                    .iter()
+                    .zip(session.history.iter())
+                    .map(|(&id, msg)| (id, msg.clone()))
+                    .collect();
+                hook.rotate_history(&session.id, &surviving);
+                // Line numbers restart at 1 after rotation; remap IDs.
+                for (i, id) in session.message_ids.iter_mut().enumerate() {
+                    *id = (i + 1) as i64;
+                }
+            }
             let mut messages: Vec<ChatMessage> =
                 std::iter::once(ChatMessage::system_text(system_prompt))
                     .chain(session.history.iter().cloned())

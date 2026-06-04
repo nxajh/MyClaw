@@ -120,7 +120,7 @@ pub(crate) struct MemoryToolExecutor {
 }
 
 impl MemoryToolExecutor {
-    const ALLOWED: &'static [&'static str] = &["file_read", "file_write", "file_edit", "shell"];
+    const ALLOWED: &'static [&'static str] = &["file_read", "file_write", "file_edit", "shell", "memory_manage"];
 
     pub(crate) fn new(tools: Arc<ToolRegistry>) -> Self {
         Self { tools }
