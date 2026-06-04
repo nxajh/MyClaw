@@ -138,49 +138,44 @@ impl Agent {
         const MAX_EMPTY_RETRIES: usize = 3;
         let mut overflow_retries: usize = 0;
         const MAX_OVERFLOW_RETRIES: usize = 3;
-        // Current-turn images are persisted into history (add_user_with_media),
-        // so the `messages` clone above already carries them on the last user
-        // message. Vision models use those parts natively; non-vision models
-        // get media normalized to text by `adapt_media_for_model` (historical
-        // images → cached description/placeholder, current turn → auxiliary
-        // translation). Adaptation runs on the cloned `messages` only and never
-        // mutates persistent history.
-        // Images are lowered per concrete model inside the provider layer (each
-        // chat provider is wrapped in `MediaLoweringProvider`): a vision model
-        // gets the real image, a text-only model gets a `[图片 #N]` marker. The
-        // agent sends the canonical format — real images — and never pre-renders,
-        // so whichever model the fallback/override actually serves with sees the
-        // right thing. It only owns the `view_image` tool (advertise + execute in
-        // the loop, since retrieval is a multi-round, model-calling concern).
+        // Media (images, audio) is lowered per concrete model inside the provider
+        // layer (each chat provider is wrapped in `MediaLoweringProvider`): a
+        // vision model gets the real image, a text-only model gets a `[图片 #N]`
+        // marker (and likewise `[语音 #N]` for audio). The
+        // agent sends the canonical format — real images and audio — and never
+        // pre-renders them, so whichever model the fallback/override actually
+        // serves with sees the right thing. It only owns the retrieval tools
+        // (advertise + execute in the loop, since retrieval is a multi-round,
+        // model-calling concern): `view_image` for `[图片 #N]`, `hear_audio` for
+        // `[语音 #N]`.
         //
-        // Advertise view_image whenever a vision model exists in the chain AND
-        // this turn carries images or history already references the tool (the
-        // latter keeps it present across a /model switch so prior calls don't
-        // become orphan tool calls the provider would reject).
-        let vision_in_chain = runtime
-            .providers
-            .find_chat_model_with_modality(crate::providers::capability::Modality::Image)
-            .is_some();
-        if vision_in_chain
-            && (history_has_images(&session.history)
-                || history_has_view_image_calls(&session.history))
-        {
-            let vt: Arc<dyn crate::providers::Tool> =
-                Arc::new(crate::tools::ViewImageTool::new(Arc::clone(&runtime.providers)));
-            tool_specs.push(ToolSpec {
-                name: vt.name().to_string(),
-                description: Some(vt.description().to_string()),
-                input_schema: vt.parameters_schema(),
-            });
-            allowed_tools.push(vt);
-        }
-        // If view_image isn't declared this turn but history references it, fold
+        // Advertise each tool when its aux model exists in the chain AND this turn
+        // carries that media or history already references the tool (the latter
+        // keeps it present across a /model switch so prior calls don't become
+        // orphan tool calls the provider would reject).
+        use crate::providers::capability::Modality;
+        advertise_media_tool(
+            &mut tool_specs,
+            &mut allowed_tools,
+            runtime.providers.as_ref(),
+            Modality::Image,
+            history_has_images(&session.history)
+                || history_has_tool_calls(&session.history, "view_image"),
+            || Arc::new(crate::tools::ViewImageTool::new(Arc::clone(&runtime.providers))),
+        );
+        advertise_media_tool(
+            &mut tool_specs,
+            &mut allowed_tools,
+            runtime.providers.as_ref(),
+            Modality::Audio,
+            history_has_audio(&session.history)
+                || history_has_tool_calls(&session.history, "hear_audio"),
+            || Arc::new(crate::tools::HearAudioTool::new(Arc::clone(&runtime.providers))),
+        );
+        // If a media tool isn't declared this turn but history references it, fold
         // those calls to text so no orphan tool call reaches the provider.
-        fold_view_image_if_absent(&mut messages, &tool_specs);
-
-        // Audio is still transcribed eagerly here (interim — a lazy `hear_audio`
-        // tool replaces this next). Images are now the provider's job.
-        adapt_audio_for_model(&mut messages, runtime, &session.id).await;
+        fold_absent_media_tool(&mut messages, &tool_specs, "view_image", "图片查看结果");
+        fold_absent_media_tool(&mut messages, &tool_specs, "hear_audio", "语音内容");
 
         loop {
             // Shutdown checkpoint between LLM calls (mirrors AgentLoop chat_loop).
@@ -589,19 +584,6 @@ impl Agent {
     }
 }
 
-/// Transcribe audio in the cloned `messages` to text. Chat protocols can't carry
-/// audio natively, so even an audio-capable primary receives a transcription;
-/// historical clips reuse a cached transcription, the current turn's are sent to
-/// an auxiliary audio model. Operates on the clone only — persistent history is
-/// never mutated.
-///
-/// (Images are no longer handled here: each chat provider is wrapped in
-/// `MediaLoweringProvider`, which lowers images per the concrete serving model.)
-async fn adapt_audio_for_model(messages: &mut [ChatMessage], runtime: &AgentRuntime, session_id: &str) {
-    use crate::agents::modality_adapter::AUDIO_SPEC;
-    adapt_modality(messages, runtime, session_id, &AUDIO_SPEC).await;
-}
-
 /// True if any message in `history` carries an image part.
 fn history_has_images(history: &[ChatMessage]) -> bool {
     history.iter().any(|m| {
@@ -611,96 +593,104 @@ fn history_has_images(history: &[ChatMessage]) -> bool {
     })
 }
 
-/// True if `history` contains a prior `view_image` tool call. Used to keep the
-/// tool present after a model switch so those calls don't become orphan tool
-/// calls (declared in history but absent from the request's tool list).
-fn history_has_view_image_calls(history: &[ChatMessage]) -> bool {
+/// True if any message in `history` carries an audio part.
+fn history_has_audio(history: &[ChatMessage]) -> bool {
+    history
+        .iter()
+        .any(|m| m.parts.iter().any(|p| matches!(p, ContentPart::AudioB64 { .. })))
+}
+
+/// True if `history` contains a prior tool call named `name`. Used to keep a
+/// media-retrieval tool present after a model switch so those calls don't become
+/// orphan tool calls (declared in history but absent from the request's tools).
+fn history_has_tool_calls(history: &[ChatMessage], name: &str) -> bool {
     history.iter().any(|m| {
         m.role == "assistant"
             && m.tool_calls
                 .as_ref()
-                .is_some_and(|tcs| tcs.iter().any(|tc| tc.name == "view_image"))
+                .is_some_and(|tcs| tcs.iter().any(|tc| tc.name == name))
     })
 }
 
-/// Backstop for a rare edge (e.g. config hot-reload drops the vision model
-/// mid-session): if the request won't declare `view_image` but history still
-/// references it, fold each `view_image` call + its result into inline text on
-/// the calling assistant message and drop the tool-result message, so no orphan
-/// tool call survives to be rejected by the provider. No-op when the tool is
-/// declared. Operates on the cloned `messages` only.
-fn fold_view_image_if_absent(messages: &mut Vec<ChatMessage>, tool_specs: &[ToolSpec]) {
-    if tool_specs.iter().any(|t| t.name == "view_image") {
+/// Advertise (and make dispatchable) a media-retrieval tool when `want` (this
+/// turn carries that media or history references the tool) AND its aux model
+/// exists in the chain. The tool is only constructed when it will be offered.
+fn advertise_media_tool(
+    tool_specs: &mut Vec<ToolSpec>,
+    allowed_tools: &mut Vec<Arc<dyn crate::providers::Tool>>,
+    providers: &dyn crate::providers::ProviderRegistry,
+    modality: crate::providers::capability::Modality,
+    want: bool,
+    make: impl FnOnce() -> Arc<dyn crate::providers::Tool>,
+) {
+    if !want || providers.find_chat_model_with_modality(modality).is_none() {
         return;
     }
-    // Collect view_image call ids and their result text.
-    let mut vi_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let tool = make();
+    tool_specs.push(ToolSpec {
+        name: tool.name().to_string(),
+        description: Some(tool.description().to_string()),
+        input_schema: tool.parameters_schema(),
+    });
+    allowed_tools.push(tool);
+}
+
+/// Backstop for a rare edge (e.g. config hot-reload drops the aux model
+/// mid-session): if the request won't declare `tool_name` but history still
+/// references it, fold each such call + its result into inline `[label]: …` text
+/// on the calling assistant message and drop the tool-result message, so no
+/// orphan tool call survives to be rejected by the provider. No-op when the tool
+/// is declared. Operates on the cloned `messages` only.
+fn fold_absent_media_tool(
+    messages: &mut Vec<ChatMessage>,
+    tool_specs: &[ToolSpec],
+    tool_name: &str,
+    label: &str,
+) {
+    if tool_specs.iter().any(|t| t.name == tool_name) {
+        return;
+    }
+    let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for m in messages.iter() {
         if m.role == "assistant" {
             if let Some(tcs) = &m.tool_calls {
-                for tc in tcs.iter().filter(|tc| tc.name == "view_image") {
-                    vi_ids.insert(tc.id.clone());
+                for tc in tcs.iter().filter(|tc| tc.name == tool_name) {
+                    ids.insert(tc.id.clone());
                 }
             }
         }
     }
-    if vi_ids.is_empty() {
+    if ids.is_empty() {
         return;
     }
     let mut results: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for m in messages.iter() {
         if m.role == "tool" {
             if let Some(id) = &m.tool_call_id {
-                if vi_ids.contains(id) {
+                if ids.contains(id) {
                     results.insert(id.clone(), m.text_content());
                 }
             }
         }
     }
-    // Rewrite assistant messages: drop the view_image calls, append the results
-    // inline so the conversation keeps the information without the tool round-trip.
     for m in messages.iter_mut() {
         if m.role != "assistant" {
             continue;
         }
         let Some(tcs) = m.tool_calls.take() else { continue };
-        let (vi, rest): (Vec<_>, Vec<_>) = tcs.into_iter().partition(|tc| tc.name == "view_image");
+        let (mine, rest): (Vec<_>, Vec<_>) = tcs.into_iter().partition(|tc| tc.name == tool_name);
         m.tool_calls = if rest.is_empty() { None } else { Some(rest) };
-        for tc in vi {
+        for tc in mine {
             if let Some(out) = results.get(&tc.id) {
                 if !out.is_empty() {
-                    m.parts.push(ContentPart::Text { text: format!("[图片查看结果]: {out}") });
+                    m.parts.push(ContentPart::Text { text: format!("[{label}]: {out}") });
                 }
             }
         }
     }
-    // Drop the now-folded tool-result messages.
     messages.retain(|m| {
-        !(m.role == "tool" && m.tool_call_id.as_ref().is_some_and(|id| vi_ids.contains(id)))
+        !(m.role == "tool" && m.tool_call_id.as_ref().is_some_and(|id| ids.contains(id)))
     });
-}
-
-/// Adapt one modality across the cloned `messages`: historical media reuse a
-/// cached description (or degrade to the placeholder); the current turn's media
-/// is translated by the modality's auxiliary model. No-op when nothing matches.
-async fn adapt_modality(
-    messages: &mut [ChatMessage],
-    runtime: &AgentRuntime,
-    session_id: &str,
-    spec: &crate::agents::modality_adapter::ModalitySpec,
-) {
-    use crate::agents::modality_adapter;
-    let cache = &*runtime.description_cache;
-    let last_user_idx = messages.iter().rposition(|m| m.role == "user");
-    modality_adapter::adapt_history_media(messages, spec, cache, session_id, last_user_idx);
-    if let Some(idx) = last_user_idx {
-        let aux = runtime
-            .providers
-            .find_chat_model_with_modality(spec.modality.clone());
-        let aux_ref = aux.as_ref().map(|(p, id)| (p, id.as_str()));
-        modality_adapter::adapt_last_turn_media(&mut messages[idx], spec, aux_ref, cache, session_id)
-            .await;
-    }
 }
 
 /// Persist `session.history.last()` via `session.persist` and write the
@@ -828,8 +818,8 @@ async fn maybe_compact(
                     .chain(session.history.iter().cloned())
                     .collect();
             crate::agents::session::sanitize_history(&mut messages);
-            fold_view_image_if_absent(&mut messages, tool_specs);
-            adapt_audio_for_model(&mut messages, runtime, &session.id).await;
+            fold_absent_media_tool(&mut messages, tool_specs, "view_image", "图片查看结果");
+            fold_absent_media_tool(&mut messages, tool_specs, "hear_audio", "语音内容");
             tracing::info!(
                 summary_tokens = result.summary_tokens,
                 removed_tokens = result.removed_tokens,
@@ -1117,7 +1107,7 @@ mod tests {
         let mut messages = vec![ChatMessage::user_text("这是什么"), asst, tool_res];
 
         // No view_image in tool_specs → fold.
-        fold_view_image_if_absent(&mut messages, &[]);
+        fold_absent_media_tool(&mut messages, &[], "view_image", "图片查看结果");
 
         assert!(
             !messages.iter().any(|m| m.role == "tool"),
@@ -1156,7 +1146,7 @@ mod tests {
             description: None,
             input_schema: serde_json::json!({}),
         }];
-        fold_view_image_if_absent(&mut messages, &specs);
+        fold_absent_media_tool(&mut messages, &specs, "view_image", "图片查看结果");
         // Tool declared → calls preserved untouched.
         assert!(messages[0]
             .tool_calls
@@ -1165,14 +1155,14 @@ mod tests {
     }
 
     #[test]
-    fn history_has_view_image_calls_detects_prior_tool_use() {
+    fn history_has_tool_calls_detects_prior_tool_use() {
         let mut asst = ChatMessage::assistant_text("");
         asst.tool_calls = Some(vec![ToolCall {
             id: "c1".into(),
             name: "view_image".into(),
             arguments: "{}".into(),
         }]);
-        assert!(history_has_view_image_calls(&[asst]));
+        assert!(history_has_tool_calls(&[asst], "view_image"));
 
         let mut other = ChatMessage::assistant_text("");
         other.tool_calls = Some(vec![ToolCall {
@@ -1180,8 +1170,8 @@ mod tests {
             name: "calculator".into(),
             arguments: "{}".into(),
         }]);
-        assert!(!history_has_view_image_calls(&[other]));
-        assert!(!history_has_view_image_calls(&[ChatMessage::user_text("hi")]));
+        assert!(!history_has_tool_calls(&[other], "view_image"));
+        assert!(!history_has_tool_calls(&[ChatMessage::user_text("hi")], "view_image"));
     }
 
     // (Image placeholdering moved to `providers::media::lower_media_for`, which
