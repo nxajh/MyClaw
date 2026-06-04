@@ -108,9 +108,11 @@ impl ContextEngine {
 
     /// Generate a compaction summary for `history[0..boundary]`.
     ///
-    /// `tool_specs` is the main request's full tool list; the summarizer is
-    /// shown only the memory subset of it (see `do_summarize`), so it attempts
-    /// only tools it can actually execute.
+    /// `tool_specs` must match the spec list used for the main LLM
+    /// request so the provider's prefix cache key (model +
+    /// system_prompt + tool_definitions) matches and the summarizer
+    /// call hits the cache. Execution is gated separately by
+    /// `MemoryToolExecutor`, which permits only the memory tools.
     pub(crate) async fn execute_compaction(
         &self,
         history: &[ChatMessage],
@@ -223,18 +225,6 @@ impl ContextEngine {
                 }
             });
 
-        // Show the summarizer only the tools it can actually use (the memory
-        // subset). Exposing the full toolset made the model attempt blocked
-        // tools and burn summarize rounds; matching visible→executable keeps it
-        // focused. This diverges from the main request's tool list, so the first
-        // summarizer round won't hit that request's prefix cache — a worthwhile
-        // trade against wasted rounds (later rounds still cache among themselves).
-        let summarizer_tools: Vec<ToolSpec> = tool_specs
-            .iter()
-            .filter(|s| MemoryToolExecutor::ALLOWED.contains(&s.name.as_str()))
-            .cloned()
-            .collect();
-
         let mut round = 0;
         let final_text = loop {
             round += 1;
@@ -250,7 +240,12 @@ impl ContextEngine {
                 thinking: thinking.clone(),
                 stop: None,
                 seed: None,
-                tools: if summarizer_tools.is_empty() { None } else { Some(&summarizer_tools) },
+                // Carry the *full* tool list (not just the executable subset) so
+                // the prefix-cache key (model + system_prompt + tool_definitions)
+                // matches the main request and the summarizer call hits the
+                // cache. Gating happens in the executor: MemoryToolExecutor
+                // permits only the memory tools and blocks everything else.
+                tools: if tool_specs.is_empty() { None } else { Some(tool_specs) },
                 stream: true,
             };
 

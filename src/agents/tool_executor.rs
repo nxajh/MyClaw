@@ -122,11 +122,10 @@ pub(crate) struct MemoryToolExecutor {
 impl MemoryToolExecutor {
     /// Tools the summarizer is permitted to call during compaction. Memory is
     /// file-based (notes under the knowledge dir), so these four cover it. The
-    /// summarizer's request is filtered to exactly this set, so the model never
-    /// sees tools it can't use (which previously wasted summarize rounds on
-    /// blocked calls); the guard in `execute` stays as defense-in-depth.
-    pub(crate) const ALLOWED: &'static [&'static str] =
-        &["file_read", "file_write", "file_edit", "shell"];
+    /// summarizer request still advertises the *full* tool list (for prefix-cache
+    /// matching with the main request); this allow-list is the actual gate —
+    /// any other tool call is blocked with an error result.
+    const ALLOWED: &'static [&'static str] = &["file_read", "file_write", "file_edit", "shell"];
 
     pub(crate) fn new(tools: Arc<ToolRegistry>) -> Self {
         Self { tools }
