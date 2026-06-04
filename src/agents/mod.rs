@@ -27,6 +27,8 @@ pub mod agent_registry;
 pub mod ask_router;
 pub mod runtime;
 pub mod user_profile;
+#[cfg(test)]
+mod media_e2e_test;
 
 /// Scheduling: cron jobs, webhooks, heartbeat scheduler.
 pub mod scheduling;
