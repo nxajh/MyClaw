@@ -24,7 +24,7 @@ use crate::agents::turn::{TurnContext, TurnResult};
 use crate::agents::turn_event::TurnEvent;
 use crate::agents::AgentRuntime;
 use crate::config::sub_agent::SubAgentConfig;
-use crate::providers::capability_chat::{ChatMessage, ChatRequest, StopReason, ToolSpec};
+use crate::providers::capability_chat::{ChatMessage, ChatProvider, ChatRequest, StopReason, ToolSpec};
 use crate::providers::{BoxStream, Capability, ContentPart, StreamEvent, ToolCall};
 
 /// "An agent" — just its config (name, system prompt fragment, three
@@ -75,11 +75,25 @@ impl Agent {
             .collect();
 
         // Resolve provider + model.
+        //
+        // - No override → the Chat fallback wrapper (fans out across the
+        //   configured chain on transient errors).
+        // - Override (`/model`) → the raw per-model provider, but wrapped in
+        //   `RetryChatProvider` so a 502/timeout/connection-drop is retried on
+        //   the SAME chosen model rather than failing the turn. We intentionally
+        //   do NOT fall back to a different model here — the user picked this one.
+        const OVERRIDE_RETRIES: usize = 3;
         let (provider, model_id) = match turn_ctx.model_id {
-            Some(m) => runtime
-                .providers
-                .get_chat_provider_by_model(m)
-                .ok_or_else(|| anyhow::anyhow!("model '{}' not found in registry", m))?,
+            Some(m) => {
+                let (p, id) = runtime
+                    .providers
+                    .get_chat_provider_by_model(m)
+                    .ok_or_else(|| anyhow::anyhow!("model '{}' not found in registry", m))?;
+                let retrying: Arc<dyn ChatProvider> = Arc::new(
+                    crate::providers::RetryChatProvider::new(p, id.clone(), OVERRIDE_RETRIES),
+                );
+                (retrying, id)
+            }
             None => runtime.providers.get_chat_provider(Capability::Chat)?,
         };
 

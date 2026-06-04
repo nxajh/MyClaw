@@ -50,10 +50,12 @@ pub mod minimax;
 pub mod openai;
 pub mod provider_factory;
 pub mod provider_id;
+pub mod retry;
 pub mod shared;
 pub mod xiaomi;
 
 pub use fallback::FallbackChatProvider;
+pub use retry::RetryChatProvider;
 pub use credential_pool::{CredentialPool, CredentialEntry, CredentialStatus, RotationStrategy, SharedCredentialPool};
 pub use anthropic::AnthropicProvider;
 pub use glm::GlmProvider;

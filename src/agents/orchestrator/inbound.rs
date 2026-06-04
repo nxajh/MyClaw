@@ -17,7 +17,7 @@ use super::ctx::OrchestratorCtx;
 use super::key::SessionKey;
 use crate::agents::commands;
 use crate::agents::user_messages::{
-    BTN_ABORT, BTN_RETRY, MSG_ABORT_ACK, MSG_INCOMPLETE_TURN, MSG_NO_PENDING_RETRY, MSG_TURN_FAILED,
+    BTN_ABORT, BTN_RETRY, MSG_ABORT_ACK, MSG_INCOMPLETE_TURN, MSG_NO_PENDING_RETRY,
 };
 use crate::channels::{
     CallbackAction, Channel, ChannelMessage, InlineButton, MessagePayload, SendTarget,
@@ -297,9 +297,10 @@ pub(super) async fn dispatch_turn(ctx: &OrchestratorCtx, key: &SessionKey, msg: 
         // Successful turns: process_turn does the fallback `channel.send(text)`
         // internally per RFC §三.B. We only handle the error notice here.
         let result = session_ctx.process_turn(msg, Some(channel.clone()), runtime).await;
-        if result.is_err() {
+        if let Err(ref e) = result {
             let target = SendTarget::new(reply_target);
-            let _ = channel.send_payload(&target, &MessagePayload::text(MSG_TURN_FAILED)).await;
+            let text = crate::agents::user_messages::user_facing_error_message(e);
+            let _ = channel.send_payload(&target, &MessagePayload::text(text)).await;
         }
     });
 }
