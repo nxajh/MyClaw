@@ -14,7 +14,6 @@ use parking_lot::RwLock;
 
 use crate::agents::context_engine::ContextEngine;
 use crate::agents::loop_breaker::LoopBreaker;
-use crate::agents::modality_adapter::{DescriptionCache, LruDescriptionCache};
 use crate::agents::mcp_manager::McpManager;
 use crate::agents::prompt::SystemPromptConfig;
 use crate::agents::tool_executor::ToolExecutor;
@@ -82,11 +81,6 @@ pub struct AgentRuntime {
     /// (the tool writes timestamps on rate-limit; `/status` reads them
     /// to render ⏱️ markers next to cooled-down providers).
     pub search_cooldown: Option<Arc<SearchProviderCooldown>>,
-    /// Cache of media-fingerprint → text description, used by the modality
-    /// adapter to avoid re-translating the same image/audio/video across
-    /// turns. Defaults to an in-memory LRU; replace via
-    /// [`AgentRuntime::with_description_cache`].
-    pub description_cache: Arc<dyn DescriptionCache>,
 }
 
 impl AgentRuntime {
@@ -112,13 +106,7 @@ impl AgentRuntime {
             defaults: RuntimeDefaults::default(),
             mcp_manager: None,
             search_cooldown: None,
-            description_cache: Arc::new(LruDescriptionCache::default()),
         }
-    }
-
-    pub fn with_description_cache(mut self, cache: Arc<dyn DescriptionCache>) -> Self {
-        self.description_cache = cache;
-        self
     }
 
     pub fn with_defaults(mut self, defaults: RuntimeDefaults) -> Self {
