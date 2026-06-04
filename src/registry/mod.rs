@@ -61,7 +61,9 @@ pub struct Registry {
     stt_providers: HashMap<String, Arc<dyn SttProvider>>,
     // Stored separately so the primary model's raw entry in chat_providers is
     // never overwritten and remains reachable via get_chat_provider_by_model.
-    fallback_chat_provider: Option<(Arc<dyn ChatProvider>, String)>,
+    // Concrete type (not `dyn ChatProvider`) so `next_chat_model` can consult
+    // the cooldown-aware `next_model()` to learn which model will actually serve.
+    fallback_chat_provider: Option<(Arc<crate::providers::FallbackChatProvider>, String)>,
 }
 
 impl Registry {
@@ -403,7 +405,8 @@ impl ProviderRegistry for Registry {
         // This keeps get_chat_provider_by_model pointing at the raw per-model provider.
         if capability == Capability::Chat {
             if let Some((ref fp, ref model_id)) = self.fallback_chat_provider {
-                return Ok((Arc::clone(fp), model_id.clone()));
+                let p: Arc<dyn ChatProvider> = fp.clone();
+                return Ok((p, model_id.clone()));
             }
         }
         let entry = self.routing.get(capability)
@@ -514,6 +517,15 @@ impl ProviderRegistry for Registry {
             .get(Capability::Chat)
             .map(|e| e.models.clone())
             .unwrap_or_default()
+    }
+
+    fn next_chat_model(&self) -> Option<String> {
+        // With a fallback chain, consult its cooldown-aware view of which model
+        // will actually be tried first; otherwise the first routed model.
+        if let Some((ref fp, _)) = self.fallback_chat_provider {
+            return Some(fp.next_model().to_string());
+        }
+        self.get_chat_routing_models().into_iter().next()
     }
 
     fn get_all_provider_summaries(&self) -> Vec<crate::providers::ProviderSummary> {

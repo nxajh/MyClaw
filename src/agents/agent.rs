@@ -151,24 +151,25 @@ impl Agent {
             .map(|cfg| cfg.supports_image_input())
             .unwrap_or(false);
 
-        // Whether we may send images natively — decided by the model(s) that can
-        // actually serve this request, NOT just the primary:
+        // Whether we may send images natively — decided by the model that will
+        // ACTUALLY serve this request, not just the primary:
         // - override (/model): the sole serving model — use its capability.
-        // - fallback: any model in the chain may serve, so native is safe only
-        //   if EVERY routed model supports image input; otherwise a text-only
-        //   model could receive native images and choke. Default to the tool.
+        // - fallback: `next_chat_model` resolves the cooldown-aware first model
+        //   in the chain (e.g. if glm/mimo are cooling, the vision model that
+        //   will really serve), so we send native images exactly when that model
+        //   can take them — and use the `view_image` tool otherwise.
         let send_images_natively = match turn_ctx.model_id {
             Some(_) => model_supports_images,
             None => {
-                let models = runtime.providers.get_chat_routing_models();
-                !models.is_empty()
-                    && models.iter().all(|m| {
-                        runtime
-                            .providers
-                            .get_chat_model_config(m)
-                            .map(|c| c.supports_image_input())
-                            .unwrap_or(false)
-                    })
+                let effective = runtime
+                    .providers
+                    .next_chat_model()
+                    .unwrap_or_else(|| model_id.clone());
+                runtime
+                    .providers
+                    .get_chat_model_config(&effective)
+                    .map(|c| c.supports_image_input())
+                    .unwrap_or(false)
             }
         };
 
@@ -195,6 +196,9 @@ impl Agent {
             });
             allowed_tools.push(vt);
         }
+        // If view_image isn't declared this turn but history references it, fold
+        // those calls to text so no orphan tool call reaches the provider.
+        fold_view_image_if_absent(&mut messages, &tool_specs);
 
         adapt_media_for_model(&mut messages, runtime, &session.id, send_images_natively).await;
 
@@ -658,6 +662,63 @@ fn history_has_view_image_calls(history: &[ChatMessage]) -> bool {
     })
 }
 
+/// Backstop for a rare edge (e.g. config hot-reload drops the vision model
+/// mid-session): if the request won't declare `view_image` but history still
+/// references it, fold each `view_image` call + its result into inline text on
+/// the calling assistant message and drop the tool-result message, so no orphan
+/// tool call survives to be rejected by the provider. No-op when the tool is
+/// declared. Operates on the cloned `messages` only.
+fn fold_view_image_if_absent(messages: &mut Vec<ChatMessage>, tool_specs: &[ToolSpec]) {
+    if tool_specs.iter().any(|t| t.name == "view_image") {
+        return;
+    }
+    // Collect view_image call ids and their result text.
+    let mut vi_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for m in messages.iter() {
+        if m.role == "assistant" {
+            if let Some(tcs) = &m.tool_calls {
+                for tc in tcs.iter().filter(|tc| tc.name == "view_image") {
+                    vi_ids.insert(tc.id.clone());
+                }
+            }
+        }
+    }
+    if vi_ids.is_empty() {
+        return;
+    }
+    let mut results: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for m in messages.iter() {
+        if m.role == "tool" {
+            if let Some(id) = &m.tool_call_id {
+                if vi_ids.contains(id) {
+                    results.insert(id.clone(), m.text_content());
+                }
+            }
+        }
+    }
+    // Rewrite assistant messages: drop the view_image calls, append the results
+    // inline so the conversation keeps the information without the tool round-trip.
+    for m in messages.iter_mut() {
+        if m.role != "assistant" {
+            continue;
+        }
+        let Some(tcs) = m.tool_calls.take() else { continue };
+        let (vi, rest): (Vec<_>, Vec<_>) = tcs.into_iter().partition(|tc| tc.name == "view_image");
+        m.tool_calls = if rest.is_empty() { None } else { Some(rest) };
+        for tc in vi {
+            if let Some(out) = results.get(&tc.id) {
+                if !out.is_empty() {
+                    m.parts.push(ContentPart::Text { text: format!("[图片查看结果]: {out}") });
+                }
+            }
+        }
+    }
+    // Drop the now-folded tool-result messages.
+    messages.retain(|m| {
+        !(m.role == "tool" && m.tool_call_id.as_ref().is_some_and(|id| vi_ids.contains(id)))
+    });
+}
+
 /// Replace image parts in the cloned `messages` with numbered placeholders.
 /// Ids are assigned by scan order, matching `view_image`'s `nth_image_part`
 /// resolution against `session.history` (both skip non-image parts, and the
@@ -840,6 +901,7 @@ async fn maybe_compact(
                     .chain(session.history.iter().cloned())
                     .collect();
             crate::agents::session::sanitize_history(&mut messages);
+            fold_view_image_if_absent(&mut messages, tool_specs);
             adapt_media_for_model(&mut messages, runtime, &session.id, model_supports_images).await;
             tracing::info!(
                 summary_tokens = result.summary_tokens,
@@ -1115,6 +1177,66 @@ mod tests {
     fn history_has_images_detects_image_parts() {
         assert!(!history_has_images(&[ChatMessage::user_text("hi")]));
         assert!(history_has_images(&[img_msg("AAA")]));
+    }
+
+    #[test]
+    fn fold_view_image_inlines_results_when_tool_absent() {
+        let mut asst = ChatMessage::assistant_text("让我看看");
+        asst.tool_calls = Some(vec![ToolCall {
+            id: "c1".into(),
+            name: "view_image".into(),
+            arguments: "{}".into(),
+        }]);
+        let mut tool_res = ChatMessage::text("tool", "一只红色的猫");
+        tool_res.tool_call_id = Some("c1".into());
+        let mut messages = vec![ChatMessage::user_text("这是什么"), asst, tool_res];
+
+        // No view_image in tool_specs → fold.
+        fold_view_image_if_absent(&mut messages, &[]);
+
+        assert!(
+            !messages.iter().any(|m| m.role == "tool"),
+            "tool-result message must be dropped"
+        );
+        assert!(
+            messages.iter().all(|m| m
+                .tool_calls
+                .as_ref()
+                .map(|tcs| tcs.iter().all(|tc| tc.name != "view_image"))
+                .unwrap_or(true)),
+            "no view_image tool call may survive"
+        );
+        let folded = messages
+            .iter()
+            .flat_map(|m| &m.parts)
+            .filter_map(|p| match p {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .any(|t| t.contains("一只红色的猫"));
+        assert!(folded, "result text must be inlined onto the assistant message");
+    }
+
+    #[test]
+    fn fold_view_image_is_noop_when_tool_present() {
+        let mut asst = ChatMessage::assistant_text("");
+        asst.tool_calls = Some(vec![ToolCall {
+            id: "c1".into(),
+            name: "view_image".into(),
+            arguments: "{}".into(),
+        }]);
+        let mut messages = vec![asst];
+        let specs = vec![ToolSpec {
+            name: "view_image".into(),
+            description: None,
+            input_schema: serde_json::json!({}),
+        }];
+        fold_view_image_if_absent(&mut messages, &specs);
+        // Tool declared → calls preserved untouched.
+        assert!(messages[0]
+            .tool_calls
+            .as_ref()
+            .is_some_and(|tcs| tcs.iter().any(|tc| tc.name == "view_image")));
     }
 
     #[test]

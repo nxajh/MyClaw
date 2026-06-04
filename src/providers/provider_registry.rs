@@ -45,6 +45,15 @@ pub trait ProviderRegistry: Send + Sync {
     /// Get the list of model IDs in the chat routing config (in fallback order).
     fn get_chat_routing_models(&self) -> Vec<String>;
 
+    /// The chat model that will actually be tried first for the next request,
+    /// accounting for fallback cooldown state. Lets callers shape the request
+    /// (e.g. native images vs the `view_image` tool) for the model that will
+    /// really serve it, instead of always assuming the primary. Default: the
+    /// first routed model.
+    fn next_chat_model(&self) -> Option<String> {
+        self.get_chat_routing_models().into_iter().next()
+    }
+
     /// Get summaries for all registered providers (name, chat models, search models).
     fn get_all_provider_summaries(&self) -> Vec<ProviderSummary>;
 

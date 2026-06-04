@@ -51,6 +51,23 @@ impl FallbackChatProvider {
             model_cooldowns: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+
+    /// The model `chat()` would try first given the current cooldown state — the
+    /// model most likely to actually serve the next request. Skips entries still
+    /// on cooldown; falls back to the primary if every entry is cooling. Lets a
+    /// caller shape the request (native images vs the `view_image` tool) for the
+    /// model that will really serve it, instead of always assuming the primary.
+    pub fn next_model(&self) -> &str {
+        let cooldowns = self.model_cooldowns.lock().unwrap();
+        let now = Instant::now();
+        for entry in &self.chain {
+            let cooling = cooldowns.get(&entry.model_id).is_some_and(|&t| now < t);
+            if !cooling {
+                return &entry.model_id;
+            }
+        }
+        &self.chain[0].model_id
+    }
 }
 
 /// Returns `true` if the error is provider-specific and warrants failover to the
