@@ -57,9 +57,9 @@ impl Tool for ViewImageTool {
     }
 
     fn description(&self) -> &str {
-        "查看用户发送的图片内容。当对话中出现 `[图片 #N — 调用 view_image]` 占位符时，\
-         调用本工具并附上你想了解的具体问题，即可获得该图片的相关信息。\
-         image_id 对应占位符里的编号 N。"
+        "查看用户发送的图片内容。当对话中出现 `[图片 #N]` 标记时，说明那里有一张你看不到的\
+         图片；调用本工具并附上你想了解的具体问题，即可获得该图片的相关信息。\
+         image_id 对应标记里的编号 N。"
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

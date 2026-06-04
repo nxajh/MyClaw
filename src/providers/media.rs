@@ -194,7 +194,7 @@ mod tests {
         let caps = MediaCaps { image: true, audio: false };
         let out = lower_media_for(&ms, caps).expect("audio needs lowering");
         assert_eq!(out[0].parts.iter().filter(|p| is_image(p)).count(), 1, "image kept native");
-        assert!(!out[0].parts.iter().any(|p| is_audio(p)), "audio lowered");
+        assert!(!out[0].parts.iter().any(is_audio), "audio lowered");
         assert!(texts(&out).contains(&"[语音 #1]".to_string()));
     }
 }
