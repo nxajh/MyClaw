@@ -102,14 +102,13 @@ impl Agent {
         // tracking lives solely on `Session.token_tracker`; ContextEngine
         // only carries threshold/retain_units + summarizer state.
         let context = &runtime.context_engine;
-        // Reconcile Session.token_tracker against a fresh estimate of the actual
-        // history. This both seeds a fresh session and *corrects* a stale/low
-        // persisted total restored on restart (where `is_fresh()` is false so the
-        // old seed-only path was skipped) — so `should_compact` can't be fooled
-        // into never firing. Precise API usage is preserved; only the pending
-        // estimate is raised to cover any shortfall.
-        let history_estimate = estimate_history_tokens(turn_ctx.system_prompt, &session.history);
-        session.token_tracker.reconcile_with_estimate(history_estimate);
+        // Seed Session.token_tracker from history when fresh (display/usage only).
+        // The compaction decision does NOT read the tracker — it uses a direct
+        // per-request estimate in `maybe_compact` — so a stale tracker restored on
+        // restart can no longer suppress compaction.
+        if session.token_tracker.is_fresh() {
+            session.token_tracker.seed_from_history(turn_ctx.system_prompt, &session.history);
+        }
 
         // Assemble the LLM request prefix once. Subsequent rebuilds re-clone
         // the session's growing history.
@@ -201,11 +200,10 @@ impl Agent {
             let stream = provider.chat(req)?;
             let response = collect_stream(stream, &mut session.turn_stream).await?;
 
-            // Update Session.token_tracker from the API response. Target
-            // architecture: tokens are tracked solely on the Session (so
-            // they survive restarts via `last_total_tokens`); ContextEngine
-            // reads the count via `should_compact(total, window)` instead
-            // of keeping its own copy.
+            // Update Session.token_tracker from the API response. The tracker is
+            // the source of truth for *usage reporting* (display + persistence,
+            // surviving restarts); it is intentionally NOT the input to the
+            // compaction decision — `maybe_compact` sizes the request directly.
             if let Some(ref usage) = response.usage {
                 let input = usage.input_tokens.unwrap_or(0);
                 let output = usage.output_tokens.unwrap_or(0);

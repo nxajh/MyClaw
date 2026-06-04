@@ -90,26 +90,6 @@ impl TokenTracker {
         self.record_pending(estimate_history_tokens(system_prompt, history));
     }
 
-    /// Reconcile the tracked total against a fresh history estimate, bumping the
-    /// pending estimate so `total_tokens()` is never *below* `estimate`.
-    ///
-    /// This guards against a stale/under-counted persisted total: e.g. a total
-    /// saved right after compaction, then grown by hundreds of (un-usage-counted)
-    /// tool messages, then reloaded on restart — where `is_fresh()` is false so
-    /// `seed_from_history` is skipped and `should_compact` would otherwise never
-    /// fire. Precise API usage is preserved; only the pending estimate is raised
-    /// to cover any shortfall.
-    pub fn reconcile_with_estimate(&mut self, estimate: u64) {
-        let precise = self
-            .last_input_tokens
-            .saturating_add(self.last_cached_tokens)
-            .saturating_add(self.last_output_tokens);
-        let shortfall = estimate.saturating_sub(precise);
-        if shortfall > self.pending_estimated_tokens {
-            self.pending_estimated_tokens = shortfall;
-        }
-    }
-
     pub fn total_tokens(&self) -> u64 {
         self.last_input_tokens
             .saturating_add(self.last_cached_tokens)
@@ -155,30 +135,6 @@ pub fn is_write_tool(name: &str) -> bool {
 #[cfg(test)]
 mod tracker_tests {
     use super::*;
-
-    #[test]
-    fn reconcile_bumps_pending_to_cover_stale_total() {
-        // Simulate restart: tracker restored with a stale-low persisted total.
-        let mut t = TokenTracker::new();
-        t.update_from_usage(31_424, 0, 0); // last_input = 31_424, not fresh
-        assert!(!t.is_fresh());
-        assert_eq!(t.total_tokens(), 31_424);
-
-        // History actually estimates far higher → reconcile must raise total.
-        t.reconcile_with_estimate(280_000);
-        assert_eq!(t.total_tokens(), 280_000, "pending should cover the shortfall");
-    }
-
-    #[test]
-    fn reconcile_preserves_precise_usage_and_never_lowers() {
-        let mut t = TokenTracker::new();
-        t.update_from_usage(200_000, 500, 0);
-        let before = t.total_tokens();
-        // A lower estimate must not shrink the tracked total.
-        t.reconcile_with_estimate(50_000);
-        assert_eq!(t.total_tokens(), before);
-        assert_eq!(t.last_input(), 200_000);
-    }
 
     #[test]
     fn estimate_history_tokens_counts_system_and_messages() {
