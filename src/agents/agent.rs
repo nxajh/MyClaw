@@ -151,20 +151,41 @@ impl Agent {
             .map(|cfg| cfg.supports_image_input())
             .unwrap_or(false);
 
-        // Vision-as-tool: a text-only primary can still handle images by calling
-        // `view_image`, which routes the image + the model's OWN question to a
-        // vision model in the chain (context-aware, unlike a blind upfront
-        // caption). Inject the tool only when it can actually be used: the
-        // primary lacks native vision, the turn carries images, and the chain
-        // has a vision model. The images themselves are turned into numbered
-        // placeholders by `adapt_media_for_model` below.
-        if !model_supports_images
-            && history_has_images(&session.history)
-            && runtime
-                .providers
-                .find_chat_model_with_modality(crate::providers::capability::Modality::Image)
-                .is_some()
-        {
+        // Whether we may send images natively — decided by the model(s) that can
+        // actually serve this request, NOT just the primary:
+        // - override (/model): the sole serving model — use its capability.
+        // - fallback: any model in the chain may serve, so native is safe only
+        //   if EVERY routed model supports image input; otherwise a text-only
+        //   model could receive native images and choke. Default to the tool.
+        let send_images_natively = match turn_ctx.model_id {
+            Some(_) => model_supports_images,
+            None => {
+                let models = runtime.providers.get_chat_routing_models();
+                !models.is_empty()
+                    && models.iter().all(|m| {
+                        runtime
+                            .providers
+                            .get_chat_model_config(m)
+                            .map(|c| c.supports_image_input())
+                            .unwrap_or(false)
+                    })
+            }
+        };
+
+        // Vision-as-tool: a model that can't take images natively reaches them
+        // via `view_image`, which routes the image + the model's OWN question to
+        // a vision model in the chain (context-aware, unlike a blind caption).
+        // Inject the tool when either (a) we'll placeholder this turn's images,
+        // or (b) history already references view_image — keeping the tool present
+        // across a model switch (e.g. /model to a vision model) so the prior
+        // tool calls in history don't become orphan calls the provider rejects.
+        // Both require a vision model in the chain for the tool to function.
+        let vision_in_chain = runtime
+            .providers
+            .find_chat_model_with_modality(crate::providers::capability::Modality::Image)
+            .is_some();
+        let will_placeholder = !send_images_natively && history_has_images(&session.history);
+        if vision_in_chain && (will_placeholder || history_has_view_image_calls(&session.history)) {
             let vt: Arc<dyn crate::providers::Tool> =
                 Arc::new(crate::tools::ViewImageTool::new(Arc::clone(&runtime.providers)));
             tool_specs.push(ToolSpec {
@@ -175,7 +196,7 @@ impl Agent {
             allowed_tools.push(vt);
         }
 
-        adapt_media_for_model(&mut messages, runtime, &session.id, model_supports_images).await;
+        adapt_media_for_model(&mut messages, runtime, &session.id, send_images_natively).await;
 
         loop {
             // Shutdown checkpoint between LLM calls (mirrors AgentLoop chat_loop).
@@ -218,7 +239,7 @@ impl Agent {
                 turn_ctx.system_prompt,
                 &model_id,
                 &tool_specs,
-                model_supports_images,
+                send_images_natively,
                 false,
             )
             .await
@@ -271,7 +292,7 @@ impl Agent {
                         turn_ctx.system_prompt,
                         &model_id,
                         &tool_specs,
-                        model_supports_images,
+                        send_images_natively,
                         true, // force: bypass the threshold, we know it overflowed
                     )
                     .await
@@ -622,6 +643,18 @@ fn history_has_images(history: &[ChatMessage]) -> bool {
         m.parts
             .iter()
             .any(|p| matches!(p, ContentPart::ImageB64 { .. } | ContentPart::ImageUrl { .. }))
+    })
+}
+
+/// True if `history` contains a prior `view_image` tool call. Used to keep the
+/// tool present after a model switch so those calls don't become orphan tool
+/// calls (declared in history but absent from the request's tool list).
+fn history_has_view_image_calls(history: &[ChatMessage]) -> bool {
+    history.iter().any(|m| {
+        m.role == "assistant"
+            && m.tool_calls
+                .as_ref()
+                .is_some_and(|tcs| tcs.iter().any(|tc| tc.name == "view_image"))
     })
 }
 
@@ -1082,6 +1115,26 @@ mod tests {
     fn history_has_images_detects_image_parts() {
         assert!(!history_has_images(&[ChatMessage::user_text("hi")]));
         assert!(history_has_images(&[img_msg("AAA")]));
+    }
+
+    #[test]
+    fn history_has_view_image_calls_detects_prior_tool_use() {
+        let mut asst = ChatMessage::assistant_text("");
+        asst.tool_calls = Some(vec![ToolCall {
+            id: "c1".into(),
+            name: "view_image".into(),
+            arguments: "{}".into(),
+        }]);
+        assert!(history_has_view_image_calls(&[asst]));
+
+        let mut other = ChatMessage::assistant_text("");
+        other.tool_calls = Some(vec![ToolCall {
+            id: "c2".into(),
+            name: "calculator".into(),
+            arguments: "{}".into(),
+        }]);
+        assert!(!history_has_view_image_calls(&[other]));
+        assert!(!history_has_view_image_calls(&[ChatMessage::user_text("hi")]));
     }
 
     #[test]
