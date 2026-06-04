@@ -586,6 +586,13 @@ pub struct ContextEngine {
 }
 ```
 
+> **压缩时序（重要）**：`agent.rs::run` 在**发送前**调 `maybe_compact(.., force=false)`
+> 作为大小闸门——阈值判定用 `estimate_history_tokens(系统提示+history)` 这个**直接估算**，
+> 而非 `token_tracker`，以免 tracker 偏低（重启后恢复了陈旧的持久 total）放行越界请求。
+> 若 provider 仍回 `StopReason::ContextOverflow`，则 `maybe_compact(.., force=true)` 强制压缩并
+> 重试（上限 `MAX_OVERFLOW_RETRIES`）；压缩无法再减则给用户一条明确提示而非静默放弃。
+> 旧的"仅在 API 返回后基于 tracker 判定压缩"已被发送前闸门取代。
+
 **Impl** `impl ContextEngine`:
 ```rust
   pub fn new(
@@ -1672,6 +1679,10 @@ pub struct TokenTracker {
   pub fn update_from_usage(&mut self, input_tokens: u64, output_tokens: u64, cached_tokens: u64)
   pub fn record_pending(&mut self, tokens: u64)
   pub fn seed_from_history(&mut self, system_prompt: &str, history: &[ChatMessage])
+  // Raise pending so total_tokens() >= estimate — corrects a stale/low persisted
+  // total restored on restart (is_fresh()==false skips seed). Never lowers; keeps
+  // precise API usage. Called every turn-start with estimate_history_tokens(...).
+  pub fn reconcile_with_estimate(&mut self, estimate: u64)
   pub fn total_tokens(&self) -> u64
   pub fn is_fresh(&self) -> bool
   pub fn last_input(&self) -> u64 { self.last_input_tokens }
@@ -7408,6 +7419,11 @@ pub enum StopReason {
   ContentFilter,
   ToolUse,
   Timeout,
+  // Provider rejected the request as over the context window (empty body).
+  // Mapped from GLM `model_context_window_exceeded` etc. via
+  // `is_context_overflow_reason()`. Agent forces a compaction + retry instead
+  // of misreading it as EndTurn and blindly retrying an empty response.
+  ContextOverflow,
 }
 ```
 

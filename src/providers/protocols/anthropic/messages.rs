@@ -272,6 +272,9 @@ fn parse_anthropic_sse(
                             "max_tokens" => StopReason::MaxTokens,
                             "tool_use" => StopReason::ToolUse,
                             "content_filter" => StopReason::ContentFilter,
+                            s if crate::providers::capability_chat::is_context_overflow_reason(s) => {
+                                StopReason::ContextOverflow
+                            }
                             _ => StopReason::EndTurn,
                         };
                         events.push(StreamEvent::Done { reason });

@@ -433,6 +433,13 @@ fn parse_glm_sse(line: &str, saw_tool_call: &mut bool) -> Option<Vec<StreamEvent
                 "tool_calls" => StopReason::ToolUse,
                 "length" => StopReason::MaxTokens,
                 "content_filter" | "sensitive" => StopReason::ContentFilter,
+                // GLM rejects an over-length request with
+                // `model_context_window_exceeded` (empty content + no tool_calls);
+                // surface it so the agent compacts & retries instead of treating
+                // the empty body as a normal EndTurn and blindly retrying.
+                s if crate::providers::capability_chat::is_context_overflow_reason(s) => {
+                    StopReason::ContextOverflow
+                }
                 _ => StopReason::EndTurn,
             };
             events.push(StreamEvent::Done { reason });
@@ -559,5 +566,33 @@ impl SearchProvider for GlmProvider {
             total,
             query: req.query,
         })
+    }
+}
+
+#[cfg(test)]
+mod overflow_tests {
+    use super::*;
+
+    fn done_reason(line: &str) -> Option<StopReason> {
+        let mut saw_tool_call = false;
+        parse_glm_sse(line, &mut saw_tool_call)?.into_iter().find_map(|e| match e {
+            StreamEvent::Done { reason } => Some(reason),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn maps_context_window_exceeded_to_overflow() {
+        let line = r#"data: {"choices":[{"delta":{"content":""},"finish_reason":"model_context_window_exceeded"}]}"#;
+        assert_eq!(done_reason(line), Some(StopReason::ContextOverflow));
+    }
+
+    #[test]
+    fn plain_stop_and_length_unaffected() {
+        let stop = r#"data: {"choices":[{"delta":{"content":""},"finish_reason":"stop"}]}"#;
+        assert_eq!(done_reason(stop), Some(StopReason::EndTurn));
+        // `length` is the output-token cap, NOT a context overflow.
+        let length = r#"data: {"choices":[{"delta":{"content":""},"finish_reason":"length"}]}"#;
+        assert_eq!(done_reason(length), Some(StopReason::MaxTokens));
     }
 }

@@ -271,6 +271,9 @@ fn parse_openai_sse(line: &str) -> Vec<StreamEvent> {
                 "length" => StopReason::MaxTokens,
                 "content_filter" => StopReason::ContentFilter,
                 "tool_calls" => StopReason::ToolUse,
+                s if crate::providers::capability_chat::is_context_overflow_reason(s) => {
+                    StopReason::ContextOverflow
+                }
                 _ => StopReason::EndTurn,
             };
             events.push(StreamEvent::Done { reason });

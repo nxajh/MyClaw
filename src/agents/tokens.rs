@@ -42,6 +42,20 @@ pub fn estimate_message_tokens(msg: &ChatMessage) -> u64 {
     tokens
 }
 
+/// Estimate the total prompt tokens for a system prompt + full history — i.e.
+/// the size of what an LLM request actually carries. Used both to seed/reconcile
+/// the [`TokenTracker`] and as a tracker-independent pre-send compaction guard.
+pub fn estimate_history_tokens(system_prompt: &str, history: &[ChatMessage]) -> u64 {
+    let mut total = 0u64;
+    if !system_prompt.is_empty() {
+        total += estimate_tokens(system_prompt) + 4;
+    }
+    for msg in history {
+        total += estimate_message_tokens(msg);
+    }
+    total
+}
+
 /// Token usage tracker — combines precise API-reported usage with
 /// estimated pending tokens. Lives on `Session.token_tracker`.
 #[derive(Debug, Clone, Default)]
@@ -73,11 +87,26 @@ impl TokenTracker {
     /// message in the history. Used at turn start when no prior API usage
     /// has been recorded yet (fresh session or post-restart).
     pub fn seed_from_history(&mut self, system_prompt: &str, history: &[ChatMessage]) {
-        if !system_prompt.is_empty() {
-            self.record_pending(estimate_tokens(system_prompt) + 4);
-        }
-        for msg in history {
-            self.record_pending(estimate_message_tokens(msg));
+        self.record_pending(estimate_history_tokens(system_prompt, history));
+    }
+
+    /// Reconcile the tracked total against a fresh history estimate, bumping the
+    /// pending estimate so `total_tokens()` is never *below* `estimate`.
+    ///
+    /// This guards against a stale/under-counted persisted total: e.g. a total
+    /// saved right after compaction, then grown by hundreds of (un-usage-counted)
+    /// tool messages, then reloaded on restart — where `is_fresh()` is false so
+    /// `seed_from_history` is skipped and `should_compact` would otherwise never
+    /// fire. Precise API usage is preserved; only the pending estimate is raised
+    /// to cover any shortfall.
+    pub fn reconcile_with_estimate(&mut self, estimate: u64) {
+        let precise = self
+            .last_input_tokens
+            .saturating_add(self.last_cached_tokens)
+            .saturating_add(self.last_output_tokens);
+        let shortfall = estimate.saturating_sub(precise);
+        if shortfall > self.pending_estimated_tokens {
+            self.pending_estimated_tokens = shortfall;
         }
     }
 
@@ -121,4 +150,44 @@ pub fn is_write_tool(name: &str) -> bool {
             | "agent_kill"
             | "http"
     )
+}
+
+#[cfg(test)]
+mod tracker_tests {
+    use super::*;
+
+    #[test]
+    fn reconcile_bumps_pending_to_cover_stale_total() {
+        // Simulate restart: tracker restored with a stale-low persisted total.
+        let mut t = TokenTracker::new();
+        t.update_from_usage(31_424, 0, 0); // last_input = 31_424, not fresh
+        assert!(!t.is_fresh());
+        assert_eq!(t.total_tokens(), 31_424);
+
+        // History actually estimates far higher → reconcile must raise total.
+        t.reconcile_with_estimate(280_000);
+        assert_eq!(t.total_tokens(), 280_000, "pending should cover the shortfall");
+    }
+
+    #[test]
+    fn reconcile_preserves_precise_usage_and_never_lowers() {
+        let mut t = TokenTracker::new();
+        t.update_from_usage(200_000, 500, 0);
+        let before = t.total_tokens();
+        // A lower estimate must not shrink the tracked total.
+        t.reconcile_with_estimate(50_000);
+        assert_eq!(t.total_tokens(), before);
+        assert_eq!(t.last_input(), 200_000);
+    }
+
+    #[test]
+    fn estimate_history_tokens_counts_system_and_messages() {
+        let history = vec![
+            ChatMessage::user_text("hello there"),
+            ChatMessage::assistant_text("hi"),
+        ];
+        let est = estimate_history_tokens("you are a bot", &history);
+        // Strictly greater than the system prompt alone + nonzero per message.
+        assert!(est > estimate_tokens("you are a bot"));
+    }
 }
