@@ -42,6 +42,32 @@ fn is_transient(category: &ErrorCategory) -> bool {
     )
 }
 
+/// Classify a stream event: `Some(true)` = transient terminal error (retry),
+/// `Some(false)` = terminal error that should be forwarded, `None` = a normal
+/// (non-terminal) event. Folds the `HttpError`/`Error` cases into one path.
+fn terminal_error_is_transient(event: &StreamEvent) -> Option<bool> {
+    let classified = match event {
+        StreamEvent::HttpError { status, message } => {
+            ClassifiedError::classify("retry", *status, message)
+        }
+        StreamEvent::Error(msg) => ClassifiedError::classify("retry", 0, msg),
+        _ => return None,
+    };
+    Some(is_transient(&classified.category))
+}
+
+/// Whether an event carries user-visible content (so re-running would duplicate).
+fn is_content(event: &StreamEvent) -> bool {
+    matches!(
+        event,
+        StreamEvent::Delta { .. }
+            | StreamEvent::Thinking { .. }
+            | StreamEvent::ToolCallStart { .. }
+            | StreamEvent::ToolCallDelta { .. }
+            | StreamEvent::ToolCallEnd { .. }
+    )
+}
+
 /// Short exponential backoff: 500ms, 1s, 2s, … (gateway blips usually clear in
 /// well under a second; we keep total added latency bounded for an interactive
 /// turn rather than honoring the classifier's multi-minute cooldown).
@@ -86,44 +112,20 @@ impl ChatProvider for RetryChatProvider {
                     stream: stream_flag,
                 };
 
-                // Decide retry vs. forward for a classified error. We only retry
-                // when nothing has been streamed yet — re-running after partial
-                // output would duplicate the user-visible response.
+                // We only retry when nothing has been streamed yet — re-running
+                // after partial output would duplicate the user-visible response.
                 let mut emitted = false;
+                let mut retry = false;
 
                 match inner.chat(req) {
                     Ok(mut stream) => {
-                        let mut retry = false;
                         while let Some(event) = stream.next().await {
-                            match &event {
-                                StreamEvent::HttpError { status, message } => {
-                                    let classified = ClassifiedError::classify(
-                                        "retry", *status, message,
-                                    );
-                                    if !emitted
-                                        && attempt < max_retries
-                                        && is_transient(&classified.category)
-                                    {
-                                        tracing::warn!(
-                                            model = %model_id, status = *status,
-                                            attempt = attempt + 1,
-                                            "transient HTTP error; retrying same model"
-                                        );
-                                        retry = true;
-                                        break;
-                                    }
-                                    let _ = tx.send(event).await;
-                                    return;
-                                }
-                                StreamEvent::Error(msg) => {
-                                    let classified = ClassifiedError::classify("retry", 0, msg);
-                                    if !emitted
-                                        && attempt < max_retries
-                                        && is_transient(&classified.category)
-                                    {
+                            match terminal_error_is_transient(&event) {
+                                Some(transient) => {
+                                    if !emitted && transient && attempt < max_retries {
                                         tracing::warn!(
                                             model = %model_id, attempt = attempt + 1,
-                                            "transient stream error; retrying same model"
+                                            "transient error; retrying same model"
                                         );
                                         retry = true;
                                         break;
@@ -131,28 +133,19 @@ impl ChatProvider for RetryChatProvider {
                                     let _ = tx.send(event).await;
                                     return;
                                 }
-                                StreamEvent::Delta { .. }
-                                | StreamEvent::Thinking { .. }
-                                | StreamEvent::ToolCallStart { .. }
-                                | StreamEvent::ToolCallDelta { .. }
-                                | StreamEvent::ToolCallEnd { .. } => {
-                                    emitted = true;
-                                    let _ = tx.send(event).await;
-                                }
-                                _ => {
+                                None => {
+                                    emitted |= is_content(&event);
                                     let _ = tx.send(event).await;
                                 }
                             }
                         }
-                        if !retry {
-                            // Stream ended (Done forwarded) — success, or a
-                            // mid-stream error already forwarded above.
-                            return;
-                        }
                     }
                     Err(e) => {
-                        let classified = ClassifiedError::classify("retry", 0, &e.to_string());
-                        if !(attempt < max_retries && is_transient(&classified.category)) {
+                        // chat() setup error — retry only if transient.
+                        retry = attempt < max_retries
+                            && terminal_error_is_transient(&StreamEvent::Error(e.to_string()))
+                                .unwrap_or(false);
+                        if !retry {
                             let _ = tx.send(StreamEvent::Error(e.to_string())).await;
                             return;
                         }
@@ -163,6 +156,11 @@ impl ChatProvider for RetryChatProvider {
                     }
                 }
 
+                if !retry {
+                    // Stream ended normally (Done forwarded), or a terminal error
+                    // was already forwarded above.
+                    return;
+                }
                 tokio::time::sleep(backoff(attempt)).await;
                 attempt += 1;
             }
