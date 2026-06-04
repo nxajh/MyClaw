@@ -67,6 +67,14 @@ pub trait Tool: Send + Sync {
         10_000
     }
 
+    /// Whether this tool legitimately blocks on a human (e.g. `ask_user`) and
+    /// must therefore be exempt from the executor's generic per-tool timeout —
+    /// a human has no predictable response latency, so the compute-tool
+    /// watchdog does not apply. Default: `false`.
+    fn blocks_on_human(&self) -> bool {
+        false
+    }
+
     /// Execute the tool with the given arguments.
     ///
     /// `session` carries the calling session's identity, owner (routing_key),

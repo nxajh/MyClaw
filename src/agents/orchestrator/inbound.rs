@@ -353,7 +353,6 @@ mod tests {
     use super::*;
 
     use super::super::test_support::{inbound_msg, test_ctx, MockChannel};
-    use std::time::Duration;
 
     /// Golden test: the inbound chain order is load-bearing (ask-reply must run
     /// before callback before dispatch, etc.). Pin it so reordering is a
@@ -407,7 +406,7 @@ mod tests {
         // Register an outstanding ask for this session.
         let router = ctx.ask.clone();
         let sid = session_id.clone();
-        let waiter = tokio::spawn(async move { router.wait_for_reply(&sid, Duration::from_secs(5)).await });
+        let waiter = tokio::spawn(async move { router.wait_for_reply(&sid).await });
         tokio::task::yield_now().await;
 
         let flow = AskReply.handle(&ctx, &k, inbound_msg("user1", "the answer")).await;
