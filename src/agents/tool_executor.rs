@@ -120,7 +120,13 @@ pub(crate) struct MemoryToolExecutor {
 }
 
 impl MemoryToolExecutor {
-    const ALLOWED: &'static [&'static str] = &["file_read", "file_write", "file_edit", "shell", "memory_manage"];
+    /// Tools the summarizer is permitted to call during compaction: file
+    /// read/write/edit, shell, and the dedicated `memory_manage` tool. The
+    /// summarizer request still advertises the *full* tool list (for prefix-cache
+    /// matching with the main request); this allow-list is the actual gate —
+    /// any other tool call is blocked with an error result.
+    const ALLOWED: &'static [&'static str] =
+        &["file_read", "file_write", "file_edit", "shell", "memory_manage"];
 
     pub(crate) fn new(tools: Arc<ToolRegistry>) -> Self {
         Self { tools }

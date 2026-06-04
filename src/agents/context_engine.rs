@@ -64,7 +64,7 @@ impl ContextEngine {
             registry,
             resources,
             memory_executor: MemoryToolExecutor::new(tools),
-            max_rounds: 10,
+            max_rounds: 30,
         }
     }
 
@@ -111,7 +111,8 @@ impl ContextEngine {
     /// `tool_specs` must match the spec list used for the main LLM
     /// request so the provider's prefix cache key (model +
     /// system_prompt + tool_definitions) matches and the summarizer
-    /// call hits the cache.
+    /// call hits the cache. Execution is gated separately by
+    /// `MemoryToolExecutor`, which permits only the memory tools.
     pub(crate) async fn execute_compaction(
         &self,
         history: &[ChatMessage],
@@ -239,6 +240,11 @@ impl ContextEngine {
                 thinking: thinking.clone(),
                 stop: None,
                 seed: None,
+                // Carry the *full* tool list (not just the executable subset) so
+                // the prefix-cache key (model + system_prompt + tool_definitions)
+                // matches the main request and the summarizer call hits the
+                // cache. Gating happens in the executor: MemoryToolExecutor
+                // permits only the memory tools and blocks everything else.
                 tools: if tool_specs.is_empty() { None } else { Some(tool_specs) },
                 stream: true,
             };

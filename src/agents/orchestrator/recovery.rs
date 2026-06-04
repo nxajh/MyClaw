@@ -121,8 +121,18 @@ pub(super) fn run_startup(
     unfinished: &[UnfinishedSubAgent],
     delegator: &Option<Arc<DelegationCoordinator>>,
 ) {
+    // `list_all_sessions` returns one entry per persisted session *record*, but
+    // recovery is keyed by `owner` (the routing key) and always resumes that
+    // owner's *active* session. An owner with N historical sessions would
+    // otherwise spawn N identical recovery tasks for the same active session
+    // (they serialize on the shared turn_lock, so N-1 are wasted no-ops). Dedup
+    // on the owner key so each active session is recovered exactly once.
+    let mut seen_owners = std::collections::HashSet::new();
     for info in sessions.list_all_sessions() {
         let key = info.owner;
+        if !seen_owners.insert(key.clone()) {
+            continue;
+        }
         let snap = sessions.get_or_create(&key);
         if snap.history.is_empty() || !super::history_has_incomplete_turn(&snap.history) {
             continue;

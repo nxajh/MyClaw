@@ -184,7 +184,9 @@ impl Agent {
             // history estimate (not the token tracker) so a stale/under-counted
             // tracker can't let an over-window request through. This is the real
             // fix for the "974 msgs sent at 31k tracked → context overflow" bug.
-            if let Some(compacted) = maybe_compact(
+            // Loops until under threshold so a history far over the window
+            // converges within this turn rather than one chunk per user turn.
+            if let Some(compacted) = compact_until_fit(
                 context,
                 session,
                 runtime,
@@ -237,7 +239,7 @@ impl Agent {
             if response.stop_reason == StopReason::ContextOverflow {
                 overflow_retries += 1;
                 let recovered = if overflow_retries <= MAX_OVERFLOW_RETRIES {
-                    maybe_compact(
+                    compact_until_fit(
                         context,
                         session,
                         runtime,
@@ -747,6 +749,56 @@ async fn maybe_compact(
             None
         }
     }
+}
+
+/// Compact repeatedly until the history estimate drops below the compaction
+/// threshold, or no further progress is possible.
+///
+/// A single `maybe_compact` pass folds only a bounded prefix (≤ the compaction
+/// budget, ~window×threshold) into the rolling summary, so a history far over
+/// the window — e.g. 934K against a 262K window — used to shrink by one chunk
+/// per *user turn*, taking 6+ turns (and 6+ stalls) to converge. Looping the
+/// passes within one turn drives it under threshold before we send, while
+/// keeping each summary's input bounded (so per-summary fidelity is unchanged).
+///
+/// `force` applies only to the first pass (the provider-overflow backstop knows
+/// the request overflowed even when our estimate sits under threshold); later
+/// passes are gated by `should_compact`, so the loop stops the moment we fit.
+/// Each `Some` pass strictly shrinks history (one fewer work unit), so the loop
+/// terminates; `MAX_PASSES` is a defensive cap against pathological summary
+/// growth.
+#[allow(clippy::too_many_arguments)]
+async fn compact_until_fit(
+    context: &ContextEngine,
+    session: &mut Session,
+    runtime: &AgentRuntime,
+    system_prompt: &str,
+    model_id: &str,
+    tool_specs: &[ToolSpec],
+    model_supports_images: bool,
+    force: bool,
+) -> Option<Vec<ChatMessage>> {
+    const MAX_PASSES: usize = 10;
+    let mut latest: Option<Vec<ChatMessage>> = None;
+    for pass in 0..MAX_PASSES {
+        let force_pass = force && pass == 0;
+        match maybe_compact(
+            context,
+            session,
+            runtime,
+            system_prompt,
+            model_id,
+            tool_specs,
+            model_supports_images,
+            force_pass,
+        )
+        .await
+        {
+            Some(messages) => latest = Some(messages),
+            None => break,
+        }
+    }
+    latest
 }
 
 /// Pull the text of the most recent user message from history, if any.
