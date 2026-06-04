@@ -27,6 +27,7 @@ mod skill_manage_tool;
 mod task;
 pub mod tool_search;
 pub mod truncation;
+mod view_image;
 mod web;
 mod web_search;
 pub mod search_cooldown;
@@ -50,6 +51,7 @@ pub use skill_manage_tool::SkillManageTool;
 pub use task::{TaskManagerTool, TaskState};
 pub use tool_search::ToolSearchTool;
 pub use truncation::{truncate_output, truncate_tool_result};
+pub use view_image::ViewImageTool;
 pub use web::WebFetchTool;
 pub use web_search::WebSearchTool;
 

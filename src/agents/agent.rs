@@ -59,11 +59,11 @@ impl Agent {
         runtime: &AgentRuntime,
     ) -> Result<TurnResult> {
         // Resolve filtered tool view from runtime + per-agent config.
-        let allowed_tools = self.allowed_tools(runtime);
+        let mut allowed_tools = self.allowed_tools(runtime);
         // Convert capability_tool::ToolSpec → capability_chat::ToolSpec
         // (the LLM request type). Same fields, different module homes —
         // a unification candidate for a separate cleanup.
-        let tool_specs: Vec<ToolSpec> = allowed_tools
+        let mut tool_specs: Vec<ToolSpec> = allowed_tools
             .iter()
             .map(|t| {
                 let s = t.spec();
@@ -150,6 +150,31 @@ impl Agent {
             .get_chat_model_config(&model_id)
             .map(|cfg| cfg.supports_image_input())
             .unwrap_or(false);
+
+        // Vision-as-tool: a text-only primary can still handle images by calling
+        // `view_image`, which routes the image + the model's OWN question to a
+        // vision model in the chain (context-aware, unlike a blind upfront
+        // caption). Inject the tool only when it can actually be used: the
+        // primary lacks native vision, the turn carries images, and the chain
+        // has a vision model. The images themselves are turned into numbered
+        // placeholders by `adapt_media_for_model` below.
+        if !model_supports_images
+            && history_has_images(&session.history)
+            && runtime
+                .providers
+                .find_chat_model_with_modality(crate::providers::capability::Modality::Image)
+                .is_some()
+        {
+            let vt: Arc<dyn crate::providers::Tool> =
+                Arc::new(crate::tools::ViewImageTool::new(Arc::clone(&runtime.providers)));
+            tool_specs.push(ToolSpec {
+                name: vt.name().to_string(),
+                description: Some(vt.description().to_string()),
+                input_schema: vt.parameters_schema(),
+            });
+            allowed_tools.push(vt);
+        }
+
         adapt_media_for_model(&mut messages, runtime, &session.id, model_supports_images).await;
 
         loop {
@@ -563,25 +588,73 @@ impl Agent {
 
 /// Normalize non-text media in the cloned `messages` when the primary model
 /// lacks image input. No-op for vision models — the `messages` clone already
-/// carries native `ImageUrl/ImageB64` parts from history. For non-vision
-/// models: historical images (every message except the current turn's last
-/// user message) reuse a cached description or degrade to a placeholder via
-/// `adapt_history_media`; the current turn's images are translated by an
-/// auxiliary vision model via `adapt_last_turn_media`. Operates on the clone
-/// only — persistent history is never mutated.
+/// carries native `ImageUrl/ImageB64` parts from history (current and
+/// historical), used natively.
+///
+/// For non-vision models, every image (current and historical) is replaced with
+/// a numbered `[图片 #N …]` placeholder. When a vision model exists in the chain
+/// the placeholder points at the `view_image` tool, which fetches the real image
+/// on demand and answers the model's own question (context-aware); otherwise it
+/// just notes the image can't be viewed. Audio is always transcribed (chat
+/// protocols can't carry audio natively). Operates on the clone only —
+/// persistent history is never mutated, so `view_image` can still read the real
+/// image from `session.history`.
 async fn adapt_media_for_model(
     messages: &mut [ChatMessage],
     runtime: &AgentRuntime,
     session_id: &str,
     model_supports_images: bool,
 ) {
-    use crate::agents::modality_adapter::{AUDIO_SPEC, IMAGE_SPEC};
-    // Audio is always adapted: chat protocols can't carry audio natively, so even
-    // an "audio-capable" primary model receives a text transcription. Images are
-    // adapted only when the model can't take them natively.
+    use crate::agents::modality_adapter::AUDIO_SPEC;
     adapt_modality(messages, runtime, session_id, &AUDIO_SPEC).await;
     if !model_supports_images {
-        adapt_modality(messages, runtime, session_id, &IMAGE_SPEC).await;
+        let vision_available = runtime
+            .providers
+            .find_chat_model_with_modality(crate::providers::capability::Modality::Image)
+            .is_some();
+        placeholder_images(messages, vision_available);
+    }
+}
+
+/// True if any message in `history` carries an image part.
+fn history_has_images(history: &[ChatMessage]) -> bool {
+    history.iter().any(|m| {
+        m.parts
+            .iter()
+            .any(|p| matches!(p, ContentPart::ImageB64 { .. } | ContentPart::ImageUrl { .. }))
+    })
+}
+
+/// Replace image parts in the cloned `messages` with numbered placeholders.
+/// Ids are assigned by scan order, matching `view_image`'s `nth_image_part`
+/// resolution against `session.history` (both skip non-image parts, and the
+/// only extra leading message — the system prompt — carries no images).
+fn placeholder_images(messages: &mut [ChatMessage], vision_available: bool) {
+    let mut n = 0;
+    for msg in messages.iter_mut() {
+        if !msg
+            .parts
+            .iter()
+            .any(|p| matches!(p, ContentPart::ImageB64 { .. } | ContentPart::ImageUrl { .. }))
+        {
+            continue;
+        }
+        let mut new_parts = Vec::with_capacity(msg.parts.len());
+        for part in std::mem::take(&mut msg.parts) {
+            match part {
+                ContentPart::ImageB64 { .. } | ContentPart::ImageUrl { .. } => {
+                    n += 1;
+                    let text = if vision_available {
+                        format!("[图片 #{n} — 调用 view_image(image_id={n}, question=…) 查看内容]")
+                    } else {
+                        format!("[图片 #{n} — 当前无可用视觉模型，无法查看]")
+                    };
+                    new_parts.push(ContentPart::Text { text });
+                }
+                other => new_parts.push(other),
+            }
+        }
+        msg.parts = new_parts;
     }
 }
 
@@ -992,6 +1065,66 @@ mod tests {
     use crate::agents::session::Session;
     use crate::config::sub_agent::SubAgentConfig;
 
+    fn img_msg(b64: &str) -> ChatMessage {
+        let mut m = ChatMessage::user_text("");
+        m.parts = vec![
+            ContentPart::Text { text: "看图".into() },
+            ContentPart::ImageB64 {
+                b64_json: b64.into(),
+                media_type: None,
+                detail: crate::providers::ImageDetail::Auto,
+            },
+        ];
+        m
+    }
+
+    #[test]
+    fn history_has_images_detects_image_parts() {
+        assert!(!history_has_images(&[ChatMessage::user_text("hi")]));
+        assert!(history_has_images(&[img_msg("AAA")]));
+    }
+
+    #[test]
+    fn placeholder_images_numbers_and_points_at_tool() {
+        let mut messages = vec![
+            ChatMessage::system_text("sys"),
+            img_msg("AAA"),
+            img_msg("BBB"),
+        ];
+        placeholder_images(&mut messages, true);
+        // No image parts survive; two numbered placeholders pointing at view_image.
+        let texts: Vec<String> = messages
+            .iter()
+            .flat_map(|m| m.parts.iter())
+            .filter_map(|p| match p {
+                ContentPart::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(messages
+            .iter()
+            .flat_map(|m| &m.parts)
+            .all(|p| !matches!(p, ContentPart::ImageB64 { .. })));
+        assert!(texts.iter().any(|t| t.contains("#1") && t.contains("view_image")));
+        assert!(texts.iter().any(|t| t.contains("#2") && t.contains("view_image")));
+    }
+
+    #[test]
+    fn placeholder_images_notes_when_no_vision_model() {
+        let mut messages = vec![img_msg("AAA")];
+        placeholder_images(&mut messages, false);
+        let joined: String = messages
+            .iter()
+            .flat_map(|m| &m.parts)
+            .filter_map(|p| match p {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(joined.contains("无可用视觉模型"));
+        assert!(!joined.contains("view_image"));
+    }
+
     fn empty_config() -> SubAgentConfig {
         SubAgentConfig {
             name: "test".into(),
@@ -1278,10 +1411,12 @@ mod tests {
         assert_eq!(imgs, 1, "image must not be duplicated");
     }
 
-    /// T4.2a — non-vision model with an auxiliary vision model in the routing
-    /// chain: the current-turn image is translated to text via the aux model.
+    /// T4.2a — non-vision model with a vision model in the routing chain: the
+    /// image is replaced by a numbered `view_image` placeholder (NOT a blind aux
+    /// description — the model fetches it on demand with its own question). The
+    /// aux provider is not called during adaptation.
     #[tokio::test]
-    async fn adapt_translates_current_turn_with_aux() {
+    async fn adapt_placeholders_image_with_view_image_tool() {
         let mut configs = HashMap::new();
         configs.insert("aux".to_string(), vision_cfg());
         let mut providers: HashMap<String, Arc<dyn ChatProvider>> = HashMap::new();
@@ -1292,9 +1427,10 @@ mod tests {
 
         adapt_media_for_model(&mut messages, &runtime, "test-session", false).await;
 
-        assert!(!has_image(&messages[0]), "image must be replaced by text for non-vision model");
+        assert!(!has_image(&messages[0]), "image must be replaced by a placeholder for non-vision model");
         let text = joined_text(&messages[0]);
-        assert!(text.contains("A RED CAT"), "aux description must be injected: {text}");
+        assert!(text.contains("view_image") && text.contains("#1"), "must point at view_image: {text}");
+        assert!(!text.contains("A RED CAT"), "adaptation must NOT call the vision model: {text}");
         assert!(text.contains("what is this?"), "original user text must be preserved: {text}");
     }
 
