@@ -578,6 +578,57 @@ impl QQBotChannel {
         }
     }
 
+    /// Download image attachments from the raw inbound `data` payload,
+    /// convert to base64, and store in `msg.image_base64`.
+    ///
+    /// The API proxy (`us.jinl.in/cpa`) does not support `{"type":"url"}` image
+    /// sources — it silently drops them, causing the vision model to hallucinate.
+    /// Downloading upfront and inlining as base64 guarantees the image is seen.
+    async fn ingest_image_attachments(
+        &self,
+        data: &serde_json::Value,
+        msg: &mut ChannelMessage,
+    ) {
+        let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) else {
+            return;
+        };
+        let mut images = Vec::new();
+        for att in attachments {
+            let ct = att.get("content_type").and_then(|v| v.as_str()).unwrap_or("");
+            if !(ct == "image" || ct.starts_with("image/")) {
+                continue;
+            }
+            let Some(url) = att.get("url").and_then(|v| v.as_str()) else { continue };
+            let full_url = if url.starts_with("http") {
+                url.to_string()
+            } else {
+                format!("https://{url}")
+            };
+            match self.http_client.get(&full_url).send().await.and_then(|r| r.error_for_status()) {
+                Ok(resp) => {
+                    match resp.bytes().await {
+                        Ok(bytes) => {
+                            use base64::Engine;
+                            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                            tracing::debug!(url = %full_url, size = bytes.len(), "qqbot: image downloaded and base64-encoded");
+                            images.push(b64);
+                        }
+                        Err(e) => {
+                            tracing::warn!("qqbot: reading image bytes failed for {full_url}: {e}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("qqbot: image download failed for {full_url}: {e}");
+                }
+            }
+        }
+        if !images.is_empty() {
+            msg.image_base64 = Some(images);
+            msg.image_urls = None; // base64 supersedes URLs; fallback on download failure.
+        }
+    }
+
     /// Build a markdown message body for QQ Bot API.
     /// Build a plain-text message body (msg_type=0).
     /// Required for active messages where markdown (msg_type=2) is not supported.
@@ -1477,6 +1528,10 @@ impl QQBotChannel {
                         // Voice/audio: use QQ's native ASR text when present, else
                         // attach downloaded bytes for the auxiliary STT model.
                         self.ingest_voice_attachments(&payload.d, &mut channel_msg).await;
+
+                        // Image: download and convert to base64 so vision models
+                        // can see the image without relying on proxy URL fetching.
+                        self.ingest_image_attachments(&payload.d, &mut channel_msg).await;
 
                         if tx.send(channel_msg.clone()).await.is_err() {
                             warn!("channel receiver dropped, stopping listen");
