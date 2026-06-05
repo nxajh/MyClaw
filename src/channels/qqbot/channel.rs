@@ -221,6 +221,7 @@ impl QQBotChannel {
         }
         match event_type {
             "C2C_MESSAGE_CREATE" => {
+                debug!(data = %data, "C2C_MESSAGE_CREATE raw payload");
                 let msg = match self.parse_c2c_message(data) {
                     Some(m) => m,
                     None => {
