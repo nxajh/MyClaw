@@ -1253,6 +1253,134 @@ impl Channel for QQBotChannel {
         Ok(())
     }
 
+    /// Send media (image/file) via QQ Bot rich media API.
+    ///
+    /// Two-step process:
+    /// 1. POST /v2/users/{openid}/files — upload file (base64), get file_info
+    /// 2. POST /v2/users/{openid}/messages — send message with msg_type=7 + media
+    async fn send_payload(
+        &self,
+        target: &crate::channels::SendTarget,
+        payload: &crate::channels::MessagePayload,
+    ) -> anyhow::Result<crate::channels::SendResult> {
+        match payload {
+            crate::channels::MessagePayload::Media { source, caption } => {
+                let (data, mime_type, file_name) = match source {
+                    crate::channels::MediaSource::Inline { data, mime_type, file_name } => {
+                        (data.clone(), mime_type.clone(), file_name.clone())
+                    }
+                    crate::channels::MediaSource::Url(url) => {
+                        let full = if url.starts_with("http") {
+                            url.to_string()
+                        } else {
+                            format!("https://{url}")
+                        };
+                        let resp = self.http_client.get(&full).send().await
+                            .map_err(|e| anyhow::anyhow!("download failed: {e}"))?;
+                        let bytes = resp.bytes().await
+                            .map_err(|e| anyhow::anyhow!("read bytes failed: {e}"))?;
+                        (bytes.to_vec(), None, None)
+                    }
+                };
+
+                let fname = file_name.unwrap_or_else(|| "file".to_string());
+
+                // Determine file_type: 1=image, 2=video, 3=voice, 4=file
+                let file_type = match mime_type.as_deref() {
+                    Some(m) if m.starts_with("image/") => 1,
+                    Some(m) if m.starts_with("video/") => 2,
+                    Some(m) if m.starts_with("audio/") => 3,
+                    _ => {
+                        let ext = fname.rsplit('.').next().unwrap_or("");
+                        match ext {
+                            "png" | "jpg" | "jpeg" | "gif" | "webp" => 1,
+                            "mp4" => 2,
+                            "mp3" | "wav" | "ogg" | "flac" | "silk" => 3,
+                            _ => 4,
+                        }
+                    }
+                };
+
+                use base64::Engine;
+                let file_data = base64::engine::general_purpose::STANDARD.encode(&data);
+
+                // Parse recipient to determine c2c vs group
+                let (openid, is_group) = {
+                    let raw = &target.recipient;
+                    if let Some(oid) = raw.strip_prefix("c2c:") {
+                        (oid.to_string(), false)
+                    } else if let Some(oid) = raw.strip_prefix("group:") {
+                        (oid.to_string(), true)
+                    } else {
+                        (raw.clone(), false)
+                    }
+                };
+
+                // Step 1: upload file
+                let files_url = if is_group {
+                    format!("{}/v2/groups/{}/files", API_BASE, openid)
+                } else {
+                    format!("{}/v2/users/{}/files", API_BASE, openid)
+                };
+
+                let upload_body = serde_json::json!({
+                    "file_type": file_type,
+                    "srv_send_msg": false,
+                    "file_data": file_data,
+                });
+
+                let token = self.token_manager.get_token().await?;
+                let ua = user_agent();
+                let upload_resp = self
+                    .http_client
+                    .post(&files_url)
+                    .header("Authorization", format!("QQBot {}", token))
+                    .header("Content-Type", "application/json")
+                    .header("User-Agent", &ua)
+                    .json(&upload_body)
+                    .send()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("upload failed: {e}"))?;
+
+                if !upload_resp.status().is_success() {
+                    let status = upload_resp.status();
+                    let text = upload_resp.text().await.unwrap_or_default();
+                    return Err(anyhow::anyhow!("upload returned {status}: {text}"));
+                }
+
+                let upload_result: serde_json::Value = upload_resp.json().await
+                    .map_err(|e| anyhow::anyhow!("upload parse failed: {e}"))?;
+                let file_info = upload_result
+                    .get("file_info")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("upload response missing file_info: {upload_result}"))?;
+
+                // Step 2: send message with media
+                let msg_url = if is_group {
+                    format!("{}/v2/groups/{}/messages", API_BASE, openid)
+                } else {
+                    format!("{}/v2/users/{}/messages", API_BASE, openid)
+                };
+
+                let caption_text = caption.as_deref().unwrap_or(" ");
+                let msg_body = serde_json::json!({
+                    "content": caption_text,
+                    "msg_type": 7,
+                    "media": { "file_info": file_info },
+                });
+
+                self.send_rest_with_retry(&msg_url, &msg_body).await?;
+                Ok(None)
+            }
+            // Everything else: delegate to default impl (text fallback).
+            _ => {
+                let msg = crate::channels::SendMessage::new(payload.to_fallback_text(), &target.recipient);
+                self.send(&msg).await?;
+                Ok(None)
+            }
+        }
+    }
+
     async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>> {
         // Start proactive background token refresh (OpenClaw-style).
         self.token_manager.start_background_refresh().await;

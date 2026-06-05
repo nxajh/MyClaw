@@ -21,7 +21,7 @@ use crate::agents::workspace::skills::SkillManager;
 use crate::agents::AgentRegistry;
 use crate::config::agent::PermissionMode;
 use crate::providers::ProviderRegistry;
-use crate::tools::search_cooldown::SearchProviderCooldown;
+use crate::tools::SearchProviderCooldown;
 
 use super::tool_registry::ToolRegistry;
 

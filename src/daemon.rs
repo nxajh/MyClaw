@@ -410,6 +410,7 @@ async fn build_tools(
     tools.register(Arc::new(crate::tools::AskUserTool::new(ask_router)));
 
     // Register additional built-in tools.
+    tools.register(Arc::new(crate::tools::SendMediaTool::new()));
     tools.register(Arc::new(crate::tools::ListDirTool::new()));
     tools.register(Arc::new(crate::tools::TaskManagerTool::new(
         crate::tools::TaskManagerTool::shared_state(),
@@ -734,7 +735,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let registry_arc: Arc<dyn crate::providers::ProviderRegistry> = Arc::new(registry);
 
     // Register WebSearchTool — requires ProviderRegistry for search routing.
-    let search_cooldown = Arc::new(crate::tools::search_cooldown::SearchProviderCooldown::new());
+    let search_cooldown = Arc::new(crate::tools::SearchProviderCooldown::new());
     tools.register(Arc::new(crate::tools::WebSearchTool::new(
         registry_arc.clone(),
         Arc::clone(&search_cooldown),

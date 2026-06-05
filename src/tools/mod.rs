@@ -21,6 +21,8 @@ mod http;
 mod list_dir;
 mod memory_tool;
 mod search;
+mod search_cooldown;
+mod send_media;
 mod shell;
 mod skill_tool;
 mod skills_list_tool;
@@ -31,7 +33,6 @@ pub mod truncation;
 mod view_image;
 mod web;
 mod web_search;
-pub mod search_cooldown;
 
 // Re-export tools.
 pub use agent_kill::AgentKillTool;
@@ -46,6 +47,8 @@ pub use http::HttpRequestTool;
 pub use list_dir::ListDirTool;
 pub use memory_tool::{MemoryListTool, MemoryViewTool, MemorySearchTool, MemoryManageTool};
 pub use search::{ContentSearchTool, GlobSearchTool};
+pub use search_cooldown::SearchProviderCooldown;
+pub use send_media::SendMediaTool;
 pub use shell::ShellTool;
 pub use skill_tool::SkillTool;
 pub use skills_list_tool::SkillsListTool;

@@ -1437,6 +1437,78 @@ impl Channel for TelegramChannel {
         Ok(())
     }
 
+    /// Send media (image/file) via Telegram Bot API.
+    async fn send_payload(
+        &self,
+        target: &crate::channels::SendTarget,
+        payload: &crate::channels::MessagePayload,
+    ) -> anyhow::Result<crate::channels::SendResult> {
+        let (chat_id, _thread_id) = Self::parse_reply_target(&target.recipient);
+
+        match payload {
+            // Media: upload file via multipart.
+            crate::channels::MessagePayload::Media { source, caption } => {
+                let (data, mime_type, file_name) = match source {
+                    crate::channels::MediaSource::Inline { data, mime_type, file_name } => {
+                        (data.clone(), mime_type.clone(), file_name.clone())
+                    }
+                    crate::channels::MediaSource::Url(url) => {
+                        // Download the URL first.
+                        let resp = self.http.get(url).send().await
+                            .map_err(|e| anyhow::anyhow!("failed to download media URL: {e}"))?;
+                        let data = resp.bytes().await
+                            .map_err(|e| anyhow::anyhow!("failed to read media bytes: {e}"))?;
+                        (data.to_vec(), None, None)
+                    }
+                };
+
+                let fname = file_name.unwrap_or_else(|| "file".to_string());
+                let is_image = mime_type
+                    .as_deref()
+                    .map(|m| m.starts_with("image/"))
+                    .unwrap_or_else(|| {
+                        let ext = fname.rsplit('.').next().unwrap_or("");
+                        matches!(ext, "png" | "jpg" | "jpeg" | "gif" | "webp")
+                    });
+
+                let method = if is_image { "sendPhoto" } else { "sendDocument" };
+                let part_name = if is_image { "photo" } else { "document" };
+
+                let form = reqwest::multipart::Form::new()
+                    .text("chat_id", chat_id.clone())
+                    .part(
+                        part_name.to_string(),
+                        reqwest::multipart::Part::bytes(data)
+                            .file_name(fname),
+                    );
+
+                // Add caption if present.
+                let form = match caption {
+                    Some(c) if !c.is_empty() => form.text("caption", c.clone()),
+                    _ => form,
+                };
+
+                let url = self.api_url(method);
+                let resp = self.http.post(&url).multipart(form).send().await
+                    .map_err(|e| anyhow::anyhow!("Telegram {method} failed: {e}"))?;
+
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    return Err(anyhow::anyhow!("Telegram {method} returned {status}: {text}"));
+                }
+
+                Ok(None)
+            }
+            // Everything else: delegate to default impl (text fallback).
+            _ => {
+                let msg = crate::channels::SendMessage::new(payload.to_fallback_text(), &target.recipient);
+                self.send(&msg).await?;
+                Ok(None)
+            }
+        }
+    }
+
     /// RFC §7.1 Phase 3: edit a previously sent Telegram message.
     /// `target.recipient` carries the chat_id; `message_id` is the
     /// Telegram message_id as a decimal string.
