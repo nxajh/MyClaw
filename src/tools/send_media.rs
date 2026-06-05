@@ -154,7 +154,12 @@ impl Tool for SendMediaTool {
             }
         };
 
-        let target = SendTarget::new(&reply_target);
+        let mut target = SendTarget::new(&reply_target);
+        // Carry the original inbound message ID as a passive reply reference
+        // so QQ Bot doesn't consume the active message quota.
+        if let Some(ref last_msg) = session.last_message {
+            target = target.with_thread(&last_msg.id);
+        }
         let payload = MessagePayload::Media {
             source: MediaSource::Inline {
                 data,

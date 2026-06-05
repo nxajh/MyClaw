@@ -1363,12 +1363,15 @@ impl Channel for QQBotChannel {
                 };
 
                 let caption_text = caption.as_deref().unwrap_or(" ");
-                let msg_body = serde_json::json!({
+                let mut msg_body = serde_json::json!({
                     "content": caption_text,
                     "msg_type": 7,
                     "media": { "file_info": file_info },
                 });
-
+                // Include msg_id for passive reply (avoids consuming active quota).
+                if let Some(ref msg_id) = target.thread_id {
+                    msg_body["msg_id"] = serde_json::json!(msg_id);
+                }
                 self.send_rest_with_retry(&msg_url, &msg_body).await?;
                 Ok(None)
             }
