@@ -462,15 +462,14 @@ impl QQBotChannel {
     /// Ingest voice/audio attachments from a raw inbound `data` payload.
     ///
     /// Per the official QQ v2 schema, an inbound voice attachment is
-    /// `{ content_type: "voice", url, filename, size }` and the file is SILK —
-    /// there is NO native ASR/transcription field. We download `url` and attach
-    /// it as `audio/silk` for the auxiliary STT model. Note SILK is rejected by
-    /// most STT models, so this commonly degrades to a "[audio]" placeholder
-    /// unless a SILK-capable audio model is configured.
+    /// `{ content_type: "voice", url, filename, size }` and the file is SILK.
+    /// Some gateways also provide `voice_wav_url` (a pre-converted WAV) and
+    /// `asr_refer_text` (Tencent's own transcription).
     ///
-    /// As a zero-cost best effort we also read `asr_refer_text` first: it is NOT
-    /// in the official schema, but some gateways/proxies inject a transcription
-    /// there — when present we use it and skip the download.
+    /// Priority:
+    /// 1. `asr_refer_text` present → inject text directly, skip download.
+    /// 2. `voice_wav_url` present → download WAV (no SILK decoding needed).
+    /// 3. Fallback → download `url` (SILK; requires SILK-aware audio model).
     async fn ingest_voice_attachments(
         &self,
         data: &serde_json::Value,
@@ -501,12 +500,18 @@ impl QQBotChannel {
                 continue;
             }
 
-            // Official path: download the SILK voice file referenced by `url`.
-            let Some(url) = att.get("url").and_then(|v| v.as_str()) else { continue };
-            let full_url = if url.starts_with("http") {
-                url.to_string()
+            // Choose audio source: prefer platform-preconverted WAV over raw SILK.
+            let wav_url = att
+                .get("voice_wav_url")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
+            let raw_url = att.get("url").and_then(|v| v.as_str());
+            let Some(audio_url) = wav_url.or(raw_url) else { continue };
+
+            let full_url = if audio_url.starts_with("http") {
+                audio_url.to_string()
             } else {
-                format!("https://{url}")
+                format!("https://{audio_url}")
             };
             let resp = match self
                 .http_client
@@ -517,8 +522,27 @@ impl QQBotChannel {
             {
                 Ok(r) => r,
                 Err(e) => {
-                    warn!("qqbot: audio download failed for {full_url}: {e}");
-                    continue;
+                    // If the WAV URL failed and a raw SILK URL exists, try it.
+                    if wav_url.is_some() {
+                        if let Some(fallback) = raw_url {
+                            let fb_full = if fallback.starts_with("http") {
+                                fallback.to_string()
+                            } else {
+                                format!("https://{fallback}")
+                            };
+                            warn!("qqbot: voice_wav_url download failed ({e}), falling back to raw SILK");
+                            match self.http_client.get(&fb_full).send().await.and_then(|r| r.error_for_status()) {
+                                Ok(r) => r,
+                                Err(e2) => { warn!("qqbot: SILK fallback also failed: {e2}"); continue; }
+                            }
+                        } else {
+                            warn!("qqbot: audio download failed for {full_url}: {e}");
+                            continue;
+                        }
+                    } else {
+                        warn!("qqbot: audio download failed for {full_url}: {e}");
+                        continue;
+                    }
                 }
             };
             let bytes = match resp.bytes().await {
@@ -528,8 +552,14 @@ impl QQBotChannel {
                     continue;
                 }
             };
-            // QQ voice files are SILK (official: 语音=silk); "voice" is not a MIME.
-            let mime = if ctype.contains('/') { ctype.to_string() } else { "audio/silk".to_string() };
+            // If we downloaded from voice_wav_url the format is WAV; otherwise SILK.
+            let mime = if wav_url.is_some() {
+                "audio/wav".to_string()
+            } else if ctype.contains('/') {
+                ctype.to_string()
+            } else {
+                "audio/silk".to_string()
+            };
             let file_name = att
                 .get("filename")
                 .and_then(|v| v.as_str())
