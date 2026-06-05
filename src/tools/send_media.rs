@@ -17,6 +17,12 @@ const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB
 
 pub struct SendMediaTool;
 
+impl Default for SendMediaTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SendMediaTool {
     pub fn new() -> Self {
         Self
