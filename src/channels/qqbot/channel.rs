@@ -383,10 +383,12 @@ impl QQBotChannel {
         let msg_id = data.get("id")?.as_str()?;
 
         // Parse image URLs from attachments.
+        // QQ Bot uses MIME types (e.g. "image/jpeg"), not bare "image".
         let image_urls = if let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) {
             let urls: Vec<String> = attachments.iter()
                 .filter_map(|a| {
-                    if a.get("content_type").and_then(|v| v.as_str()) == Some("image") {
+                    let ct = a.get("content_type").and_then(|v| v.as_str()).unwrap_or("");
+                    if ct == "image" || ct.starts_with("image/") {
                         a.get("url").and_then(|v| v.as_str()).map(String::from)
                     } else {
                         None
@@ -428,10 +430,12 @@ impl QQBotChannel {
         let msg_id = data.get("id")?.as_str()?;
 
         // Parse image URLs from attachments.
+        // QQ Bot uses MIME types (e.g. "image/jpeg"), not bare "image".
         let image_urls = if let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) {
             let urls: Vec<String> = attachments.iter()
                 .filter_map(|a| {
-                    if a.get("content_type").and_then(|v| v.as_str()) == Some("image") {
+                    let ct = a.get("content_type").and_then(|v| v.as_str()).unwrap_or("");
+                    if ct == "image" || ct.starts_with("image/") {
                         a.get("url").and_then(|v| v.as_str()).map(String::from)
                     } else {
                         None
