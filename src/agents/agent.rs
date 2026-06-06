@@ -24,7 +24,7 @@ use crate::agents::turn::{TurnContext, TurnResult};
 use crate::agents::turn_event::TurnEvent;
 use crate::agents::AgentRuntime;
 use crate::config::sub_agent::SubAgentConfig;
-use crate::providers::capability_chat::{ChatMessage, ChatProvider, ChatRequest, StopReason, ToolSpec};
+use crate::providers::capability_chat::{ChatMessage, ChatRequest, StopReason, ToolSpec};
 use crate::providers::{BoxStream, Capability, ContentPart, StreamEvent, ToolCall};
 use crate::storage::SummaryRecord;
 
@@ -79,22 +79,15 @@ impl Agent {
         //
         // - No override → the Chat fallback wrapper (fans out across the
         //   configured chain on transient errors).
-        // - Override (`/model`) → the raw per-model provider, but wrapped in
-        //   `RetryChatProvider` so a 502/timeout/connection-drop is retried on
-        //   the SAME chosen model rather than failing the turn. We intentionally
-        //   do NOT fall back to a different model here — the user picked this one.
-        const OVERRIDE_RETRIES: usize = 3;
+        // - Override (`/model`) → the raw per-model provider. Transient errors
+        //   (502/timeout/SSE interruption) are retried in the LLM call loop
+        //   below on the SAME chosen model. We intentionally do NOT fall back
+        //   to a different model — the user picked this one.
         let (provider, model_id) = match turn_ctx.model_id {
-            Some(m) => {
-                let (p, id) = runtime
-                    .providers
-                    .get_chat_provider_by_model(m)
-                    .ok_or_else(|| anyhow::anyhow!("model '{}' not found in registry", m))?;
-                let retrying: Arc<dyn ChatProvider> = Arc::new(
-                    crate::providers::RetryChatProvider::new(p, id.clone(), OVERRIDE_RETRIES),
-                );
-                (retrying, id)
-            }
+            Some(m) => runtime
+                .providers
+                .get_chat_provider_by_model(m)
+                .ok_or_else(|| anyhow::anyhow!("model '{}' not found in registry", m))?,
             None => runtime.providers.get_chat_provider(Capability::Chat)?,
         };
 
@@ -225,21 +218,39 @@ impl Agent {
                 messages = compacted;
             }
 
-            let thinking = turn_ctx.thinking.cloned();
-            let req = ChatRequest {
-                model: &model_id,
-                messages: &messages,
-                temperature: None,
-                max_tokens: None,
-                thinking,
-                stop: None,
-                seed: None,
-                tools: if tool_specs.is_empty() { None } else { Some(&tool_specs) },
-                stream: true,
-            };
-
-            let stream = provider.chat(req)?;
-            let response = collect_stream(stream, &mut session.turn_stream).await?;
+            let response = {
+                const MAX_LLM_RETRIES: usize = 2;
+                let mut attempt: usize = 0;
+                loop {
+                    let thinking = turn_ctx.thinking.cloned();
+                    let req = ChatRequest {
+                        model: &model_id,
+                        messages: &messages,
+                        temperature: None,
+                        max_tokens: None,
+                        thinking,
+                        stop: None,
+                        seed: None,
+                        tools: if tool_specs.is_empty() { None } else { Some(&tool_specs) },
+                        stream: true,
+                    };
+                    let stream = provider.chat(req)?;
+                    match collect_stream(stream, &mut session.turn_stream).await {
+                        Ok(resp) => break Ok(resp),
+                        Err(e) if attempt < MAX_LLM_RETRIES && is_transient_llm_error(&e) => {
+                            attempt += 1;
+                            tracing::warn!(
+                                model = %model_id, attempt,
+                                err = %e,
+                                "LLM call failed with transient error, retrying"
+                            );
+                            tokio::time::sleep(backoff_duration(attempt)).await;
+                            continue;
+                        }
+                        Err(e) => break Err(e),
+                    }
+                }
+            }?;
 
             // Update Session.token_tracker from the API response. The tracker is
             // the source of truth for *usage reporting* (display + persistence,
@@ -1067,6 +1078,34 @@ async fn collect_stream(
         stop_reason,
         usage,
     })
+}
+
+/// Whether an LLM error is transient and worth retrying on the same model.
+/// Reuses the existing error classification from `error_class.rs`.
+fn is_transient_llm_error(err: &anyhow::Error) -> bool {
+    use crate::providers::{ClassifiedError, ErrorCategory, ProviderHttpError};
+    // HTTP errors: classify via the existing pipeline
+    if let Some(http_err) = err.downcast_ref::<ProviderHttpError>() {
+        let classified = ClassifiedError::classify("agent", http_err.status, &http_err.message);
+        return matches!(
+            classified.category,
+            ErrorCategory::ServerError | ErrorCategory::Overloaded | ErrorCategory::Timeout
+        );
+    }
+    // Stream errors: SSE interruption, connection drop, etc.
+    let msg = err.to_string();
+    if msg.starts_with("stream error:") { return true; }
+    if msg.contains("stream chunk timeout") { return true; }
+    if msg.contains("stream stalled") { return true; }
+    if msg.contains("stream ended without a completion marker") { return true; }
+    false
+}
+
+/// Short exponential backoff: 1s, 2s.
+/// Gateway blips usually clear in well under a second; total added latency
+/// is bounded to ~3s (two retries) for an interactive turn.
+fn backoff_duration(attempt: usize) -> std::time::Duration {
+    std::time::Duration::from_secs(1u64 << attempt.min(1))
 }
 
 #[cfg(test)]
