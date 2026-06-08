@@ -405,9 +405,19 @@ impl Tool for MemorySearchTool {
 
         let json_results: Vec<serde_json::Value> = results.iter().map(|(score, mf)| {
             let content_lower = mf.content.to_lowercase();
-            let snippet = if let Some(pos) = content_lower.find(&query) {
-                let start = pos.saturating_sub(40);
-                let end = (pos + query.len() + 60).min(mf.content.len());
+            let snippet = if let Some(byte_pos) = content_lower.find(&query) {
+                // Map byte position in content_lower → char index, then
+                // apply char-based offsets → map back to byte offsets in
+                // the original string.  This avoids panicking when fixed
+                // byte offsets land inside a multi-byte UTF-8 character.
+                let char_pos = content_lower[..byte_pos].chars().count();
+                let query_chars = query.chars().count();
+                let start = mf.content.char_indices()
+                    .nth(char_pos.saturating_sub(40))
+                    .map(|(i, _)| i).unwrap_or(0);
+                let end = mf.content.char_indices()
+                    .nth(char_pos + query_chars + 60)
+                    .map(|(i, _)| i).unwrap_or(mf.content.len());
                 let mut s = String::new();
                 if start > 0 { s.push_str("..."); }
                 s.push_str(&mf.content[start..end]);
