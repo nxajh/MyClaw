@@ -1142,11 +1142,14 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         tracing::debug!(socket_fd, "shutdown flag set, executing hot switch (fork+execv)");
         let client_fd = CLIENT_SOCKET_FD.load(Ordering::SeqCst);
         if let Err(e) = tokio::task::block_in_place(|| crate::hot_switch::do_hot_switch(socket_fd, client_fd)) {
-            tracing::warn!(err = %e, "hot switch failed, daemon will exit normally");
+            tracing::error!(err = %e, "hot switch failed — exiting with non-zero code for systemd restart");
+            // do_hot_switch already rolled back MAINPID to self.  Exit with non-zero
+            // so systemd Restart=on-failure will immediately re-launch the daemon.
+            // This is safer than trying to re-enter the dispatch loop (orchestrator.run()
+            // consumes self and signal handlers are one-shot).
+            std::process::exit(1);
         }
-        // do_hot_switch either: (a) exits via the SIGUSR2 handler when new
-        // process is ready, or (b) returns Err on failure. Either way we
-        // fall through to normal exit below.
+        // do_hot_switch succeeded: parent exits via SIGUSR2 handler (never reaches here).
     }
 
     tracing::info!("myclaw daemon stopped");

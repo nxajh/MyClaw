@@ -97,13 +97,32 @@ pub fn do_hot_switch(socket_fd: i32, client_fd: i32) -> anyhow::Result<()> {
     let current_exe = std::env::current_exe()?;
     let current_pid = std::process::id();
 
-    // current_exe() resolves to /proc/self/exe → the old inode (renamed to .old).
-    // Strip .old suffix to get the new binary path.
+    // current_exe() resolves to /proc/self/exe → may point to a renamed (.old)
+    // or deleted inode.  We need to resolve to the actual binary on disk.
     let new_binary = {
-        let s = current_exe.to_string_lossy().to_string();
+        let mut s = current_exe.to_string_lossy().to_string();
+
+        // Kernel appends " (deleted)" when the directory entry was removed.
+        // Strip it first so the .old check below can work.
+        if s.ends_with(" (deleted)") {
+            s.truncate(s.len() - " (deleted)".len());
+        }
+
+        // myclaw update renames the running binary to .old before replacing it.
         if s.ends_with(".old") {
-            std::path::PathBuf::from(&s[..s.len() - 4])
+            s.truncate(s.len() - 4);
+        }
+
+        let path = std::path::PathBuf::from(&s);
+        if path.exists() {
+            path
         } else {
+            // Last resort: use original path (execve will fail → rollback).
+            tracing::warn!(
+                original = %current_exe.display(),
+                resolved = %s,
+                "resolved binary path does not exist, hot switch will likely fail"
+            );
             current_exe.clone()
         }
     };
@@ -172,6 +191,19 @@ pub fn do_hot_switch(socket_fd: i32, client_fd: i32) -> anyhow::Result<()> {
         );
         crate::SHUTDOWN_FLAG.store(false, Ordering::SeqCst);
         tracing::info!("shutdown flag cleared, daemon continues running");
+
+        // Restore systemd MAINPID to self — the fork set MAINPID to the dead child,
+        // so systemd is now tracking a non-existent process and won't auto-restart
+        // if we crash later.
+        if let Err(e) = sd_notify::notify(
+            false,
+            &[sd_notify::NotifyState::MainPid(std::process::id())],
+        ) {
+            tracing::warn!(err = %e, "sd_notify MAINPID rollback failed");
+        } else {
+            tracing::debug!("sd_notify MAINPID restored to self on rollback");
+        }
+
         return Err(anyhow::anyhow!("hot switch failed, daemon continues"));
     }
 
