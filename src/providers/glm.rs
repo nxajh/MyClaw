@@ -17,6 +17,7 @@
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use std::collections::HashMap;
 
 use reqwest::Client;
 use crate::providers::http::build_reqwest_client;
@@ -107,6 +108,7 @@ impl ChatProvider for GlmProvider {
             // the connection was closed mid-response and must not be reported
             // as a clean completion.
             let mut saw_terminal = false;
+            let mut tool_index_map: HashMap<u32, String> = HashMap::new();
             let mut buffer = String::new();
             let mut utf8_buf = Vec::new();
             let mut stream = resp.bytes_stream();
@@ -142,7 +144,7 @@ impl ChatProvider for GlmProvider {
                     if line.trim().strip_prefix("data:").map(str::trim) == Some("[DONE]") {
                         saw_terminal = true;
                     }
-                    let parsed = parse_glm_sse(&line, &mut saw_tool_call);
+                    let parsed = parse_glm_sse(&line, &mut saw_tool_call, &mut tool_index_map);
                     if let Some(events) = parsed {
                         for ev in events {
                             if matches!(ev, StreamEvent::Done { .. }) {
@@ -323,7 +325,7 @@ fn build_glm_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
 /// - `finish_reason` can be `"sensitive"` (content filtered by GLM safety)
 /// - `finish_reason` may be `"stop"` even when `tool_calls` were emitted
 ///   in previous chunks; `saw_tool_call` tracks this and overrides the reason
-fn parse_glm_sse(line: &str, saw_tool_call: &mut bool) -> Option<Vec<StreamEvent>> {
+fn parse_glm_sse(line: &str, saw_tool_call: &mut bool, tool_index_map: &mut HashMap<u32, String>) -> Option<Vec<StreamEvent>> {
     let line = line.trim();
     if line.is_empty() || line.starts_with(':') { return None; }
     let data = line.strip_prefix("data:")?.trim();
@@ -395,6 +397,7 @@ fn parse_glm_sse(line: &str, saw_tool_call: &mut bool) -> Option<Vec<StreamEvent
 
                 if !id.is_empty() && func.is_some_and(|f| f.name.is_some()) {
                     let initial_args = func.and_then(|f| f.arguments.clone()).unwrap_or_default();
+                    tool_index_map.insert(tc.index, id.clone());
                     events.push(StreamEvent::ToolCallStart {
                         id: id.clone(),
                         name: func.and_then(|f| f.name.clone()).unwrap_or_default(),
@@ -407,7 +410,12 @@ fn parse_glm_sse(line: &str, saw_tool_call: &mut bool) -> Option<Vec<StreamEvent
 
                 let args = func.and_then(|f| f.arguments.clone()).unwrap_or_default();
                 if !args.is_empty() {
-                    events.push(StreamEvent::ToolCallDelta { id, delta: args });
+                    let real_id = if id.is_empty() {
+                        tool_index_map.get(&tc.index).cloned().unwrap_or_default()
+                    } else {
+                        id
+                    };
+                    events.push(StreamEvent::ToolCallDelta { index: tc.index, id: real_id, delta: args });
                     return Some(events);
                 }
             }
@@ -575,7 +583,8 @@ mod overflow_tests {
 
     fn done_reason(line: &str) -> Option<StopReason> {
         let mut saw_tool_call = false;
-        parse_glm_sse(line, &mut saw_tool_call)?.into_iter().find_map(|e| match e {
+        let mut tool_index_map: HashMap<u32, String> = HashMap::new();
+        parse_glm_sse(line, &mut saw_tool_call, &mut tool_index_map)?.into_iter().find_map(|e| match e {
             StreamEvent::Done { reason } => Some(reason),
             _ => None,
         })

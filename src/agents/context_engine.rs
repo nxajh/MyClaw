@@ -330,14 +330,14 @@ impl ContextEngine {
                     StreamEvent::ToolCallStart { id, name, initial_arguments } => {
                         tool_calls.push(ToolCall { id, name, arguments: initial_arguments });
                     }
-                    StreamEvent::ToolCallDelta { id, delta } => {
-                        if !id.is_empty() {
-                            if let Some(call) = tool_calls.iter_mut().find(|c| c.id == id) {
-                                call.arguments.push_str(&delta);
-                            }
-                        } else if let Some(last) = tool_calls.last_mut() {
-                            last.arguments.push_str(&delta);
+                    StreamEvent::ToolCallDelta { index, id, delta } => {
+                        let idx = index as usize;
+                        while tool_calls.len() <= idx {
+                            tool_calls.push(ToolCall { id: String::new(), name: String::new(), arguments: String::new() });
                         }
+                        let call = &mut tool_calls[idx];
+                        if !id.is_empty() { call.id = id; }
+                        call.arguments.push_str(&delta);
                     }
                     StreamEvent::ToolCallEnd { id, name, arguments } => {
                         if let Some(call) = tool_calls.iter_mut().find(|c| c.id == id) {

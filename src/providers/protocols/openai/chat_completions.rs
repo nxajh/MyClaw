@@ -5,6 +5,7 @@
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use std::collections::HashMap;
 
 use crate::providers::{
     BoxStream, ChatProvider, ChatRequest, StreamEvent, StopReason,
@@ -87,6 +88,7 @@ impl ChatProvider for OpenAiChatCompletionsClient {
             // distinguishes a clean completion from a mid-stream connection
             // close (which yields neither).
             let mut saw_done_sentinel = false;
+            let mut tool_index_map: HashMap<u32, String> = HashMap::new();
             let mut buffer = String::new();
             let mut utf8_buf = Vec::new();
             let mut stream = resp.bytes_stream();
@@ -121,7 +123,7 @@ impl ChatProvider for OpenAiChatCompletionsClient {
                     if line.trim().strip_prefix("data:").map(str::trim) == Some("[DONE]") {
                         saw_done_sentinel = true;
                     }
-                    let events = parse_openai_sse(&line);
+                    let events = parse_openai_sse(&line, &mut tool_index_map);
                     for ev in events {
                         match ev {
                             StreamEvent::ToolCallStart { .. } | StreamEvent::ToolCallDelta { .. } => {
@@ -171,7 +173,7 @@ impl ChatProvider for OpenAiChatCompletionsClient {
     }
 }
 
-fn parse_openai_sse(line: &str) -> Vec<StreamEvent> {
+fn parse_openai_sse(line: &str, tool_index_map: &mut HashMap<u32, String>) -> Vec<StreamEvent> {
     use crate::providers::{ChatUsage, StopReason};
 
     let line = line.trim();
@@ -238,6 +240,7 @@ fn parse_openai_sse(line: &str) -> Vec<StreamEvent> {
                 // GLM sends id + name + arguments all in one chunk.
                 if !id.is_empty() && func.is_some_and(|f| f.name.is_some()) {
                     let initial_args = func.and_then(|f| f.arguments.clone()).unwrap_or_default();
+                    tool_index_map.insert(tc.index, id.clone());
                     events.push(StreamEvent::ToolCallStart {
                         id,
                         name: func.and_then(|f| f.name.clone()).unwrap_or_default(),
@@ -247,8 +250,13 @@ fn parse_openai_sse(line: &str) -> Vec<StreamEvent> {
                 } else {
                     let args = func.and_then(|f| f.arguments.clone()).unwrap_or_default();
                     if !args.is_empty() {
-                        let delta_id = if id.is_empty() { format!("#{}", tc.index) } else { id };
-                        events.push(StreamEvent::ToolCallDelta { id: delta_id, delta: args });
+                        let delta_id = if id.is_empty() {
+                            tool_index_map.get(&tc.index).cloned().unwrap_or_default()
+                        } else {
+                            tool_index_map.insert(tc.index, id.clone());
+                            id
+                        };
+                        events.push(StreamEvent::ToolCallDelta { index: tc.index, id: delta_id, delta: args });
                         emitted_tool_event = true;
                     }
                 }

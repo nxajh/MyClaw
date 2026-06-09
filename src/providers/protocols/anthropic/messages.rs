@@ -245,7 +245,7 @@ fn parse_anthropic_sse(
                         None => return vec![],
                     };
                     let args = delta.get("partial_json").and_then(|v| v.as_str()).unwrap_or("");
-                    vec![StreamEvent::ToolCallDelta { id, delta: args.to_string() }]
+                    vec![StreamEvent::ToolCallDelta { index: index as u32, id, delta: args.to_string() }]
                 }
                 _ => vec![],
             }
