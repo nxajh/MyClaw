@@ -1030,13 +1030,14 @@ async fn collect_stream(
             StreamEvent::ToolCallStart { id, name, initial_arguments } => {
                 tool_calls.push(ToolCall { id, name, arguments: initial_arguments });
             }
-            StreamEvent::ToolCallDelta { index, id, delta } => {
+            StreamEvent::ToolCallDelta { index, id, delta, name } => {
                 let idx = index as usize;
                 while tool_calls.len() <= idx {
                     tool_calls.push(ToolCall { id: String::new(), name: String::new(), arguments: String::new() });
                 }
                 let call = &mut tool_calls[idx];
                 if !id.is_empty() { call.id = id; }
+                if !name.is_empty() { call.name = name; }
                 call.arguments.push_str(&delta);
             }
             StreamEvent::ToolCallEnd { id, name, arguments } => {

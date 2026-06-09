@@ -415,7 +415,7 @@ fn parse_glm_sse(line: &str, saw_tool_call: &mut bool, tool_index_map: &mut Hash
                     } else {
                         id
                     };
-                    events.push(StreamEvent::ToolCallDelta { index: tc.index, id: real_id, delta: args });
+                    events.push(StreamEvent::ToolCallDelta { index: tc.index, id: real_id, name: String::new(), delta: args });
                     return Some(events);
                 }
             }

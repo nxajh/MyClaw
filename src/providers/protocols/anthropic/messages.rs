@@ -103,8 +103,13 @@ impl AnthropicMessagesClient {
                 return;
             }
 
-            // index → (tool_id, tool_name) mapping for Anthropic's block-indexed SSE.
+            // Anthropic's SSE `index` covers ALL content blocks (text + tool_use),
+            // but downstream `collect_stream` expects `ToolCallStart` to be pushed
+            // sequentially and `ToolCallDelta.index` to match that sequential position.
+            // We remap Anthropic's global block-index to a tool-local index here.
             let mut tool_index_map: HashMap<u64, (String, String)> = HashMap::new();
+            let mut next_tool_index: u32 = 0;
+            let mut anthropic_to_tool_index: HashMap<u64, u32> = HashMap::new();
             // Set once an authoritative terminal event (`message_delta` stop /
             // `message_stop`, both parsed into `Done`) is seen. If the byte
             // stream ends without one, the connection was closed mid-response.
@@ -139,7 +144,7 @@ impl AnthropicMessagesClient {
                 while let Some(pos) = buffer.find('\n') {
                     let line = buffer[..pos].to_string();
                     buffer.drain(..=pos);
-                    let events = parse_anthropic_sse(&line, &mut tool_index_map);
+                    let events = parse_anthropic_sse(&line, &mut tool_index_map, &mut next_tool_index, &mut anthropic_to_tool_index);
                     for event in events {
                         if matches!(event, StreamEvent::Done { .. }) {
                             saw_terminal = true;
@@ -179,6 +184,8 @@ fn parse_anthropic_error_body(body: &str) -> Option<String> {
 fn parse_anthropic_sse(
     line: &str,
     tool_index_map: &mut HashMap<u64, (String, String)>,
+    next_tool_index: &mut u32,
+    anthropic_to_tool_index: &mut HashMap<u64, u32>,
 ) -> Vec<StreamEvent> {
     use crate::providers::{ChatUsage, StopReason};
 
@@ -211,6 +218,9 @@ fn parse_anthropic_sse(
                     let name = cb.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     if !id.is_empty() && !name.is_empty() {
                         tool_index_map.insert(index, (id.clone(), name.clone()));
+                        let tool_idx = *next_tool_index;
+                        anthropic_to_tool_index.insert(index, tool_idx);
+                        *next_tool_index += 1;
                         return vec![StreamEvent::ToolCallStart { id, name, initial_arguments: String::new() }];
                     }
                 }
@@ -244,8 +254,9 @@ fn parse_anthropic_sse(
                         Some(entry) => entry.clone(),
                         None => return vec![],
                     };
+                    let tool_idx = anthropic_to_tool_index.get(&index).copied().unwrap_or(index as u32);
                     let args = delta.get("partial_json").and_then(|v| v.as_str()).unwrap_or("");
-                    vec![StreamEvent::ToolCallDelta { index: index as u32, id, delta: args.to_string() }]
+                    vec![StreamEvent::ToolCallDelta { index: tool_idx, id, name: String::new(), delta: args.to_string() }]
                 }
                 _ => vec![],
             }

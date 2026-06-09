@@ -256,7 +256,8 @@ fn parse_openai_sse(line: &str, tool_index_map: &mut HashMap<u32, String>) -> Ve
                             tool_index_map.insert(tc.index, id.clone());
                             id
                         };
-                        events.push(StreamEvent::ToolCallDelta { index: tc.index, id: delta_id, delta: args });
+                        let delta_name = func.and_then(|f| f.name.clone()).unwrap_or_default();
+                        events.push(StreamEvent::ToolCallDelta { index: tc.index, id: delta_id, name: delta_name, delta: args });
                         emitted_tool_event = true;
                     }
                 }

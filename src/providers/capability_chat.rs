@@ -147,7 +147,7 @@ pub enum StreamEvent {
     /// in subsequent requests.
     ThinkingSignature { signature: String },
     ToolCallStart { id: String, name: String, initial_arguments: String },
-    ToolCallDelta { index: u32, id: String, delta: String },
+    ToolCallDelta { index: u32, id: String, name: String, delta: String },
     ToolCallEnd { id: String, name: String, arguments: String },
     Usage(ChatUsage),
     Done { reason: StopReason },
@@ -320,13 +320,14 @@ impl ChatResponse {
                 StreamEvent::ToolCallStart { id, name, initial_arguments } => {
                     tool_calls.push(ToolCall { id, name, arguments: initial_arguments });
                 }
-                StreamEvent::ToolCallDelta { index, id, delta } => {
+                StreamEvent::ToolCallDelta { index, id, name, delta } => {
                     let idx = index as usize;
                     while tool_calls.len() <= idx {
                         tool_calls.push(ToolCall { id: String::new(), name: String::new(), arguments: String::new() });
                     }
                     let call = &mut tool_calls[idx];
                     if !id.is_empty() { call.id = id; }
+                    if !name.is_empty() { call.name = name; }
                     call.arguments.push_str(&delta);
                 }
                 StreamEvent::ToolCallEnd { id, name, arguments } => {
