@@ -219,6 +219,13 @@ impl Agent {
             }
 
             let response = {
+                tracing::info!(
+                    session = %session.id,
+                    msg_count = messages.len(),
+                    model = %model_id,
+                    history_len = session.history.len(),
+                    "agent: sending LLM request"
+                );
                 const MAX_LLM_RETRIES: usize = 2;
                 let mut attempt: usize = 0;
                 loop {

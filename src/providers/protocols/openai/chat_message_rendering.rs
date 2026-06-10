@@ -38,6 +38,30 @@ fn audio_format_hint(media_type: Option<&str>) -> &'static str {
 /// - `stream_options: { include_usage: true }` requests a final usage chunk.
 /// - `parallel_tool_calls: true` when tools are present.
 pub fn render_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
+    // Debug: log message count and check for empty tool_call names
+    {
+        let mut empty_name_count = 0;
+        for (i, msg) in req.messages.iter().enumerate() {
+            if let Some(tcs) = &msg.tool_calls {
+                for tc in tcs {
+                    if tc.name.is_empty() {
+                        tracing::error!(
+                            idx = i,
+                            id = %tc.id,
+                            "render_openai_chat_body: EMPTY tool_call name in message"
+                        );
+                        empty_name_count += 1;
+                    }
+                }
+            }
+        }
+        tracing::info!(
+            msg_count = req.messages.len(),
+            model = req.model,
+            empty_name_count,
+            "render_openai_chat_body: rendering request"
+        );
+    }
     let messages: Vec<serde_json::Value> = req.messages
         .iter()
         .map(|msg| {
