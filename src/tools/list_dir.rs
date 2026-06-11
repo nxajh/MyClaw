@@ -3,7 +3,7 @@
 //! 比 glob_search 更直观，不需要 pattern。
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::Path;
 
 use crate::providers::{Tool, ToolResult};
@@ -54,7 +54,11 @@ impl Tool for ListDirTool {
         5_000
     }
 
-    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _session: &crate::agents::session::Session,
+    ) -> anyhow::Result<ToolResult> {
         let path_str = args["path"].as_str().unwrap_or(".");
         let show_hidden = args["show_hidden"].as_bool().unwrap_or(false);
 

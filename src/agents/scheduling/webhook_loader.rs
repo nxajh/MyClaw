@@ -72,8 +72,7 @@ pub fn parse_webhook_file(path: &Path) -> anyhow::Result<WebhookJobDef> {
         _ => WebhookAuth::Hmac,
     };
 
-    let target = extract_yaml_string(&front_matter, "target")
-        .unwrap_or_else(|| "last".to_string());
+    let target = extract_yaml_string(&front_matter, "target").unwrap_or_else(|| "last".to_string());
 
     let prompt_template = body.trim().to_string();
 
@@ -174,7 +173,10 @@ pub fn render_template(template: &str, payload: &serde_json::Value) -> String {
 }
 
 /// Navigate a JSON value by dot-separated path with array index support.
-fn navigate_json_value<'a>(val: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+fn navigate_json_value<'a>(
+    val: &'a serde_json::Value,
+    path: &str,
+) -> Option<&'a serde_json::Value> {
     let mut current = val;
     for segment in path.split('.') {
         if let Some(bracket) = segment.find('[') {
@@ -234,11 +236,7 @@ mod tests {
     fn parse_webhook_file_no_secret() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("public.md");
-        std::fs::write(
-            &path,
-            "---\npath: /public\n---\n\n公开端点。\n",
-        )
-        .unwrap();
+        std::fs::write(&path, "---\npath: /public\n---\n\n公开端点。\n").unwrap();
 
         let job = parse_webhook_file(&path).unwrap();
         assert_eq!(job.secret, None);
@@ -248,11 +246,7 @@ mod tests {
     fn parse_webhook_file_path_normalization() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.md");
-        std::fs::write(
-            &path,
-            "---\npath: github/issues\n---\n\nPrompt.\n",
-        )
-        .unwrap();
+        std::fs::write(&path, "---\npath: github/issues\n---\n\nPrompt.\n").unwrap();
 
         let job = parse_webhook_file(&path).unwrap();
         assert_eq!(job.path, "/github/issues");
@@ -322,7 +316,10 @@ mod tests {
                 "user": {"login": "alice"}
             }
         });
-        assert_eq!(render_template(template, &payload), "Issue: Fix bug by alice");
+        assert_eq!(
+            render_template(template, &payload),
+            "Issue: Fix bug by alice"
+        );
     }
 
     #[test]
@@ -359,13 +356,19 @@ mod tests {
     fn render_template_number_and_bool() {
         let template = "Count: {{count}}, Active: {{active}}";
         let payload = serde_json::json!({"count": 42, "active": true});
-        assert_eq!(render_template(template, &payload), "Count: 42, Active: true");
+        assert_eq!(
+            render_template(template, &payload),
+            "Count: 42, Active: true"
+        );
     }
 
     #[test]
     fn render_template_unclosed_braces_ignored() {
         let template = "Hello {{name} not closed";
         let payload = serde_json::json!({"name": "world"});
-        assert_eq!(render_template(template, &payload), "Hello {{name} not closed");
+        assert_eq!(
+            render_template(template, &payload),
+            "Hello {{name} not closed"
+        );
     }
 }

@@ -1,8 +1,8 @@
 //! channels_message — Shared channel message types.
 
-use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -228,7 +228,9 @@ impl MessagePayload {
             MessagePayload::Media { caption, source } => {
                 let url_or_size = match source {
                     MediaSource::Url(u) => format!("<media: {}>", u),
-                    MediaSource::Inline { data, file_name, .. } => match file_name {
+                    MediaSource::Inline {
+                        data, file_name, ..
+                    } => match file_name {
                         Some(f) => format!("<media: {} ({} bytes)>", f, data.len()),
                         None => format!("<media: {} bytes>", data.len()),
                     },
@@ -258,6 +260,9 @@ pub struct ChannelMessage {
     pub timestamp: u64,
     pub thread_ts: Option<String>,
     pub interruption_scope_id: Option<String>,
+    #[serde(default)]
+    pub files: Vec<FileAttachment>,
+    #[serde(default)]
     pub attachments: Vec<MediaAttachment>,
     /// URLs of images attached to this message (e.g. from Telegram photo messages).
     pub image_urls: Option<Vec<String>>,
@@ -359,6 +364,18 @@ impl SendMessage {
     pub fn is_verbose(&self, chunk_limit: usize) -> bool {
         self.content.chars().count() > chunk_limit
     }
+}
+
+/// A persisted/session-local file attachment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileAttachment {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
 }
 
 /// A media attachment.
@@ -466,10 +483,7 @@ pub trait Channel: Send + Sync {
     /// pushes via `session.turn_stream.as_mut()`. Non-streaming channels
     /// return `None`; the agent then falls through to the
     /// `send_payload` / `send` fallback at end of turn.
-    fn create_stream(
-        &self,
-        _reply_target: &str,
-    ) -> Option<Box<dyn crate::channels::TurnStream>> {
+    fn create_stream(&self, _reply_target: &str) -> Option<Box<dyn crate::channels::TurnStream>> {
         None
     }
 
@@ -1048,18 +1062,25 @@ mod tests {
 
     #[test]
     fn callback_action_roundtrip_retry_abort() {
-        let r = CallbackAction::Retry { session_key_prefix: "abc123".into() };
+        let r = CallbackAction::Retry {
+            session_key_prefix: "abc123".into(),
+        };
         assert_eq!(r.serialize(), "__retry:abc123");
         assert_eq!(CallbackAction::parse("__retry:abc123"), Some(r));
 
-        let a = CallbackAction::Abort { session_key_prefix: "xyz".into() };
+        let a = CallbackAction::Abort {
+            session_key_prefix: "xyz".into(),
+        };
         assert_eq!(a.serialize(), "__abort:xyz");
         assert_eq!(CallbackAction::parse("__abort:xyz"), Some(a));
     }
 
     #[test]
     fn callback_action_custom_passthrough() {
-        let c = CallbackAction::Custom { tag: "vote".into(), data: "yes".into() };
+        let c = CallbackAction::Custom {
+            tag: "vote".into(),
+            data: "yes".into(),
+        };
         assert_eq!(c.serialize(), "__vote:yes");
         assert_eq!(CallbackAction::parse("__vote:yes"), Some(c));
     }
@@ -1079,8 +1100,14 @@ mod tests {
         let i = MessagePayload::Interactive {
             text: "Pick one".into(),
             buttons: vec![
-                InlineButton { label: "A".into(), callback_data: "a".into() },
-                InlineButton { label: "B".into(), callback_data: "b".into() },
+                InlineButton {
+                    label: "A".into(),
+                    callback_data: "a".into(),
+                },
+                InlineButton {
+                    label: "B".into(),
+                    callback_data: "b".into(),
+                },
             ],
         };
         assert_eq!(i.to_fallback_text(), "Pick one\n[A | B]");
@@ -1090,7 +1117,7 @@ mod tests {
     fn dedup_state_basic_dedup() {
         let d = DedupState::new();
         assert!(!d.check_and_record("a")); // first sight → false
-        assert!(d.check_and_record("a"));  // duplicate → true
+        assert!(d.check_and_record("a")); // duplicate → true
         assert!(!d.check_and_record("b"));
         assert_eq!(d.len(), 2);
     }
@@ -1240,7 +1267,10 @@ mod tests {
         let chunks = split_message_chunk(&msg, limit, LenUnit::Codepoints);
         assert_within(&chunks, limit, LenUnit::Codepoints);
         for c in &chunks {
-            assert!(!c.lines().any(is_table_delimiter), "spurious delimiter: {c:?}");
+            assert!(
+                !c.lines().any(is_table_delimiter),
+                "spurious delimiter: {c:?}"
+            );
         }
     }
 
@@ -1268,7 +1298,10 @@ mod tests {
         // survives whole in one chunk.
         let limit = 80;
         let link = "[click the documentation here](http://example.com/a/very/long/path)";
-        let msg = format!("{} {link} and then more trailing text here", "word ".repeat(12));
+        let msg = format!(
+            "{} {link} and then more trailing text here",
+            "word ".repeat(12)
+        );
         let chunks = split_message_chunk(&msg, limit, LenUnit::Codepoints);
         assert_within(&chunks, limit, LenUnit::Codepoints);
         assert!(

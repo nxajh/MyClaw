@@ -1,3 +1,3 @@
 //! CLI signal utilities — re-exports from the library crate.
 
-pub use myclaw::signal::{send_sigusr1, send_sigterm};
+pub use myclaw::signal::{send_sigterm, send_sigusr1};

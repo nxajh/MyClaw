@@ -3,16 +3,16 @@
 // Declare routing submodule FIRST (before imports that use it).
 pub mod routing;
 
+use anyhow::Context;
 use std::collections::HashMap;
 use std::sync::Arc;
-use anyhow::Context;
 
 use crate::providers::Capability;
 use crate::providers::capability_chat::ChatProvider;
 use crate::providers::capability_embedding::EmbeddingProvider;
 use crate::providers::image::ImageGenerationProvider;
-use crate::providers::search::SearchProvider;
 use crate::providers::provider_registry::ProviderRegistry;
+use crate::providers::search::SearchProvider;
 use crate::providers::stt::SttProvider;
 use crate::providers::tts::TtsProvider;
 use crate::providers::video::VideoGenerationProvider;
@@ -66,9 +66,12 @@ pub struct Registry {
 
 impl Registry {
     pub fn new(providers: HashMap<String, ProviderConfig>, routing: RoutingConfig) -> Self {
-        let model_index = providers.iter()
+        let model_index = providers
+            .iter()
             .flat_map(|(key, p)| {
-                p.models.iter().map(move |m| (m.model_id.clone(), (key.clone(), m.clone())))
+                p.models
+                    .iter()
+                    .map(move |m| (m.model_id.clone(), (key.clone(), m.clone())))
             })
             .collect();
         Self {
@@ -96,10 +99,16 @@ impl Registry {
             })
     }
 
-    fn select_model(&self, entry: &RouteEntry, capability: Capability) -> anyhow::Result<&ModelConfig> {
+    fn select_model(
+        &self,
+        entry: &RouteEntry,
+        capability: Capability,
+    ) -> anyhow::Result<&ModelConfig> {
         match entry.strategy {
             RoutingStrategy::Fixed => {
-                let model_id = entry.models.first()
+                let model_id = entry
+                    .models
+                    .first()
                     .with_context(|| "No models in route entry")?;
                 let (_, model) = self.find_provider_by_model(model_id)?;
                 if !model.supports(capability) {
@@ -134,7 +143,8 @@ impl Registry {
     }
 
     pub fn get_chat_routing(&self) -> anyhow::Result<&RouteEntry> {
-        self.routing.get(Capability::Chat)
+        self.routing
+            .get(Capability::Chat)
             .with_context(|| "No chat routing configured")
     }
 
@@ -317,20 +327,40 @@ impl RoutingConfig {
 // ── Registry registration methods ─────────────────────────────────────────────
 
 impl Registry {
-    pub fn register_chat(&mut self, provider: Box<dyn ChatProvider>, model_id: String, model_config: crate::providers::capability::ChatModelConfig) {
-        use crate::providers::capability::Modality;
+    pub fn register_chat(
+        &mut self,
+        provider: Box<dyn ChatProvider>,
+        model_id: String,
+        model_config: crate::providers::capability::ChatModelConfig,
+        provider_id: Option<crate::providers::ProviderId>,
+        protocol: Option<crate::config::provider::Protocol>,
+    ) {
         // Wrap every per-model provider so it lowers media this model can't take
-        // natively (image/audio → `[图片 #N]`/`[语音 #N]` markers) right before the
-        // wire. Done here, at the single per-model construction point, so the
-        // fallback chain, `/model` override, and aux tool-calls all inherit the
-        // same per-model lowering and the agent only ever sends the canonical form.
-        let caps = crate::providers::MediaCaps {
-            image: model_config.supports_input(Modality::Image),
-            audio: model_config.supports_input(Modality::Audio),
-        };
-        let wrapped: Arc<dyn ChatProvider> =
-            Arc::new(crate::providers::MediaLoweringProvider::new(provider.into(), caps));
-        self.chat_model_configs.insert(model_id.clone(), model_config);
+        // natively right before the wire. `model_config.input` describes model
+        // understanding; `MediaPolicy` also accounts for provider/protocol renderer
+        // support and size limits.
+        let policy = provider_id
+            .as_ref()
+            .map(|id| {
+                crate::providers::MediaPolicy::for_provider_protocol_model(
+                    id,
+                    protocol.unwrap_or(crate::config::provider::Protocol::OpenAi),
+                    &model_config,
+                )
+            })
+            .unwrap_or_else(|| {
+                use crate::providers::capability::Modality;
+                crate::providers::MediaPolicy::from_model_support(
+                    model_config.supports_input(Modality::Image),
+                    model_config.supports_input(Modality::Audio),
+                    model_config.supports_input(Modality::Video),
+                )
+            });
+        let wrapped: Arc<dyn ChatProvider> = Arc::new(
+            crate::providers::MediaLoweringProvider::new(provider.into(), policy),
+        );
+        self.chat_model_configs
+            .insert(model_id.clone(), model_config);
         self.chat_providers.insert(model_id, wrapped);
     }
 
@@ -410,7 +440,10 @@ impl Registry {
 // ── ProviderRegistry trait impl ─────────────────────────────────────────────────
 
 impl ProviderRegistry for Registry {
-    fn get_chat_provider(&self, capability: Capability) -> anyhow::Result<(Arc<dyn ChatProvider>, String)> {
+    fn get_chat_provider(
+        &self,
+        capability: Capability,
+    ) -> anyhow::Result<(Arc<dyn ChatProvider>, String)> {
         // For Chat capability, prefer the dedicated fallback wrapper when present.
         // This keeps get_chat_provider_by_model pointing at the raw per-model provider.
         if capability == Capability::Chat {
@@ -418,10 +451,14 @@ impl ProviderRegistry for Registry {
                 return Ok((Arc::clone(fp), model_id.clone()));
             }
         }
-        let entry = self.routing.get(capability)
+        let entry = self
+            .routing
+            .get(capability)
             .with_context(|| format!("No routing for {:?}", capability))?;
         let model = self.select_model(entry, capability)?;
-        let provider = self.chat_providers.get(&model.model_id)
+        let provider = self
+            .chat_providers
+            .get(&model.model_id)
             .with_context(|| format!("No live provider for model: {}", model.model_id))?;
         Ok((Arc::clone(provider), model.model_id.clone()))
     }
@@ -432,11 +469,17 @@ impl ProviderRegistry for Registry {
         provider_hint: Option<&str>,
     ) -> anyhow::Result<(Arc<dyn ChatProvider>, String)> {
         if let Some(hint) = provider_hint {
-            let provider_cfg = self.providers.get(hint)
+            let provider_cfg = self
+                .providers
+                .get(hint)
                 .with_context(|| format!("Unknown provider: {}", hint))?;
-            let model = provider_cfg.models.first()
+            let model = provider_cfg
+                .models
+                .first()
                 .with_context(|| format!("Provider {} has no models", hint))?;
-            let provider = self.chat_providers.get(&model.model_id)
+            let provider = self
+                .chat_providers
+                .get(&model.model_id)
                 .with_context(|| format!("No live provider for model: {}", model.model_id))?;
             Ok((Arc::clone(provider), model.model_id.clone()))
         } else {
@@ -444,8 +487,13 @@ impl ProviderRegistry for Registry {
         }
     }
 
-    fn get_chat_fallback_chain(&self, capability: Capability) -> anyhow::Result<Vec<(Arc<dyn ChatProvider>, String)>> {
-        let entry = self.routing.get(capability)
+    fn get_chat_fallback_chain(
+        &self,
+        capability: Capability,
+    ) -> anyhow::Result<Vec<(Arc<dyn ChatProvider>, String)>> {
+        let entry = self
+            .routing
+            .get(capability)
             .with_context(|| format!("No routing for {:?}", capability))?;
 
         let mut chain = Vec::new();
@@ -460,7 +508,10 @@ impl ProviderRegistry for Registry {
         }
 
         if chain.is_empty() {
-            anyhow::bail!("No available providers in fallback chain for {:?}", capability);
+            anyhow::bail!(
+                "No available providers in fallback chain for {:?}",
+                capability
+            );
         }
 
         Ok(chain)
@@ -486,14 +537,19 @@ impl ProviderRegistry for Registry {
         self.route_capability(Capability::Search, &self.search_providers)
     }
 
-    fn get_search_fallback_chain(&self) -> anyhow::Result<Vec<(Arc<dyn SearchProvider>, String, String)>> {
-        let entry = self.routing.get(Capability::Search)
+    fn get_search_fallback_chain(
+        &self,
+    ) -> anyhow::Result<Vec<(Arc<dyn SearchProvider>, String, String)>> {
+        let entry = self
+            .routing
+            .get(Capability::Search)
             .with_context(|| "No routing configured for Search")?;
 
         let mut chain = Vec::new();
         for model_id in &entry.models {
             if let Some(provider) = self.search_providers.get(model_id.as_str()) {
-                let provider_name = self.find_provider_by_model(model_id)
+                let provider_name = self
+                    .find_provider_by_model(model_id)
                     .map(|(name, _)| name.to_string())
                     .unwrap_or_else(|_| "unknown".to_string());
                 chain.push((Arc::clone(provider), model_id.clone(), provider_name));
@@ -511,13 +567,21 @@ impl ProviderRegistry for Registry {
         self.route_capability(Capability::SpeechToText, &self.stt_providers)
     }
 
-    fn get_chat_model_config(&self, model_id: &str) -> anyhow::Result<&crate::providers::capability::ChatModelConfig> {
-        self.chat_model_configs.get(model_id)
+    fn get_chat_model_config(
+        &self,
+        model_id: &str,
+    ) -> anyhow::Result<&crate::providers::capability::ChatModelConfig> {
+        self.chat_model_configs
+            .get(model_id)
             .with_context(|| format!("No chat model config found for model: {}", model_id))
     }
 
-    fn get_chat_provider_by_model(&self, model_id: &str) -> Option<(Arc<dyn ChatProvider>, String)> {
-        self.chat_providers.get(model_id)
+    fn get_chat_provider_by_model(
+        &self,
+        model_id: &str,
+    ) -> Option<(Arc<dyn ChatProvider>, String)> {
+        self.chat_providers
+            .get(model_id)
             .map(|p| (Arc::clone(p), model_id.to_string()))
     }
 
@@ -558,7 +622,9 @@ impl Registry {
         capability: Capability,
         store: &HashMap<String, Arc<T>>,
     ) -> anyhow::Result<(Arc<T>, String)> {
-        let entry = self.routing.get(capability)
+        let entry = self
+            .routing
+            .get(capability)
             .with_context(|| format!("No routing configured for {:?}", capability))?;
         let model = self.select_model(entry, capability)?;
 

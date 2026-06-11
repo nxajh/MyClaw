@@ -8,14 +8,13 @@ use tokio::sync::{Mutex, Notify, oneshot};
 use tokio::time::{Duration, timeout};
 use tokio_stream::StreamExt;
 
+use super::{
+    MCP_JSON_CONTENT_TYPE, MCP_STREAMABLE_ACCEPT, McpTransportConn, extract_json_from_sse_text,
+    read_first_jsonrpc_from_sse_response,
+};
 use crate::mcp::config_types::McpServerConfig;
 use crate::mcp::protocol::JSONRPC_VERSION;
 use crate::mcp::protocol::{INTERNAL_ERROR, JsonRpcError, JsonRpcRequest, JsonRpcResponse};
-use super::{
-    McpTransportConn,
-    MCP_STREAMABLE_ACCEPT, MCP_JSON_CONTENT_TYPE,
-    extract_json_from_sse_text, read_first_jsonrpc_from_sse_response,
-};
 
 /// SSE-based transport (HTTP POST for requests, SSE for responses).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

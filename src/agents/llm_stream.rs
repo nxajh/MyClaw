@@ -5,7 +5,7 @@
 //! these bound provider/network stalls and are not an operator knob. Tune
 //! them here if upstream model latencies change.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use futures::StreamExt;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -35,10 +35,7 @@ pub async fn read_next(
     match timeout(timeout_dur, stream.next()).await {
         Ok(Some(ev)) => Ok(Some(ev)),
         Ok(None) => Ok(None),
-        Err(_) => Err(anyhow!(
-            "stream timed out after {}s",
-            timeout_dur.as_secs()
-        )),
+        Err(_) => Err(anyhow!("stream timed out after {}s", timeout_dur.as_secs())),
     }
 }
 

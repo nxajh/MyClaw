@@ -12,18 +12,18 @@ use std::sync::Arc;
 
 use futures_util::StreamExt;
 
-use crate::providers::{
-    BoxStream, ChatMessage, ChatRequest, ChatUsage, ContentPart, ProviderRegistry,
-    StreamEvent, ThinkingConfig, ToolCall,
-};
-use crate::providers::capability_chat::ToolSpec;
-use crate::providers::Capability;
 use crate::agents::resource_provider::ResourceProvider;
+use crate::agents::scheduling::work_unit;
+use crate::agents::tokens::estimate_message_tokens;
 use crate::agents::tool_executor::MemoryToolExecutor;
 use crate::agents::tool_registry::ToolRegistry;
-use crate::agents::tokens::estimate_message_tokens;
-use crate::agents::scheduling::work_unit;
 use crate::config::agent::ContextConfig;
+use crate::providers::Capability;
+use crate::providers::capability_chat::ToolSpec;
+use crate::providers::{
+    BoxStream, ChatMessage, ChatRequest, ChatUsage, ContentPart, ProviderRegistry, StreamEvent,
+    ThinkingConfig, ToolCall,
+};
 
 /// Result returned by `ContextEngine::execute_compaction`.
 /// Caller is responsible for applying it to the live session (drain /
@@ -102,7 +102,13 @@ impl ContextEngine {
         system_prompt_tokens: u64,
         tool_spec_tokens: u64,
     ) -> Option<usize> {
-        self.compaction_boundary_with_retain(history, context_window, system_prompt_tokens, tool_spec_tokens, None)
+        self.compaction_boundary_with_retain(
+            history,
+            context_window,
+            system_prompt_tokens,
+            tool_spec_tokens,
+            None,
+        )
     }
 
     /// Find the boundary index for compaction with an optional override for
@@ -163,7 +169,14 @@ impl ContextEngine {
         );
 
         let summary = self
-            .summarize(&to_compact, existing_summary.as_deref(), system_prompt, tool_specs, model_id, session)
+            .summarize(
+                &to_compact,
+                existing_summary.as_deref(),
+                system_prompt,
+                tool_specs,
+                model_id,
+                session,
+            )
             .await?;
 
         let (ok, reasons) = audit_summary_quality(&to_compact, &summary);
@@ -192,7 +205,17 @@ impl ContextEngine {
         model_id: &str,
         session: &crate::agents::session::Session,
     ) -> anyhow::Result<String> {
-        match self.do_summarize(to_compact, existing_summary, system_prompt, tool_specs, model_id, session).await {
+        match self
+            .do_summarize(
+                to_compact,
+                existing_summary,
+                system_prompt,
+                tool_specs,
+                model_id,
+                session,
+            )
+            .await
+        {
             Ok(s) if !s.trim().is_empty() => Ok(s),
             Ok(_) => {
                 tracing::warn!("summarize returned empty text");
@@ -236,11 +259,16 @@ impl ContextEngine {
         let prompt = build_summarizer_prompt(to_compact.len(), existing_summary, &memory_prompt);
         messages.push(ChatMessage::user_text(prompt));
 
-        let thinking = self.registry.get_chat_model_config(model_id)
+        let thinking = self
+            .registry
+            .get_chat_model_config(model_id)
             .ok()
             .and_then(|cfg| {
                 if cfg.reasoning {
-                    Some(ThinkingConfig { enabled: true, effort: None })
+                    Some(ThinkingConfig {
+                        enabled: true,
+                        effort: None,
+                    })
                 } else {
                     None
                 }
@@ -266,7 +294,11 @@ impl ContextEngine {
                 // matches the main request and the summarizer call hits the
                 // cache. Gating happens in the executor: MemoryToolExecutor
                 // permits only the memory tools and blocks everything else.
-                tools: if tool_specs.is_empty() { None } else { Some(tool_specs) },
+                tools: if tool_specs.is_empty() {
+                    None
+                } else {
+                    Some(tool_specs)
+                },
                 stream: true,
             };
 
@@ -299,7 +331,10 @@ impl ContextEngine {
             if let Some(ref thinking_text) = response.reasoning_content {
                 assistant_msg.parts.insert(
                     0,
-                    ContentPart::Thinking { thinking: thinking_text.clone(), signature: response.thinking_signature.clone() },
+                    ContentPart::Thinking {
+                        thinking: thinking_text.clone(),
+                        signature: response.thinking_signature.clone(),
+                    },
                 );
             }
             messages.push(assistant_msg);
@@ -311,7 +346,9 @@ impl ContextEngine {
                     Ok(r) => {
                         let mut out = r.output.clone();
                         if let Some(ref err) = r.error {
-                            if out.is_empty() { out = format!("error: {}", err); }
+                            if out.is_empty() {
+                                out = format!("error: {}", err);
+                            }
                         }
                         (out, !r.success)
                     }
@@ -327,7 +364,10 @@ impl ContextEngine {
         Ok(final_text)
     }
 
-    async fn collect_summary_stream(&self, mut stream: BoxStream<StreamEvent>) -> anyhow::Result<SummaryResponse> {
+    async fn collect_summary_stream(
+        &self,
+        mut stream: BoxStream<StreamEvent>,
+    ) -> anyhow::Result<SummaryResponse> {
         let mut text = String::new();
         let mut reasoning_content: Option<String> = None;
         let mut thinking_signature: Option<String> = None;
@@ -348,20 +388,45 @@ impl ContextEngine {
                             }
                         }
                     }
-                    StreamEvent::ToolCallStart { id, name, initial_arguments } => {
-                        tool_calls.push(ToolCall { id, name, arguments: initial_arguments });
+                    StreamEvent::ToolCallStart {
+                        id,
+                        name,
+                        initial_arguments,
+                    } => {
+                        tool_calls.push(ToolCall {
+                            id,
+                            name,
+                            arguments: initial_arguments,
+                        });
                     }
-                    StreamEvent::ToolCallDelta { index, id, name, delta } => {
+                    StreamEvent::ToolCallDelta {
+                        index,
+                        id,
+                        name,
+                        delta,
+                    } => {
                         let idx = index as usize;
                         while tool_calls.len() <= idx {
-                            tool_calls.push(ToolCall { id: String::new(), name: String::new(), arguments: String::new() });
+                            tool_calls.push(ToolCall {
+                                id: String::new(),
+                                name: String::new(),
+                                arguments: String::new(),
+                            });
                         }
                         let call = &mut tool_calls[idx];
-                        if !id.is_empty() { call.id = id; }
-                        if !name.is_empty() { call.name = name; }
+                        if !id.is_empty() {
+                            call.id = id;
+                        }
+                        if !name.is_empty() {
+                            call.name = name;
+                        }
                         call.arguments.push_str(&delta);
                     }
-                    StreamEvent::ToolCallEnd { id, name, arguments } => {
+                    StreamEvent::ToolCallEnd {
+                        id,
+                        name,
+                        arguments,
+                    } => {
                         if let Some(call) = tool_calls.iter_mut().find(|c| c.id == id) {
                             call.name = name;
                             call.arguments = arguments;
@@ -369,9 +434,15 @@ impl ContextEngine {
                     }
                     StreamEvent::Usage(u) => {
                         if let Some(ref mut existing) = usage {
-                            if u.input_tokens.is_some() { existing.input_tokens = u.input_tokens; }
-                            if u.output_tokens.is_some() { existing.output_tokens = u.output_tokens; }
-                            if u.cached_input_tokens.is_some() { existing.cached_input_tokens = u.cached_input_tokens; }
+                            if u.input_tokens.is_some() {
+                                existing.input_tokens = u.input_tokens;
+                            }
+                            if u.output_tokens.is_some() {
+                                existing.output_tokens = u.output_tokens;
+                            }
+                            if u.cached_input_tokens.is_some() {
+                                existing.cached_input_tokens = u.cached_input_tokens;
+                            }
                         } else {
                             usage = Some(u);
                         }
@@ -380,7 +451,9 @@ impl ContextEngine {
                     StreamEvent::ThinkingSignature { signature } => {
                         thinking_signature = Some(signature);
                     }
-                    StreamEvent::HttpError { message, .. } => anyhow::bail!("summarizer stream error: {}", message),
+                    StreamEvent::HttpError { message, .. } => {
+                        anyhow::bail!("summarizer stream error: {}", message)
+                    }
                     StreamEvent::Error(e) => anyhow::bail!("summarizer stream error: {}", e),
                 },
                 Ok(None) => {
@@ -394,7 +467,13 @@ impl ContextEngine {
             }
         }
 
-        Ok(SummaryResponse { text, reasoning_content, thinking_signature, tool_calls, usage })
+        Ok(SummaryResponse {
+            text,
+            reasoning_content,
+            thinking_signature,
+            tool_calls,
+            usage,
+        })
     }
 }
 
@@ -409,9 +488,14 @@ struct SummaryResponse {
     usage: Option<ChatUsage>,
 }
 
-fn find_incremental_range(history: &[ChatMessage], boundary: usize) -> (usize, usize, Option<String>) {
+fn find_incremental_range(
+    history: &[ChatMessage],
+    boundary: usize,
+) -> (usize, usize, Option<String>) {
     let last_summary = history[..boundary].iter().rposition(|m| {
-        m.role == "user" && m.text_content().starts_with("[CONTEXT COMPACTION — REFERENCE ONLY]")
+        m.role == "user"
+            && m.text_content()
+                .starts_with("[CONTEXT COMPACTION — REFERENCE ONLY]")
     });
     match last_summary {
         Some(idx) => {
@@ -424,18 +508,18 @@ fn find_incremental_range(history: &[ChatMessage], boundary: usize) -> (usize, u
 
 fn strip_images(msg: &ChatMessage) -> ChatMessage {
     let mut cleaned = msg.clone();
-    cleaned.parts = cleaned.parts.into_iter().map(|part| match part {
-        ContentPart::ImageUrl { .. } => ContentPart::Text { text: "[image]".into() },
-        ContentPart::ImageB64 { .. } => ContentPart::Text { text: "[image]".into() },
-        // ImageRef is disk-only and should be hydrated before reaching here,
-        // but treat it like any other image just in case.
-        ContentPart::ImageRef { .. } => ContentPart::Text { text: "[image]".into() },
-        // Audio is normally adapted to text upstream; collapse any stray part too.
-        ContentPart::AudioB64 { .. } | ContentPart::AudioRef { .. } => {
-            ContentPart::Text { text: "[audio]".into() }
-        }
-        other => other,
-    }).collect();
+    cleaned.parts = cleaned
+        .parts
+        .into_iter()
+        .map(|part| match part {
+            ContentPart::File {
+                path, mime_type, ..
+            } => ContentPart::Text {
+                text: crate::providers::media::marker_for_file(&path, mime_type.as_deref()),
+            },
+            other => other,
+        })
+        .collect();
     cleaned
 }
 
@@ -479,7 +563,11 @@ fn build_memory_prompt(knowledge_dir: &str) -> String {
     )
 }
 
-fn build_summarizer_prompt(msg_count: usize, existing_summary: Option<&str>, memory_prompt: &str) -> String {
+fn build_summarizer_prompt(
+    msg_count: usize,
+    existing_summary: Option<&str>,
+    memory_prompt: &str,
+) -> String {
     match existing_summary {
         Some(base) => format!(
             "Below is a PREVIOUS SUMMARY followed by NEW conversation messages.\n\
@@ -555,7 +643,10 @@ fn audit_summary_quality(to_compact: &[ChatMessage], summary: &str) -> (bool, Ve
 
     let original_paths = extract_file_paths(to_compact);
     if !original_paths.is_empty() {
-        let preserved = original_paths.iter().filter(|p| summary.contains(*p)).count();
+        let preserved = original_paths
+            .iter()
+            .filter(|p| summary.contains(*p))
+            .count();
         if preserved == 0 && original_paths.len() <= 5 {
             reasons.push(format!(
                 "no file paths preserved (original had {})",
@@ -569,9 +660,8 @@ fn audit_summary_quality(to_compact: &[ChatMessage], summary: &str) -> (bool, Ve
 
 fn extract_file_paths(messages: &[ChatMessage]) -> Vec<String> {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let re = RE.get_or_init(|| {
-        regex::Regex::new(r"(?:/[\w/.-]+\.\w{1,5})|(?:src/[\w/.-]+)").unwrap()
-    });
+    let re =
+        RE.get_or_init(|| regex::Regex::new(r"(?:/[\w/.-]+\.\w{1,5})|(?:src/[\w/.-]+)").unwrap());
     let mut seen = std::collections::HashSet::new();
     let mut paths = Vec::new();
     for msg in messages {

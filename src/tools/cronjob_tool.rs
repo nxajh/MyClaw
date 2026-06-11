@@ -6,9 +6,11 @@
 use async_trait::async_trait;
 
 use crate::agents::SharedScheduler;
-use crate::agents::scheduling::cron_types::{DeliveryConfig, FailureAlertConfig, RetryConfig, ScheduleKind};
+use crate::agents::scheduling::cron_types::{
+    DeliveryConfig, FailureAlertConfig, RetryConfig, ScheduleKind,
+};
 use crate::agents::scheduling::scheduler::{
-    self, validate_active_hours, validate_at_timestamp, validate_schedule, validate_tz, JobEntry,
+    self, JobEntry, validate_active_hours, validate_at_timestamp, validate_schedule, validate_tz,
 };
 use crate::providers::{Tool, ToolResult};
 
@@ -146,10 +148,12 @@ impl Tool for CronJobTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
-        let action = args.get("action")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _session: &crate::agents::session::Session,
+    ) -> anyhow::Result<ToolResult> {
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
 
         match action {
             "create" => self.handle_create(&args),
@@ -188,17 +192,39 @@ impl CronJobTool {
             return Ok(err_result(&format!("Prompt rejected: {}", e)));
         }
 
-        let target = args.get("target")
+        let target = args
+            .get("target")
             .and_then(|v| v.as_str())
             .unwrap_or("last")
             .to_string();
-        let name = args.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let active_hours = args.get("active_hours").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let tz = args.get("tz").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let model = args.get("model").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let provider = args.get("provider").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let max_runs = args.get("max_runs").and_then(|v| v.as_u64()).map(|n| n as u32);
-        let delete_after_run = args.get("delete_after_run").and_then(|v| v.as_bool()).unwrap_or(false);
+        let name = args
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let active_hours = args
+            .get("active_hours")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let tz = args
+            .get("tz")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let model = args
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let provider = args
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let max_runs = args
+            .get("max_runs")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32);
+        let delete_after_run = args
+            .get("delete_after_run")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         // Validate schedule.
         let (schedule, schedule_kind) = match parse_schedule_input(&schedule_input) {
@@ -272,13 +298,29 @@ impl CronJobTool {
         match self.scheduler.add_job(entry) {
             Ok(id) => {
                 let mut details = vec![
-                    format!("Created cron job '{}' (id: {})", name.as_deref().unwrap_or("unnamed"), id),
+                    format!(
+                        "Created cron job '{}' (id: {})",
+                        name.as_deref().unwrap_or("unnamed"),
+                        id
+                    ),
                     format!("  schedule: {}", schedule),
                 ];
-                if let Some(ref m) = model { details.push(format!("  model: {}", m)); }
-                if let Some(ref p) = provider { details.push(format!("  provider: {}", p)); }
+                if let Some(ref m) = model {
+                    details.push(format!("  model: {}", m));
+                }
+                if let Some(ref p) = provider {
+                    details.push(format!("  provider: {}", p));
+                }
                 if let Some(mr) = max_runs {
-                    details.push(format!("  max_runs: {}{}", mr, if delete_after_run { " (auto-delete)" } else { " (auto-disable)" }));
+                    details.push(format!(
+                        "  max_runs: {}{}",
+                        mr,
+                        if delete_after_run {
+                            " (auto-delete)"
+                        } else {
+                            " (auto-disable)"
+                        }
+                    ));
                 }
                 Ok(ToolResult {
                     success: true,
@@ -388,7 +430,9 @@ impl CronJobTool {
             || update.provider.is_some();
 
         if !has_update {
-            return Ok(err_result("No fields to update. Provide at least one field besides 'id' and 'action'."));
+            return Ok(err_result(
+                "No fields to update. Provide at least one field besides 'id' and 'action'.",
+            ));
         }
 
         match self.scheduler.update_job(&id, update) {
@@ -407,12 +451,8 @@ impl CronJobTool {
     }
 
     fn handle_list(&self, args: &serde_json::Value) -> anyhow::Result<ToolResult> {
-        let limit = args.get("limit")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(20) as usize;
-        let offset = args.get("offset")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
+        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+        let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
         let jobs = self.scheduler.jobs();
 
@@ -429,7 +469,12 @@ impl CronJobTool {
 
         let mut lines = Vec::new();
         if offset > 0 || total > limit {
-            lines.push(format!("Showing {}-{} of {} jobs", offset + 1, offset + page.len(), total));
+            lines.push(format!(
+                "Showing {}-{} of {} jobs",
+                offset + 1,
+                offset + page.len(),
+                total
+            ));
             lines.push(String::new());
         }
 
@@ -439,7 +484,11 @@ impl CronJobTool {
             let next = job.next_run_at.as_deref().unwrap_or("none");
             let last = job.last_run_at.as_deref().unwrap_or("never");
             let delivery_info = match &job.delivery {
-                Some(d) => format!(", delivery: {}→{}", d.channel, d.to.as_deref().unwrap_or("*")),
+                Some(d) => format!(
+                    ", delivery: {}→{}",
+                    d.channel,
+                    d.to.as_deref().unwrap_or("*")
+                ),
                 None => String::new(),
             };
             let tool_info = match (&job.enabled_tools, &job.disabled_tools) {
@@ -450,7 +499,11 @@ impl CronJobTool {
             let runs_info = if job.last_runs.is_empty() {
                 String::new()
             } else {
-                let last_status = job.last_runs.last().map(|r| r.status.as_str()).unwrap_or("?");
+                let last_status = job
+                    .last_runs
+                    .last()
+                    .map(|r| r.status.as_str())
+                    .unwrap_or("?");
                 format!(", last_run: {}", last_status)
             };
             let model_info = match &job.model {
@@ -496,7 +549,11 @@ impl CronJobTool {
         })
     }
 
-    fn handle_set_enabled(&self, args: &serde_json::Value, enabled: bool) -> anyhow::Result<ToolResult> {
+    fn handle_set_enabled(
+        &self,
+        args: &serde_json::Value,
+        enabled: bool,
+    ) -> anyhow::Result<ToolResult> {
         let id = match args.get("id").and_then(|v| v.as_str()) {
             Some(id) => id.to_string(),
             None => return Ok(err_result("Missing required field: id")),
@@ -569,9 +626,7 @@ impl CronJobTool {
             Some(id) => id,
             None => return Ok(err_result("Missing required field: id")),
         };
-        let limit = args.get("limit")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(10) as usize;
+        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
         // Try persistent JSONL log first, fall back to in-memory.
         let records = self.scheduler.read_run_log(id, limit);
@@ -582,22 +637,33 @@ impl CronJobTool {
             return match job {
                 Some(j) if j.last_runs.is_empty() => Ok(ToolResult {
                     success: true,
-                    output: format!("Job '{}' has no run history.", j.name.as_deref().unwrap_or(&j.id)),
+                    output: format!(
+                        "Job '{}' has no run history.",
+                        j.name.as_deref().unwrap_or(&j.id)
+                    ),
                     error: None,
                 }),
                 Some(j) => {
-                    let mut output = format!("📋 Run log for '{}':\n\n", j.name.as_deref().unwrap_or(&j.id));
+                    let mut output = format!(
+                        "📋 Run log for '{}':\n\n",
+                        j.name.as_deref().unwrap_or(&j.id)
+                    );
                     for (i, run) in j.last_runs.iter().rev().take(limit).enumerate() {
                         output.push_str(&format_run_record(i + 1, run));
                     }
-                    Ok(ToolResult { success: true, output, error: None })
+                    Ok(ToolResult {
+                        success: true,
+                        output,
+                        error: None,
+                    })
                 }
                 None => Ok(err_result(&format!("Job '{}' not found", id))),
             };
         }
 
         let jobs = self.scheduler.jobs();
-        let job_name = jobs.iter()
+        let job_name = jobs
+            .iter()
             .find(|j| j.id == id)
             .and_then(|j| j.name.clone())
             .unwrap_or_else(|| id.to_string());
@@ -606,8 +672,15 @@ impl CronJobTool {
         for (i, run) in records.iter().enumerate() {
             output.push_str(&format_run_record(i + 1, run));
         }
-        output.push_str(&format!("\n({} entries from persistent log)", records.len()));
-        Ok(ToolResult { success: true, output, error: None })
+        output.push_str(&format!(
+            "\n({} entries from persistent log)",
+            records.len()
+        ));
+        Ok(ToolResult {
+            success: true,
+            output,
+            error: None,
+        })
     }
 }
 
@@ -630,7 +703,11 @@ fn format_run_record(i: usize, run: &crate::agents::scheduling::cron_types::RunR
     let ts = &run.run_at[..19.min(run.run_at.len())];
     format!(
         "{}. [{}] {} — {}ms{}\n",
-        i, ts, run.status.as_str(), run.duration_ms, error_info,
+        i,
+        ts,
+        run.status.as_str(),
+        run.duration_ms,
+        error_info,
     )
 }
 
@@ -641,14 +718,22 @@ fn parse_schedule_input(input: &str) -> Result<(String, Option<ScheduleKind>), S
     // "every 30m" / "every 1h" / "every 90s"
     if let Some(rest) = trimmed.strip_prefix("every ") {
         let ms = parse_duration_to_ms(rest)?;
-        return Ok((trimmed.to_string(), Some(ScheduleKind::Every { interval_ms: ms })));
+        return Ok((
+            trimmed.to_string(),
+            Some(ScheduleKind::Every { interval_ms: ms }),
+        ));
     }
 
     // "at 2026-05-15T09:00:00+08:00"
     if let Some(rest) = trimmed.strip_prefix("at ") {
         chrono::DateTime::parse_from_rfc3339(rest)
             .map_err(|e| format!("invalid datetime '{}': {}", rest, e))?;
-        return Ok((trimmed.to_string(), Some(ScheduleKind::At { at: rest.to_string() })));
+        return Ok((
+            trimmed.to_string(),
+            Some(ScheduleKind::At {
+                at: rest.to_string(),
+            }),
+        ));
     }
 
     // Standard cron expression (6-field). Validate upfront.
@@ -660,15 +745,25 @@ fn parse_schedule_input(input: &str) -> Result<(String, Option<ScheduleKind>), S
 fn parse_duration_to_ms(s: &str) -> Result<u64, String> {
     let s = s.trim();
     if let Some(n) = s.strip_suffix("ms") {
-        n.parse::<u64>().map_err(|_| format!("invalid ms value: '{}'", s))
+        n.parse::<u64>()
+            .map_err(|_| format!("invalid ms value: '{}'", s))
     } else if let Some(n) = s.strip_suffix("s") {
-        n.parse::<u64>().map(|v| v * 1000).map_err(|_| format!("invalid seconds: '{}'", s))
+        n.parse::<u64>()
+            .map(|v| v * 1000)
+            .map_err(|_| format!("invalid seconds: '{}'", s))
     } else if let Some(n) = s.strip_suffix("m") {
-        n.parse::<u64>().map(|v| v * 60_000).map_err(|_| format!("invalid minutes: '{}'", s))
+        n.parse::<u64>()
+            .map(|v| v * 60_000)
+            .map_err(|_| format!("invalid minutes: '{}'", s))
     } else if let Some(n) = s.strip_suffix("h") {
-        n.parse::<u64>().map(|v| v * 3_600_000).map_err(|_| format!("invalid hours: '{}'", s))
+        n.parse::<u64>()
+            .map(|v| v * 3_600_000)
+            .map_err(|_| format!("invalid hours: '{}'", s))
     } else {
-        Err(format!("expected duration like '30s', '5m', '1h', got: '{}'", s))
+        Err(format!(
+            "expected duration like '30s', '5m', '1h', got: '{}'",
+            s
+        ))
     }
 }
 
@@ -678,9 +773,15 @@ fn parse_delivery(value: Option<&serde_json::Value>) -> Option<DeliveryConfig> {
         let channel = v.get("channel")?.as_str()?;
         Some(DeliveryConfig {
             channel: channel.to_string(),
-            account_id: v.get("account_id").and_then(|a| a.as_str()).map(|s| s.to_string()),
+            account_id: v
+                .get("account_id")
+                .and_then(|a| a.as_str())
+                .map(|s| s.to_string()),
             to: v.get("to").and_then(|t| t.as_str()).map(|s| s.to_string()),
-            thread_id: v.get("thread_id").and_then(|t| t.as_str()).map(|s| s.to_string()),
+            thread_id: v
+                .get("thread_id")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string()),
         })
     })
 }
@@ -689,7 +790,8 @@ fn parse_delivery(value: Option<&serde_json::Value>) -> Option<DeliveryConfig> {
 fn parse_retry_config(v: &serde_json::Value) -> Option<RetryConfig> {
     Some(RetryConfig {
         max_attempts: v.get("max_attempts").and_then(|v| v.as_u64()).unwrap_or(3) as u32,
-        backoff_ms: v.get("backoff_ms")
+        backoff_ms: v
+            .get("backoff_ms")
             .and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
             .unwrap_or_else(|| vec![30_000, 60_000, 300_000]),
@@ -700,13 +802,22 @@ fn parse_retry_config(v: &serde_json::Value) -> Option<RetryConfig> {
 fn parse_failure_alert(v: &serde_json::Value) -> Option<FailureAlertConfig> {
     Some(FailureAlertConfig {
         after: v.get("after").and_then(|v| v.as_u64()).unwrap_or(3) as u32,
-        cooldown_secs: v.get("cooldown_secs").and_then(|v| v.as_u64()).unwrap_or(3600),
-        include_skipped: v.get("include_skipped").and_then(|v| v.as_bool()).unwrap_or(false),
+        cooldown_secs: v
+            .get("cooldown_secs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(3600),
+        include_skipped: v
+            .get("include_skipped")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     })
 }
 
 /// Parse a JSON array of strings.
 fn parse_string_array(value: Option<&serde_json::Value>) -> Option<Vec<String>> {
-    value.and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+    value.and_then(|v| v.as_array()).map(|arr| {
+        arr.iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect()
+    })
 }

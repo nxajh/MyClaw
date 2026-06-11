@@ -15,14 +15,14 @@ use anyhow::Result;
 
 use futures_util::StreamExt;
 
+use crate::agents::AgentRuntime;
+use crate::agents::context_engine::ContextEngine;
 use crate::agents::error::AgentError;
 use crate::agents::loop_breaker::LoopBreak;
-use crate::agents::tokens::{estimate_history_tokens, estimate_tokens};
-use crate::agents::context_engine::ContextEngine;
 use crate::agents::session::Session;
+use crate::agents::tokens::{estimate_history_tokens, estimate_tokens};
 use crate::agents::turn::{TurnContext, TurnResult};
 use crate::agents::turn_event::TurnEvent;
-use crate::agents::AgentRuntime;
 use crate::config::sub_agent::SubAgentConfig;
 use crate::providers::capability_chat::{ChatMessage, ChatRequest, StopReason, ToolSpec};
 use crate::providers::{BoxStream, Capability, ContentPart, StreamEvent, ToolCall};
@@ -115,7 +115,9 @@ impl Agent {
         // per-request estimate in `maybe_compact` — so a stale tracker restored on
         // restart can no longer suppress compaction.
         if session.token_tracker.is_fresh() {
-            session.token_tracker.seed_from_history(turn_ctx.system_prompt, &session.history);
+            session
+                .token_tracker
+                .seed_from_history(turn_ctx.system_prompt, &session.history);
         }
 
         // Assemble the LLM request prefix once. Subsequent rebuilds re-clone
@@ -131,16 +133,14 @@ impl Agent {
         const MAX_EMPTY_RETRIES: usize = 3;
         let mut overflow_retries: usize = 0;
         const MAX_OVERFLOW_RETRIES: usize = 3;
-        // Media (images, audio) is lowered per concrete model inside the provider
+        // Media (images, audio, video) is lowered per concrete model inside the provider
         // layer (each chat provider is wrapped in `MediaLoweringProvider`): a
-        // vision model gets the real image, a text-only model gets a `[图片 #N]`
-        // marker (and likewise `[语音 #N]` for audio). The
-        // agent sends the canonical format — real images and audio — and never
-        // pre-renders them, so whichever model the fallback/override actually
+        // multimodal model gets the real file, while a model without the modality gets
+        // a marker. The agent sends the canonical format — session-local files — and
+        // never pre-renders them, so whichever model the fallback/override actually
         // serves with sees the right thing. It only owns the retrieval tools
         // (advertise + execute in the loop, since retrieval is a multi-round,
-        // model-calling concern): `view_image` for `[图片 #N]`, `hear_audio` for
-        // `[语音 #N]`.
+        // model-calling concern): `view_image`, `hear_audio`, and `view_video`.
         //
         // Advertise each tool when its aux model exists in the chain AND this turn
         // carries that media or history already references the tool (the latter
@@ -154,7 +154,11 @@ impl Agent {
             Modality::Image,
             history_has_images(&session.history)
                 || history_has_tool_calls(&session.history, "view_image"),
-            || Arc::new(crate::tools::ViewImageTool::new(Arc::clone(&runtime.providers))),
+            || {
+                Arc::new(crate::tools::ViewImageTool::new(Arc::clone(
+                    &runtime.providers,
+                )))
+            },
         );
         advertise_media_tool(
             &mut tool_specs,
@@ -163,12 +167,30 @@ impl Agent {
             Modality::Audio,
             history_has_audio(&session.history)
                 || history_has_tool_calls(&session.history, "hear_audio"),
-            || Arc::new(crate::tools::HearAudioTool::new(Arc::clone(&runtime.providers))),
+            || {
+                Arc::new(crate::tools::HearAudioTool::new(Arc::clone(
+                    &runtime.providers,
+                )))
+            },
+        );
+        advertise_media_tool(
+            &mut tool_specs,
+            &mut allowed_tools,
+            runtime.providers.as_ref(),
+            Modality::Video,
+            history_has_video(&session.history)
+                || history_has_tool_calls(&session.history, "view_video"),
+            || {
+                Arc::new(crate::tools::ViewVideoTool::new(Arc::clone(
+                    &runtime.providers,
+                )))
+            },
         );
         // If a media tool isn't declared this turn but history references it, fold
         // those calls to text so no orphan tool call reaches the provider.
         fold_absent_media_tool(&mut messages, &tool_specs, "view_image", "图片查看结果");
         fold_absent_media_tool(&mut messages, &tool_specs, "hear_audio", "语音内容");
+        fold_absent_media_tool(&mut messages, &tool_specs, "view_video", "视频查看结果");
 
         loop {
             // Shutdown checkpoint between LLM calls (mirrors AgentLoop chat_loop).
@@ -183,11 +205,7 @@ impl Agent {
             // User-cancel checkpoint: if the session's TurnStream surfaces a
             // CancellationToken, honor it. RFC §7.6 (Phase 1.5): cancel
             // lives on the per-turn stream now, not on Channel directly.
-            if let Some(token) = session
-                .turn_stream
-                .as_ref()
-                .and_then(|s| s.cancel_token())
-            {
+            if let Some(token) = session.turn_stream.as_ref().and_then(|s| s.cancel_token()) {
                 if token.is_cancelled() {
                     return Ok(TurnResult {
                         text: String::new(),
@@ -238,7 +256,11 @@ impl Agent {
                         thinking,
                         stop: None,
                         seed: None,
-                        tools: if tool_specs.is_empty() { None } else { Some(&tool_specs) },
+                        tools: if tool_specs.is_empty() {
+                            None
+                        } else {
+                            Some(&tool_specs)
+                        },
                         stream: true,
                     };
                     let stream = provider.chat(req)?;
@@ -267,7 +289,9 @@ impl Agent {
                 let input = usage.input_tokens.unwrap_or(0);
                 let output = usage.output_tokens.unwrap_or(0);
                 let cached = usage.cached_input_tokens.unwrap_or(0);
-                session.token_tracker.update_from_usage(input, output, cached);
+                session
+                    .token_tracker
+                    .update_from_usage(input, output, cached);
                 if let Some(ref hook) = session.persist {
                     hook.save_token_count(&session.id, session.token_tracker.total_tokens());
                 }
@@ -331,7 +355,9 @@ impl Agent {
                 // the final-text signal in the canonical order.
                 push_or_drop(
                     &mut session.turn_stream,
-                    TurnEvent::Done { text: response.text.clone() },
+                    TurnEvent::Done {
+                        text: response.text.clone(),
+                    },
                 )
                 .await;
                 if response.text.trim().is_empty() {
@@ -399,8 +425,8 @@ impl Agent {
                 // Emit ToolCall event before execution (streaming UIs show
                 // the call spinner).
                 {
-                    let args: serde_json::Value = serde_json::from_str(&call.arguments)
-                        .unwrap_or(serde_json::Value::Null);
+                    let args: serde_json::Value =
+                        serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null);
                     push_or_drop(
                         &mut session.turn_stream,
                         TurnEvent::ToolCall {
@@ -428,11 +454,7 @@ impl Agent {
                     Err(e) => (format!("error: {}", e), true),
                 };
 
-                match loop_breaker.record_and_check(
-                    &call.name,
-                    &call.arguments,
-                    &result_content,
-                ) {
+                match loop_breaker.record_and_check(&call.name, &call.arguments, &result_content) {
                     LoopBreak::Detected(reason) => {
                         // Record-and-check triggered: append the result for
                         // this call so the pair is complete, then strip any
@@ -574,7 +596,12 @@ impl Agent {
 
             for call in &pending_calls {
                 let result = tool_executor
-                    .execute(call, session, Some(&turn_ctx.permission_mode), &allowed_tools)
+                    .execute(
+                        call,
+                        session,
+                        Some(&turn_ctx.permission_mode),
+                        &allowed_tools,
+                    )
                     .await;
                 let (result_content, is_error) = match &result {
                     Ok(r) => {
@@ -626,17 +653,46 @@ impl Agent {
 /// True if any message in `history` carries an image part.
 fn history_has_images(history: &[ChatMessage]) -> bool {
     history.iter().any(|m| {
-        m.parts
-            .iter()
-            .any(|p| matches!(p, ContentPart::ImageB64 { .. } | ContentPart::ImageUrl { .. }))
+        m.parts.iter().any(|p| match p {
+            ContentPart::File {
+                path, mime_type, ..
+            } => {
+                crate::providers::media::modality_from_mime(mime_type.as_deref(), path)
+                    == crate::providers::media::FileModality::Image
+            }
+            _ => false,
+        })
     })
 }
 
 /// True if any message in `history` carries an audio part.
 fn history_has_audio(history: &[ChatMessage]) -> bool {
-    history
-        .iter()
-        .any(|m| m.parts.iter().any(|p| matches!(p, ContentPart::AudioB64 { .. })))
+    history.iter().any(|m| {
+        m.parts.iter().any(|p| match p {
+            ContentPart::File {
+                path, mime_type, ..
+            } => {
+                crate::providers::media::modality_from_mime(mime_type.as_deref(), path)
+                    == crate::providers::media::FileModality::Audio
+            }
+            _ => false,
+        })
+    })
+}
+
+/// True if any message in `history` carries a video part.
+fn history_has_video(history: &[ChatMessage]) -> bool {
+    history.iter().any(|m| {
+        m.parts.iter().any(|p| match p {
+            ContentPart::File {
+                path, mime_type, ..
+            } => {
+                crate::providers::media::modality_from_mime(mime_type.as_deref(), path)
+                    == crate::providers::media::FileModality::Video
+            }
+            _ => false,
+        })
+    })
 }
 
 /// True if `history` contains a prior tool call named `name`. Used to keep a
@@ -716,13 +772,17 @@ fn fold_absent_media_tool(
         if m.role != "assistant" {
             continue;
         }
-        let Some(tcs) = m.tool_calls.take() else { continue };
+        let Some(tcs) = m.tool_calls.take() else {
+            continue;
+        };
         let (mine, rest): (Vec<_>, Vec<_>) = tcs.into_iter().partition(|tc| tc.name == tool_name);
         m.tool_calls = if rest.is_empty() { None } else { Some(rest) };
         for tc in mine {
             if let Some(out) = results.get(&tc.id) {
                 if !out.is_empty() {
-                    m.parts.push(ContentPart::Text { text: format!("[{label}]: {out}") });
+                    m.parts.push(ContentPart::Text {
+                        text: format!("[{label}]: {out}"),
+                    });
                 }
             }
         }
@@ -790,8 +850,13 @@ async fn maybe_compact(
                 + 8
         })
         .sum();
-    let boundary =
-        context.compaction_boundary_with_retain(&session.history, window, sys_prompt_tokens, tool_spec_tokens, override_retain)?;
+    let boundary = context.compaction_boundary_with_retain(
+        &session.history,
+        window,
+        sys_prompt_tokens,
+        tool_spec_tokens,
+        override_retain,
+    )?;
 
     // Snapshot history for the summarizer (which reads a slice); the live
     // session is passed through for the memory tools inside the summarizer.
@@ -833,14 +898,17 @@ async fn maybe_compact(
             // messages to a fresh history.jsonl so the next restart loads the
             // compacted state instead of the full un-compacted history).
             if let Some(ref hook) = session.persist {
-                hook.save_compaction(&session.id, &SummaryRecord {
-                    id: 0,
-                    version,
-                    summary: result.summary.clone(),
-                    up_to_message: last_compacted_id,
-                    token_estimate: Some(result.summary_tokens),
-                    created_at: chrono::Utc::now(),
-                });
+                hook.save_compaction(
+                    &session.id,
+                    &SummaryRecord {
+                        id: 0,
+                        version,
+                        summary: result.summary.clone(),
+                        up_to_message: last_compacted_id,
+                        token_estimate: Some(result.summary_tokens),
+                        created_at: chrono::Utc::now(),
+                    },
+                );
                 let surviving: Vec<(i64, ChatMessage)> = session
                     .message_ids
                     .iter()
@@ -860,6 +928,7 @@ async fn maybe_compact(
             crate::agents::session::sanitize_history(&mut messages);
             fold_absent_media_tool(&mut messages, tool_specs, "view_image", "图片查看结果");
             fold_absent_media_tool(&mut messages, tool_specs, "hear_audio", "语音内容");
+            fold_absent_media_tool(&mut messages, tool_specs, "view_video", "视频查看结果");
             tracing::info!(
                 summary_tokens = result.summary_tokens,
                 removed_tokens = result.removed_tokens,
@@ -993,7 +1062,9 @@ async fn push_or_drop(
     turn_stream: &mut Option<Box<dyn crate::channels::TurnStream>>,
     event: TurnEvent,
 ) {
-    let Some(stream) = turn_stream.as_mut() else { return };
+    let Some(stream) = turn_stream.as_mut() else {
+        return;
+    };
     if let Err(e) = stream.push(event).await {
         tracing::warn!(
             err = %e,
@@ -1069,13 +1140,21 @@ async fn collect_stream(
         match event {
             StreamEvent::Delta { text: delta } => {
                 text.push_str(&delta);
-                push_or_drop(turn_stream, TurnEvent::Chunk { delta: delta.clone() }).await;
+                push_or_drop(
+                    turn_stream,
+                    TurnEvent::Chunk {
+                        delta: delta.clone(),
+                    },
+                )
+                .await;
             }
             StreamEvent::Thinking { text: delta } => {
                 if !delta.is_empty() {
                     push_or_drop(
                         turn_stream,
-                        TurnEvent::Thinking { delta: delta.clone() },
+                        TurnEvent::Thinking {
+                            delta: delta.clone(),
+                        },
                     )
                     .await;
                     if let Some(rc) = &mut reasoning_content {
@@ -1088,20 +1167,45 @@ async fn collect_stream(
             StreamEvent::ThinkingSignature { signature } => {
                 thinking_signature = Some(signature);
             }
-            StreamEvent::ToolCallStart { id, name, initial_arguments } => {
-                tool_calls.push(ToolCall { id, name, arguments: initial_arguments });
+            StreamEvent::ToolCallStart {
+                id,
+                name,
+                initial_arguments,
+            } => {
+                tool_calls.push(ToolCall {
+                    id,
+                    name,
+                    arguments: initial_arguments,
+                });
             }
-            StreamEvent::ToolCallDelta { index, id, delta, name } => {
+            StreamEvent::ToolCallDelta {
+                index,
+                id,
+                delta,
+                name,
+            } => {
                 let idx = index as usize;
                 while tool_calls.len() <= idx {
-                    tool_calls.push(ToolCall { id: String::new(), name: String::new(), arguments: String::new() });
+                    tool_calls.push(ToolCall {
+                        id: String::new(),
+                        name: String::new(),
+                        arguments: String::new(),
+                    });
                 }
                 let call = &mut tool_calls[idx];
-                if !id.is_empty() { call.id = id; }
-                if !name.is_empty() { call.name = name; }
+                if !id.is_empty() {
+                    call.id = id;
+                }
+                if !name.is_empty() {
+                    call.name = name;
+                }
                 call.arguments.push_str(&delta);
             }
-            StreamEvent::ToolCallEnd { id, name, arguments } => {
+            StreamEvent::ToolCallEnd {
+                id,
+                name,
+                arguments,
+            } => {
                 if let Some(call) = tool_calls.iter_mut().find(|c| c.id == id) {
                     call.name = name;
                     call.arguments = arguments;
@@ -1154,10 +1258,18 @@ fn is_transient_llm_error(err: &anyhow::Error) -> bool {
     }
     // Stream errors: SSE interruption, connection drop, etc.
     let msg = err.to_string();
-    if msg.starts_with("stream error:") { return true; }
-    if msg.contains("stream chunk timeout") { return true; }
-    if msg.contains("stream stalled") { return true; }
-    if msg.contains("stream ended without a completion marker") { return true; }
+    if msg.starts_with("stream error:") {
+        return true;
+    }
+    if msg.contains("stream chunk timeout") {
+        return true;
+    }
+    if msg.contains("stream stalled") {
+        return true;
+    }
+    if msg.contains("stream ended without a completion marker") {
+        return true;
+    }
     false
 }
 
@@ -1174,14 +1286,17 @@ mod tests {
     use crate::agents::session::Session;
     use crate::config::sub_agent::SubAgentConfig;
 
-    fn img_msg(b64: &str) -> ChatMessage {
+    fn img_msg(path: &str) -> ChatMessage {
         let mut m = ChatMessage::user_text("");
         m.parts = vec![
-            ContentPart::Text { text: "看图".into() },
-            ContentPart::ImageB64 {
-                b64_json: b64.into(),
-                media_type: None,
-                detail: crate::providers::ImageDetail::Auto,
+            ContentPart::Text {
+                text: "看图".into(),
+            },
+            ContentPart::File {
+                path: path.into(),
+                mime_type: Some("image/png".into()),
+                name: None,
+                size_bytes: None,
             },
         ];
         m
@@ -1228,7 +1343,10 @@ mod tests {
                 _ => None,
             })
             .any(|t| t.contains("一只红色的猫"));
-        assert!(folded, "result text must be inlined onto the assistant message");
+        assert!(
+            folded,
+            "result text must be inlined onto the assistant message"
+        );
     }
 
     #[test]
@@ -1247,10 +1365,12 @@ mod tests {
         }];
         fold_absent_media_tool(&mut messages, &specs, "view_image", "图片查看结果");
         // Tool declared → calls preserved untouched.
-        assert!(messages[0]
-            .tool_calls
-            .as_ref()
-            .is_some_and(|tcs| tcs.iter().any(|tc| tc.name == "view_image")));
+        assert!(
+            messages[0]
+                .tool_calls
+                .as_ref()
+                .is_some_and(|tcs| tcs.iter().any(|tc| tc.name == "view_image"))
+        );
     }
 
     #[test]
@@ -1270,7 +1390,10 @@ mod tests {
             arguments: "{}".into(),
         }]);
         assert!(!history_has_tool_calls(&[other], "view_image"));
-        assert!(!history_has_tool_calls(&[ChatMessage::user_text("hi")], "view_image"));
+        assert!(!history_has_tool_calls(
+            &[ChatMessage::user_text("hi")],
+            "view_image"
+        ));
     }
 
     // (Image placeholdering moved to `providers::media::lower_media_for`, which
@@ -1304,7 +1427,9 @@ mod tests {
         assert!(session.channel.is_none());
     }
 
-    fn events_to_stream(events: Vec<crate::providers::StreamEvent>) -> BoxStream<crate::providers::StreamEvent> {
+    fn events_to_stream(
+        events: Vec<crate::providers::StreamEvent>,
+    ) -> BoxStream<crate::providers::StreamEvent> {
         use futures_util::stream;
         Box::pin(stream::iter(events))
     }
@@ -1318,8 +1443,12 @@ mod tests {
         // anthropic renderer's filter_map drops the unreplayable block at
         // send time so the next turn doesn't 400.
         let s = events_to_stream(vec![
-            StreamEvent::Thinking { text: "let me think...".into() },
-            StreamEvent::Done { reason: crate::providers::StopReason::EndTurn },
+            StreamEvent::Thinking {
+                text: "let me think...".into(),
+            },
+            StreamEvent::Done {
+                reason: crate::providers::StopReason::EndTurn,
+            },
         ]);
         let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
         let resp = match collect_stream(s, &mut turn_stream).await {
@@ -1335,10 +1464,18 @@ mod tests {
         use crate::providers::StreamEvent;
 
         let s = events_to_stream(vec![
-            StreamEvent::Thinking { text: "thinking...".into() },
-            StreamEvent::ThinkingSignature { signature: "sig123".into() },
-            StreamEvent::Delta { text: "hello".into() },
-            StreamEvent::Done { reason: crate::providers::StopReason::EndTurn },
+            StreamEvent::Thinking {
+                text: "thinking...".into(),
+            },
+            StreamEvent::ThinkingSignature {
+                signature: "sig123".into(),
+            },
+            StreamEvent::Delta {
+                text: "hello".into(),
+            },
+            StreamEvent::Done {
+                reason: crate::providers::StopReason::EndTurn,
+            },
         ]);
         let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
         let resp = match collect_stream(s, &mut turn_stream).await {
@@ -1357,7 +1494,9 @@ mod tests {
         // No thinking at all → no signature needed.
         let s = events_to_stream(vec![
             StreamEvent::Delta { text: "hi".into() },
-            StreamEvent::Done { reason: crate::providers::StopReason::EndTurn },
+            StreamEvent::Done {
+                reason: crate::providers::StopReason::EndTurn,
+            },
         ]);
         let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
         let resp = match collect_stream(s, &mut turn_stream).await {
@@ -1375,9 +1514,9 @@ mod tests {
         // Stream ends with content but no terminal Done/Error — i.e. the
         // provider connection was closed mid-response. collect_stream must
         // fail the turn rather than persist the partial text as complete.
-        let s = events_to_stream(vec![
-            StreamEvent::Delta { text: "中方".into() },
-        ]);
+        let s = events_to_stream(vec![StreamEvent::Delta {
+            text: "中方".into(),
+        }]);
         let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
         assert!(
             collect_stream(s, &mut turn_stream).await.is_err(),
@@ -1392,7 +1531,9 @@ mod tests {
         // A provider that detects truncation emits StreamEvent::Error after
         // the partial deltas; that must surface as a turn failure.
         let s = events_to_stream(vec![
-            StreamEvent::Delta { text: "partial".into() },
+            StreamEvent::Delta {
+                text: "partial".into(),
+            },
             StreamEvent::Error("stream closed before completion".into()),
         ]);
         let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
@@ -1401,5 +1542,4 @@ mod tests {
             "provider Error must fail the turn"
         );
     }
-
 }

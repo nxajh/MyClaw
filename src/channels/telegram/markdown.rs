@@ -217,14 +217,12 @@ pub fn markdown_to_telegram_html(markdown: &str) -> String {
             if let Some(bracket_end) = chars[i + 1..].iter().position(|&c| c == ']') {
                 let real_bracket = i + 1 + bracket_end;
                 if real_bracket + 1 < len && chars[real_bracket + 1] == '(' {
-                    if let Some(paren_end) = chars[real_bracket + 2..]
-                        .iter()
-                        .position(|&c| c == ')')
+                    if let Some(paren_end) =
+                        chars[real_bracket + 2..].iter().position(|&c| c == ')')
                     {
                         let real_paren = real_bracket + 2 + paren_end;
                         let link_text: String = chars[i + 1..real_bracket].iter().collect();
-                        let link_url: String =
-                            chars[real_bracket + 2..real_paren].iter().collect();
+                        let link_url: String = chars[real_bracket + 2..real_paren].iter().collect();
                         out.push_str(&format!(
                             "<a href=\"{}\">{}</a>",
                             escape_html(&link_url),
@@ -263,9 +261,8 @@ pub fn markdown_to_telegram_html(markdown: &str) -> String {
         // Must be preceded by whitespace/start and followed by non-whitespace,
         // or preceded by non-whitespace and followed by whitespace/end.
         if (chars[i] == '*' || chars[i] == '_') && !stack.contains(&Tag::Bold) {
-            let prev_ok = i == 0
-                || chars[i - 1].is_whitespace()
-                || chars[i - 1].is_ascii_punctuation();
+            let prev_ok =
+                i == 0 || chars[i - 1].is_whitespace() || chars[i - 1].is_ascii_punctuation();
             let next_ok = i + 1 < len && !chars[i + 1].is_whitespace();
 
             if stack.contains(&Tag::Italic) {

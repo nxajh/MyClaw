@@ -32,7 +32,8 @@ pub fn cmd_help() -> String {
      **其他**  \n\
      /mcp — 查看 MCP 服务器状态  \n\
      /btw <问题> — 旁路提问，不影响上下文  \n\n\
-     _别名: /h=/help, /n=/new, /ss=/sessions, /sw=/switch, /rn=/rename, /del=/delete_".to_string()
+     _别名: /h=/help, /n=/new, /ss=/sessions, /sw=/switch, /rn=/rename, /del=/delete_"
+        .to_string()
 }
 
 pub async fn cmd_status(ctx: CommandContext<'_>) -> String {
@@ -116,14 +117,16 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
             Ok(s) => s,
             Err(_) => return "⏳ 会话正在响应中，请稍后再试 /context。".to_string(),
         };
-        let model = session.session_override.model.clone()
-            .unwrap_or_else(|| {
-                ctx.registry.get_chat_provider(crate::providers::Capability::Chat)
-                    .ok()
-                    .map(|(_, id)| id)
-                    .unwrap_or_default()
-            });
-        let context_window = ctx.registry.get_chat_model_config(&model)
+        let model = session.session_override.model.clone().unwrap_or_else(|| {
+            ctx.registry
+                .get_chat_provider(crate::providers::Capability::Chat)
+                .ok()
+                .map(|(_, id)| id)
+                .unwrap_or_default()
+        });
+        let context_window = ctx
+            .registry
+            .get_chat_model_config(&model)
             .ok()
             .and_then(|cfg| cfg.context_window)
             .unwrap_or(0);
@@ -133,7 +136,9 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
         let history_len = session.history.len();
 
         // Estimate actual context size from current history (system prompt + all messages).
-        let estimated_total: u64 = session.history.iter()
+        let estimated_total: u64 = session
+            .history
+            .iter()
             .map(crate::agents::tokens::estimate_message_tokens)
             .sum();
 
@@ -174,11 +179,17 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
         let usage_detail = if cached > 0 {
             let total_input = input.saturating_add(cached);
             let cache_rate = if total_input > 0 {
-                format!(" | 缓存命中率: {:.0}%", (cached as f64 / total_input as f64) * 100.0)
+                format!(
+                    " | 缓存命中率: {:.0}%",
+                    (cached as f64 / total_input as f64) * 100.0
+                )
             } else {
                 String::new()
             };
-            format!("(输入: {} | 缓存: {} | 输出: {}){}", input, cached, output, cache_rate)
+            format!(
+                "(输入: {} | 缓存: {} | 输出: {}){}",
+                input, cached, output, cache_rate
+            )
         } else {
             format!("(输入: {} | 输出: {})", input, output)
         };
@@ -191,15 +202,29 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
              压缩阈值: {}  \n\
              历史消息: {} 条  \n\
              压缩状态: {}",
-            model_id, context_window, window_kb, total, usage_detail, used_kb, usage_pct, threshold, history_len, summary_info
+            model_id,
+            context_window,
+            window_kb,
+            total,
+            usage_detail,
+            used_kb,
+            usage_pct,
+            threshold,
+            history_len,
+            summary_info
         )
     } else {
         // No active SessionContext (post-restart, post-/new, post-/switch).
         // Resolve model from registry default and read history from
         // SessionManager cache (cheap, doesn't block on a running turn).
-        let (model_id, context_window) = match ctx.registry.get_chat_provider(crate::providers::Capability::Chat) {
+        let (model_id, context_window) = match ctx
+            .registry
+            .get_chat_provider(crate::providers::Capability::Chat)
+        {
             Ok((_, id)) => {
-                let cw = ctx.registry.get_chat_model_config(&id)
+                let cw = ctx
+                    .registry
+                    .get_chat_model_config(&id)
                     .ok()
                     .and_then(|cfg| cfg.context_window)
                     .unwrap_or(0);
@@ -248,9 +273,15 @@ pub async fn cmd_context(ctx: CommandContext<'_>) -> String {
                  压缩阈值: {}  \n\
                  历史消息: {} 条  \n\
                  压缩状态: {}",
-                model_id, context_window, window_kb,
-                total, used_kb, usage_pct,
-                threshold, session.history.len(), summary_info
+                model_id,
+                context_window,
+                window_kb,
+                total,
+                used_kb,
+                usage_pct,
+                threshold,
+                session.history.len(),
+                summary_info
             )
         }
     }
@@ -260,15 +291,19 @@ pub async fn cmd_btw(args: &str, ctx: CommandContext<'_>) -> String {
     if args.is_empty() {
         return "💡 **旁路提问**\n\n\
                用法: `/btw 你的问题`\n\n\
-               旁路提问使用独立请求回答，不影响当前会话上下文。".to_string();
+               旁路提问使用独立请求回答，不影响当前会话上下文。"
+            .to_string();
     }
 
     // Run a one-shot query using the same model, without touching session history.
-    match ctx.registry.get_chat_provider(crate::providers::Capability::Chat) {
+    match ctx
+        .registry
+        .get_chat_provider(crate::providers::Capability::Chat)
+    {
         Ok((provider, model_id)) => {
             let messages = vec![
                 crate::providers::ChatMessage::system_text(
-                    "你是一个简洁有用的助手。用中文简要回答以下问题，不超过200字。"
+                    "你是一个简洁有用的助手。用中文简要回答以下问题，不超过200字。",
                 ),
                 crate::providers::ChatMessage::user_text(args.to_string()),
             ];
@@ -291,7 +326,9 @@ pub async fn cmd_btw(args: &str, ctx: CommandContext<'_>) -> String {
                     let mut rx = stream;
                     while let Some(event) = rx.next().await {
                         match event {
-                            crate::providers::StreamEvent::Delta { text: delta } => text.push_str(&delta),
+                            crate::providers::StreamEvent::Delta { text: delta } => {
+                                text.push_str(&delta)
+                            }
                             crate::providers::StreamEvent::Error(e) => {
                                 return format!("❌ 旁路提问失败: {}", e);
                             }
@@ -319,10 +356,7 @@ pub async fn cmd_export(ctx: CommandContext<'_>) -> String {
     };
     let sk_display = ctx.user_id.to_string();
 
-    let mut lines = vec![format!(
-        "📤 **会话导出** — {}\n\n---\n",
-        sk_display
-    )];
+    let mut lines = vec![format!("📤 **会话导出** — {}\n\n---\n", sk_display)];
     for (i, msg) in history.iter().enumerate() {
         let role_emoji = match msg.role.as_str() {
             "user" => "👤",
@@ -361,7 +395,8 @@ pub async fn cmd_mcp(ctx: CommandContext<'_>) -> String {
                 )
             } else {
                 "🔌 **MCP 状态**  \n\n状态: ❌ 未连接  \n\n\
-                 请检查配置文件中的 `[mcp_servers]` 部分。".to_string()
+                 请检查配置文件中的 `[mcp_servers]` 部分。"
+                    .to_string()
             }
         }
         None => "🔌 **MCP 状态**  \n\n未配置 MCP 服务器。".to_string(),
@@ -382,7 +417,10 @@ pub fn cmd_skill(ctx: CommandContext<'_>) -> String {
         let desc = if skill.description.is_empty() {
             "（无描述）".to_string()
         } else if skill.description.chars().count() > 80 {
-            format!("{}...", skill.description.chars().take(77).collect::<String>())
+            format!(
+                "{}...",
+                skill.description.chars().take(77).collect::<String>()
+            )
         } else {
             skill.description.clone()
         };
@@ -392,16 +430,21 @@ pub fn cmd_skill(ctx: CommandContext<'_>) -> String {
             let kw_str: Vec<&str> = skill.keywords.iter().map(|s| s.as_str()).take(5).collect();
             format!(" `[{}]`", kw_str.join(", "))
         };
-        let ver = skill.version.as_deref()
+        let ver = skill
+            .version
+            .as_deref()
             .map(|v| format!(" v{}", v))
             .unwrap_or_default();
         let invocable_mark = match (skill.user_invocable, skill.agent_invocable) {
-            (true, true)   => String::new(),
-            (true, false)  => " 👤".to_string(),
-            (false, true)  => " 🤖".to_string(),
+            (true, true) => String::new(),
+            (true, false) => " 👤".to_string(),
+            (false, true) => " 🤖".to_string(),
             (false, false) => " 🚫".to_string(),
         };
-        lines.push(format!("- **{}**{}{}{} — {}", name, ver, invocable_mark, kw, desc));
+        lines.push(format!(
+            "- **{}**{}{}{} — {}",
+            name, ver, invocable_mark, kw, desc
+        ));
     }
     lines.join("\n")
 }

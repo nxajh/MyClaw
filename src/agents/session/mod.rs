@@ -10,6 +10,6 @@ pub mod types;
 // `crate::agents::session_manager::*` (through agents/mod.rs re-exports).
 pub use backend::{BackendPersistHook, InMemoryBackend, PersistHook};
 pub use manager::{SessionManager, SessionNotOwned};
-pub use recovery::{detect_incomplete_turn, identify_breakpoint, BreakpointItem};
-pub use session_override::{sanitize_history, SessionOverride};
+pub use recovery::{BreakpointItem, detect_incomplete_turn, identify_breakpoint};
+pub use session_override::{SessionOverride, sanitize_history};
 pub use types::{Session, SummaryMetadata};

@@ -185,13 +185,11 @@ impl ClassifiedError {
                     ErrorCategory::Timeout
                 } else {
                     // Layer 2: provider-specific refinement (400 / 429)
-                    classify_provider(provider, status, body).unwrap_or(
-                        if status == 400 {
-                            ErrorCategory::FormatError
-                        } else {
-                            ErrorCategory::RateLimit
-                        },
-                    )
+                    classify_provider(provider, status, body).unwrap_or(if status == 400 {
+                        ErrorCategory::FormatError
+                    } else {
+                        ErrorCategory::RateLimit
+                    })
                 }
             }
         };
@@ -238,11 +236,7 @@ impl ClassifiedError {
     }
 
     /// Set provider/model metadata (builder style).
-    pub fn with_provider(
-        mut self,
-        provider: impl Into<String>,
-        model: impl Into<String>,
-    ) -> Self {
+    pub fn with_provider(mut self, provider: impl Into<String>, model: impl Into<String>) -> Self {
         self.provider = Some(provider.into());
         self.model = Some(model.into());
         self
@@ -327,10 +321,7 @@ impl ClassifiedError {
 // ── Free-standing helpers ────────────────────────────────────────────────
 
 /// Compute recovery hints for a category and optional retry-after.
-fn recovery_hints_for(
-    category: &ErrorCategory,
-    retry_after: Option<Duration>,
-) -> RecoveryHints {
+fn recovery_hints_for(category: &ErrorCategory, retry_after: Option<Duration>) -> RecoveryHints {
     match category {
         ErrorCategory::Auth => RecoveryHints {
             retry: false,
@@ -406,11 +397,7 @@ fn classify_http(status: u16) -> Option<ErrorCategory> {
 
 // ── Layer 2: Provider-specific business code refinement ──────────────────
 
-fn classify_provider(
-    provider: &str,
-    status: u16,
-    body: &str,
-) -> Option<ErrorCategory> {
+fn classify_provider(provider: &str, status: u16, body: &str) -> Option<ErrorCategory> {
     let lp = provider.to_lowercase();
 
     match status {
@@ -435,8 +422,7 @@ fn classify_provider(
         // ── 400 refinement ──
         400 => {
             // GLM / Zhipu context overflow
-            if (lp.contains("glm") || lp.contains("zhipu")) && body_contains_code(body, 1261)
-            {
+            if (lp.contains("glm") || lp.contains("zhipu")) && body_contains_code(body, 1261) {
                 return Some(ErrorCategory::ContextOverflow);
             }
             // Generic context overflow
@@ -649,7 +635,11 @@ mod tests {
 
     #[test]
     fn billing_report_true() {
-        let err = ClassifiedError::classify("openai", 429, r#"{"error":{"message":"insufficient_quota"}}"#);
+        let err = ClassifiedError::classify(
+            "openai",
+            429,
+            r#"{"error":{"message":"insufficient_quota"}}"#,
+        );
         assert!(err.should_report());
     }
 
@@ -687,8 +677,7 @@ mod tests {
 
     #[test]
     fn with_provider_sets_metadata() {
-        let err = ClassifiedError::from_http(500, Some("oops"))
-            .with_provider("openai", "gpt-4");
+        let err = ClassifiedError::from_http(500, Some("oops")).with_provider("openai", "gpt-4");
         assert_eq!(err.provider.as_deref(), Some("openai"));
         assert_eq!(err.model.as_deref(), Some("gpt-4"));
     }

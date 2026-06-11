@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use chrono::Utc;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -129,7 +129,11 @@ impl Tool for TaskManagerTool {
         5_000
     }
 
-    async fn execute(&self, args: Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: Value,
+        _session: &crate::agents::session::Session,
+    ) -> anyhow::Result<ToolResult> {
         let action = args["action"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing 'action'"))?;
@@ -172,17 +176,16 @@ impl TaskManagerTool {
         // 支持 string 或 array
         let subjects: Vec<String> = match &args["subject"] {
             Value::String(s) => vec![s.clone()],
-            Value::Array(arr) => {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            }
+            Value::Array(arr) => arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect(),
             _ => {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
                     error: Some("subject must be a string or array of strings".to_string()),
-                })
+                });
             }
         };
 
@@ -379,22 +382,13 @@ impl TaskManagerTool {
             });
         }
 
-        let completed = children
-            .iter()
-            .filter(|t| t.status == "completed")
-            .count();
+        let completed = children.iter().filter(|t| t.status == "completed").count();
         let in_progress = children
             .iter()
             .filter(|t| t.status == "in_progress")
             .count();
-        let pending = children
-            .iter()
-            .filter(|t| t.status == "pending")
-            .count();
-        let cancelled = children
-            .iter()
-            .filter(|t| t.status == "cancelled")
-            .count();
+        let pending = children.iter().filter(|t| t.status == "pending").count();
+        let cancelled = children.iter().filter(|t| t.status == "cancelled").count();
         let total = children.len();
 
         let current = children
@@ -433,10 +427,13 @@ mod tests {
 
         // 批量创建 goals
         let result = tool
-            .execute(json!({
-                "action": "create",
-                "subject": ["Goal A", "Goal B", "Goal C"]
-            }), &crate::agents::session::Session::new("test".to_string()))
+            .execute(
+                json!({
+                    "action": "create",
+                    "subject": ["Goal A", "Goal B", "Goal C"]
+                }),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
             .await
             .unwrap();
 
@@ -453,10 +450,13 @@ mod tests {
 
         // 先创建 goal
         let goal = tool
-            .execute(json!({
-                "action": "create",
-                "subject": "My Goal"
-            }), &crate::agents::session::Session::new("test".to_string()))
+            .execute(
+                json!({
+                    "action": "create",
+                    "subject": "My Goal"
+                }),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
             .await
             .unwrap();
         let goal_output: Value = serde_json::from_str(&goal.output).unwrap();
@@ -464,11 +464,14 @@ mod tests {
 
         // 批量创建子任务
         let result = tool
-            .execute(json!({
-                "action": "create",
-                "subject": ["Task 1", "Task 2"],
-                "parent": goal_id
-            }), &crate::agents::session::Session::new("test".to_string()))
+            .execute(
+                json!({
+                    "action": "create",
+                    "subject": ["Task 1", "Task 2"],
+                    "parent": goal_id
+                }),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
             .await
             .unwrap();
 

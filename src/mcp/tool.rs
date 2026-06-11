@@ -27,7 +27,8 @@ pub struct McpToolWrapper {
 
 impl McpToolWrapper {
     pub fn new(prefixed_name: String, def: McpToolDef, registry: Arc<McpRegistry>) -> Self {
-        let description = def.description
+        let description = def
+            .description
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "MCP tool".to_string());
         Self {
@@ -64,7 +65,11 @@ impl Tool for McpToolWrapper {
         crate::providers::ToolSource::Mcp { server }
     }
 
-    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _session: &crate::agents::session::Session,
+    ) -> anyhow::Result<ToolResult> {
         // Strip the `approved` field before forwarding to the MCP server.
         // ZeroClaw's security model injects `approved: bool` into built-in tool
         // calls for supervised-mode confirmation. MCP servers have no knowledge
@@ -174,7 +179,10 @@ mod tests {
         let def = make_def("ghost", Some("Ghost tool"), json!({}));
         let wrapper = McpToolWrapper::new("nowhere__ghost".to_string(), def, registry);
         let result = wrapper
-            .execute(json!({}), &crate::agents::session::Session::new("test".to_string()))
+            .execute(
+                json!({}),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
             .await
             .expect("execute should be non-fatal");
         assert!(!result.success);
@@ -212,7 +220,10 @@ mod tests {
         let wrapper = McpToolWrapper::new("srv__do_thing".to_string(), def, registry);
         // With `approved` present the call must not propagate an Err — non-fatal.
         let result = wrapper
-            .execute(json!({ "approved": true, "param": "value" }), &crate::agents::session::Session::new("test".to_string()))
+            .execute(
+                json!({ "approved": true, "param": "value" }),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
             .await
             .expect("execute must be non-fatal even with approved field");
         // The registry returns a non-fatal error (unknown tool), not a panic/Err.
@@ -234,7 +245,10 @@ mod tests {
         let wrapper = McpToolWrapper::new("srv__noop".to_string(), def, registry);
         for non_obj in [json!(null), json!("a string"), json!([1, 2, 3])] {
             let result = wrapper
-                .execute(non_obj.clone(), &crate::agents::session::Session::new("test".to_string()))
+                .execute(
+                    non_obj.clone(),
+                    &crate::agents::session::Session::new("test".to_string()),
+                )
                 .await
                 .expect("non-object args must not propagate Err");
             assert!(!result.success, "expected non-fatal failure for {non_obj}");

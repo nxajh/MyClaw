@@ -8,16 +8,19 @@
 //! - [`PrivateMemory`] — namespace-isolated decorator for per-session memory
 //! - [`SessionBackend`] trait — session persistence
 
-mod memory;
-mod shared;
-mod private;
-mod types;
-mod session;
 pub mod json_file;
+mod memory;
+mod private;
+mod session;
+mod shared;
+mod types;
 
-pub use memory::{Memory, MemoryCategory, MemoryEntry, ExportFilter, ProceduralMessage};
-pub use shared::SharedMemory;
-pub use private::PrivateMemory;
-pub use types::{SearchMode, MemoryConfig, MemoryPolicyConfig, Provider, build_proxy_client};
-pub use session::{SessionBackend, SessionInfo, SummaryRecord, ChatMessage};
 pub use json_file::JsonFileBackend;
+pub use memory::{ExportFilter, Memory, MemoryCategory, MemoryEntry, ProceduralMessage};
+pub use private::PrivateMemory;
+pub use session::{
+    ChatMessage, SavedSessionFile, SessionBackend, SessionInfo, SummaryRecord, session_file_name,
+    write_session_file,
+};
+pub use shared::SharedMemory;
+pub use types::{MemoryConfig, MemoryPolicyConfig, Provider, SearchMode, build_proxy_client};

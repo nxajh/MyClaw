@@ -6,7 +6,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::providers::capability_chat::ChatMessage;
-use crate::storage::{SessionBackend, SessionInfo, SummaryRecord};
+use crate::storage::{SavedSessionFile, SessionBackend, SessionInfo, SummaryRecord};
 
 struct InMemorySessionMeta {
     owner: String,
@@ -43,7 +43,11 @@ impl Default for InMemoryBackend {
 }
 
 impl SessionBackend for InMemoryBackend {
-    fn create_session(&self, owner: &str, display_name: Option<&str>) -> std::io::Result<SessionInfo> {
+    fn create_session(
+        &self,
+        owner: &str,
+        display_name: Option<&str>,
+    ) -> std::io::Result<SessionInfo> {
         use std::sync::atomic::Ordering;
         let id = format!("{:08x}", self.counter.fetch_add(1, Ordering::Relaxed));
         let now = chrono::Utc::now();
@@ -55,12 +59,15 @@ impl SessionBackend for InMemoryBackend {
             last_activity: now,
             message_count: 0,
         };
-        self.sessions.write().insert(id.clone(), InMemorySessionMeta {
-            owner: owner.to_string(),
-            display_name: display_name.map(|s| s.to_string()),
-            created_at: now,
-            last_activity: now,
-        });
+        self.sessions.write().insert(
+            id.clone(),
+            InMemorySessionMeta {
+                owner: owner.to_string(),
+                display_name: display_name.map(|s| s.to_string()),
+                created_at: now,
+                last_activity: now,
+            },
+        );
         self.messages.write().insert(id, Vec::new());
         Ok(info)
     }
@@ -83,7 +90,12 @@ impl SessionBackend for InMemoryBackend {
 
     fn get_session(&self, session_id: &str) -> Option<SessionInfo> {
         self.sessions.read().get(session_id).map(|meta| {
-            let msgs = self.messages.read().get(session_id).map(|v| v.len()).unwrap_or(0);
+            let msgs = self
+                .messages
+                .read()
+                .get(session_id)
+                .map(|v| v.len())
+                .unwrap_or(0);
             SessionInfo {
                 id: session_id.to_string(),
                 owner: meta.owner.clone(),
@@ -96,7 +108,9 @@ impl SessionBackend for InMemoryBackend {
     }
 
     fn list_sessions(&self, owner: &str) -> Vec<SessionInfo> {
-        self.sessions.read().iter()
+        self.sessions
+            .read()
+            .iter()
             .filter(|(_, meta)| meta.owner == owner)
             .map(|(id, meta)| {
                 let msgs = self.messages.read().get(id).map(|v| v.len()).unwrap_or(0);
@@ -113,7 +127,9 @@ impl SessionBackend for InMemoryBackend {
     }
 
     fn list_all_sessions(&self) -> Vec<SessionInfo> {
-        self.sessions.read().iter()
+        self.sessions
+            .read()
+            .iter()
             .map(|(id, meta)| {
                 let msgs = self.messages.read().get(id).map(|v| v.len()).unwrap_or(0);
                 SessionInfo {
@@ -133,12 +149,18 @@ impl SessionBackend for InMemoryBackend {
     }
 
     fn set_active_session(&self, user_id: &str, session_id: &str) -> std::io::Result<()> {
-        self.active.write().insert(user_id.to_string(), session_id.to_string());
+        self.active
+            .write()
+            .insert(user_id.to_string(), session_id.to_string());
         Ok(())
     }
 
     fn load_messages(&self, session_id: &str) -> Vec<ChatMessage> {
-        self.messages.read().get(session_id).cloned().unwrap_or_default()
+        self.messages
+            .read()
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn append_message(&self, session_id: &str, message: &ChatMessage) -> std::io::Result<i64> {
@@ -169,7 +191,8 @@ impl SessionBackend for InMemoryBackend {
     }
 
     fn save_summary(&self, session_id: &str, summary: &SummaryRecord) -> std::io::Result<()> {
-        self.summaries.write()
+        self.summaries
+            .write()
             .entry(session_id.to_string())
             .or_default()
             .push(summary.clone());
@@ -177,13 +200,19 @@ impl SessionBackend for InMemoryBackend {
     }
 
     fn load_latest_summary(&self, session_id: &str) -> Option<SummaryRecord> {
-        self.summaries.read().get(session_id).and_then(|v| v.last().cloned())
+        self.summaries
+            .read()
+            .get(session_id)
+            .and_then(|v| v.last().cloned())
     }
 
     fn load_incremental(&self, session_id: &str, after_message_id: i64) -> Vec<(i64, ChatMessage)> {
-        self.messages.read().get(session_id)
+        self.messages
+            .read()
+            .get(session_id)
             .map(|msgs| {
-                msgs.iter().enumerate()
+                msgs.iter()
+                    .enumerate()
                     .filter(|(i, _)| ((*i + 1) as i64) > after_message_id)
                     .map(|(i, m)| ((i + 1) as i64, m.clone()))
                     .collect()
@@ -199,12 +228,34 @@ impl SessionBackend for InMemoryBackend {
     fn cleanup_stale(&self, _ttl_hours: u32) -> std::io::Result<usize> {
         Ok(0)
     }
+
+    fn save_session_file(
+        &self,
+        session_id: &str,
+        preferred_name: Option<&str>,
+        bytes: &[u8],
+        mime_type: Option<&str>,
+    ) -> std::io::Result<SavedSessionFile> {
+        let file_name = crate::storage::session_file_name(preferred_name, bytes, mime_type);
+        let root = std::env::current_dir()
+            .unwrap_or_else(|_| std::env::temp_dir())
+            .join("sessions");
+        crate::storage::write_session_file(&root, session_id, &file_name, bytes, mime_type)
+    }
 }
 
 /// Trait for hooks that persist session messages to the backend.
 pub trait PersistHook: Send + Sync {
     /// Persist a message and return its assigned backend ID (None on failure).
     fn persist_message(&self, session_id: &str, message: &ChatMessage) -> Option<i64>;
+    /// Save inbound bytes as a session-local file.
+    fn save_file(
+        &self,
+        session_id: &str,
+        preferred_name: Option<&str>,
+        bytes: &[u8],
+        mime_type: Option<&str>,
+    ) -> Option<SavedSessionFile>;
     fn save_compaction(&self, session_id: &str, summary: &SummaryRecord);
     /// Archive the current history segment; surviving messages are kept in the new file.
     fn rotate_history(&self, session_id: &str, surviving: &[(i64, ChatMessage)]);
@@ -242,6 +293,25 @@ impl PersistHook for BackendPersistHook {
         }
     }
 
+    fn save_file(
+        &self,
+        session_id: &str,
+        preferred_name: Option<&str>,
+        bytes: &[u8],
+        mime_type: Option<&str>,
+    ) -> Option<SavedSessionFile> {
+        match self
+            .backend
+            .save_session_file(session_id, preferred_name, bytes, mime_type)
+        {
+            Ok(saved) => Some(saved),
+            Err(e) => {
+                tracing::warn!(session = %session_id, err = %e, "save session file failed");
+                None
+            }
+        }
+    }
+
     fn save_compaction(&self, session_id: &str, summary: &SummaryRecord) {
         if let Err(e) = self.backend.save_summary(session_id, summary) {
             tracing::warn!(session = %session_id, err = %e, "save compaction failed");
@@ -261,7 +331,10 @@ impl PersistHook for BackendPersistHook {
     }
 
     fn save_session_override(&self, session_id: &str, override_json: &str) {
-        if let Err(e) = self.backend.save_session_override(session_id, override_json) {
+        if let Err(e) = self
+            .backend
+            .save_session_override(session_id, override_json)
+        {
             tracing::warn!(session = %session_id, err = %e, "save session override failed");
         }
     }

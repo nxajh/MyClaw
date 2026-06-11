@@ -71,22 +71,26 @@ impl SearchProvider for MiniMaxProvider {
 
         let body = serde_json::json!({ "q": req.query });
 
-        let text = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async {
-            let resp = reqwest::Client::new()
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send()
-                .await?;
+        let text = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let resp = reqwest::Client::new()
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {}", self.api_key))
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await?;
 
-            let status = resp.status();
-            if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                anyhow::bail!("MiniMax search HTTP {}: {}", status, body);
-            }
-            resp.text().await.map_err(|e| anyhow::anyhow!(e.to_string()))
-        }))?;
+                let status = resp.status();
+                if !status.is_success() {
+                    let body = resp.text().await.unwrap_or_default();
+                    anyhow::bail!("MiniMax search HTTP {}: {}", status, body);
+                }
+                resp.text()
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))
+            })
+        })?;
 
         #[derive(serde::Deserialize)]
         struct SearchResp {

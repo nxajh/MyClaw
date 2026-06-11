@@ -45,7 +45,11 @@ impl Tool for AgentKillTool {
         20_000
     }
 
-    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _session: &crate::agents::session::Session,
+    ) -> anyhow::Result<ToolResult> {
         let task_id = args["task_id"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'task_id' is required"))?;
@@ -55,10 +59,7 @@ impl Tool for AgentKillTool {
         if cancelled {
             Ok(ToolResult {
                 success: true,
-                output: format!(
-                    r#"{{"status": "terminated", "task_id": "{}"}}"#,
-                    task_id
-                ),
+                output: format!(r#"{{"status": "terminated", "task_id": "{}"}}"#, task_id),
                 error: None,
             })
         } else {

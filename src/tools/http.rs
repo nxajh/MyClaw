@@ -1,7 +1,7 @@
 //! HTTP request tool — generic HTTP client (GET/POST/PUT/DELETE).
 
-use async_trait::async_trait;
 use crate::providers::{Tool, ToolResult};
+use async_trait::async_trait;
 use serde_json::json;
 use tokio::time::{Duration, timeout};
 
@@ -70,7 +70,11 @@ impl Tool for HttpRequestTool {
         20_000
     }
 
-    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _session: &crate::agents::session::Session,
+    ) -> anyhow::Result<ToolResult> {
         let url = args["url"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'url' is required"))?;

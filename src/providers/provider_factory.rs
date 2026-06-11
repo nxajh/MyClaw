@@ -5,15 +5,15 @@
 //! `provider` / `protocol` config overrides.
 
 use crate::config::provider::Protocol;
-use crate::providers::{AuthStyle, ProviderId};
 use crate::providers::capability_chat::ChatProvider;
 use crate::providers::capability_embedding::EmbeddingProvider;
 use crate::providers::image::ImageGenerationProvider;
-use crate::providers::search::SearchProvider;
-use crate::providers::tts::TtsProvider;
-use crate::providers::stt::SttProvider;
-use crate::providers::video::VideoGenerationProvider;
 use crate::providers::provider_id::well_known;
+use crate::providers::search::SearchProvider;
+use crate::providers::stt::SttProvider;
+use crate::providers::tts::TtsProvider;
+use crate::providers::video::VideoGenerationProvider;
+use crate::providers::{AuthStyle, ProviderId};
 
 // ── Build requests ────────────────────────────────────────────────────────────
 
@@ -146,9 +146,12 @@ impl ProviderFactory {
             // ── GLM: dedicated provider with v4 endpoints ──
             (well_known::GLM, _) => {
                 let mut p = crate::providers::glm::GlmProvider::with_base_url(
-                    request.api_key, request.base_url,
+                    request.api_key,
+                    request.base_url,
                 );
-                if let Some(ua) = request.user_agent { p = p.with_user_agent(ua); }
+                if let Some(ua) = request.user_agent {
+                    p = p.with_user_agent(ua);
+                }
                 Ok(Box::new(p))
             }
             // ── OpenAI-compatible providers ──
@@ -164,9 +167,11 @@ impl ProviderFactory {
             }
             // ── Anthropic-protocol providers ──
             (_, Protocol::Anthropic) => {
-                let client = crate::providers::protocols::anthropic::messages::AnthropicMessagesClient::new(
-                    request.api_key, request.base_url,
-                );
+                let client =
+                    crate::providers::protocols::anthropic::messages::AnthropicMessagesClient::new(
+                        request.api_key,
+                        request.base_url,
+                    );
                 let client = match request.user_agent {
                     Some(ua) => client.with_user_agent(ua),
                     None => client,
@@ -198,16 +203,22 @@ impl ProviderFactory {
         match id {
             well_known::GLM => {
                 let mut p = crate::providers::glm::GlmProvider::with_base_url(
-                    request.api_key, request.base_url,
+                    request.api_key,
+                    request.base_url,
                 );
-                if let Some(ua) = request.user_agent { p = p.with_user_agent(ua); }
+                if let Some(ua) = request.user_agent {
+                    p = p.with_user_agent(ua);
+                }
                 Some(Box::new(p))
             }
             well_known::OPENAI | well_known::KIMI | well_known::GENERIC => {
                 let mut p = crate::providers::openai::OpenAiProvider::with_base_url(
-                    request.api_key, request.base_url,
+                    request.api_key,
+                    request.base_url,
                 );
-                if let Some(ua) = request.user_agent { p = p.with_user_agent(ua); }
+                if let Some(ua) = request.user_agent {
+                    p = p.with_user_agent(ua);
+                }
                 Some(Box::new(p))
             }
             _ => None,
@@ -224,9 +235,12 @@ impl ProviderFactory {
             // Only OpenAI-compatible providers support image generation.
             well_known::OPENAI | well_known::GENERIC | well_known::KIMI => {
                 let mut p = crate::providers::openai::OpenAiProvider::with_base_url(
-                    request.api_key, request.base_url,
+                    request.api_key,
+                    request.base_url,
                 );
-                if let Some(ua) = request.user_agent { p = p.with_user_agent(ua); }
+                if let Some(ua) = request.user_agent {
+                    p = p.with_user_agent(ua);
+                }
                 Some(Box::new(p))
             }
             _ => None,
@@ -243,9 +257,12 @@ impl ProviderFactory {
             // Only OpenAI-compatible providers support TTS.
             well_known::OPENAI | well_known::GENERIC | well_known::KIMI => {
                 let mut p = crate::providers::openai::OpenAiProvider::with_base_url(
-                    request.api_key, request.base_url,
+                    request.api_key,
+                    request.base_url,
                 );
-                if let Some(ua) = request.user_agent { p = p.with_user_agent(ua); }
+                if let Some(ua) = request.user_agent {
+                    p = p.with_user_agent(ua);
+                }
                 Some(Box::new(p))
             }
             _ => None,
@@ -261,22 +278,29 @@ impl ProviderFactory {
         match id {
             well_known::GLM => {
                 let mut p = crate::providers::glm::GlmProvider::with_base_url(
-                    request.api_key, request.base_url,
+                    request.api_key,
+                    request.base_url,
                 );
-                if let Some(ua) = request.user_agent { p = p.with_user_agent(ua); }
+                if let Some(ua) = request.user_agent {
+                    p = p.with_user_agent(ua);
+                }
                 Some(Box::new(p))
             }
             well_known::GOOGLE => {
                 let p = crate::providers::google::GoogleProvider::with_base_url(
-                    request.api_key, request.base_url,
+                    request.api_key,
+                    request.base_url,
                 );
                 Some(Box::new(p))
             }
             well_known::MINIMAX => {
                 let mut p = crate::providers::minimax::MiniMaxProvider::with_base_url(
-                    request.api_key, request.base_url,
+                    request.api_key,
+                    request.base_url,
                 );
-                if let Some(ua) = request.user_agent { p = p.with_user_agent(ua); }
+                if let Some(ua) = request.user_agent {
+                    p = p.with_user_agent(ua);
+                }
                 Some(Box::new(p))
             }
             _ => None,

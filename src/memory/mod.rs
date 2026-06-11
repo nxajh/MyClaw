@@ -99,7 +99,8 @@ impl From<&MemoryFile> for IndexEntry {
         Self {
             mem_type: f.mem_type,
             name: f.name.clone(),
-            filename: f.path
+            filename: f
+                .path
                 .file_name()
                 .unwrap_or_default()
                 .to_str()
@@ -237,7 +238,10 @@ pub fn format_memory_index(entries: &[IndexEntry]) -> String {
     let mut lines = Vec::new();
 
     for &mem_type in MemoryType::injected_types() {
-        let group: Vec<&&IndexEntry> = injectable.iter().filter(|e| e.mem_type == mem_type).collect();
+        let group: Vec<&&IndexEntry> = injectable
+            .iter()
+            .filter(|e| e.mem_type == mem_type)
+            .collect();
         if group.is_empty() {
             continue;
         }
@@ -416,15 +420,13 @@ mod tests {
     #[test]
     fn test_format_index_empty_injectable() {
         // Only project/reference entries → empty index
-        let entries = vec![
-            IndexEntry {
-                mem_type: MemoryType::Project,
-                name: "project1".into(),
-                filename: "project1.md".into(),
-                summary: "Project context".into(),
-                tags: vec![],
-            },
-        ];
+        let entries = vec![IndexEntry {
+            mem_type: MemoryType::Project,
+            name: "project1".into(),
+            filename: "project1.md".into(),
+            summary: "Project context".into(),
+            tags: vec![],
+        }];
         let index = format_memory_index(&entries);
         assert!(index.contains("暂无需要遵守的记忆"));
     }

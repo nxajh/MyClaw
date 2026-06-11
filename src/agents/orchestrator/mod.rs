@@ -10,25 +10,25 @@
 //! is done in the Composition Root (orchestration/orchestrator main.rs + daemon.rs),
 //! not here. This struct receives fully-assembled components via its constructor.
 
+pub mod ctx;
 mod delegation;
+pub mod event;
 mod inbound;
+pub mod key;
 mod recovery;
 mod scheduled;
 #[cfg(test)]
 mod test_support;
 mod turn;
-pub mod ctx;
-pub mod event;
-pub mod key;
 
 pub use ctx::{ChannelRegistry, OrchestratorCtx};
 pub use event::OrchestratorEvent;
 pub(crate) use scheduled::run_scheduled_turn;
 
-use anyhow::Context;
-use crate::agents::delegation::DelegationEvent;
 use crate::agents::DelegationCoordinator;
+use crate::agents::delegation::DelegationEvent;
 use crate::channels::{Channel, ChannelMessage};
+use anyhow::Context;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -95,7 +95,9 @@ pub struct Orchestrator {
 /// Return `true` if the session history ends with an incomplete tool execution:
 /// either trailing tool-result messages, or assistant tool_calls whose IDs have
 /// no matching tool-result — indicating the turn was interrupted mid-execution.
-pub(super) fn history_has_incomplete_turn(history: &[crate::providers::capability_chat::ChatMessage]) -> bool {
+pub(super) fn history_has_incomplete_turn(
+    history: &[crate::providers::capability_chat::ChatMessage],
+) -> bool {
     let mut completed_ids = std::collections::HashSet::new();
     let mut has_trailing_tools = false;
     let mut found_pending = false;
@@ -169,7 +171,10 @@ impl Orchestrator {
                 Arc::clone(channel),
                 Arc::clone(&msg_tx),
             );
-            channels.insert((channel_type.clone(), account_id.clone()), Arc::clone(channel));
+            channels.insert(
+                (channel_type.clone(), account_id.clone()),
+                Arc::clone(channel),
+            );
             listener_handles.push(handle);
             info!(channel = %channel_type, account = %account_id, "listener started");
         }
@@ -195,7 +200,10 @@ impl Orchestrator {
             scheduler_rx: parts.scheduler_rx,
         };
 
-        info!(channels = orchestrator.ctx.channels.len(), "orchestrator initialized");
+        info!(
+            channels = orchestrator.ctx.channels.len(),
+            "orchestrator initialized"
+        );
         (orchestrator, (*msg_tx).clone())
     }
 
@@ -234,7 +242,11 @@ impl Orchestrator {
                     }
                 };
                 while let Some(msg) = rx.recv().await {
-                    if msg_tx.send(((channel_type.clone(), account_id.clone()), msg)).await.is_err() {
+                    if msg_tx
+                        .send(((channel_type.clone(), account_id.clone()), msg))
+                        .await
+                        .is_err()
+                    {
                         // Orchestrator is gone; no point reconnecting.
                         return;
                     }
@@ -266,7 +278,10 @@ impl Orchestrator {
         use tokio_stream::wrappers::ReceiverStream;
         use tokio_stream::{Stream, StreamExt};
 
-        let rx = self.msg_rx.take().context("run() already called or msg_rx was None")?;
+        let rx = self
+            .msg_rx
+            .take()
+            .context("run() already called or msg_rx was None")?;
 
         // ── Startup recovery ──────────────────────────────────────────────
         // Sessions register a SessionContext synchronously; the recovery
@@ -291,10 +306,12 @@ impl Orchestrator {
             }),
         );
         if let Some(drx) = self.delegation_rx.take() {
-            events = Box::pin(events.merge(ReceiverStream::new(drx).map(OrchestratorEvent::Delegation)));
+            events =
+                Box::pin(events.merge(ReceiverStream::new(drx).map(OrchestratorEvent::Delegation)));
         }
         if let Some(srx) = self.scheduler_rx.take() {
-            events = Box::pin(events.merge(ReceiverStream::new(srx).map(OrchestratorEvent::Scheduled)));
+            events =
+                Box::pin(events.merge(ReceiverStream::new(srx).map(OrchestratorEvent::Scheduled)));
         }
 
         loop {
@@ -333,7 +350,11 @@ impl Orchestrator {
                         tracing::warn!(session = %session_id, "AskReply for unknown session");
                     }
                 }
-                OrchestratorEvent::Inbound { channel_type, account_id, message: msg } => {
+                OrchestratorEvent::Inbound {
+                    channel_type,
+                    account_id,
+                    message: msg,
+                } => {
                     inbound::dispatch(&self.ctx, (channel_type, account_id), msg).await;
                 }
                 OrchestratorEvent::Delegation(event) => {
@@ -350,14 +371,16 @@ impl Orchestrator {
         Ok(())
     }
 
-
     /// Handle a scheduler event (from the Scheduler task via mpsc).
     /// Dispatch scheduler events by spawning independent tasks.
     /// Pre-flight checks (file read, parse, due filter) run inline to avoid
     /// unnecessary task creation; the actual LLM execution is spawned.
     async fn handle_scheduler_event(&self, event: SchedulerEvent) {
         match event {
-            SchedulerEvent::Heartbeat { target_channel, target_account } => {
+            SchedulerEvent::Heartbeat {
+                target_channel,
+                target_account,
+            } => {
                 tracing::debug!("heartbeat triggered (from scheduler)");
                 // Pre-flight: cheap checks before spawning.
                 let heartbeat_path = std::path::Path::new("HEARTBEAT.md");
@@ -381,10 +404,7 @@ impl Orchestrator {
                 let state = super::heartbeat_tasks::HeartbeatState::load(state_path);
                 let due = super::heartbeat_tasks::due_tasks(&tasks, &state);
                 if due.is_empty() {
-                    tracing::debug!(
-                        total_tasks = tasks.len(),
-                        "heartbeat skipped: no tasks due"
-                    );
+                    tracing::debug!(total_tasks = tasks.len(), "heartbeat skipped: no tasks due");
                     return;
                 }
 

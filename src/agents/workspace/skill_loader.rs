@@ -13,11 +13,13 @@
 //! Use curl to fetch weather from wttr.in.
 //! ```
 
-use std::path::{Path, PathBuf};
 use anyhow::Result;
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
-use crate::str_utils::{parse_front_matter, extract_yaml_string, extract_yaml_list, extract_yaml_bool};
+use crate::str_utils::{
+    extract_yaml_bool, extract_yaml_list, extract_yaml_string, parse_front_matter,
+};
 
 /// 从 SKILL.md 解析的 Skill 定义
 #[derive(Debug, Clone)]
@@ -43,17 +45,15 @@ pub fn parse_skill_file(path: &Path) -> Result<SkillDefinition> {
     let (front_matter, body) = parse_front_matter(&content);
 
     // 解析 YAML front matter
-    let name = extract_yaml_string(&front_matter, "name")
-        .unwrap_or_else(|| {
-            // fallback: 用目录名
-            path.parent()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "unknown".to_string())
-        });
+    let name = extract_yaml_string(&front_matter, "name").unwrap_or_else(|| {
+        // fallback: 用目录名
+        path.parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    });
 
-    let description = extract_yaml_string(&front_matter, "description")
-        .unwrap_or_default();
+    let description = extract_yaml_string(&front_matter, "description").unwrap_or_default();
 
     let keywords = extract_yaml_list(&front_matter, "keywords");
     let version = extract_yaml_string(&front_matter, "version");
@@ -178,7 +178,10 @@ Search flights."#;
         assert_eq!(skill.name, "flight");
         assert_eq!(skill.version, Some("1.2.0".to_string()));
         assert_eq!(skill.when_to_use, Some("用户查机票时".to_string()));
-        assert_eq!(skill.argument_hint, Some("[出发城市] [到达城市]".to_string()));
+        assert_eq!(
+            skill.argument_hint,
+            Some("[出发城市] [到达城市]".to_string())
+        );
         assert_eq!(skill.arguments, vec!["from_city", "to_city"]);
         assert!(skill.user_invocable);
         assert!(!skill.agent_invocable);

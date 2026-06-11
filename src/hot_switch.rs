@@ -49,9 +49,7 @@ pub fn inherited_client_socket_fd() -> Option<i32> {
 
 /// Retrieve the old process PID passed from the fork parent.
 pub fn old_pid() -> Option<i32> {
-    std::env::var(ENV_OLD_PID)
-        .ok()
-        .and_then(|s| s.parse().ok())
+    std::env::var(ENV_OLD_PID).ok().and_then(|s| s.parse().ok())
 }
 
 /// Build the envp for the hot-switch child.
@@ -59,7 +57,11 @@ pub fn old_pid() -> Option<i32> {
 /// Called in the parent before fork so we never touch std::env inside the
 /// child — std::env uses a global mutex that may be held by another thread
 /// at fork time, causing a deadlock if accessed in the single-threaded child.
-fn build_child_envp(socket_fd: i32, client_fd: i32, current_pid: u32) -> anyhow::Result<Vec<CString>> {
+fn build_child_envp(
+    socket_fd: i32,
+    client_fd: i32,
+    current_pid: u32,
+) -> anyhow::Result<Vec<CString>> {
     let mut overrides = vec![
         (ENV_HOT_SWITCH, "1".to_string()),
         (ENV_SOCKET_FD, socket_fd.to_string()),
@@ -133,8 +135,7 @@ pub fn do_hot_switch(socket_fd: i32, client_fd: i32) -> anyhow::Result<()> {
     let argv: [*const libc::c_char; 3] = [c_path.as_ptr(), c_run.as_ptr(), std::ptr::null()];
 
     let envp_strings = build_child_envp(socket_fd, client_fd, current_pid)?;
-    let mut envp_ptrs: Vec<*const libc::c_char> =
-        envp_strings.iter().map(|s| s.as_ptr()).collect();
+    let mut envp_ptrs: Vec<*const libc::c_char> = envp_strings.iter().map(|s| s.as_ptr()).collect();
     envp_ptrs.push(std::ptr::null());
 
     tracing::info!(
@@ -158,7 +159,10 @@ pub fn do_hot_switch(socket_fd: i32, client_fd: i32) -> anyhow::Result<()> {
         if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::MainPid(pid as u32)]) {
             tracing::warn!(err = %e, child_pid = pid, "sd_notify MAINPID failed");
         } else {
-            tracing::debug!(child_pid = pid, "sd_notify MAINPID sent — systemd now tracks child");
+            tracing::debug!(
+                child_pid = pid,
+                "sd_notify MAINPID sent — systemd now tracks child"
+            );
         }
     }
 
@@ -175,7 +179,10 @@ pub fn do_hot_switch(socket_fd: i32, client_fd: i32) -> anyhow::Result<()> {
     }
 
     // ── Parent (old process): wait for child outcome ───────────────────
-    tracing::info!(child_pid = pid, "forked child, waiting for SIGUSR2 or child exit");
+    tracing::info!(
+        child_pid = pid,
+        "forked child, waiting for SIGUSR2 or child exit"
+    );
 
     // Block until either:
     //   • SIGUSR2 arrives (new process ready) → SIGUSR2 handler calls exit(0)

@@ -9,14 +9,11 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::{Channel, ChannelMessage, DedupState, SendMessage, ProcessingStatus};
 use crate::config::channel::TelegramAccountConfig;
+use crate::{Channel, ChannelMessage, DedupState, ProcessingStatus, SendMessage};
 
-use super::types::{
-    Chat, GetUpdatesResponse, Message,
-    SendChatActionRequest, SendMessageRequest,
-};
 use super::markdown::markdown_to_telegram_html;
+use super::types::{Chat, GetUpdatesResponse, Message, SendChatActionRequest, SendMessageRequest};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -149,7 +146,10 @@ impl TelegramChannel {
             let _ = std::fs::create_dir_all(parent);
         }
         if let Err(e) = std::fs::write(&path, offset.to_string()) {
-            warn!("Failed to persist Telegram offset to {}: {e}", path.display());
+            warn!(
+                "Failed to persist Telegram offset to {}: {e}",
+                path.display()
+            );
         }
     }
 
@@ -188,10 +188,14 @@ impl TelegramChannel {
         .collect();
 
         if identities.is_empty() {
-            return AuthDecision::Reject { reason: "no sender identity" };
+            return AuthDecision::Reject {
+                reason: "no sender identity",
+            };
         }
 
-        let mut last_non_allow = AuthDecision::Reject { reason: "sender not in allowed_users" };
+        let mut last_non_allow = AuthDecision::Reject {
+            reason: "sender not in allowed_users",
+        };
         for ident in &identities {
             match self.check_authorization(ident, scope) {
                 AuthDecision::Allow => return AuthDecision::Allow,
@@ -204,11 +208,7 @@ impl TelegramChannel {
 
     async fn fetch_bot_username(&self) -> Option<String> {
         let client = self.http_client();
-        let resp = client
-            .get(self.api_url("getMe"))
-            .send()
-            .await
-            .ok()?;
+        let resp = client.get(self.api_url("getMe")).send().await.ok()?;
         let data: serde_json::Value = resp.json().await.ok()?;
         data.get("result")?
             .get("username")?
@@ -310,7 +310,8 @@ impl TelegramChannel {
 
     fn format_forward_attribution(msg: &Message) -> Option<String> {
         if let Some(fwd) = &msg.forward_from {
-            let name = fwd.username
+            let name = fwd
+                .username
                 .as_ref()
                 .map(|u| format!("@{}", u))
                 .or_else(|| fwd.first_name.clone())
@@ -389,7 +390,8 @@ impl TelegramChannel {
                 ));
             }
             let resp_json: serde_json::Value = resp2.json().await?;
-            let msg_id = resp_json.get("result")
+            let msg_id = resp_json
+                .get("result")
                 .and_then(|r| r.get("message_id"))
                 .and_then(|m| m.as_i64());
             return Ok(msg_id);
@@ -397,7 +399,8 @@ impl TelegramChannel {
 
         if resp.status().is_success() {
             let resp_json: serde_json::Value = resp.json().await?;
-            let msg_id = resp_json.get("result")
+            let msg_id = resp_json
+                .get("result")
                 .and_then(|r| r.get("message_id"))
                 .and_then(|m| m.as_i64());
             return Ok(msg_id);
@@ -462,7 +465,8 @@ impl TelegramChannel {
             anyhow::bail!("sendMessage failed: status={status}, body={body}");
         }
         let resp_json: serde_json::Value = fallback_resp.json().await?;
-        let msg_id = resp_json.get("result")
+        let msg_id = resp_json
+            .get("result")
             .and_then(|r| r.get("message_id"))
             .and_then(|m| m.as_i64());
         Ok(msg_id)
@@ -494,7 +498,12 @@ impl TelegramChannel {
     /// Distinct from the trait method `Channel::edit_message` which
     /// takes the abstract `&SendTarget` + `&MessageId` + `&MessagePayload`.
     /// Matches the `send_raw` convention for inherent Telegram API helpers.
-    async fn edit_message_text_raw(&self, chat_id: i64, message_id: i64, text: &str) -> anyhow::Result<bool> {
+    async fn edit_message_text_raw(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        text: &str,
+    ) -> anyhow::Result<bool> {
         let client = self.http_client();
         let html_text = markdown_to_telegram_html(text);
 
@@ -583,16 +592,10 @@ impl TelegramChannel {
             .ok_or_else(|| anyhow::anyhow!("getFile response missing file_path"))?;
 
         // Step 2: Download the file content.
-        let download_url = format!(
-            "{}/file/bot{}/{}",
-            self.api_base, self.bot_token, file_path
-        );
+        let download_url = format!("{}/file/bot{}/{}", self.api_base, self.bot_token, file_path);
         let file_resp = client.get(&download_url).send().await?;
         if !file_resp.status().is_success() {
-            anyhow::bail!(
-                "file download failed: status={}",
-                file_resp.status()
-            );
+            anyhow::bail!("file download failed: status={}", file_resp.status());
         }
         Ok(file_resp.bytes().await?.to_vec())
     }
@@ -616,7 +619,10 @@ impl TelegramChannel {
             "reaction": [{"type": "emoji", "emoji": "👀"}]
         });
         if let Err(e) = client.post(&url).json(&body).send().await {
-            warn!("Failed to send ack reaction to message {} in chat {}: {e}", message_id, chat_id);
+            warn!(
+                "Failed to send ack reaction to message {} in chat {}: {e}",
+                message_id, chat_id
+            );
         }
     }
 
@@ -633,7 +639,10 @@ impl TelegramChannel {
             "reaction": []
         });
         if let Err(e) = client.post(&url).json(&body).send().await {
-            warn!("Failed to remove ack reaction from message {} in chat {}: {e}", message_id, chat_id);
+            warn!(
+                "Failed to remove ack reaction from message {} in chat {}: {e}",
+                message_id, chat_id
+            );
         }
     }
 
@@ -658,7 +667,12 @@ impl TelegramChannel {
     }
 
     /// Remove a specific emoji reaction from a message.
-    async fn remove_reaction(&self, chat_id: i64, message_id: i64, _emoji: &str) -> anyhow::Result<()> {
+    async fn remove_reaction(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        _emoji: &str,
+    ) -> anyhow::Result<()> {
         // Setting an empty reaction array removes all reactions.
         let client = self.http_client();
         let body = serde_json::json!({
@@ -704,7 +718,9 @@ impl TelegramChannel {
         }
 
         // Record typing start time for stall watchdog.
-        self.typing_started_at.lock().insert(recipient.to_string(), std::time::Instant::now());
+        self.typing_started_at
+            .lock()
+            .insert(recipient.to_string(), std::time::Instant::now());
 
         let bot_token = self.bot_token.clone();
         let api_base = self.api_base.clone();
@@ -728,7 +744,11 @@ impl TelegramChannel {
             loop {
                 // TTL check
                 if start.elapsed() >= max_duration {
-                    warn!("Telegram typing TTL exceeded ({}s) for {}", max_duration.as_secs(), recipient_key);
+                    warn!(
+                        "Telegram typing TTL exceeded ({}s) for {}",
+                        max_duration.as_secs(),
+                        recipient_key
+                    );
                     break;
                 }
 
@@ -744,7 +764,10 @@ impl TelegramChannel {
                     Err(e) => {
                         consecutive_failures += 1;
                         if consecutive_failures >= max_consecutive_failures {
-                            warn!("Telegram typing circuit breaker tripped after {consecutive_failures} consecutive failures for {}: {e}", recipient_key);
+                            warn!(
+                                "Telegram typing circuit breaker tripped after {consecutive_failures} consecutive failures for {}: {e}",
+                                recipient_key
+                            );
                             break;
                         }
                     }
@@ -810,6 +833,7 @@ impl TelegramChannel {
                     timestamp: entry.first_ts,
                     thread_ts: None,
                     interruption_scope_id: None,
+                    files: vec![],
                     attachments: vec![],
                     image_urls: None,
                     image_base64: entry.images,
@@ -926,7 +950,8 @@ impl TelegramChannel {
                     .await
                 {
                     Ok(Some(stall_msg_id)) => {
-                        self.stall_messages.lock()
+                        self.stall_messages
+                            .lock()
                             .entry(target.clone())
                             .or_default()
                             .push((chat_id_i64, stall_msg_id));
@@ -1005,7 +1030,6 @@ impl TelegramChannel {
             }
 
             for update in updates.into_iter() {
-
                 // Handle callback query (inline keyboard button click).
                 if let Some(cq) = update.callback_query {
                     // ACK the callback query to stop loading spinner.
@@ -1052,11 +1076,12 @@ impl TelegramChannel {
                         continue;
                     }
 
-                    let reply_target = if let Some(tid) = cq.message.as_ref().and_then(|m| m.message_thread_id) {
-                        format!("{}:{}", chat.id, tid)
-                    } else {
-                        chat.id.to_string()
-                    };
+                    let reply_target =
+                        if let Some(tid) = cq.message.as_ref().and_then(|m| m.message_thread_id) {
+                            format!("{}:{}", chat.id, tid)
+                        } else {
+                            chat.id.to_string()
+                        };
 
                     let channel_msg = ChannelMessage {
                         id: update_id,
@@ -1067,8 +1092,13 @@ impl TelegramChannel {
                         reply_target,
                         content: data,
                         timestamp: chrono::Utc::now().timestamp_millis() as u64,
-                        thread_ts: cq.message.as_ref().and_then(|m| m.message_thread_id).map(|id| id.to_string()),
+                        thread_ts: cq
+                            .message
+                            .as_ref()
+                            .and_then(|m| m.message_thread_id)
+                            .map(|id| id.to_string()),
                         interruption_scope_id: None,
+                        files: vec![],
                         attachments: vec![],
                         image_urls: None,
                         image_base64: None,
@@ -1121,8 +1151,7 @@ impl TelegramChannel {
                 let chat_id_str = chat.id.to_string();
                 let scope = if Self::is_group_message(&chat) {
                     let text = msg.text.as_deref().unwrap_or("");
-                    let has_mention =
-                        self.contains_bot_mention(text) || self.is_reply_to_bot(&msg);
+                    let has_mention = self.contains_bot_mention(text) || self.is_reply_to_bot(&msg);
                     crate::channels::MessageScope::Group {
                         id: &chat_id_str,
                         has_mention,
@@ -1162,16 +1191,16 @@ impl TelegramChannel {
                                 image_base64 = Some(vec![b64]);
                             }
                             Err(e) => {
-                                warn!("Telegram download failed for photo {}: {e}", largest.file_id);
+                                warn!(
+                                    "Telegram download failed for photo {}: {e}",
+                                    largest.file_id
+                                );
                             }
                         }
                     }
                     // Use caption if available, otherwise default to "[图片]"
                     if content.is_empty() {
-                        content = msg
-                            .caption
-                            .clone()
-                            .unwrap_or_else(|| "[图片]".to_string());
+                        content = msg.caption.clone().unwrap_or_default();
                     }
                 }
 
@@ -1184,13 +1213,18 @@ impl TelegramChannel {
                             file_name: format!("voice-{}.ogg", voice.file_id),
                             data,
                             mime_type: Some(
-                                voice.mime_type.clone().unwrap_or_else(|| "audio/ogg".to_string()),
+                                voice
+                                    .mime_type
+                                    .clone()
+                                    .unwrap_or_else(|| "audio/ogg".to_string()),
                             ),
                         }),
-                        Err(e) => warn!("Telegram download failed for voice {}: {e}", voice.file_id),
+                        Err(e) => {
+                            warn!("Telegram download failed for voice {}: {e}", voice.file_id)
+                        }
                     }
                     if content.is_empty() {
-                        content = msg.caption.clone().unwrap_or_else(|| "[语音]".to_string());
+                        content = msg.caption.clone().unwrap_or_default();
                     }
                 }
                 if let Some(audio) = &msg.audio {
@@ -1199,13 +1233,18 @@ impl TelegramChannel {
                             file_name: format!("audio-{}", audio.file_id),
                             data,
                             mime_type: Some(
-                                audio.mime_type.clone().unwrap_or_else(|| "audio/mpeg".to_string()),
+                                audio
+                                    .mime_type
+                                    .clone()
+                                    .unwrap_or_else(|| "audio/mpeg".to_string()),
                             ),
                         }),
-                        Err(e) => warn!("Telegram download failed for audio {}: {e}", audio.file_id),
+                        Err(e) => {
+                            warn!("Telegram download failed for audio {}: {e}", audio.file_id)
+                        }
                     }
                     if content.is_empty() {
-                        content = msg.caption.clone().unwrap_or_else(|| "[音频]".to_string());
+                        content = msg.caption.clone().unwrap_or_default();
                     }
                 }
 
@@ -1224,6 +1263,7 @@ impl TelegramChannel {
                     timestamp: chrono::Utc::now().timestamp_millis() as u64,
                     thread_ts: msg.message_thread_id.map(|id| id.to_string()),
                     interruption_scope_id: None,
+                    files: vec![],
                     attachments,
                     image_urls: None,
                     image_base64,
@@ -1231,7 +1271,10 @@ impl TelegramChannel {
 
                 if self.debounce_ms > 0 {
                     // Clean up stale error reactions from previous interactions
-                    let stale_status = self.status_reactions.lock().remove(&channel_msg.reply_target);
+                    let stale_status = self
+                        .status_reactions
+                        .lock()
+                        .remove(&channel_msg.reply_target);
                     if let Some(msg_ids) = stale_status {
                         for (cid, mid) in msg_ids {
                             let _ = self.remove_reaction(cid, mid, "❌").await;
@@ -1248,7 +1291,8 @@ impl TelegramChannel {
                             .push((chat.id, msg.message_id));
                     }
 
-                    let debounce_key = format!("{}|{}", channel_msg.sender, channel_msg.reply_target);
+                    let debounce_key =
+                        format!("{}|{}", channel_msg.sender, channel_msg.reply_target);
                     let is_new = !self.debounce_buffer.lock().contains_key(&debounce_key);
                     if is_new {
                         self.start_internal_typing(&channel_msg.reply_target);
@@ -1256,7 +1300,10 @@ impl TelegramChannel {
                     self.debounce_send(channel_msg, tx.clone()).await;
                 } else {
                     // Clean up stale error reactions from previous interactions
-                    let stale_status = self.status_reactions.lock().remove(&channel_msg.reply_target);
+                    let stale_status = self
+                        .status_reactions
+                        .lock()
+                        .remove(&channel_msg.reply_target);
                     if let Some(msg_ids) = stale_status {
                         for (cid, mid) in msg_ids {
                             let _ = self.remove_reaction(cid, mid, "❌").await;
@@ -1381,17 +1428,21 @@ impl Channel for TelegramChannel {
         let mut last_error = None;
 
         // Build reply_markup from inline_buttons (attached to last chunk only).
-        let reply_markup: Option<serde_json::Value> = message.inline_buttons.as_ref().map(|buttons| {
-            let keyboard: Vec<Vec<serde_json::Value>> = vec![
-                buttons.iter().map(|b| {
-                    serde_json::json!({
-                        "text": b.label,
-                        "callback_data": b.callback_data,
-                    })
-                }).collect()
-            ];
-            serde_json::json!({ "inline_keyboard": keyboard })
-        });
+        let reply_markup: Option<serde_json::Value> =
+            message.inline_buttons.as_ref().map(|buttons| {
+                let keyboard: Vec<Vec<serde_json::Value>> = vec![
+                    buttons
+                        .iter()
+                        .map(|b| {
+                            serde_json::json!({
+                                "text": b.label,
+                                "callback_data": b.callback_data,
+                            })
+                        })
+                        .collect(),
+                ];
+                serde_json::json!({ "inline_keyboard": keyboard })
+            });
 
         for (i, chunk) in chunks.into_iter().enumerate() {
             let text = if count > 1 && i < count - 1 {
@@ -1400,8 +1451,15 @@ impl Channel for TelegramChannel {
                 chunk
             };
             // Attach buttons only to the last chunk.
-            let markup = if i == count - 1 { reply_markup.clone() } else { None };
-            if let Err(e) = self.send_raw(&chat_id, &text, thread_id.as_deref(), markup).await {
+            let markup = if i == count - 1 {
+                reply_markup.clone()
+            } else {
+                None
+            };
+            if let Err(e) = self
+                .send_raw(&chat_id, &text, thread_id.as_deref(), markup)
+                .await
+            {
                 warn!("Failed to send chunk {}/{}: {}", i + 1, count, e);
                 last_error = Some(e);
                 // Continue trying subsequent chunks
@@ -1449,14 +1507,20 @@ impl Channel for TelegramChannel {
             // Media: upload file via multipart.
             crate::channels::MessagePayload::Media { source, caption } => {
                 let (data, mime_type, file_name) = match source {
-                    crate::channels::MediaSource::Inline { data, mime_type, file_name } => {
-                        (data.clone(), mime_type.clone(), file_name.clone())
-                    }
+                    crate::channels::MediaSource::Inline {
+                        data,
+                        mime_type,
+                        file_name,
+                    } => (data.clone(), mime_type.clone(), file_name.clone()),
                     crate::channels::MediaSource::Url(url) => {
                         // Download the URL first.
-                        let resp = self.http.get(url).send().await
-                            .map_err(|e| anyhow::anyhow!("failed to download media URL: {e}"))?;
-                        let data = resp.bytes().await
+                        let resp =
+                            self.http.get(url).send().await.map_err(|e| {
+                                anyhow::anyhow!("failed to download media URL: {e}")
+                            })?;
+                        let data = resp
+                            .bytes()
+                            .await
                             .map_err(|e| anyhow::anyhow!("failed to read media bytes: {e}"))?;
                         (data.to_vec(), None, None)
                     }
@@ -1471,15 +1535,18 @@ impl Channel for TelegramChannel {
                         matches!(ext, "png" | "jpg" | "jpeg" | "gif" | "webp")
                     });
 
-                let method = if is_image { "sendPhoto" } else { "sendDocument" };
+                let method = if is_image {
+                    "sendPhoto"
+                } else {
+                    "sendDocument"
+                };
                 let part_name = if is_image { "photo" } else { "document" };
 
                 let form = reqwest::multipart::Form::new()
                     .text("chat_id", chat_id.clone())
                     .part(
                         part_name.to_string(),
-                        reqwest::multipart::Part::bytes(data)
-                            .file_name(fname),
+                        reqwest::multipart::Part::bytes(data).file_name(fname),
                     );
 
                 // Add caption if present.
@@ -1489,20 +1556,30 @@ impl Channel for TelegramChannel {
                 };
 
                 let url = self.api_url(method);
-                let resp = self.http.post(&url).multipart(form).send().await
+                let resp = self
+                    .http
+                    .post(&url)
+                    .multipart(form)
+                    .send()
+                    .await
                     .map_err(|e| anyhow::anyhow!("Telegram {method} failed: {e}"))?;
 
                 if !resp.status().is_success() {
                     let status = resp.status();
                     let text = resp.text().await.unwrap_or_default();
-                    return Err(anyhow::anyhow!("Telegram {method} returned {status}: {text}"));
+                    return Err(anyhow::anyhow!(
+                        "Telegram {method} returned {status}: {text}"
+                    ));
                 }
 
                 Ok(None)
             }
             // Everything else: delegate to default impl (text fallback).
             _ => {
-                let msg = crate::channels::SendMessage::new(payload.to_fallback_text(), &target.recipient);
+                let msg = crate::channels::SendMessage::new(
+                    payload.to_fallback_text(),
+                    &target.recipient,
+                );
                 self.send(&msg).await?;
                 Ok(None)
             }
@@ -1530,7 +1607,9 @@ impl Channel for TelegramChannel {
         // Media → fallback text. Interactive (inline buttons) edit requires
         // a separate editMessageReplyMarkup call we don't expose yet.
         let text = payload.to_fallback_text();
-        let ok = self.edit_message_text_raw(chat_id_i64, msg_id_i64, &text).await?;
+        let ok = self
+            .edit_message_text_raw(chat_id_i64, msg_id_i64, &text)
+            .await?;
         if !ok {
             anyhow::bail!("editMessageText reported failure");
         }
@@ -1603,7 +1682,9 @@ impl Channel for TelegramChannel {
                     let _ = self.set_reaction(*chat_id, *msg_id, "🤔").await;
                     status_ids.push((*chat_id, *msg_id));
                 }
-                self.status_reactions.lock().insert(recipient.to_string(), status_ids);
+                self.status_reactions
+                    .lock()
+                    .insert(recipient.to_string(), status_ids);
             }
             ProcessingStatus::Done => {
                 // Remove 🤔 reaction from all tracked messages (send() already handles cleanup, but this is a safety net).
@@ -1633,8 +1714,8 @@ impl Channel for TelegramChannel {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::types::User;
+    use super::*;
 
     fn make_config() -> TelegramAccountConfig {
         TelegramAccountConfig {
@@ -1648,7 +1729,7 @@ mod tests {
             approval_timeout_secs: 120,
             ack_reactions: true,
             workspace_dir: None,
-            debounce_ms: 0, // disabled in tests
+            debounce_ms: 0,        // disabled in tests
             stall_timeout_secs: 0, // disabled in tests
         }
     }
@@ -1673,8 +1754,10 @@ mod tests {
         let ch = TelegramChannel::new(make_config());
         // make_config has allowed_groups = None, mention_only = false
         let policy = ch.security_policy();
-        assert!(matches!(policy.group_mode, GroupAuthMode::Reject),
-            "Phase 4 default: missing allowed_groups must reject groups");
+        assert!(
+            matches!(policy.group_mode, GroupAuthMode::Reject),
+            "Phase 4 default: missing allowed_groups must reject groups"
+        );
     }
 
     #[test]
@@ -1706,7 +1789,10 @@ mod tests {
         let decision = ch.try_authorize(
             Some("alice"),
             None,
-            MessageScope::Group { id: "-100123", has_mention: false },
+            MessageScope::Group {
+                id: "-100123",
+                has_mention: false,
+            },
         );
         assert_eq!(decision, AuthDecision::Ignore);
 
@@ -1714,7 +1800,10 @@ mod tests {
         let decision = ch.try_authorize(
             Some("alice"),
             None,
-            MessageScope::Group { id: "-100123", has_mention: true },
+            MessageScope::Group {
+                id: "-100123",
+                has_mention: true,
+            },
         );
         assert_eq!(decision, AuthDecision::Allow);
     }
@@ -1898,7 +1987,7 @@ mod tests {
     fn test_dedup() {
         let dedup = DedupState::new();
         assert!(!dedup.check_and_record("msg1")); // new → false (not seen before)
-        assert!(dedup.check_and_record("msg1"));  // duplicate → true (already seen)
+        assert!(dedup.check_and_record("msg1")); // duplicate → true (already seen)
         assert!(!dedup.check_and_record("msg2")); // new → false (not seen before)
     }
 
@@ -1911,8 +2000,7 @@ mod tests {
         assert_eq!(chunks[0], "short");
 
         let long = "a".repeat(5000);
-        let chunks =
-            crate::channels::message::split_message_chunk(&long, 100, LenUnit::Codepoints);
+        let chunks = crate::channels::message::split_message_chunk(&long, 100, LenUnit::Codepoints);
         assert!(chunks.len() > 1);
         assert!(chunks.iter().all(|c| c.len() <= 100));
     }
@@ -2106,5 +2194,4 @@ Here is some <code>inline code</code> and a <a href=\"https://example.com\">link
 
         assert_eq!(markdown_to_telegram_html(input), expected);
     }
-
 }

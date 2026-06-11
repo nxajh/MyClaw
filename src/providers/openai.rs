@@ -5,18 +5,14 @@
 
 use async_trait::async_trait;
 
-use reqwest::Client;
 use crate::providers::http::build_reqwest_client;
+use crate::providers::{BoxStream, ChatProvider, ChatRequest, StreamEvent};
+use crate::providers::{EmbedInput, EmbedRequest, EmbedResponse, EmbeddingProvider};
 use crate::providers::{
-    BoxStream, ChatProvider, ChatRequest, StreamEvent,
+    ImageFormat, ImageGenerationProvider, ImageOutput, ImageRequest, ImageResponse,
 };
-use crate::providers::{
-    EmbedInput, EmbedRequest, EmbedResponse, EmbeddingProvider,
-};
-use crate::providers::{
-    ImageGenerationProvider, ImageRequest, ImageResponse, ImageFormat, ImageOutput,
-};
-use crate::providers::{TtsProvider, TtsRequest, TtsFormat, TtsVoice};
+use crate::providers::{TtsFormat, TtsProvider, TtsRequest, TtsVoice};
+use reqwest::Client;
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 
@@ -34,7 +30,12 @@ impl OpenAiProvider {
     }
 
     pub fn with_base_url(api_key: String, base_url: String) -> Self {
-        Self { base_url, api_key, client: build_reqwest_client(), user_agent: None }
+        Self {
+            base_url,
+            api_key,
+            client: build_reqwest_client(),
+            user_agent: None,
+        }
     }
 
     pub fn with_user_agent(mut self, user_agent: String) -> Self {
@@ -46,15 +47,27 @@ impl OpenAiProvider {
         format!("Bearer {}", self.api_key)
     }
 
-    fn images_url(&self) -> String { format!("{}/v1/images/generations", self.base_url.trim_end_matches('/')) }
-    fn embeddings_url(&self) -> String { format!("{}/v1/embeddings", self.base_url.trim_end_matches('/')) }
-    fn tts_url(&self) -> String { format!("{}/v1/audio/speech", self.base_url.trim_end_matches('/')) }
+    fn images_url(&self) -> String {
+        format!(
+            "{}/v1/images/generations",
+            self.base_url.trim_end_matches('/')
+        )
+    }
+    fn embeddings_url(&self) -> String {
+        format!("{}/v1/embeddings", self.base_url.trim_end_matches('/'))
+    }
+    fn tts_url(&self) -> String {
+        format!("{}/v1/audio/speech", self.base_url.trim_end_matches('/'))
+    }
 
     /// Build a HeaderMap with common headers (auth, content-type, optional user-agent).
     fn common_headers(&self) -> reqwest::header::HeaderMap {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(reqwest::header::AUTHORIZATION, self.auth().parse().unwrap());
-        headers.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            "application/json".parse().unwrap(),
+        );
         if let Some(ref ua) = self.user_agent {
             headers.insert(reqwest::header::USER_AGENT, ua.parse().unwrap());
         }
@@ -106,25 +119,46 @@ impl ImageGenerationProvider for OpenAiProvider {
             },
         });
 
-        let text = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async move {
-            let resp = self.client.post(&url).headers(headers).json(&body).send().await?;
-            let resp = resp.error_for_status()?;
-            resp.text().await
-        }))?;
+        let text = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async move {
+                let resp = self
+                    .client
+                    .post(&url)
+                    .headers(headers)
+                    .json(&body)
+                    .send()
+                    .await?;
+                let resp = resp.error_for_status()?;
+                resp.text().await
+            })
+        })?;
 
         #[derive(serde::Deserialize)]
-        struct ImgResp { data: Vec<ImgData> }
+        struct ImgResp {
+            data: Vec<ImgData>,
+        }
         #[derive(serde::Deserialize)]
-        struct ImgData { url: Option<String>, b64_json: Option<String>, revised_prompt: Option<String> }
+        struct ImgData {
+            url: Option<String>,
+            b64_json: Option<String>,
+            revised_prompt: Option<String>,
+        }
 
         let resp: ImgResp = serde_json::from_str(&text)?;
-        let images = resp.data.into_iter().map(|d| ImageOutput {
-            url: d.url,
-            b64_json: d.b64_json,
-            revised_prompt: d.revised_prompt,
-        }).collect();
+        let images = resp
+            .data
+            .into_iter()
+            .map(|d| ImageOutput {
+                url: d.url,
+                b64_json: d.b64_json,
+                revised_prompt: d.revised_prompt,
+            })
+            .collect();
 
-        Ok(ImageResponse { images, usage: None })
+        Ok(ImageResponse {
+            images,
+            usage: None,
+        })
     }
 }
 
@@ -138,7 +172,10 @@ impl TtsProvider for OpenAiProvider {
 
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(reqwest::header::AUTHORIZATION, auth.parse().unwrap());
-        headers.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            "application/json".parse().unwrap(),
+        );
 
         let voice_id = match &req.voice {
             TtsVoice::Id(id) => id.clone(),
@@ -156,11 +193,19 @@ impl TtsProvider for OpenAiProvider {
             "speed": req.speed.unwrap_or(1.0),
         });
 
-        let bytes = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async move {
-            let resp = self.client.post(&url).headers(headers).json(&body).send().await?;
-            let resp = resp.error_for_status()?;
-            resp.bytes().await
-        }))?;
+        let bytes = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async move {
+                let resp = self
+                    .client
+                    .post(&url)
+                    .headers(headers)
+                    .json(&body)
+                    .send()
+                    .await?;
+                let resp = resp.error_for_status()?;
+                resp.bytes().await
+            })
+        })?;
 
         Ok(crate::providers::tts::AudioResponse {
             audio: crate::providers::tts::AudioData {
@@ -189,23 +234,44 @@ impl EmbeddingProvider for OpenAiProvider {
             body["dimensions"] = serde_json::json!(dim);
         }
 
-        let text = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async move {
-            let resp = self.client.post(&url).headers(headers).json(&body).send().await?;
-            let resp = resp.error_for_status()?;
-            resp.text().await
-        }))?;
+        let text = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async move {
+                let resp = self
+                    .client
+                    .post(&url)
+                    .headers(headers)
+                    .json(&body)
+                    .send()
+                    .await?;
+                let resp = resp.error_for_status()?;
+                resp.text().await
+            })
+        })?;
 
         #[derive(serde::Deserialize)]
-        struct Er { data: Vec<Ed>, usage: Option<Eu> }
+        struct Er {
+            data: Vec<Ed>,
+            usage: Option<Eu>,
+        }
         #[derive(serde::Deserialize)]
-        struct Ed { embedding: Vec<f32> }
+        struct Ed {
+            embedding: Vec<f32>,
+        }
         #[derive(serde::Deserialize)]
-        struct Eu { prompt_tokens: u64 }
+        struct Eu {
+            prompt_tokens: u64,
+        }
 
         let resp: Er = serde_json::from_str(&text)?;
-        let usage = resp.usage.map(|u| crate::providers::EmbeddingUsage { prompt_tokens: u.prompt_tokens });
+        let usage = resp.usage.map(|u| crate::providers::EmbeddingUsage {
+            prompt_tokens: u.prompt_tokens,
+        });
         let embeddings = resp.data.into_iter().flat_map(|d| d.embedding).collect();
 
-        Ok(EmbedResponse { embeddings, usage, model: req.model })
+        Ok(EmbedResponse {
+            embeddings,
+            usage,
+            model: req.model,
+        })
     }
 }

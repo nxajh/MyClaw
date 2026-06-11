@@ -189,7 +189,10 @@ mod tests {
         let config = SubAgentConfig {
             name: "t".to_string(),
             system_prompt: String::new(),
-            tools: crate::config::filters::ToolFilter::Allow(vec!["shell".to_string(), "file_read".to_string()]),
+            tools: crate::config::filters::ToolFilter::Allow(vec![
+                "shell".to_string(),
+                "file_read".to_string(),
+            ]),
             skills: Default::default(),
             mcp: Default::default(),
             max_tool_calls: None,

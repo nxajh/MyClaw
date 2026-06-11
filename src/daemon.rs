@@ -9,17 +9,16 @@
 //! DDD: The Composition Root is the *only* place that knows about concrete
 //! Infrastructure types. Application layer receives everything through traits.
 
-use anyhow::{Context, Result};
-use crate::agents::{
-    InMemoryBackend, Orchestrator, OrchestratorParts, SessionManager,
-    ToolRegistry, SkillManager, Skill, SystemPromptConfig, RunMode,
-    McpManager, DelegationCoordinator,
-};
 use crate::agents::AgentDelegator;
+use crate::agents::{
+    DelegationCoordinator, InMemoryBackend, McpManager, Orchestrator, OrchestratorParts, RunMode,
+    SessionManager, Skill, SkillManager, SystemPromptConfig, ToolRegistry,
+};
+use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
 
 use crate::channels::Channel;
@@ -46,8 +45,7 @@ pub fn load_config() -> Result<crate::config::AppConfig> {
         let p = PathBuf::from(expanded);
         if p.exists() {
             tracing::info!(path = %p.display(), "loading config");
-            return crate::config::ConfigLoader::from_file(&p)
-                .context("failed to load config");
+            return crate::config::ConfigLoader::from_file(&p).context("failed to load config");
         }
     }
     anyhow::bail!(
@@ -81,13 +79,17 @@ fn bind_reusable(port: u16) -> anyhow::Result<std::net::TcpListener> {
     let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
         .context("failed to create socket")?;
     socket.set_reuse_port(true).context("SO_REUSEPORT failed")?;
-    socket.set_reuse_address(true).context("SO_REUSEADDR failed")?;
+    socket
+        .set_reuse_address(true)
+        .context("SO_REUSEADDR failed")?;
     // socket2 v0.5 adds SOCK_CLOEXEC by default.  Clear it so that the fd
     // survives fork+execve during hot switch.  Without this the child gets
     // EBADF (fd closed by execve) or EPERM (fd number reused as a
     // non-pollable file type before epoll_ctl(EPOLL_CTL_ADD) is called).
     #[cfg(unix)]
-    socket.set_cloexec(false).context("clearing FD_CLOEXEC failed")?;
+    socket
+        .set_cloexec(false)
+        .context("clearing FD_CLOEXEC failed")?;
     socket
         .bind(&addr.into())
         .with_context(|| format!("failed to bind {addr}"))?;
@@ -100,7 +102,7 @@ fn bind_reusable(port: u16) -> anyhow::Result<std::net::TcpListener> {
 
 /// Initialize tracing subscriber based on config.
 pub fn init_tracing(config: &crate::config::AppConfig) {
-    use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+    use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
     let level = config.logging.level.as_deref().unwrap_or("info");
     // Build RUST_LOG-style directives: global level + per-module overrides.
@@ -110,19 +112,23 @@ pub fn init_tracing(config: &crate::config::AppConfig) {
     }
     let directives = parts.join(",");
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(directives));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(directives));
 
     let subscriber = tracing_subscriber::registry()
         .with(filter)
         .with(fmt::layer().with_target(true).with_thread_ids(true));
 
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("failed to set tracing subscriber");
+    tracing::subscriber::set_global_default(subscriber).expect("failed to set tracing subscriber");
 }
 
 /// Print startup banner with config summary.
-fn print_banner(config: &crate::config::AppConfig, mcp_servers: usize, mcp_tools: usize, sub_agent_count: usize, sub_agent_names: &[String]) {
+fn print_banner(
+    config: &crate::config::AppConfig,
+    mcp_servers: usize,
+    mcp_tools: usize,
+    sub_agent_count: usize,
+    sub_agent_names: &[String],
+) {
     println!();
     println!("🐾 MyClaw Daemon");
     println!("  📁 Workspace: {}", config.workspace_dir.display());
@@ -152,7 +158,11 @@ fn print_banner(config: &crate::config::AppConfig, mcp_servers: usize, mcp_tools
 
     if sub_agent_count > 0 {
         let names: Vec<&str> = sub_agent_names.iter().map(|s| s.as_str()).collect();
-        println!("  🤝 Sub-agents: {} ({})", sub_agent_count, names.join(", "));
+        println!(
+            "  🤝 Sub-agents: {} ({})",
+            sub_agent_count,
+            names.join(", ")
+        );
     }
 
     println!();
@@ -166,13 +176,12 @@ fn print_banner(config: &crate::config::AppConfig, mcp_servers: usize, mcp_tools
 
 /// Build the Registry and register all providers from config.
 fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::registry::Registry> {
-    use crate::providers::{ProviderId, detect_from_url};
     use crate::providers::{
-        ProviderFactory,
-        BuildChatProviderRequest, BuildEmbeddingProviderRequest,
-        BuildImageProviderRequest, BuildTtsProviderRequest,
-        BuildSearchProviderRequest, BuildVideoProviderRequest, BuildSttProviderRequest,
+        BuildChatProviderRequest, BuildEmbeddingProviderRequest, BuildImageProviderRequest,
+        BuildSearchProviderRequest, BuildSttProviderRequest, BuildTtsProviderRequest,
+        BuildVideoProviderRequest, ProviderFactory,
     };
+    use crate::providers::{ProviderId, detect_from_url};
 
     let factory = ProviderFactory::new();
     let mut registry =
@@ -181,14 +190,28 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
 
     for (provider_key, provider_cfg) in &config.providers {
         // Resolve provider identity: explicit override > base_url inference > generic
-        let provider_id = provider_cfg.provider.as_ref()
+        let provider_id = provider_cfg
+            .provider
+            .as_ref()
             .map(|s| ProviderId::new(s.clone()))
             .or_else(|| {
                 // Try to infer from the first capability's base_url
-                provider_cfg.chat.as_ref()
+                provider_cfg
+                    .chat
+                    .as_ref()
                     .and_then(|c| detect_from_url(&c.base_url))
-                    .or_else(|| provider_cfg.embedding.as_ref().and_then(|e| detect_from_url(&e.base_url)))
-                    .or_else(|| provider_cfg.search.as_ref().and_then(|s| detect_from_url(&s.base_url)))
+                    .or_else(|| {
+                        provider_cfg
+                            .embedding
+                            .as_ref()
+                            .and_then(|e| detect_from_url(&e.base_url))
+                    })
+                    .or_else(|| {
+                        provider_cfg
+                            .search
+                            .as_ref()
+                            .and_then(|s| detect_from_url(&s.base_url))
+                    })
             })
             .unwrap_or_else(|| ProviderId::new("generic"));
 
@@ -197,8 +220,7 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
         // ── Chat ──────────────────────────────────────────────────────
         if let Some(ref chat) = provider_cfg.chat {
             let api_key = provider_cfg.effective_api_key(chat.api_key.as_deref());
-            let api_key = api_key
-                .with_context(|| format!("no API key for '{}'", provider_key))?;
+            let api_key = api_key.with_context(|| format!("no API key for '{}'", provider_key))?;
             let auth_style = provider_cfg.effective_auth_style(chat.auth_style);
             let user_agent = chat.user_agent.clone();
 
@@ -220,21 +242,28 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
                     user_agent: user_agent.clone(),
                 };
 
-                let chat_provider = factory.build_chat_provider(request)
-                    .with_context(|| format!(
+                let chat_provider = factory.build_chat_provider(request).with_context(|| {
+                    format!(
                         "cannot build chat provider for base_url '{}' (key='{}')",
                         chat.base_url, provider_key
-                    ))?;
+                    )
+                })?;
 
-                registry.register_chat(chat_provider, model_id.clone(), model_cfg.clone());
+                registry.register_chat(
+                    chat_provider,
+                    model_id.clone(),
+                    model_cfg.clone(),
+                    Some(provider_id.clone()),
+                    chat.protocol,
+                );
             }
         }
 
         // ── Embedding ─────────────────────────────────────────────────
         if let Some(ref emb) = provider_cfg.embedding {
             let api_key = provider_cfg.effective_api_key(emb.api_key.as_deref());
-            let api_key = api_key
-                .with_context(|| format!("no API key for '{}' embedding", provider_key))?;
+            let api_key =
+                api_key.with_context(|| format!("no API key for '{}' embedding", provider_key))?;
             let auth_style = provider_cfg.effective_auth_style(emb.auth_style);
             let user_agent = emb.user_agent.clone();
 
@@ -288,8 +317,8 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
         // ── TTS ───────────────────────────────────────────────────────
         if let Some(ref sec) = provider_cfg.tts {
             let api_key = provider_cfg.effective_api_key(sec.api_key.as_deref());
-            let api_key = api_key
-                .with_context(|| format!("no API key for '{}' tts", provider_key))?;
+            let api_key =
+                api_key.with_context(|| format!("no API key for '{}' tts", provider_key))?;
             let auth_style = provider_cfg.effective_auth_style(sec.auth_style);
             let user_agent = sec.user_agent.clone();
 
@@ -312,8 +341,8 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
         // ── Video ─────────────────────────────────────────────────────
         if let Some(ref sec) = provider_cfg.video {
             let api_key = provider_cfg.effective_api_key(sec.api_key.as_deref());
-            let api_key = api_key
-                .with_context(|| format!("no API key for '{}' video", provider_key))?;
+            let api_key =
+                api_key.with_context(|| format!("no API key for '{}' video", provider_key))?;
             let auth_style = provider_cfg.effective_auth_style(sec.auth_style);
             let user_agent = sec.user_agent.clone();
 
@@ -336,8 +365,8 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
         // ── Search ────────────────────────────────────────────────────
         if let Some(ref sec) = provider_cfg.search {
             let api_key = provider_cfg.effective_api_key(sec.api_key.as_deref());
-            let api_key = api_key
-                .with_context(|| format!("no API key for '{}' search", provider_key))?;
+            let api_key =
+                api_key.with_context(|| format!("no API key for '{}' search", provider_key))?;
             let auth_style = provider_cfg.effective_auth_style(sec.auth_style);
             let user_agent = sec.user_agent.clone();
 
@@ -360,8 +389,8 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
         // ── STT ───────────────────────────────────────────────────────
         if let Some(ref sec) = provider_cfg.stt {
             let api_key = provider_cfg.effective_api_key(sec.api_key.as_deref());
-            let api_key = api_key
-                .with_context(|| format!("no API key for '{}' stt", provider_key))?;
+            let api_key =
+                api_key.with_context(|| format!("no API key for '{}' stt", provider_key))?;
             let auth_style = provider_cfg.effective_auth_style(sec.auth_style);
             let user_agent = sec.user_agent.clone();
 
@@ -420,7 +449,9 @@ async fn build_tools(
     tools.register(Arc::new(crate::tools::SkillTool::new(Arc::clone(skills))));
 
     // SkillsListTool — lists skill metadata.
-    tools.register(Arc::new(crate::tools::SkillsListTool::new(Arc::clone(skills))));
+    tools.register(Arc::new(crate::tools::SkillsListTool::new(Arc::clone(
+        skills,
+    ))));
 
     // SkillManageTool — CRUD for skills.
     tools.register(Arc::new(crate::tools::SkillManageTool::new(
@@ -429,14 +460,25 @@ async fn build_tools(
     )));
 
     // CronJobTool — manage scheduled cron jobs.
-    tools.register(Arc::new(crate::tools::CronJobTool::new(Arc::clone(shared_scheduler))));
+    tools.register(Arc::new(crate::tools::CronJobTool::new(Arc::clone(
+        shared_scheduler,
+    ))));
 
     // Memory tools — persistent per-user memory (G43: workspace/users/{uid}/memory/).
     let wd = workspace_dir.to_path_buf();
     let r = Arc::clone(user_resolver);
-    tools.register(Arc::new(crate::tools::MemoryListTool::new(wd.clone(), Arc::clone(&r))));
-    tools.register(Arc::new(crate::tools::MemoryViewTool::new(wd.clone(), Arc::clone(&r))));
-    tools.register(Arc::new(crate::tools::MemorySearchTool::new(wd.clone(), Arc::clone(&r))));
+    tools.register(Arc::new(crate::tools::MemoryListTool::new(
+        wd.clone(),
+        Arc::clone(&r),
+    )));
+    tools.register(Arc::new(crate::tools::MemoryViewTool::new(
+        wd.clone(),
+        Arc::clone(&r),
+    )));
+    tools.register(Arc::new(crate::tools::MemorySearchTool::new(
+        wd.clone(),
+        Arc::clone(&r),
+    )));
     tools.register(Arc::new(crate::tools::MemoryManageTool::new(wd, r)));
 
     // Inject MCP tools (if any servers are configured and connected).
@@ -472,17 +514,24 @@ fn build_skill_manager(workspace_dir: &std::path::Path) -> SkillManager {
 ///
 /// Sub-agents are defined in `workspace/agents/<name>/AGENT.md` — each file
 /// contains YAML front matter (metadata) and Markdown body (system prompt).
-fn build_sub_agents(workspace_dir: &std::path::Path) -> Vec<crate::config::sub_agent::SubAgentConfig> {
+fn build_sub_agents(
+    workspace_dir: &std::path::Path,
+) -> Vec<crate::config::sub_agent::SubAgentConfig> {
     let agents_dir = workspace_dir.join("agents");
     let agents = crate::agents::agent_loader::load_agents_from_dir(&agents_dir);
     if !agents.is_empty() {
-        tracing::info!(agent_count = agents.len(), "sub-agents loaded from workspace");
+        tracing::info!(
+            agent_count = agents.len(),
+            "sub-agents loaded from workspace"
+        );
     }
     agents
 }
 
 /// Build the session backend (shared with SessionManager and persist hooks).
-fn build_session_backend(config: &crate::config::AppConfig) -> Arc<dyn crate::storage::SessionBackend> {
+fn build_session_backend(
+    config: &crate::config::AppConfig,
+) -> Arc<dyn crate::storage::SessionBackend> {
     let sessions_dir = config.workspace_dir.join("sessions");
     match crate::storage::JsonFileBackend::open(&sessions_dir) {
         Ok(backend) => {
@@ -497,7 +546,9 @@ fn build_session_backend(config: &crate::config::AppConfig) -> Arc<dyn crate::st
 }
 
 /// Build Channel adapters from config, returning (channel_type, account_id, channel).
-fn build_channel_accounts(config: &crate::config::AppConfig) -> Vec<(String, String, Arc<dyn Channel>)> {
+fn build_channel_accounts(
+    config: &crate::config::AppConfig,
+) -> Vec<(String, String, Arc<dyn Channel>)> {
     let mut channels: Vec<(String, String, Arc<dyn Channel>)> = Vec::new();
 
     if let Some(ref cfg) = config.channels.telegram {
@@ -507,7 +558,9 @@ fn build_channel_accounts(config: &crate::config::AppConfig) -> Vec<(String, Str
                     channels.push((
                         "telegram".to_string(),
                         account_id.clone(),
-                        Arc::new(crate::channels::telegram::TelegramChannel::new(account_cfg.clone())),
+                        Arc::new(crate::channels::telegram::TelegramChannel::new(
+                            account_cfg.clone(),
+                        )),
                     ));
                 }
             }
@@ -522,7 +575,9 @@ fn build_channel_accounts(config: &crate::config::AppConfig) -> Vec<(String, Str
                     channels.push((
                         "wechat".to_string(),
                         account_id.clone(),
-                        Arc::new(crate::channels::wechat::WechatChannel::new(account_cfg.clone())),
+                        Arc::new(crate::channels::wechat::WechatChannel::new(
+                            account_cfg.clone(),
+                        )),
                     ));
                 }
             }
@@ -537,7 +592,9 @@ fn build_channel_accounts(config: &crate::config::AppConfig) -> Vec<(String, Str
                     channels.push((
                         "qqbot".to_string(),
                         account_id.clone(),
-                        Arc::new(crate::channels::qqbot::QQBotChannel::new(account_cfg.clone())),
+                        Arc::new(crate::channels::qqbot::QQBotChannel::new(
+                            account_cfg.clone(),
+                        )),
                     ));
                 }
             }
@@ -570,13 +627,20 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // 让进程 cwd 与 workspace_dir 一致，保证 file_read 等工具的相对路径解析
     // 和 system prompt 告诉 LLM 的 "Working directory" 一致
     std::env::set_current_dir(&config.workspace_dir).with_context(|| {
-        format!("failed to set cwd to workspace_dir '{}'", config.workspace_dir.display())
+        format!(
+            "failed to set cwd to workspace_dir '{}'",
+            config.workspace_dir.display()
+        )
     })?;
 
     // D27 — RFC v2 §三.A: workspace/agents/main/AGENT.md is required.
     // Without it there is no default agent to route inbound messages to.
     // Run scripts/migrate_main_agent.sh on first boot after upgrade.
-    let main_agent_md = config.workspace_dir.join("agents").join("main").join("AGENT.md");
+    let main_agent_md = config
+        .workspace_dir
+        .join("agents")
+        .join("main")
+        .join("AGENT.md");
     if !main_agent_md.exists() {
         anyhow::bail!(
             "missing main agent at {}\n\
@@ -640,9 +704,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     }
 
     // Ensure knowledge directory exists
-    if let Err(e) = crate::memory::ensure_memory_dir(
-        config.knowledge_dir.to_str().unwrap_or("."),
-    ) {
+    if let Err(e) = crate::memory::ensure_memory_dir(config.knowledge_dir.to_str().unwrap_or(".")) {
         tracing::warn!(err = %e, "failed to create knowledge directory");
     }
 
@@ -657,18 +719,30 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
     // Build skill manager (SKILL.md files).
     let skills = build_skill_manager(&config.workspace_dir);
-    let skills_arc: Arc<parking_lot::RwLock<SkillManager>> = Arc::new(parking_lot::RwLock::new(skills));
+    let skills_arc: Arc<parking_lot::RwLock<SkillManager>> =
+        Arc::new(parking_lot::RwLock::new(skills));
 
     // Resolve timezone: config.timezone (IANA) takes precedence over timezone_offset.
     let tz_name = config.prompt.timezone.clone().unwrap_or_else(|| {
         // Convert legacy offset to Etc/GMT name (signs are inverted in Etc/GMT).
         let offset = config.prompt.timezone_offset;
-        if offset == 0 { "UTC".to_string() }
-        else { format!("Etc/GMT{}", if offset > 0 { format!("-{}", offset) } else { format!("{}", -offset) }) }
+        if offset == 0 {
+            "UTC".to_string()
+        } else {
+            format!(
+                "Etc/GMT{}",
+                if offset > 0 {
+                    format!("-{}", offset)
+                } else {
+                    format!("{}", -offset)
+                }
+            )
+        }
     });
 
     // Create scheduler channel early (needed for SharedScheduler creation).
-    let (scheduler_tx, scheduler_rx) = tokio::sync::mpsc::channel::<crate::agents::SchedulerEvent>(100);
+    let (scheduler_tx, scheduler_rx) =
+        tokio::sync::mpsc::channel::<crate::agents::SchedulerEvent>(100);
 
     // Build shared scheduler (owns all cron job data).
     let cron_dir = config.workspace_dir.join("cron");
@@ -724,7 +798,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         config.knowledge_dir.to_str().unwrap_or("."),
         &user_resolver,
         Arc::clone(&ask_router),
-    ).await;
+    )
+    .await;
 
     // Build sub-agent configs (AGENT.md files from workspace/agents/).
     let sub_agent_configs = build_sub_agents(&config.workspace_dir);
@@ -743,7 +818,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     tracing::debug!("web_search tool registered (connected to ProviderRegistry)");
 
     // WorkspaceWatcher for hot-reload.
-    let _watcher = crate::agents::WorkspaceWatcher::new(&config.workspace_dir, &config.knowledge_dir)?;
+    let _watcher =
+        crate::agents::WorkspaceWatcher::new(&config.workspace_dir, &config.knowledge_dir)?;
     // change_rx is no longer subscribed to — D25's WorkspaceWatcher::spawn_managed
     // handles agent/skill reloads autonomously (the watcher publishes the
     // ChangeSet but nothing now subscribes here).
@@ -788,7 +864,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         // Build agent_delegate tool. H47: now wired through `AgentDelegator`
         // (the legacy `TaskDelegator` trait has been removed).
         let delegate_tool = crate::tools::AgentDelegateTool::new(
-            Arc::clone(&delegator_arc) as Arc<dyn AgentDelegator>,
+            Arc::clone(&delegator_arc) as Arc<dyn AgentDelegator>
         );
 
         // Build parent tool registry: same tools + agent_delegate + agent_list
@@ -803,12 +879,12 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         // agent_list / agent_kill let the parent inspect and terminate running
         // sub-agents. Both depend on the DelegationCoordinator, so they live in
         // the multi-agent branch (single-agent mode has no coordinator).
-        parent_tools.register(Arc::new(
-            crate::tools::AgentListTool::new(Arc::clone(&delegator_arc)),
-        ));
-        parent_tools.register(Arc::new(
-            crate::tools::AgentKillTool::new(Arc::clone(&delegator_arc)),
-        ));
+        parent_tools.register(Arc::new(crate::tools::AgentListTool::new(Arc::clone(
+            &delegator_arc,
+        ))));
+        parent_tools.register(Arc::new(crate::tools::AgentKillTool::new(Arc::clone(
+            &delegator_arc,
+        ))));
         tracing::debug!("agent_list / agent_kill tools registered (multi-agent mode)");
 
         let tool_search = crate::tools::ToolSearchTool::new(Arc::clone(&base_tools_arc));
@@ -838,8 +914,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // instead of reading `subagent_running_*.json` marker files (the marker
     // mechanism has been deleted along with the corresponding writes in
     // DelegationCoordinator).
-    let unfinished_subagents =
-        crate::agents::recovery::scan_unfinished_subagents(&session_manager);
+    let unfinished_subagents = crate::agents::recovery::scan_unfinished_subagents(&session_manager);
     if !unfinished_subagents.is_empty() {
         tracing::warn!(
             count = unfinished_subagents.len(),
@@ -897,10 +972,19 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         });
     #[cfg(feature = "client")]
     if let Some(ref cc) = _client_channel {
-        channels.push(("client".to_string(), "default".to_string(), cc.clone() as Arc<dyn Channel>));
+        channels.push((
+            "client".to_string(),
+            "default".to_string(),
+            cc.clone() as Arc<dyn Channel>,
+        ));
     }
 
-    let prompt_config = build_prompt_config(&config.agent, &config.prompt, &config.workspace_dir, &config.knowledge_dir);
+    let prompt_config = build_prompt_config(
+        &config.agent,
+        &config.prompt,
+        &config.workspace_dir,
+        &config.knowledge_dir,
+    );
     let mcp_manager_arc = Arc::new(mcp_manager);
 
     // Get MCP server instructions for attachment injection.
@@ -992,7 +1076,13 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // /new and /switch is no longer needed. SessionContext is invalidated
     // directly by the slash command handlers.
 
-    print_banner(&config, mcp_manager_arc.server_count().await, mcp_manager_arc.tool_count().await, sub_agent_count, &sub_agent_names);
+    print_banner(
+        &config,
+        mcp_manager_arc.server_count().await,
+        mcp_manager_arc.tool_count().await,
+        sub_agent_count,
+        &sub_agent_names,
+    );
 
     // ── Scheduler tasks ────────────────────────────────────────────────────
 
@@ -1011,7 +1101,10 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             // If hot-switch stored a valid fd earlier, reuse it directly.
             let inherited_fd = LISTEN_SOCKET_FD.load(Ordering::SeqCst);
             if inherited_fd >= 0 {
-                tracing::info!(fd = inherited_fd, "reusing inherited webhook socket from hot switch");
+                tracing::info!(
+                    fd = inherited_fd,
+                    "reusing inherited webhook socket from hot switch"
+                );
                 // SAFETY: the fd was inherited from the parent via execv and is
                 // a valid, already-bound, already-listening socket.
                 use std::os::unix::io::FromRawFd;
@@ -1048,7 +1141,9 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         // Run the scheduler (it was created earlier with heartbeat config).
         if shared_scheduler.should_run() {
             let scheduler = Arc::clone(&shared_scheduler);
-            tokio::spawn(async move { scheduler.run().await; });
+            tokio::spawn(async move {
+                scheduler.run().await;
+            });
         }
     }
 
@@ -1058,8 +1153,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // ── SIGUSR1: set shutdown flag for checkpoint exit (hot switch) ────────
     #[cfg(unix)]
     {
-        let mut sigusr1 = signal(SignalKind::user_defined1())
-            .expect("failed to register SIGUSR1 handler");
+        let mut sigusr1 =
+            signal(SignalKind::user_defined1()).expect("failed to register SIGUSR1 handler");
         let shutdown_tx_usr1 = shutdown_tx.clone();
         tokio::spawn(async move {
             sigusr1.recv().await;
@@ -1079,8 +1174,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // ── SIGUSR2: new process ready, exit immediately ──────────────────────
     #[cfg(unix)]
     {
-        let mut sigusr2 = signal(SignalKind::user_defined2())
-            .expect("failed to register SIGUSR2 handler");
+        let mut sigusr2 =
+            signal(SignalKind::user_defined2()).expect("failed to register SIGUSR2 handler");
         tokio::spawn(async move {
             sigusr2.recv().await;
             tracing::info!("SIGUSR2 received, new process ready, exiting");
@@ -1104,17 +1199,25 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             //      MAINPID, and only NotifyAccess=all (set in the service file)
             //      allows us to update it from here.
             let new_pid = std::process::id();
-            if let Err(e) = sd_notify::notify(false, &[
-                sd_notify::NotifyState::MainPid(new_pid),
-                sd_notify::NotifyState::Ready,
-            ]) {
+            if let Err(e) = sd_notify::notify(
+                false,
+                &[
+                    sd_notify::NotifyState::MainPid(new_pid),
+                    sd_notify::NotifyState::Ready,
+                ],
+            ) {
                 tracing::warn!(err = %e, "sd_notify MAINPID+READY failed");
             } else {
                 tracing::debug!(new_pid, "sd_notify MAINPID+READY sent");
             }
             if let Some(old_pid) = crate::hot_switch::old_pid() {
-                tracing::debug!(old_pid, "sending SIGUSR2 to old process — new process is ready");
-                unsafe { libc::kill(old_pid as libc::pid_t, libc::SIGUSR2); }
+                tracing::debug!(
+                    old_pid,
+                    "sending SIGUSR2 to old process — new process is ready"
+                );
+                unsafe {
+                    libc::kill(old_pid as libc::pid_t, libc::SIGUSR2);
+                }
             }
         } else {
             // Normal startup: tell systemd we are ready to accept connections.
@@ -1126,7 +1229,10 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
     // Run the message dispatch loop (blocks until shutdown). `run` consumes the
     // orchestrator and aborts its listener tasks before returning.
-    orchestrator.run(shutdown_rx, unfinished_subagents).await.context("orchestrator run error")?;
+    orchestrator
+        .run(shutdown_rx, unfinished_subagents)
+        .await
+        .context("orchestrator run error")?;
 
     tracing::debug!("dispatch loop ended, listeners aborted");
 
@@ -1139,9 +1245,14 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     #[cfg(unix)]
     if crate::is_shutting_down() {
         let socket_fd = LISTEN_SOCKET_FD.load(Ordering::SeqCst);
-        tracing::debug!(socket_fd, "shutdown flag set, executing hot switch (fork+execv)");
+        tracing::debug!(
+            socket_fd,
+            "shutdown flag set, executing hot switch (fork+execv)"
+        );
         let client_fd = CLIENT_SOCKET_FD.load(Ordering::SeqCst);
-        if let Err(e) = tokio::task::block_in_place(|| crate::hot_switch::do_hot_switch(socket_fd, client_fd)) {
+        if let Err(e) =
+            tokio::task::block_in_place(|| crate::hot_switch::do_hot_switch(socket_fd, client_fd))
+        {
             tracing::error!(err = %e, "hot switch failed — exiting with non-zero code for systemd restart");
             // do_hot_switch already rolled back MAINPID to self.  Exit with non-zero
             // so systemd Restart=on-failure will immediately re-launch the daemon.

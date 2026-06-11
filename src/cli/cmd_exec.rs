@@ -5,7 +5,13 @@ use std::sync::Arc;
 
 use crate::cli::Cli;
 
-pub async fn run(cli: &Cli, prompt: &str, agent: Option<&str>, model: Option<&str>, format: &str) -> Result<()> {
+pub async fn run(
+    cli: &Cli,
+    prompt: &str,
+    agent: Option<&str>,
+    model: Option<&str>,
+    format: &str,
+) -> Result<()> {
     let cfg = super::load_config(cli)?;
     super::init_tracing(&cfg);
 
@@ -21,18 +27,34 @@ pub async fn run(cli: &Cli, prompt: &str, agent: Option<&str>, model: Option<&st
     let skills_arc: Arc<parking_lot::RwLock<myclaw::SkillManager>> =
         Arc::new(parking_lot::RwLock::new(myclaw::SkillManager::new()));
     let workspace_dir = std::path::PathBuf::from(&cfg.workspace_dir);
-    tools.register(Arc::new(myclaw::tools::SkillTool::new(Arc::clone(&skills_arc))));
-    tools.register(Arc::new(myclaw::tools::SkillsListTool::new(Arc::clone(&skills_arc))));
+    tools.register(Arc::new(myclaw::tools::SkillTool::new(Arc::clone(
+        &skills_arc,
+    ))));
+    tools.register(Arc::new(myclaw::tools::SkillsListTool::new(Arc::clone(
+        &skills_arc,
+    ))));
     tools.register(Arc::new(myclaw::tools::SkillManageTool::new(
         Arc::clone(&skills_arc),
         workspace_dir.clone(),
     )));
     // Memory tools (G43: workspace/users/{uid}/memory/, identity resolver in CLI mode)
     let resolver = Arc::new(myclaw::UserResolver::new());
-    tools.register(Arc::new(myclaw::tools::MemoryListTool::new(workspace_dir.clone(), Arc::clone(&resolver))));
-    tools.register(Arc::new(myclaw::tools::MemoryViewTool::new(workspace_dir.clone(), Arc::clone(&resolver))));
-    tools.register(Arc::new(myclaw::tools::MemorySearchTool::new(workspace_dir.clone(), Arc::clone(&resolver))));
-    tools.register(Arc::new(myclaw::tools::MemoryManageTool::new(workspace_dir, resolver)));
+    tools.register(Arc::new(myclaw::tools::MemoryListTool::new(
+        workspace_dir.clone(),
+        Arc::clone(&resolver),
+    )));
+    tools.register(Arc::new(myclaw::tools::MemoryViewTool::new(
+        workspace_dir.clone(),
+        Arc::clone(&resolver),
+    )));
+    tools.register(Arc::new(myclaw::tools::MemorySearchTool::new(
+        workspace_dir.clone(),
+        Arc::clone(&resolver),
+    )));
+    tools.register(Arc::new(myclaw::tools::MemoryManageTool::new(
+        workspace_dir,
+        resolver,
+    )));
     let tools_arc = Arc::new(tools);
 
     // RFC v2: Agent + AgentRuntime. CLI doesn't need delegation.
@@ -93,7 +115,9 @@ pub async fn run(cli: &Cli, prompt: &str, agent: Option<&str>, model: Option<&st
         permission_mode: myclaw::PermissionMode::default(),
         run_mode: myclaw::RunMode::default(),
     };
-    let result = agent_obj.run(&mut session, turn_ctx, &agent_runtime).await?;
+    let result = agent_obj
+        .run(&mut session, turn_ctx, &agent_runtime)
+        .await?;
     let response = result.text;
 
     match format {

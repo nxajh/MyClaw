@@ -14,8 +14,10 @@ pub async fn cmd_reload(ctx: CommandContext<'_>) -> String {
     // 1. Re-scan skills
     let skills_dir = workspace_dir.join("skills");
     let new_defs = crate::agents::skill_loader::load_skills_from_dir(&skills_dir);
-    let new_skills: Vec<crate::agents::Skill> =
-        new_defs.iter().map(crate::agents::Skill::from_definition).collect();
+    let new_skills: Vec<crate::agents::Skill> = new_defs
+        .iter()
+        .map(crate::agents::Skill::from_definition)
+        .collect();
     {
         let mut skills = ctx.runtime.skills.write();
         skills.reload(new_skills);
@@ -29,5 +31,8 @@ pub async fn cmd_reload(ctx: CommandContext<'_>) -> String {
 
     let skill_count = ctx.runtime.skills.read().skill_count();
 
-    format!("🔄 已重新加载：{} 个 skills，{} 个 agents", skill_count, agent_count)
+    format!(
+        "🔄 已重新加载：{} 个 skills，{} 个 agents",
+        skill_count, agent_count
+    )
 }

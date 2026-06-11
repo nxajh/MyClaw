@@ -11,7 +11,10 @@ pub async fn cmd_model(args: &str, ctx: CommandContext<'_>) -> String {
         let active_model = if let Some(ref m) = current_override.model {
             format!("会话覆盖: `{}`", m)
         } else {
-            match ctx.registry.get_chat_provider(crate::providers::Capability::Chat) {
+            match ctx
+                .registry
+                .get_chat_provider(crate::providers::Capability::Chat)
+            {
                 Ok((_, id)) => format!("路由默认: `{}`", id),
                 Err(_) => "未配置".to_string(),
             }
@@ -40,10 +43,14 @@ pub async fn cmd_model(args: &str, ctx: CommandContext<'_>) -> String {
             apply_and_persist_override(ov, &ctx).await;
             match ctx.registry.get_chat_model_config(&model_id) {
                 Ok(cfg) => {
-                    let cw = cfg.context_window
+                    let cw = cfg
+                        .context_window
                         .map(|v| format!(", 上下文: {}K", v / 1024))
                         .unwrap_or_default();
-                    format!("✅ 会话模型已覆盖为: `{}`{}\n_本会话后续所有请求均使用此模型。_", model_id, cw)
+                    format!(
+                        "✅ 会话模型已覆盖为: `{}`{}\n_本会话后续所有请求均使用此模型。_",
+                        model_id, cw
+                    )
                 }
                 Err(_) => format!("✅ 会话模型已覆盖为: `{}`", model_id),
             }
@@ -53,7 +60,10 @@ pub async fn cmd_model(args: &str, ctx: CommandContext<'_>) -> String {
 }
 
 pub fn cmd_models(ctx: CommandContext<'_>) -> String {
-    match ctx.registry.get_chat_fallback_chain(crate::providers::Capability::Chat) {
+    match ctx
+        .registry
+        .get_chat_fallback_chain(crate::providers::Capability::Chat)
+    {
         Ok(chain) => {
             if chain.is_empty() {
                 return "⚠️ 没有可用的 chat 模型。".to_string();
@@ -74,7 +84,10 @@ pub async fn cmd_think(args: &str, ctx: CommandContext<'_>) -> String {
     if level.is_empty() {
         let current = ctx.session_manager.get_session_override(ctx.user_id);
         let state = match current.thinking {
-            Some(true) => format!("开启 (effort: {})", current.effort.as_deref().unwrap_or("默认")),
+            Some(true) => format!(
+                "开启 (effort: {})",
+                current.effort.as_deref().unwrap_or("默认")
+            ),
             Some(false) => "强制关闭".to_string(),
             None => "跟随模型配置".to_string(),
         };
@@ -120,7 +133,12 @@ pub async fn cmd_think(args: &str, ctx: CommandContext<'_>) -> String {
             ov.effort = None;
             "🧠 推理模式已恢复为**跟随模型配置**".to_string()
         }
-        _ => return format!("⚠️ 未知推理级别: `{}`\n可用: on, high, medium, low, off, auto", level),
+        _ => {
+            return format!(
+                "⚠️ 未知推理级别: `{}`\n可用: on, high, medium, low, off, auto",
+                level
+            );
+        }
     };
 
     apply_and_persist_override(ov, &ctx).await;

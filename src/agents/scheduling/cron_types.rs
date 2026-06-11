@@ -48,8 +48,12 @@ pub struct RetryConfig {
     pub backoff_ms: Vec<u64>,
 }
 
-fn default_max_attempts() -> u32 { 3 }
-fn default_backoff_ms() -> Vec<u64> { vec![30_000, 60_000, 300_000] }
+fn default_max_attempts() -> u32 {
+    3
+}
+fn default_backoff_ms() -> Vec<u64> {
+    vec![30_000, 60_000, 300_000]
+}
 
 impl Default for RetryConfig {
     fn default() -> Self {
@@ -76,8 +80,12 @@ pub struct FailureAlertConfig {
     pub include_skipped: bool,
 }
 
-fn default_after() -> u32 { 3 }
-fn default_cooldown_secs() -> u64 { 3600 }
+fn default_after() -> u32 {
+    3
+}
+fn default_cooldown_secs() -> u64 {
+    3600
+}
 
 impl Default for FailureAlertConfig {
     fn default() -> Self {

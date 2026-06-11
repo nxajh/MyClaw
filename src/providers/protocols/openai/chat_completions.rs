@@ -7,12 +7,10 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use std::collections::HashMap;
 
-use crate::providers::{
-    BoxStream, ChatProvider, ChatRequest, StreamEvent, StopReason,
-};
-use reqwest::Client;
 use crate::providers::http::build_reqwest_client;
 use crate::providers::protocols::openai::chat_message_rendering::render_openai_chat_body;
+use crate::providers::{BoxStream, ChatProvider, ChatRequest, StopReason, StreamEvent};
+use reqwest::Client;
 
 /// OpenAI Chat Completions protocol client.
 #[derive(Clone)]
@@ -25,7 +23,12 @@ pub struct OpenAiChatCompletionsClient {
 
 impl OpenAiChatCompletionsClient {
     pub fn new(api_key: String, base_url: String) -> Self {
-        Self { base_url, api_key, client: build_reqwest_client(), user_agent: None }
+        Self {
+            base_url,
+            api_key,
+            client: build_reqwest_client(),
+            user_agent: None,
+        }
     }
 
     pub fn with_user_agent(mut self, user_agent: String) -> Self {
@@ -38,13 +41,19 @@ impl OpenAiChatCompletionsClient {
     }
 
     fn chat_url(&self) -> String {
-        format!("{}/v1/chat/completions", self.base_url.trim_end_matches('/'))
+        format!(
+            "{}/v1/chat/completions",
+            self.base_url.trim_end_matches('/')
+        )
     }
 
     fn common_headers(&self) -> reqwest::header::HeaderMap {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(reqwest::header::AUTHORIZATION, self.auth().parse().unwrap());
-        headers.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            "application/json".parse().unwrap(),
+        );
         if let Some(ref ua) = self.user_agent {
             headers.insert(reqwest::header::USER_AGENT, ua.parse().unwrap());
         }
@@ -74,10 +83,12 @@ impl ChatProvider for OpenAiChatCompletionsClient {
             if resp.error_for_status_ref().is_err() {
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_default();
-                let _ = tx.send(StreamEvent::HttpError {
-                    status: status.as_u16(),
-                    message: format!("HTTP {}: {}", status, text),
-                }).await;
+                let _ = tx
+                    .send(StreamEvent::HttpError {
+                        status: status.as_u16(),
+                        message: format!("HTTP {}: {}", status, text),
+                    })
+                    .await;
                 return;
             }
 
@@ -105,16 +116,24 @@ impl ChatProvider for OpenAiChatCompletionsClient {
                 utf8_buf.extend_from_slice(&bytes);
                 let try_decode = std::str::from_utf8(&utf8_buf);
                 let text = match try_decode {
-                    Ok(s) => { let owned = s.to_string(); utf8_buf.clear(); owned }
+                    Ok(s) => {
+                        let owned = s.to_string();
+                        utf8_buf.clear();
+                        owned
+                    }
                     Err(e) => {
                         let valid = e.valid_up_to();
-                        if valid == 0 && utf8_buf.len() < 4 { continue; }
+                        if valid == 0 && utf8_buf.len() < 4 {
+                            continue;
+                        }
                         let t = String::from_utf8_lossy(&utf8_buf[..valid]).into_owned();
                         utf8_buf.clear();
                         t
                     }
                 };
-                if text.is_empty() { continue; }
+                if text.is_empty() {
+                    continue;
+                }
                 buffer.push_str(&text);
 
                 while let Some(pos) = buffer.find('\n') {
@@ -126,7 +145,8 @@ impl ChatProvider for OpenAiChatCompletionsClient {
                     let events = parse_openai_sse(&line, &mut tool_index_map);
                     for ev in events {
                         match ev {
-                            StreamEvent::ToolCallStart { .. } | StreamEvent::ToolCallDelta { .. } => {
+                            StreamEvent::ToolCallStart { .. }
+                            | StreamEvent::ToolCallDelta { .. } => {
                                 saw_tool_call = true;
                                 let _ = tx.send(ev).await;
                             }
@@ -134,7 +154,9 @@ impl ChatProvider for OpenAiChatCompletionsClient {
                             StreamEvent::Done { reason } => {
                                 sse_stop_reason = Some(reason);
                             }
-                            _ => { let _ = tx.send(ev).await; }
+                            _ => {
+                                let _ = tx.send(ev).await;
+                            }
                         }
                     }
                 }
@@ -151,13 +173,26 @@ impl ChatProvider for OpenAiChatCompletionsClient {
                 let final_reason = match sse_stop_reason {
                     Some(StopReason::ToolUse) => StopReason::ToolUse,
                     Some(r) if saw_tool_call => {
-                        tracing::debug!(?r, "overriding SSE stop reason with ToolUse (saw tool call events)");
+                        tracing::debug!(
+                            ?r,
+                            "overriding SSE stop reason with ToolUse (saw tool call events)"
+                        );
                         StopReason::ToolUse
                     }
                     Some(r) => r,
-                    None => if saw_tool_call { StopReason::ToolUse } else { StopReason::EndTurn },
+                    None => {
+                        if saw_tool_call {
+                            StopReason::ToolUse
+                        } else {
+                            StopReason::EndTurn
+                        }
+                    }
                 };
-                let _ = tx.send(StreamEvent::Done { reason: final_reason }).await;
+                let _ = tx
+                    .send(StreamEvent::Done {
+                        reason: final_reason,
+                    })
+                    .await;
             } else {
                 let _ = tx
                     .send(StreamEvent::Error(
@@ -177,12 +212,16 @@ fn parse_openai_sse(line: &str, tool_index_map: &mut HashMap<u32, String>) -> Ve
     use crate::providers::{ChatUsage, StopReason};
 
     let line = line.trim();
-    if line.is_empty() || line.starts_with(':') { return vec![]; }
+    if line.is_empty() || line.starts_with(':') {
+        return vec![];
+    }
     let data = match line.strip_prefix("data:") {
         Some(d) => d.trim(),
         None => return vec![],
     };
-    if data == "[DONE]" { return vec![]; }
+    if data == "[DONE]" {
+        return vec![];
+    }
 
     #[derive(serde::Deserialize)]
     struct Chunk {
@@ -191,7 +230,10 @@ fn parse_openai_sse(line: &str, tool_index_map: &mut HashMap<u32, String>) -> Ve
         usage: Option<ChunkUsage>,
     }
     #[derive(serde::Deserialize)]
-    struct Choice { delta: Delta, finish_reason: Option<String> }
+    struct Choice {
+        delta: Delta,
+        finish_reason: Option<String>,
+    }
     #[derive(serde::Deserialize)]
     struct Delta {
         content: Option<String>,
@@ -200,12 +242,22 @@ fn parse_openai_sse(line: &str, tool_index_map: &mut HashMap<u32, String>) -> Ve
     }
     #[derive(serde::Deserialize, serde::Serialize)]
     #[allow(dead_code)]
-    struct TcDelta { index: u32, id: Option<String>, function: Option<FuncDelta> }
+    struct TcDelta {
+        index: u32,
+        id: Option<String>,
+        function: Option<FuncDelta>,
+    }
     #[derive(serde::Deserialize, serde::Serialize)]
     #[allow(dead_code)]
-    struct FuncDelta { name: Option<String>, arguments: Option<String> }
+    struct FuncDelta {
+        name: Option<String>,
+        arguments: Option<String>,
+    }
     #[derive(serde::Deserialize)]
-    struct ChunkUsage { prompt_tokens: Option<u64>, completion_tokens: Option<u64> }
+    struct ChunkUsage {
+        prompt_tokens: Option<u64>,
+        completion_tokens: Option<u64>,
+    }
 
     let chunk: Chunk = match serde_json::from_str(data) {
         Ok(c) => c,
@@ -257,7 +309,12 @@ fn parse_openai_sse(line: &str, tool_index_map: &mut HashMap<u32, String>) -> Ve
                             id
                         };
                         let delta_name = func.and_then(|f| f.name.clone()).unwrap_or_default();
-                        events.push(StreamEvent::ToolCallDelta { index: tc.index, id: delta_id, name: delta_name, delta: args });
+                        events.push(StreamEvent::ToolCallDelta {
+                            index: tc.index,
+                            id: delta_id,
+                            name: delta_name,
+                            delta: args,
+                        });
                         emitted_tool_event = true;
                     }
                 }
@@ -267,10 +324,16 @@ fn parse_openai_sse(line: &str, tool_index_map: &mut HashMap<u32, String>) -> Ve
         // Skip content when tool_calls were present (some providers send both).
         if !emitted_tool_event {
             if let Some(text) = &choice.delta.content {
-                if !text.is_empty() { events.push(StreamEvent::Delta { text: text.clone() }); }
+                if !text.is_empty() {
+                    events.push(StreamEvent::Delta { text: text.clone() });
+                }
             }
             if let Some(reasoning) = &choice.delta.reasoning_content {
-                if !reasoning.is_empty() { events.push(StreamEvent::Thinking { text: reasoning.clone() }); }
+                if !reasoning.is_empty() {
+                    events.push(StreamEvent::Thinking {
+                        text: reasoning.clone(),
+                    });
+                }
             }
         }
 

@@ -110,8 +110,12 @@ pub struct JobEntry {
     pub last_failure_alert_at: Option<String>,
 }
 
-fn default_target() -> String { "last".to_string() }
-fn default_true() -> bool { true }
+fn default_target() -> String {
+    "last".to_string()
+}
+fn default_true() -> bool {
+    true
+}
 
 /// Update fields for a cron job (all optional, only set fields are updated).
 #[derive(Debug, Clone, Default)]
@@ -187,13 +191,18 @@ impl Scheduler {
             if let Ok(content) = std::fs::read_to_string(&path) {
                 if let Ok(parsed) = serde_json::from_str::<JobsFile>(&content) {
                     data = parsed;
-                    last_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+                    last_mtime = std::fs::metadata(&path)
+                        .ok()
+                        .and_then(|m| m.modified().ok());
                 }
             }
         }
 
         let job_count = data.jobs.len();
-        tracing::info!(count = job_count, "scheduler loaded cron jobs from JSON store");
+        tracing::info!(
+            count = job_count,
+            "scheduler loaded cron jobs from JSON store"
+        );
 
         let last_channel_value = std::fs::read_to_string(&last_channel_file)
             .ok()
@@ -386,32 +395,73 @@ impl Scheduler {
     pub fn update_job(&self, id: &str, update: JobUpdate) -> anyhow::Result<bool> {
         let mut data = self.jobs.write();
         if let Some(job) = data.jobs.iter_mut().find(|j| j.id == id) {
-            if let Some(name) = update.name { job.name = Some(name); }
+            if let Some(name) = update.name {
+                job.name = Some(name);
+            }
             if let Some(schedule) = update.schedule {
                 job.schedule = schedule;
-                job.next_run_at = compute_next_run(&job.schedule, job.last_run_at.as_deref(), job.tz.as_deref().unwrap_or(&self.timezone));
+                job.next_run_at = compute_next_run(
+                    &job.schedule,
+                    job.last_run_at.as_deref(),
+                    job.tz.as_deref().unwrap_or(&self.timezone),
+                );
             }
-            if let Some(prompt) = update.prompt { job.prompt = prompt; }
-            if let Some(target) = update.target { job.target = target; }
+            if let Some(prompt) = update.prompt {
+                job.prompt = prompt;
+            }
+            if let Some(target) = update.target {
+                job.target = target;
+            }
             if let Some(tz) = update.tz {
                 job.tz = Some(tz);
-                job.next_run_at = compute_next_run(&job.schedule, job.last_run_at.as_deref(), job.tz.as_deref().unwrap_or(&self.timezone));
+                job.next_run_at = compute_next_run(
+                    &job.schedule,
+                    job.last_run_at.as_deref(),
+                    job.tz.as_deref().unwrap_or(&self.timezone),
+                );
             }
-            if let Some(active_hours) = update.active_hours { job.active_hours = Some(active_hours); }
+            if let Some(active_hours) = update.active_hours {
+                job.active_hours = Some(active_hours);
+            }
             if let Some(enabled) = update.enabled {
                 job.enabled = enabled;
-                if !enabled { job.next_run_at = None; }
-                else { job.next_run_at = compute_next_run(&job.schedule, job.last_run_at.as_deref(), job.tz.as_deref().unwrap_or(&self.timezone)); }
+                if !enabled {
+                    job.next_run_at = None;
+                } else {
+                    job.next_run_at = compute_next_run(
+                        &job.schedule,
+                        job.last_run_at.as_deref(),
+                        job.tz.as_deref().unwrap_or(&self.timezone),
+                    );
+                }
             }
-            if let Some(delivery) = update.delivery { job.delivery = Some(delivery); }
-            if let Some(enabled_tools) = update.enabled_tools { job.enabled_tools = Some(enabled_tools); }
-            if let Some(disabled_tools) = update.disabled_tools { job.disabled_tools = Some(disabled_tools); }
-            if let Some(retry) = update.retry { job.retry = Some(retry); }
-            if let Some(failure_alert) = update.failure_alert { job.failure_alert = Some(failure_alert); }
-            if let Some(max_runs) = update.max_runs { job.max_runs = max_runs; }
-            if let Some(delete_after_run) = update.delete_after_run { job.delete_after_run = delete_after_run; }
-            if let Some(model) = update.model { job.model = model; }
-            if let Some(provider) = update.provider { job.provider = provider; }
+            if let Some(delivery) = update.delivery {
+                job.delivery = Some(delivery);
+            }
+            if let Some(enabled_tools) = update.enabled_tools {
+                job.enabled_tools = Some(enabled_tools);
+            }
+            if let Some(disabled_tools) = update.disabled_tools {
+                job.disabled_tools = Some(disabled_tools);
+            }
+            if let Some(retry) = update.retry {
+                job.retry = Some(retry);
+            }
+            if let Some(failure_alert) = update.failure_alert {
+                job.failure_alert = Some(failure_alert);
+            }
+            if let Some(max_runs) = update.max_runs {
+                job.max_runs = max_runs;
+            }
+            if let Some(delete_after_run) = update.delete_after_run {
+                job.delete_after_run = delete_after_run;
+            }
+            if let Some(model) = update.model {
+                job.model = model;
+            }
+            if let Some(provider) = update.provider {
+                job.provider = provider;
+            }
             self.save_to_disk_inner(&data)?;
             Ok(true)
         } else {
@@ -434,7 +484,13 @@ impl Scheduler {
 
     /// Set enabled/disabled state.
     pub fn set_enabled(&self, id: &str, enabled: bool) -> anyhow::Result<bool> {
-        self.update_job(id, JobUpdate { enabled: Some(enabled), ..Default::default() })
+        self.update_job(
+            id,
+            JobUpdate {
+                enabled: Some(enabled),
+                ..Default::default()
+            },
+        )
     }
 
     /// Record a run result for a job.
@@ -463,7 +519,11 @@ impl Scheduler {
                 RunStatus::Skipped => {
                     job.consecutive_skipped += 1;
                     // Optionally count skipped as failure for alerting.
-                    if job.failure_alert.as_ref().is_some_and(|a| a.include_skipped) {
+                    if job
+                        .failure_alert
+                        .as_ref()
+                        .is_some_and(|a| a.include_skipped)
+                    {
                         job.consecutive_errors += 1;
                     }
                 }
@@ -477,8 +537,11 @@ impl Scheduler {
                         Some(last) => {
                             let last_dt = chrono::DateTime::parse_from_rfc3339(last)
                                 .map(|dt| dt.with_timezone(&chrono::Utc))
-                                .unwrap_or_else(|_| chrono::Utc::now() - chrono::Duration::hours(24));
-                            let cooldown = chrono::Duration::seconds(alert_cfg.cooldown_secs as i64);
+                                .unwrap_or_else(|_| {
+                                    chrono::Utc::now() - chrono::Duration::hours(24)
+                                });
+                            let cooldown =
+                                chrono::Duration::seconds(alert_cfg.cooldown_secs as i64);
                             chrono::Utc::now() - last_dt >= cooldown
                         }
                     };
@@ -539,16 +602,19 @@ impl Scheduler {
     /// Get jobs that should be auto-deleted (reached max_runs with delete_after_run).
     pub fn drain_auto_delete(&self) -> Vec<String> {
         let mut data = self.jobs.write();
-        let to_delete: Vec<String> = data.jobs.iter()
-            .filter(|j| {
-                j.max_runs.is_some_and(|max| j.completed_runs >= max) && j.delete_after_run
-            })
+        let to_delete: Vec<String> = data
+            .jobs
+            .iter()
+            .filter(|j| j.max_runs.is_some_and(|max| j.completed_runs >= max) && j.delete_after_run)
             .map(|j| j.id.clone())
             .collect();
         if !to_delete.is_empty() {
             data.jobs.retain(|j| !to_delete.contains(&j.id));
             let _ = self.save_to_disk_inner(&data);
-            tracing::info!(count = to_delete.len(), "auto-deleted completed one-shot jobs");
+            tracing::info!(
+                count = to_delete.len(),
+                "auto-deleted completed one-shot jobs"
+            );
         }
         to_delete
     }
@@ -561,7 +627,8 @@ impl Scheduler {
             Ok(c) => c,
             Err(_) => return Vec::new(),
         };
-        let mut records: Vec<RunRecord> = content.lines()
+        let mut records: Vec<RunRecord> = content
+            .lines()
             .filter(|l| !l.trim().is_empty())
             .filter_map(|l| serde_json::from_str(l).ok())
             .collect();
@@ -572,7 +639,8 @@ impl Scheduler {
 
     /// Path to the run log JSONL file for a given job.
     fn run_log_path(&self, job_id: &str) -> PathBuf {
-        self.path.parent()
+        self.path
+            .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("run_logs")
             .join(format!("{}.jsonl", job_id))
@@ -586,7 +654,11 @@ impl Scheduler {
         }
         if let Ok(line) = serde_json::to_string(record) {
             use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
                 let _ = writeln!(f, "{}", line);
             }
         }
@@ -613,7 +685,9 @@ impl Scheduler {
         let meta = std::fs::metadata(&self.path).ok();
         let mtime = meta.and_then(|m| m.modified().ok());
         let mut last = self.last_mtime.lock();
-        if mtime == *last { return; }
+        if mtime == *last {
+            return;
+        }
         if let Ok(content) = std::fs::read_to_string(&self.path) {
             if let Ok(parsed) = serde_json::from_str::<JobsFile>(&content) {
                 let mut data = self.jobs.write();
@@ -626,7 +700,9 @@ impl Scheduler {
 
     /// Migrate jobs from old markdown files in the cron directory.
     pub fn migrate_from_markdown(&self, cron_dir: &Path) -> usize {
-        if !cron_dir.exists() { return 0; }
+        if !cron_dir.exists() {
+            return 0;
+        }
 
         let entries = match std::fs::read_dir(cron_dir) {
             Ok(e) => e,
@@ -657,12 +733,19 @@ impl Scheduler {
                 .unwrap_or_else(|| "last".to_string());
 
             let prompt = body.trim().to_string();
-            if prompt.is_empty() { continue; }
+            if prompt.is_empty() {
+                continue;
+            }
 
             let active_hours = crate::str_utils::extract_yaml_string(&front_matter, "active_hours");
 
-            let already_exists = data.jobs.iter().any(|j| j.schedule == schedule && j.prompt == prompt);
-            if already_exists { continue; }
+            let already_exists = data
+                .jobs
+                .iter()
+                .any(|j| j.schedule == schedule && j.prompt == prompt);
+            if already_exists {
+                continue;
+            }
 
             let entry = JobEntry {
                 id: generate_id(),
@@ -712,24 +795,42 @@ pub fn scan_prompt_injection(prompt: &str) -> Result<(), String> {
     let lower = prompt.to_lowercase();
 
     let role_hijack = [
-        "ignore previous", "ignore all instructions", "you are now",
-        "system prompt", "忽略之前", "忽略所有", "你现在是", "你的新角色",
-        "disregard your", "override your instructions",
-        "forget your instructions", "new instructions",
+        "ignore previous",
+        "ignore all instructions",
+        "you are now",
+        "system prompt",
+        "忽略之前",
+        "忽略所有",
+        "你现在是",
+        "你的新角色",
+        "disregard your",
+        "override your instructions",
+        "forget your instructions",
+        "new instructions",
     ];
     for pattern in &role_hijack {
         if lower.contains(pattern) {
-            return Err(format!("prompt injection detected (role hijack): '{}'", pattern));
+            return Err(format!(
+                "prompt injection detected (role hijack): '{}'",
+                pattern
+            ));
         }
     }
 
     let exfiltration = [
-        "send to http", "post to http", "curl -x post", "wget --post",
-        "发送到http", "上传到http",
+        "send to http",
+        "post to http",
+        "curl -x post",
+        "wget --post",
+        "发送到http",
+        "上传到http",
     ];
     for pattern in &exfiltration {
         if lower.contains(pattern) {
-            return Err(format!("prompt injection detected (exfiltration): '{}'", pattern));
+            return Err(format!(
+                "prompt injection detected (exfiltration): '{}'",
+                pattern
+            ));
         }
     }
 
@@ -777,12 +878,18 @@ pub fn validate_active_hours(hours: &str) -> Result<(), String> {
     match parse_hours(hours) {
         Some((start, end)) => {
             if start >= end {
-                Err(format!("active_hours start ({}) must be before end ({})", start, end))
+                Err(format!(
+                    "active_hours start ({}) must be before end ({})",
+                    start, end
+                ))
             } else {
                 Ok(())
             }
         }
-        None => Err(format!("invalid active_hours format '{}', expected 'HH:MM-HH:MM'", hours)),
+        None => Err(format!(
+            "invalid active_hours format '{}', expected 'HH:MM-HH:MM'",
+            hours
+        )),
     }
 }
 
@@ -853,7 +960,9 @@ fn compute_next_run_inner(
                 None => chrono::Utc::now(),
             };
             let base_local = base_utc.with_timezone(&tz);
-            cron_schedule.after(&base_local).next()
+            cron_schedule
+                .after(&base_local)
+                .next()
                 .map(|dt| dt.with_timezone(&chrono::Utc).to_rfc3339())
         }
         None => {
@@ -873,7 +982,9 @@ fn compute_next_run_inner(
                 None => chrono::Utc::now(),
             };
             let base_local = base_utc.with_timezone(&tz);
-            cron_schedule.after(&base_local).next()
+            cron_schedule
+                .after(&base_local)
+                .next()
                 .map(|dt| dt.with_timezone(&chrono::Utc).to_rfc3339())
         }
     }
@@ -933,7 +1044,10 @@ pub fn parse_interval(s: &str) -> Option<Duration> {
 fn parse_target_channel(target: &str) -> Option<String> {
     match target {
         "last" | "none" | "" => None,
-        _ => target.split_once(':').map(|(ch, _)| ch.to_string()).or_else(|| Some(target.to_string())),
+        _ => target
+            .split_once(':')
+            .map(|(ch, _)| ch.to_string())
+            .or_else(|| Some(target.to_string())),
     }
 }
 
@@ -996,7 +1110,6 @@ pub async fn run_scheduled_task(
     crate::agents::orchestrator::run_scheduled_turn(&ctx.ctx, session_key, prompt, None).await
 }
 
-
 /// Send a response to the configured target channel.
 pub async fn send_to_target(ctx: &WebhookContext, target: &str, content: &str) {
     let (ch_type, acc_id) = match target {
@@ -1055,12 +1168,12 @@ pub async fn send_to_target(ctx: &WebhookContext, target: &str, content: &str) {
 
 // ── Webhook ────────────────────────────────────────────────────────────────
 
+use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use http_body_util::Full;
 
 /// Run the webhook HTTP server.
 ///
@@ -1180,19 +1293,17 @@ async fn handle_request(
     // Verify auth per-route.
     if let Some(ref secret) = job.secret {
         match job.auth {
-            WebhookAuth::Hmac => {
-                match sig_header {
-                    Some(ref sig) if !verify_hmac_signature(&body_bytes, secret, sig) => {
-                        tracing::warn!(path = %path, "webhook: HMAC verification failed");
-                        return ok_response(StatusCode::UNAUTHORIZED, "invalid signature");
-                    }
-                    None => {
-                        tracing::warn!(path = %path, "webhook: missing signature header");
-                        return ok_response(StatusCode::UNAUTHORIZED, "missing signature");
-                    }
-                    _ => {}
+            WebhookAuth::Hmac => match sig_header {
+                Some(ref sig) if !verify_hmac_signature(&body_bytes, secret, sig) => {
+                    tracing::warn!(path = %path, "webhook: HMAC verification failed");
+                    return ok_response(StatusCode::UNAUTHORIZED, "invalid signature");
                 }
-            }
+                None => {
+                    tracing::warn!(path = %path, "webhook: missing signature header");
+                    return ok_response(StatusCode::UNAUTHORIZED, "missing signature");
+                }
+                _ => {}
+            },
             WebhookAuth::Bearer => {
                 let expected = format!("Bearer {}", secret);
                 match auth_header {
@@ -1209,12 +1320,16 @@ async fn handle_request(
     tracing::info!(path = %path, "webhook triggered");
 
     // Parse payload as JSON for template rendering.
-    let payload: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
+    let payload: serde_json::Value =
+        serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
 
     // Render template with payload.
     let prompt = render_template(&job.prompt_template, &payload);
 
-    let session_key = format!("_webhook_{}", path.trim_start_matches('/').replace('/', "_"));
+    let session_key = format!(
+        "_webhook_{}",
+        path.trim_start_matches('/').replace('/', "_")
+    );
     let result = run_scheduled_task(&ctx, &session_key, &prompt).await;
 
     match result {
@@ -1241,7 +1356,11 @@ async fn handle_hooks_agent(
     // Verify global Bearer token.
     if let Some(secret) = global_secret {
         let expected = format!("Bearer {}", secret);
-        match req.headers().get("Authorization").and_then(|v| v.to_str().ok()) {
+        match req
+            .headers()
+            .get("Authorization")
+            .and_then(|v| v.to_str().ok())
+        {
             Some(h) if h == expected => {}
             _ => return ok_response(StatusCode::UNAUTHORIZED, "invalid token"),
         }
@@ -1256,7 +1375,8 @@ async fn handle_hooks_agent(
         }
     };
 
-    let message = payload.get("message")
+    let message = payload
+        .get("message")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
@@ -1265,7 +1385,8 @@ async fn handle_hooks_agent(
         return ok_response(StatusCode::BAD_REQUEST, "missing 'message' field");
     }
 
-    let target = payload.get("target")
+    let target = payload
+        .get("target")
         .and_then(|v| v.as_str())
         .unwrap_or("last");
 
@@ -1296,7 +1417,11 @@ async fn handle_hooks_wake(
     // Verify global Bearer token.
     if let Some(secret) = global_secret {
         let expected = format!("Bearer {}", secret);
-        match req.headers().get("Authorization").and_then(|v| v.to_str().ok()) {
+        match req
+            .headers()
+            .get("Authorization")
+            .and_then(|v| v.to_str().ok())
+        {
             Some(h) if h == expected => {}
             _ => return ok_response(StatusCode::UNAUTHORIZED, "invalid token"),
         }
@@ -1311,7 +1436,8 @@ async fn handle_hooks_wake(
         }
     };
 
-    let text = payload.get("text")
+    let text = payload
+        .get("text")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
@@ -1447,7 +1573,11 @@ mod tests {
 
     #[test]
     fn verify_hmac_signature_invalid() {
-        assert!(!verify_hmac_signature(b"test payload", "secret", "sha256=bad_hex"));
+        assert!(!verify_hmac_signature(
+            b"test payload",
+            "secret",
+            "sha256=bad_hex"
+        ));
     }
 
     #[test]

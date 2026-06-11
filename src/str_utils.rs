@@ -113,11 +113,7 @@ pub fn extract_yaml_list(yaml: &str, key: &str) -> Vec<String> {
                 let inner = rest.trim_matches(|c| c == '[' || c == ']');
                 items = inner
                     .split(',')
-                    .map(|s| {
-                        s.trim()
-                            .trim_matches(|c| c == '"' || c == '\'')
-                            .to_string()
-                    })
+                    .map(|s| s.trim().trim_matches(|c| c == '"' || c == '\'').to_string())
                     .filter(|s| !s.is_empty())
                     .collect();
                 break;
@@ -163,7 +159,10 @@ mod tests {
     #[test]
     fn test_extract_yaml_string() {
         let yaml = "name: weather\ndescription: \"Get weather\"";
-        assert_eq!(extract_yaml_string(yaml, "name"), Some("weather".to_string()));
+        assert_eq!(
+            extract_yaml_string(yaml, "name"),
+            Some("weather".to_string())
+        );
         assert_eq!(
             extract_yaml_string(yaml, "description"),
             Some("Get weather".to_string())
@@ -187,7 +186,8 @@ mod tests {
 
     #[test]
     fn test_extract_yaml_bool() {
-        let yaml = "user_invocable: true\nagent_invocable: false\nother: yes\nfoo: no\nbar: on\nbaz: off";
+        let yaml =
+            "user_invocable: true\nagent_invocable: false\nother: yes\nfoo: no\nbar: on\nbaz: off";
         assert_eq!(extract_yaml_bool(yaml, "user_invocable"), Some(true));
         assert_eq!(extract_yaml_bool(yaml, "agent_invocable"), Some(false));
         assert_eq!(extract_yaml_bool(yaml, "other"), Some(true));

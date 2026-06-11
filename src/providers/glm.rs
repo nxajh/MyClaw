@@ -19,11 +19,13 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use std::collections::HashMap;
 
-use reqwest::Client;
 use crate::providers::http::build_reqwest_client;
-use crate::providers::{BoxStream, ChatProvider, ChatRequest, ContentPart, StreamEvent, StopReason};
+use crate::providers::{
+    BoxStream, ChatProvider, ChatRequest, ContentPart, StopReason, StreamEvent,
+};
 use crate::providers::{EmbedInput, EmbedRequest, EmbedResponse, EmbeddingProvider};
 use crate::providers::{SearchProvider, SearchRequest, SearchResult, SearchResults};
+use reqwest::Client;
 
 const DEFAULT_BASE_URL: &str = "https://open.bigmodel.cn/api/paas";
 
@@ -41,7 +43,12 @@ impl GlmProvider {
     }
 
     pub fn with_base_url(api_key: String, base_url: String) -> Self {
-        Self { base_url, api_key, client: build_reqwest_client(), user_agent: None }
+        Self {
+            base_url,
+            api_key,
+            client: build_reqwest_client(),
+            user_agent: None,
+        }
     }
 
     pub fn with_user_agent(mut self, user_agent: String) -> Self {
@@ -50,7 +57,10 @@ impl GlmProvider {
     }
 
     fn auth(&self) -> String {
-        crate::providers::shared::build_auth(&crate::providers::shared::AuthStyle::Bearer, &self.api_key)
+        crate::providers::shared::build_auth(
+            &crate::providers::shared::AuthStyle::Bearer,
+            &self.api_key,
+        )
     }
 
     fn embeddings_url(&self) -> String {
@@ -67,7 +77,10 @@ impl GlmProvider {
 #[async_trait]
 impl ChatProvider for GlmProvider {
     fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
-        let url = format!("{}/v4/chat/completions", self.base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/v4/chat/completions",
+            self.base_url.trim_end_matches('/')
+        );
         let body = build_glm_body(&req);
         let auth = self.auth();
         let client = self.client.clone();
@@ -77,7 +90,10 @@ impl ChatProvider for GlmProvider {
         tokio::spawn(async move {
             let mut headers = reqwest::header::HeaderMap::new();
             headers.insert(reqwest::header::AUTHORIZATION, auth.parse().unwrap());
-            headers.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
+            headers.insert(
+                reqwest::header::CONTENT_TYPE,
+                "application/json".parse().unwrap(),
+            );
             if let Some(ref ua) = user_agent {
                 headers.insert(reqwest::header::USER_AGENT, ua.parse().unwrap());
             }
@@ -94,10 +110,12 @@ impl ChatProvider for GlmProvider {
             if resp.error_for_status_ref().is_err() {
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_default();
-                let _ = tx.send(StreamEvent::HttpError {
-                    status: status.as_u16(),
-                    message: format!("HTTP {}: {}", status, text),
-                }).await;
+                let _ = tx
+                    .send(StreamEvent::HttpError {
+                        status: status.as_u16(),
+                        message: format!("HTTP {}: {}", status, text),
+                    })
+                    .await;
                 return;
             }
 
@@ -125,16 +143,24 @@ impl ChatProvider for GlmProvider {
                 utf8_buf.extend_from_slice(&bytes);
                 let try_decode = std::str::from_utf8(&utf8_buf);
                 let text = match try_decode {
-                    Ok(s) => { let owned = s.to_string(); utf8_buf.clear(); owned }
+                    Ok(s) => {
+                        let owned = s.to_string();
+                        utf8_buf.clear();
+                        owned
+                    }
                     Err(e) => {
                         let valid = e.valid_up_to();
-                        if valid == 0 && utf8_buf.len() < 4 { continue; }
+                        if valid == 0 && utf8_buf.len() < 4 {
+                            continue;
+                        }
                         let t = String::from_utf8_lossy(&utf8_buf[..valid]).into_owned();
                         utf8_buf.clear();
                         t
                     }
                 };
-                if text.is_empty() { continue; }
+                if text.is_empty() {
+                    continue;
+                }
                 buffer.push_str(&text);
 
                 while let Some(pos) = buffer.find('\n') {
@@ -186,6 +212,7 @@ impl ChatProvider for GlmProvider {
 /// - `tool_stream: true` when tools are present so that tool calls arrive
 ///   as incremental SSE deltas instead of a single blob at stream end.
 fn build_glm_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
+    use base64::Engine as _;
     use serde_json::json;
 
     let messages: Vec<serde_json::Value> = req.messages
@@ -205,22 +232,40 @@ fn build_glm_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
             // Build content parts, skipping Thinking.
             let content_vec: Vec<serde_json::Value> = msg.parts.iter().filter_map(|part| match part {
                 ContentPart::Text { text } => Some(json!({"type": "text", "text": text})),
-                ContentPart::ImageUrl { url, detail } => Some(json!({
-                    "type": "image_url",
-                    "image_url": { "url": url, "detail": format!("{:?}", detail).to_lowercase() }
-                })),
-                ContentPart::ImageB64 { b64_json, detail, .. } => Some(json!({
-                    "type": "image_url",
-                    "image_url": { "url": format!("data:image;base64,{}", b64_json), "detail": format!("{:?}", detail).to_lowercase() }
-                })),
-                ContentPart::ImageRef { .. } => {
-                    unreachable!("ImageRef is disk-only; hydrate before render")
-                }
-                // GLM chat has no audio input; degrade rather than panic if this
-                // model is (mis)routed as the audio aux (AudioRef stays disk-only).
-                ContentPart::AudioB64 { .. } => Some(json!({ "type": "text", "text": "[audio]" })),
-                ContentPart::AudioRef { .. } => {
-                    unreachable!("AudioRef is disk-only; hydrate before render")
+                ContentPart::File { path, mime_type, .. } => {
+                    let modality = crate::providers::media::modality_from_mime(mime_type.as_deref(), path);
+                    match modality {
+                        crate::providers::media::FileModality::Image | crate::providers::media::FileModality::Video => {
+                            let abs = crate::providers::media::resolve_path(path);
+                            let bytes = match std::fs::read(&abs) {
+                                Ok(bytes) => bytes,
+                                Err(e) => return Some(json!({ "type": "text", "text": format!("{}（读取失败: {e}）", crate::providers::media::marker_for_file(path, mime_type.as_deref())) })),
+                            };
+                            let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+                            match modality {
+                                crate::providers::media::FileModality::Image => {
+                                    let mime = mime_type.as_deref()
+                                        .or_else(|| crate::providers::media::infer_image_mime(path))
+                                        .unwrap_or("image/jpeg");
+                                    Some(json!({
+                                        "type": "image_url",
+                                        "image_url": { "url": format!("data:{};base64,{}", mime, b64), "detail": "auto" }
+                                    }))
+                                }
+                                crate::providers::media::FileModality::Video => {
+                                    let mime = mime_type.as_deref()
+                                        .or_else(|| crate::providers::media::infer_video_mime(path))
+                                        .unwrap_or("video/mp4");
+                                    Some(json!({
+                                        "type": "video_url",
+                                        "video_url": { "url": format!("data:{};base64,{}", mime, b64) }
+                                    }))
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        _ => Some(json!({ "type": "text", "text": crate::providers::media::marker_for_file(path, mime_type.as_deref()) })),
+                    }
                 }
                 ContentPart::Thinking { .. } => None,
             }).collect();
@@ -316,7 +361,6 @@ fn build_glm_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
     body
 }
 
-
 // ── SSE parsing ───────────────────────────────────────────────────────────────
 
 /// Parse a single SSE line from GLM.
@@ -325,16 +369,31 @@ fn build_glm_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
 /// - `finish_reason` can be `"sensitive"` (content filtered by GLM safety)
 /// - `finish_reason` may be `"stop"` even when `tool_calls` were emitted
 ///   in previous chunks; `saw_tool_call` tracks this and overrides the reason
-fn parse_glm_sse(line: &str, saw_tool_call: &mut bool, tool_index_map: &mut HashMap<u32, String>) -> Option<Vec<StreamEvent>> {
+fn parse_glm_sse(
+    line: &str,
+    saw_tool_call: &mut bool,
+    tool_index_map: &mut HashMap<u32, String>,
+) -> Option<Vec<StreamEvent>> {
     let line = line.trim();
-    if line.is_empty() || line.starts_with(':') { return None; }
+    if line.is_empty() || line.starts_with(':') {
+        return None;
+    }
     let data = line.strip_prefix("data:")?.trim();
-    if data == "[DONE]" { return None; }
+    if data == "[DONE]" {
+        return None;
+    }
 
     #[derive(serde::Deserialize)]
-    struct Chunk { choices: Vec<Choice>, #[serde(default)] usage: Option<Usage> }
+    struct Chunk {
+        choices: Vec<Choice>,
+        #[serde(default)]
+        usage: Option<Usage>,
+    }
     #[derive(serde::Deserialize)]
-    struct Choice { delta: Delta, finish_reason: Option<String> }
+    struct Choice {
+        delta: Delta,
+        finish_reason: Option<String>,
+    }
     #[derive(serde::Deserialize)]
     struct Delta {
         content: Option<String>,
@@ -343,18 +402,31 @@ fn parse_glm_sse(line: &str, saw_tool_call: &mut bool, tool_index_map: &mut Hash
     }
     #[derive(serde::Deserialize)]
     #[allow(dead_code)]
-    struct TcDelta { index: u32, id: Option<String>, function: Option<FuncDelta> }
-    #[derive(serde::Deserialize)]
-    #[allow(dead_code)]
-    struct FuncDelta { name: Option<String>, arguments: Option<String> }
-    #[derive(serde::Deserialize)]
-    struct Usage {
-        #[serde(default)] prompt_tokens: Option<u64>,
-        #[serde(default)] completion_tokens: Option<u64>,
-        #[serde(default)] prompt_tokens_details: Option<PromptDetails>,
+    struct TcDelta {
+        index: u32,
+        id: Option<String>,
+        function: Option<FuncDelta>,
     }
     #[derive(serde::Deserialize)]
-    struct PromptDetails { #[serde(default)] cached_tokens: Option<u64> }
+    #[allow(dead_code)]
+    struct FuncDelta {
+        name: Option<String>,
+        arguments: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Usage {
+        #[serde(default)]
+        prompt_tokens: Option<u64>,
+        #[serde(default)]
+        completion_tokens: Option<u64>,
+        #[serde(default)]
+        prompt_tokens_details: Option<PromptDetails>,
+    }
+    #[derive(serde::Deserialize)]
+    struct PromptDetails {
+        #[serde(default)]
+        cached_tokens: Option<u64>,
+    }
 
     let chunk: Chunk = serde_json::from_str(data).ok()?;
 
@@ -381,7 +453,11 @@ fn parse_glm_sse(line: &str, saw_tool_call: &mut bool, tool_index_map: &mut Hash
     }
 
     if chunk.choices.is_empty() {
-        return if events.is_empty() { None } else { Some(events) };
+        return if events.is_empty() {
+            None
+        } else {
+            Some(events)
+        };
     }
 
     for choice in &chunk.choices {
@@ -415,7 +491,12 @@ fn parse_glm_sse(line: &str, saw_tool_call: &mut bool, tool_index_map: &mut Hash
                     } else {
                         id
                     };
-                    events.push(StreamEvent::ToolCallDelta { index: tc.index, id: real_id, name: String::new(), delta: args });
+                    events.push(StreamEvent::ToolCallDelta {
+                        index: tc.index,
+                        id: real_id,
+                        name: String::new(),
+                        delta: args,
+                    });
                     return Some(events);
                 }
             }
@@ -429,7 +510,9 @@ fn parse_glm_sse(line: &str, saw_tool_call: &mut bool, tool_index_map: &mut Hash
         }
         if let Some(reasoning) = &choice.delta.reasoning_content {
             if !reasoning.is_empty() {
-                events.push(StreamEvent::Thinking { text: reasoning.clone() });
+                events.push(StreamEvent::Thinking {
+                    text: reasoning.clone(),
+                });
                 return Some(events);
             }
         }
@@ -455,7 +538,11 @@ fn parse_glm_sse(line: &str, saw_tool_call: &mut bool, tool_index_map: &mut Hash
         }
     }
 
-    if events.is_empty() { None } else { Some(events) }
+    if events.is_empty() {
+        None
+    } else {
+        Some(events)
+    }
 }
 
 // ── EmbeddingProvider ─────────────────────────────────────────────────────────
@@ -475,25 +562,44 @@ impl EmbeddingProvider for GlmProvider {
             body["dimensions"] = serde_json::json!(dim);
         }
 
-        let text = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async {
-            let mut headers = reqwest::header::HeaderMap::new();
-            headers.insert(reqwest::header::AUTHORIZATION, auth.parse().unwrap());
-            headers.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
-            if let Some(ref ua) = self.user_agent {
-                headers.insert(reqwest::header::USER_AGENT, ua.parse().unwrap());
-            }
+        let text = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut headers = reqwest::header::HeaderMap::new();
+                headers.insert(reqwest::header::AUTHORIZATION, auth.parse().unwrap());
+                headers.insert(
+                    reqwest::header::CONTENT_TYPE,
+                    "application/json".parse().unwrap(),
+                );
+                if let Some(ref ua) = self.user_agent {
+                    headers.insert(reqwest::header::USER_AGENT, ua.parse().unwrap());
+                }
 
-            let resp = self.client.post(&url).headers(headers).json(&body).send().await?;
-            let resp = resp.error_for_status()?;
-            resp.text().await
-        }))?;
+                let resp = self
+                    .client
+                    .post(&url)
+                    .headers(headers)
+                    .json(&body)
+                    .send()
+                    .await?;
+                let resp = resp.error_for_status()?;
+                resp.text().await
+            })
+        })?;
 
         #[derive(serde::Deserialize)]
-        struct Er { data: Vec<Ed>, usage: Option<Eu>, model: String }
+        struct Er {
+            data: Vec<Ed>,
+            usage: Option<Eu>,
+            model: String,
+        }
         #[derive(serde::Deserialize)]
-        struct Ed { embedding: Vec<f32> }
+        struct Ed {
+            embedding: Vec<f32>,
+        }
         #[derive(serde::Deserialize)]
-        struct Eu { prompt_tokens: u64 }
+        struct Eu {
+            prompt_tokens: u64,
+        }
 
         let resp: Er = serde_json::from_str(&text)?;
         let usage = resp.usage.map(|u| crate::providers::EmbeddingUsage {
@@ -526,32 +632,50 @@ impl SearchProvider for GlmProvider {
             "count": limit,
         });
 
-        let text = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async {
-            let mut headers = reqwest::header::HeaderMap::new();
-            headers.insert(reqwest::header::AUTHORIZATION, auth.parse().unwrap());
-            headers.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
-            if let Some(ref ua) = self.user_agent {
-                headers.insert(reqwest::header::USER_AGENT, ua.parse().unwrap());
-            }
+        let text = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut headers = reqwest::header::HeaderMap::new();
+                headers.insert(reqwest::header::AUTHORIZATION, auth.parse().unwrap());
+                headers.insert(
+                    reqwest::header::CONTENT_TYPE,
+                    "application/json".parse().unwrap(),
+                );
+                if let Some(ref ua) = self.user_agent {
+                    headers.insert(reqwest::header::USER_AGENT, ua.parse().unwrap());
+                }
 
-            let resp = self.client.post(&url).headers(headers).json(&body).send().await?;
-            let status = resp.status();
-            if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                anyhow::bail!("GLM web_search HTTP {}: {}", status, body);
-            }
-            resp.text().await.map_err(|e| anyhow::anyhow!(e.to_string()))
-        }))?;
+                let resp = self
+                    .client
+                    .post(&url)
+                    .headers(headers)
+                    .json(&body)
+                    .send()
+                    .await?;
+                let status = resp.status();
+                if !status.is_success() {
+                    let body = resp.text().await.unwrap_or_default();
+                    anyhow::bail!("GLM web_search HTTP {}: {}", status, body);
+                }
+                resp.text()
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))
+            })
+        })?;
 
         #[derive(serde::Deserialize)]
-        struct SearchResp { #[serde(default)] search_result: Vec<Sr> }
+        struct SearchResp {
+            #[serde(default)]
+            search_result: Vec<Sr>,
+        }
         #[derive(serde::Deserialize)]
         struct Sr {
             title: String,
             content: String,
             link: String,
-            #[allow(dead_code)] media: String,
-            #[serde(default)] publish_date: Option<String>,
+            #[allow(dead_code)]
+            media: String,
+            #[serde(default)]
+            publish_date: Option<String>,
         }
 
         let resp: SearchResp = serde_json::from_str(&text)?;
@@ -584,10 +708,12 @@ mod overflow_tests {
     fn done_reason(line: &str) -> Option<StopReason> {
         let mut saw_tool_call = false;
         let mut tool_index_map: HashMap<u32, String> = HashMap::new();
-        parse_glm_sse(line, &mut saw_tool_call, &mut tool_index_map)?.into_iter().find_map(|e| match e {
-            StreamEvent::Done { reason } => Some(reason),
-            _ => None,
-        })
+        parse_glm_sse(line, &mut saw_tool_call, &mut tool_index_map)?
+            .into_iter()
+            .find_map(|e| match e {
+                StreamEvent::Done { reason } => Some(reason),
+                _ => None,
+            })
     }
 
     #[test]

@@ -29,7 +29,10 @@ fn validate_name(name: &str) -> Result<(), String> {
     if name.len() > MAX_NAME_LENGTH {
         return Err(format!("Name too long (max {} chars).", MAX_NAME_LENGTH));
     }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
         return Err(format!("Invalid name '{}'. Use only a-z, 0-9, _, -", name));
     }
     if name.contains("..") {
@@ -113,10 +116,19 @@ fn atomic_write(target: &Path, content: &str) -> std::io::Result<()> {
 }
 
 /// Build frontmatter string.
-fn build_frontmatter(name: &str, summary: &str, tags: &[String], mem_type: &crate::memory::MemoryType, created_at: &str) -> String {
+fn build_frontmatter(
+    name: &str,
+    summary: &str,
+    tags: &[String],
+    mem_type: &crate::memory::MemoryType,
+    created_at: &str,
+) -> String {
     let mut fm = format!(
         "---\nname: {}\nsummary: \"{}\"\ntype: {}\ncreated_at: {}",
-        name, summary, mem_type.as_str(), created_at
+        name,
+        summary,
+        mem_type.as_str(),
+        created_at
     );
     if !tags.is_empty() {
         fm.push_str(&format!("\ntags: [{}]", tags.join(", ")));
@@ -136,7 +148,10 @@ pub struct MemoryListTool {
 
 impl MemoryListTool {
     pub fn new(workspace_dir: PathBuf, resolver: Arc<UserResolver>) -> Self {
-        Self { workspace_dir, resolver }
+        Self {
+            workspace_dir,
+            resolver,
+        }
     }
 }
 
@@ -158,15 +173,21 @@ impl Tool for MemoryListTool {
         })
     }
 
-    async fn execute(&self, _args: serde_json::Value, session: &Session) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        session: &Session,
+    ) -> anyhow::Result<ToolResult> {
         let user_id = user_id_for(session, &self.resolver);
         let paths = match MemoryPaths::for_user(&self.workspace_dir, &user_id) {
             Ok(p) => p,
-            Err(e) => return Ok(ToolResult {
-                success: false,
-                output: json!({"success": false, "error": e}).to_string(),
-                error: None,
-            }),
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: json!({"success": false, "error": e}).to_string(),
+                    error: None,
+                });
+            }
         };
 
         let entries = scan_entries(&paths.memory_dir);
@@ -179,22 +200,26 @@ impl Tool for MemoryListTool {
                     "count": 0,
                     "entries": [],
                     "hint": "Use memory_manage(action='add') to create your first memory."
-                }).to_string(),
+                })
+                .to_string(),
                 error: None,
             });
         }
 
-        let json_entries: Vec<serde_json::Value> = entries.iter().map(|e| {
-            let mut obj = json!({
-                "type": e.mem_type.as_str(),
-                "name": e.name,
-                "summary": e.summary,
-            });
-            if !e.tags.is_empty() {
-                obj["tags"] = json!(e.tags);
-            }
-            obj
-        }).collect();
+        let json_entries: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|e| {
+                let mut obj = json!({
+                    "type": e.mem_type.as_str(),
+                    "name": e.name,
+                    "summary": e.summary,
+                });
+                if !e.tags.is_empty() {
+                    obj["tags"] = json!(e.tags);
+                }
+                obj
+            })
+            .collect();
 
         Ok(ToolResult {
             success: true,
@@ -220,7 +245,10 @@ pub struct MemoryViewTool {
 
 impl MemoryViewTool {
     pub fn new(workspace_dir: PathBuf, resolver: Arc<UserResolver>) -> Self {
-        Self { workspace_dir, resolver }
+        Self {
+            workspace_dir,
+            resolver,
+        }
     }
 }
 
@@ -247,24 +275,32 @@ impl Tool for MemoryViewTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, session: &Session) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        session: &Session,
+    ) -> anyhow::Result<ToolResult> {
         let name = match args["name"].as_str() {
             Some(n) => n,
-            None => return Ok(ToolResult {
-                success: false,
-                output: json!({"success": false, "error": "'name' is required."}).to_string(),
-                error: None,
-            }),
+            None => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: json!({"success": false, "error": "'name' is required."}).to_string(),
+                    error: None,
+                });
+            }
         };
 
         let user_id = user_id_for(session, &self.resolver);
         let paths = match MemoryPaths::for_user(&self.workspace_dir, &user_id) {
             Ok(p) => p,
-            Err(e) => return Ok(ToolResult {
-                success: false,
-                output: json!({"success": false, "error": e}).to_string(),
-                error: None,
-            }),
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: json!({"success": false, "error": e}).to_string(),
+                    error: None,
+                });
+            }
         };
 
         let files = crate::memory::scan_memory_files(&paths.memory_dir);
@@ -298,7 +334,8 @@ impl Tool for MemoryViewTool {
                         "error": format!("Memory '{}' not found.", name),
                         "available": available,
                         "hint": "Use memory_list() to see all entries."
-                    }).to_string(),
+                    })
+                    .to_string(),
                     error: None,
                 })
             }
@@ -317,7 +354,10 @@ pub struct MemorySearchTool {
 
 impl MemorySearchTool {
     pub fn new(workspace_dir: PathBuf, resolver: Arc<UserResolver>) -> Self {
-        Self { workspace_dir, resolver }
+        Self {
+            workspace_dir,
+            resolver,
+        }
     }
 }
 
@@ -345,24 +385,32 @@ impl Tool for MemorySearchTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, session: &Session) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        session: &Session,
+    ) -> anyhow::Result<ToolResult> {
         let query = match args["query"].as_str() {
             Some(q) => q.to_lowercase(),
-            None => return Ok(ToolResult {
-                success: false,
-                output: json!({"success": false, "error": "'query' is required."}).to_string(),
-                error: None,
-            }),
+            None => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: json!({"success": false, "error": "'query' is required."}).to_string(),
+                    error: None,
+                });
+            }
         };
 
         let user_id = user_id_for(session, &self.resolver);
         let paths = match MemoryPaths::for_user(&self.workspace_dir, &user_id) {
             Ok(p) => p,
-            Err(e) => return Ok(ToolResult {
-                success: false,
-                output: json!({"success": false, "error": e}).to_string(),
-                error: None,
-            }),
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: json!({"success": false, "error": e}).to_string(),
+                    error: None,
+                });
+            }
         };
 
         let files = crate::memory::scan_memory_files(&paths.memory_dir);
@@ -403,44 +451,57 @@ impl Tool for MemorySearchTool {
 
         results.sort_by(|a, b| b.0.cmp(&a.0));
 
-        let json_results: Vec<serde_json::Value> = results.iter().map(|(score, mf)| {
-            let content_lower = mf.content.to_lowercase();
-            let snippet = if let Some(byte_pos) = content_lower.find(&query) {
-                // Map byte position in content_lower → char index, then
-                // apply char-based offsets → map back to byte offsets in
-                // the original string.  This avoids panicking when fixed
-                // byte offsets land inside a multi-byte UTF-8 character.
-                let char_pos = content_lower[..byte_pos].chars().count();
-                let query_chars = query.chars().count();
-                let start = mf.content.char_indices()
-                    .nth(char_pos.saturating_sub(40))
-                    .map(|(i, _)| i).unwrap_or(0);
-                let end = mf.content.char_indices()
-                    .nth(char_pos + query_chars + 60)
-                    .map(|(i, _)| i).unwrap_or(mf.content.len());
-                let mut s = String::new();
-                if start > 0 { s.push_str("..."); }
-                s.push_str(&mf.content[start..end]);
-                if end < mf.content.len() { s.push_str("..."); }
-                s
-            } else if mf.summary.to_lowercase().contains(&query) {
-                mf.summary.clone()
-            } else {
-                mf.content.chars().take(80).collect()
-            };
+        let json_results: Vec<serde_json::Value> = results
+            .iter()
+            .map(|(score, mf)| {
+                let content_lower = mf.content.to_lowercase();
+                let snippet = if let Some(byte_pos) = content_lower.find(&query) {
+                    // Map byte position in content_lower → char index, then
+                    // apply char-based offsets → map back to byte offsets in
+                    // the original string.  This avoids panicking when fixed
+                    // byte offsets land inside a multi-byte UTF-8 character.
+                    let char_pos = content_lower[..byte_pos].chars().count();
+                    let query_chars = query.chars().count();
+                    let start = mf
+                        .content
+                        .char_indices()
+                        .nth(char_pos.saturating_sub(40))
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    let end = mf
+                        .content
+                        .char_indices()
+                        .nth(char_pos + query_chars + 60)
+                        .map(|(i, _)| i)
+                        .unwrap_or(mf.content.len());
+                    let mut s = String::new();
+                    if start > 0 {
+                        s.push_str("...");
+                    }
+                    s.push_str(&mf.content[start..end]);
+                    if end < mf.content.len() {
+                        s.push_str("...");
+                    }
+                    s
+                } else if mf.summary.to_lowercase().contains(&query) {
+                    mf.summary.clone()
+                } else {
+                    mf.content.chars().take(80).collect()
+                };
 
-            let mut result = json!({
-                "name": mf.name,
-                "type": mf.mem_type.as_str(),
-                "summary": mf.summary,
-                "snippet": snippet,
-                "relevance": score,
-            });
-            if !mf.tags.is_empty() {
-                result["tags"] = json!(mf.tags);
-            }
-            result
-        }).collect();
+                let mut result = json!({
+                    "name": mf.name,
+                    "type": mf.mem_type.as_str(),
+                    "summary": mf.summary,
+                    "snippet": snippet,
+                    "relevance": score,
+                });
+                if !mf.tags.is_empty() {
+                    result["tags"] = json!(mf.tags);
+                }
+                result
+            })
+            .collect();
 
         Ok(ToolResult {
             success: true,
@@ -448,7 +509,8 @@ impl Tool for MemorySearchTool {
                 "success": true,
                 "count": json_results.len(),
                 "results": json_results,
-            }).to_string(),
+            })
+            .to_string(),
             error: None,
         })
     }
@@ -465,7 +527,10 @@ pub struct MemoryManageTool {
 
 impl MemoryManageTool {
     pub fn new(workspace_dir: PathBuf, resolver: Arc<UserResolver>) -> Self {
-        Self { workspace_dir, resolver }
+        Self {
+            workspace_dir,
+            resolver,
+        }
     }
 }
 
@@ -521,7 +586,11 @@ impl Tool for MemoryManageTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, session: &Session) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        session: &Session,
+    ) -> anyhow::Result<ToolResult> {
         let action = args["action"].as_str().unwrap_or("");
         let name = args["name"].as_str().unwrap_or("");
         let user_id = user_id_for(session, &self.resolver);
@@ -531,12 +600,17 @@ impl Tool for MemoryManageTool {
             "replace" => self.action_replace(name, &args, &user_id),
             "remove" => self.action_remove(name, &user_id),
             _ => Err(format!(
-                "Unknown action '{}'. Use: add, replace, remove", action
+                "Unknown action '{}'. Use: add, replace, remove",
+                action
             )),
         };
 
         match result {
-            Ok(v) => Ok(ToolResult { success: true, output: v.to_string(), error: None }),
+            Ok(v) => Ok(ToolResult {
+                success: true,
+                output: v.to_string(),
+                error: None,
+            }),
             Err(msg) => Ok(ToolResult {
                 success: false,
                 output: json!({"success": false, "error": msg}).to_string(),
@@ -547,16 +621,25 @@ impl Tool for MemoryManageTool {
 }
 
 impl MemoryManageTool {
-    fn action_add(&self, name: &str, args: &serde_json::Value, user_id: &str) -> Result<serde_json::Value, String> {
+    fn action_add(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        user_id: &str,
+    ) -> Result<serde_json::Value, String> {
         validate_name(name)?;
 
-        let content = args["content"].as_str()
+        let content = args["content"]
+            .as_str()
             .ok_or("'content' is required for add.")?;
         if content.trim().is_empty() {
             return Err("Content cannot be empty.".to_string());
         }
         if content.chars().count() > MAX_CONTENT_CHARS {
-            return Err(format!("Content exceeds {} character limit.", MAX_CONTENT_CHARS));
+            return Err(format!(
+                "Content exceeds {} character limit.",
+                MAX_CONTENT_CHARS
+            ));
         }
 
         scan_memory_content_opt(content)?;
@@ -566,7 +649,8 @@ impl MemoryManageTool {
         let files = crate::memory::scan_memory_files(&paths.memory_dir);
         if files.iter().any(|f| f.name == name) {
             return Err(format!(
-                "Memory '{}' already exists. Use 'replace' to update it.", name
+                "Memory '{}' already exists. Use 'replace' to update it.",
+                name
             ));
         }
 
@@ -593,27 +677,39 @@ impl MemoryManageTool {
         }))
     }
 
-    fn action_replace(&self, name: &str, args: &serde_json::Value, user_id: &str) -> Result<serde_json::Value, String> {
+    fn action_replace(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        user_id: &str,
+    ) -> Result<serde_json::Value, String> {
         validate_name(name)?;
 
         let paths = MemoryPaths::for_user(&self.workspace_dir, user_id)?;
         let files = crate::memory::scan_memory_files(&paths.memory_dir);
-        let existing = files.iter().find(|f| f.name == name)
+        let existing = files
+            .iter()
+            .find(|f| f.name == name)
             .ok_or_else(|| format!("Memory '{}' not found.", name))?;
 
-        let content = args["content"].as_str()
+        let content = args["content"]
+            .as_str()
             .ok_or("'content' is required for replace.")?;
         if content.trim().is_empty() {
             return Err("Content cannot be empty.".to_string());
         }
         if content.chars().count() > MAX_CONTENT_CHARS {
-            return Err(format!("Content exceeds {} character limit.", MAX_CONTENT_CHARS));
+            return Err(format!(
+                "Content exceeds {} character limit.",
+                MAX_CONTENT_CHARS
+            ));
         }
 
         scan_memory_content_opt(content)?;
 
         // Preserve existing metadata unless overridden
-        let mem_type = args["memory_type"].as_str()
+        let mem_type = args["memory_type"]
+            .as_str()
             .and_then(crate::memory::MemoryType::from_str_lossy)
             .unwrap_or(existing.mem_type);
         let summary = if args["summary"].as_str().is_some() {
@@ -626,12 +722,18 @@ impl MemoryManageTool {
         } else {
             existing.tags.clone()
         };
-        let filename = existing.path.file_name()
+        let filename = existing
+            .path
+            .file_name()
             .unwrap_or_default()
             .to_str()
             .unwrap_or(name);
         let fallback_filename = format!("{}.md", name);
-        let filename = if filename == name { &fallback_filename } else { filename };
+        let filename = if filename == name {
+            &fallback_filename
+        } else {
+            filename
+        };
         let now = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
         let frontmatter = build_frontmatter(name, &summary, &tags, &mem_type, &now);
@@ -653,7 +755,9 @@ impl MemoryManageTool {
 
         let paths = MemoryPaths::for_user(&self.workspace_dir, user_id)?;
         let files = crate::memory::scan_memory_files(&paths.memory_dir);
-        let existing = files.iter().find(|f| f.name == name)
+        let existing = files
+            .iter()
+            .find(|f| f.name == name)
             .ok_or_else(|| format!("Memory '{}' not found.", name))?;
 
         std::fs::remove_file(&existing.path)
@@ -666,7 +770,8 @@ impl MemoryManageTool {
     }
 
     fn resolve_type(&self, args: &serde_json::Value) -> crate::memory::MemoryType {
-        args["memory_type"].as_str()
+        args["memory_type"]
+            .as_str()
             .and_then(crate::memory::MemoryType::from_str_lossy)
             .unwrap_or(crate::memory::MemoryType::Project)
     }
@@ -684,7 +789,8 @@ impl MemoryManageTool {
             }
         }
         // Auto-generate from first non-empty line of content
-        let first_line = content.lines()
+        let first_line = content
+            .lines()
             .find(|l| !l.trim().is_empty())
             .unwrap_or(content);
         let truncated: String = first_line.chars().take(200).collect();
@@ -693,7 +799,8 @@ impl MemoryManageTool {
 
     fn resolve_tags(&self, args: &serde_json::Value) -> Vec<String> {
         match args["tags"].as_array() {
-            Some(arr) => arr.iter()
+            Some(arr) => arr
+                .iter()
                 .filter_map(|v| v.as_str())
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())

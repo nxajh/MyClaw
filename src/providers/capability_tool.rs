@@ -80,7 +80,11 @@ pub trait Tool: Send + Sync {
     /// `session` carries the calling session's identity, owner (routing_key),
     /// reply_target, and last_message. Most tools ignore it; per-user tools
     /// (memory_*, ask_user) read `session.owner` to scope their behavior.
-    async fn execute(&self, args: serde_json::Value, session: &Session) -> anyhow::Result<ToolResult>;
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        session: &Session,
+    ) -> anyhow::Result<ToolResult>;
 
     /// Build a [`ToolSpec`] from this tool's metadata.
     fn spec(&self) -> ToolSpec {

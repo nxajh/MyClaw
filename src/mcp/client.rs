@@ -329,12 +329,17 @@ impl McpRegistry {
                 if tools.is_empty() {
                     String::new()
                 } else {
-                    let lines: Vec<String> = tools.iter().map(|t| {
-                        let desc = t.description.as_deref()
-                            .filter(|s| !s.trim().is_empty())
-                            .unwrap_or("no description");
-                        format!("- {}: {}", t.name, desc.trim())
-                    }).collect();
+                    let lines: Vec<String> = tools
+                        .iter()
+                        .map(|t| {
+                            let desc = t
+                                .description
+                                .as_deref()
+                                .filter(|s| !s.trim().is_empty())
+                                .unwrap_or("no description");
+                            format!("- {}: {}", t.name, desc.trim())
+                        })
+                        .collect();
                     format!("Available tools:\n{}", lines.join("\n"))
                 }
             } else {

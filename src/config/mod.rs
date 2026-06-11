@@ -62,11 +62,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::agents::loop_breaker::LoopBreakerConfig;
+use crate::config::scheduler::SchedulerConfig;
 use agent::{AgentConfig, ContextConfig, PromptConfig, ToolExecutorConfig};
 use channel::ChannelConfigs;
 use mcp::McpServerConfig;
-use crate::agents::loop_breaker::LoopBreakerConfig;
-use crate::config::scheduler::SchedulerConfig;
 use provider::ProviderConfig;
 use routing::RoutingConfig;
 
@@ -201,8 +201,7 @@ impl ConfigLoader {
 
     /// Load from a TOML string (useful for testing).
     pub fn from_toml(content: &str) -> Result<AppConfig> {
-        let raw: RawConfig = toml::from_str(content)
-            .context("Failed to parse config string")?;
+        let raw: RawConfig = toml::from_str(content).context("Failed to parse config string")?;
         Self::resolve(raw, PathBuf::new())
     }
 
@@ -212,7 +211,8 @@ impl ConfigLoader {
         Self::expand_env_vars(&mut raw);
 
         // Resolve workspace_dir.
-        let workspace_dir = raw.workspace_dir
+        let workspace_dir = raw
+            .workspace_dir
             .map(|dir| Self::expand_path(&dir))
             .unwrap_or_else(|| {
                 directories::ProjectDirs::from("", "", "myclaw")
@@ -221,7 +221,8 @@ impl ConfigLoader {
             });
 
         // Resolve knowledge_dir: explicit path or default to {workspace_dir}/memory.
-        let knowledge_dir = raw.knowledge_dir
+        let knowledge_dir = raw
+            .knowledge_dir
             .map(|d| Self::expand_path(&d))
             .unwrap_or_else(|| workspace_dir.join("memory"));
 
@@ -431,11 +432,17 @@ level = "INFO"
         assert!(chat.models.contains_key("gpt-4o"));
 
         // Routing
-        let chat_route = config.routing.get(crate::providers::Capability::Chat).unwrap();
+        let chat_route = config
+            .routing
+            .get(crate::providers::Capability::Chat)
+            .unwrap();
         assert_eq!(chat_route.models, vec!["gpt-4o"]);
 
         // Channels
-        assert_eq!(config.channels.enabled_channels(), vec!["wechat", "telegram"]);
+        assert_eq!(
+            config.channels.enabled_channels(),
+            vec!["wechat", "telegram"]
+        );
 
         // Agent / loop breaker
         assert_eq!(config.agent.permission_mode, agent::PermissionMode::Full);
@@ -451,7 +458,9 @@ level = "INFO"
 
     #[test]
     fn env_var_expansion() {
-        unsafe { std::env::set_var("TEST_MYCLAW_KEY", "secret123"); }
+        unsafe {
+            std::env::set_var("TEST_MYCLAW_KEY", "secret123");
+        }
 
         let toml_str = r#"
 [providers.test]
@@ -466,10 +475,17 @@ output = ["text"]
 "#;
         let config = ConfigLoader::from_toml(toml_str).unwrap();
         assert_eq!(
-            config.providers["test"].chat.as_ref().unwrap().api_key.as_deref(),
+            config.providers["test"]
+                .chat
+                .as_ref()
+                .unwrap()
+                .api_key
+                .as_deref(),
             Some("secret123")
         );
 
-        unsafe { std::env::remove_var("TEST_MYCLAW_KEY"); }
+        unsafe {
+            std::env::remove_var("TEST_MYCLAW_KEY");
+        }
     }
 }

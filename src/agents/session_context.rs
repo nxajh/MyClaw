@@ -12,10 +12,64 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::agents::attachment::AttachmentManager;
-use crate::agents::session::Session;
+use crate::agents::session::{PersistHook, Session};
 use crate::agents::turn::TurnResult;
 use crate::agents::{Agent, AgentRuntime, TurnContext, UserProfile};
-use crate::channels::{Channel, ChannelMessage};
+use crate::channels::{Channel, ChannelMessage, FileAttachment};
+
+fn normalize_inbound_files(
+    session_id: &str,
+    msg: &mut ChannelMessage,
+    persist: Option<&dyn PersistHook>,
+) {
+    let Some(persist) = persist else {
+        return;
+    };
+
+    if let Some(b64s) = msg.image_base64.take() {
+        use base64::Engine as _;
+        for (idx, raw) in b64s.into_iter().enumerate() {
+            let b64 = raw
+                .split_once("base64,")
+                .map(|(_, b)| b)
+                .unwrap_or(raw.as_str());
+            match base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
+                Ok(bytes) => {
+                    let name = format!("image-{}.png", idx + 1);
+                    if let Some(saved) =
+                        persist.save_file(session_id, Some(&name), &bytes, Some("image/png"))
+                    {
+                        msg.files.push(FileAttachment {
+                            path: saved.path,
+                            file_name: Some(saved.file_name),
+                            mime_type: saved.mime_type,
+                            size_bytes: Some(saved.size_bytes),
+                        });
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(session = %session_id, err = %e, "failed to decode inbound image base64")
+                }
+            }
+        }
+    }
+
+    for att in std::mem::take(&mut msg.attachments) {
+        if let Some(saved) = persist.save_file(
+            session_id,
+            Some(&att.file_name),
+            &att.data,
+            att.mime_type.as_deref(),
+        ) {
+            msg.files.push(FileAttachment {
+                path: saved.path,
+                file_name: Some(saved.file_name),
+                mime_type: saved.mime_type,
+                size_bytes: Some(saved.size_bytes),
+            });
+        }
+    }
+}
 
 /// Per-session bundle held by the SessionManager's session-context table.
 ///
@@ -114,14 +168,16 @@ impl SessionContext {
         let _turn_guard = self.turn_lock.lock().await;
         let mut session = self.session.lock().await;
 
+        let mut inbound_msg = inbound_msg;
         let content = inbound_msg.content.clone();
         let reply_target = inbound_msg.reply_target.clone();
-        session.record_inbound(inbound_msg);
 
         // Session.persist was wired at SessionContext creation by
         // SessionManager; capture a clone so the post-turn `add_user`
         // persistence call sees the same hook.
         let persist_hook = session.persist.clone();
+        normalize_inbound_files(&session.id, &mut inbound_msg, persist_hook.as_deref());
+        session.record_inbound(inbound_msg);
         let channel_for_send = channel.clone();
         // RFC §7.6: install per-turn streaming handle BEFORE Agent::run.
         // Channels that don't support streaming return None; the
@@ -161,7 +217,12 @@ impl SessionContext {
                 .agents
                 .values_cloned()
                 .into_iter()
-                .map(|a| (a.config.name.clone(), a.config.description.clone().unwrap_or_default()))
+                .map(|a| {
+                    (
+                        a.config.name.clone(),
+                        a.config.description.clone().unwrap_or_default(),
+                    )
+                })
                 .collect();
             attachments.diff_agents(&agent_list, &session.history);
             // Date injection respects the configured [prompt] timezone_offset
@@ -177,47 +238,35 @@ impl SessionContext {
             Some(rem) => format!("{}\n\n{}", rem, content),
             None => content,
         };
-        // Build media (image) content parts from the inbound message so the
-        // image-bearing user message is recorded in history (and externalized
-        // by the persist hook below). `image_urls` and `image_base64` come from
-        // the channel's `ChannelMessage`.
+        // Build file content parts from the normalized inbound message so media is
+        // recorded in history as session-local file references. Legacy image URLs are
+        // preserved only as plain text so models can use fetch/http tools when needed;
+        // legacy base64/raw attachment fields are converted by `normalize_inbound_files`
+        // before `record_inbound`.
         let media_parts: Vec<crate::providers::ContentPart> = {
-            use crate::providers::{ContentPart, ImageDetail};
+            use crate::providers::ContentPart;
             let mut parts = Vec::new();
             if let Some(msg) = session.last_message.as_ref() {
                 if let Some(urls) = msg.image_urls.as_ref() {
                     for url in urls {
-                        parts.push(ContentPart::ImageUrl {
-                            url: url.clone(),
-                            detail: ImageDetail::Auto,
+                        parts.push(ContentPart::Text {
+                            text: format!("\n[图片URL: {url}]"),
                         });
                     }
                 }
-                if let Some(b64s) = msg.image_base64.as_ref() {
-                    for b64 in b64s {
-                        parts.push(ContentPart::ImageB64 {
-                            b64_json: b64.clone(),
-                            media_type: None,
-                            detail: ImageDetail::Auto,
-                        });
-                    }
+                if let Some(_b64s) = msg.image_base64.as_ref() {
+                    tracing::warn!(session = %session.id, "inbound image base64 was not normalized to a file; dropping inline payload")
                 }
-                // Audio attachments (e.g. Telegram voice) become `AudioB64`
-                // parts; the modality adapter transcribes them to text via the
-                // auxiliary speech-to-text model before any model sees them.
-                use base64::Engine as _;
-                for att in &msg.attachments {
-                    let is_audio = att
-                        .mime_type
-                        .as_deref()
-                        .map(|m| m.starts_with("audio/"))
-                        .unwrap_or(false);
-                    if is_audio {
-                        parts.push(ContentPart::AudioB64 {
-                            b64_json: base64::engine::general_purpose::STANDARD.encode(&att.data),
-                            media_type: att.mime_type.clone(),
-                        });
-                    }
+                if !msg.attachments.is_empty() {
+                    tracing::warn!(session = %session.id, count = msg.attachments.len(), "inbound raw attachments were not normalized to files; dropping inline payloads")
+                }
+                for file in &msg.files {
+                    parts.push(ContentPart::File {
+                        path: file.path.clone(),
+                        mime_type: file.mime_type.clone(),
+                        name: file.file_name.clone(),
+                        size_bytes: file.size_bytes,
+                    });
                 }
             }
             parts

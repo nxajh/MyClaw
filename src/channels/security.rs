@@ -152,13 +152,19 @@ pub fn warn_if_locked_down(channel: &dyn super::Channel) {
 
 /// Default `check_authorization` body — channels with a `ChannelSecurityPolicy`
 /// can delegate here instead of re-implementing the dispatch logic.
-pub fn evaluate(policy: &ChannelSecurityPolicy, sender: &str, scope: MessageScope<'_>) -> AuthDecision {
+pub fn evaluate(
+    policy: &ChannelSecurityPolicy,
+    sender: &str,
+    scope: MessageScope<'_>,
+) -> AuthDecision {
     match scope {
         MessageScope::Direct => {
             if policy.allowed_users.allows(sender) {
                 AuthDecision::Allow
             } else {
-                AuthDecision::Reject { reason: "sender not in allowed_users" }
+                AuthDecision::Reject {
+                    reason: "sender not in allowed_users",
+                }
             }
         }
         MessageScope::Group { id, has_mention } => match policy.group_mode {
@@ -166,11 +172,15 @@ pub fn evaluate(policy: &ChannelSecurityPolicy, sender: &str, scope: MessageScop
             GroupAuthMode::MentionOnly if !has_mention => AuthDecision::Ignore,
             GroupAuthMode::Open | GroupAuthMode::MentionOnly => {
                 if !policy.group_allowlist.allows(id) {
-                    AuthDecision::Reject { reason: "group not in allowed_groups" }
+                    AuthDecision::Reject {
+                        reason: "group not in allowed_groups",
+                    }
                 } else if policy.allowed_users.allows(sender) {
                     AuthDecision::Allow
                 } else {
-                    AuthDecision::Reject { reason: "sender not in allowed_users" }
+                    AuthDecision::Reject {
+                        reason: "sender not in allowed_users",
+                    }
                 }
             }
         },
@@ -244,7 +254,10 @@ mod tests {
             evaluate(
                 &policy,
                 "alice",
-                MessageScope::Group { id: "g1", has_mention: false }
+                MessageScope::Group {
+                    id: "g1",
+                    has_mention: false
+                }
             ),
             AuthDecision::Ignore
         );
@@ -261,7 +274,10 @@ mod tests {
             evaluate(
                 &policy,
                 "alice",
-                MessageScope::Group { id: "g1", has_mention: false }
+                MessageScope::Group {
+                    id: "g1",
+                    has_mention: false
+                }
             ),
             AuthDecision::Ignore
         );
@@ -269,7 +285,10 @@ mod tests {
             evaluate(
                 &policy,
                 "alice",
-                MessageScope::Group { id: "g1", has_mention: true }
+                MessageScope::Group {
+                    id: "g1",
+                    has_mention: true
+                }
             ),
             AuthDecision::Allow
         );
@@ -286,7 +305,10 @@ mod tests {
             evaluate(
                 &policy,
                 "alice",
-                MessageScope::Group { id: "g1", has_mention: false }
+                MessageScope::Group {
+                    id: "g1",
+                    has_mention: false
+                }
             ),
             AuthDecision::Allow
         );
@@ -294,7 +316,10 @@ mod tests {
             evaluate(
                 &policy,
                 "alice",
-                MessageScope::Group { id: "g2", has_mention: false }
+                MessageScope::Group {
+                    id: "g2",
+                    has_mention: false
+                }
             ),
             AuthDecision::Reject { .. }
         ));

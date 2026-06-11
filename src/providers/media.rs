@@ -1,79 +1,311 @@
-//! Per-model media lowering — the boundary between the *canonical* message
-//! format (rich `ImageB64`/`AudioB64` parts in their real form, as the agent
-//! emits them) and the *lowered* form a concrete model can actually accept.
-//!
-//! A model that lacks native input for a modality cannot receive those parts on
-//! the wire (the protocol renderers `unreachable!` on them). Instead of the
-//! agent guessing which model will serve and pre-rendering for it, lowering
-//! happens **per concrete model**, right above each per-model provider: every
-//! chat provider registered in the [`crate::registry`] is wrapped in a
-//! [`MediaLoweringProvider`] carrying that model's [`MediaCaps`]. So the fallback
-//! chain, a `/model` override, and aux tool-calls all lower identically and
-//! automatically, and the agent always sends one canonical format.
-//!
-//! Lowering replaces an unsupported part with a neutral marker — `[图片 #N]` /
-//! `[语音 #N]` — numbered by scan order. The marker is deliberately tool-agnostic:
-//! the `view_image` / `hear_audio` tools (which live in the agent loop, because
-//! retrieval is a multi-round, model-calling concern) describe how to resolve a
-//! marker by its index. The numbering here and the index resolution there share
-//! this module's scan-order convention.
+//! Per-model media lowering — converts canonical rich/file content into the
+//! concrete form a model can accept, or into path markers for unsupported media.
 
 use async_trait::async_trait;
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::providers::capability_chat::{
     BoxStream, ChatMessage, ChatProvider, ChatRequest, ContentPart, StreamEvent,
 };
+use crate::providers::provider_id::{ProviderId, well_known};
 
-/// The canonical marker for the `n`-th image (1-based, by scan order). Shared by
-/// the lowering pass (which emits it) and the `view_image` tool (which resolves
-/// the `n`-th image from history).
+pub fn image_marker_path(path: &str) -> String {
+    format!("[图片: {path}]")
+}
+
+pub fn audio_marker_path(path: &str) -> String {
+    format!("[语音: {path}]")
+}
+
+pub fn video_marker_path(path: &str) -> String {
+    format!("[视频: {path}]")
+}
+
+pub fn file_marker_path(path: &str) -> String {
+    format!("[文件: {path}]")
+}
+
+/// Legacy marker for old in-memory/base64 history.
 pub fn image_marker(n: usize) -> String {
     format!("[图片 #{n}]")
 }
 
-/// The canonical marker for the `n`-th audio clip (1-based, by scan order).
-/// Shared by the lowering pass and the `hear_audio` tool.
+/// Legacy marker for old in-memory/base64 history.
 pub fn audio_marker(n: usize) -> String {
     format!("[语音 #{n}]")
 }
 
-/// What input modalities a concrete model accepts natively. Anything not set is
-/// lowered to a marker for that model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileModality {
+    Image,
+    Audio,
+    Video,
+    Other,
+}
+
+pub fn modality_from_mime(mime: Option<&str>, path: &str) -> FileModality {
+    if let Some(mime) = mime.map(|m| m.split(';').next().unwrap_or(m).trim().to_ascii_lowercase()) {
+        if mime.starts_with("image/") {
+            return FileModality::Image;
+        }
+        if mime.starts_with("audio/") {
+            return FileModality::Audio;
+        }
+        if mime.starts_with("video/") {
+            return FileModality::Video;
+        }
+    }
+    match Path::new(path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" => FileModality::Image,
+        "ogg" | "mp3" | "wav" | "flac" | "m4a" | "aac" => FileModality::Audio,
+        "mp4" | "webm" | "mov" | "mkv" => FileModality::Video,
+        _ => FileModality::Other,
+    }
+}
+
+pub fn marker_for_file(path: &str, mime: Option<&str>) -> String {
+    match modality_from_mime(mime, path) {
+        FileModality::Image => image_marker_path(path),
+        FileModality::Audio => audio_marker_path(path),
+        FileModality::Video => video_marker_path(path),
+        FileModality::Other => file_marker_path(path),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaTransport {
+    Marker,
+    InlineBase64,
+}
+
 #[derive(Debug, Clone, Copy)]
-pub struct MediaCaps {
-    pub image: bool,
-    pub audio: bool,
+pub struct MediaInputPolicy {
+    pub model_supports: bool,
+    pub transport: MediaTransport,
+    pub max_inline_bytes: Option<u64>,
 }
 
-fn is_image(p: &ContentPart) -> bool {
-    matches!(p, ContentPart::ImageB64 { .. } | ContentPart::ImageUrl { .. })
-}
-fn is_audio(p: &ContentPart) -> bool {
-    matches!(p, ContentPart::AudioB64 { .. })
+impl MediaInputPolicy {
+    pub fn marker(model_supports: bool) -> Self {
+        Self {
+            model_supports,
+            transport: MediaTransport::Marker,
+            max_inline_bytes: None,
+        }
+    }
+
+    pub fn inline_base64(model_supports: bool, max_inline_bytes: Option<u64>) -> Self {
+        Self {
+            model_supports,
+            transport: MediaTransport::InlineBase64,
+            max_inline_bytes,
+        }
+    }
+
+    fn can_inline(&self, size_bytes: Option<u64>) -> bool {
+        if !self.model_supports || self.transport != MediaTransport::InlineBase64 {
+            return false;
+        }
+        match (self.max_inline_bytes, size_bytes) {
+            (Some(max), Some(size)) => size <= max,
+            _ => true,
+        }
+    }
 }
 
-/// Lower every media part the model can't take natively to its marker, leaving
-/// supported parts untouched. Returns `None` when nothing changes — so the
-/// common native / text-only paths avoid cloning the (often large) message list.
+/// Provider/protocol media policy for file lowering.
 ///
-/// Image and audio are numbered with independent 1-based counters, matching how
-/// `view_image` / `hear_audio` resolve the `n`-th part of each kind.
-pub fn lower_media_for(messages: &[ChatMessage], caps: MediaCaps) -> Option<Vec<ChatMessage>> {
-    let needs = messages.iter().any(|m| {
-        m.parts
-            .iter()
-            .any(|p| (is_image(p) && !caps.image) || (is_audio(p) && !caps.audio))
-    });
+/// `model_config.input` only says the model understands a modality; this policy
+/// says the current provider/protocol renderer can safely carry it. Unsupported
+/// or over-limit media becomes a path marker.
+#[derive(Debug, Clone, Copy)]
+pub struct MediaPolicy {
+    pub image: MediaInputPolicy,
+    pub audio: MediaInputPolicy,
+    pub video: MediaInputPolicy,
+    pub other: MediaInputPolicy,
+}
+
+impl MediaPolicy {
+    pub fn from_model_support(image: bool, audio: bool, video: bool) -> Self {
+        Self {
+            image: MediaInputPolicy::inline_base64(image, Some(25 * 1024 * 1024)),
+            audio: MediaInputPolicy::marker(audio),
+            video: MediaInputPolicy::marker(video),
+            other: MediaInputPolicy::marker(false),
+        }
+    }
+
+    pub fn for_provider_protocol_model(
+        provider_id: &ProviderId,
+        protocol: crate::config::provider::Protocol,
+        model_config: &crate::providers::capability::ChatModelConfig,
+    ) -> Self {
+        use crate::providers::capability::Modality;
+
+        let image = model_config.supports_input(Modality::Image);
+        let audio = model_config.supports_input(Modality::Audio);
+        let video = model_config.supports_input(Modality::Video);
+
+        let image_policy = match provider_id.as_str() {
+            well_known::OPENAI | well_known::ANTHROPIC | well_known::GLM | well_known::GENERIC => {
+                MediaInputPolicy::inline_base64(image, Some(25 * 1024 * 1024))
+            }
+            well_known::XIAOMI | well_known::MINIMAX
+                if protocol == crate::config::provider::Protocol::OpenAi =>
+            {
+                MediaInputPolicy::inline_base64(image, Some(25 * 1024 * 1024))
+            }
+            _ => MediaInputPolicy::marker(image),
+        };
+
+        let audio_policy = match provider_id.as_str() {
+            well_known::OPENAI => MediaInputPolicy::inline_base64(audio, Some(25 * 1024 * 1024)),
+            _ => MediaInputPolicy::marker(audio),
+        };
+
+        let video_policy = match provider_id.as_str() {
+            well_known::GLM | well_known::GENERIC => {
+                MediaInputPolicy::inline_base64(video, Some(50 * 1024 * 1024))
+            }
+            well_known::XIAOMI | well_known::MINIMAX
+                if protocol == crate::config::provider::Protocol::OpenAi =>
+            {
+                MediaInputPolicy::inline_base64(video, Some(50 * 1024 * 1024))
+            }
+            _ => MediaInputPolicy::marker(video),
+        };
+
+        Self {
+            image: image_policy,
+            audio: audio_policy,
+            video: video_policy,
+            other: MediaInputPolicy::marker(false),
+        }
+    }
+
+    pub fn for_provider_model(
+        provider_id: &ProviderId,
+        model_config: &crate::providers::capability::ChatModelConfig,
+    ) -> Self {
+        Self::for_provider_protocol_model(
+            provider_id,
+            crate::config::provider::Protocol::OpenAi,
+            model_config,
+        )
+    }
+}
+
+/// Backward-compatible alias for older call sites/tests. Prefer `MediaPolicy`.
+pub type MediaCaps = MediaPolicy;
+
+fn is_file(p: &ContentPart) -> bool {
+    matches!(p, ContentPart::File { .. })
+}
+
+pub fn resolve_path(path: &str) -> std::path::PathBuf {
+    let p = std::path::PathBuf::from(path);
+    if p.is_absolute() {
+        p
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(p)
+    }
+}
+
+fn lower_file_part(
+    path: String,
+    mime_type: Option<String>,
+    name: Option<String>,
+    size_bytes: Option<u64>,
+    policy: MediaPolicy,
+) -> ContentPart {
+    let supported = match modality_from_mime(mime_type.as_deref(), &path) {
+        FileModality::Image => policy.image.can_inline(size_bytes),
+        FileModality::Audio => policy.audio.can_inline(size_bytes),
+        FileModality::Video => policy.video.can_inline(size_bytes),
+        FileModality::Other => policy.other.can_inline(size_bytes),
+    };
+    if supported {
+        ContentPart::File {
+            path,
+            mime_type,
+            name,
+            size_bytes,
+        }
+    } else {
+        ContentPart::Text {
+            text: marker_for_file(&path, mime_type.as_deref()),
+        }
+    }
+}
+
+pub fn infer_image_mime(path: &str) -> Option<&'static str> {
+    match Path::new(path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "png" => Some("image/png"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
+pub fn infer_audio_mime(path: &str) -> Option<&'static str> {
+    match Path::new(path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "ogg" => Some("audio/ogg"),
+        "mp3" => Some("audio/mpeg"),
+        "wav" => Some("audio/wav"),
+        "flac" => Some("audio/flac"),
+        "m4a" => Some("audio/m4a"),
+        _ => None,
+    }
+}
+
+pub fn infer_video_mime(path: &str) -> Option<&'static str> {
+    match Path::new(path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "mp4" => Some("video/mp4"),
+        "webm" => Some("video/webm"),
+        "mov" => Some("video/quicktime"),
+        "mkv" => Some("video/x-matroska"),
+        _ => None,
+    }
+}
+
+pub fn lower_media_for(messages: &[ChatMessage], policy: MediaPolicy) -> Option<Vec<ChatMessage>> {
+    let needs = messages.iter().any(|m| m.parts.iter().any(is_file));
     if !needs {
         return None;
     }
 
-    let mut img_n = 0usize;
-    let mut aud_n = 0usize;
     let mut out = Vec::with_capacity(messages.len());
     for m in messages {
-        if !m.parts.iter().any(|p| is_image(p) || is_audio(p)) {
+        if !m.parts.iter().any(is_file) {
             out.push(m.clone());
             continue;
         }
@@ -81,21 +313,13 @@ pub fn lower_media_for(messages: &[ChatMessage], caps: MediaCaps) -> Option<Vec<
         let mut new_parts = Vec::with_capacity(nm.parts.len());
         for part in std::mem::take(&mut nm.parts) {
             match part {
-                ContentPart::ImageB64 { .. } | ContentPart::ImageUrl { .. } => {
-                    img_n += 1;
-                    if caps.image {
-                        new_parts.push(part);
-                    } else {
-                        new_parts.push(ContentPart::Text { text: image_marker(img_n) });
-                    }
-                }
-                ContentPart::AudioB64 { .. } => {
-                    aud_n += 1;
-                    if caps.audio {
-                        new_parts.push(part);
-                    } else {
-                        new_parts.push(ContentPart::Text { text: audio_marker(aud_n) });
-                    }
+                ContentPart::File {
+                    path,
+                    mime_type,
+                    name,
+                    size_bytes,
+                } => {
+                    new_parts.push(lower_file_part(path, mime_type, name, size_bytes, policy));
                 }
                 other => new_parts.push(other),
             }
@@ -106,46 +330,11 @@ pub fn lower_media_for(messages: &[ChatMessage], caps: MediaCaps) -> Option<Vec<
     Some(out)
 }
 
-/// Wraps a single concrete model's chat provider and lowers any media that model
-/// can't take natively before delegating. One per (model, provider) registration
-/// — see [`crate::registry::Registry::register_chat`].
-pub struct MediaLoweringProvider {
-    inner: Arc<dyn ChatProvider>,
-    caps: MediaCaps,
-}
-
-impl MediaLoweringProvider {
-    pub fn new(inner: Arc<dyn ChatProvider>, caps: MediaCaps) -> Self {
-        Self { inner, caps }
-    }
-}
-
-#[async_trait]
-impl ChatProvider for MediaLoweringProvider {
-    fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
-        match lower_media_for(req.messages, self.caps) {
-            // Nothing to lower — pass the borrowed request straight through.
-            None => self.inner.chat(req),
-            Some(lowered) => {
-                let req = ChatRequest { messages: &lowered, ..req };
-                self.inner.chat(req)
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::capability_chat::ImageDetail;
 
-    fn img(b: &str) -> ContentPart {
-        ContentPart::ImageB64 { b64_json: b.into(), media_type: None, detail: ImageDetail::Auto }
-    }
-    fn aud(b: &str) -> ContentPart {
-        ContentPart::AudioB64 { b64_json: b.into(), media_type: None }
-    }
-    fn msg(parts: Vec<ContentPart>) -> ChatMessage {
+    fn user_msg(parts: Vec<ContentPart>) -> ChatMessage {
         ChatMessage {
             role: "user".into(),
             parts,
@@ -155,46 +344,135 @@ mod tests {
             is_error: None,
         }
     }
-    fn texts(ms: &[ChatMessage]) -> Vec<String> {
-        ms.iter()
-            .flat_map(|m| &m.parts)
-            .filter_map(|p| match p {
-                ContentPart::Text { text } => Some(text.clone()),
-                _ => None,
-            })
-            .collect()
+
+    #[test]
+    fn file_markers_use_path_and_modality() {
+        assert_eq!(
+            marker_for_file("sessions/s/files/photo.jpg", Some("image/jpeg")),
+            "[图片: sessions/s/files/photo.jpg]"
+        );
+        assert_eq!(
+            marker_for_file("sessions/s/files/voice.ogg", Some("audio/ogg; codecs=opus")),
+            "[语音: sessions/s/files/voice.ogg]"
+        );
+        assert_eq!(
+            marker_for_file("sessions/s/files/clip.mp4", None),
+            "[视频: sessions/s/files/clip.mp4]"
+        );
+        assert_eq!(
+            marker_for_file("sessions/s/files/report.pdf", Some("application/pdf")),
+            "[文件: sessions/s/files/report.pdf]"
+        );
     }
 
     #[test]
-    fn full_native_is_noop() {
-        let ms = vec![msg(vec![img("A"), aud("B")])];
-        let caps = MediaCaps { image: true, audio: true };
-        assert!(lower_media_for(&ms, caps).is_none(), "no clone when everything is supported");
+    fn lower_file_preserves_supported_image_for_renderer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("image.png");
+        std::fs::write(&path, b"png-bytes").unwrap();
+        let msg = user_msg(vec![ContentPart::File {
+            path: path.to_string_lossy().to_string(),
+            mime_type: Some("image/png".into()),
+            name: Some("image.png".into()),
+            size_bytes: Some(9),
+        }]);
+
+        let lowered =
+            lower_media_for(&[msg], MediaPolicy::from_model_support(true, true, true)).unwrap();
+
+        match &lowered[0].parts[0] {
+            ContentPart::File {
+                path: p, mime_type, ..
+            } => {
+                assert_eq!(p, &path.to_string_lossy().to_string());
+                assert_eq!(mime_type.as_deref(), Some("image/png"));
+            }
+            other => panic!("expected File, got {other:?}"),
+        }
     }
 
     #[test]
-    fn text_only_model_markers_both_with_independent_counters() {
-        let ms = vec![
-            msg(vec![ContentPart::Text { text: "hi".into() }, img("A")]),
-            msg(vec![aud("B"), img("C")]),
-        ];
-        let caps = MediaCaps { image: false, audio: false };
-        let out = lower_media_for(&ms, caps).expect("should lower");
-        assert!(!out.iter().flat_map(|m| &m.parts).any(|p| is_image(p) || is_audio(p)));
-        let t = texts(&out);
-        assert!(t.contains(&"[图片 #1]".to_string()));
-        assert!(t.contains(&"[图片 #2]".to_string()));
-        assert!(t.contains(&"[语音 #1]".to_string()));
+    fn lower_file_keeps_audio_video_as_markers_by_default() {
+        let msg = user_msg(vec![
+            ContentPart::File {
+                path: "sessions/s/files/voice.ogg".into(),
+                mime_type: Some("audio/ogg".into()),
+                name: None,
+                size_bytes: None,
+            },
+            ContentPart::File {
+                path: "sessions/s/files/clip.mp4".into(),
+                mime_type: Some("video/mp4".into()),
+                name: None,
+                size_bytes: None,
+            },
+        ]);
+
+        let lowered =
+            lower_media_for(&[msg], MediaPolicy::from_model_support(true, true, true)).unwrap();
+
+        assert!(
+            matches!(&lowered[0].parts[0], ContentPart::Text { text } if text == "[语音: sessions/s/files/voice.ogg]")
+        );
+        assert!(
+            matches!(&lowered[0].parts[1], ContentPart::Text { text } if text == "[视频: sessions/s/files/clip.mp4]")
+        );
     }
 
     #[test]
-    fn partial_caps_lowers_only_unsupported_modality() {
-        // Supports images, not audio: image stays native, audio → marker.
-        let ms = vec![msg(vec![img("A"), aud("B")])];
-        let caps = MediaCaps { image: true, audio: false };
-        let out = lower_media_for(&ms, caps).expect("audio needs lowering");
-        assert_eq!(out[0].parts.iter().filter(|p| is_image(p)).count(), 1, "image kept native");
-        assert!(!out[0].parts.iter().any(is_audio), "audio lowered");
-        assert!(texts(&out).contains(&"[语音 #1]".to_string()));
+    fn openai_policy_can_preserve_audio_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("voice.ogg");
+        std::fs::write(&path, b"ogg-bytes").unwrap();
+        let msg = user_msg(vec![ContentPart::File {
+            path: path.to_string_lossy().to_string(),
+            mime_type: Some("audio/ogg".into()),
+            name: Some("voice.ogg".into()),
+            size_bytes: Some(9),
+        }]);
+        let policy = MediaPolicy {
+            image: MediaInputPolicy::marker(false),
+            audio: MediaInputPolicy::inline_base64(true, Some(25 * 1024 * 1024)),
+            video: MediaInputPolicy::marker(false),
+            other: MediaInputPolicy::marker(false),
+        };
+
+        let lowered = lower_media_for(&[msg], policy).unwrap();
+        match &lowered[0].parts[0] {
+            ContentPart::File {
+                path: p, mime_type, ..
+            } => {
+                assert_eq!(p, &path.to_string_lossy().to_string());
+                assert_eq!(mime_type.as_deref(), Some("audio/ogg"));
+            }
+            other => panic!("expected File, got {other:?}"),
+        }
+    }
+}
+
+pub struct MediaLoweringProvider {
+    inner: Arc<dyn ChatProvider>,
+    policy: MediaPolicy,
+}
+
+impl MediaLoweringProvider {
+    pub fn new(inner: Arc<dyn ChatProvider>, policy: MediaPolicy) -> Self {
+        Self { inner, policy }
+    }
+}
+
+#[async_trait]
+impl ChatProvider for MediaLoweringProvider {
+    fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
+        match lower_media_for(req.messages, self.policy) {
+            None => self.inner.chat(req),
+            Some(lowered) => {
+                let req = ChatRequest {
+                    messages: &lowered,
+                    ..req
+                };
+                self.inner.chat(req)
+            }
+        }
     }
 }

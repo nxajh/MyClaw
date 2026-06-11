@@ -17,11 +17,19 @@ pub struct AnthropicProvider {
 
 impl AnthropicProvider {
     pub fn new(api_key: String) -> Self {
-        Self { base_url: DEFAULT_BASE_URL.to_string(), api_key, user_agent: None }
+        Self {
+            base_url: DEFAULT_BASE_URL.to_string(),
+            api_key,
+            user_agent: None,
+        }
     }
 
     pub fn with_base_url(api_key: String, base_url: String) -> Self {
-        Self { base_url, api_key, user_agent: None }
+        Self {
+            base_url,
+            api_key,
+            user_agent: None,
+        }
     }
 
     pub fn with_user_agent(mut self, user_agent: String) -> Self {

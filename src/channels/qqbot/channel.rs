@@ -13,12 +13,12 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
-use crate::{Channel, ChannelMessage, DedupState, SendMessage};
-use crate::config::channel::QQBotAccountConfig;
-use super::message::split_message_chunk;
-use super::types::*;
 use super::keyboard::*;
+use super::message::split_message_chunk;
 use super::token::TokenManager;
+use super::types::*;
+use crate::config::channel::QQBotAccountConfig;
+use crate::{Channel, ChannelMessage, DedupState, SendMessage};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -72,7 +72,8 @@ pub struct QQBotChannel {
     pub(super) last_seq: Arc<Mutex<Option<u64>>>,
     pub(super) http_client: reqwest::Client,
     /// Active typing keep-alive tasks, keyed by recipient (e.g. "c2c:xxx").
-    pub(super) typing_tasks: Arc<Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>>,
+    pub(super) typing_tasks:
+        Arc<Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>>,
     /// WebSocket session for Resume support.
     pub(super) session: Arc<Mutex<Option<SessionState>>>,
     /// Monotonic counter for proactive message msg_seq to avoid collisions.
@@ -103,16 +104,16 @@ impl QQBotChannel {
 
     /// Return the next proactive msg_seq value (monotonically increasing).
     fn next_msg_seq(&self) -> u32 {
-        self.msg_seq_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        self.msg_seq_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Build the unified security policy from QQBot config (RFC §14.5).
     fn build_security_policy(&self) -> crate::channels::ChannelSecurityPolicy {
         use crate::channels::{AllowList, ChannelSecurityPolicy, GroupAuthMode};
-        let group_allowlist =
-            AllowList::from_config(self.config.allowed_groups.clone());
+        let group_allowlist = AllowList::from_config(self.config.allowed_groups.clone());
         let group_mode = match &self.config.allowed_groups {
-            None => GroupAuthMode::Reject, // Phase 4 "统一关"
+            None => GroupAuthMode::Reject,  // Phase 4 "统一关"
             Some(_) => GroupAuthMode::Open, // QQBot has no @mention concept
         };
         ChannelSecurityPolicy {
@@ -272,7 +273,10 @@ impl QQBotChannel {
                 if !apply_auth(
                     self,
                     &msg.sender,
-                    crate::channels::MessageScope::Group { id: group_id, has_mention: true },
+                    crate::channels::MessageScope::Group {
+                        id: group_id,
+                        has_mention: true,
+                    },
                 ) {
                     return None;
                 }
@@ -281,7 +285,8 @@ impl QQBotChannel {
             "INTERACTION_CREATE" => {
                 // QQ Bot interaction: button click -> convert to text message.
                 debug!(data = %data, "INTERACTION_CREATE raw event data");
-                let resolved = data.get("data")
+                let resolved = data
+                    .get("data")
                     .and_then(|d| d.get("resolved"))
                     .or_else(|| data.get("resolved"));
 
@@ -310,7 +315,8 @@ impl QQBotChannel {
                         .and_then(|a| a.get("member_openid"))
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
-                    let group_openid = data.get("group_openid")
+                    let group_openid = data
+                        .get("group_openid")
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
                     (member_openid.to_string(), format!("group:{}", group_openid))
@@ -325,7 +331,10 @@ impl QQBotChannel {
 
                 // Access check for interaction.
                 let scope = if let Some(group_id) = reply_target.strip_prefix("group:") {
-                    crate::channels::MessageScope::Group { id: group_id, has_mention: true }
+                    crate::channels::MessageScope::Group {
+                        id: group_id,
+                        has_mention: true,
+                    }
                 } else {
                     crate::channels::MessageScope::Direct
                 };
@@ -338,7 +347,8 @@ impl QQBotChannel {
 
                 // Try to extract the original message ID from the interaction
                 // event for passive-reply routing (avoids active-message restrictions).
-                let original_msg_id = data.get("message_id")
+                let original_msg_id = data
+                    .get("message_id")
                     .or_else(|| data.get("data").and_then(|d| d.get("message_id")))
                     .or_else(|| resolved.and_then(|r| r.get("message_id")))
                     .and_then(|v| v.as_str())
@@ -358,6 +368,7 @@ impl QQBotChannel {
                         .as_secs(),
                     thread_ts: original_msg_id,
                     interruption_scope_id: None,
+                    files: vec![],
                     attachments: vec![],
                     image_urls: None,
                     image_base64: None,
@@ -375,7 +386,8 @@ impl QQBotChannel {
         let author = data.get("author")?;
         let user_openid = author.get("user_openid")?.as_str()?;
         // content may be absent or empty for image-only messages — don't bail on it
-        let content = data.get("content")
+        let content = data
+            .get("content")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .trim()
@@ -384,21 +396,23 @@ impl QQBotChannel {
 
         // Parse image URLs from attachments.
         // QQ Bot uses MIME types (e.g. "image/jpeg"), not bare "image".
-        let image_urls = if let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) {
-            let urls: Vec<String> = attachments.iter()
-                .filter_map(|a| {
-                    let ct = a.get("content_type").and_then(|v| v.as_str()).unwrap_or("");
-                    if ct == "image" || ct.starts_with("image/") {
-                        a.get("url").and_then(|v| v.as_str()).map(String::from)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if urls.is_empty() { None } else { Some(urls) }
-        } else {
-            None
-        };
+        let image_urls =
+            if let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) {
+                let urls: Vec<String> = attachments
+                    .iter()
+                    .filter_map(|a| {
+                        let ct = a.get("content_type").and_then(|v| v.as_str()).unwrap_or("");
+                        if ct == "image" || ct.starts_with("image/") {
+                            a.get("url").and_then(|v| v.as_str()).map(String::from)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if urls.is_empty() { None } else { Some(urls) }
+            } else {
+                None
+            };
 
         Some(ChannelMessage {
             id: msg_id.to_string(),
@@ -411,6 +425,7 @@ impl QQBotChannel {
                 .as_secs(),
             thread_ts: None,
             interruption_scope_id: None,
+            files: vec![],
             attachments: vec![],
             image_urls,
             image_base64: None,
@@ -422,7 +437,8 @@ impl QQBotChannel {
         let author = data.get("author")?;
         let member_openid = author.get("member_openid")?.as_str()?;
         let group_openid = data.get("group_openid")?.as_str()?;
-        let content = data.get("content")
+        let content = data
+            .get("content")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .trim()
@@ -431,21 +447,23 @@ impl QQBotChannel {
 
         // Parse image URLs from attachments.
         // QQ Bot uses MIME types (e.g. "image/jpeg"), not bare "image".
-        let image_urls = if let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) {
-            let urls: Vec<String> = attachments.iter()
-                .filter_map(|a| {
-                    let ct = a.get("content_type").and_then(|v| v.as_str()).unwrap_or("");
-                    if ct == "image" || ct.starts_with("image/") {
-                        a.get("url").and_then(|v| v.as_str()).map(String::from)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if urls.is_empty() { None } else { Some(urls) }
-        } else {
-            None
-        };
+        let image_urls =
+            if let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) {
+                let urls: Vec<String> = attachments
+                    .iter()
+                    .filter_map(|a| {
+                        let ct = a.get("content_type").and_then(|v| v.as_str()).unwrap_or("");
+                        if ct == "image" || ct.starts_with("image/") {
+                            a.get("url").and_then(|v| v.as_str()).map(String::from)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if urls.is_empty() { None } else { Some(urls) }
+            } else {
+                None
+            };
 
         Some(ChannelMessage {
             id: msg_id.to_string(),
@@ -458,6 +476,7 @@ impl QQBotChannel {
                 .as_secs(),
             thread_ts: None,
             interruption_scope_id: None,
+            files: vec![],
             attachments: vec![],
             image_urls,
             image_base64: None,
@@ -475,16 +494,15 @@ impl QQBotChannel {
     /// 1. `asr_refer_text` present → inject text directly, skip download.
     /// 2. `voice_wav_url` present → download WAV (no SILK decoding needed).
     /// 3. Fallback → download `url` (SILK; requires SILK-aware audio model).
-    async fn ingest_voice_attachments(
-        &self,
-        data: &serde_json::Value,
-        msg: &mut ChannelMessage,
-    ) {
+    async fn ingest_voice_attachments(&self, data: &serde_json::Value, msg: &mut ChannelMessage) {
         let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) else {
             return;
         };
         for att in attachments {
-            let ctype = att.get("content_type").and_then(|v| v.as_str()).unwrap_or("");
+            let ctype = att
+                .get("content_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             // Official: content_type == "voice". Accept "audio"/"audio/*" too.
             if !(ctype == "voice" || ctype == "audio" || ctype.starts_with("audio")) {
                 continue;
@@ -511,7 +529,9 @@ impl QQBotChannel {
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty());
             let raw_url = att.get("url").and_then(|v| v.as_str());
-            let Some(audio_url) = wav_url.or(raw_url) else { continue };
+            let Some(audio_url) = wav_url.or(raw_url) else {
+                continue;
+            };
 
             let full_url = if audio_url.starts_with("http") {
                 audio_url.to_string()
@@ -535,10 +555,21 @@ impl QQBotChannel {
                             } else {
                                 format!("https://{fallback}")
                             };
-                            warn!("qqbot: voice_wav_url download failed ({e}), falling back to raw SILK");
-                            match self.http_client.get(&fb_full).send().await.and_then(|r| r.error_for_status()) {
+                            warn!(
+                                "qqbot: voice_wav_url download failed ({e}), falling back to raw SILK"
+                            );
+                            match self
+                                .http_client
+                                .get(&fb_full)
+                                .send()
+                                .await
+                                .and_then(|r| r.error_for_status())
+                            {
                                 Ok(r) => r,
-                                Err(e2) => { warn!("qqbot: SILK fallback also failed: {e2}"); continue; }
+                                Err(e2) => {
+                                    warn!("qqbot: SILK fallback also failed: {e2}");
+                                    continue;
+                                }
                             }
                         } else {
                             warn!("qqbot: audio download failed for {full_url}: {e}");
@@ -570,11 +601,12 @@ impl QQBotChannel {
                 .and_then(|v| v.as_str())
                 .unwrap_or("voice")
                 .to_string();
-            msg.attachments.push(crate::channels::message::MediaAttachment {
-                file_name,
-                data: bytes.to_vec(),
-                mime_type: Some(mime),
-            });
+            msg.attachments
+                .push(crate::channels::message::MediaAttachment {
+                    file_name,
+                    data: bytes.to_vec(),
+                    mime_type: Some(mime),
+                });
         }
     }
 
@@ -584,40 +616,45 @@ impl QQBotChannel {
     /// The API proxy (`us.jinl.in/cpa`) does not support `{"type":"url"}` image
     /// sources — it silently drops them, causing the vision model to hallucinate.
     /// Downloading upfront and inlining as base64 guarantees the image is seen.
-    async fn ingest_image_attachments(
-        &self,
-        data: &serde_json::Value,
-        msg: &mut ChannelMessage,
-    ) {
+    async fn ingest_image_attachments(&self, data: &serde_json::Value, msg: &mut ChannelMessage) {
         let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) else {
             return;
         };
         let mut images = Vec::new();
         for att in attachments {
-            let ct = att.get("content_type").and_then(|v| v.as_str()).unwrap_or("");
+            let ct = att
+                .get("content_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if !(ct == "image" || ct.starts_with("image/")) {
                 continue;
             }
-            let Some(url) = att.get("url").and_then(|v| v.as_str()) else { continue };
+            let Some(url) = att.get("url").and_then(|v| v.as_str()) else {
+                continue;
+            };
             let full_url = if url.starts_with("http") {
                 url.to_string()
             } else {
                 format!("https://{url}")
             };
-            match self.http_client.get(&full_url).send().await.and_then(|r| r.error_for_status()) {
-                Ok(resp) => {
-                    match resp.bytes().await {
-                        Ok(bytes) => {
-                            use base64::Engine;
-                            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                            tracing::debug!(url = %full_url, size = bytes.len(), "qqbot: image downloaded and base64-encoded");
-                            images.push(b64);
-                        }
-                        Err(e) => {
-                            tracing::warn!("qqbot: reading image bytes failed for {full_url}: {e}");
-                        }
+            match self
+                .http_client
+                .get(&full_url)
+                .send()
+                .await
+                .and_then(|r| r.error_for_status())
+            {
+                Ok(resp) => match resp.bytes().await {
+                    Ok(bytes) => {
+                        use base64::Engine;
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        tracing::debug!(url = %full_url, size = bytes.len(), "qqbot: image downloaded and base64-encoded");
+                        images.push(b64);
                     }
-                }
+                    Err(e) => {
+                        tracing::warn!("qqbot: reading image bytes failed for {full_url}: {e}");
+                    }
+                },
                 Err(e) => {
                     tracing::warn!("qqbot: image download failed for {full_url}: {e}");
                 }
@@ -668,7 +705,11 @@ impl QQBotChannel {
     /// Send a REST message to QQ Bot with retry logic (token refresh + 429 backoff).
     /// `url` is the fully constructed API endpoint URL.
     /// `body` is the pre-built JSON body.
-    async fn send_rest_with_retry(&self, url: &str, body: &serde_json::Value) -> anyhow::Result<()> {
+    async fn send_rest_with_retry(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<()> {
         let token = self.token_manager.get_token().await?;
         let ua = user_agent();
         let resp = self
@@ -721,7 +762,10 @@ impl QQBotChannel {
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(5);
-            warn!(retry_after_secs = retry_after, "QQ Bot REST rate limited, retrying after delay");
+            warn!(
+                retry_after_secs = retry_after,
+                "QQ Bot REST rate limited, retrying after delay"
+            );
             tokio::time::sleep(Duration::from_secs(retry_after)).await;
             let token = self.token_manager.get_token().await?;
             let ua = user_agent();
@@ -830,12 +874,14 @@ impl QQBotChannel {
                         "msg_type": 6,
                         "input_notify": { "input_type": 1, "input_second": 60 },
                     });
-                    let _ = http.post(&url)
+                    let _ = http
+                        .post(&url)
                         .header("Authorization", format!("QQBot {}", token))
                         .header("Content-Type", "application/json")
                         .header("User-Agent", user_agent())
                         .json(&body)
-                        .send().await;
+                        .send()
+                        .await;
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(50)).await;
             }
@@ -879,7 +925,8 @@ impl QQBotChannel {
         }
 
         let ua = user_agent();
-        let resp = self.http_client
+        let resp = self
+            .http_client
             .post(&url)
             .header("Authorization", format!("QQBot {}", token))
             .header("Content-Type", "application/json")
@@ -897,7 +944,8 @@ impl QQBotChannel {
             if status.as_u16() == 401 || text.contains("11244") {
                 warn!(status = %status, "C2C keyboard got token-expired error, refreshing and retrying");
                 let new_token = self.token_manager.refresh().await?;
-                let resp = self.http_client
+                let resp = self
+                    .http_client
                     .post(&url)
                     .header("Authorization", format!("QQBot {}", new_token))
                     .header("Content-Type", "application/json")
@@ -908,15 +956,26 @@ impl QQBotChannel {
                     .map_err(|e| anyhow::anyhow!("C2C keyboard retry failed: {}", e))?;
 
                 if resp.status().is_success() {
-                    debug!(openid = openid, "C2C keyboard message sent (after token refresh)");
+                    debug!(
+                        openid = openid,
+                        "C2C keyboard message sent (after token refresh)"
+                    );
                     return Ok(());
                 }
                 let retry_status = resp.status();
                 let retry_text = resp.text().await.unwrap_or_default();
-                return Err(anyhow::anyhow!("C2C keyboard retry returned {}: {}", retry_status, retry_text));
+                return Err(anyhow::anyhow!(
+                    "C2C keyboard retry returned {}: {}",
+                    retry_status,
+                    retry_text
+                ));
             }
 
-            return Err(anyhow::anyhow!("C2C keyboard send returned {}: {}", status, text));
+            return Err(anyhow::anyhow!(
+                "C2C keyboard send returned {}: {}",
+                status,
+                text
+            ));
         }
 
         debug!(openid = openid, "C2C keyboard message sent");
@@ -951,7 +1010,8 @@ impl QQBotChannel {
         }
 
         let ua = user_agent();
-        let resp = self.http_client
+        let resp = self
+            .http_client
             .post(&url)
             .header("Authorization", format!("QQBot {}", token))
             .header("Content-Type", "application/json")
@@ -969,7 +1029,8 @@ impl QQBotChannel {
             if status.as_u16() == 401 || text.contains("11244") {
                 warn!(status = %status, "group keyboard got token-expired error, refreshing and retrying");
                 let new_token = self.token_manager.refresh().await?;
-                let resp = self.http_client
+                let resp = self
+                    .http_client
                     .post(&url)
                     .header("Authorization", format!("QQBot {}", new_token))
                     .header("Content-Type", "application/json")
@@ -980,15 +1041,26 @@ impl QQBotChannel {
                     .map_err(|e| anyhow::anyhow!("Group keyboard retry failed: {}", e))?;
 
                 if resp.status().is_success() {
-                    debug!(group_openid = group_openid, "group keyboard message sent (after token refresh)");
+                    debug!(
+                        group_openid = group_openid,
+                        "group keyboard message sent (after token refresh)"
+                    );
                     return Ok(());
                 }
                 let retry_status = resp.status();
                 let retry_text = resp.text().await.unwrap_or_default();
-                return Err(anyhow::anyhow!("Group keyboard retry returned {}: {}", retry_status, retry_text));
+                return Err(anyhow::anyhow!(
+                    "Group keyboard retry returned {}: {}",
+                    retry_status,
+                    retry_text
+                ));
             }
 
-            return Err(anyhow::anyhow!("Group keyboard send returned {}: {}", status, text));
+            return Err(anyhow::anyhow!(
+                "Group keyboard send returned {}: {}",
+                status,
+                text
+            ));
         }
 
         debug!(group_openid = group_openid, "group keyboard message sent");
@@ -1015,7 +1087,8 @@ impl QQBotChannel {
             let ua = user_agent();
             let body = serde_json::json!({ "code": 0 });
 
-            match http.put(&url)
+            match http
+                .put(&url)
                 .header("Authorization", format!("QQBot {}", token))
                 .header("Content-Type", "application/json")
                 .header("User-Agent", &ua)
@@ -1045,12 +1118,7 @@ impl QQBotChannel {
 
     /// Try to handle a bot- prefixed slash command.
     /// Returns true if the command was handled (message consumed), false to continue dispatch.
-    async fn try_bot_command(
-        &self,
-        content: &str,
-        reply_target: &str,
-        msg_id: &str,
-    ) -> bool {
+    async fn try_bot_command(&self, content: &str, reply_target: &str, msg_id: &str) -> bool {
         let trimmed = content.trim();
 
         let reply = match trimmed {
@@ -1067,7 +1135,11 @@ impl QQBotChannel {
                         ("/new", "/new"),
                         ("/status", "/status"),
                     ]);
-                    if self.send_c2c_keyboard(openid, help_text, &kb, msg_id).await.is_ok() {
+                    if self
+                        .send_c2c_keyboard(openid, help_text, &kb, msg_id)
+                        .await
+                        .is_ok()
+                    {
                         return true;
                     }
                     // Keyboard failed, fall through to text reply below.
@@ -1113,7 +1185,10 @@ Type any command or just chat!"#;
         } else if let Some(group_openid) = reply_target.strip_prefix("group:") {
             for (i, chunk) in chunks.iter().enumerate() {
                 let seq = self.next_msg_seq() + i as u32;
-                if let Err(e) = self.send_group_message(group_openid, chunk, msg_id, seq).await {
+                if let Err(e) = self
+                    .send_group_message(group_openid, chunk, msg_id, seq)
+                    .await
+                {
                     warn!(chunk = i, err = %e, "failed to send bot command reply chunk");
                     return true;
                 }
@@ -1161,7 +1236,8 @@ impl Channel for QQBotChannel {
         if raw_recipient.is_empty() {
             anyhow::bail!("QQBot send failed: no recipient");
         }
-        let recipient = if raw_recipient.starts_with("c2c:") || raw_recipient.starts_with("group:") {
+        let recipient = if raw_recipient.starts_with("c2c:") || raw_recipient.starts_with("group:")
+        {
             raw_recipient
         } else {
             format!("c2c:{}", raw_recipient)
@@ -1169,7 +1245,8 @@ impl Channel for QQBotChannel {
 
         // Build keyboard from inline_buttons (attached to last chunk only).
         let keyboard: Option<Keyboard> = msg.inline_buttons.as_ref().map(|buttons| {
-            let pairs: Vec<(String, String)> = buttons.iter()
+            let pairs: Vec<(String, String)> = buttons
+                .iter()
                 .map(|b| (b.label.clone(), b.callback_data.clone()))
                 .collect();
             Keyboard::from_pairs(&pairs)
@@ -1189,7 +1266,8 @@ impl Channel for QQBotChannel {
                         if let Some(openid) = recipient.strip_prefix("c2c:") {
                             self.send_c2c_keyboard(openid, chunk, kb, msg_id).await
                         } else if let Some(group_openid) = recipient.strip_prefix("group:") {
-                            self.send_group_keyboard(group_openid, chunk, kb, msg_id).await
+                            self.send_group_keyboard(group_openid, chunk, kb, msg_id)
+                                .await
                         } else {
                             Err(anyhow::anyhow!(
                                 "invalid QQ Bot recipient format: {} (expected c2c:<openid> or group:<openid>)",
@@ -1201,7 +1279,8 @@ impl Channel for QQBotChannel {
                         if let Some(openid) = recipient.strip_prefix("c2c:") {
                             self.send_c2c_message(openid, chunk, msg_id, msg_seq).await
                         } else if let Some(group_openid) = recipient.strip_prefix("group:") {
-                            self.send_group_message(group_openid, chunk, msg_id, msg_seq).await
+                            self.send_group_message(group_openid, chunk, msg_id, msg_seq)
+                                .await
                         } else {
                             Err(anyhow::anyhow!(
                                 "invalid QQ Bot recipient format: {} (expected c2c:<openid> or group:<openid>)",
@@ -1214,7 +1293,8 @@ impl Channel for QQBotChannel {
                     if let Some(openid) = recipient.strip_prefix("c2c:") {
                         self.send_c2c_message(openid, chunk, msg_id, msg_seq).await
                     } else if let Some(group_openid) = recipient.strip_prefix("group:") {
-                        self.send_group_message(group_openid, chunk, msg_id, msg_seq).await
+                        self.send_group_message(group_openid, chunk, msg_id, msg_seq)
+                            .await
                     } else {
                         Err(anyhow::anyhow!(
                             "invalid QQ Bot recipient format: {} (expected c2c:<openid> or group:<openid>)",
@@ -1227,7 +1307,8 @@ impl Channel for QQBotChannel {
                 if let Some(openid) = recipient.strip_prefix("c2c:") {
                     self.send_c2c_message(openid, chunk, msg_id, msg_seq).await
                 } else if let Some(group_openid) = recipient.strip_prefix("group:") {
-                    self.send_group_message(group_openid, chunk, msg_id, msg_seq).await
+                    self.send_group_message(group_openid, chunk, msg_id, msg_seq)
+                        .await
                 } else {
                     Err(anyhow::anyhow!(
                         "invalid QQ Bot recipient format: {} (expected c2c:<openid> or group:<openid>)",
@@ -1266,18 +1347,26 @@ impl Channel for QQBotChannel {
         match payload {
             crate::channels::MessagePayload::Media { source, caption } => {
                 let (data, mime_type, file_name) = match source {
-                    crate::channels::MediaSource::Inline { data, mime_type, file_name } => {
-                        (data.clone(), mime_type.clone(), file_name.clone())
-                    }
+                    crate::channels::MediaSource::Inline {
+                        data,
+                        mime_type,
+                        file_name,
+                    } => (data.clone(), mime_type.clone(), file_name.clone()),
                     crate::channels::MediaSource::Url(url) => {
                         let full = if url.starts_with("http") {
                             url.to_string()
                         } else {
                             format!("https://{url}")
                         };
-                        let resp = self.http_client.get(&full).send().await
+                        let resp = self
+                            .http_client
+                            .get(&full)
+                            .send()
+                            .await
                             .map_err(|e| anyhow::anyhow!("download failed: {e}"))?;
-                        let bytes = resp.bytes().await
+                        let bytes = resp
+                            .bytes()
+                            .await
                             .map_err(|e| anyhow::anyhow!("read bytes failed: {e}"))?;
                         (bytes.to_vec(), None, None)
                     }
@@ -1348,12 +1437,16 @@ impl Channel for QQBotChannel {
                     return Err(anyhow::anyhow!("upload returned {status}: {text}"));
                 }
 
-                let upload_result: serde_json::Value = upload_resp.json().await
+                let upload_result: serde_json::Value = upload_resp
+                    .json()
+                    .await
                     .map_err(|e| anyhow::anyhow!("upload parse failed: {e}"))?;
                 let file_info = upload_result
                     .get("file_info")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("upload response missing file_info: {upload_result}"))?;
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("upload response missing file_info: {upload_result}")
+                    })?;
 
                 // Step 2: send message with media
                 let msg_url = if is_group {
@@ -1377,7 +1470,10 @@ impl Channel for QQBotChannel {
             }
             // Everything else: delegate to default impl (text fallback).
             _ => {
-                let msg = crate::channels::SendMessage::new(payload.to_fallback_text(), &target.recipient);
+                let msg = crate::channels::SendMessage::new(
+                    payload.to_fallback_text(),
+                    &target.recipient,
+                );
                 self.send(&msg).await?;
                 Ok(None)
             }
@@ -1427,11 +1523,17 @@ impl QQBotChannel {
                 }
                 Ok(WsDisconnect::Clean) => {
                     warn!("QQ Bot WebSocket disconnected, reconnecting");
-                    if rapid { attempt += 1; } else { attempt = 0; }
+                    if rapid {
+                        attempt += 1;
+                    } else {
+                        attempt = 0;
+                    }
                     let delay = if attempt >= RAPID_RECONNECT_LIMIT {
                         Duration::from_secs(60)
                     } else {
-                        Duration::from_secs(RECONNECT_DELAYS[attempt.min(RECONNECT_DELAYS.len() - 1)])
+                        Duration::from_secs(
+                            RECONNECT_DELAYS[attempt.min(RECONNECT_DELAYS.len() - 1)],
+                        )
                     };
                     // Clean disconnect clears session
                     *self.session.lock() = None;
@@ -1452,11 +1554,17 @@ impl QQBotChannel {
                 }
                 Err(e) => {
                     error!(err = %e, "QQ Bot WebSocket error, reconnecting");
-                    if rapid { attempt += 1; } else { attempt = 0; }
+                    if rapid {
+                        attempt += 1;
+                    } else {
+                        attempt = 0;
+                    }
                     let delay = if attempt >= RAPID_RECONNECT_LIMIT {
                         Duration::from_secs(60)
                     } else {
-                        Duration::from_secs(RECONNECT_DELAYS[attempt.min(RECONNECT_DELAYS.len() - 1)])
+                        Duration::from_secs(
+                            RECONNECT_DELAYS[attempt.min(RECONNECT_DELAYS.len() - 1)],
+                        )
                     };
                     tokio::time::sleep(delay).await;
                 }
@@ -1497,12 +1605,13 @@ impl QQBotChannel {
             .map_err(|e| anyhow::anyhow!("Hello parse error: {}", e))?;
 
         if hello.op != OP_HELLO {
-            return Err(anyhow::anyhow!("expected OpCode 10 (Hello), got {}", hello.op));
+            return Err(anyhow::anyhow!(
+                "expected OpCode 10 (Hello), got {}",
+                hello.op
+            ));
         }
 
-        let heartbeat_interval: u64 = hello.d["heartbeat_interval"]
-            .as_u64()
-            .unwrap_or(41250);
+        let heartbeat_interval: u64 = hello.d["heartbeat_interval"].as_u64().unwrap_or(41250);
 
         info!(heartbeat_interval_ms = heartbeat_interval, "received Hello");
 
@@ -1519,7 +1628,8 @@ impl QQBotChannel {
                         "session_id": s.session_id,
                         "seq": s.last_seq,
                     }
-                }).to_string()
+                })
+                .to_string()
             }
             None => self.build_identify(&token),
         };
@@ -1634,8 +1744,13 @@ impl QQBotChannel {
                     // Internal events first
                     match event_type.as_str() {
                         "READY" => {
-                            if let Some(session_id) = payload.d.get("session_id").and_then(|v| v.as_str()) {
-                                info!(session_id = session_id, "READY received, session established");
+                            if let Some(session_id) =
+                                payload.d.get("session_id").and_then(|v| v.as_str())
+                            {
+                                info!(
+                                    session_id = session_id,
+                                    "READY received, session established"
+                                );
                                 *self.session.lock() = Some(SessionState {
                                     session_id: session_id.to_string(),
                                     last_seq: payload.s.unwrap_or(0),
@@ -1651,18 +1766,27 @@ impl QQBotChannel {
                     if let Some(mut channel_msg) = self.handle_dispatch(event_type, &payload.d) {
                         // Bot- prefixed slash commands — intercept before orchestrator
                         let msg_id = payload.d.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                        if self.try_bot_command(&channel_msg.content, &channel_msg.reply_target, msg_id).await {
+                        if self
+                            .try_bot_command(
+                                &channel_msg.content,
+                                &channel_msg.reply_target,
+                                msg_id,
+                            )
+                            .await
+                        {
                             debug!(msg_id = %channel_msg.id, "bot command handled, skipping orchestrator");
                             return None;
                         }
 
                         // Voice/audio: use QQ's native ASR text when present, else
                         // attach downloaded bytes for the auxiliary STT model.
-                        self.ingest_voice_attachments(&payload.d, &mut channel_msg).await;
+                        self.ingest_voice_attachments(&payload.d, &mut channel_msg)
+                            .await;
 
                         // Image: download and convert to base64 so vision models
                         // can see the image without relying on proxy URL fetching.
-                        self.ingest_image_attachments(&payload.d, &mut channel_msg).await;
+                        self.ingest_image_attachments(&payload.d, &mut channel_msg)
+                            .await;
 
                         if tx.send(channel_msg.clone()).await.is_err() {
                             warn!("channel receiver dropped, stopping listen");

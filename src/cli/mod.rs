@@ -10,10 +10,10 @@ pub mod cmd_restart;
 pub mod cmd_status;
 pub mod cmd_stop;
 pub mod cmd_tools;
-pub mod cmd_update;
-pub mod signal;
 #[cfg(feature = "tui")]
 pub mod cmd_tui;
+pub mod cmd_update;
+pub mod signal;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -154,10 +154,12 @@ const DEFAULT_CONFIG_PATHS: &[&str] = &[
 
 /// Load config from the first found file, respecting CLI --config flag.
 pub fn load_config(cli: &Cli) -> Result<myclaw::config::AppConfig> {
-    let path = resolve_config_path(cli).ok_or_else(|| anyhow::anyhow!(
-        "No config file found. Searched: {}. Use --config or `myclaw config init`.",
-        DEFAULT_CONFIG_PATHS.join(", ")
-    ))?;
+    let path = resolve_config_path(cli).ok_or_else(|| {
+        anyhow::anyhow!(
+            "No config file found. Searched: {}. Use --config or `myclaw config init`.",
+            DEFAULT_CONFIG_PATHS.join(", ")
+        )
+    })?;
     myclaw::config::ConfigLoader::from_file(&path)
 }
 

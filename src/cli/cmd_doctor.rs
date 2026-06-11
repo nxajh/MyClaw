@@ -14,27 +14,27 @@ pub async fn run(_cli: &Cli, fix: bool) -> Result<()> {
     // 1. Config file
     let config_path = find_config();
     match &config_path {
-        Some(path) => {
-            match myclaw::config::ConfigLoader::from_file(path) {
-                Ok(cfg) => {
-                    println!("✅ Config file: {}", path.display());
-                    let default_model = cfg
-                        .routing
-                        .get(myclaw::providers::Capability::Chat)
-                        .and_then(|r| r.models.first().cloned())
-                        .unwrap_or_else(|| "(none)".to_string());
-                    println!("   Default model: {}", default_model);
-                    ok_count += 1;
-                }
-                Err(e) => {
-                    println!("❌ Config file found but invalid: {}", path.display());
-                    println!("   Error: {e}");
-                    issues.push(format!("Fix config file: {e}"));
-                }
+        Some(path) => match myclaw::config::ConfigLoader::from_file(path) {
+            Ok(cfg) => {
+                println!("✅ Config file: {}", path.display());
+                let default_model = cfg
+                    .routing
+                    .get(myclaw::providers::Capability::Chat)
+                    .and_then(|r| r.models.first().cloned())
+                    .unwrap_or_else(|| "(none)".to_string());
+                println!("   Default model: {}", default_model);
+                ok_count += 1;
             }
-        }
+            Err(e) => {
+                println!("❌ Config file found but invalid: {}", path.display());
+                println!("   Error: {e}");
+                issues.push(format!("Fix config file: {e}"));
+            }
+        },
         None => {
-            println!("⚠️  No config file found (searched: myclaw.toml, ~/.myclaw/myclaw.toml, /etc/myclaw/myclaw.toml)");
+            println!(
+                "⚠️  No config file found (searched: myclaw.toml, ~/.myclaw/myclaw.toml, /etc/myclaw/myclaw.toml)"
+            );
             issues.push("Create a config file with `myclaw config init`".to_string());
         }
     }
@@ -43,7 +43,8 @@ pub async fn run(_cli: &Cli, fix: bool) -> Result<()> {
     if let Some(cfg) = try_load_config() {
         if cfg.providers.is_empty() {
             println!("⚠️  No providers configured");
-            issues.push("Add at least one provider in config (e.g. [providers.openai])".to_string());
+            issues
+                .push("Add at least one provider in config (e.g. [providers.openai])".to_string());
         } else {
             for name in cfg.providers.keys() {
                 println!("✅ Provider: {name}");
@@ -114,7 +115,11 @@ pub async fn run(_cli: &Cli, fix: bool) -> Result<()> {
 }
 
 fn find_config() -> Option<PathBuf> {
-    for path in &["myclaw.toml", "~/.myclaw/myclaw.toml", "/etc/myclaw/myclaw.toml"] {
+    for path in &[
+        "myclaw.toml",
+        "~/.myclaw/myclaw.toml",
+        "/etc/myclaw/myclaw.toml",
+    ] {
         let p = PathBuf::from(shellexpand::tilde(path).to_string());
         if p.exists() {
             return Some(p);

@@ -104,16 +104,17 @@ pub fn parse_heartbeat(content: &str) -> (String, Vec<HeartbeatTask>) {
         let trimmed = line.trim();
 
         // Detect "## Tasks" section header
-        if trimmed.eq_ignore_ascii_case("## tasks")
-            || trimmed.eq_ignore_ascii_case("## tasks:")
-        {
+        if trimmed.eq_ignore_ascii_case("## tasks") || trimmed.eq_ignore_ascii_case("## tasks:") {
             in_tasks_section = true;
             has_tasks_section = true;
             continue;
         }
 
         // Detect another ## section after tasks → stop (new section)
-        if in_tasks_section && trimmed.starts_with("## ") && !trimmed.eq_ignore_ascii_case("## tasks") {
+        if in_tasks_section
+            && trimmed.starts_with("## ")
+            && !trimmed.eq_ignore_ascii_case("## tasks")
+        {
             in_tasks_section = false;
             // Don't continue — fall through to context collection
         }
@@ -188,8 +189,7 @@ fn parse_task_line(text: &str) -> Option<HeartbeatTask> {
                 } else {
                     (
                         name,
-                        parse_interval_str(interval_str)
-                            .unwrap_or(Duration::from_secs(30 * 60)),
+                        parse_interval_str(interval_str).unwrap_or(Duration::from_secs(30 * 60)),
                     )
                 }
             } else {
@@ -228,10 +228,7 @@ pub fn due_tasks<'a>(
     tasks: &'a [HeartbeatTask],
     _state: &HeartbeatState,
 ) -> Vec<&'a HeartbeatTask> {
-    tasks
-        .iter()
-        .filter(|task| !task.is_paused)
-        .collect()
+    tasks.iter().filter(|task| !task.is_paused).collect()
 }
 
 /// Build a prompt for the given due tasks.
@@ -246,7 +243,12 @@ pub fn build_heartbeat_prompt(context: &str, due: &[&HeartbeatTask]) -> String {
     prompt.push_str("Execute the following heartbeat tasks:\n\n");
 
     for (i, task) in due.iter().enumerate() {
-        prompt.push_str(&format!("{}. [{}] {}\n", i + 1, task.name, task.description));
+        prompt.push_str(&format!(
+            "{}. [{}] {}\n",
+            i + 1,
+            task.name,
+            task.description
+        ));
     }
 
     prompt.push_str(

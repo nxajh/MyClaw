@@ -17,8 +17,8 @@
 //!   per-wait drop-guard (tagged by a generation counter) clears the slot on
 //!   ANY exit, so a cancelled / dropped future never leaks a pending entry.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
 use tokio::sync::oneshot;
@@ -92,7 +92,9 @@ impl AskRouter {
             Ok(msg) => Ok(msg),
             // Sender dropped: superseded by a newer ask, or the router was torn
             // down. Surface as a non-fatal error for the caller.
-            Err(_) => Err(anyhow::anyhow!("ask_user: superseded before a reply arrived")),
+            Err(_) => Err(anyhow::anyhow!(
+                "ask_user: superseded before a reply arrived"
+            )),
         }
     }
 
@@ -131,6 +133,7 @@ mod tests {
             timestamp: 0,
             thread_ts: None,
             interruption_scope_id: None,
+            files: vec![],
             attachments: Vec::new(),
             image_urls: None,
             image_base64: None,
@@ -166,7 +169,10 @@ mod tests {
         waiter.abort(); // cancel the wait without reply or timeout
         let _ = waiter.await; // join the aborted task so its Drop runs
         // The slot must be gone — nothing to fulfill.
-        assert!(!r.fulfill("s", msg("late")), "cancelled wait must not leak a pending slot");
+        assert!(
+            !r.fulfill("s", msg("late")),
+            "cancelled wait must not leak a pending slot"
+        );
     }
 
     /// A newer ask replaces the older one; when the OLD wait unwinds, its
@@ -185,7 +191,10 @@ mod tests {
         // must still be fulfillable.
         let _ = old.await;
         tokio::task::yield_now().await;
-        assert!(r.fulfill("s", msg("answer")), "newer ask's slot must survive the old guard");
+        assert!(
+            r.fulfill("s", msg("answer")),
+            "newer ask's slot must survive the old guard"
+        );
         let reply = new.await.unwrap().unwrap();
         assert_eq!(reply.content, "answer");
     }

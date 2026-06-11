@@ -4,15 +4,15 @@ use anyhow::{Context, Result};
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures_util::{SinkExt, StreamExt};
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
-    Frame,
 };
 use std::io;
 use tokio::sync::mpsc;
@@ -30,7 +30,10 @@ enum ServerMsg {
     #[serde(rename = "thinking")]
     Thinking { delta: String },
     #[serde(rename = "tool_call")]
-    ToolCall { name: String, args: serde_json::Value },
+    ToolCall {
+        name: String,
+        args: serde_json::Value,
+    },
     #[serde(rename = "tool_result")]
     ToolResult { name: String, output: String },
     #[serde(rename = "done")]
@@ -177,7 +180,11 @@ impl App {
                 self.connected = true;
                 self.streaming = false;
                 self.status = "Connected".to_string();
-                self.push_line("─".into(), "Connected to MyClaw server.".into(), Color::Cyan);
+                self.push_line(
+                    "─".into(),
+                    "Connected to MyClaw server.".into(),
+                    Color::Cyan,
+                );
             }
             AppEvent::WsMessage(raw) => self.handle_ws_message(&raw),
             AppEvent::WsClosed => {
@@ -257,7 +264,11 @@ impl App {
                 }
                 Err(e) => {
                     warn!("Failed to send message: {e}");
-                    self.push_line("!".into(), "Send failed (not connected?).".into(), Color::Red);
+                    self.push_line(
+                        "!".into(),
+                        "Send failed (not connected?).".into(),
+                        Color::Red,
+                    );
                 }
             }
         } else {
@@ -302,7 +313,11 @@ impl App {
             }
             ServerMsg::ToolResult { name, output } => {
                 let preview = truncate_str(&output, 200);
-                self.push_line("Tool".into(), format!("← {name}: {preview}"), Color::DarkGray);
+                self.push_line(
+                    "Tool".into(),
+                    format!("← {name}: {preview}"),
+                    Color::DarkGray,
+                );
             }
             ServerMsg::Done { text } => {
                 // Finalize the accumulated response.
@@ -345,7 +360,11 @@ impl App {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fn push_line(&mut self, prefix: String, content: String, color: Color) {
-        self.lines.push(ChatLine { prefix, content, color });
+        self.lines.push(ChatLine {
+            prefix,
+            content,
+            color,
+        });
     }
 
     // ── Drawing ───────────────────────────────────────────────────────────────
@@ -355,9 +374,9 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),  // status bar
-                Constraint::Min(3),     // messages
-                Constraint::Length(3),  // input
+                Constraint::Length(1), // status bar
+                Constraint::Min(3),    // messages
+                Constraint::Length(3), // input
             ])
             .split(size);
 
@@ -372,7 +391,10 @@ impl App {
         } else {
             Style::default().fg(Color::White).bg(Color::Red)
         };
-        let status = Span::styled(format!(" MyClaw TUI │ {} ", self.status), style.add_modifier(Modifier::BOLD));
+        let status = Span::styled(
+            format!(" MyClaw TUI │ {} ", self.status),
+            style.add_modifier(Modifier::BOLD),
+        );
         let bar = Line::from(status);
         f.render_widget(Paragraph::new(bar), area);
     }
@@ -382,9 +404,7 @@ impl App {
 
         // Render stored chat lines.
         for line in &self.lines {
-            let prefix_style = Style::default()
-                .fg(line.color)
-                .add_modifier(Modifier::BOLD);
+            let prefix_style = Style::default().fg(line.color).add_modifier(Modifier::BOLD);
             let content_style = Style::default().fg(line.color);
             text_lines.push(Line::from(vec![
                 Span::styled(format!("[{}] ", line.prefix), prefix_style),
@@ -395,7 +415,9 @@ impl App {
         // Render in-progress streaming response.
         if self.streaming {
             if !self.thinking_buf.is_empty() {
-                let think_style = Style::default().fg(Color::Magenta).add_modifier(Modifier::ITALIC);
+                let think_style = Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::ITALIC);
                 text_lines.push(Line::from(Span::styled(
                     format!("💭 {}", self.thinking_buf),
                     think_style,
@@ -404,7 +426,12 @@ impl App {
             if !self.response_buf.is_empty() {
                 let stream_style = Style::default().fg(Color::White);
                 text_lines.push(Line::from(vec![
-                    Span::styled("[AI] ".to_string(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "[AI] ".to_string(),
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(&self.response_buf, stream_style),
                 ]));
             }
@@ -417,7 +444,11 @@ impl App {
         let start = max_scroll.saturating_sub(effective_scroll) as usize;
         let end = (start + visible as usize).min(text_lines.len());
 
-        let visible_lines: Vec<Line> = text_lines.into_iter().skip(start).take(end - start).collect();
+        let visible_lines: Vec<Line> = text_lines
+            .into_iter()
+            .skip(start)
+            .take(end - start)
+            .collect();
 
         let messages = Paragraph::new(visible_lines)
             .block(Block::default().borders(Borders::TOP).title(" Messages "))
@@ -426,15 +457,21 @@ impl App {
     }
 
     fn draw_input(&self, f: &mut Frame, area: Rect) {
-        let input_text = Text::from(vec![
-            Line::from(vec![
-                Span::styled("> ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::raw(&self.input),
-                Span::raw("█"),
-            ]),
-        ]);
-        let input = Paragraph::new(input_text)
-            .block(Block::default().borders(Borders::TOP).title(" Input (Enter=send, Esc=cancel, Ctrl+C=quit) "));
+        let input_text = Text::from(vec![Line::from(vec![
+            Span::styled(
+                "> ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(&self.input),
+            Span::raw("█"),
+        ])]);
+        let input = Paragraph::new(input_text).block(
+            Block::default()
+                .borders(Borders::TOP)
+                .title(" Input (Enter=send, Esc=cancel, Ctrl+C=quit) "),
+        );
         f.render_widget(input, area);
     }
 }

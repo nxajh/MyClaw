@@ -60,8 +60,6 @@ pub fn identify_breakpoint(messages: &[ChatMessage]) -> Vec<BreakpointItem> {
 pub fn detect_incomplete_turn(messages: &[ChatMessage]) -> bool {
     messages
         .last()
-        .map(|m| {
-            m.role == "assistant" && m.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty())
-        })
+        .map(|m| m.role == "assistant" && m.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty()))
         .unwrap_or(false)
 }

@@ -13,11 +13,15 @@ mod model;
 mod reload;
 mod session;
 
-pub use config::{cmd_config, cmd_settings, cmd_autonomy};
-pub use info::{cmd_help, cmd_status, cmd_tools, cmd_context, cmd_mcp, cmd_skill, cmd_btw, cmd_export};
+pub use config::{cmd_autonomy, cmd_config, cmd_settings};
+pub use info::{
+    cmd_btw, cmd_context, cmd_export, cmd_help, cmd_mcp, cmd_skill, cmd_status, cmd_tools,
+};
 pub use model::{cmd_model, cmd_models, cmd_think};
-pub use reload::{cmd_stop, cmd_reload};
-pub use session::{cmd_new, cmd_compact, cmd_history, cmd_sessions, cmd_switch, cmd_rename, cmd_delete};
+pub use reload::{cmd_reload, cmd_stop};
+pub use session::{
+    cmd_compact, cmd_delete, cmd_history, cmd_new, cmd_rename, cmd_sessions, cmd_switch,
+};
 
 /// Context available to all command handlers.
 pub struct CommandContext<'a> {
@@ -59,35 +63,35 @@ pub fn parse_command(content: &str) -> Option<(&str, &str)> {
 /// Used by the WebUI to power slash-command autocomplete.
 pub fn command_catalog() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("help",      "Show available commands"),
-        ("status",    "Show current session status"),
-        ("new",       "Start a new session"),
-        ("reset",     "Reset the current session"),
-        ("compact",   "Compact conversation history"),
-        ("model",     "Set the active model"),
-        ("models",    "List available models"),
-        ("stop",      "Stop the daemon"),
-        ("tools",     "List available tools"),
-        ("config",    "View or set config options"),
-        ("think",     "Set thinking budget"),
-        ("autonomy",  "Set autonomy level"),
-        ("settings",  "Show current settings"),
-        ("mcp",       "MCP server status"),
-        ("context",   "Show context window usage"),
-        ("btw",       "Add a background note"),
-        ("export",    "Export conversation history"),
-        ("history",   "Show conversation history"),
-        ("skills",    "List loaded skills"),
-        ("skill",     "List loaded skills"),
-        ("reload",    "Reload skills and config"),
-        ("sessions",  "List all sessions"),
-        ("ss",        "List all sessions"),
-        ("switch",    "Switch to a session"),
-        ("sw",        "Switch to a session"),
-        ("rename",    "Rename a session"),
-        ("rn",        "Rename a session"),
-        ("delete",    "Delete a session"),
-        ("del",       "Delete a session"),
+        ("help", "Show available commands"),
+        ("status", "Show current session status"),
+        ("new", "Start a new session"),
+        ("reset", "Reset the current session"),
+        ("compact", "Compact conversation history"),
+        ("model", "Set the active model"),
+        ("models", "List available models"),
+        ("stop", "Stop the daemon"),
+        ("tools", "List available tools"),
+        ("config", "View or set config options"),
+        ("think", "Set thinking budget"),
+        ("autonomy", "Set autonomy level"),
+        ("settings", "Show current settings"),
+        ("mcp", "MCP server status"),
+        ("context", "Show context window usage"),
+        ("btw", "Add a background note"),
+        ("export", "Export conversation history"),
+        ("history", "Show conversation history"),
+        ("skills", "List loaded skills"),
+        ("skill", "List loaded skills"),
+        ("reload", "Reload skills and config"),
+        ("sessions", "List all sessions"),
+        ("ss", "List all sessions"),
+        ("switch", "Switch to a session"),
+        ("sw", "Switch to a session"),
+        ("rename", "Rename a session"),
+        ("rn", "Rename a session"),
+        ("delete", "Delete a session"),
+        ("del", "Delete a session"),
     ]
 }
 
@@ -98,29 +102,37 @@ pub fn command_catalog() -> Vec<(&'static str, &'static str)> {
 pub fn is_known_command(cmd: &str) -> bool {
     matches!(
         cmd,
-        "help" | "h" | "?"
-        | "status"
-        | "new" | "reset"
-        | "compact"
-        | "model"
-        | "models"
-        | "stop"
-        | "tools"
-        | "config"
-        | "think"
-        | "autonomy"
-        | "settings"
-        | "mcp"
-        | "context"
-        | "btw"
-        | "export"
-        | "history"
-        | "skills" | "skill"
-        | "reload"
-        | "sessions" | "ss"
-        | "switch" | "sw"
-        | "rename" | "rn"
-        | "delete" | "del"
+        "help"
+            | "h"
+            | "?"
+            | "status"
+            | "new"
+            | "reset"
+            | "compact"
+            | "model"
+            | "models"
+            | "stop"
+            | "tools"
+            | "config"
+            | "think"
+            | "autonomy"
+            | "settings"
+            | "mcp"
+            | "context"
+            | "btw"
+            | "export"
+            | "history"
+            | "skills"
+            | "skill"
+            | "reload"
+            | "sessions"
+            | "ss"
+            | "switch"
+            | "sw"
+            | "rename"
+            | "rn"
+            | "delete"
+            | "del"
     )
 }
 
@@ -169,7 +181,8 @@ pub async fn dispatch(cmd: &str, args: &str, ctx: CommandContext<'_>) -> Option<
 /// queued task acquires the lock.
 pub(super) async fn apply_and_persist_override(ov: SessionOverride, ctx: &CommandContext<'_>) {
     // Persist via session_manager (updates cache + disk).
-    ctx.session_manager.save_session_override(ctx.user_id, ov.clone());
+    ctx.session_manager
+        .save_session_override(ctx.user_id, ov.clone());
 
     // Also update the live SessionContext if one is active.
     if let Some(session_ctx) = ctx.session_ctx {
@@ -191,7 +204,9 @@ pub(super) async fn apply_and_persist_override(ov: SessionOverride, ctx: &Comman
 /// live state); if the session lock is held by a running turn, falls
 /// through to the SessionManager cache (slightly stale, but never
 /// blocks the command for the LLM-call duration).
-pub(super) async fn get_history(ctx: &CommandContext<'_>) -> Option<Vec<crate::providers::ChatMessage>> {
+pub(super) async fn get_history(
+    ctx: &CommandContext<'_>,
+) -> Option<Vec<crate::providers::ChatMessage>> {
     if let Some(session_ctx) = ctx.session_ctx {
         if let Ok(session) = session_ctx.session.try_lock() {
             if !session.history.is_empty() {

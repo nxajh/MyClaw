@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
+use super::backend::PersistHook;
+use super::session_override::SessionOverride;
 use crate::agents::tokens::TokenTracker;
 use crate::channels::{Channel, ChannelMessage, TurnStream};
 use crate::providers::capability_chat::ChatMessage;
-use super::backend::PersistHook;
-use super::session_override::SessionOverride;
 
 /// Summary metadata stored in Session memory (no text parsing needed).
 #[derive(Debug, Clone)]
@@ -209,11 +209,7 @@ impl Session {
     /// text. Media parts are placed first, then a trailing `Text` part, matching
     /// the ordering most chat protocols expect. Mirrors [`Session::add_user`]:
     /// pushes the message and an unassigned (`0`) message-id slot.
-    pub fn add_user_with_media(
-        &mut self,
-        text: String,
-        media: Vec<crate::providers::ContentPart>,
-    ) {
+    pub fn add_user_with_media(&mut self, text: String, media: Vec<crate::providers::ContentPart>) {
         use crate::providers::ContentPart;
         let mut parts = media;
         parts.push(ContentPart::Text { text });
@@ -276,7 +272,13 @@ impl Session {
         // `Field required` 400.
         if let Some(thinking) = thinking {
             use crate::providers::ContentPart;
-            msg.parts.insert(0, ContentPart::Thinking { thinking, signature: thinking_signature });
+            msg.parts.insert(
+                0,
+                ContentPart::Thinking {
+                    thinking,
+                    signature: thinking_signature,
+                },
+            );
         }
         self.history.push(msg);
         self.message_ids.push(0);

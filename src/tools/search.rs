@@ -1,7 +1,7 @@
 //! Search tools: glob (file name) and content (regex) search.
 
-use async_trait::async_trait;
 use crate::providers::{Tool, ToolResult};
+use async_trait::async_trait;
 use serde_json::json;
 use std::path::Path;
 
@@ -68,7 +68,11 @@ fn walk_dir(dir: &Path, results: &mut Vec<String>, max: usize) -> std::io::Resul
         if path.is_dir() {
             // Skip hidden and common non-project dirs.
             let name = path.file_name().unwrap_or_default().to_string_lossy();
-            if name.starts_with('.') || name == "target" || name == "node_modules" || name == "__pycache__" {
+            if name.starts_with('.')
+                || name == "target"
+                || name == "node_modules"
+                || name == "__pycache__"
+            {
                 continue;
             }
             walk_dir(&path, results, max)?;
@@ -113,7 +117,11 @@ impl Tool for GlobSearchTool {
         3_000
     }
 
-    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _session: &crate::agents::session::Session,
+    ) -> anyhow::Result<ToolResult> {
         let pattern = args["pattern"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'pattern' is required"))?;
@@ -136,7 +144,8 @@ impl Tool for GlobSearchTool {
         walk_dir(base, &mut files, 1000)?;
 
         // Match against relative paths from base.
-        let matches: Vec<String> = files.iter()
+        let matches: Vec<String> = files
+            .iter()
             .filter_map(|f| {
                 let rel = Path::new(f).strip_prefix(base).ok()?;
                 let rel_str = rel.to_string_lossy();
@@ -150,7 +159,11 @@ impl Tool for GlobSearchTool {
 
         let truncated = matches.len() > 500;
         let output = if matches.is_empty() {
-            format!("no files matching '{}' found in {}", pattern, base.display())
+            format!(
+                "no files matching '{}' found in {}",
+                pattern,
+                base.display()
+            )
         } else {
             let display: Vec<&str> = matches.iter().take(500).map(|s| s.as_str()).collect();
             let mut out = format!("{} files found:\n", matches.len());
@@ -194,7 +207,11 @@ fn search_in_file(path: &Path, re: &regex::Regex, max_lines: usize) -> Option<Ve
             }
         }
     }
-    if results.is_empty() { None } else { Some(results) }
+    if results.is_empty() {
+        None
+    } else {
+        Some(results)
+    }
 }
 
 #[async_trait]
@@ -236,7 +253,11 @@ impl Tool for ContentSearchTool {
         3_000
     }
 
-    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _session: &crate::agents::session::Session,
+    ) -> anyhow::Result<ToolResult> {
         let pattern = args["regex"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'regex' is required"))?;
@@ -256,7 +277,8 @@ impl Tool for ContentSearchTool {
                 .replace('{', "(")
                 .replace('}', ")")
                 .replace(',', "|");
-            regex::Regex::new(&format!("^{}$", regexified)).unwrap_or_else(|_| regex::Regex::new(".*").unwrap())
+            regex::Regex::new(&format!("^{}$", regexified))
+                .unwrap_or_else(|_| regex::Regex::new(".*").unwrap())
         });
 
         let base = Path::new(base);

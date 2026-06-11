@@ -36,13 +36,18 @@ impl McpManager {
     /// Connect to all configured MCP servers and build tool wrappers.
     ///
     /// This is idempotent: calling it twice will reconnect.
-    pub async fn connect(&self, configs: &[crate::config::mcp::McpServerConfig]) -> anyhow::Result<()> {
+    pub async fn connect(
+        &self,
+        configs: &[crate::config::mcp::McpServerConfig],
+    ) -> anyhow::Result<()> {
         tracing::info!(count = configs.len(), "MCP manager connecting to servers");
 
         // Convert from config::mcp::McpServerConfig (user-facing) to
         // mcp::config_types::McpServerConfig (the one McpRegistry understands).
-        let registry_configs: Vec<crate::mcp::config_types::McpServerConfig> =
-            configs.iter().map(crate::mcp::config_types::McpServerConfig::from).collect();
+        let registry_configs: Vec<crate::mcp::config_types::McpServerConfig> = configs
+            .iter()
+            .map(crate::mcp::config_types::McpServerConfig::from)
+            .collect();
 
         let registry = crate::mcp::McpRegistry::connect_all(&registry_configs).await?;
 
@@ -70,12 +75,10 @@ impl McpManager {
             *tools_lock = wrappers;
         }
 
-        self.server_count.store(connected_count, std::sync::atomic::Ordering::Relaxed);
+        self.server_count
+            .store(connected_count, std::sync::atomic::Ordering::Relaxed);
 
-        tracing::debug!(
-            wrapped_tools = wrapped_count,
-            "MCP tool wrappers built"
-        );
+        tracing::debug!(wrapped_tools = wrapped_count, "MCP tool wrappers built");
 
         Ok(())
     }
@@ -180,7 +183,9 @@ mod tests {
     #[tokio::test]
     async fn connect_empty_is_connected_but_empty() {
         let mgr = McpManager::new();
-        mgr.connect(&[]).await.expect("connect with empty config must succeed");
+        mgr.connect(&[])
+            .await
+            .expect("connect with empty config must succeed");
         assert!(mgr.is_connected().await);
         assert_eq!(mgr.server_count().await, 0);
         assert!(mgr.tools().await.is_empty());

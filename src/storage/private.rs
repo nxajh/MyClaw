@@ -81,7 +81,14 @@ impl Memory for PrivateMemory {
         until: Option<&str>,
     ) -> anyhow::Result<Vec<MemoryEntry>> {
         self.inner
-            .recall_namespaced(&self.namespace(), query, limit, Some(&self.session_id), since, until)
+            .recall_namespaced(
+                &self.namespace(),
+                query,
+                limit,
+                Some(&self.session_id),
+                since,
+                until,
+            )
             .await
     }
 
@@ -95,10 +102,7 @@ impl Memory for PrivateMemory {
         category: Option<&MemoryCategory>,
         _session_id: Option<&str>,
     ) -> anyhow::Result<Vec<MemoryEntry>> {
-        let entries = self
-            .inner
-            .list(category, Some(&self.session_id))
-            .await?;
+        let entries = self.inner.list(category, Some(&self.session_id)).await?;
         let ns = self.namespace();
         Ok(entries.into_iter().filter(|e| e.namespace == ns).collect())
     }

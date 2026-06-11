@@ -11,9 +11,7 @@
 
 use async_trait::async_trait;
 
-use crate::providers::{
-    BoxStream, ChatProvider, ChatRequest, StreamEvent,
-};
+use crate::providers::{BoxStream, ChatProvider, ChatRequest, StreamEvent};
 
 const DEFAULT_BASE_URL: &str = "https://api.moonshot.cn";
 

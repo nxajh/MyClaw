@@ -22,11 +22,11 @@ pub fn parse_cron_file(path: &Path) -> anyhow::Result<CronJob> {
     let content = std::fs::read_to_string(path)?;
     let (front_matter, body) = parse_front_matter(&content);
 
-    let schedule = extract_yaml_string(&front_matter, "schedule")
-        .ok_or_else(|| anyhow::anyhow!("missing 'schedule' in front matter of {}", path.display()))?;
+    let schedule = extract_yaml_string(&front_matter, "schedule").ok_or_else(|| {
+        anyhow::anyhow!("missing 'schedule' in front matter of {}", path.display())
+    })?;
 
-    let target = extract_yaml_string(&front_matter, "target")
-        .unwrap_or_else(|| "last".to_string());
+    let target = extract_yaml_string(&front_matter, "target").unwrap_or_else(|| "last".to_string());
 
     let prompt = body.trim().to_string();
 

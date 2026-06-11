@@ -1,12 +1,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::agent::PermissionMode;
-use crate::providers::ToolCall;
-use crate::providers::capability_tool::ToolResult;
 use super::session::Session;
 use super::tokens::is_write_tool;
 use super::tool_registry::ToolRegistry;
+use crate::config::agent::PermissionMode;
+use crate::providers::ToolCall;
+use crate::providers::capability_tool::ToolResult;
 
 /// Executes tool calls on behalf of `Agent::run`.
 ///
@@ -61,7 +61,8 @@ impl ToolExecutor {
             .find(|t| t.spec().name == call.name)
             .ok_or_else(|| anyhow::anyhow!("Unknown tool: '{}'", call.name))?;
         let args = parse_tool_args(&call.arguments);
-        self.run_tool(tool.as_ref(), &call.name, args, session).await
+        self.run_tool(tool.as_ref(), &call.name, args, session)
+            .await
     }
 
     /// Execute a tool with timeout and framework-level output truncation.
@@ -76,11 +77,13 @@ impl ToolExecutor {
             let timeout = Duration::from_secs(self.timeout_secs);
             tokio::time::timeout(timeout, tool.execute(args, session))
                 .await
-                .unwrap_or_else(|_| Ok(ToolResult {
-                    success: false,
-                    output: format!("Tool '{}' timed out after {}s", name, self.timeout_secs),
-                    error: Some("timeout".to_string()),
-                }))?
+                .unwrap_or_else(|_| {
+                    Ok(ToolResult {
+                        success: false,
+                        output: format!("Tool '{}' timed out after {}s", name, self.timeout_secs),
+                        error: Some("timeout".to_string()),
+                    })
+                })?
         } else {
             // No timeout: either disabled globally, or a human-blocking tool
             // (`ask_user`) whose wait is bounded by a real reply / interruption,
@@ -103,14 +106,11 @@ impl ToolExecutor {
     }
 }
 
-
 pub(crate) fn parse_tool_args(arguments: &str) -> serde_json::Value {
     if arguments.is_empty() {
         serde_json::Value::Object(serde_json::Map::new())
     } else {
-        serde_json::from_str(arguments).unwrap_or_else(|_| {
-            serde_json::json!({ "raw": arguments })
-        })
+        serde_json::from_str(arguments).unwrap_or_else(|_| serde_json::json!({ "raw": arguments }))
     }
 }
 
@@ -128,25 +128,38 @@ impl MemoryToolExecutor {
     /// summarizer request still advertises the *full* tool list (for prefix-cache
     /// matching with the main request); this allow-list is the actual gate —
     /// any other tool call is blocked with an error result.
-    const ALLOWED: &'static [&'static str] =
-        &["file_read", "file_write", "file_edit", "shell", "memory_manage"];
+    const ALLOWED: &'static [&'static str] = &[
+        "file_read",
+        "file_write",
+        "file_edit",
+        "shell",
+        "memory_manage",
+    ];
 
     pub(crate) fn new(tools: Arc<ToolRegistry>) -> Self {
         Self { tools }
     }
 
-    pub(crate) async fn execute(&self, call: &ToolCall, session: &Session) -> anyhow::Result<ToolResult> {
+    pub(crate) async fn execute(
+        &self,
+        call: &ToolCall,
+        session: &Session,
+    ) -> anyhow::Result<ToolResult> {
         if !Self::ALLOWED.contains(&call.name.as_str()) {
             tracing::warn!(tool = %call.name, "summarizer tried to call restricted tool, blocking");
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some(format!("tool '{}' not available during compaction summarization", call.name)),
+                error: Some(format!(
+                    "tool '{}' not available during compaction summarization",
+                    call.name
+                )),
             });
         }
-        let tool = self.tools.get(&call.name).ok_or_else(|| {
-            anyhow::anyhow!("tool '{}' not found in registry", call.name)
-        })?;
+        let tool = self
+            .tools
+            .get(&call.name)
+            .ok_or_else(|| anyhow::anyhow!("tool '{}' not found in registry", call.name))?;
         let args = parse_tool_args(&call.arguments);
         tool.execute(args, session).await
     }

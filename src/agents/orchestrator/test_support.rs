@@ -40,7 +40,12 @@ impl MockChannel {
     }
     /// The fallback text of every message sent so far.
     pub(crate) fn texts(&self) -> Vec<String> {
-        self.sent.lock().unwrap().iter().map(|m| m.content.clone()).collect()
+        self.sent
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|m| m.content.clone())
+            .collect()
     }
 }
 
@@ -119,9 +124,7 @@ fn test_runtime() -> AgentRuntime {
 
 /// Build an `OrchestratorCtx` over an in-memory SessionManager, a fresh
 /// AskRouter, and the given channels (keyed by `(channel_type, account_id)`).
-pub(crate) fn test_ctx(
-    channels: Vec<((String, String), Arc<dyn Channel>)>,
-) -> OrchestratorCtx {
+pub(crate) fn test_ctx(channels: Vec<((String, String), Arc<dyn Channel>)>) -> OrchestratorCtx {
     let registry = ChannelRegistry::new();
     for (k, ch) in channels {
         registry.insert(k, ch);
@@ -149,5 +152,6 @@ pub(crate) fn inbound_msg(sender: &str, content: &str) -> ChannelMessage {
         attachments: Vec::new(),
         image_urls: None,
         image_base64: None,
+        files: Vec::new(),
     }
 }

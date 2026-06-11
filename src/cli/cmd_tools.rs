@@ -57,9 +57,15 @@ fn list_tools(format: &str) -> Result<()> {
     ];
 
     match format {
-        "json" => println!("{}", serde_json::to_string_pretty(
-            &tools.iter().map(|(n, d)| serde_json::json!({"name": n, "description": d})).collect::<Vec<_>>()
-        )?),
+        "json" => println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &tools
+                    .iter()
+                    .map(|(n, d)| serde_json::json!({"name": n, "description": d}))
+                    .collect::<Vec<_>>()
+            )?
+        ),
         _ => {
             println!("📋 Built-in Tools ({} available)\n", tools.len());
             for (name, desc) in &tools {
@@ -75,10 +81,15 @@ fn list_agents(cli: &Cli, format: &str) -> Result<()> {
 
     match format {
         "json" => {
-            let agents: Vec<String> = cfg.as_ref()
+            let agents: Vec<String> = cfg
+                .as_ref()
                 .map(|c| {
-                    myclaw::agents::agent_loader::load_agents_from_dir(&c.workspace_dir.join("agents"))
-                        .into_iter().map(|a| a.name).collect()
+                    myclaw::agents::agent_loader::load_agents_from_dir(
+                        &c.workspace_dir.join("agents"),
+                    )
+                    .into_iter()
+                    .map(|a| a.name)
+                    .collect()
                 })
                 .unwrap_or_default();
             println!("{}", serde_json::to_string_pretty(&agents)?);
@@ -86,7 +97,9 @@ fn list_agents(cli: &Cli, format: &str) -> Result<()> {
         _ => {
             println!("🤖 Configured Sub-Agents\n");
             if let Some(cfg) = cfg {
-                let agents = myclaw::agents::agent_loader::load_agents_from_dir(&cfg.workspace_dir.join("agents"));
+                let agents = myclaw::agents::agent_loader::load_agents_from_dir(
+                    &cfg.workspace_dir.join("agents"),
+                );
                 if agents.is_empty() {
                     println!("  (none configured — add AGENT.md files to workspace/agents/)");
                 }
@@ -107,7 +120,10 @@ fn list_mcp(cli: &Cli, format: &str) -> Result<()> {
 
     match format {
         "json" => {
-            let servers: Vec<_> = cfg.as_ref().map(|c| c.mcp_servers.iter().map(|s| &s.name).collect()).unwrap_or_default();
+            let servers: Vec<_> = cfg
+                .as_ref()
+                .map(|c| c.mcp_servers.iter().map(|s| &s.name).collect())
+                .unwrap_or_default();
             println!("{}", serde_json::to_string_pretty(&servers)?);
         }
         _ => {

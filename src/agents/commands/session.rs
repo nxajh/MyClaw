@@ -4,7 +4,11 @@ use super::CommandContext;
 use super::get_history;
 
 pub async fn cmd_new(args: &str, ctx: CommandContext<'_>) -> String {
-    let name = if args.trim().is_empty() { None } else { Some(args.trim()) };
+    let name = if args.trim().is_empty() {
+        None
+    } else {
+        Some(args.trim())
+    };
     // Evict cached SessionContext so the next message creates fresh
     // state for the new session.
     ctx.session_manager.drop_context(ctx.user_id);
@@ -22,7 +26,10 @@ pub async fn cmd_compact(ctx: CommandContext<'_>) -> String {
         Some(c) => c,
         None => return "ℹ️ 当前没有活跃会话，无需压缩。".to_string(),
     };
-    let model_id = match ctx.registry.get_chat_provider(crate::providers::Capability::Chat) {
+    let model_id = match ctx
+        .registry
+        .get_chat_provider(crate::providers::Capability::Chat)
+    {
         Ok((_, id)) => id,
         Err(e) => return format!("❌ 无法获取当前模型: {}", e),
     };
@@ -40,12 +47,16 @@ pub async fn cmd_compact(ctx: CommandContext<'_>) -> String {
     // Build the system prompt once for both the token seed + the
     // compaction request — must match what Agent.run uses so the
     // summarizer hits the prefix cache.
-    let system_prompt = ctx.runtime.build_system_prompt(&ctx.runtime.defaults.prompt);
+    let system_prompt = ctx
+        .runtime
+        .build_system_prompt(&ctx.runtime.defaults.prompt);
 
     // Seed Session.token_tracker so we have a baseline for the post-compaction display.
     if session.token_tracker.is_fresh() {
         let history_snap = session.history.clone();
-        session.token_tracker.seed_from_history(system_prompt.as_str(), &history_snap);
+        session
+            .token_tracker
+            .seed_from_history(system_prompt.as_str(), &history_snap);
     }
 
     let cfg = match ctx.registry.get_chat_model_config(&model_id) {
@@ -58,43 +69,60 @@ pub async fn cmd_compact(ctx: CommandContext<'_>) -> String {
     };
 
     let sys_tokens = (system_prompt.len() as u64).div_ceil(4);
-    let tool_tokens: u64 = ctx.runtime.tools.all_tools().iter().map(|t| {
-        let spec = t.spec();
-        let schema = spec.parameters.to_string();
-        (spec.name.len() as u64).div_ceil(4)
-            + (spec.description.len() as u64).div_ceil(4)
-            + (schema.len() as u64).div_ceil(4)
-            + 8
-    }).sum();
+    let tool_tokens: u64 = ctx
+        .runtime
+        .tools
+        .all_tools()
+        .iter()
+        .map(|t| {
+            let spec = t.spec();
+            let schema = spec.parameters.to_string();
+            (spec.name.len() as u64).div_ceil(4)
+                + (spec.description.len() as u64).div_ceil(4)
+                + (schema.len() as u64).div_ceil(4)
+                + 8
+        })
+        .sum();
 
-    let boundary = match engine.compaction_boundary(&session.history, window, sys_tokens, tool_tokens) {
-        Some(b) => b,
-        None => return "ℹ️ 历史不足以压缩。".to_string(),
-    };
+    let boundary =
+        match engine.compaction_boundary(&session.history, window, sys_tokens, tool_tokens) {
+            Some(b) => b,
+            None => return "ℹ️ 历史不足以压缩。".to_string(),
+        };
 
     let history_snap: Vec<crate::providers::ChatMessage> = session.history.clone();
-    match engine.execute_compaction(
-        &history_snap,
-        system_prompt.as_str(),
-        &ctx.runtime.tools.all_tools().iter().map(|t| {
-            let s = t.spec();
-            crate::providers::capability_chat::ToolSpec {
-                name: s.name,
-                description: Some(s.description),
-                input_schema: s.parameters,
-            }
-        }).collect::<Vec<_>>(),
-        boundary,
-        &model_id,
-        &session,
-    ).await {
+    match engine
+        .execute_compaction(
+            &history_snap,
+            system_prompt.as_str(),
+            &ctx.runtime
+                .tools
+                .all_tools()
+                .iter()
+                .map(|t| {
+                    let s = t.spec();
+                    crate::providers::capability_chat::ToolSpec {
+                        name: s.name,
+                        description: Some(s.description),
+                        input_schema: s.parameters,
+                    }
+                })
+                .collect::<Vec<_>>(),
+            boundary,
+            &model_id,
+            &session,
+        )
+        .await
+    {
         Ok(result) => {
             let version = session.compact_version + 1;
             let summary_prefix = "[CONTEXT COMPACTION — REFERENCE ONLY] ";
-            let summary_msg = crate::providers::ChatMessage::user_text(
-                format!("{}{}", summary_prefix, result.summary)
-            );
-            let last_compacted_id = session.message_ids
+            let summary_msg = crate::providers::ChatMessage::user_text(format!(
+                "{}{}",
+                summary_prefix, result.summary
+            ));
+            let last_compacted_id = session
+                .message_ids
                 .get(boundary.saturating_sub(1))
                 .copied()
                 .unwrap_or(0);
@@ -106,17 +134,22 @@ pub async fn cmd_compact(ctx: CommandContext<'_>) -> String {
                 last_compacted_id,
                 result.summary_tokens,
             );
-            session.token_tracker.adjust_for_compaction(result.removed_tokens, result.summary_tokens);
+            session
+                .token_tracker
+                .adjust_for_compaction(result.removed_tokens, result.summary_tokens);
             // Persist compaction to disk (same as maybe_compact in agent.rs).
             if let Some(ref hook) = session.persist {
-                hook.save_compaction(&session.id, &crate::storage::SummaryRecord {
-                    id: 0,
-                    version,
-                    summary: result.summary.clone(),
-                    up_to_message: last_compacted_id,
-                    token_estimate: Some(result.summary_tokens),
-                    created_at: chrono::Utc::now(),
-                });
+                hook.save_compaction(
+                    &session.id,
+                    &crate::storage::SummaryRecord {
+                        id: 0,
+                        version,
+                        summary: result.summary.clone(),
+                        up_to_message: last_compacted_id,
+                        token_estimate: Some(result.summary_tokens),
+                        created_at: chrono::Utc::now(),
+                    },
+                );
                 let surviving: Vec<(i64, crate::providers::ChatMessage)> = session
                     .message_ids
                     .iter()
@@ -179,7 +212,8 @@ pub async fn cmd_history(ctx: CommandContext<'_>) -> String {
             if tool_calls.is_empty() {
                 "(无文本)".to_string()
             } else {
-                tool_calls.iter()
+                tool_calls
+                    .iter()
                     .map(|tc| {
                         let args = truncate(&tc.arguments, 50);
                         format!("🔧{}({})", tc.name, args)
@@ -205,11 +239,21 @@ pub fn cmd_sessions(ctx: CommandContext<'_>) -> String {
 
     let mut lines = vec!["📂 **会话列表**  \n\n".to_string()];
     for (i, s) in sessions.iter().enumerate() {
-        let marker = if active_id.as_deref() == Some(&s.id) { " ← 当前" } else { "" };
+        let marker = if active_id.as_deref() == Some(&s.id) {
+            " ← 当前"
+        } else {
+            ""
+        };
         let name = s.display_name.as_deref().unwrap_or("(未命名)");
         let msg_count = s.message_count;
-        lines.push(format!("{}. **{}**{} — {}条消息 — `{}`",
-            i + 1, name, marker, msg_count, s.id));
+        lines.push(format!(
+            "{}. **{}**{} — {}条消息 — `{}`",
+            i + 1,
+            name,
+            marker,
+            msg_count,
+            s.id
+        ));
     }
     lines.push("\n---\n_/new [名称] — 新建 | /switch <N> — 切换 | /rename <N> <名称> — 重命名 | /delete <N> — 删除_".to_string());
     lines.join("  \n")

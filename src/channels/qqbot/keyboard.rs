@@ -77,12 +77,18 @@ impl Keyboard {
                 group_id: None,
             });
             if current_row.len() >= 5 {
-                rows.push(ButtonRow { buttons: std::mem::take(&mut current_row) });
+                rows.push(ButtonRow {
+                    buttons: std::mem::take(&mut current_row),
+                });
             }
         }
         if !current_row.is_empty() {
-            rows.push(ButtonRow { buttons: current_row });
+            rows.push(ButtonRow {
+                buttons: current_row,
+            });
         }
-        Self { content: KeyboardContent { rows } }
+        Self {
+            content: KeyboardContent { rows },
+        }
     }
 }

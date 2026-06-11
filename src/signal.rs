@@ -21,10 +21,7 @@ pub fn find_daemon_pid() -> Result<i32> {
     let pid_file = pid_file_path();
     if pid_file.exists() {
         let pid_str = std::fs::read_to_string(&pid_file)?;
-        let pid: i32 = pid_str
-            .trim()
-            .parse()
-            .context("invalid PID in pid file")?;
+        let pid: i32 = pid_str.trim().parse().context("invalid PID in pid file")?;
         return Ok(pid);
     }
 

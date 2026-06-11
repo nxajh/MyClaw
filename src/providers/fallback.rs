@@ -13,12 +13,12 @@ pub const CHAIN_EXHAUSTED_TAG: &str = "fallback_chain_exhausted";
 /// currently on cooldown and none was attempted.
 pub const CHAIN_ALL_COOLING_TAG: &str = "fallback_chain_all_cooling";
 
-use async_trait::async_trait;
-use crate::providers::{
-    BoxStream, ChatProvider, ChatRequest, ChatMessage, StreamEvent, ChatToolSpec,
-    ThinkingConfig, ClassifiedError, ErrorCategory,
-};
 use crate::providers::credential_pool::SharedCredentialPool;
+use crate::providers::{
+    BoxStream, ChatMessage, ChatProvider, ChatRequest, ChatToolSpec, ClassifiedError,
+    ErrorCategory, StreamEvent, ThinkingConfig,
+};
+use async_trait::async_trait;
 use futures_util::StreamExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -72,7 +72,10 @@ fn record_cooldown(
     classified: &ClassifiedError,
 ) {
     if let Some(d) = classified.cooldown_duration() {
-        cooldowns.lock().unwrap().insert(model_id.to_string(), Instant::now() + d);
+        cooldowns
+            .lock()
+            .unwrap()
+            .insert(model_id.to_string(), Instant::now() + d);
     }
 }
 
@@ -108,7 +111,8 @@ impl ChatProvider for FallbackChatProvider {
                     if let Some(&available_at) = cg.get(&entry.model_id) {
                         if Instant::now() < available_at {
                             soonest_cooling = Some(
-                                soonest_cooling.map_or(available_at, |s: Instant| s.min(available_at))
+                                soonest_cooling
+                                    .map_or(available_at, |s: Instant| s.min(available_at)),
                             );
                             tracing::info!(
                                 model = %entry.model_id,
@@ -166,12 +170,9 @@ impl ChatProvider for FallbackChatProvider {
                 while let Some(event) = inner_stream.next().await {
                     match &event {
                         StreamEvent::HttpError { status, message } => {
-                            let classified = ClassifiedError::classify(
-                                "fallback",
-                                *status,
-                                message,
-                            )
-                            .with_provider("fallback", &entry.model_id);
+                            let classified =
+                                ClassifiedError::classify("fallback", *status, message)
+                                    .with_provider("fallback", &entry.model_id);
                             tracing::warn!(
                                 model = %entry.model_id,
                                 status = *status,
@@ -254,9 +255,11 @@ impl ChatProvider for FallbackChatProvider {
                 let wait_secs = soonest_cooling
                     .map(|at| at.saturating_duration_since(Instant::now()).as_secs())
                     .unwrap_or(0);
-                let _ = tx.send(StreamEvent::Error(
-                    format!("{CHAIN_ALL_COOLING_TAG}: all providers on cooldown, retry in {wait_secs}s")
-                )).await;
+                let _ = tx
+                    .send(StreamEvent::Error(format!(
+                        "{CHAIN_ALL_COOLING_TAG}: all providers on cooldown, retry in {wait_secs}s"
+                    )))
+                    .await;
             } else {
                 // Tried at least one provider; all failed with retryable errors.
                 let _ = tx.send(StreamEvent::Error(

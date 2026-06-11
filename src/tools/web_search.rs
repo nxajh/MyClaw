@@ -5,12 +5,12 @@
 //! Supports per-provider cooldown: providers that recently failed with
 //! retryable errors are skipped until their cooldown expires.
 
-use async_trait::async_trait;
-use std::sync::Arc;
-use crate::providers::{ProviderRegistry, Tool, ToolResult};
 use crate::providers::search::SearchRequest;
+use crate::providers::{ProviderRegistry, Tool, ToolResult};
 use crate::tools::search_cooldown::{SearchProviderCooldown, parse_search_cooldown};
+use async_trait::async_trait;
 use serde_json::json;
+use std::sync::Arc;
 
 pub struct WebSearchTool {
     registry: Arc<dyn ProviderRegistry>,
@@ -54,7 +54,11 @@ impl Tool for WebSearchTool {
         5_000
     }
 
-    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _session: &crate::agents::session::Session,
+    ) -> anyhow::Result<ToolResult> {
         let query = args["query"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'query' is required"))?;
@@ -118,7 +122,11 @@ impl Tool for WebSearchTool {
                     }
 
                     // Format results into a readable text response.
-                    let mut output = format!("Search results for \"{}\" ({} found):\n\n", query, results.results.len());
+                    let mut output = format!(
+                        "Search results for \"{}\" ({} found):\n\n",
+                        query,
+                        results.results.len()
+                    );
                     for (i, result) in results.results.iter().enumerate() {
                         output.push_str(&format!("{}. {}\n", i + 1, result.title));
                         output.push_str(&format!("   URL: {}\n", result.url));
@@ -149,7 +157,8 @@ impl Tool for WebSearchTool {
                     // (e.g., non-HTTP errors), try parsing the raw error string directly.
                     if !self.cooldown.is_cooled_down(provider_name) {
                         if let Some(parsed) = parse_search_cooldown(&error_str) {
-                            self.cooldown.record_failure_with_cooldown(provider_name, parsed);
+                            self.cooldown
+                                .record_failure_with_cooldown(provider_name, parsed);
                         }
                     }
 
@@ -176,7 +185,9 @@ impl Tool for WebSearchTool {
             });
         }
 
-        let msg = last_error.map(|e| e.to_string()).unwrap_or_else(|| "unknown error".into());
+        let msg = last_error
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "unknown error".into());
         tracing::warn!("all search providers failed: {}", msg);
         Ok(ToolResult {
             success: false,

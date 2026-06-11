@@ -1,11 +1,11 @@
 //! SkillTool — LLM 通过此工具按需加载 skill 全文或辅助文件。
 
 use async_trait::async_trait;
+use parking_lot::RwLock;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 use crate::agents::SkillManager;
 use crate::providers::{Tool, ToolResult};
@@ -53,7 +53,11 @@ impl Tool for SkillTool {
         20_000
     }
 
-    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _session: &crate::agents::session::Session,
+    ) -> anyhow::Result<ToolResult> {
         let name = args["name"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'name' is required"))?;
@@ -72,7 +76,8 @@ impl Tool for SkillTool {
                         "error": format!("Skill '{}' not found.", name),
                         "available_skills": available,
                         "hint": "Use skills_list to see all available skills"
-                    }).to_string(),
+                    })
+                    .to_string(),
                     error: None,
                 });
             }
@@ -84,7 +89,8 @@ impl Tool for SkillTool {
                 output: json!({
                     "success": false,
                     "error": format!("Skill '{}' is not agent-invocable.", name)
-                }).to_string(),
+                })
+                .to_string(),
                 error: None,
             });
         }
@@ -100,7 +106,8 @@ impl Tool for SkillTool {
                             "name": name,
                             "content": "",
                             "message": "Skill has no instructions."
-                        }).to_string(),
+                        })
+                        .to_string(),
                         error: None,
                     });
                 }
@@ -108,11 +115,15 @@ impl Tool for SkillTool {
                 // Substitute ${SKILL_DIR} with the actual absolute path so
                 // the LLM sees concrete paths like /home/user/.myclaw/workspace/skills/foo/scripts/run.sh
                 // instead of having to guess or reconstruct the directory.
-                let rendered_content = skill.skill_dir.as_deref()
+                let rendered_content = skill
+                    .skill_dir
+                    .as_deref()
                     .map(|dir| substitute_template_vars(&skill.prompt_body, dir))
                     .unwrap_or_else(|| skill.prompt_body.clone());
 
-                let linked_files = skill.skill_dir.as_deref()
+                let linked_files = skill
+                    .skill_dir
+                    .as_deref()
                     .map(scan_skill_files)
                     .filter(|m| !m.is_empty());
 
@@ -134,7 +145,8 @@ impl Tool for SkillTool {
                         "skill_dir": skill.skill_dir.as_deref().map(|p| p.display().to_string()),
                         "linked_files": linked_files,
                         "usage_hint": usage_hint,
-                    }).to_string(),
+                    })
+                    .to_string(),
                     error: None,
                 })
             }
@@ -146,7 +158,8 @@ impl Tool for SkillTool {
                         output: json!({
                             "success": false,
                             "error": "Path traversal not allowed."
-                        }).to_string(),
+                        })
+                        .to_string(),
                         error: None,
                     });
                 }
@@ -159,7 +172,8 @@ impl Tool for SkillTool {
                             output: json!({
                                 "success": false,
                                 "error": "Skill has no directory (cannot read supporting files)."
-                            }).to_string(),
+                            })
+                            .to_string(),
                             error: None,
                         });
                     }
@@ -172,7 +186,8 @@ impl Tool for SkillTool {
                         output: json!({
                             "success": false,
                             "error": "Path traversal not allowed."
-                        }).to_string(),
+                        })
+                        .to_string(),
                         error: None,
                     });
                 }
@@ -186,7 +201,8 @@ impl Tool for SkillTool {
                             "error": format!("File '{}' not found in skill '{}'.", fp, name),
                             "available_files": available,
                             "hint": "Use one of the available file paths listed above"
-                        }).to_string(),
+                        })
+                        .to_string(),
                         error: None,
                     });
                 }
@@ -199,12 +215,14 @@ impl Tool for SkillTool {
                             "name": name,
                             "file": fp,
                             "content": text
-                        }).to_string(),
+                        })
+                        .to_string(),
                         error: None,
                     }),
                     Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
                         let size = target.metadata().map(|m| m.len()).unwrap_or(0);
-                        let ext = target.extension()
+                        let ext = target
+                            .extension()
                             .map(|e| e.to_string_lossy().to_string())
                             .unwrap_or_default();
                         Ok(ToolResult {
@@ -217,7 +235,8 @@ impl Tool for SkillTool {
                                 "is_binary": true,
                                 "file_type": ext,
                                 "file_size": size
-                            }).to_string(),
+                            })
+                            .to_string(),
                             error: None,
                         })
                     }
@@ -226,7 +245,8 @@ impl Tool for SkillTool {
                         output: json!({
                             "success": false,
                             "error": format!("Failed to read file: {}", e)
-                        }).to_string(),
+                        })
+                        .to_string(),
                         error: None,
                     }),
                 }
@@ -244,8 +264,11 @@ fn scan_skill_files(dir: &Path) -> HashMap<String, Vec<String>> {
         if d.exists() {
             let mut sub_files: Vec<String> = collect_files_recursive(&d)
                 .into_iter()
-                .filter_map(|p| p.strip_prefix(dir).ok()
-                    .map(|rel| rel.to_string_lossy().to_string()))
+                .filter_map(|p| {
+                    p.strip_prefix(dir)
+                        .ok()
+                        .map(|rel| rel.to_string_lossy().to_string())
+                })
                 .collect();
             if !sub_files.is_empty() {
                 sub_files.sort();
@@ -258,7 +281,9 @@ fn scan_skill_files(dir: &Path) -> HashMap<String, Vec<String>> {
 
 fn collect_files_recursive(dir: &Path) -> Vec<PathBuf> {
     let mut result = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else { return result };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return result;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -317,7 +342,13 @@ mod tests {
         mgr.register(make_skill("test", true));
         let tool = SkillTool::new(Arc::new(RwLock::new(mgr)));
 
-        let result = tool.execute(json!({"name": "test"}), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
+        let result = tool
+            .execute(
+                json!({"name": "test"}),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
         assert!(result.success);
         let v: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         assert_eq!(v["success"], true);
@@ -327,7 +358,13 @@ mod tests {
     #[tokio::test]
     async fn test_execute_unknown_skill() {
         let tool = SkillTool::new(Arc::new(RwLock::new(SkillManager::new())));
-        let result = tool.execute(json!({"name": "nonexistent"}), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
+        let result = tool
+            .execute(
+                json!({"name": "nonexistent"}),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
         assert!(!result.success);
         let v: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         assert_eq!(v["success"], false);
@@ -339,7 +376,13 @@ mod tests {
         mgr.register(make_skill("private", false));
         let tool = SkillTool::new(Arc::new(RwLock::new(mgr)));
 
-        let result = tool.execute(json!({"name": "private"}), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
+        let result = tool
+            .execute(
+                json!({"name": "private"}),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
         assert!(!result.success);
         let v: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         assert!(v["error"].as_str().unwrap().contains("not agent-invocable"));
@@ -351,7 +394,13 @@ mod tests {
         mgr.register(make_skill("test", true));
         let tool = SkillTool::new(Arc::new(RwLock::new(mgr)));
 
-        let result = tool.execute(json!({"name": "test", "file_path": "../../etc/passwd"}), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
+        let result = tool
+            .execute(
+                json!({"name": "test", "file_path": "../../etc/passwd"}),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
         assert!(!result.success);
         let v: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         assert!(v["error"].as_str().unwrap().contains("traversal"));

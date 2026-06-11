@@ -1,11 +1,11 @@
 //! SkillsListTool — 列出所有 skill 的元数据。
 
 use async_trait::async_trait;
+use parking_lot::RwLock;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 use crate::agents::SkillManager;
 use crate::providers::{Tool, ToolResult};
@@ -39,10 +39,15 @@ impl Tool for SkillsListTool {
         })
     }
 
-    async fn execute(&self, _args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        _session: &crate::agents::session::Session,
+    ) -> anyhow::Result<ToolResult> {
         let skills = self.skills.read();
 
-        let mut entries: Vec<serde_json::Value> = skills.skills_iter()
+        let mut entries: Vec<serde_json::Value> = skills
+            .skills_iter()
             .map(|(_, skill)| {
                 let mut entry = json!({
                     "name": skill.name,
@@ -75,7 +80,10 @@ impl Tool for SkillsListTool {
             .collect();
 
         entries.sort_by(|a, b| {
-            a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
+            a["name"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(b["name"].as_str().unwrap_or(""))
         });
 
         let count = entries.len();
@@ -100,8 +108,11 @@ fn scan_skill_files(dir: &Path) -> HashMap<String, Vec<String>> {
         if d.exists() {
             let mut sub_files: Vec<String> = collect_files_recursive(&d)
                 .into_iter()
-                .filter_map(|p| p.strip_prefix(dir).ok()
-                    .map(|rel| rel.to_string_lossy().to_string()))
+                .filter_map(|p| {
+                    p.strip_prefix(dir)
+                        .ok()
+                        .map(|rel| rel.to_string_lossy().to_string())
+                })
                 .collect();
             if !sub_files.is_empty() {
                 sub_files.sort();
@@ -114,7 +125,9 @@ fn scan_skill_files(dir: &Path) -> HashMap<String, Vec<String>> {
 
 fn collect_files_recursive(dir: &Path) -> Vec<PathBuf> {
     let mut result = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else { return result };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return result;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -150,7 +163,13 @@ mod tests {
     #[tokio::test]
     async fn test_empty_skills() {
         let tool = SkillsListTool::new(Arc::new(RwLock::new(SkillManager::new())));
-        let result = tool.execute(json!({}), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
+        let result = tool
+            .execute(
+                json!({}),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
         assert!(result.success);
         let v: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         assert_eq!(v["count"], 0);
@@ -164,7 +183,13 @@ mod tests {
         mgr.register(make_skill("alpha", "Alpha skill"));
         let tool = SkillsListTool::new(Arc::new(RwLock::new(mgr)));
 
-        let result = tool.execute(json!({}), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
+        let result = tool
+            .execute(
+                json!({}),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
         assert!(result.success);
         let v: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         assert_eq!(v["count"], 2);
@@ -182,7 +207,13 @@ mod tests {
         mgr.register(skill);
         let tool = SkillsListTool::new(Arc::new(RwLock::new(mgr)));
 
-        let result = tool.execute(json!({}), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
+        let result = tool
+            .execute(
+                json!({}),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         let entry = &v["skills"][0];
         assert_eq!(entry["agent_invocable"], false);

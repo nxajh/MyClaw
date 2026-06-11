@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use super::workspace::skills::SkillManager;
 use super::AgentRegistry;
+use super::workspace::skills::SkillManager;
 
 /// Hot-loadable shared resources, held in Arc for sharing between
 /// CompactionExecutor instances. Most fields are kept for future

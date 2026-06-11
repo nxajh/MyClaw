@@ -74,7 +74,9 @@ pub async fn run(cli: &Cli, action: ConfigAction) -> Result<()> {
             }
 
             // Sub-agents are loaded from workspace/agents/, not from config
-            let agents = myclaw::agents::agent_loader::load_agents_from_dir(&cfg.workspace_dir.join("agents"));
+            let agents = myclaw::agents::agent_loader::load_agents_from_dir(
+                &cfg.workspace_dir.join("agents"),
+            );
             if !agents.is_empty() {
                 println!("[[agents]] (from workspace/agents/)");
                 for agent in &agents {
@@ -87,7 +89,9 @@ pub async fn run(cli: &Cli, action: ConfigAction) -> Result<()> {
             }
         }
         ConfigAction::Get { path } => {
-            println!("⚠️  config get \"{path}\" — not yet implemented (AppConfig is not serde-serializable)");
+            println!(
+                "⚠️  config get \"{path}\" — not yet implemented (AppConfig is not serde-serializable)"
+            );
             println!("   Use `myclaw config show` to see the full resolved config.");
         }
         ConfigAction::Set { path, value } => {
@@ -145,5 +149,6 @@ storage = "sqlite"
 # [channels.telegram]
 # bot_token = "${TELEGRAM_BOT_TOKEN}"
 # allowed_users = ["*"]
-"#.to_string()
+"#
+    .to_string()
 }

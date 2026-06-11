@@ -63,7 +63,10 @@ pub fn detect_from_url(base_url: &str) -> Option<ProviderId> {
         Some(ProviderId::new(well_known::KIMI))
     } else if host.contains("googleapis.com") || host.contains("google.com") {
         Some(ProviderId::new(well_known::GOOGLE))
-    } else if host.contains("openai.com") || host.contains("deepseek") || host.contains("siliconflow") {
+    } else if host.contains("openai.com")
+        || host.contains("deepseek")
+        || host.contains("siliconflow")
+    {
         Some(ProviderId::new(well_known::OPENAI))
     } else {
         None

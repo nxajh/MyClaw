@@ -78,7 +78,8 @@ impl SkillManager {
 
     /// Iterate only agent-invocable skills (for attachment injection).
     pub fn agent_skills_iter(&self) -> impl Iterator<Item = (&str, &Skill)> {
-        self.skills.iter()
+        self.skills
+            .iter()
             .filter(|(_, s)| s.agent_invocable)
             .map(|(k, v)| (k.as_str(), v))
     }
@@ -103,7 +104,8 @@ impl SkillManager {
 
     /// Get all skill prompts (name, prompt_body) for system prompt injection.
     pub fn skill_prompts(&self) -> Vec<(&str, &str)> {
-        self.skills.values()
+        self.skills
+            .values()
             .filter(|s| !s.prompt_body.is_empty())
             .map(|s| (s.name.as_str(), s.prompt_body.as_str()))
             .collect()

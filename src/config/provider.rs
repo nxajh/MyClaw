@@ -8,12 +8,11 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 // Re-export new types from the canonical source.
-pub use crate::providers::capability::{
-    Capability, Modality,
-    ChatModelConfig, EmbeddingModelConfig, BasicModelConfig,
-    ChatPricing, EmbeddingPricing, BasicPricing,
-};
 pub use crate::providers::RotationStrategy;
+pub use crate::providers::capability::{
+    BasicModelConfig, BasicPricing, Capability, ChatModelConfig, ChatPricing, EmbeddingModelConfig,
+    EmbeddingPricing, Modality,
+};
 
 // ── Protocol ──────────────────────────────────────────────────────────────────
 
@@ -154,7 +153,9 @@ impl ProviderConfig {
     /// Returns `api_keys` if populated, otherwise falls back to `api_key` as a single-element vec.
     pub fn effective_api_keys(&self, capability_api_key: Option<&str>) -> Vec<String> {
         // Capability-level api_keys (not yet supported per-capability, use provider-level)
-        let provider_keys: Vec<String> = self.api_keys.iter()
+        let provider_keys: Vec<String> = self
+            .api_keys
+            .iter()
             .filter(|k| !k.is_empty())
             .cloned()
             .collect();

@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use super::{is_silent_ok, OrchestratorCtx};
+use super::{OrchestratorCtx, is_silent_ok};
 use crate::channels::ChannelMessage;
 
 /// Run a scheduled turn for `session_key` with `prompt`, forcing Background
@@ -26,16 +26,14 @@ pub(crate) async fn run_scheduled_turn(
     // every invocation so cron jobs that change `model` mid-stream are
     // honored on the next turn.
     let model_for_init = model_override.clone();
-    let session_ctx = orch.sessions.get_or_create_context_with(
-        session_key,
-        move |session| {
-            session.session_override.run_mode =
-                Some(crate::config::agent::RunMode::Background);
+    let session_ctx = orch
+        .sessions
+        .get_or_create_context_with(session_key, move |session| {
+            session.session_override.run_mode = Some(crate::config::agent::RunMode::Background);
             if let Some(m) = model_for_init {
                 session.session_override.model = Some(m);
             }
-        },
-    );
+        });
     if let Some(ref m) = model_override {
         let mut session = session_ctx.session.lock().await;
         session.session_override.model = Some(m.clone());
@@ -53,6 +51,7 @@ pub(crate) async fn run_scheduled_turn(
         timestamp: chrono::Utc::now().timestamp() as u64,
         thread_ts: None,
         interruption_scope_id: None,
+        files: vec![],
         attachments: Vec::new(),
         image_urls: None,
         image_base64: None,
@@ -120,17 +119,19 @@ pub(crate) async fn run_cron_task(orch: Arc<OrchestratorCtx>, trigger: super::Cr
 
     // Build run record and mark result in scheduler.
     let record = match &result {
-        Ok(response) => {
-            crate::agents::scheduling::cron_types::RunRecord::now(
-                crate::agents::scheduling::cron_types::RunStatus::Ok,
-            ).with_duration(duration_ms).with_output_preview(response)
-        }
+        Ok(response) => crate::agents::scheduling::cron_types::RunRecord::now(
+            crate::agents::scheduling::cron_types::RunStatus::Ok,
+        )
+        .with_duration(duration_ms)
+        .with_output_preview(response),
         Err(e) => {
             let err_str = e.to_string();
             tracing::warn!(session_key = %session_key, err = %err_str, "cron job failed");
             crate::agents::scheduling::cron_types::RunRecord::now(
                 crate::agents::scheduling::cron_types::RunStatus::Error,
-            ).with_duration(duration_ms).with_error(err_str)
+            )
+            .with_duration(duration_ms)
+            .with_error(err_str)
         }
     };
 
@@ -144,7 +145,13 @@ pub(crate) async fn run_cron_task(orch: Arc<OrchestratorCtx>, trigger: super::Cr
     // Send output to target channel (on success with non-empty output).
     if let Ok(ref response) = result {
         if !response.trim().is_empty() {
-            send_to_target_internal(&orch, target_channel.clone(), target_account.clone(), response).await;
+            send_to_target_internal(
+                &orch,
+                target_channel.clone(),
+                target_account.clone(),
+                response,
+            )
+            .await;
         }
     }
 

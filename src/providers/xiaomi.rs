@@ -17,10 +17,8 @@
 
 use async_trait::async_trait;
 
-use crate::providers::{
-    BoxStream, ChatProvider, ChatRequest, StreamEvent,
-};
 use crate::providers::protocols::anthropic::message_rendering::build_anthropic_body;
+use crate::providers::{BoxStream, ChatProvider, ChatRequest, StreamEvent};
 
 const DEFAULT_BASE_URL: &str = "https://api.xiaomimimo.com/anthropic";
 
@@ -73,12 +71,12 @@ fn patch_mimo_thinking(body: &mut serde_json::Value) {
             _ => continue,
         };
 
-        let has_thinking = content.iter().any(|b| {
-            b.get("type").and_then(|v| v.as_str()) == Some("thinking")
-        });
-        let has_tool_use = content.iter().any(|b| {
-            b.get("type").and_then(|v| v.as_str()) == Some("tool_use")
-        });
+        let has_thinking = content
+            .iter()
+            .any(|b| b.get("type").and_then(|v| v.as_str()) == Some("thinking"));
+        let has_tool_use = content
+            .iter()
+            .any(|b| b.get("type").and_then(|v| v.as_str()) == Some("tool_use"));
 
         if !has_thinking && has_tool_use {
             content.insert(0, serde_json::json!({"type": "thinking", "thinking": ""}));

@@ -26,7 +26,7 @@ use std::time::Duration;
 #[cfg(feature = "wechat")]
 use aes::Aes128;
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 #[cfg(feature = "wechat")]
 use ecb::cipher::{BlockDecryptMut, BlockEncryptMut, KeyInit};
 #[cfg(feature = "wechat")]
@@ -37,8 +37,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::{Channel, ChannelMessage, DedupState, SendMessage};
 use crate::config::channel::WechatAccountConfig;
+use crate::{Channel, ChannelMessage, DedupState, SendMessage};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -73,7 +73,10 @@ fn pkcs7_unpad(data: &[u8]) -> Result<Vec<u8>, String> {
     if pad_len == 0 || pad_len > data.len() {
         return Err("Invalid padding".into());
     }
-    if data[data.len() - pad_len..].iter().any(|&b| b != pad_len as u8) {
+    if data[data.len() - pad_len..]
+        .iter()
+        .any(|&b| b != pad_len as u8)
+    {
         return Err("Invalid PKCS7 padding".into());
     }
     Ok(data[..data.len() - pad_len].to_vec())
@@ -114,7 +117,9 @@ fn decrypt_ecb(ciphertext: &[u8], key: &[u8; 16]) -> Result<Vec<u8>, String> {
 // ── API types ─────────────────────────────────────────────────────────────────
 
 fn build_base_info() -> BaseInfo {
-    BaseInfo { channel_version: CHANNEL_VERSION.to_string() }
+    BaseInfo {
+        channel_version: CHANNEL_VERSION.to_string(),
+    }
 }
 
 fn build_client_version() -> u32 {
@@ -159,9 +164,15 @@ struct IlinkMessage {
 
 impl IlinkMessage {
     fn chat_id(&self) -> &str {
-        if self.group_id.is_empty() { &self.from_user_id } else { &self.group_id }
+        if self.group_id.is_empty() {
+            &self.from_user_id
+        } else {
+            &self.group_id
+        }
     }
-    fn is_group(&self) -> bool { !self.group_id.is_empty() }
+    fn is_group(&self) -> bool {
+        !self.group_id.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -288,7 +299,9 @@ struct SendMessageItem {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct SendTextItem { text: String }
+struct SendTextItem {
+    text: String,
+}
 
 #[derive(Debug, Clone, Serialize)]
 struct SendTypingRequest {
@@ -310,7 +323,10 @@ struct GetConfigRequest {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct GetBotQrCodeRequest { #[serde(rename = "base_info")] base_info: BaseInfo }
+struct GetBotQrCodeRequest {
+    #[serde(rename = "base_info")]
+    base_info: BaseInfo,
+}
 
 #[derive(Debug, Clone, Serialize)]
 struct GetQrCodeStatusRequest {
@@ -382,10 +398,17 @@ impl ApiClient {
     }
 
     fn url(&self, endpoint: &str) -> String {
-        let base = self.state.read()
-            .api_base.clone()
+        let base = self
+            .state
+            .read()
+            .api_base
+            .clone()
             .unwrap_or_else(|| self.api_base.clone());
-        format!("{}/{}", base.trim_end_matches('/'), endpoint.trim_start_matches('/'))
+        format!(
+            "{}/{}",
+            base.trim_end_matches('/'),
+            endpoint.trim_start_matches('/')
+        )
     }
 
     fn random_uin_header() -> String {
@@ -393,10 +416,20 @@ impl ApiClient {
         BASE64.encode(uin.to_string())
     }
 
-    async fn api_post(&self, endpoint: &str, body: &serde_json::Value) -> Result<serde_json::Value, ApiError> {
+    async fn api_post(
+        &self,
+        endpoint: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, ApiError> {
         let mut req = self.http.post(self.url(endpoint));
         req = req.header("AuthorizationType", "ilink_bot_token");
-        if let Some(token) = self.state.read().bot_token.clone().filter(|t| !t.is_empty()) {
+        if let Some(token) = self
+            .state
+            .read()
+            .bot_token
+            .clone()
+            .filter(|t| !t.is_empty())
+        {
             req = req.header("Authorization", format!("Bearer {token}"));
         }
         req = req
@@ -404,30 +437,47 @@ impl ApiClient {
             .header("iLink-App-Id", ILINK_APP_ID)
             .header("iLink-App-ClientVersion", &self.client_version);
 
-        let resp = req.json(body).send().await
+        let resp = req
+            .json(body)
+            .send()
+            .await
             .map_err(|e| ApiError::Network(e.to_string()))?;
 
         if !resp.status().is_success() {
-            return Err(ApiError::Http(resp.status().as_u16(), resp.text().await.unwrap_or_default()));
+            return Err(ApiError::Http(
+                resp.status().as_u16(),
+                resp.text().await.unwrap_or_default(),
+            ));
         }
 
-        resp.json().await.map_err(|e| ApiError::Parse(e.to_string()))
+        resp.json()
+            .await
+            .map_err(|e| ApiError::Parse(e.to_string()))
     }
 
     async fn api_get(&self, endpoint: &str) -> Result<serde_json::Value, ApiError> {
-        let req = self.http.get(self.url(endpoint))
+        let req = self
+            .http
+            .get(self.url(endpoint))
             .header("X-WECHAT-UIN", Self::random_uin_header())
             .header("iLink-App-Id", ILINK_APP_ID)
             .header("iLink-App-ClientVersion", &self.client_version);
 
-        let resp = req.send().await
+        let resp = req
+            .send()
+            .await
             .map_err(|e| ApiError::Network(e.to_string()))?;
 
         if !resp.status().is_success() {
-            return Err(ApiError::Http(resp.status().as_u16(), resp.text().await.unwrap_or_default()));
+            return Err(ApiError::Http(
+                resp.status().as_u16(),
+                resp.text().await.unwrap_or_default(),
+            ));
         }
 
-        resp.json().await.map_err(|e| ApiError::Parse(e.to_string()))
+        resp.json()
+            .await
+            .map_err(|e| ApiError::Parse(e.to_string()))
     }
 
     fn check_ret(&self, raw: &serde_json::Value) -> Result<(), ApiError> {
@@ -445,10 +495,22 @@ impl ApiClient {
 
     async fn get_updates(&self) -> Result<GetUpdatesResponse, ApiError> {
         let buf = self.state.read().get_updates_buf.clone();
-        let req_body = GetUpdatesRequest { get_updates_buf: buf, base_info: build_base_info() };
-        let resp = self.api_post("ilink/bot/getupdates", &serde_json::to_value(&req_body).unwrap()).await?;
+        let req_body = GetUpdatesRequest {
+            get_updates_buf: buf,
+            base_info: build_base_info(),
+        };
+        let resp = self
+            .api_post(
+                "ilink/bot/getupdates",
+                &serde_json::to_value(&req_body).unwrap(),
+            )
+            .await?;
 
-        let new_buf = resp.get("get_updates_buf").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let new_buf = resp
+            .get("get_updates_buf")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if !new_buf.is_empty() {
             self.state.write().get_updates_buf = new_buf;
         }
@@ -457,7 +519,12 @@ impl ApiClient {
             .map_err(|e| ApiError::Parse(format!("get_updates: {e}")))
     }
 
-    async fn send_text(&self, to_user_id: &str, text: &str, context_token: Option<&str>) -> Result<(), ApiError> {
+    async fn send_text(
+        &self,
+        to_user_id: &str,
+        text: &str,
+        context_token: Option<&str>,
+    ) -> Result<(), ApiError> {
         let client_id = format!("myclaw_{}", uuid::Uuid::new_v4());
         let req = SendMessageRequest {
             msg: SendMessageMsg {
@@ -468,13 +535,20 @@ impl ApiClient {
                 message_state: MESSAGE_STATE_FINISH,
                 item_list: vec![SendMessageItem {
                     item_type: ITEM_TYPE_TEXT,
-                    text_item: SendTextItem { text: text.to_string() },
+                    text_item: SendTextItem {
+                        text: text.to_string(),
+                    },
                 }],
                 context_token: context_token.map(String::from),
             },
             base_info: build_base_info(),
         };
-        let resp = self.api_post("ilink/bot/sendmessage", &serde_json::to_value(&req).unwrap()).await?;
+        let resp = self
+            .api_post(
+                "ilink/bot/sendmessage",
+                &serde_json::to_value(&req).unwrap(),
+            )
+            .await?;
         self.check_ret(&resp)
     }
 
@@ -483,29 +557,50 @@ impl ApiClient {
         let req = SendTypingRequest {
             ilink_user_id: to_user_id.to_string(),
             typing_ticket: ticket,
-            status: if typing { TYPING_STATUS_TYPING } else { TYPING_STATUS_CANCEL },
+            status: if typing {
+                TYPING_STATUS_TYPING
+            } else {
+                TYPING_STATUS_CANCEL
+            },
             base_info: build_base_info(),
         };
-        let resp = self.api_post("ilink/bot/sendtyping", &serde_json::to_value(&req).unwrap()).await?;
+        let resp = self
+            .api_post("ilink/bot/sendtyping", &serde_json::to_value(&req).unwrap())
+            .await?;
         self.check_ret(&resp)
     }
 
     async fn get_config(&self, ilink_user_id: &str) -> Result<GetConfigResponse, ApiError> {
-        let req = GetConfigRequest { ilink_user_id: ilink_user_id.to_string(), base_info: build_base_info() };
-        let resp = self.api_post("ilink/bot/getconfig", &serde_json::to_value(&req).unwrap()).await?;
+        let req = GetConfigRequest {
+            ilink_user_id: ilink_user_id.to_string(),
+            base_info: build_base_info(),
+        };
+        let resp = self
+            .api_post("ilink/bot/getconfig", &serde_json::to_value(&req).unwrap())
+            .await?;
         self.check_ret(&resp)?;
         serde_json::from_value(resp).map_err(|e| ApiError::Parse(format!("get_config: {e}")))
     }
 
     async fn get_bot_qrcode(&self) -> Result<QrCodeResponse, ApiError> {
-        let _req = GetBotQrCodeRequest { base_info: build_base_info() };
+        let _req = GetBotQrCodeRequest {
+            base_info: build_base_info(),
+        };
         let resp = self.api_get("ilink/bot/getbotqrcode").await?;
         serde_json::from_value(resp).map_err(|e| ApiError::Parse(format!("get_bot_qrcode: {e}")))
     }
 
     async fn get_qrcode_status(&self, qrcode: &str) -> Result<QrStatus, ApiError> {
-        let req = GetQrCodeStatusRequest { qrcode: qrcode.to_string(), base_info: build_base_info() };
-        let resp = self.api_post("ilink/bot/getqrcodeqrt", &serde_json::to_value(&req).unwrap()).await?;
+        let req = GetQrCodeStatusRequest {
+            qrcode: qrcode.to_string(),
+            base_info: build_base_info(),
+        };
+        let resp = self
+            .api_post(
+                "ilink/bot/getqrcodeqrt",
+                &serde_json::to_value(&req).unwrap(),
+            )
+            .await?;
         serde_json::from_value(resp).map_err(|e| ApiError::Parse(format!("get_qrcode_status: {e}")))
     }
 }
@@ -513,7 +608,10 @@ impl ApiClient {
 // ── Inbound event ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
-enum InboundContent { Text(String), Unknown }
+enum InboundContent {
+    Text(String),
+    Unknown,
+}
 
 #[derive(Debug, Clone)]
 struct InboundEvent {
@@ -528,12 +626,21 @@ struct InboundEvent {
 
 fn parse_inbound(msg: &IlinkMessage) -> InboundEvent {
     let content = match msg.list.first() {
-        Some(first) if first.item_type == ITEM_TYPE_TEXT => {
-            InboundContent::Text(first.text_item.as_ref().map(|t| t.text.clone()).unwrap_or_default())
-        }
+        Some(first) if first.item_type == ITEM_TYPE_TEXT => InboundContent::Text(
+            first
+                .text_item
+                .as_ref()
+                .map(|t| t.text.clone())
+                .unwrap_or_default(),
+        ),
         // Voice: use WeChat's native ASR transcription as the text body.
         Some(first) if first.item_type == ITEM_TYPE_VOICE => {
-            match first.voice_item.as_ref().map(|v| v.text.clone()).unwrap_or_default() {
+            match first
+                .voice_item
+                .as_ref()
+                .map(|v| v.text.clone())
+                .unwrap_or_default()
+            {
                 t if t.trim().is_empty() => InboundContent::Unknown,
                 t => InboundContent::Text(t),
             }
@@ -561,16 +668,26 @@ fn parse_inbound(msg: &IlinkMessage) -> InboundEvent {
 // ── Error classification ──────────────────────────────────────────────────────
 
 #[derive(Debug)]
-enum ErrorClass { Auth, Network, Server, Parse }
+enum ErrorClass {
+    Auth,
+    Network,
+    Server,
+    Parse,
+}
 
 fn error_class(err: &ApiError) -> ErrorClass {
     match err {
         ApiError::Http(code, _) if *code == 401 || *code == 403 => ErrorClass::Auth,
         ApiError::Api(code, msg) => {
             let lower = msg.to_lowercase();
-            if *code == -1 || lower.contains("token") || lower.contains("expired")
-                || lower.contains("unauthorized") || lower.contains("not login")
-                || lower.contains("请先登录") || lower.contains("未登录") {
+            if *code == -1
+                || lower.contains("token")
+                || lower.contains("expired")
+                || lower.contains("unauthorized")
+                || lower.contains("not login")
+                || lower.contains("请先登录")
+                || lower.contains("未登录")
+            {
                 ErrorClass::Auth
             } else {
                 ErrorClass::Server
@@ -603,7 +720,11 @@ pub struct WechatChannel {
 
 impl WechatChannel {
     pub fn new(config: WechatAccountConfig) -> Self {
-        let ch = Self { api: ApiClient::new(&config), config, dedup: DedupState::new() };
+        let ch = Self {
+            api: ApiClient::new(&config),
+            config,
+            dedup: DedupState::new(),
+        };
         crate::channels::warn_if_locked_down(&ch);
         ch
     }
@@ -633,7 +754,10 @@ impl WechatChannel {
         let qr_resp = self.api.get_bot_qrcode().await?;
 
         if !qr_resp.qrcode_img_content.is_empty() {
-            info!("WeChat QR code image available (base64, {} bytes)", qr_resp.qrcode_img_content.len());
+            info!(
+                "WeChat QR code image available (base64, {} bytes)",
+                qr_resp.qrcode_img_content.len()
+            );
         }
 
         let mut qrcode = qr_resp.qrcode;
@@ -643,7 +767,10 @@ impl WechatChannel {
 
             match status.status.as_str() {
                 "confirmed" => {
-                    info!("WeChat QR login confirmed: {} ({})", status.nickname, status.ilink_bot_id);
+                    info!(
+                        "WeChat QR login confirmed: {} ({})",
+                        status.nickname, status.ilink_bot_id
+                    );
                     let mut st = self.api.state.write();
                     st.bot_token = Some(status.bot_token);
                     st.bot_wxid = Some(status.ilink_bot_id.clone());
@@ -675,7 +802,9 @@ static WECHAT_CAPS: crate::channels::message::ChannelCapabilities =
 
 #[async_trait]
 impl Channel for WechatChannel {
-    fn name(&self) -> &str { "wechat" }
+    fn name(&self) -> &str {
+        "wechat"
+    }
 
     fn capabilities(&self) -> &crate::channels::message::ChannelCapabilities {
         &WECHAT_CAPS
@@ -686,14 +815,22 @@ impl Channel for WechatChannel {
     }
 
     async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
-        let ctx_token = self.api.state.read().context_tokens.get(&message.recipient).cloned();
+        let ctx_token = self
+            .api
+            .state
+            .read()
+            .context_tokens
+            .get(&message.recipient)
+            .cloned();
         let chunks = crate::channels::message::split_message_chunk(
             &message.content,
             self.capabilities().message_chunk_limit,
             self.capabilities().message_len_unit,
         );
         for chunk in chunks {
-            self.api.send_text(&message.recipient, &chunk, ctx_token.as_deref()).await?;
+            self.api
+                .send_text(&message.recipient, &chunk, ctx_token.as_deref())
+                .await?;
         }
         Ok(())
     }
@@ -714,7 +851,9 @@ impl Channel for WechatChannel {
                         consecutive_errors = 0;
                         for msg in resp.msgs {
                             let event = parse_inbound(&msg);
-                            if !this.dedup.check_and_record(&event.msg_id) { continue; }
+                            if !this.dedup.check_and_record(&event.msg_id) {
+                                continue;
+                            }
                             match this.check_authorization(
                                 &event.sender_wxid,
                                 crate::channels::MessageScope::Direct,
@@ -731,11 +870,16 @@ impl Channel for WechatChannel {
                                 InboundContent::Text(t) => t,
                                 InboundContent::Unknown => continue,
                             };
-                            if content.trim().is_empty() { continue; }
+                            if content.trim().is_empty() {
+                                continue;
+                            }
 
                             if !event.context_token.is_empty() {
-                                this.api.state.write()
-                                    .context_tokens.insert(event.chat_id.clone(), event.context_token.clone());
+                                this.api
+                                    .state
+                                    .write()
+                                    .context_tokens
+                                    .insert(event.chat_id.clone(), event.context_token.clone());
                             }
 
                             let channel_msg = ChannelMessage {
@@ -746,6 +890,7 @@ impl Channel for WechatChannel {
                                 timestamp: event.raw_timestamp as u64,
                                 thread_ts: None,
                                 interruption_scope_id: None,
+                                files: vec![],
                                 attachments: vec![],
                                 image_urls: None,
                                 image_base64: None,
@@ -758,7 +903,10 @@ impl Channel for WechatChannel {
                         }
                     }
                     Err(ApiError::Api(-14, _)) => {
-                        warn!("WeChat: rate limited (-14), pausing {}s", RATE_LIMIT_PAUSE_SECS);
+                        warn!(
+                            "WeChat: rate limited (-14), pausing {}s",
+                            RATE_LIMIT_PAUSE_SECS
+                        );
                         tokio::time::sleep(Duration::from_secs(RATE_LIMIT_PAUSE_SECS)).await;
                     }
                     Err(e) => {
@@ -779,7 +927,9 @@ impl Channel for WechatChannel {
                                 warn!("WeChat: network error, retrying in {backoff}s: {e}");
                             }
                             ErrorClass::Server => {
-                                warn!("WeChat: server error ({consecutive_errors}): {e}, retrying in {backoff}s");
+                                warn!(
+                                    "WeChat: server error ({consecutive_errors}): {e}, retrying in {backoff}s"
+                                );
                                 if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
                                     warn!("WeChat: max consecutive errors, attempting re-login");
                                     this.api.state.write().bot_token = None;
@@ -846,14 +996,23 @@ mod tests {
             group_id: String::new(),
             message_type: 1,
             message_state: 2,
-            list: vec![MessageItem { item_type: ITEM_TYPE_TEXT, text_item: Some(TextItem { text: "hello".into() }), voice_item: None }],
+            list: vec![MessageItem {
+                item_type: ITEM_TYPE_TEXT,
+                text_item: Some(TextItem {
+                    text: "hello".into(),
+                }),
+                voice_item: None,
+            }],
             context_token: "ctx_tok".into(),
         };
         let event = parse_inbound(&msg);
         assert_eq!(event.sender_wxid, "user1");
         assert_eq!(event.chat_id, "user1");
         assert!(!event.is_group);
-        match event.content { InboundContent::Text(t) => assert_eq!(t, "hello"), _ => panic!("expected text") }
+        match event.content {
+            InboundContent::Text(t) => assert_eq!(t, "hello"),
+            _ => panic!("expected text"),
+        }
     }
 
     #[test]
@@ -869,7 +1028,9 @@ mod tests {
             list: vec![MessageItem {
                 item_type: ITEM_TYPE_VOICE,
                 text_item: None,
-                voice_item: Some(VoiceItem { text: "转写出来的内容".into() }),
+                voice_item: Some(VoiceItem {
+                    text: "转写出来的内容".into(),
+                }),
             }],
             context_token: String::new(),
         };
@@ -897,15 +1058,18 @@ mod tests {
             }],
             context_token: String::new(),
         };
-        assert!(matches!(parse_inbound(&msg).content, InboundContent::Unknown));
+        assert!(matches!(
+            parse_inbound(&msg).content,
+            InboundContent::Unknown
+        ));
     }
 
     #[test]
     fn test_dedup() {
         let dedup = DedupState::new();
         // check_and_record returns true if already seen (should skip), false if new.
-        assert!(!dedup.check_and_record("msg1"));  // new → false (don't skip)
-        assert!(dedup.check_and_record("msg1"));   // duplicate → true (skip)
-        assert!(!dedup.check_and_record("msg2"));  // new → false (don't skip)
+        assert!(!dedup.check_and_record("msg1")); // new → false (don't skip)
+        assert!(dedup.check_and_record("msg1")); // duplicate → true (skip)
+        assert!(!dedup.check_and_record("msg2")); // new → false (don't skip)
     }
 }

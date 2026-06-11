@@ -56,14 +56,21 @@ pub struct CredentialPool {
 
 impl CredentialPool {
     /// Create a new pool from a list of API keys.
-    pub fn new(provider_name: impl Into<String>, keys: Vec<String>, strategy: RotationStrategy) -> Self {
-        let entries = keys.into_iter().map(|key| CredentialEntry {
-            key,
-            status: CredentialStatus::Active,
-            exhausted_until: None,
-            last_used: None,
-            use_count: 0,
-        }).collect();
+    pub fn new(
+        provider_name: impl Into<String>,
+        keys: Vec<String>,
+        strategy: RotationStrategy,
+    ) -> Self {
+        let entries = keys
+            .into_iter()
+            .map(|key| CredentialEntry {
+                key,
+                status: CredentialStatus::Active,
+                exhausted_until: None,
+                last_used: None,
+                use_count: 0,
+            })
+            .collect();
         Self {
             entries,
             strategy,
@@ -105,7 +112,9 @@ impl CredentialPool {
     pub fn next_credential(&mut self) -> Option<&str> {
         self.refresh();
 
-        let active_indices: Vec<usize> = self.entries.iter()
+        let active_indices: Vec<usize> = self
+            .entries
+            .iter()
             .enumerate()
             .filter(|(_, e)| e.status == CredentialStatus::Active)
             .map(|(i, _)| i)
@@ -126,11 +135,10 @@ impl CredentialPool {
                 let idx = rand::random_range(0..active_indices.len());
                 active_indices[idx]
             }
-            RotationStrategy::LeastUsed => {
-                active_indices.into_iter()
-                    .min_by_key(|i| self.entries[*i].use_count)
-                    .unwrap_or(0)
-            }
+            RotationStrategy::LeastUsed => active_indices
+                .into_iter()
+                .min_by_key(|i| self.entries[*i].use_count)
+                .unwrap_or(0),
         };
 
         let entry = &mut self.entries[selected_idx];
@@ -163,25 +171,32 @@ impl CredentialPool {
     /// Snapshot of current pool state for diagnostics.
     pub fn snapshot(&self) -> Vec<(String, CredentialStatus, Option<Duration>)> {
         let now = Instant::now();
-        self.entries.iter().map(|e| {
-            let remaining = e.exhausted_until.map(|u| {
-                if u > now { u.duration_since(now) } else { Duration::ZERO }
-            });
-            (Self::mask_key(&e.key), e.status, remaining)
-        }).collect()
+        self.entries
+            .iter()
+            .map(|e| {
+                let remaining = e.exhausted_until.map(|u| {
+                    if u > now {
+                        u.duration_since(now)
+                    } else {
+                        Duration::ZERO
+                    }
+                });
+                (Self::mask_key(&e.key), e.status, remaining)
+            })
+            .collect()
     }
 
     // ── Internal helpers ───────────────────────────────────────────────────
 
     fn cooldown_for_reason(reason: &FailoverReason) -> Duration {
         match reason {
-            FailoverReason::Auth => Duration::from_secs(5 * 60),        // 5 minutes
-            FailoverReason::RateLimit => Duration::from_secs(60 * 60),  // 1 hour
-            FailoverReason::Billing => Duration::from_secs(24 * 3600),  // 24 hours
-            FailoverReason::Overloaded => Duration::from_secs(5 * 60),  // 5 minutes
+            FailoverReason::Auth => Duration::from_secs(5 * 60), // 5 minutes
+            FailoverReason::RateLimit => Duration::from_secs(60 * 60), // 1 hour
+            FailoverReason::Billing => Duration::from_secs(24 * 3600), // 24 hours
+            FailoverReason::Overloaded => Duration::from_secs(5 * 60), // 5 minutes
             FailoverReason::ServerError => Duration::from_secs(10 * 60), // 10 minutes
-            FailoverReason::Timeout => Duration::from_secs(5 * 60),      // 5 minutes
-            _ => Duration::from_secs(60 * 60),                           // 1 hour default
+            FailoverReason::Timeout => Duration::from_secs(5 * 60), // 5 minutes
+            _ => Duration::from_secs(60 * 60),                   // 1 hour default
         }
     }
 
@@ -189,7 +204,7 @@ impl CredentialPool {
         if key.len() <= 8 {
             "***".to_string()
         } else {
-            format!("{}...{}", &key[..4], &key[key.len()-4..])
+            format!("{}...{}", &key[..4], &key[key.len() - 4..])
         }
     }
 }
@@ -288,6 +303,9 @@ mod tests {
 
     #[test]
     fn mask_key_hides_middle() {
-        assert_eq!(CredentialPool::mask_key("sk-abcdefghijklmnopqrstuvwxyz"), "sk-a...wxyz");
+        assert_eq!(
+            CredentialPool::mask_key("sk-abcdefghijklmnopqrstuvwxyz"),
+            "sk-a...wxyz"
+        );
     }
 }

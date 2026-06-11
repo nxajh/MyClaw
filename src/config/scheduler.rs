@@ -5,9 +5,15 @@
 
 use serde::{Deserialize, Serialize};
 
-fn default_every() -> String { "30m".to_string() }
-fn default_target() -> String { "last".to_string() }
-fn default_webhook_port() -> u16 { 18789 }
+fn default_every() -> String {
+    "30m".to_string()
+}
+fn default_target() -> String {
+    "last".to_string()
+}
+fn default_webhook_port() -> u16 {
+    18789
+}
 
 /// Heartbeat configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -66,6 +66,7 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
         timestamp: chrono::Utc::now().timestamp() as u64,
         thread_ts: None,
         interruption_scope_id: None,
+        files: vec![],
         attachments: Vec::new(),
         image_urls: None,
         image_base64: None,

@@ -36,14 +36,22 @@ enum CompletionSink {
 impl CompletionSink {
     async fn deliver(self, text: String) {
         match self {
-            CompletionSink::Channel { key, backend, channels } => {
+            CompletionSink::Channel {
+                key,
+                backend,
+                channels,
+            } => {
                 let recipient = backend
                     .load_last_message(&key)
                     .map(|m| m.reply_target)
                     .unwrap_or_else(|| {
-                        SessionKey::parse(&key).map(|k| k.sender).unwrap_or_default()
+                        SessionKey::parse(&key)
+                            .map(|k| k.sender)
+                            .unwrap_or_default()
                     });
-                let Some(parsed) = SessionKey::parse(&key) else { return };
+                let Some(parsed) = SessionKey::parse(&key) else {
+                    return;
+                };
                 let Some(channel) = channels.get(&parsed.account_key()) else {
                     return;
                 };
@@ -55,7 +63,12 @@ impl CompletionSink {
                     tracing::warn!(session = %key, err = %e, "startup recovery: failed to send response");
                 }
             }
-            CompletionSink::Delegate { task_id, parent_session_id, reply_target, delegator } => {
+            CompletionSink::Delegate {
+                task_id,
+                parent_session_id,
+                reply_target,
+                delegator,
+            } => {
                 if let Some(dm) = delegator {
                     if let Some(tx) = dm.event_sender() {
                         let _ = tx
@@ -93,7 +106,11 @@ fn spawn_recovery(
         let resolved = ResolvedTurn::resolve(&session, &runtime);
         let turn_ctx = resolved.turn_context();
 
-        match session_ctx.agent.run_recovery(&mut session, turn_ctx, &runtime).await {
+        match session_ctx
+            .agent
+            .run_recovery(&mut session, turn_ctx, &runtime)
+            .await
+        {
             Ok(Some(tr)) if !tr.text.is_empty() => {
                 tracing::info!(id = %id, "{label}: turn completed");
                 sink.deliver(tr.text).await;

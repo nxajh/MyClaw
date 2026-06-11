@@ -1,8 +1,8 @@
 //! File operation tools: read, write, edit.
 
-use async_trait::async_trait;
 use crate::providers::{Tool, ToolResult};
 use crate::str_utils;
+use async_trait::async_trait;
 use serde_json::json;
 use std::path::Path;
 
@@ -21,20 +21,25 @@ fn validate_path(path: &str) -> anyhow::Result<std::path::PathBuf> {
     let mut normalized = std::path::PathBuf::new();
     for component in abs.components() {
         match component {
-            std::path::Component::ParentDir => { normalized.pop(); }
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
             std::path::Component::CurDir => {}
             c => normalized.push(c),
         }
     }
 
     // Disallow paths outside home or cwd — catches ../../etc/passwd patterns.
-    let home = std::env::var("HOME").map(std::path::PathBuf::from)
+    let home = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("/home"));
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     if !normalized.starts_with(&home) && !normalized.starts_with(&cwd) {
         anyhow::bail!(
             "path '{}' resolves outside allowed directories (home: {}, cwd: {})",
-            path, home.display(), cwd.display()
+            path,
+            home.display(),
+            cwd.display()
         );
     }
     Ok(normalized)
@@ -86,7 +91,11 @@ impl Tool for FileReadTool {
         10_000
     }
 
-    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _session: &crate::agents::session::Session,
+    ) -> anyhow::Result<ToolResult> {
         let path = args["path"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'path' is required"))?;
@@ -97,20 +106,27 @@ impl Tool for FileReadTool {
         let offset = args["offset"].as_u64().unwrap_or(0) as usize; // 0 means from start
         let limit = args["limit"].as_u64().map(|l| l as usize);
 
-        let content = tokio::fs::read_to_string(path).await.map_err(|e| {
-            anyhow::anyhow!("failed to read '{}': {}", path, e)
-        })?;
+        let content = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to read '{}': {}", path, e))?;
 
         let lines: Vec<&str> = content.lines().collect();
-        let start = if offset > 0 { (offset - 1).min(lines.len()) } else { 0 };
+        let start = if offset > 0 {
+            (offset - 1).min(lines.len())
+        } else {
+            0
+        };
 
         let selected: Vec<String> = if let Some(limit) = limit {
-            lines[start..].iter().take(limit)
+            lines[start..]
+                .iter()
+                .take(limit)
                 .enumerate()
                 .map(|(i, line)| format!("{:>6}\t{}", start + i + 1, line))
                 .collect()
         } else {
-            lines[start..].iter()
+            lines[start..]
+                .iter()
                 .enumerate()
                 .map(|(i, line)| format!("{:>6}\t{}", start + i + 1, line))
                 .collect()
@@ -168,7 +184,11 @@ impl Tool for FileWriteTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _session: &crate::agents::session::Session,
+    ) -> anyhow::Result<ToolResult> {
         let path = args["path"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'path' is required"))?;
@@ -188,9 +208,9 @@ impl Tool for FileWriteTool {
             }
         }
 
-        tokio::fs::write(path, content).await.map_err(|e| {
-            anyhow::anyhow!("failed to write '{}': {}", path, e)
-        })?;
+        tokio::fs::write(path, content)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to write '{}': {}", path, e))?;
 
         let line_count = content.lines().count();
         let byte_count = content.len();
@@ -202,8 +222,16 @@ impl Tool for FileWriteTool {
                 byte_count,
                 line_count,
                 path,
-                content.lines().next().map(|l| str_utils::truncate_line(l, 80)).unwrap_or_else(|| "(empty)".to_string()),
-                content.lines().last().map(|l| str_utils::truncate_line(l, 80)).unwrap_or_else(|| "(empty)".to_string()),
+                content
+                    .lines()
+                    .next()
+                    .map(|l| str_utils::truncate_line(l, 80))
+                    .unwrap_or_else(|| "(empty)".to_string()),
+                content
+                    .lines()
+                    .last()
+                    .map(|l| str_utils::truncate_line(l, 80))
+                    .unwrap_or_else(|| "(empty)".to_string()),
             ),
             error: None,
         })
@@ -252,7 +280,11 @@ impl Tool for FileEditTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _session: &crate::agents::session::Session,
+    ) -> anyhow::Result<ToolResult> {
         let path = args["path"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'path' is required"))?;
@@ -261,13 +293,11 @@ impl Tool for FileEditTool {
         let old_string = args["old_string"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'old_string' is required"))?;
-        let new_string = args["new_string"]
-            .as_str()
-            .unwrap_or("");
+        let new_string = args["new_string"].as_str().unwrap_or("");
 
-        let content = tokio::fs::read_to_string(path).await.map_err(|e| {
-            anyhow::anyhow!("failed to read '{}': {}", path, e)
-        })?;
+        let content = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to read '{}': {}", path, e))?;
 
         let count = content.matches(old_string).count();
         if count == 0 {
@@ -281,15 +311,18 @@ impl Tool for FileEditTool {
             return Ok(ToolResult {
                 success: false,
                 output: format!("old_string found {} times, must be unique", count),
-                error: Some(format!("old_string matched {} times, expected exactly 1", count)),
+                error: Some(format!(
+                    "old_string matched {} times, expected exactly 1",
+                    count
+                )),
             });
         }
 
         let new_content = content.replacen(old_string, new_string, 1);
 
-        tokio::fs::write(path, &new_content).await.map_err(|e| {
-            anyhow::anyhow!("failed to write '{}': {}", path, e)
-        })?;
+        tokio::fs::write(path, &new_content)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to write '{}': {}", path, e))?;
 
         Ok(ToolResult {
             success: true,

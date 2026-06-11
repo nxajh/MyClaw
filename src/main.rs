@@ -18,13 +18,37 @@ async fn main() -> Result<()> {
         }
 
         // `myclaw chat` — interactive chat
-        Some(cli::Commands::Chat { ref prompt, ref agent, ref model, print }) => {
-            cli::cmd_chat::run(&cli_args, prompt.as_deref(), agent.as_deref(), model.as_deref(), print).await?;
+        Some(cli::Commands::Chat {
+            ref prompt,
+            ref agent,
+            ref model,
+            print,
+        }) => {
+            cli::cmd_chat::run(
+                &cli_args,
+                prompt.as_deref(),
+                agent.as_deref(),
+                model.as_deref(),
+                print,
+            )
+            .await?;
         }
 
         // `myclaw exec` — non-interactive single prompt
-        Some(cli::Commands::Exec { ref prompt, ref agent, ref model, ref format }) => {
-            cli::cmd_exec::run(&cli_args, prompt, agent.as_deref(), model.as_deref(), format).await?;
+        Some(cli::Commands::Exec {
+            ref prompt,
+            ref agent,
+            ref model,
+            ref format,
+        }) => {
+            cli::cmd_exec::run(
+                &cli_args,
+                prompt,
+                agent.as_deref(),
+                model.as_deref(),
+                format,
+            )
+            .await?;
         }
 
         // `myclaw doctor` — diagnostics
@@ -100,19 +124,17 @@ async fn main() -> Result<()> {
 fn resolve_config_or_die(explicit_path: Option<&str>) -> myclaw::config::AppConfig {
     if let Some(path) = explicit_path {
         let expanded = shellexpand::tilde(path).to_string();
-        return myclaw::daemon::load_config_from(&expanded)
-            .unwrap_or_else(|e| {
-                eprintln!("Error: Failed to load config from {path}: {e}");
-                std::process::exit(1);
-            });
+        return myclaw::daemon::load_config_from(&expanded).unwrap_or_else(|e| {
+            eprintln!("Error: Failed to load config from {path}: {e}");
+            std::process::exit(1);
+        });
     }
 
     if let Ok(env_path) = std::env::var("MYCLAW_CONFIG") {
-        return myclaw::daemon::load_config_from(&env_path)
-            .unwrap_or_else(|e| {
-                eprintln!("Error: Failed to load config from MYCLAW_CONFIG={env_path}: {e}");
-                std::process::exit(1);
-            });
+        return myclaw::daemon::load_config_from(&env_path).unwrap_or_else(|e| {
+            eprintln!("Error: Failed to load config from MYCLAW_CONFIG={env_path}: {e}");
+            std::process::exit(1);
+        });
     }
 
     myclaw::daemon::load_config().unwrap_or_else(|e| {

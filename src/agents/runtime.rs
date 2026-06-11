@@ -12,13 +12,13 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
+use crate::agents::AgentRegistry;
 use crate::agents::context_engine::ContextEngine;
 use crate::agents::loop_breaker::LoopBreaker;
 use crate::agents::mcp_manager::McpManager;
 use crate::agents::prompt::SystemPromptConfig;
 use crate::agents::tool_executor::ToolExecutor;
 use crate::agents::workspace::skills::SkillManager;
-use crate::agents::AgentRegistry;
 use crate::config::agent::PermissionMode;
 use crate::providers::ProviderRegistry;
 use crate::tools::SearchProviderCooldown;

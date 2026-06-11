@@ -1,7 +1,7 @@
 //! Calculator tool — evaluates mathematical expressions safely.
 
-use async_trait::async_trait;
 use crate::providers::{Tool, ToolResult};
+use async_trait::async_trait;
 use serde_json::json;
 
 /// Simple recursive-descent math expression evaluator.
@@ -47,7 +47,11 @@ impl Tool for CalculatorTool {
         1_000
     }
 
-    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _session: &crate::agents::session::Session,
+    ) -> anyhow::Result<ToolResult> {
         let expr = args["expression"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'expression' is required"))?;
@@ -94,21 +98,46 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
 
     while i < chars.len() {
         match chars[i] {
-            ' ' | '\t' | '\n' => { i += 1; }
-            '+' => { tokens.push(Token::Plus); i += 1; }
-            '-' => { tokens.push(Token::Minus); i += 1; }
-            '*' => { tokens.push(Token::Star); i += 1; }
-            '/' => { tokens.push(Token::Slash); i += 1; }
-            '^' => { tokens.push(Token::Caret); i += 1; }
-            '(' => { tokens.push(Token::LParen); i += 1; }
-            ')' => { tokens.push(Token::RParen); i += 1; }
+            ' ' | '\t' | '\n' => {
+                i += 1;
+            }
+            '+' => {
+                tokens.push(Token::Plus);
+                i += 1;
+            }
+            '-' => {
+                tokens.push(Token::Minus);
+                i += 1;
+            }
+            '*' => {
+                tokens.push(Token::Star);
+                i += 1;
+            }
+            '/' => {
+                tokens.push(Token::Slash);
+                i += 1;
+            }
+            '^' => {
+                tokens.push(Token::Caret);
+                i += 1;
+            }
+            '(' => {
+                tokens.push(Token::LParen);
+                i += 1;
+            }
+            ')' => {
+                tokens.push(Token::RParen);
+                i += 1;
+            }
             c if c.is_ascii_digit() || c == '.' => {
                 let start = i;
                 while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
                     i += 1;
                 }
                 let num_str: String = chars[start..i].iter().collect();
-                let num: f64 = num_str.parse().map_err(|_| format!("invalid number: {}", num_str))?;
+                let num: f64 = num_str
+                    .parse()
+                    .map_err(|_| format!("invalid number: {}", num_str))?;
                 tokens.push(Token::Number(num));
             }
             c if c.is_ascii_alphabetic() || c == '_' => {
@@ -237,7 +266,10 @@ fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<f64, String> {
                 *pos += 1; // skip '('
                 let arg = parse_expr(tokens, pos)?;
                 if *pos >= tokens.len() || !matches!(&tokens[*pos], Token::RParen) {
-                    return Err(format!("expected ')' after function arguments for {}", name));
+                    return Err(format!(
+                        "expected ')' after function arguments for {}",
+                        name
+                    ));
                 }
                 *pos += 1; // skip ')'
 

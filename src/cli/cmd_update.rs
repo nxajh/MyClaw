@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 /// Execute `myclaw update`.
 pub fn run_update() -> Result<()> {
     // 1. Get current binary path
-    let current_exe = std::env::current_exe()
-        .context("failed to determine current executable path")?;
+    let current_exe =
+        std::env::current_exe().context("failed to determine current executable path")?;
 
     // 2. Get latest successful run ID
     println!("Checking for updates...");
@@ -34,8 +34,7 @@ pub fn run_update() -> Result<()> {
     if old_binary.exists() {
         std::fs::remove_file(&old_binary)?;
     }
-    std::fs::rename(&current_exe, &old_binary)
-        .context("failed to rename current binary")?;
+    std::fs::rename(&current_exe, &old_binary).context("failed to rename current binary")?;
 
     // 6. Move new binary into place (rename avoids "Text file busy" on running binaries)
     std::fs::rename(&new_binary, &current_exe)
@@ -51,10 +50,7 @@ pub fn run_update() -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            &current_exe,
-            std::fs::Permissions::from_mode(0o755),
-        )?;
+        std::fs::set_permissions(&current_exe, std::fs::Permissions::from_mode(0o755))?;
     }
 
     // 7. Clean up temp files

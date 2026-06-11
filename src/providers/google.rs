@@ -17,8 +17,8 @@
 //!
 //!   [providers.google.search.models."gemini-2.0-flash"]
 
-use crate::providers::{SearchProvider, SearchRequest, SearchResult, SearchResults};
 use crate::providers::http::build_reqwest_client;
+use crate::providers::{SearchProvider, SearchRequest, SearchResult, SearchResults};
 
 const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com";
 const DEFAULT_MODEL: &str = "gemini-2.0-flash";
@@ -137,33 +137,41 @@ impl SearchProvider for GoogleProvider {
             }]
         });
 
-        let resp_text = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async {
-            let resp = self
-                .client
-                .post(&url)
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send()
-                .await?;
+        let resp_text = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let resp = self
+                    .client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await?;
 
-            let status = resp.status();
-            if !status.is_success() {
-                let text = resp.text().await.unwrap_or_default();
-                anyhow::bail!("Google Gemini HTTP {}: {}", status, text);
-            }
-            resp.text().await.map_err(|e| anyhow::anyhow!(e.to_string()))
-        }))?;
+                let status = resp.status();
+                if !status.is_success() {
+                    let text = resp.text().await.unwrap_or_default();
+                    anyhow::bail!("Google Gemini HTTP {}: {}", status, text);
+                }
+                resp.text()
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))
+            })
+        })?;
 
         let resp: GeminiResponse = serde_json::from_str(&resp_text)?;
 
         // Debug: log grounding metadata state.
         if let Some(candidate) = resp.candidates.as_ref().and_then(|c| c.first()) {
             let has_meta = candidate.grounding_metadata.is_some();
-            let chunk_count = candidate.grounding_metadata.as_ref()
+            let chunk_count = candidate
+                .grounding_metadata
+                .as_ref()
                 .and_then(|m| m.grounding_chunks.as_ref())
                 .map(|c| c.len())
                 .unwrap_or(0);
-            let support_count = candidate.grounding_metadata.as_ref()
+            let support_count = candidate
+                .grounding_metadata
+                .as_ref()
                 .and_then(|m| m.grounding_supports.as_ref())
                 .map(|s| s.len())
                 .unwrap_or(0);
@@ -176,7 +184,9 @@ impl SearchProvider for GoogleProvider {
         }
 
         if let Some(err) = resp.error {
-            let msg = err.message.unwrap_or_else(|| err.status.unwrap_or_default());
+            let msg = err
+                .message
+                .unwrap_or_else(|| err.status.unwrap_or_default());
             anyhow::bail!("Google Gemini error {}: {}", err.code.unwrap_or(0), msg);
         }
 
@@ -244,9 +254,7 @@ impl SearchProvider for GoogleProvider {
                     if let Some(web) = chunk.web {
                         let url = web.uri.unwrap_or_default();
                         if !url.is_empty() {
-                            let snippet = chunk_snippets
-                                .remove(&i)
-                                .unwrap_or_default();
+                            let snippet = chunk_snippets.remove(&i).unwrap_or_default();
                             results.push(SearchResult {
                                 title: web.title.unwrap_or_default(),
                                 url,

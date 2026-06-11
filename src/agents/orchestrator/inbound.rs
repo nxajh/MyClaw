@@ -43,7 +43,13 @@ trait Interceptor: Send + Sync {
 
 /// The ordered interceptor chain. Terminal stage (`DispatchTurn`) must be last.
 fn chain() -> [&'static dyn Interceptor; 5] {
-    [&AskReply, &Callback, &CrashRecovery, &SlashCommand, &DispatchTurn]
+    [
+        &AskReply,
+        &Callback,
+        &CrashRecovery,
+        &SlashCommand,
+        &DispatchTurn,
+    ]
 }
 
 /// Run the inbound chain for one user message.
@@ -58,7 +64,9 @@ pub(super) async fn dispatch(
     // lives in the runner, not in the chain (delegation wakes skip it).
     if let Some(ref scheduler) = ctx.scheduler {
         let channel_key = format!("{}:{}", account.0, account.1);
-        scheduler.record_user_message(&channel_key, &msg.reply_target).await;
+        scheduler
+            .record_user_message(&channel_key, &msg.reply_target)
+            .await;
     }
 
     let key = SessionKey::new(&account.0, &account.1, &msg.sender);
@@ -107,7 +115,12 @@ impl Interceptor for Callback {
     fn name(&self) -> &'static str {
         "callback"
     }
-    async fn handle(&self, ctx: &OrchestratorCtx, key: &SessionKey, mut msg: ChannelMessage) -> Flow {
+    async fn handle(
+        &self,
+        ctx: &OrchestratorCtx,
+        key: &SessionKey,
+        mut msg: ChannelMessage,
+    ) -> Flow {
         let is_retry = match CallbackAction::parse(&msg.content) {
             Some(CallbackAction::Retry { .. }) => true,
             Some(CallbackAction::Abort { .. }) => false,
@@ -237,7 +250,10 @@ impl Interceptor for SlashCommand {
                 if let Some(channel) = channel_cmd {
                     let mut target = SendTarget::new(rt_cmd);
                     target.thread_id = rid_cmd;
-                    if let Err(e) = channel.send_payload(&target, &MessagePayload::text(response)).await {
+                    if let Err(e) = channel
+                        .send_payload(&target, &MessagePayload::text(response))
+                        .await
+                    {
                         error!(session = %sk, err = %e, "command response send failed");
                     }
                 }
@@ -296,11 +312,15 @@ pub(super) async fn dispatch_turn(ctx: &OrchestratorCtx, key: &SessionKey, msg: 
     tokio::spawn(async move {
         // Successful turns: process_turn does the fallback `channel.send(text)`
         // internally per RFC §三.B. We only handle the error notice here.
-        let result = session_ctx.process_turn(msg, Some(channel.clone()), runtime).await;
+        let result = session_ctx
+            .process_turn(msg, Some(channel.clone()), runtime)
+            .await;
         if let Err(ref e) = result {
             let target = SendTarget::new(reply_target);
             let text = crate::agents::user_messages::user_facing_error_message(e);
-            let _ = channel.send_payload(&target, &MessagePayload::text(text)).await;
+            let _ = channel
+                .send_payload(&target, &MessagePayload::text(text))
+                .await;
         }
     });
 }
@@ -309,7 +329,9 @@ pub(super) async fn dispatch_turn(ctx: &OrchestratorCtx, key: &SessionKey, msg: 
 
 async fn send_text(channel: &Arc<dyn Channel>, reply_target: &str, text: &str) {
     let target = SendTarget::new(reply_target);
-    let _ = channel.send_payload(&target, &MessagePayload::text(text)).await;
+    let _ = channel
+        .send_payload(&target, &MessagePayload::text(text))
+        .await;
 }
 
 /// Build a `(SendTarget, MessagePayload::Interactive)` pair for the
@@ -352,7 +374,7 @@ pub(super) fn retry_abort_prompt(
 mod tests {
     use super::*;
 
-    use super::super::test_support::{inbound_msg, test_ctx, MockChannel};
+    use super::super::test_support::{MockChannel, inbound_msg, test_ctx};
 
     /// Golden test: the inbound chain order is load-bearing (ask-reply must run
     /// before callback before dispatch, etc.). Pin it so reordering is a
@@ -393,7 +415,9 @@ mod tests {
     #[tokio::test]
     async fn ask_reply_passes_through_when_no_pending_ask() {
         let ctx = test_ctx(vec![]);
-        let flow = AskReply.handle(&ctx, &key(), inbound_msg("user1", "hi")).await;
+        let flow = AskReply
+            .handle(&ctx, &key(), inbound_msg("user1", "hi"))
+            .await;
         assert_eq!(next_content(flow).as_deref(), Some("hi"));
     }
 
@@ -409,8 +433,13 @@ mod tests {
         let waiter = tokio::spawn(async move { router.wait_for_reply(&sid).await });
         tokio::task::yield_now().await;
 
-        let flow = AskReply.handle(&ctx, &k, inbound_msg("user1", "the answer")).await;
-        assert!(matches!(flow, Flow::Stop), "pending ask should consume the inbound");
+        let flow = AskReply
+            .handle(&ctx, &k, inbound_msg("user1", "the answer"))
+            .await;
+        assert!(
+            matches!(flow, Flow::Stop),
+            "pending ask should consume the inbound"
+        );
         assert_eq!(waiter.await.unwrap().unwrap().content, "the answer");
     }
 
@@ -419,7 +448,9 @@ mod tests {
     #[tokio::test]
     async fn callback_non_callback_passes_through() {
         let ctx = test_ctx(vec![]);
-        let flow = Callback.handle(&ctx, &key(), inbound_msg("user1", "ordinary text")).await;
+        let flow = Callback
+            .handle(&ctx, &key(), inbound_msg("user1", "ordinary text"))
+            .await;
         assert_eq!(next_content(flow).as_deref(), Some("ordinary text"));
     }
 
@@ -427,8 +458,13 @@ mod tests {
     async fn callback_abort_acks_and_stops() {
         let ch = MockChannel::new();
         let ctx = with_channel(ch.clone());
-        let content = CallbackAction::Abort { session_key_prefix: "x".into() }.serialize();
-        let flow = Callback.handle(&ctx, &key(), inbound_msg("user1", &content)).await;
+        let content = CallbackAction::Abort {
+            session_key_prefix: "x".into(),
+        }
+        .serialize();
+        let flow = Callback
+            .handle(&ctx, &key(), inbound_msg("user1", &content))
+            .await;
         assert!(matches!(flow, Flow::Stop));
         assert!(ch.texts().iter().any(|t| t == MSG_ABORT_ACK));
     }
@@ -438,11 +474,18 @@ mod tests {
         let ch = MockChannel::new();
         let ctx = with_channel(ch.clone());
         let k = key();
-        *ctx.session_context_for(&k.to_string()).pending_retry.lock().await =
-            Some("original question".into());
+        *ctx.session_context_for(&k.to_string())
+            .pending_retry
+            .lock()
+            .await = Some("original question".into());
 
-        let content = CallbackAction::Retry { session_key_prefix: "x".into() }.serialize();
-        let flow = Callback.handle(&ctx, &k, inbound_msg("user1", &content)).await;
+        let content = CallbackAction::Retry {
+            session_key_prefix: "x".into(),
+        }
+        .serialize();
+        let flow = Callback
+            .handle(&ctx, &k, inbound_msg("user1", &content))
+            .await;
         // Retry falls through with the saved text substituted in.
         assert_eq!(next_content(flow).as_deref(), Some("original question"));
     }
@@ -451,8 +494,13 @@ mod tests {
     async fn callback_retry_without_pending_notifies_and_stops() {
         let ch = MockChannel::new();
         let ctx = with_channel(ch.clone());
-        let content = CallbackAction::Retry { session_key_prefix: "x".into() }.serialize();
-        let flow = Callback.handle(&ctx, &key(), inbound_msg("user1", &content)).await;
+        let content = CallbackAction::Retry {
+            session_key_prefix: "x".into(),
+        }
+        .serialize();
+        let flow = Callback
+            .handle(&ctx, &key(), inbound_msg("user1", &content))
+            .await;
         assert!(matches!(flow, Flow::Stop));
         assert!(ch.texts().iter().any(|t| t == MSG_NO_PENDING_RETRY));
     }
@@ -462,7 +510,9 @@ mod tests {
     #[tokio::test]
     async fn crash_recovery_passes_through_when_turn_complete() {
         let ctx = test_ctx(vec![]);
-        let flow = CrashRecovery.handle(&ctx, &key(), inbound_msg("user1", "hi")).await;
+        let flow = CrashRecovery
+            .handle(&ctx, &key(), inbound_msg("user1", "hi"))
+            .await;
         assert_eq!(next_content(flow).as_deref(), Some("hi"));
     }
 
@@ -471,13 +521,22 @@ mod tests {
         let ch = MockChannel::new();
         let ctx = with_channel(ch.clone());
         let k = key();
-        ctx.session_context_for(&k.to_string()).session.lock().await.incomplete_turn = true;
+        ctx.session_context_for(&k.to_string())
+            .session
+            .lock()
+            .await
+            .incomplete_turn = true;
 
-        let flow = CrashRecovery.handle(&ctx, &k, inbound_msg("user1", "hi")).await;
+        let flow = CrashRecovery
+            .handle(&ctx, &k, inbound_msg("user1", "hi"))
+            .await;
         assert!(matches!(flow, Flow::Stop));
         // The incomplete-turn prompt is an Interactive payload (retry + abort).
         let sent = ch.sent.lock().unwrap();
-        assert!(sent.iter().any(|m| m.inline_buttons.as_ref().is_some_and(|b| b.len() == 2)));
+        assert!(
+            sent.iter()
+                .any(|m| m.inline_buttons.as_ref().is_some_and(|b| b.len() == 2))
+        );
     }
 
     // ── retry_abort_prompt helper ─────────────────────────────────────────

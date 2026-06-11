@@ -15,4 +15,4 @@ pub use deferred::{ActivatedToolSet, DeferredMcpToolStub};
 pub use protocol::{JsonRpcRequest, JsonRpcResponse, McpToolDef};
 pub use tool::McpToolWrapper;
 pub use tool_trait::{Tool, ToolResult, ToolSpec};
-pub use transport::{create_transport, McpTransportConn};
+pub use transport::{McpTransportConn, create_transport};

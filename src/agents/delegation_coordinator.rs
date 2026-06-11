@@ -173,223 +173,249 @@ impl DelegationCoordinator {
         task_id_override: Option<&'a str>,
         session_key: Option<&'a str>,
         reply_target: Option<&'a str>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'a>>
+    {
         Box::pin(async move {
-        let agent = self.find_agent(agent_name)
-            .ok_or_else(|| {
+            let agent = self.find_agent(agent_name).ok_or_else(|| {
                 let available = self.configs.names();
                 anyhow::anyhow!(
                     "Unknown sub-agent '{}'. Available: {}",
-                    agent_name, available.join(", ")
+                    agent_name,
+                    available.join(", ")
                 )
             })?;
-        let config = &agent.config;
+            let config = &agent.config;
 
-        // H50: no marker file. Recovery scans SessionManager for sub-sessions
-        // (by `meta.parent_session_id`) and checks their history shape —
-        // see `agents::recovery::scan_unfinished_subagents`.
-        let task_id = task_id_override.map(|s| s.to_string())
-            .unwrap_or_else(|| format!("del_{}", uuid::Uuid::new_v4()));
+            // H50: no marker file. Recovery scans SessionManager for sub-sessions
+            // (by `meta.parent_session_id`) and checks their history shape —
+            // see `agents::recovery::scan_unfinished_subagents`.
+            let task_id = task_id_override
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("del_{}", uuid::Uuid::new_v4()));
 
-        tracing::info!(
-            agent = %config.name,
-            task_id = %task_id,
-            parent = %parent_session_id,
-            tools = ?config.tools,
-            task_len = task.len(),
-            "creating sub-agent for delegation"
-        );
+            tracing::info!(
+                agent = %config.name,
+                task_id = %task_id,
+                parent = %parent_session_id,
+                tools = ?config.tools,
+                task_len = task.len(),
+                "creating sub-agent for delegation"
+            );
 
-        // --- worktree creation (moved BEFORE prompt so we can inject the path) ---
-        let (worktree_path, cleanup_worktree, branch_name) = match config.isolation {
-            AgentIsolation::Worktree => {
-                let task_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
-                let branch_name = format!("subagent/{}_{}", config.name, task_id);
-                let worktree_path = self.worktrees_root.join(format!("{}_{}", config.name, task_id));
+            // --- worktree creation (moved BEFORE prompt so we can inject the path) ---
+            let (worktree_path, cleanup_worktree, branch_name) = match config.isolation {
+                AgentIsolation::Worktree => {
+                    let task_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+                    let branch_name = format!("subagent/{}_{}", config.name, task_id);
+                    let worktree_path = self
+                        .worktrees_root
+                        .join(format!("{}_{}", config.name, task_id));
 
-                if let Some(parent) = worktree_path.parent() {
-                    std::fs::create_dir_all(parent).ok();
-                }
-                if worktree_path.exists() {
-                    let _ = std::fs::remove_dir_all(&worktree_path);
-                }
+                    if let Some(parent) = worktree_path.parent() {
+                        std::fs::create_dir_all(parent).ok();
+                    }
+                    if worktree_path.exists() {
+                        let _ = std::fs::remove_dir_all(&worktree_path);
+                    }
 
-                let output = std::process::Command::new("git")
-                    .args(["worktree", "add", "-b", &branch_name, &worktree_path.to_string_lossy(), "HEAD"])
-                    .output()
-                    .map_err(|e| anyhow::anyhow!("failed to run git worktree add: {}", e))?;
+                    let output = std::process::Command::new("git")
+                        .args([
+                            "worktree",
+                            "add",
+                            "-b",
+                            &branch_name,
+                            &worktree_path.to_string_lossy(),
+                            "HEAD",
+                        ])
+                        .output()
+                        .map_err(|e| anyhow::anyhow!("failed to run git worktree add: {}", e))?;
 
-                if !output.status.success() {
-                    anyhow::bail!(
-                        "failed to create git worktree: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    );
-                }
-
-                tracing::info!(
-                    path = %worktree_path.display(),
-                    branch = %branch_name,
-                    "created git worktree for sub-agent"
-                );
-                (worktree_path, Some(task_id), Some(branch_name))
-            }
-            AgentIsolation::Shared => (PathBuf::new(), None, None),
-        };
-
-        let workspace_dir = if worktree_path.as_os_str().is_empty() {
-            String::new()
-        } else {
-            worktree_path.to_string_lossy().to_string()
-        };
-
-        let workspace_section = if workspace_dir.is_empty() {
-            String::new()
-        } else {
-            format!("\n\nWorking directory: {}", workspace_dir)
-        };
-
-        let identity = if config.system_prompt.is_empty() {
-            format!("You are a specialized agent named '{}'.{}", config.name, workspace_section)
-        } else {
-            format!("{}{}", config.system_prompt, workspace_section)
-        };
-
-        // session_key + reply_target args are still accepted (delegate_async
-        // passes them) but no longer persisted to a marker file.
-        let _ = (session_key, reply_target, &agent);
-
-        // RFC §三.A line 404-419: sub-sessions flow through the unified
-        // path — SessionManager builds a SessionContext (held only by this
-        // function), session-level overrides carry the run_mode / model /
-        // identity prompt, and `process_turn` does the rest.
-        let sub_ctx = self
-            .session_manager
-            .create_sub_session_context(parent_session_id, &config.name)?;
-
-        {
-            let mut session = sub_ctx.session.lock().await;
-            session.session_override.run_mode =
-                Some(crate::config::agent::RunMode::Background);
-            session.session_override.permission_mode =
-                Some(crate::agents::PermissionMode::Full);
-            if let Some(ref m) = config.model {
-                session.session_override.model = Some(m.clone());
-            }
-            session.session_override.system_prompt_override = Some(identity.clone());
-        }
-
-        // Snapshot the runtime; for worktree isolation, overlay the
-        // working directory so file tools see the worktree path.
-        let mut runtime = self.runtime()?;
-        if !worktree_path.as_os_str().is_empty() {
-            runtime.defaults.prompt.workspace_dir = worktree_path.to_string_lossy().to_string();
-        }
-
-        // Synthetic ChannelMessage carries the delegated task. No channel
-        // — sub-agent output is returned to the parent's tool call via
-        // the TurnResult text.
-        let synthetic = crate::channels::ChannelMessage {
-            id: format!("delegation:{}", task_id),
-            sender: format!("agent:{}", config.name),
-            reply_target: String::new(),
-            content: task.to_string(),
-            timestamp: chrono::Utc::now().timestamp() as u64,
-            thread_ts: None,
-            interruption_scope_id: None,
-            attachments: Vec::new(),
-            image_urls: None,
-            image_base64: None,
-        };
-
-        tracing::debug!(agent = %config.name, "sub-agent started");
-        let result = sub_ctx
-            .process_turn(synthetic, None, runtime)
-            .await
-            .map(|tr| tr.text);
-
-        match &result {
-            Ok(text) => tracing::debug!(agent = %config.name, text_len = text.len(), "sub-agent completed"),
-            Err(e) => tracing::warn!(agent = %config.name, err = %e, "sub-agent failed"),
-        }
-
-        // Merge sub-agent branch back into the main branch (if it committed anything).
-        if let Some(ref branch_name) = branch_name {
-            let diff = std::process::Command::new("git")
-                .args(["log", "--oneline", "HEAD..", branch_name])
-                .output();
-
-            let has_commits = match diff {
-                Ok(d) => !d.stdout.is_empty(),
-                Err(_) => false,
-            };
-
-            if has_commits {
-                // Switch back to the previous branch.
-                let checkout = std::process::Command::new("git")
-                    .args(["checkout", "@{-1}"])
-                    .output();
-
-                if let Ok(co) = checkout {
-                    if co.status.success() {
-                        let merge = std::process::Command::new("git")
-                            .args(["merge", "--no-ff", "-m",
-                                   &format!("merge sub-agent: {}", config.name),
-                                   branch_name])
-                            .output();
-
-                        match merge {
-                            Ok(m) if !m.status.success() => {
-                                tracing::warn!(
-                                    branch = %branch_name,
-                                    stderr = %String::from_utf8_lossy(&m.stderr),
-                                    "merge conflict — aborting merge, worktree preserved"
-                                );
-                                let _ = std::process::Command::new("git")
-                                    .args(["merge", "--abort"])
-                                    .output();
-                                return Err(anyhow::anyhow!(
-                                    "sub-agent '{}' completed but merge failed (conflict). Worktree preserved at {}",
-                                    config.name, worktree_path.display()
-                                ));
-                            }
-                            Err(e) => {
-                                tracing::warn!(branch = %branch_name, err = %e, "failed to run git merge");
-                            }
-                            _ => {
-                                tracing::debug!(branch = %branch_name, "merged sub-agent branch");
-                            }
-                        }
-                    } else {
-                        tracing::warn!(
-                            branch = %branch_name,
-                            stderr = %String::from_utf8_lossy(&co.stderr),
-                            "failed to checkout previous branch"
+                    if !output.status.success() {
+                        anyhow::bail!(
+                            "failed to create git worktree: {}",
+                            String::from_utf8_lossy(&output.stderr)
                         );
                     }
+
+                    tracing::info!(
+                        path = %worktree_path.display(),
+                        branch = %branch_name,
+                        "created git worktree for sub-agent"
+                    );
+                    (worktree_path, Some(task_id), Some(branch_name))
                 }
+                AgentIsolation::Shared => (PathBuf::new(), None, None),
+            };
+
+            let workspace_dir = if worktree_path.as_os_str().is_empty() {
+                String::new()
             } else {
-                tracing::debug!(branch = %branch_name, "no new commits, skipping merge");
-            }
-        }
+                worktree_path.to_string_lossy().to_string()
+            };
 
-        // Cleanup worktree + branch (only on success).
-        if cleanup_worktree.is_some() && result.is_ok() {
-            let _ = std::process::Command::new("git")
-                .args(["worktree", "remove", "--force", &worktree_path.to_string_lossy()])
-                .output();
-            if let Some(ref bn) = branch_name {
-                let _ = std::process::Command::new("git")
-                    .args(["branch", "-D", bn])
+            let workspace_section = if workspace_dir.is_empty() {
+                String::new()
+            } else {
+                format!("\n\nWorking directory: {}", workspace_dir)
+            };
+
+            let identity = if config.system_prompt.is_empty() {
+                format!(
+                    "You are a specialized agent named '{}'.{}",
+                    config.name, workspace_section
+                )
+            } else {
+                format!("{}{}", config.system_prompt, workspace_section)
+            };
+
+            // session_key + reply_target args are still accepted (delegate_async
+            // passes them) but no longer persisted to a marker file.
+            let _ = (session_key, reply_target, &agent);
+
+            // RFC §三.A line 404-419: sub-sessions flow through the unified
+            // path — SessionManager builds a SessionContext (held only by this
+            // function), session-level overrides carry the run_mode / model /
+            // identity prompt, and `process_turn` does the rest.
+            let sub_ctx = self
+                .session_manager
+                .create_sub_session_context(parent_session_id, &config.name)?;
+
+            {
+                let mut session = sub_ctx.session.lock().await;
+                session.session_override.run_mode = Some(crate::config::agent::RunMode::Background);
+                session.session_override.permission_mode =
+                    Some(crate::agents::PermissionMode::Full);
+                if let Some(ref m) = config.model {
+                    session.session_override.model = Some(m.clone());
+                }
+                session.session_override.system_prompt_override = Some(identity.clone());
+            }
+
+            // Snapshot the runtime; for worktree isolation, overlay the
+            // working directory so file tools see the worktree path.
+            let mut runtime = self.runtime()?;
+            if !worktree_path.as_os_str().is_empty() {
+                runtime.defaults.prompt.workspace_dir = worktree_path.to_string_lossy().to_string();
+            }
+
+            // Synthetic ChannelMessage carries the delegated task. No channel
+            // — sub-agent output is returned to the parent's tool call via
+            // the TurnResult text.
+            let synthetic = crate::channels::ChannelMessage {
+                id: format!("delegation:{}", task_id),
+                sender: format!("agent:{}", config.name),
+                reply_target: String::new(),
+                content: task.to_string(),
+                timestamp: chrono::Utc::now().timestamp() as u64,
+                thread_ts: None,
+                interruption_scope_id: None,
+                files: vec![],
+                attachments: Vec::new(),
+                image_urls: None,
+                image_base64: None,
+            };
+
+            tracing::debug!(agent = %config.name, "sub-agent started");
+            let result = sub_ctx
+                .process_turn(synthetic, None, runtime)
+                .await
+                .map(|tr| tr.text);
+
+            match &result {
+                Ok(text) => {
+                    tracing::debug!(agent = %config.name, text_len = text.len(), "sub-agent completed")
+                }
+                Err(e) => tracing::warn!(agent = %config.name, err = %e, "sub-agent failed"),
+            }
+
+            // Merge sub-agent branch back into the main branch (if it committed anything).
+            if let Some(ref branch_name) = branch_name {
+                let diff = std::process::Command::new("git")
+                    .args(["log", "--oneline", "HEAD..", branch_name])
                     .output();
+
+                let has_commits = match diff {
+                    Ok(d) => !d.stdout.is_empty(),
+                    Err(_) => false,
+                };
+
+                if has_commits {
+                    // Switch back to the previous branch.
+                    let checkout = std::process::Command::new("git")
+                        .args(["checkout", "@{-1}"])
+                        .output();
+
+                    if let Ok(co) = checkout {
+                        if co.status.success() {
+                            let merge = std::process::Command::new("git")
+                                .args([
+                                    "merge",
+                                    "--no-ff",
+                                    "-m",
+                                    &format!("merge sub-agent: {}", config.name),
+                                    branch_name,
+                                ])
+                                .output();
+
+                            match merge {
+                                Ok(m) if !m.status.success() => {
+                                    tracing::warn!(
+                                        branch = %branch_name,
+                                        stderr = %String::from_utf8_lossy(&m.stderr),
+                                        "merge conflict — aborting merge, worktree preserved"
+                                    );
+                                    let _ = std::process::Command::new("git")
+                                        .args(["merge", "--abort"])
+                                        .output();
+                                    return Err(anyhow::anyhow!(
+                                        "sub-agent '{}' completed but merge failed (conflict). Worktree preserved at {}",
+                                        config.name,
+                                        worktree_path.display()
+                                    ));
+                                }
+                                Err(e) => {
+                                    tracing::warn!(branch = %branch_name, err = %e, "failed to run git merge");
+                                }
+                                _ => {
+                                    tracing::debug!(branch = %branch_name, "merged sub-agent branch");
+                                }
+                            }
+                        } else {
+                            tracing::warn!(
+                                branch = %branch_name,
+                                stderr = %String::from_utf8_lossy(&co.stderr),
+                                "failed to checkout previous branch"
+                            );
+                        }
+                    }
+                } else {
+                    tracing::debug!(branch = %branch_name, "no new commits, skipping merge");
+                }
             }
-            tracing::debug!(path = %worktree_path.display(), "cleaned up worktree and branch");
-        }
 
-        // H50: no marker file to clean up. Sub-session completion clears
-        // `incomplete_turn` via the standard turn-end persistence path; the
-        // session is then no longer flagged as needing recovery.
+            // Cleanup worktree + branch (only on success).
+            if cleanup_worktree.is_some() && result.is_ok() {
+                let _ = std::process::Command::new("git")
+                    .args([
+                        "worktree",
+                        "remove",
+                        "--force",
+                        &worktree_path.to_string_lossy(),
+                    ])
+                    .output();
+                if let Some(ref bn) = branch_name {
+                    let _ = std::process::Command::new("git")
+                        .args(["branch", "-D", bn])
+                        .output();
+                }
+                tracing::debug!(path = %worktree_path.display(), "cleaned up worktree and branch");
+            }
 
-        result
+            // H50: no marker file to clean up. Sub-session completion clears
+            // `incomplete_turn` via the standard turn-end persistence path; the
+            // session is then no longer flagged as needing recovery.
+
+            result
         }) // end Box::pin
     }
 
@@ -403,14 +429,14 @@ impl DelegationCoordinator {
         parent_session_id: &str,
         reply_target: &str,
     ) -> anyhow::Result<String> {
-        let agent = self.find_agent(agent_name)
-            .ok_or_else(|| {
-                let available = self.configs.names();
-                anyhow::anyhow!(
-                    "Unknown sub-agent '{}'. Available: {}",
-                    agent_name, available.join(", ")
-                )
-            })?;
+        let agent = self.find_agent(agent_name).ok_or_else(|| {
+            let available = self.configs.names();
+            anyhow::anyhow!(
+                "Unknown sub-agent '{}'. Available: {}",
+                agent_name,
+                available.join(", ")
+            )
+        })?;
         let config = &agent.config;
 
         let task_id = format!("del_{}", uuid::Uuid::new_v4());
@@ -438,8 +464,12 @@ impl DelegationCoordinator {
 
             let result = sub_delegator
                 .delegate_with_parent(
-                    &agent_name_owned, &task_owned, &parent_session_id_owned,
-                    Some(&task_id_clone), Some(&session_key_owned), Some(&reply_target_owned),
+                    &agent_name_owned,
+                    &task_owned,
+                    &parent_session_id_owned,
+                    Some(&task_id_clone),
+                    Some(&session_key_owned),
+                    Some(&reply_target_owned),
                 )
                 .await;
 
@@ -449,22 +479,26 @@ impl DelegationCoordinator {
                 match result {
                     Ok(summary) => {
                         tracing::info!(task_id = %task_id_clone, duration_secs, "sub-agent completed successfully");
-                        let _ = tx.send(DelegationEvent::Completed {
-                            task_id: task_id_clone.clone(),
-                            parent_session_id: parent_session_id_owned,
-                            reply_target: reply_target_owned,
-                            summary,
-                            duration_secs,
-                        }).await;
+                        let _ = tx
+                            .send(DelegationEvent::Completed {
+                                task_id: task_id_clone.clone(),
+                                parent_session_id: parent_session_id_owned,
+                                reply_target: reply_target_owned,
+                                summary,
+                                duration_secs,
+                            })
+                            .await;
                     }
                     Err(e) => {
                         tracing::warn!(task_id = %task_id_clone, duration_secs, err = %e, "sub-agent failed");
-                        let _ = tx.send(DelegationEvent::Failed {
-                            task_id: task_id_clone.clone(),
-                            parent_session_id: parent_session_id_owned,
-                            reply_target: reply_target_owned,
-                            error: e.to_string(),
-                        }).await;
+                        let _ = tx
+                            .send(DelegationEvent::Failed {
+                                task_id: task_id_clone.clone(),
+                                parent_session_id: parent_session_id_owned,
+                                reply_target: reply_target_owned,
+                                error: e.to_string(),
+                            })
+                            .await;
                     }
                 }
             }
@@ -491,9 +525,7 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
         task: &str,
         parent_session: &super::session::Session,
     ) -> anyhow::Result<String> {
-        let reply_target = parent_session
-            .reply_target()
-            .map(|s| s.to_string());
+        let reply_target = parent_session.reply_target().map(|s| s.to_string());
         self.delegate_with_parent(
             agent_name,
             task,

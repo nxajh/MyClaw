@@ -7,12 +7,10 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use std::collections::HashMap;
 
-use crate::providers::{
-    BoxStream, ChatProvider, ChatRequest, StreamEvent,
-};
-use reqwest::Client;
 use crate::providers::http::build_reqwest_client;
 use crate::providers::protocols::anthropic::message_rendering::build_anthropic_body;
+use crate::providers::{BoxStream, ChatProvider, ChatRequest, StreamEvent};
+use reqwest::Client;
 
 /// Anthropic Messages protocol client.
 #[derive(Clone)]
@@ -34,7 +32,12 @@ impl ChatProvider for AnthropicMessagesClient {
 
 impl AnthropicMessagesClient {
     pub fn new(api_key: String, base_url: String) -> Self {
-        Self { base_url, api_key, client: build_reqwest_client(), user_agent: None }
+        Self {
+            base_url,
+            api_key,
+            client: build_reqwest_client(),
+            user_agent: None,
+        }
     }
 
     pub fn with_user_agent(mut self, user_agent: String) -> Self {
@@ -64,10 +67,16 @@ impl AnthropicMessagesClient {
         tokio::spawn(async move {
             let mut headers = reqwest::header::HeaderMap::new();
             headers.insert("x-api-key", api_key.parse().unwrap());
-            headers.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
+            headers.insert(
+                reqwest::header::CONTENT_TYPE,
+                "application/json".parse().unwrap(),
+            );
             headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
             if thinking_enabled {
-                headers.insert("anthropic-beta", "interleaved-thinking-2025-05-14".parse().unwrap());
+                headers.insert(
+                    "anthropic-beta",
+                    "interleaved-thinking-2025-05-14".parse().unwrap(),
+                );
             }
             if let Some(ref ua) = user_agent {
                 headers.insert(reqwest::header::USER_AGENT, ua.parse().unwrap());
@@ -96,10 +105,12 @@ impl AnthropicMessagesClient {
                         "HTTP 400 from provider — dumping request body for diagnosis",
                     );
                 }
-                let _ = tx.send(StreamEvent::HttpError {
-                    status: status.as_u16(),
-                    message,
-                }).await;
+                let _ = tx
+                    .send(StreamEvent::HttpError {
+                        status: status.as_u16(),
+                        message,
+                    })
+                    .await;
                 return;
             }
 
@@ -129,22 +140,35 @@ impl AnthropicMessagesClient {
                 };
                 utf8_buf.extend_from_slice(&bytes);
                 let text = match std::str::from_utf8(&utf8_buf) {
-                    Ok(s) => { let owned = s.to_string(); utf8_buf.clear(); owned }
+                    Ok(s) => {
+                        let owned = s.to_string();
+                        utf8_buf.clear();
+                        owned
+                    }
                     Err(e) => {
                         let valid = e.valid_up_to();
-                        if valid == 0 && utf8_buf.len() < 4 { continue; }
+                        if valid == 0 && utf8_buf.len() < 4 {
+                            continue;
+                        }
                         let t = String::from_utf8_lossy(&utf8_buf[..valid]).into_owned();
                         utf8_buf.clear();
                         t
                     }
                 };
-                if text.is_empty() { continue; }
+                if text.is_empty() {
+                    continue;
+                }
                 buffer.push_str(&text);
 
                 while let Some(pos) = buffer.find('\n') {
                     let line = buffer[..pos].to_string();
                     buffer.drain(..=pos);
-                    let events = parse_anthropic_sse(&line, &mut tool_index_map, &mut next_tool_index, &mut anthropic_to_tool_index);
+                    let events = parse_anthropic_sse(
+                        &line,
+                        &mut tool_index_map,
+                        &mut next_tool_index,
+                        &mut anthropic_to_tool_index,
+                    );
                     for event in events {
                         if matches!(event, StreamEvent::Done { .. }) {
                             saw_terminal = true;
@@ -190,12 +214,16 @@ fn parse_anthropic_sse(
     use crate::providers::{ChatUsage, StopReason};
 
     let line = line.trim();
-    if line.is_empty() || line.starts_with(':') { return vec![]; }
+    if line.is_empty() || line.starts_with(':') {
+        return vec![];
+    }
     let data = match line.strip_prefix("data:") {
         Some(d) => d.trim(),
         None => return vec![],
     };
-    if data == "[DONE]" { return vec![]; }
+    if data == "[DONE]" {
+        return vec![];
+    }
 
     let evt = match serde_json::from_str::<serde_json::Value>(data) {
         Ok(v) => v,
@@ -214,14 +242,26 @@ fn parse_anthropic_sse(
             };
             if let Some(cb) = evt.get("content_block") {
                 if cb.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
-                    let id = cb.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let name = cb.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let id = cb
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let name = cb
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     if !id.is_empty() && !name.is_empty() {
                         tool_index_map.insert(index, (id.clone(), name.clone()));
                         let tool_idx = *next_tool_index;
                         anthropic_to_tool_index.insert(index, tool_idx);
                         *next_tool_index += 1;
-                        return vec![StreamEvent::ToolCallStart { id, name, initial_arguments: String::new() }];
+                        return vec![StreamEvent::ToolCallStart {
+                            id,
+                            name,
+                            initial_arguments: String::new(),
+                        }];
                     }
                 }
             }
@@ -235,15 +275,36 @@ fn parse_anthropic_sse(
             match delta.get("type").and_then(|v| v.as_str()).unwrap_or("") {
                 "text_delta" => {
                     let text = delta.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                    if !text.is_empty() { vec![StreamEvent::Delta { text: text.to_string() }] } else { vec![] }
+                    if !text.is_empty() {
+                        vec![StreamEvent::Delta {
+                            text: text.to_string(),
+                        }]
+                    } else {
+                        vec![]
+                    }
                 }
                 "thinking_delta" => {
                     let text = delta.get("thinking").and_then(|v| v.as_str()).unwrap_or("");
-                    if !text.is_empty() { vec![StreamEvent::Thinking { text: text.to_string() }] } else { vec![] }
+                    if !text.is_empty() {
+                        vec![StreamEvent::Thinking {
+                            text: text.to_string(),
+                        }]
+                    } else {
+                        vec![]
+                    }
                 }
                 "signature_delta" => {
-                    let sig = delta.get("signature").and_then(|v| v.as_str()).unwrap_or("");
-                    if sig.is_empty() { vec![] } else { vec![StreamEvent::ThinkingSignature { signature: sig.to_string() }] }
+                    let sig = delta
+                        .get("signature")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if sig.is_empty() {
+                        vec![]
+                    } else {
+                        vec![StreamEvent::ThinkingSignature {
+                            signature: sig.to_string(),
+                        }]
+                    }
                 }
                 "input_json_delta" => {
                     let index = match evt.get("index").and_then(|v| v.as_u64()) {
@@ -254,9 +315,20 @@ fn parse_anthropic_sse(
                         Some(entry) => entry.clone(),
                         None => return vec![],
                     };
-                    let tool_idx = anthropic_to_tool_index.get(&index).copied().unwrap_or(index as u32);
-                    let args = delta.get("partial_json").and_then(|v| v.as_str()).unwrap_or("");
-                    vec![StreamEvent::ToolCallDelta { index: tool_idx, id, name: String::new(), delta: args.to_string() }]
+                    let tool_idx = anthropic_to_tool_index
+                        .get(&index)
+                        .copied()
+                        .unwrap_or(index as u32);
+                    let args = delta
+                        .get("partial_json")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    vec![StreamEvent::ToolCallDelta {
+                        index: tool_idx,
+                        id,
+                        name: String::new(),
+                        delta: args.to_string(),
+                    }]
                 }
                 _ => vec![],
             }
@@ -264,15 +336,20 @@ fn parse_anthropic_sse(
         "message_start" | "message_delta" => {
             let mut events = Vec::new();
             let usage = evt
-                .get("message").and_then(|m| m.get("usage"))
+                .get("message")
+                .and_then(|m| m.get("usage"))
                 .or_else(|| evt.get("usage"));
             if let Some(usage) = usage {
                 events.push(StreamEvent::Usage(ChatUsage {
                     input_tokens: usage.get("input_tokens").and_then(|v| v.as_u64()),
                     output_tokens: usage.get("output_tokens").and_then(|v| v.as_u64()),
-                    cached_input_tokens: usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()),
+                    cached_input_tokens: usage
+                        .get("cache_read_input_tokens")
+                        .and_then(|v| v.as_u64()),
                     reasoning_tokens: None,
-                    cache_write_tokens: usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()),
+                    cache_write_tokens: usage
+                        .get("cache_creation_input_tokens")
+                        .and_then(|v| v.as_u64()),
                 }));
             }
             if ty == "message_delta" {
@@ -283,7 +360,10 @@ fn parse_anthropic_sse(
                             "max_tokens" => StopReason::MaxTokens,
                             "tool_use" => StopReason::ToolUse,
                             "content_filter" => StopReason::ContentFilter,
-                            s if crate::providers::capability_chat::is_context_overflow_reason(s) => {
+                            s if crate::providers::capability_chat::is_context_overflow_reason(
+                                s,
+                            ) =>
+                            {
                                 StopReason::ContextOverflow
                             }
                             _ => StopReason::EndTurn,
@@ -294,7 +374,9 @@ fn parse_anthropic_sse(
             }
             events
         }
-        "message_stop" => vec![StreamEvent::Done { reason: StopReason::EndTurn }],
+        "message_stop" => vec![StreamEvent::Done {
+            reason: StopReason::EndTurn,
+        }],
         _ => vec![],
     }
 }

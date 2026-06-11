@@ -9,13 +9,13 @@ use tokio_stream::StreamExt;
 use crate::mcp::config_types::{McpServerConfig, McpTransport};
 use crate::mcp::protocol::{JsonRpcRequest, JsonRpcResponse};
 
-mod stdio;
 mod http;
 mod sse;
+mod stdio;
 
-pub use stdio::StdioTransport;
 pub use http::HttpTransport;
 pub use sse::SseTransport;
+pub use stdio::StdioTransport;
 
 /// Maximum bytes for a single JSON-RPC response.
 pub(super) const MAX_LINE_BYTES: usize = 4 * 1024 * 1024; // 4 MB

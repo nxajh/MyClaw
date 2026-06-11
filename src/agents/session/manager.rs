@@ -4,13 +4,13 @@ use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 
-use std::collections::HashMap;
 use parking_lot::RwLock;
+use std::collections::HashMap;
 
+use crate::agents::Agent;
 use crate::agents::agent_registry::AgentRegistry;
 use crate::agents::session_context::SessionContext;
 use crate::agents::user_profile::UserResolver;
-use crate::agents::Agent;
 use crate::config::sub_agent::SubAgentConfig;
 
 /// Returned by `switch_session` when the caller tries to point a routing_key
@@ -38,16 +38,14 @@ impl fmt::Display for SessionNotOwned {
 
 impl std::error::Error for SessionNotOwned {}
 
-
-
 use crate::providers::capability_chat::ChatMessage;
 use crate::storage::{SessionBackend, SessionInfo};
 
 use super::backend::InMemoryBackend;
-use super::recovery::{identify_breakpoint, BreakpointItem};
+use super::recovery::{BreakpointItem, identify_breakpoint};
+use super::session_override::SessionOverride;
 use super::session_override::sanitize_paired;
 use super::types::{Session, SummaryMetadata};
-use super::session_override::SessionOverride;
 
 /// Manages session lifecycle — creates, retrieves, and persists sessions.
 pub struct SessionManager {
@@ -126,7 +124,9 @@ impl SessionManager {
 
         // Load from backend.
         let stored_total_tokens = self.backend.load_token_count(&session_id);
-        let session_override = self.backend.load_session_override(&session_id)
+        let session_override = self
+            .backend
+            .load_session_override(&session_id)
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or_default();
         let (summary_meta, compact_ver) = match self.backend.load_latest_summary(&session_id) {
@@ -151,58 +151,59 @@ impl SessionManager {
         let raw_msgs: Vec<ChatMessage> = rows.iter().map(|(_, m)| m.clone()).collect();
         let breakpoints = identify_breakpoint(&raw_msgs);
 
-        let (ids, msgs, breakpoints): (Vec<i64>, Vec<ChatMessage>, Vec<BreakpointItem>) = if !breakpoints.is_empty() {
-            // Breakpoint mode: only remove orphan tool results, but keep the
-            // trailing assistant message with tool_calls so the model can
-            // re-execute the interrupted tools.
-            let known_tool_ids: HashSet<String> = rows
-                .iter()
-                .filter(|(_, m)| m.role == "assistant")
-                .flat_map(|(_, m)| m.tool_calls.iter().flatten().map(|tc| tc.id.clone()))
-                .collect();
-            let filtered: Vec<_> = rows
-                .into_iter()
-                .filter(|(_, msg)| {
-                    if msg.role == "tool" {
-                        return msg
-                            .tool_call_id
-                            .as_ref()
-                            .is_some_and(|id| known_tool_ids.contains(id));
+        let (ids, msgs, breakpoints): (Vec<i64>, Vec<ChatMessage>, Vec<BreakpointItem>) =
+            if !breakpoints.is_empty() {
+                // Breakpoint mode: only remove orphan tool results, but keep the
+                // trailing assistant message with tool_calls so the model can
+                // re-execute the interrupted tools.
+                let known_tool_ids: HashSet<String> = rows
+                    .iter()
+                    .filter(|(_, m)| m.role == "assistant")
+                    .flat_map(|(_, m)| m.tool_calls.iter().flatten().map(|tc| tc.id.clone()))
+                    .collect();
+                let filtered: Vec<_> = rows
+                    .into_iter()
+                    .filter(|(_, msg)| {
+                        if msg.role == "tool" {
+                            return msg
+                                .tool_call_id
+                                .as_ref()
+                                .is_some_and(|id| known_tool_ids.contains(id));
+                        }
+                        true
+                    })
+                    .collect();
+                let (i, m): (Vec<i64>, Vec<_>) = filtered.into_iter().unzip();
+                tracing::warn!(
+                    session = %session_id,
+                    breakpoint_count = breakpoints.len(),
+                    "detected breakpoint: tool calls without results, preserving for recovery"
+                );
+                (i, m, breakpoints)
+            } else {
+                let pairs = sanitize_paired(rows);
+                let sanitized = pairs.len();
+                let (i, m): (Vec<i64>, Vec<_>) = pairs.into_iter().unzip();
+                if count > 0 {
+                    if from_compacted {
+                        tracing::info!(
+                            session = %session_id,
+                            message_count = count,
+                            sanitized,
+                            stored_total_tokens,
+                            "session restored from compacted history"
+                        );
+                    } else {
+                        tracing::info!(
+                            session = %session_id,
+                            message_count = count,
+                            sanitized,
+                            "session restored from full history"
+                        );
                     }
-                    true
-                })
-                .collect();
-            let (i, m): (Vec<i64>, Vec<_>) = filtered.into_iter().unzip();
-            tracing::warn!(
-                session = %session_id,
-                breakpoint_count = breakpoints.len(),
-                "detected breakpoint: tool calls without results, preserving for recovery"
-            );
-            (i, m, breakpoints)
-        } else {
-            let pairs = sanitize_paired(rows);
-            let sanitized = pairs.len();
-            let (i, m): (Vec<i64>, Vec<_>) = pairs.into_iter().unzip();
-            if count > 0 {
-                if from_compacted {
-                    tracing::info!(
-                        session = %session_id,
-                        message_count = count,
-                        sanitized,
-                        stored_total_tokens,
-                        "session restored from compacted history"
-                    );
-                } else {
-                    tracing::info!(
-                        session = %session_id,
-                        message_count = count,
-                        sanitized,
-                        "session restored from full history"
-                    );
                 }
-            }
-            (i, m, Vec::new())
-        };
+                (i, m, Vec::new())
+            };
 
         // Seed the token tracker from the persisted total so it carries
         // across restarts. If there's no stored value, the tracker stays
@@ -215,7 +216,9 @@ impl SessionManager {
         let mut session = Session {
             id: session_id.clone(),
             owner: user_id.to_string(),
-            agent_name: self.backend.load_agent_name(&session_id)
+            agent_name: self
+                .backend
+                .load_agent_name(&session_id)
                 .unwrap_or_else(|| "main".to_string()),
             parent_session_id: self.backend.load_parent_session_id(&session_id),
             history: msgs,
@@ -293,15 +296,19 @@ impl SessionManager {
     /// offer to create a new session in the current channel instead of bouncing
     /// the user to the other channel's session pool.
     pub fn switch_session(&self, user_id: &str, session_id: &str) -> std::io::Result<SessionInfo> {
-        let info = self.backend.get_session(session_id)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "session not found"))?;
+        let info = self.backend.get_session(session_id).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "session not found")
+        })?;
 
         if info.owner != user_id {
             let err = SessionNotOwned {
                 session_id: session_id.to_string(),
                 routing_key: user_id.to_string(),
             };
-            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, err));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                err,
+            ));
         }
 
         self.backend.set_active_session(user_id, session_id)?;
@@ -318,14 +325,21 @@ impl SessionManager {
     pub fn delete_session(&self, user_id: &str, session_id: &str) -> std::io::Result<()> {
         // Check not active.
         if self.backend.get_active_session(user_id).as_deref() == Some(session_id) {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "cannot delete the active session"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "cannot delete the active session",
+            ));
         }
 
-        let info = self.backend.get_session(session_id)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "session not found"))?;
+        let info = self.backend.get_session(session_id).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "session not found")
+        })?;
 
         if info.owner != user_id {
-            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "not your session"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "not your session",
+            ));
         }
 
         // Cascade: drop sub-sessions first so an interrupted delete leaves
@@ -371,10 +385,7 @@ impl SessionManager {
     /// Sessions are deduplicated by id; sub-sessions are filtered out.
     /// `list_sessions(routing_key)` is the per-channel slice; this method is
     /// the per-human aggregation needed by the `/sessions` slash command.
-    pub fn list_sessions_for_user(
-        &self,
-        user_id: &str,
-    ) -> Vec<SessionInfo> {
+    pub fn list_sessions_for_user(&self, user_id: &str) -> Vec<SessionInfo> {
         let mut seen = std::collections::HashSet::<String>::new();
         let mut out = Vec::new();
         for rk in self.resolver.routing_keys_for(user_id) {
@@ -402,8 +413,7 @@ impl SessionManager {
             .list_all_sessions()
             .into_iter()
             .filter(|info| {
-                self.backend.load_parent_session_id(&info.id).as_deref()
-                    == Some(parent_session_id)
+                self.backend.load_parent_session_id(&info.id).as_deref() == Some(parent_session_id)
             })
             .collect()
     }
@@ -472,15 +482,9 @@ impl SessionManager {
         // Sub-sessions belong to the parent's owner so recovery scans the same
         // bucket. The parent's owner is read from the backend rather than the
         // cache because the parent may have been evicted.
-        let parent = self
-            .backend
-            .get_session(parent_session_id)
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "parent session not found",
-                )
-            })?;
+        let parent = self.backend.get_session(parent_session_id).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "parent session not found")
+        })?;
         let info = self.backend.create_session(
             &parent.owner,
             Some(&format!("sub:{}:{}", parent_session_id, agent_name)),
@@ -551,7 +555,8 @@ impl SessionManager {
             Some(id) => id,
             None => return SessionOverride::default(),
         };
-        self.backend.load_session_override(&session_id)
+        self.backend
+            .load_session_override(&session_id)
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or_default()
     }
@@ -595,7 +600,9 @@ impl SessionManager {
         session.persist = Some(self.build_persist_hook());
         let agent = self.build_agent_for_session(&session);
         let ctx = Arc::new(SessionContext::new(session, agent));
-        self.contexts.write().insert(routing_key.to_string(), ctx.clone());
+        self.contexts
+            .write()
+            .insert(routing_key.to_string(), ctx.clone());
         ctx
     }
 

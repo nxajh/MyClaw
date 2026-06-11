@@ -16,9 +16,9 @@
 //! - Stall watchdog (notify when thinking for too long)
 //! - Photo/image download + forward attribution
 
+pub mod channel;
 pub mod markdown;
 pub mod types;
-pub mod channel;
 
 pub use channel::TelegramChannel;
 pub use markdown::markdown_to_telegram_html;

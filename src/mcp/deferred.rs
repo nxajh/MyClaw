@@ -288,8 +288,8 @@ mod tests {
 
     #[test]
     fn activated_set_tracks_activation() {
-        use async_trait::async_trait;
         use crate::mcp::tool_trait::ToolResult;
+        use async_trait::async_trait;
 
         struct FakeTool;
         #[async_trait]
@@ -303,7 +303,11 @@ mod tests {
             fn parameters_schema(&self) -> serde_json::Value {
                 serde_json::json!({})
             }
-            async fn execute(&self, _: serde_json::Value, _: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
+            async fn execute(
+                &self,
+                _: serde_json::Value,
+                _: &crate::agents::session::Session,
+            ) -> anyhow::Result<ToolResult> {
                 Ok(ToolResult {
                     success: true,
                     output: String::new(),
@@ -322,8 +326,8 @@ mod tests {
 
     #[test]
     fn activated_set_resolves_unique_suffix() {
-        use async_trait::async_trait;
         use crate::mcp::tool_trait::ToolResult;
+        use async_trait::async_trait;
 
         struct FakeTool;
         #[async_trait]
@@ -337,7 +341,11 @@ mod tests {
             fn parameters_schema(&self) -> serde_json::Value {
                 serde_json::json!({})
             }
-            async fn execute(&self, _: serde_json::Value, _: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
+            async fn execute(
+                &self,
+                _: serde_json::Value,
+                _: &crate::agents::session::Session,
+            ) -> anyhow::Result<ToolResult> {
                 Ok(ToolResult {
                     success: true,
                     output: String::new(),
@@ -353,8 +361,8 @@ mod tests {
 
     #[test]
     fn activated_set_rejects_ambiguous_suffix() {
-        use async_trait::async_trait;
         use crate::mcp::tool_trait::ToolResult;
+        use async_trait::async_trait;
 
         struct FakeTool(&'static str);
         #[async_trait]
@@ -368,7 +376,11 @@ mod tests {
             fn parameters_schema(&self) -> serde_json::Value {
                 serde_json::json!({})
             }
-            async fn execute(&self, _: serde_json::Value, _: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
+            async fn execute(
+                &self,
+                _: serde_json::Value,
+                _: &crate::agents::session::Session,
+            ) -> anyhow::Result<ToolResult> {
                 Ok(ToolResult {
                     success: true,
                     output: String::new(),

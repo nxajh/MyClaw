@@ -92,8 +92,7 @@ impl Tool for AskUserTool {
                     success: false,
                     output: String::new(),
                     error: Some(
-                        "ask_user requires an active reply_target on the session"
-                            .to_string(),
+                        "ask_user requires an active reply_target on the session".to_string(),
                     ),
                 });
             }

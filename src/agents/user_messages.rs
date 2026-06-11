@@ -27,8 +27,8 @@ pub const MSG_TURN_FAILED: &str = "⚠️ 处理超时，未收到模型回复�
 /// (carries the real HTTP status) and falls back to substring heuristics on the
 /// error message for connection/timeout/chain-exhausted cases.
 pub fn user_facing_error_message(err: &anyhow::Error) -> String {
-    use crate::providers::fallback::{CHAIN_ALL_COOLING_TAG, CHAIN_EXHAUSTED_TAG};
     use crate::providers::ProviderHttpError;
+    use crate::providers::fallback::{CHAIN_ALL_COOLING_TAG, CHAIN_EXHAUSTED_TAG};
 
     if let Some(http) = err.downcast_ref::<ProviderHttpError>() {
         let too_long = http.message.contains("too long")

@@ -26,7 +26,7 @@ use futures_util::{SinkExt, StreamExt};
 use parking_lot::{Mutex as SyncMutex, RwLock};
 use std::sync::OnceLock;
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
@@ -152,8 +152,12 @@ impl ClientChannel {
         // across an await point (parking_lot::MutexGuard is not Send).
         let pre_bound = self.pre_bound.lock().take();
         let listener = if let Some(std_listener) = pre_bound {
-            std_listener.set_nonblocking(true)
-                .map_err(|e| anyhow::anyhow!("failed to set nonblocking on inherited client socket: {}", e))?;
+            std_listener.set_nonblocking(true).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to set nonblocking on inherited client socket: {}",
+                    e
+                )
+            })?;
             let l = TcpListener::from_std(std_listener)
                 .map_err(|e| anyhow::anyhow!("failed to convert inherited client socket: {}", e))?;
             tracing::info!(
@@ -162,10 +166,12 @@ impl ClientChannel {
             );
             l
         } else {
-            let addr: SocketAddr = self.config.bind.parse()
-                .map_err(|e| anyhow::anyhow!("invalid client bind address '{}': {}", self.config.bind, e))?;
-            TcpListener::bind(addr).await
-                .map_err(|e| anyhow::anyhow!("failed to bind WebSocket server to {}: {}", addr, e))?
+            let addr: SocketAddr = self.config.bind.parse().map_err(|e| {
+                anyhow::anyhow!("invalid client bind address '{}': {}", self.config.bind, e)
+            })?;
+            TcpListener::bind(addr).await.map_err(|e| {
+                anyhow::anyhow!("failed to bind WebSocket server to {}: {}", addr, e)
+            })?
         };
 
         let max_connections = self.config.max_connections;
@@ -229,15 +235,18 @@ impl ClientChannel {
                         // Register connection.
                         {
                             let mut conns = connections.write();
-                            conns.insert(conn_id.clone(), ClientConnection {
-                                ws_sender: ws_sender.clone(),
-                                active_session: session_key.clone(),
-                                sessions: {
-                                    let mut set = std::collections::HashSet::new();
-                                    set.insert(session_key.clone());
-                                    set
+                            conns.insert(
+                                conn_id.clone(),
+                                ClientConnection {
+                                    ws_sender: ws_sender.clone(),
+                                    active_session: session_key.clone(),
+                                    sessions: {
+                                        let mut set = std::collections::HashSet::new();
+                                        set.insert(session_key.clone());
+                                        set
+                                    },
                                 },
-                            });
+                            );
                             let mut owners = session_owners.write();
                             owners.insert(session_key.clone(), conn_id.clone());
                         }
@@ -287,7 +296,9 @@ impl ClientChannel {
                                 // sessions survive reconnects.
                                 let mut client_id = conn_id_clone.clone();
 
-                                while let Some(msg_result) = futures_util::StreamExt::next(&mut ws_stream).await {
+                                while let Some(msg_result) =
+                                    futures_util::StreamExt::next(&mut ws_stream).await
+                                {
                                     let msg = match msg_result {
                                         Ok(Message::Text(text)) => text.to_string(),
                                         Ok(Message::Close(_)) => break,
@@ -299,7 +310,8 @@ impl ClientChannel {
                                     };
 
                                     // Parse the incoming JSON message.
-                                    let parsed: serde_json::Value = match serde_json::from_str(&msg) {
+                                    let parsed: serde_json::Value = match serde_json::from_str(&msg)
+                                    {
                                         Ok(v) => v,
                                         Err(e) => {
                                             let err = serde_json::json!({"type":"error","message":format!("invalid JSON: {}", e)});
@@ -326,7 +338,9 @@ impl ClientChannel {
                                                     client_id = format!("web:{}", cid);
                                                 }
                                             }
-                                            let _ = ws_sender.send(r#"{"type":"auth_ok"}"#.to_string()).await;
+                                            let _ = ws_sender
+                                                .send(r#"{"type":"auth_ok"}"#.to_string())
+                                                .await;
                                             tracing::debug!(conn_id = %conn_id_clone, "WebSocket client authenticated");
                                         } else {
                                             let err = serde_json::json!({
@@ -353,7 +367,10 @@ impl ClientChannel {
 
                                     match msg_type {
                                         "message" => {
-                                            let mut content = parsed["content"].as_str().unwrap_or("").to_string();
+                                            let mut content = parsed["content"]
+                                                .as_str()
+                                                .unwrap_or("")
+                                                .to_string();
 
                                             // Inline text-file attachments into the prompt
                                             // ({name, content} pairs sent by the WebUI).
@@ -395,15 +412,19 @@ impl ClientChannel {
                                             // semantically lets sub-agents push events
                                             // to the parent's UI when their session
                                             // inherits the parent's reply_target.
-                                            let (event_tx, mut event_rx) = mpsc::channel::<TurnEvent>(64);
+                                            let (event_tx, mut event_rx) =
+                                                mpsc::channel::<TurnEvent>(64);
                                             let cancel = CancellationToken::new();
                                             let reply_target_key = session_key_clone.clone();
                                             {
                                                 let mut contexts = stream_contexts_clone.write();
-                                                contexts.insert(reply_target_key.clone(), StreamContext {
-                                                    event_tx: event_tx.clone(),
-                                                    cancel: cancel.clone(),
-                                                });
+                                                contexts.insert(
+                                                    reply_target_key.clone(),
+                                                    StreamContext {
+                                                        event_tx: event_tx.clone(),
+                                                        cancel: cancel.clone(),
+                                                    },
+                                                );
                                             }
 
                                             // Spawn event forwarder: event_rx → ws_sender.
@@ -418,7 +439,10 @@ impl ClientChannel {
                                                     let json = match serde_json::to_string(&event) {
                                                         Ok(j) => j,
                                                         Err(e) => {
-                                                            tracing::warn!("failed to serialize TurnEvent: {}", e);
+                                                            tracing::warn!(
+                                                                "failed to serialize TurnEvent: {}",
+                                                                e
+                                                            );
                                                             continue;
                                                         }
                                                     };
@@ -430,20 +454,31 @@ impl ClientChannel {
 
                                             // Create ChannelMessage for Orchestrator.
                                             let channel_msg = ChannelMessage {
-                                                id: format!("{}-{}", conn_id_clone, chrono::Utc::now().timestamp_millis()),
+                                                id: format!(
+                                                    "{}-{}",
+                                                    conn_id_clone,
+                                                    chrono::Utc::now().timestamp_millis()
+                                                ),
                                                 sender: client_id.clone(),
                                                 reply_target: session_key_clone.clone(),
                                                 content,
                                                 timestamp: chrono::Utc::now().timestamp() as u64,
                                                 thread_ts: None,
                                                 interruption_scope_id: None,
+                                                files: vec![],
                                                 attachments: vec![],
                                                 image_urls: None,
-                                                image_base64: if has_images { Some(images) } else { None },
+                                                image_base64: if has_images {
+                                                    Some(images)
+                                                } else {
+                                                    None
+                                                },
                                             };
 
                                             if message_tx_clone.send(channel_msg).await.is_err() {
-                                                tracing::warn!("orchestrator message channel closed");
+                                                tracing::warn!(
+                                                    "orchestrator message channel closed"
+                                                );
                                                 break;
                                             }
                                         }
@@ -459,17 +494,25 @@ impl ClientChannel {
 
                                         "api" => {
                                             // Management API.
-                                            let id = parsed["id"].as_str().unwrap_or("").to_string();
-                                            let method = parsed["method"].as_str().unwrap_or("").to_string();
-                                            let params = parsed.get("params").cloned().unwrap_or(serde_json::Value::Null);
+                                            let id =
+                                                parsed["id"].as_str().unwrap_or("").to_string();
+                                            let method =
+                                                parsed["method"].as_str().unwrap_or("").to_string();
+                                            let params = parsed
+                                                .get("params")
+                                                .cloned()
+                                                .unwrap_or(serde_json::Value::Null);
 
                                             // Align the management-API session scope
                                             // with the orchestrator's session key
                                             // (channel:account:sender) so the WebUI
                                             // sees the same sessions chat actually uses.
-                                            let api_user_id = format!("client:default:{}", client_id);
+                                            let api_user_id =
+                                                format!("client:default:{}", client_id);
                                             let resp = handle_api_request(
-                                                &id, &method, &params,
+                                                &id,
+                                                &method,
+                                                &params,
                                                 &ApiContext {
                                                     user_id: &api_user_id,
                                                     session_manager: &session_manager_clone,
@@ -484,7 +527,9 @@ impl ClientChannel {
                                         }
 
                                         "ping" => {
-                                            let _ = ws_sender.send(r#"{"type":"pong"}"#.to_string()).await;
+                                            let _ = ws_sender
+                                                .send(r#"{"type":"pong"}"#.to_string())
+                                                .await;
                                         }
 
                                         _ => {
@@ -602,9 +647,10 @@ impl Channel for ClientChannel {
     async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>> {
         // Lazily start the WebSocket server on first listen() call.
         self.start().await?;
-        let rx = self.message_rx.lock().await
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("listen() called more than once on ClientChannel"))?;
+        let rx =
+            self.message_rx.lock().await.take().ok_or_else(|| {
+                anyhow::anyhow!("listen() called more than once on ClientChannel")
+            })?;
         Ok(rx)
     }
 
@@ -616,10 +662,7 @@ impl Channel for ClientChannel {
     /// already registered for `reply_target`. Returns None if no client
     /// is currently subscribed for this target — caller falls through to
     /// the non-streaming `send` path.
-    fn create_stream(
-        &self,
-        reply_target: &str,
-    ) -> Option<Box<dyn crate::channels::TurnStream>> {
+    fn create_stream(&self, reply_target: &str) -> Option<Box<dyn crate::channels::TurnStream>> {
         let contexts = self.stream_contexts.read();
         let ctx = contexts.get(reply_target)?;
         Some(Box::new(ClientTurnStream {
@@ -648,10 +691,7 @@ pub(crate) struct ClientTurnStream {
 
 #[async_trait]
 impl crate::channels::TurnStream for ClientTurnStream {
-    async fn push(
-        &mut self,
-        event: TurnEvent,
-    ) -> anyhow::Result<crate::channels::StreamDelivery> {
+    async fn push(&mut self, event: TurnEvent) -> anyhow::Result<crate::channels::StreamDelivery> {
         if self.event_tx.send(event).await.is_err() {
             tracing::debug!(
                 reply_target = %self.reply_target,
@@ -728,7 +768,8 @@ fn handle_api_request(
                 "type": "api_error",
                 "id": id,
                 "error": "session manager not available"
-            }).to_string();
+            })
+            .to_string();
         }
     };
 
@@ -1163,7 +1204,13 @@ fn reconstruct_history(
         for p in &m.parts {
             match p {
                 ContentPart::Text { text: t } => text.push_str(t),
-                ContentPart::ImageUrl { .. } | ContentPart::ImageB64 { .. } => has_image = true,
+                ContentPart::File {
+                    path, mime_type, ..
+                } if crate::providers::media::modality_from_mime(mime_type.as_deref(), path)
+                    == crate::providers::media::FileModality::Image =>
+                {
+                    has_image = true
+                }
                 _ => {}
             }
         }

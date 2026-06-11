@@ -9,8 +9,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::providers::ChatMessage;
 use super::skills::SkillManager;
+use crate::providers::ChatMessage;
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -110,9 +110,15 @@ impl AttachmentManager {
                         .trim();
                     if !inner.is_empty() {
                         match current_section {
-                            Some("skills") => { skills.remove(inner); }
-                            Some("agents") => { agents.remove(inner); }
-                            Some("mcp") => { mcp.remove(inner); }
+                            Some("skills") => {
+                                skills.remove(inner);
+                            }
+                            Some("agents") => {
+                                agents.remove(inner);
+                            }
+                            Some("mcp") => {
+                                mcp.remove(inner);
+                            }
                             _ => {}
                         }
                     }
@@ -126,7 +132,9 @@ impl AttachmentManager {
                             let raw = &rest[..end];
                             if !raw.is_empty() {
                                 match current_section {
-                                    Some("skills") => { skills.insert(raw.to_string()); }
+                                    Some("skills") => {
+                                        skills.insert(raw.to_string());
+                                    }
                                     Some("agents") => {
                                         // Agent lines render as "- **name: desc**"
                                         // Extract just the name part before the colon.
@@ -152,7 +160,11 @@ impl AttachmentManager {
             }
         }
 
-        AnnouncedState { skills, agents, mcp }
+        AnnouncedState {
+            skills,
+            agents,
+            mcp,
+        }
     }
 
     // ── Diff ────────────────────────────────────────────────────────────
@@ -162,8 +174,10 @@ impl AttachmentManager {
     pub fn diff_skills(&mut self, skills: &SkillManager, history: &[ChatMessage]) {
         let announced = Self::rebuild_from_history(history);
         // Only agent_invocable skills appear in the model's index.
-        let current: HashSet<String> =
-            skills.agent_skills_iter().map(|(n, _)| n.to_string()).collect();
+        let current: HashSet<String> = skills
+            .agent_skills_iter()
+            .map(|(n, _)| n.to_string())
+            .collect();
 
         let added: Vec<String> = current.difference(&announced.skills).cloned().collect();
         let removed: Vec<String> = announced.skills.difference(&current).cloned().collect();
@@ -177,10 +191,8 @@ impl AttachmentManager {
         );
 
         if !added.is_empty() || !removed.is_empty() {
-            self.pending.insert(
-                AttachmentKind::SkillListing,
-                Delta { added, removed },
-            );
+            self.pending
+                .insert(AttachmentKind::SkillListing, Delta { added, removed });
         }
     }
 
@@ -196,8 +208,10 @@ impl AttachmentManager {
         let removed: Vec<String> = announced.agents.difference(&current).cloned().collect();
 
         if !added_names.is_empty() || !removed.is_empty() {
-            let desc_map: HashMap<&str, &str> =
-                agents.iter().map(|(n, d)| (n.as_str(), d.as_str())).collect();
+            let desc_map: HashMap<&str, &str> = agents
+                .iter()
+                .map(|(n, d)| (n.as_str(), d.as_str()))
+                .collect();
             let added: Vec<String> = added_names
                 .iter()
                 .map(|name| {
@@ -209,10 +223,8 @@ impl AttachmentManager {
                     }
                 })
                 .collect();
-            self.pending.insert(
-                AttachmentKind::AgentListing,
-                Delta { added, removed },
-            );
+            self.pending
+                .insert(AttachmentKind::AgentListing, Delta { added, removed });
         }
     }
 
@@ -233,28 +245,23 @@ impl AttachmentManager {
         let removed: Vec<String> = announced.mcp.difference(&current).cloned().collect();
 
         if !added.is_empty() || !removed.is_empty() {
-            self.pending.insert(
-                AttachmentKind::McpInstructions,
-                Delta { added, removed },
-            );
+            self.pending
+                .insert(AttachmentKind::McpInstructions, Delta { added, removed });
         }
     }
 
     /// 与 memory 索引做 diff，变更时生成通知式 system-reminder。
     /// 只注入 user + feedback 类型（agent 必须始终遵守的偏好和纠正）。
     /// project + reference 通过 memory_list / memory_search 按需查找。
-    pub fn diff_memory(
-        &mut self,
-        entries: &[crate::memory::IndexEntry],
-        history: &[ChatMessage],
-    ) {
+    pub fn diff_memory(&mut self, entries: &[crate::memory::IndexEntry], history: &[ChatMessage]) {
         // Filter to user + feedback only
         let injectable: Vec<&crate::memory::IndexEntry> = entries
             .iter()
             .filter(|e| crate::memory::MemoryType::injected_types().contains(&e.mem_type))
             .collect();
 
-        let new_key: String = injectable.iter()
+        let new_key: String = injectable
+            .iter()
             .map(|e| e.name.clone())
             .collect::<Vec<_>>()
             .join(",");
@@ -277,7 +284,8 @@ impl AttachmentManager {
         // Build structured index for user + feedback
         let mut added = Vec::new();
         for &mem_type in crate::memory::MemoryType::injected_types() {
-            let group: Vec<&&crate::memory::IndexEntry> = injectable.iter()
+            let group: Vec<&&crate::memory::IndexEntry> = injectable
+                .iter()
                 .filter(|e| e.mem_type == mem_type)
                 .collect();
             if group.is_empty() {
@@ -338,8 +346,7 @@ impl AttachmentManager {
         let msg = if is_date_change {
             format!(
                 "The date has changed. Today's date is now {} ({}).",
-                current_date,
-                current_weekday,
+                current_date, current_weekday,
             )
         } else {
             let tz_str = if timezone_offset >= 0 {
@@ -349,15 +356,16 @@ impl AttachmentManager {
             };
             format!(
                 "Current date: {} ({}, UTC{}). Use this for any date-relative references.",
-                current_date,
-                current_weekday,
-                tz_str,
+                current_date, current_weekday, tz_str,
             )
         };
 
         self.pending.insert(
             AttachmentKind::DateInjection,
-            Delta { added: vec![msg], removed: vec![] },
+            Delta {
+                added: vec![msg],
+                removed: vec![],
+            },
         );
     }
 
@@ -428,14 +436,17 @@ impl AttachmentManager {
 
     /// Debug helper: pending delta kinds.
     pub fn pending_keys(&self) -> Vec<&'static str> {
-        self.pending.keys().map(|k| match k {
-            AttachmentKind::SkillListing => "skills",
-            AttachmentKind::AgentListing => "agents",
-            AttachmentKind::McpInstructions => "mcp",
-            AttachmentKind::MemoryListing => "memory",
-            AttachmentKind::DateInjection => "date",
-            AttachmentKind::AutonomyNotice => "autonomy",
-        }).collect()
+        self.pending
+            .keys()
+            .map(|k| match k {
+                AttachmentKind::SkillListing => "skills",
+                AttachmentKind::AgentListing => "agents",
+                AttachmentKind::McpInstructions => "mcp",
+                AttachmentKind::MemoryListing => "memory",
+                AttachmentKind::DateInjection => "date",
+                AttachmentKind::AutonomyNotice => "autonomy",
+            })
+            .collect()
     }
 
     // ── Private render ──────────────────────────────────────────────────
@@ -539,13 +550,20 @@ impl AttachmentManager {
         let level = delta.added.first().map(|s| s.as_str()).unwrap_or("default");
         let desc = match level {
             "full" => "All tools are permitted. No restrictions apply.",
-            "read_only" => "Autonomy is now READ-ONLY. \
+            "read_only" => {
+                "Autonomy is now READ-ONLY. \
                 You may only use read-only tools (file_read, list_dir, search, web_search, etc.). \
-                Shell execution, file writes, HTTP calls, and agent delegation are blocked.",
-            _ => "Autonomy is set to default. \
-                Safe tools are permitted; avoid destructive operations without user confirmation.",
+                Shell execution, file writes, HTTP calls, and agent delegation are blocked."
+            }
+            _ => {
+                "Autonomy is set to default. \
+                Safe tools are permitted; avoid destructive operations without user confirmation."
+            }
         };
-        format!("## Autonomy Level Changed\n\nCurrent autonomy: **{}**. {}", level, desc)
+        format!(
+            "## Autonomy Level Changed\n\nCurrent autonomy: **{}**. {}",
+            level, desc
+        )
     }
 }
 
@@ -705,7 +723,7 @@ mod tests {
     #[test]
     fn rebuild_parses_removed_items() {
         let history = vec![ChatMessage::user_text(
-            "<system-reminder>\n## Skills\n- **a**\n- **b**\n</system-reminder>"
+            "<system-reminder>\n## Skills\n- **a**\n- **b**\n</system-reminder>",
         )];
         let announced = AttachmentManager::rebuild_from_history(&history);
         assert!(announced.skills.contains("a"));
@@ -714,16 +732,16 @@ mod tests {
         // Now add a removal
         let history2 = vec![
             ChatMessage::user_text(
-                "<system-reminder>\n## Skills\n- **a**\n- **b**\n</system-reminder>"
+                "<system-reminder>\n## Skills\n- **a**\n- **b**\n</system-reminder>",
             ),
             ChatMessage::user_text(
-                "<system-reminder>\n## Skills\nThe following skills are no longer available:\n- ~~a~~\n\nSkills provide behavioral instructions for specific tasks.\n- **c**\n</system-reminder>"
+                "<system-reminder>\n## Skills\nThe following skills are no longer available:\n- ~~a~~\n\nSkills provide behavioral instructions for specific tasks.\n- **c**\n</system-reminder>",
             ),
         ];
         let announced2 = AttachmentManager::rebuild_from_history(&history2);
         assert!(!announced2.skills.contains("a")); // removed
-        assert!(announced2.skills.contains("b"));   // still there
-        assert!(announced2.skills.contains("c"));   // added
+        assert!(announced2.skills.contains("b")); // still there
+        assert!(announced2.skills.contains("c")); // added
     }
 
     #[test]

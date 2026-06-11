@@ -72,19 +72,17 @@ impl TokenManager {
                 let state = self.state.read().await;
                 match *state {
                     Some(ref s) => {
-                        let remaining = s.expires_at
+                        let remaining = s
+                            .expires_at
                             .duration_since(std::time::SystemTime::now())
                             .unwrap_or(Duration::ZERO);
                         // Refresh early — but never more than 1/3 of the remaining lifetime,
                         // so short-lived tokens still get a reasonable sleep window.
-                        let refresh_ahead = Duration::min(
-                            Duration::from_secs(300),
-                            remaining / 3,
-                        );
-                        let jitter = Duration::from_millis(
-                            rand::random::<u64>() % 30_000
-                        );
-                        remaining.saturating_sub(refresh_ahead).saturating_sub(jitter)
+                        let refresh_ahead = Duration::min(Duration::from_secs(300), remaining / 3);
+                        let jitter = Duration::from_millis(rand::random::<u64>() % 30_000);
+                        remaining
+                            .saturating_sub(refresh_ahead)
+                            .saturating_sub(jitter)
                     }
                     None => Duration::from_secs(5), // No token, retry soon.
                 }
@@ -111,7 +109,9 @@ impl TokenManager {
             }
         }
         drop(state);
-        Err(anyhow::anyhow!("QQ Bot token not available (expired or not initialized)"))
+        Err(anyhow::anyhow!(
+            "QQ Bot token not available (expired or not initialized)"
+        ))
     }
 
     /// Force refresh the access token.
@@ -164,16 +164,17 @@ impl TokenManager {
             .ok_or_else(|| anyhow::anyhow!("missing access_token in response"))?
             .to_string();
 
-        let expires_in: u64 = data["expires_in"]
-            .as_u64()
-            .unwrap_or(7000);
+        let expires_in: u64 = data["expires_in"].as_u64().unwrap_or(7000);
 
         let token_state = TokenState {
             access_token: access_token.clone(),
             expires_at: std::time::SystemTime::now() + Duration::from_secs(expires_in),
         };
 
-        info!(expires_in_secs = expires_in, "QQ Bot access token refreshed");
+        info!(
+            expires_in_secs = expires_in,
+            "QQ Bot access token refreshed"
+        );
         Ok(token_state)
     }
 }

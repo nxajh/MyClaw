@@ -67,7 +67,11 @@ impl Tool for AgentDelegateTool {
         20_000
     }
 
-    async fn execute(&self, args: serde_json::Value, session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        session: &crate::agents::session::Session,
+    ) -> anyhow::Result<ToolResult> {
         let agent_name = args["agent"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'agent' is required"))?;

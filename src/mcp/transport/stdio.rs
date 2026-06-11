@@ -5,10 +5,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::time::{Duration, timeout};
 
+use super::{MAX_LINE_BYTES, McpTransportConn, RECV_TIMEOUT_SECS};
 use crate::mcp::config_types::McpServerConfig;
 use crate::mcp::protocol::JSONRPC_VERSION;
 use crate::mcp::protocol::{JsonRpcRequest, JsonRpcResponse};
-use super::{McpTransportConn, RECV_TIMEOUT_SECS, MAX_LINE_BYTES};
 
 /// Stdio-based transport (spawn local process).
 pub struct StdioTransport {

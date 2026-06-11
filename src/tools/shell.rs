@@ -1,7 +1,7 @@
 //! Shell execution tool.
 
-use async_trait::async_trait;
 use crate::providers::{Tool, ToolResult};
+use async_trait::async_trait;
 use serde_json::json;
 use tokio::time::{Duration, timeout};
 
@@ -50,15 +50,16 @@ impl Tool for ShellTool {
         3_000
     }
 
-    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _session: &crate::agents::session::Session,
+    ) -> anyhow::Result<ToolResult> {
         let command = args["command"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'command' is required"))?;
 
-        let timeout_secs = args["timeout_secs"]
-            .as_u64()
-            .unwrap_or(120)
-            .min(300); // hard cap at 5 minutes
+        let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(120).min(300); // hard cap at 5 minutes
 
         let workdir = args["workdir"].as_str();
 
@@ -82,7 +83,11 @@ impl Tool for ShellTool {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
 
-                let mut output_text = format!("exit code: {}\n{}", output.status.code().unwrap_or(-1), stdout.into_owned());
+                let mut output_text = format!(
+                    "exit code: {}\n{}",
+                    output.status.code().unwrap_or(-1),
+                    stdout.into_owned()
+                );
                 if !stderr.is_empty() {
                     output_text.push_str(&format!("\nstderr:\n{}", stderr));
                 }
@@ -90,7 +95,11 @@ impl Tool for ShellTool {
                 Ok(ToolResult {
                     success: output.status.success(),
                     output: output_text,
-                    error: if output.status.success() { None } else { Some(format!("exit code {}", output.status.code().unwrap_or(-1))) },
+                    error: if output.status.success() {
+                        None
+                    } else {
+                        Some(format!("exit code {}", output.status.code().unwrap_or(-1)))
+                    },
                 })
             }
             Ok(Err(e)) => Ok(ToolResult {

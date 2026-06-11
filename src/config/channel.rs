@@ -185,13 +185,25 @@ impl ChannelConfigs {
     /// AND it has at least one enabled account.
     pub fn enabled_channels(&self) -> Vec<&str> {
         let mut names = Vec::new();
-        if self.wechat.as_ref().is_some_and(|c| c.enabled && c.accounts.values().any(|a| a.enabled)) {
+        if self
+            .wechat
+            .as_ref()
+            .is_some_and(|c| c.enabled && c.accounts.values().any(|a| a.enabled))
+        {
             names.push("wechat");
         }
-        if self.telegram.as_ref().is_some_and(|c| c.enabled && c.accounts.values().any(|a| a.enabled)) {
+        if self
+            .telegram
+            .as_ref()
+            .is_some_and(|c| c.enabled && c.accounts.values().any(|a| a.enabled))
+        {
             names.push("telegram");
         }
-        if self.qqbot.as_ref().is_some_and(|c| c.enabled && c.accounts.values().any(|a| a.enabled)) {
+        if self
+            .qqbot
+            .as_ref()
+            .is_some_and(|c| c.enabled && c.accounts.values().any(|a| a.enabled))
+        {
             names.push("qqbot");
         }
         if self.client.as_ref().is_some_and(|c| c.enabled) {
@@ -304,12 +316,15 @@ enabled = true
         assert!(channels.enabled_channels().is_empty());
 
         let mut accounts = HashMap::new();
-        accounts.insert("default".to_string(), TelegramAccountConfig {
-            bot_token: "tok".into(),
-            allowed_users: vec!["*".into()],
-            enabled: true,
-            ..Default::default()
-        });
+        accounts.insert(
+            "default".to_string(),
+            TelegramAccountConfig {
+                bot_token: "tok".into(),
+                allowed_users: vec!["*".into()],
+                enabled: true,
+                ..Default::default()
+            },
+        );
         channels.telegram = Some(TelegramChannelConfig {
             enabled: true,
             accounts,

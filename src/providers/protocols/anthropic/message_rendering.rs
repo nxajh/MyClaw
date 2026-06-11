@@ -3,17 +3,9 @@
 //! Converts internal `ChatMessage` / `ChatRequest` into the JSON body expected
 //! by the Anthropic Messages endpoint (and Anthropic-compatible providers).
 
-use serde_json::json;
 use crate::providers::ChatRequest;
-
-/// Infer image MIME type from the leading bytes of a base64-encoded image.
-fn detect_image_media_type(b64: &str) -> &'static str {
-    if b64.starts_with("/9j/")  { "image/jpeg" }
-    else if b64.starts_with("iVBOR") { "image/png"  }
-    else if b64.starts_with("R0lG")  { "image/gif"  }
-    else if b64.starts_with("UklG")  { "image/webp" }
-    else                              { "image/jpeg" }
-}
+use base64::Engine as _;
+use serde_json::json;
 
 /// Rendered Anthropic messages: top-level system prompt + conversation messages.
 pub struct RenderedAnthropicMessages {
@@ -30,13 +22,19 @@ pub struct RenderedAnthropicMessages {
 /// - Merging consecutive same-role messages.
 /// - Filtering empty text blocks.
 pub fn render_anthropic_messages<'a>(req: &ChatRequest<'a>) -> RenderedAnthropicMessages {
-    let system: String = req.messages.iter()
+    let system: String = req
+        .messages
+        .iter()
         .filter(|m| m.role == "system")
         .filter_map(|m| {
-            let text: String = m.parts.iter().filter_map(|p| match p {
-                crate::providers::ContentPart::Text { text } => Some(text.clone()),
-                _ => None,
-            }).collect();
+            let text: String = m
+                .parts
+                .iter()
+                .filter_map(|p| match p {
+                    crate::providers::ContentPart::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect();
             if text.is_empty() { None } else { Some(text) }
         })
         .collect::<Vec<_>>()
@@ -64,27 +62,24 @@ pub fn render_anthropic_messages<'a>(req: &ChatRequest<'a>) -> RenderedAnthropic
                 let mut p: Vec<serde_json::Value> = msg.parts.iter().filter_map(|part| match part {
                     crate::providers::ContentPart::Text { text } =>
                         Some(serde_json::json!({"type": "text", "text": text})),
-                    crate::providers::ContentPart::ImageUrl { url, .. } =>
-                        Some(serde_json::json!({"type": "image", "source": {"type": "url", "url": url}})),
-                    crate::providers::ContentPart::ImageB64 { b64_json, media_type, .. } => {
-                        let mime = media_type.as_deref()
-                            .unwrap_or_else(|| detect_image_media_type(b64_json));
+                    crate::providers::ContentPart::File { path, mime_type, .. } => {
+                        if crate::providers::media::modality_from_mime(mime_type.as_deref(), path)
+                            != crate::providers::media::FileModality::Image
+                        {
+                            return Some(serde_json::json!({"type": "text", "text": crate::providers::media::marker_for_file(path, mime_type.as_deref())}));
+                        }
+                        let abs = crate::providers::media::resolve_path(path);
+                        let bytes = match std::fs::read(&abs) {
+                            Ok(bytes) => bytes,
+                            Err(e) => return Some(serde_json::json!({"type": "text", "text": format!("{}（读取失败: {e}）", crate::providers::media::image_marker_path(path))})),
+                        };
+                        let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+                        let mime = mime_type.as_deref()
+                            .or_else(|| crate::providers::media::infer_image_mime(path))
+                            .unwrap_or("image/jpeg");
                         Some(serde_json::json!({"type": "image", "source": {
-                            "type": "base64", "media_type": mime, "data": b64_json,
+                            "type": "base64", "media_type": mime, "data": data,
                         }}))
-                    }
-                    crate::providers::ContentPart::ImageRef { .. } => {
-                        unreachable!("ImageRef is disk-only; hydrate before render")
-                    }
-                    // Anthropic Messages API has no audio input. Audio reaching
-                    // here means this model was (mis)routed as the audio aux —
-                    // degrade to a text marker rather than panic; the adapter
-                    // then surfaces a failed/placeholder transcription.
-                    crate::providers::ContentPart::AudioB64 { .. } => {
-                        Some(serde_json::json!({"type": "text", "text": "[audio]"}))
-                    }
-                    crate::providers::ContentPart::AudioRef { .. } => {
-                        unreachable!("AudioRef is disk-only; hydrate before render")
                     }
                     crate::providers::ContentPart::Thinking { thinking, signature } => {
                         // Anthropic Messages API requires every thinking block to
@@ -229,7 +224,11 @@ pub fn render_anthropic_messages<'a>(req: &ChatRequest<'a>) -> RenderedAnthropic
     });
 
     RenderedAnthropicMessages {
-        system_prompt: if system.is_empty() { None } else { Some(system) },
+        system_prompt: if system.is_empty() {
+            None
+        } else {
+            Some(system)
+        },
         messages,
     }
 }
@@ -246,27 +245,34 @@ pub fn build_anthropic_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
     if let Some(system) = rendered.system_prompt {
         body["system"] = serde_json::json!(system);
     }
-    if let Some(temp) = req.temperature { body["temperature"] = serde_json::json!(temp); }
+    if let Some(temp) = req.temperature {
+        body["temperature"] = serde_json::json!(temp);
+    }
     // max_tokens is required by the Anthropic API; default to 8192 when not set.
     body["max_tokens"] = serde_json::json!(req.max_tokens.unwrap_or(8192));
     if let Some(ref thinking) = req.thinking {
         if thinking.enabled {
             let budget_tokens: u32 = match thinking.effort.as_deref() {
                 Some("high") => 10_000,
-                Some("low")  =>  1_000,
-                _            =>  5_000,
+                Some("low") => 1_000,
+                _ => 5_000,
             };
             body["thinking"] = json!({"type": "enabled", "budget_tokens": budget_tokens});
         }
     }
     if let Some(tools) = req.tools {
-        body["tools"] = serde_json::json!(tools.iter().map(|t| {
-            serde_json::json!({
-                "name": t.name,
-                "description": t.description,
-                "input_schema": t.input_schema,
-            })
-        }).collect::<Vec<_>>());
+        body["tools"] = serde_json::json!(
+            tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "input_schema": t.input_schema,
+                    })
+                })
+                .collect::<Vec<_>>()
+        );
     }
 
     body

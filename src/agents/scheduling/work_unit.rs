@@ -3,8 +3,8 @@
 //! 一个 work unit = 触发该轮对话的 user 消息 + assistant 回复 + assistant 调用的所有 tool results。
 //! 纯文本 assistant 消息（无 tool_calls）也是一个独立 work unit（user + assistant）。
 
-use std::collections::HashSet;
 use crate::providers::ChatMessage;
+use std::collections::HashSet;
 
 #[derive(Debug, Clone)]
 pub struct WorkUnit {
@@ -33,7 +33,9 @@ pub fn extract_work_units(history: &[ChatMessage]) -> Vec<WorkUnit> {
         let start = i;
 
         // 向前回溯：找到触发该 assistant 的 user 消息
-        let user_start = history[..start].iter().rposition(|m| m.role == "user")
+        let user_start = history[..start]
+            .iter()
+            .rposition(|m| m.role == "user")
             .unwrap_or(start); // 若找不到 user，则退化为 assistant 自身
 
         let mut tool_ids = HashSet::new();
@@ -45,7 +47,11 @@ pub fn extract_work_units(history: &[ChatMessage]) -> Vec<WorkUnit> {
 
         // 无 tool calls 的纯文本 assistant = 独立 work unit
         if tool_ids.is_empty() {
-            units.push(WorkUnit { user_start, start, end: start });
+            units.push(WorkUnit {
+                user_start,
+                start,
+                end: start,
+            });
             i += 1;
             continue;
         }
@@ -64,7 +70,11 @@ pub fn extract_work_units(history: &[ChatMessage]) -> Vec<WorkUnit> {
             break; // 遇到不匹配的 tool result 或下一个 assistant
         }
 
-        units.push(WorkUnit { user_start, start, end });
+        units.push(WorkUnit {
+            user_start,
+            start,
+            end,
+        });
         i = j; // 跳到下一个 work unit 的起点
     }
 
@@ -96,18 +106,19 @@ pub fn find_compaction_boundary(history: &[ChatMessage], retain_count: usize) ->
 /// Mirrors `estimate_message_tokens` in agent_impl without creating a circular import.
 fn estimate_msg_tokens(msg: &ChatMessage) -> u64 {
     use crate::providers::ContentPart;
-    let text_len: usize = msg.parts.iter().map(|p| match p {
-        ContentPart::Text { text } => text.len(),
-        ContentPart::Thinking { thinking, .. } => thinking.len(),
-        ContentPart::ImageUrl { .. } | ContentPart::ImageB64 { .. } => 400,
-        // Disk-only image placeholder; charge the same flat image cost.
-        ContentPart::ImageRef { .. } => 400,
-        // Audio (adapted to text before a model sees it); flat cost if present.
-        ContentPart::AudioB64 { .. } | ContentPart::AudioRef { .. } => 400,
-    }).sum();
-    let tool_len: usize = msg.tool_calls.as_ref().map_or(0, |tcs| {
-        tcs.iter().map(|tc| tc.arguments.len() + 32).sum()
-    });
+    let text_len: usize = msg
+        .parts
+        .iter()
+        .map(|p| match p {
+            ContentPart::Text { text } => text.len(),
+            ContentPart::Thinking { thinking, .. } => thinking.len(),
+            ContentPart::File { path, .. } => path.len() + 16,
+        })
+        .sum();
+    let tool_len: usize = msg
+        .tool_calls
+        .as_ref()
+        .map_or(0, |tcs| tcs.iter().map(|tc| tc.arguments.len() + 32).sum());
     ((text_len + tool_len) as u64).div_ceil(4) + 4
 }
 
@@ -145,7 +156,11 @@ pub fn find_compaction_boundary_for_budget(
     let mut best_boundary: Option<usize> = None;
 
     for compress_count in 1..=max_compress_count {
-        let prev = if compress_count == 1 { 0 } else { units[compress_count - 1].user_start };
+        let prev = if compress_count == 1 {
+            0
+        } else {
+            units[compress_count - 1].user_start
+        };
         let boundary = units[compress_count].user_start;
 
         for msg in &history[prev..boundary] {

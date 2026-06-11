@@ -27,7 +27,11 @@ pub enum TurnEvent {
 
     /// 工具返回结果
     #[serde(rename = "tool_result")]
-    ToolResult { id: String, name: String, output: String },
+    ToolResult {
+        id: String,
+        name: String,
+        output: String,
+    },
 
     /// Turn 被用户取消
     #[serde(rename = "cancelled")]

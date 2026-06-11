@@ -3,14 +3,13 @@
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::time::{Duration, timeout};
 
+use super::{
+    MCP_JSON_CONTENT_TYPE, MCP_SESSION_ID_HEADER, MCP_STREAMABLE_ACCEPT, McpTransportConn,
+    RECV_TIMEOUT_SECS, parse_jsonrpc_response_text, read_first_jsonrpc_from_sse_response,
+};
 use crate::mcp::config_types::McpServerConfig;
 use crate::mcp::protocol::JSONRPC_VERSION;
 use crate::mcp::protocol::{JsonRpcRequest, JsonRpcResponse};
-use super::{
-    McpTransportConn, RECV_TIMEOUT_SECS,
-    MCP_STREAMABLE_ACCEPT, MCP_JSON_CONTENT_TYPE, MCP_SESSION_ID_HEADER,
-    parse_jsonrpc_response_text, read_first_jsonrpc_from_sse_response,
-};
 
 /// HTTP-based transport (POST requests).
 pub struct HttpTransport {
@@ -41,7 +40,10 @@ impl HttpTransport {
         })
     }
 
-    pub(super) fn apply_session_header(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    pub(super) fn apply_session_header(
+        &self,
+        req: reqwest::RequestBuilder,
+    ) -> reqwest::RequestBuilder {
         if let Some(session_id) = self.session_id.as_deref() {
             req.header(MCP_SESSION_ID_HEADER, session_id)
         } else {

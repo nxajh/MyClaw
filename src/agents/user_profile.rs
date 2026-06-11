@@ -125,9 +125,8 @@ impl UserProfile {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let body = toml::to_string_pretty(self).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-        })?;
+        let body = toml::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         std::fs::write(&path, body)
     }
 

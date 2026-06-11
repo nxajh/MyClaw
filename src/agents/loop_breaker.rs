@@ -37,15 +37,9 @@ pub enum LoopBreakReason {
         rounds: usize,
     },
     /// Same tool, different args, same results.
-    NoProgress {
-        tool: String,
-        count: usize,
-    },
+    NoProgress { tool: String, count: usize },
     /// Hard limit exceeded.
-    MaxCalls {
-        count: usize,
-        limit: usize,
-    },
+    MaxCalls { count: usize, limit: usize },
 }
 
 /// Configuration for loop breaking. Also serves as the `[loop_breaker]`
@@ -74,12 +68,24 @@ pub struct LoopBreakerConfig {
     pub relaxed_tools: Vec<String>,
 }
 
-fn default_max_tool_calls() -> usize { 100 }
-fn default_window_size() -> usize { 20 }
-fn default_exact_repeat_threshold() -> usize { 3 }
-fn default_ping_pong_rounds() -> usize { 6 }
-fn default_no_progress_threshold() -> usize { 5 }
-fn default_relaxed_tools() -> Vec<String> { vec!["shell".to_string()] }
+fn default_max_tool_calls() -> usize {
+    100
+}
+fn default_window_size() -> usize {
+    20
+}
+fn default_exact_repeat_threshold() -> usize {
+    3
+}
+fn default_ping_pong_rounds() -> usize {
+    6
+}
+fn default_no_progress_threshold() -> usize {
+    5
+}
+fn default_relaxed_tools() -> Vec<String> {
+    vec!["shell".to_string()]
+}
 
 impl Default for LoopBreakerConfig {
     fn default() -> Self {
@@ -285,7 +291,12 @@ impl LoopBreakerCounter {
         // If all args for each tool are unique, the model is making progress
         // (different inputs each time), not stuck in a true loop.
         let args_a: Vec<u64> = tail.iter().step_by(2).map(|inv| inv.args_hash).collect();
-        let args_b: Vec<u64> = tail.iter().skip(1).step_by(2).map(|inv| inv.args_hash).collect();
+        let args_b: Vec<u64> = tail
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .map(|inv| inv.args_hash)
+            .collect();
         let unique_a = args_a.iter().collect::<HashSet<_>>().len();
         let unique_b = args_b.iter().collect::<HashSet<_>>().len();
         if unique_a == args_a.len() && unique_b == args_b.len() {
@@ -419,7 +430,9 @@ mod tests {
         );
         let result = lb.record_and_check("read_file", r#"{"p":"b"}"#, "ok");
         match result {
-            LoopBreak::Detected(LoopBreakReason::ExactRepeat { count, threshold, .. }) => {
+            LoopBreak::Detected(LoopBreakReason::ExactRepeat {
+                count, threshold, ..
+            }) => {
                 assert_eq!(count, 3);
                 assert_eq!(threshold, 3);
             }
@@ -514,7 +527,11 @@ mod tests {
         };
         let mut lb = LoopBreakerCounter::new(config);
         for i in 0..8 {
-            let tool = if i % 2 == 0 { "read_file" } else { "write_file" };
+            let tool = if i % 2 == 0 {
+                "read_file"
+            } else {
+                "write_file"
+            };
             let result = lb.record_and_check(tool, "{}", "data");
             if i < 7 {
                 assert_eq!(result, LoopBreak::None, "call {} should not trigger", i + 1);
@@ -592,7 +609,11 @@ mod tests {
         for i in 0..4 {
             let args = format!(r#"{{"query": "attempt2 {}"}}"#, i);
             let result = lb.record_and_check("search", &args, "no results found");
-            assert_eq!(result, LoopBreak::None, "should not trigger after streak break");
+            assert_eq!(
+                result,
+                LoopBreak::None,
+                "should not trigger after streak break"
+            );
         }
     }
 
@@ -604,15 +625,27 @@ mod tests {
         for i in 0..9 {
             let args = format!(r#"{{"command": "grep pattern{} file"}}"#, i);
             let result = lb.record_and_check("shell", &args, "exit code: 0");
-            assert_eq!(result, LoopBreak::None, "relaxed tool: call {} should not trigger", i + 1);
+            assert_eq!(
+                result,
+                LoopBreak::None,
+                "relaxed tool: call {} should not trigger",
+                i + 1
+            );
         }
         // 10th call — triggers with relaxed threshold.
-        match lb.record_and_check("shell", r#"{"command": "grep pattern10 file"}"#, "exit code: 0") {
+        match lb.record_and_check(
+            "shell",
+            r#"{"command": "grep pattern10 file"}"#,
+            "exit code: 0",
+        ) {
             LoopBreak::Detected(LoopBreakReason::NoProgress { tool, count }) => {
                 assert_eq!(tool, "shell");
                 assert_eq!(count, 10);
             }
-            other => panic!("expected NoProgress for shell at relaxed threshold, got {:?}", other),
+            other => panic!(
+                "expected NoProgress for shell at relaxed threshold, got {:?}",
+                other
+            ),
         }
     }
 
@@ -690,7 +723,9 @@ mod tests {
         // Make 50 calls — should never trigger MaxCalls.
         for i in 0..50 {
             let args = format!(r#"{{"n": {}}}"#, i);
-            if let LoopBreak::Detected(LoopBreakReason::MaxCalls { .. }) = lb.record_and_check("tool", &args, "ok") {
+            if let LoopBreak::Detected(LoopBreakReason::MaxCalls { .. }) =
+                lb.record_and_check("tool", &args, "ok")
+            {
                 panic!("should not trigger MaxCalls when max_tool_calls=0");
             }
         }

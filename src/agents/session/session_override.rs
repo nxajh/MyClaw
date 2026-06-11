@@ -131,7 +131,10 @@ pub fn sanitize_history(history: &mut Vec<ChatMessage>) {
         break;
     }
     if trimmed > 0 {
-        tracing::warn!(trimmed, "sanitized trailing assistant messages with unfulfilled tool_calls");
+        tracing::warn!(
+            trimmed,
+            "sanitized trailing assistant messages with unfulfilled tool_calls"
+        );
     }
 }
 
@@ -185,7 +188,10 @@ pub(super) fn sanitize_paired(pairs: Vec<(i64, ChatMessage)>) -> Vec<(i64, ChatM
         break;
     }
     if trimmed > 0 {
-        tracing::warn!(trimmed, "sanitize_paired: trimmed trailing assistant messages with unfulfilled tool_calls");
+        tracing::warn!(
+            trimmed,
+            "sanitize_paired: trimmed trailing assistant messages with unfulfilled tool_calls"
+        );
     }
 
     let removed = before - result.len();

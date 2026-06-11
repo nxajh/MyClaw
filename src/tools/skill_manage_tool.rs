@@ -1,14 +1,14 @@
 //! SkillManageTool — Skill 的 CRUD 管理工具（6 个 action）。
 
 use async_trait::async_trait;
+use parking_lot::RwLock;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use parking_lot::RwLock;
 
-use crate::agents::{Skill, SkillManager};
 use crate::agents::workspace::skill_loader;
+use crate::agents::{Skill, SkillManager};
 use crate::providers::{Tool, ToolResult};
 
 const MAX_NAME_LENGTH: usize = 64;
@@ -24,7 +24,10 @@ pub struct SkillManageTool {
 
 impl SkillManageTool {
     pub fn new(skills: Arc<RwLock<SkillManager>>, workspace_dir: PathBuf) -> Self {
-        Self { skills, workspace_dir }
+        Self {
+            skills,
+            workspace_dir,
+        }
     }
 }
 
@@ -84,16 +87,24 @@ impl Tool for SkillManageTool {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
-        let action = args["action"].as_str().ok_or_else(|| anyhow::anyhow!("'action' is required"))?;
-        let name = args["name"].as_str().ok_or_else(|| anyhow::anyhow!("'name' is required"))?;
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _session: &crate::agents::session::Session,
+    ) -> anyhow::Result<ToolResult> {
+        let action = args["action"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("'action' is required"))?;
+        let name = args["name"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("'name' is required"))?;
 
         let result = match action {
-            "create"      => self.action_create(name, &args),
-            "edit"        => self.action_edit(name, &args),
-            "patch"       => self.action_patch(name, &args),
-            "delete"      => self.action_delete(name),
-            "write_file"  => self.action_write_file(name, &args),
+            "create" => self.action_create(name, &args),
+            "edit" => self.action_edit(name, &args),
+            "patch" => self.action_patch(name, &args),
+            "delete" => self.action_delete(name),
+            "write_file" => self.action_write_file(name, &args),
             "remove_file" => self.action_remove_file(name, &args),
             _ => Err(format!(
                 "Unknown action '{}'. Valid: create, edit, patch, delete, write_file, remove_file",
@@ -102,7 +113,11 @@ impl Tool for SkillManageTool {
         };
 
         match result {
-            Ok(v) => Ok(ToolResult { success: true, output: v.to_string(), error: None }),
+            Ok(v) => Ok(ToolResult {
+                success: true,
+                output: v.to_string(),
+                error: None,
+            }),
             Err(msg) => Ok(ToolResult {
                 success: false,
                 output: json!({ "success": false, "error": msg }).to_string(),
@@ -113,8 +128,14 @@ impl Tool for SkillManageTool {
 }
 
 impl SkillManageTool {
-    fn action_create(&self, name: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
-        let content = args["content"].as_str().ok_or("'content' is required for create")?;
+    fn action_create(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let content = args["content"]
+            .as_str()
+            .ok_or("'content' is required for create")?;
         validate_name(name)?;
         validate_frontmatter(content, name)?;
         validate_content_size(content)?;
@@ -124,7 +145,8 @@ impl SkillManageTool {
         }
         if self.skills.read().get(name).is_some() {
             return Err(format!(
-                "Skill '{}' already exists. Use 'edit' or 'patch' to modify it.", name
+                "Skill '{}' already exists. Use 'edit' or 'patch' to modify it.",
+                name
             ));
         }
 
@@ -149,8 +171,14 @@ impl SkillManageTool {
         }))
     }
 
-    fn action_edit(&self, name: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
-        let content = args["content"].as_str().ok_or("'content' is required for edit")?;
+    fn action_edit(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let content = args["content"]
+            .as_str()
+            .ok_or("'content' is required for edit")?;
         validate_frontmatter(content, name)?;
         validate_content_size(content)?;
 
@@ -166,9 +194,17 @@ impl SkillManageTool {
         }))
     }
 
-    fn action_patch(&self, name: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
-        let old_string = args["old_string"].as_str().ok_or("'old_string' is required for patch")?;
-        let new_string = args["new_string"].as_str().ok_or("'new_string' is required for patch")?;
+    fn action_patch(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let old_string = args["old_string"]
+            .as_str()
+            .ok_or("'old_string' is required for patch")?;
+        let new_string = args["new_string"]
+            .as_str()
+            .ok_or("'new_string' is required for patch")?;
         let file_path = args["file_path"].as_str();
 
         let skill_dir = self.get_skill_dir(name)?;
@@ -189,12 +225,14 @@ impl SkillManageTool {
         if count == 0 {
             let preview: String = current.chars().take(500).collect();
             return Err(format!(
-                "old_string not found in {}. File preview:\n{}", file_label, preview
+                "old_string not found in {}. File preview:\n{}",
+                file_label, preview
             ));
         }
         if count > 1 {
             return Err(format!(
-                "old_string must be unique, found {} matches in {}", count, file_label
+                "old_string must be unique, found {} matches in {}",
+                count, file_label
             ));
         }
 
@@ -233,14 +271,25 @@ impl SkillManageTool {
         }))
     }
 
-    fn action_write_file(&self, name: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
-        let file_path = args["file_path"].as_str().ok_or("'file_path' is required for write_file")?;
-        let file_content = args["file_content"].as_str().ok_or("'file_content' is required for write_file")?;
+    fn action_write_file(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let file_path = args["file_path"]
+            .as_str()
+            .ok_or("'file_path' is required for write_file")?;
+        let file_content = args["file_content"]
+            .as_str()
+            .ok_or("'file_content' is required for write_file")?;
 
         validate_supporting_file_path(file_path)?;
         validate_content_size(file_content)?;
         if file_content.len() > MAX_FILE_BYTES {
-            return Err(format!("File content exceeds {} MiB limit", MAX_FILE_BYTES / 1_048_576));
+            return Err(format!(
+                "File content exceeds {} MiB limit",
+                MAX_FILE_BYTES / 1_048_576
+            ));
         }
 
         let skill_dir = self.get_skill_dir(name)?;
@@ -254,8 +303,7 @@ impl SkillManageTool {
                 .map_err(|e| format!("Failed to create directories: {}", e))?;
         }
 
-        atomic_write(&target, file_content)
-            .map_err(|e| format!("Failed to write file: {}", e))?;
+        atomic_write(&target, file_content).map_err(|e| format!("Failed to write file: {}", e))?;
 
         // Auxiliary files don't affect skill metadata — no refresh needed.
         Ok(json!({
@@ -265,8 +313,14 @@ impl SkillManageTool {
         }))
     }
 
-    fn action_remove_file(&self, name: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
-        let file_path = args["file_path"].as_str().ok_or("'file_path' is required for remove_file")?;
+    fn action_remove_file(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let file_path = args["file_path"]
+            .as_str()
+            .ok_or("'file_path' is required for remove_file")?;
         validate_supporting_file_path(file_path)?;
 
         let skill_dir = self.get_skill_dir(name)?;
@@ -279,13 +333,13 @@ impl SkillManageTool {
             let available = scan_skill_files(&skill_dir);
             return Err(format!(
                 "File '{}' not found in skill '{}'. Available files: {}",
-                file_path, name,
+                file_path,
+                name,
                 serde_json::to_string(&available).unwrap_or_default()
             ));
         }
 
-        std::fs::remove_file(&target)
-            .map_err(|e| format!("Failed to remove file: {}", e))?;
+        std::fs::remove_file(&target).map_err(|e| format!("Failed to remove file: {}", e))?;
 
         // Clean up empty parent directory (best-effort)
         if let Some(parent) = target.parent() {
@@ -301,7 +355,8 @@ impl SkillManageTool {
     }
 
     fn get_skill_dir(&self, name: &str) -> Result<PathBuf, String> {
-        self.skills.read()
+        self.skills
+            .read()
             .skill_dir(name)
             .map(|p| p.to_path_buf())
             .ok_or_else(|| format!("Skill '{}' not found.", name))
@@ -322,15 +377,22 @@ fn validate_name(name: &str) -> Result<(), String> {
         return Err("Skill name cannot be empty.".to_string());
     }
     if name.len() > MAX_NAME_LENGTH {
-        return Err(format!("Skill name too long (max {} chars).", MAX_NAME_LENGTH));
+        return Err(format!(
+            "Skill name too long (max {} chars).",
+            MAX_NAME_LENGTH
+        ));
     }
     let valid = name.chars().enumerate().all(|(i, c)| {
-        if i == 0 { c.is_ascii_alphanumeric() }
-        else { c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' }
+        if i == 0 {
+            c.is_ascii_alphanumeric()
+        } else {
+            c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-'
+        }
     });
     if !valid {
         return Err(format!(
-            "Invalid skill name '{}'. Must match ^[a-z0-9][a-z0-9._-]*$", name
+            "Invalid skill name '{}'. Must match ^[a-z0-9][a-z0-9._-]*$",
+            name
         ));
     }
     Ok(())
@@ -342,7 +404,8 @@ fn validate_frontmatter(content: &str, expected_name: &str) -> Result<(), String
         return Err("Content must start with YAML frontmatter (---)".to_string());
     }
     let after_open = &trimmed[3..];
-    let close_pos = after_open.find("\n---")
+    let close_pos = after_open
+        .find("\n---")
         .ok_or("Frontmatter is not closed with ---")?;
 
     let front_matter = after_open[..close_pos].trim();
@@ -360,7 +423,10 @@ fn validate_frontmatter(content: &str, expected_name: &str) -> Result<(), String
     let description = crate::str_utils::extract_yaml_string(front_matter, "description")
         .ok_or("Frontmatter must include a 'description' field")?;
     if description.len() > MAX_DESCRIPTION_LENGTH {
-        return Err(format!("description exceeds {} character limit.", MAX_DESCRIPTION_LENGTH));
+        return Err(format!(
+            "description exceeds {} character limit.",
+            MAX_DESCRIPTION_LENGTH
+        ));
     }
 
     if body.is_empty() {
@@ -372,7 +438,10 @@ fn validate_frontmatter(content: &str, expected_name: &str) -> Result<(), String
 
 fn validate_content_size(content: &str) -> Result<(), String> {
     if content.chars().count() > MAX_CONTENT_CHARS {
-        return Err(format!("Content exceeds {} character limit.", MAX_CONTENT_CHARS));
+        return Err(format!(
+            "Content exceeds {} character limit.",
+            MAX_CONTENT_CHARS
+        ));
     }
     Ok(())
 }
@@ -391,7 +460,8 @@ fn validate_supporting_file_path(file_path: &str) -> Result<(), String> {
         .unwrap_or("");
     if !ALLOWED_SUBDIRS.contains(&first_segment) {
         return Err(format!(
-            "file_path must start with one of: {}", ALLOWED_SUBDIRS.join(", ")
+            "file_path must start with one of: {}",
+            ALLOWED_SUBDIRS.join(", ")
         ));
     }
     if Path::new(file_path).components().count() < 2 {
@@ -424,8 +494,11 @@ fn scan_skill_files(dir: &Path) -> HashMap<String, Vec<String>> {
         if d.exists() {
             let mut sub_files: Vec<String> = collect_files_recursive(&d)
                 .into_iter()
-                .filter_map(|p| p.strip_prefix(dir).ok()
-                    .map(|rel| rel.to_string_lossy().to_string()))
+                .filter_map(|p| {
+                    p.strip_prefix(dir)
+                        .ok()
+                        .map(|rel| rel.to_string_lossy().to_string())
+                })
                 .collect();
             if !sub_files.is_empty() {
                 sub_files.sort();
@@ -438,7 +511,9 @@ fn scan_skill_files(dir: &Path) -> HashMap<String, Vec<String>> {
 
 fn collect_files_recursive(dir: &Path) -> Vec<PathBuf> {
     let mut result = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else { return result };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return result;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -459,8 +534,12 @@ mod tests {
         std::fs::create_dir_all(&skills_dir).unwrap();
         std::fs::write(
             skills_dir.join("SKILL.md"),
-            format!("---\nname: {}\ndescription: \"Test\"\n---\n# Test\n\nDo stuff.", skill_name),
-        ).unwrap();
+            format!(
+                "---\nname: {}\ndescription: \"Test\"\n---\n# Test\n\nDo stuff.",
+                skill_name
+            ),
+        )
+        .unwrap();
         let defs = skill_loader::load_skills_from_dir(&workspace.join("skills"));
         let mut mgr = SkillManager::new();
         for def in &defs {
@@ -486,11 +565,20 @@ mod tests {
     #[tokio::test]
     async fn test_create_reserved_name() {
         let dir = tempfile::tempdir().unwrap();
-        let tool = SkillManageTool::new(Arc::new(RwLock::new(SkillManager::new())), dir.path().to_path_buf());
-        let result = tool.execute(json!({
-            "action": "create", "name": "self",
-            "content": "---\nname: self\ndescription: \"x\"\n---\n# x\n\nBody."
-        }), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
+        let tool = SkillManageTool::new(
+            Arc::new(RwLock::new(SkillManager::new())),
+            dir.path().to_path_buf(),
+        );
+        let result = tool
+            .execute(
+                json!({
+                    "action": "create", "name": "self",
+                    "content": "---\nname: self\ndescription: \"x\"\n---\n# x\n\nBody."
+                }),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
         assert!(!result.success);
     }
 
@@ -510,11 +598,20 @@ mod tests {
     #[tokio::test]
     async fn test_name_mismatch() {
         let dir = tempfile::tempdir().unwrap();
-        let tool = SkillManageTool::new(Arc::new(RwLock::new(SkillManager::new())), dir.path().to_path_buf());
-        let result = tool.execute(json!({
-            "action": "create", "name": "myskill",
-            "content": "---\nname: other\ndescription: \"Test\"\n---\n# Body\n\nContent."
-        }), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
+        let tool = SkillManageTool::new(
+            Arc::new(RwLock::new(SkillManager::new())),
+            dir.path().to_path_buf(),
+        );
+        let result = tool
+            .execute(
+                json!({
+                    "action": "create", "name": "myskill",
+                    "content": "---\nname: other\ndescription: \"Test\"\n---\n# Body\n\nContent."
+                }),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
         assert!(!result.success);
         assert!(result.output.contains("does not match"));
     }
@@ -524,14 +621,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mgr = setup(dir.path(), "myskill");
         let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf());
-        let result = tool.execute(json!({
-            "action": "patch", "name": "myskill",
-            "old_string": "Do stuff.", "new_string": "Do something better."
-        }), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
+        let result = tool
+            .execute(
+                json!({
+                    "action": "patch", "name": "myskill",
+                    "old_string": "Do stuff.", "new_string": "Do something better."
+                }),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
         assert!(result.success, "{}", result.output);
-        let content = std::fs::read_to_string(
-            dir.path().join("skills/myskill/SKILL.md")
-        ).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("skills/myskill/SKILL.md")).unwrap();
         assert!(content.contains("Do something better."));
     }
 
@@ -540,10 +641,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mgr = setup(dir.path(), "myskill");
         let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf());
-        let result = tool.execute(json!({
-            "action": "patch", "name": "myskill",
-            "old_string": "this does not exist", "new_string": "x"
-        }), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
+        let result = tool
+            .execute(
+                json!({
+                    "action": "patch", "name": "myskill",
+                    "old_string": "this does not exist", "new_string": "x"
+                }),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
         assert!(!result.success);
         assert!(result.output.contains("not found"));
     }
@@ -553,7 +660,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mgr = setup(dir.path(), "myskill");
         let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf());
-        let result = tool.execute(json!({"action": "delete", "name": "myskill"}), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
+        let result = tool
+            .execute(
+                json!({"action": "delete", "name": "myskill"}),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
         assert!(result.success, "{}", result.output);
         assert!(mgr.read().get("myskill").is_none());
     }
@@ -561,8 +674,17 @@ mod tests {
     #[tokio::test]
     async fn test_delete_self_rejected() {
         let dir = tempfile::tempdir().unwrap();
-        let tool = SkillManageTool::new(Arc::new(RwLock::new(SkillManager::new())), dir.path().to_path_buf());
-        let result = tool.execute(json!({"action": "delete", "name": "self"}), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
+        let tool = SkillManageTool::new(
+            Arc::new(RwLock::new(SkillManager::new())),
+            dir.path().to_path_buf(),
+        );
+        let result = tool
+            .execute(
+                json!({"action": "delete", "name": "self"}),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
         assert!(!result.success);
     }
 
@@ -572,16 +694,28 @@ mod tests {
         let mgr = setup(dir.path(), "myskill");
         let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf());
 
-        let wr = tool.execute(json!({
-            "action": "write_file", "name": "myskill",
-            "file_path": "references/api.md", "file_content": "# API"
-        }), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
+        let wr = tool
+            .execute(
+                json!({
+                    "action": "write_file", "name": "myskill",
+                    "file_path": "references/api.md", "file_content": "# API"
+                }),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
         assert!(wr.success, "{}", wr.output);
         assert!(dir.path().join("skills/myskill/references/api.md").exists());
 
-        let rm = tool.execute(json!({
-            "action": "remove_file", "name": "myskill", "file_path": "references/api.md"
-        }), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
+        let rm = tool
+            .execute(
+                json!({
+                    "action": "remove_file", "name": "myskill", "file_path": "references/api.md"
+                }),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
         assert!(rm.success, "{}", rm.output);
         assert!(!dir.path().join("skills/myskill/references/api.md").exists());
     }
@@ -591,10 +725,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mgr = setup(dir.path(), "myskill");
         let tool = SkillManageTool::new(Arc::clone(&mgr), dir.path().to_path_buf());
-        let result = tool.execute(json!({
-            "action": "write_file", "name": "myskill",
-            "file_path": "references/../../evil.sh", "file_content": "evil"
-        }), &crate::agents::session::Session::new("test".to_string())).await.unwrap();
+        let result = tool
+            .execute(
+                json!({
+                    "action": "write_file", "name": "myskill",
+                    "file_path": "references/../../evil.sh", "file_content": "evil"
+                }),
+                &crate::agents::session::Session::new("test".to_string()),
+            )
+            .await
+            .unwrap();
         assert!(!result.success);
     }
 }

@@ -18,17 +18,16 @@ use std::sync::{Arc, Mutex};
 
 use futures_util::StreamExt;
 
-use crate::agents::{Agent, AgentRuntime};
 use crate::agents::session::Session;
 use crate::agents::turn::TurnContext;
+use crate::agents::{Agent, AgentRuntime};
 use crate::config::agent::{PermissionMode, RunMode};
 use crate::config::sub_agent::SubAgentConfig;
+use crate::providers::ProviderRegistry;
 use crate::providers::capability::{ChatModelConfig, Modality};
 use crate::providers::capability_chat::{
-    BoxStream, ChatMessage, ChatProvider, ChatRequest, ContentPart, ImageDetail, StopReason,
-    StreamEvent,
+    BoxStream, ChatMessage, ChatProvider, ChatRequest, ContentPart, StopReason, StreamEvent,
 };
-use crate::providers::ProviderRegistry;
 use crate::registry::Registry;
 
 /// A `ChatProvider` that records the messages it receives on each call and
@@ -52,12 +51,11 @@ impl ScriptedProvider {
 impl ChatProvider for ScriptedProvider {
     fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
         self.seen.lock().unwrap().push(req.messages.to_vec());
-        let events = self
-            .scripts
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or_else(|| vec![StreamEvent::Done { reason: StopReason::EndTurn }]);
+        let events = self.scripts.lock().unwrap().pop_front().unwrap_or_else(|| {
+            vec![StreamEvent::Done {
+                reason: StopReason::EndTurn,
+            }]
+        });
         Ok(futures_util::stream::iter(events).boxed())
     }
 }
@@ -118,9 +116,18 @@ fn runtime_with(providers: Arc<dyn ProviderRegistry>) -> AgentRuntime {
         Arc::clone(&tools),
     ));
     let tool_executor = Arc::new(crate::agents::tool_executor::ToolExecutor::new(30));
-    let loop_breaker =
-        Arc::new(crate::agents::LoopBreaker::new(crate::agents::LoopBreakerConfig::default()));
-    AgentRuntime::new(providers, tools, skills, agents, context_engine, tool_executor, loop_breaker)
+    let loop_breaker = Arc::new(crate::agents::LoopBreaker::new(
+        crate::agents::LoopBreakerConfig::default(),
+    ));
+    AgentRuntime::new(
+        providers,
+        tools,
+        skills,
+        agents,
+        context_engine,
+        tool_executor,
+        loop_breaker,
+    )
 }
 
 /// Registry routing (used by `get_chat_routing_models` / vision lookup).
@@ -153,9 +160,15 @@ fn config_routing(models: &[&str]) -> crate::config::routing::RoutingConfig {
 }
 
 fn has_image(msgs: &[ChatMessage]) -> bool {
-    msgs.iter()
-        .flat_map(|m| &m.parts)
-        .any(|p| matches!(p, ContentPart::ImageB64 { .. } | ContentPart::ImageUrl { .. }))
+    msgs.iter().flat_map(|m| &m.parts).any(|p| match p {
+        ContentPart::File {
+            path, mime_type, ..
+        } => {
+            crate::providers::media::modality_from_mime(mime_type.as_deref(), path)
+                == crate::providers::media::FileModality::Image
+        }
+        _ => false,
+    })
 }
 fn joined_text(msgs: &[ChatMessage]) -> String {
     msgs.iter()
@@ -185,33 +198,59 @@ async fn text_only_primary_reaches_image_via_view_image_end_to_end() {
                 name: "view_image".into(),
                 arguments: r#"{"image_id":1,"question":"图里是什么动物？"}"#.into(),
             },
-            StreamEvent::Done { reason: StopReason::ToolUse },
+            StreamEvent::Done {
+                reason: StopReason::ToolUse,
+            },
         ],
         // Call 2: final answer after seeing the tool result.
         vec![
-            StreamEvent::Delta { text: "这是一只猫。".into() },
-            StreamEvent::Done { reason: StopReason::EndTurn },
+            StreamEvent::Delta {
+                text: "这是一只猫。".into(),
+            },
+            StreamEvent::Done {
+                reason: StopReason::EndTurn,
+            },
         ],
     ]);
     let (vision_provider, vision_seen) = ScriptedProvider::new(vec![vec![
-        StreamEvent::Delta { text: "A RED CAT".into() },
-        StreamEvent::Done { reason: StopReason::EndTurn },
+        StreamEvent::Delta {
+            text: "A RED CAT".into(),
+        },
+        StreamEvent::Done {
+            reason: StopReason::EndTurn,
+        },
     ]]);
 
     let mut reg = Registry::new(Default::default(), registry_routing(&["text", "vision"]));
-    reg.register_chat(Box::new(text_provider), "text".into(), text_cfg());
-    reg.register_chat(Box::new(vision_provider), "vision".into(), vision_cfg());
+    reg.register_chat(
+        Box::new(text_provider),
+        "text".into(),
+        text_cfg(),
+        None,
+        None,
+    );
+    reg.register_chat(
+        Box::new(vision_provider),
+        "vision".into(),
+        vision_cfg(),
+        None,
+        None,
+    );
     reg.maybe_wrap_chat_fallback(&config_routing(&["text", "vision"]));
 
     let runtime = runtime_with(Arc::new(reg));
 
+    let dir = tempfile::tempdir().unwrap();
+    let image_path = dir.path().join("image.png");
+    std::fs::write(&image_path, b"dummy").unwrap();
     let mut session = Session::new("s-e2e".into());
     session.add_user_with_media(
         "图里是什么？".into(),
-        vec![ContentPart::ImageB64 {
-            b64_json: "ZHVtbXk=".into(),
-            media_type: Some("image/png".into()),
-            detail: ImageDetail::Auto,
+        vec![ContentPart::File {
+            path: image_path.to_string_lossy().to_string(),
+            mime_type: Some("image/png".into()),
+            name: Some("image.png".into()),
+            size_bytes: Some(5),
         }],
     );
 
@@ -224,11 +263,17 @@ async fn text_only_primary_reaches_image_via_view_image_end_to_end() {
         run_mode: RunMode::default(),
     };
 
-    let result = agent.run(&mut session, turn_ctx, &runtime).await.expect("turn ok");
+    let result = agent
+        .run(&mut session, turn_ctx, &runtime)
+        .await
+        .expect("turn ok");
 
     // (1) The text-only model's FIRST request had the image lowered to a marker.
     let text_seen = text_seen.lock().unwrap();
-    assert!(text_seen.len() >= 2, "text model should be called twice (tool round-trip)");
+    assert!(
+        text_seen.len() >= 2,
+        "text model should be called twice (tool round-trip)"
+    );
     assert!(
         !has_image(&text_seen[0]),
         "text-only model must NOT receive a native image part"
@@ -241,7 +286,11 @@ async fn text_only_primary_reaches_image_via_view_image_end_to_end() {
 
     // (2)+(3) view_image was dispatched and sent the REAL image to the vision model.
     let vision_seen = vision_seen.lock().unwrap();
-    assert_eq!(vision_seen.len(), 1, "vision model should be called exactly once by the tool");
+    assert_eq!(
+        vision_seen.len(),
+        1,
+        "vision model should be called exactly once by the tool"
+    );
     assert!(
         has_image(&vision_seen[0]),
         "view_image must forward the real image to the vision model"
@@ -288,31 +337,58 @@ async fn text_only_primary_reaches_audio_via_hear_audio_end_to_end() {
                 name: "hear_audio".into(),
                 arguments: r#"{"audio_id":1,"question":"用户说了什么？"}"#.into(),
             },
-            StreamEvent::Done { reason: StopReason::ToolUse },
+            StreamEvent::Done {
+                reason: StopReason::ToolUse,
+            },
         ],
         vec![
-            StreamEvent::Delta { text: "用户在打招呼。".into() },
-            StreamEvent::Done { reason: StopReason::EndTurn },
+            StreamEvent::Delta {
+                text: "用户在打招呼。".into(),
+            },
+            StreamEvent::Done {
+                reason: StopReason::EndTurn,
+            },
         ],
     ]);
     let (audio_provider, audio_seen) = ScriptedProvider::new(vec![vec![
-        StreamEvent::Delta { text: "你好世界".into() },
-        StreamEvent::Done { reason: StopReason::EndTurn },
+        StreamEvent::Delta {
+            text: "你好世界".into(),
+        },
+        StreamEvent::Done {
+            reason: StopReason::EndTurn,
+        },
     ]]);
 
     let mut reg = Registry::new(Default::default(), registry_routing(&["text", "audio"]));
-    reg.register_chat(Box::new(text_provider), "text".into(), text_cfg());
-    reg.register_chat(Box::new(audio_provider), "audio".into(), audio_cfg());
+    reg.register_chat(
+        Box::new(text_provider),
+        "text".into(),
+        text_cfg(),
+        None,
+        None,
+    );
+    reg.register_chat(
+        Box::new(audio_provider),
+        "audio".into(),
+        audio_cfg(),
+        None,
+        None,
+    );
     reg.maybe_wrap_chat_fallback(&config_routing(&["text", "audio"]));
 
     let runtime = runtime_with(Arc::new(reg));
 
+    let dir = tempfile::tempdir().unwrap();
+    let audio_path = dir.path().join("voice.ogg");
+    std::fs::write(&audio_path, b"dummy").unwrap();
     let mut session = Session::new("s-e2e-audio".into());
     session.add_user_with_media(
         "听一下".into(),
-        vec![ContentPart::AudioB64 {
-            b64_json: "ZHVtbXk=".into(),
-            media_type: Some("audio/ogg".into()),
+        vec![ContentPart::File {
+            path: audio_path.to_string_lossy().to_string(),
+            mime_type: Some("audio/ogg".into()),
+            name: Some("voice.ogg".into()),
+            size_bytes: Some(5),
         }],
     );
 
@@ -325,25 +401,34 @@ async fn text_only_primary_reaches_audio_via_hear_audio_end_to_end() {
         run_mode: RunMode::default(),
     };
 
-    let result = agent.run(&mut session, turn_ctx, &runtime).await.expect("turn ok");
+    let result = agent
+        .run(&mut session, turn_ctx, &runtime)
+        .await
+        .expect("turn ok");
 
     let text_seen = text_seen.lock().unwrap();
     assert!(text_seen.len() >= 2, "text model called twice");
     assert!(
-        joined_text(&text_seen[0]).contains("[语音 #1]"),
-        "audio must be lowered to a [语音 #N] marker: {}",
+        joined_text(&text_seen[0]).contains("[语音:"),
+        "audio must be lowered to a [语音: path] marker: {}",
         joined_text(&text_seen[0])
     );
     assert!(
-        !text_seen[0].iter().flat_map(|m| &m.parts).any(|p| matches!(p, ContentPart::AudioB64 { .. })),
+        !text_seen[0]
+            .iter()
+            .flat_map(|m| &m.parts)
+            .any(|p| matches!(p, ContentPart::File { .. })),
         "text-only model must NOT receive a native audio part"
     );
 
     let audio_seen = audio_seen.lock().unwrap();
     assert_eq!(audio_seen.len(), 1, "audio model called once by the tool");
     assert!(
-        audio_seen[0].iter().flat_map(|m| &m.parts).any(|p| matches!(p, ContentPart::AudioB64 { .. })),
-        "hear_audio must forward the real audio to the audio model"
+        audio_seen[0]
+            .iter()
+            .flat_map(|m| &m.parts)
+            .any(|p| matches!(p, ContentPart::File { .. })),
+        "hear_audio must forward the audio file to the audio model"
     );
 
     assert!(
@@ -353,4 +438,3 @@ async fn text_only_primary_reaches_audio_via_hear_audio_end_to_end() {
     );
     assert_eq!(result.text, "用户在打招呼。");
 }
-

@@ -11,52 +11,21 @@ use std::pin::Pin;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentPart {
-    Text { text: String },
-    ImageUrl { url: String, detail: ImageDetail },
-    ImageB64 {
-        b64_json: String,
-        /// MIME type of the image (e.g. "image/png"). When absent the renderer
-        /// infers the type from the base64 header bytes.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        media_type: Option<String>,
-        detail: ImageDetail,
+    Text {
+        text: String,
     },
-    /// On-disk reference to an externalized image blob (content-addressed by
-    /// SHA-256 of the decoded bytes). This variant exists ONLY in persisted
-    /// history (`history.jsonl`): `append_message` externalizes large
-    /// `ImageB64` parts into `blobs/{sha256}.bin` and replaces them with
-    /// `ImageRef`; `load_messages` hydrates them back into `ImageB64` before
-    /// the messages ever reach the in-memory render path. It must therefore
-    /// NEVER be observed by a protocol renderer — see the `unreachable!` arms
-    /// in the OpenAI/Anthropic/GLM body builders.
-    ImageRef {
-        /// Lowercase hex SHA-256 of the decoded image bytes; the blob filename.
-        hash: String,
-        /// MIME type carried through from the original `ImageB64`.
+    /// A workspace-relative or absolute file reference. New inbound media is
+    /// stored under `sessions/<session_id>/files/` and represented with this
+    /// canonical form in history; provider rendering decides whether to inline it,
+    /// upload it, send a URL/ref, or render a marker.
+    File {
+        path: String,
+        #[serde(rename = "mime", default, skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        media_type: Option<String>,
-        detail: ImageDetail,
-    },
-    /// Inline base64 audio (e.g. a voice message). Like `ImageB64` this is the
-    /// in-memory form; `json_file` externalizes large payloads to `AudioRef` on
-    /// disk. Audio is ALWAYS adapted to text before reaching a model — chat
-    /// protocols cannot carry audio — so protocol renderers never observe it
-    /// (see the `unreachable!` arms in the body builders).
-    AudioB64 {
-        b64_json: String,
-        /// MIME type of the audio (e.g. "audio/ogg"). When absent the auxiliary
-        /// transcription model infers it.
+        name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        media_type: Option<String>,
-    },
-    /// On-disk reference to an externalized audio blob (content-addressed by
-    /// SHA-256 of the decoded bytes). Persisted-history only; `load_messages`
-    /// hydrates it back into `AudioB64` — the same contract as `ImageRef`.
-    AudioRef {
-        /// Lowercase hex SHA-256 of the decoded audio bytes; the blob filename.
-        hash: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        media_type: Option<String>,
+        size_bytes: Option<u64>,
     },
     /// Extended thinking block — stored in message history so it can be
     /// re-sent to the model on subsequent turns (Anthropic protocol requires
@@ -71,23 +40,16 @@ pub enum ContentPart {
     },
 }
 
-/// Image detail level.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-pub enum ImageDetail {
-    #[default]
-    Auto,
-    Low,
-    High,
-}
-
-/// Lowercase hex SHA-256 of `bytes`. Single source of truth for the image blob
-/// store (`storage::json_file`), so an image's content hash never drifts and
-/// `ImageB64`/`ImageRef`/`blobs/{hash}.bin` all agree.
+/// Lowercase hex SHA-256 of `bytes`, used for stable content-derived names.
 pub fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Chat message.
@@ -115,21 +77,34 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     pub fn text(role: impl Into<String>, text: impl Into<String>) -> Self {
-        Self { role: role.into(), parts: vec![ContentPart::Text { text: text.into() }], name: None, tool_call_id: None, tool_calls: None, is_error: None }
+        Self {
+            role: role.into(),
+            parts: vec![ContentPart::Text { text: text.into() }],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            is_error: None,
+        }
     }
-    pub fn user_text(text: impl Into<String>) -> Self { Self::text("user", text) }
-    pub fn assistant_text(text: impl Into<String>) -> Self { Self::text("assistant", text) }
-    pub fn system_text(text: impl Into<String>) -> Self { Self::text("system", text) }
-    pub fn with_image_url(mut self, url: impl Into<String>) -> Self {
-        self.parts.push(ContentPart::ImageUrl { url: url.into(), detail: ImageDetail::Auto });
-        self
+    pub fn user_text(text: impl Into<String>) -> Self {
+        Self::text("user", text)
+    }
+    pub fn assistant_text(text: impl Into<String>) -> Self {
+        Self::text("assistant", text)
+    }
+    pub fn system_text(text: impl Into<String>) -> Self {
+        Self::text("system", text)
     }
     /// Collect all text from Text parts.
     pub fn text_content(&self) -> String {
-        self.parts.iter().filter_map(|p| match p {
-            ContentPart::Text { text } => Some(text.as_str()),
-            _ => None,
-        }).collect::<Vec<_>>().join("")
+        self.parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
     }
 }
 
@@ -140,20 +115,44 @@ pub type BoxStream<T> = Pin<Box<dyn Stream<Item = T> + Send>>;
 /// Stream event from ChatProvider::chat().
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
-    Delta { text: String },
-    Thinking { text: String },
+    Delta {
+        text: String,
+    },
+    Thinking {
+        text: String,
+    },
     /// Opaque signature for the preceding thinking block (Anthropic extended
     /// thinking). Must be stored alongside the thinking text and echoed back
     /// in subsequent requests.
-    ThinkingSignature { signature: String },
-    ToolCallStart { id: String, name: String, initial_arguments: String },
-    ToolCallDelta { index: u32, id: String, name: String, delta: String },
-    ToolCallEnd { id: String, name: String, arguments: String },
+    ThinkingSignature {
+        signature: String,
+    },
+    ToolCallStart {
+        id: String,
+        name: String,
+        initial_arguments: String,
+    },
+    ToolCallDelta {
+        index: u32,
+        id: String,
+        name: String,
+        delta: String,
+    },
+    ToolCallEnd {
+        id: String,
+        name: String,
+        arguments: String,
+    },
     Usage(ChatUsage),
-    Done { reason: StopReason },
+    Done {
+        reason: StopReason,
+    },
     Error(String),
     /// HTTP-level error with status code; used for retry/fallback decisions.
-    HttpError { status: u16, message: String },
+    HttpError {
+        status: u16,
+        message: String,
+    },
 }
 
 impl StreamEvent {
@@ -171,12 +170,10 @@ impl StreamEvent {
     /// Classify this event into a structured error (if it's an error variant).
     pub fn classify(&self) -> Option<crate::providers::ClassifiedError> {
         match self {
-            StreamEvent::HttpError { status, message } => {
-                Some(crate::providers::ClassifiedError::from_http(*status, Some(message)))
-            }
-            StreamEvent::Error(msg) => {
-                Some(crate::providers::ClassifiedError::from_message(msg))
-            }
+            StreamEvent::HttpError { status, message } => Some(
+                crate::providers::ClassifiedError::from_http(*status, Some(message)),
+            ),
+            StreamEvent::Error(msg) => Some(crate::providers::ClassifiedError::from_message(msg)),
             _ => None,
         }
     }
@@ -204,7 +201,8 @@ pub enum StopReason {
 /// Note: a plain `"length"` (output-token cap) is NOT an overflow.
 pub fn is_context_overflow_reason(reason: &str) -> bool {
     let r = reason.to_ascii_lowercase();
-    r.contains("context") && (r.contains("exceed") || r.contains("window") || r.contains("overflow"))
+    r.contains("context")
+        && (r.contains("exceed") || r.contains("window") || r.contains("overflow"))
 }
 
 /// Token usage for a chat response.
@@ -317,20 +315,45 @@ impl ChatResponse {
             match event {
                 StreamEvent::Delta { text: delta } => text.push_str(&delta),
                 StreamEvent::Thinking { text: delta } => reasoning_content.push_str(&delta),
-                StreamEvent::ToolCallStart { id, name, initial_arguments } => {
-                    tool_calls.push(ToolCall { id, name, arguments: initial_arguments });
+                StreamEvent::ToolCallStart {
+                    id,
+                    name,
+                    initial_arguments,
+                } => {
+                    tool_calls.push(ToolCall {
+                        id,
+                        name,
+                        arguments: initial_arguments,
+                    });
                 }
-                StreamEvent::ToolCallDelta { index, id, name, delta } => {
+                StreamEvent::ToolCallDelta {
+                    index,
+                    id,
+                    name,
+                    delta,
+                } => {
                     let idx = index as usize;
                     while tool_calls.len() <= idx {
-                        tool_calls.push(ToolCall { id: String::new(), name: String::new(), arguments: String::new() });
+                        tool_calls.push(ToolCall {
+                            id: String::new(),
+                            name: String::new(),
+                            arguments: String::new(),
+                        });
                     }
                     let call = &mut tool_calls[idx];
-                    if !id.is_empty() { call.id = id; }
-                    if !name.is_empty() { call.name = name; }
+                    if !id.is_empty() {
+                        call.id = id;
+                    }
+                    if !name.is_empty() {
+                        call.name = name;
+                    }
                     call.arguments.push_str(&delta);
                 }
-                StreamEvent::ToolCallEnd { id, name, arguments } => {
+                StreamEvent::ToolCallEnd {
+                    id,
+                    name,
+                    arguments,
+                } => {
                     if let Some(call) = tool_calls.iter_mut().find(|c| c.id == id) {
                         call.name = name;
                         call.arguments = arguments;

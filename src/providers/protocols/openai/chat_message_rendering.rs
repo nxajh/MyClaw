@@ -3,16 +3,9 @@
 //! Converts internal `ChatMessage` / `ChatRequest` into the JSON body expected
 //! by the OpenAI Chat Completions endpoint (and OpenAI-compatible providers).
 
-use serde_json::json;
 use crate::providers::{ChatRequest, ContentPart};
-
-fn detect_image_media_type(b64: &str) -> &'static str {
-    if b64.starts_with("/9j/")   { "image/jpeg" }
-    else if b64.starts_with("iVBOR") { "image/png"  }
-    else if b64.starts_with("R0lG")  { "image/gif"  }
-    else if b64.starts_with("UklG")  { "image/webp" }
-    else                              { "image/jpeg" }
-}
+use base64::Engine as _;
+use serde_json::json;
 
 /// Map an audio MIME type to the OpenAI `input_audio.format` token. OpenAI
 /// accepts a short codec name ("wav", "mp3", ...) rather than a MIME type.
@@ -68,36 +61,45 @@ pub fn render_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
             // Thinking blocks are not supported by OpenAI — skip them entirely.
             let content_vec: Vec<serde_json::Value> = msg.parts.iter().filter_map(|part| match part {
                 ContentPart::Text { text } => Some(json!({"type": "text", "text": text})),
-                ContentPart::ImageUrl { url, detail } => Some(json!({
-                    "type": "image_url",
-                    "image_url": { "url": url, "detail": format!("{:?}", detail).to_lowercase() }
-                })),
-                ContentPart::ImageB64 { b64_json, detail, media_type } => {
-                    let mime = media_type.as_deref().unwrap_or_else(|| detect_image_media_type(b64_json));
-                    Some(json!({
-                        "type": "image_url",
-                        "image_url": {
-                            "url": format!("data:{};base64,{}", mime, b64_json),
-                            "detail": format!("{:?}", detail).to_lowercase()
+                ContentPart::File { path, mime_type, .. } => {
+                    let modality = crate::providers::media::modality_from_mime(mime_type.as_deref(), path);
+                    let abs = crate::providers::media::resolve_path(path);
+                    let bytes = match std::fs::read(&abs) {
+                        Ok(bytes) => bytes,
+                        Err(e) => return Some(json!({"type": "text", "text": format!("{}（读取失败: {e}）", crate::providers::media::marker_for_file(path, mime_type.as_deref()))})),
+                    };
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+                    match modality {
+                        crate::providers::media::FileModality::Image => {
+                            let mime = mime_type.as_deref()
+                                .or_else(|| crate::providers::media::infer_image_mime(path))
+                                .unwrap_or("image/jpeg");
+                            Some(json!({
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": format!("data:{};base64,{}", mime, b64),
+                                    "detail": "auto"
+                                }
+                            }))
                         }
-                    }))
-                }
-                ContentPart::ImageRef { .. } => {
-                    unreachable!("ImageRef is disk-only; hydrate before render")
-                }
-                // `input_audio` content block (gpt-4o-audio family / OpenAI-
-                // compatible STT models). Reached only when this model is the
-                // auxiliary transcription model — the primary model never sees
-                // audio because the modality adapter transcribes it to text first.
-                ContentPart::AudioB64 { b64_json, media_type } => Some(json!({
-                    "type": "input_audio",
-                    "input_audio": {
-                        "data": b64_json,
-                        "format": audio_format_hint(media_type.as_deref()),
+                        crate::providers::media::FileModality::Audio => Some(json!({
+                            "type": "input_audio",
+                            "input_audio": {
+                                "data": b64,
+                                "format": audio_format_hint(mime_type.as_deref()),
+                            }
+                        })),
+                        crate::providers::media::FileModality::Video => {
+                            let mime = mime_type.as_deref()
+                                .or_else(|| crate::providers::media::infer_video_mime(path))
+                                .unwrap_or("video/mp4");
+                            Some(json!({
+                                "type": "video_url",
+                                "video_url": { "url": format!("data:{};base64,{}", mime, b64) }
+                            }))
+                        }
+                        crate::providers::media::FileModality::Other => Some(json!({"type": "text", "text": crate::providers::media::marker_for_file(path, mime_type.as_deref())})),
                     }
-                })),
-                ContentPart::AudioRef { .. } => {
-                    unreachable!("AudioRef is disk-only; hydrate before render")
                 }
                 ContentPart::Thinking { .. } => None,
             }).collect();
@@ -155,7 +157,9 @@ pub fn render_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
         "stream_options": { "include_usage": true },
     });
 
-    if let Some(temp) = req.temperature { body["temperature"] = json!(temp); }
+    if let Some(temp) = req.temperature {
+        body["temperature"] = json!(temp);
+    }
 
     // max_completion_tokens is the current parameter; include max_tokens for
     // providers that haven't updated yet.
@@ -163,8 +167,12 @@ pub fn render_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
         body["max_completion_tokens"] = json!(max);
         body["max_tokens"] = json!(max);
     }
-    if let Some(stop) = &req.stop { body["stop"] = json!(stop); }
-    if let Some(seed) = req.seed { body["seed"] = json!(seed); }
+    if let Some(stop) = &req.stop {
+        body["stop"] = json!(stop);
+    }
+    if let Some(seed) = req.seed {
+        body["seed"] = json!(seed);
+    }
     if let Some(tools) = req.tools {
         body["tools"] = json!(tools.iter().map(|t| {
             json!({
@@ -194,11 +202,16 @@ mod tests {
 
     #[test]
     fn renders_audio_as_input_audio_block() {
+        let path =
+            std::env::temp_dir().join(format!("myclaw-audio-test-{}.ogg", std::process::id()));
+        std::fs::write(&path, b"ABC").unwrap();
         let messages = [ChatMessage {
             role: "user".into(),
-            parts: vec![ContentPart::AudioB64 {
-                b64_json: "QUJD".into(),
-                media_type: Some("audio/ogg".into()),
+            parts: vec![ContentPart::File {
+                path: path.to_string_lossy().to_string(),
+                mime_type: Some("audio/ogg".into()),
+                name: None,
+                size_bytes: Some(3),
             }],
             name: None,
             tool_call_id: None,

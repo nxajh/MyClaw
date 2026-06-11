@@ -46,8 +46,12 @@ pub struct ContextConfig {
     pub retain_work_units: usize,
 }
 
-fn default_compact_threshold() -> f64 { 0.7 }
-fn default_retain_work_units() -> usize { 2 }
+fn default_compact_threshold() -> f64 {
+    0.7
+}
+fn default_retain_work_units() -> usize {
+    2
+}
 
 impl Default for ContextConfig {
     fn default() -> Self {
@@ -68,7 +72,9 @@ pub struct ToolExecutorConfig {
     pub timeout_secs: u64,
 }
 
-fn default_tool_timeout() -> u64 { 180 }
+fn default_tool_timeout() -> u64 {
+    180
+}
 
 impl Default for ToolExecutorConfig {
     fn default() -> Self {
@@ -114,9 +120,13 @@ pub struct PromptConfig {
     pub timezone_offset: i32,
 }
 
-fn default_timezone_offset() -> i32 { 8 }
+fn default_timezone_offset() -> i32 {
+    8
+}
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 impl Default for PromptConfig {
     fn default() -> Self {

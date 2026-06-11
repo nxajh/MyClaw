@@ -1,9 +1,9 @@
 //! Configuration slash commands: config, settings, autonomy.
 
-use crate::config::agent::PermissionMode;
 use super::CommandContext;
 use super::apply_and_persist_override;
-use super::info::{cmd_tools, cmd_skill};
+use super::info::{cmd_skill, cmd_tools};
+use crate::config::agent::PermissionMode;
 
 pub fn cmd_config(args: &str, ctx: CommandContext<'_>) -> String {
     let model_info = {
@@ -11,7 +11,10 @@ pub fn cmd_config(args: &str, ctx: CommandContext<'_>) -> String {
         if let Some(ref m) = ov.model {
             format!("{} (会话覆盖)", m)
         } else {
-            match ctx.registry.get_chat_provider(crate::providers::Capability::Chat) {
+            match ctx
+                .registry
+                .get_chat_provider(crate::providers::Capability::Chat)
+            {
                 Ok((_, model_id)) => model_id,
                 Err(_) => "未配置".to_string(),
             }
@@ -59,13 +62,22 @@ pub async fn cmd_settings(ctx: CommandContext<'_>) -> String {
         Some(PermissionMode::ReadOnly) => "read_only",
         None => "跟随全局配置",
     };
-    let max_tool_calls_str = ov.max_tool_calls
-        .map(|v| if v == 0 { "无限制".to_string() } else { v.to_string() })
+    let max_tool_calls_str = ov
+        .max_tool_calls
+        .map(|v| {
+            if v == 0 {
+                "无限制".to_string()
+            } else {
+                v.to_string()
+            }
+        })
         .unwrap_or_else(|| "跟随全局配置".to_string());
-    let compact_threshold_str = ov.compact_threshold
+    let compact_threshold_str = ov
+        .compact_threshold
         .map(|v| format!("{:.0}%", v * 100.0))
         .unwrap_or_else(|| "跟随全局配置".to_string());
-    let retain_work_units_str = ov.retain_work_units
+    let retain_work_units_str = ov
+        .retain_work_units
         .map(|v| v.to_string())
         .unwrap_or_else(|| "跟随全局配置".to_string());
 
@@ -86,12 +98,18 @@ pub async fn cmd_settings(ctx: CommandContext<'_>) -> String {
          {}最大工具调用: {}  \n\
          {}压缩阈值: {}  \n\
          {}保留工作单元: {}{}",
-        m(ov.model.is_some()), model_str,
-        m(ov.thinking.is_some()), thinking_str,
-        m(ov.permission_mode.is_some()), autonomy_str,
-        m(ov.max_tool_calls.is_some()), max_tool_calls_str,
-        m(ov.compact_threshold.is_some()), compact_threshold_str,
-        m(ov.retain_work_units.is_some()), retain_work_units_str,
+        m(ov.model.is_some()),
+        model_str,
+        m(ov.thinking.is_some()),
+        thinking_str,
+        m(ov.permission_mode.is_some()),
+        autonomy_str,
+        m(ov.max_tool_calls.is_some()),
+        max_tool_calls_str,
+        m(ov.compact_threshold.is_some()),
+        compact_threshold_str,
+        m(ov.retain_work_units.is_some()),
+        retain_work_units_str,
         status_note
     )
 }
@@ -122,11 +140,22 @@ pub async fn cmd_autonomy(args: &str, ctx: CommandContext<'_>) -> String {
 
     let mut ov = ctx.session_manager.get_session_override(ctx.user_id);
     let (autonomy, msg) = match level.as_str() {
-        "full" => (Some(PermissionMode::Full), "✅ 自主权已设为 **full**（所有工具自动批准）"),
+        "full" => (
+            Some(PermissionMode::Full),
+            "✅ 自主权已设为 **full**（所有工具自动批准）",
+        ),
         "default" => (Some(PermissionMode::Default), "✅ 自主权已设为 **default**"),
-        "read_only" | "readonly" => (Some(PermissionMode::ReadOnly), "✅ 自主权已设为 **read_only**（仅只读工具）"),
+        "read_only" | "readonly" => (
+            Some(PermissionMode::ReadOnly),
+            "✅ 自主权已设为 **read_only**（仅只读工具）",
+        ),
         "auto" => (None, "✅ 自主权已恢复为跟随全局配置"),
-        _ => return format!("⚠️ 未知级别: `{}`\n可用: full, default, read_only, auto", level),
+        _ => {
+            return format!(
+                "⚠️ 未知级别: `{}`\n可用: full, default, read_only, auto",
+                level
+            );
+        }
     };
 
     ov.permission_mode = autonomy;

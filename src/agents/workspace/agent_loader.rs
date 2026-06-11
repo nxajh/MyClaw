@@ -52,8 +52,8 @@ pub fn parse_agent_file(path: &Path) -> Result<SubAgentConfig> {
         crate::config::filters::ToolFilter::Allow(tools_list)
     };
 
-    let max_tool_calls = extract_yaml_string(&front_matter, "max_tool_calls")
-        .and_then(|s| s.parse::<usize>().ok());
+    let max_tool_calls =
+        extract_yaml_string(&front_matter, "max_tool_calls").and_then(|s| s.parse::<usize>().ok());
 
     let model_raw = extract_yaml_string(&front_matter, "model").unwrap_or_default();
     let model = if model_raw.is_empty() || model_raw == "null" || model_raw == "~" {
@@ -340,7 +340,10 @@ You are an expert programmer. Write clean, idiomatic code.
         let agents = vec![SubAgentConfig {
             name: "coder".into(),
             system_prompt: "a".into(),
-            tools: crate::config::filters::ToolFilter::Allow(vec!["shell".into(), "nonexistent_tool".into()]),
+            tools: crate::config::filters::ToolFilter::Allow(vec![
+                "shell".into(),
+                "nonexistent_tool".into(),
+            ]),
             skills: Default::default(),
             mcp: Default::default(),
             max_tool_calls: None,
@@ -349,8 +352,6 @@ You are an expert programmer. Write clean, idiomatic code.
             isolation: AgentIsolation::default(),
         }];
         let warnings = validate_agents(&agents, &["shell"]);
-        assert!(warnings
-            .iter()
-            .any(|w| w.contains("nonexistent_tool")));
+        assert!(warnings.iter().any(|w| w.contains("nonexistent_tool")));
     }
 }

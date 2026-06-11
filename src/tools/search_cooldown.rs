@@ -49,7 +49,11 @@ impl SearchProviderCooldown {
         let until = Instant::now() + duration;
         // Only extend cooldown, never shorten it.
         map.entry(provider_name.to_string())
-            .and_modify(|e| if *e < until { *e = until })
+            .and_modify(|e| {
+                if *e < until {
+                    *e = until
+                }
+            })
             .or_insert(until);
         tracing::info!(
             provider = provider_name,
@@ -59,17 +63,16 @@ impl SearchProviderCooldown {
     }
 
     /// Record a cooldown for the given provider using a specific duration.
-    pub fn record_failure_with_cooldown(
-        &self,
-        provider_name: &str,
-        cooldown: Duration,
-    ) {
+    pub fn record_failure_with_cooldown(&self, provider_name: &str, cooldown: Duration) {
         self.record(provider_name, cooldown);
     }
 
     /// Record a cooldown for the given provider with the default duration.
     pub fn record_failure(&self, provider_name: &str) {
-        self.record_failure_with_cooldown(provider_name, Duration::from_secs(DEFAULT_COOLDOWN_SECS));
+        self.record_failure_with_cooldown(
+            provider_name,
+            Duration::from_secs(DEFAULT_COOLDOWN_SECS),
+        );
     }
 
     /// Classify a search provider error and record cooldown if appropriate.
@@ -78,11 +81,7 @@ impl SearchProviderCooldown {
     /// First tries to parse a specific cooldown duration from the response body
     /// (e.g. `retry_after` JSON field, "try again in X seconds" text).
     /// Falls back to the default cooldown for the classified error type.
-    pub fn classify_and_record(
-        &self,
-        provider_name: &str,
-        error_msg: &str,
-    ) -> FailoverReason {
+    pub fn classify_and_record(&self, provider_name: &str, error_msg: &str) -> FailoverReason {
         // Parse HTTP status code from error message.
         // Provider errors follow patterns like:
         //   "GLM web_search HTTP 429: {body}"
@@ -98,8 +97,7 @@ impl SearchProviderCooldown {
 
         // Try to extract a specific cooldown from the response body first.
         // This gives more precise retry timing than the default per-error-type cooldowns.
-        let cooldown = parse_search_cooldown(body)
-            .or(classified.cooldown);
+        let cooldown = parse_search_cooldown(body).or(classified.cooldown);
 
         if let Some(duration) = cooldown {
             self.record(provider_name, duration);
@@ -207,18 +205,30 @@ fn extract_json_seconds(json: &serde_json::Value, key: &str) -> Option<Duration>
     let secs = if let Some(n) = val.as_u64() {
         n
     } else if let Some(f) = val.as_f64() {
-        if f > 0.0 { f as u64 } else { return None; }
+        if f > 0.0 {
+            f as u64
+        } else {
+            return None;
+        }
     } else {
         return None;
     };
-    if secs > 0 { Some(Duration::from_secs(secs)) } else { None }
+    if secs > 0 {
+        Some(Duration::from_secs(secs))
+    } else {
+        None
+    }
 }
 
 /// Helper: extract the first capture group as seconds from a regex match.
 fn extract_regex_seconds(re: &Regex, text: &str) -> Option<Duration> {
     let caps = re.captures(text)?;
     let secs = caps.get(1)?.as_str().parse::<u64>().ok()?;
-    if secs > 0 { Some(Duration::from_secs(secs)) } else { None }
+    if secs > 0 {
+        Some(Duration::from_secs(secs))
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -385,7 +395,8 @@ mod tests {
     fn classify_and_record_falls_back_to_default_cooldown() {
         // GLM 429 error without retry_after — should use ClassifiedError default (1hr)
         let cd = SearchProviderCooldown::new();
-        let msg = r#"GLM web_search HTTP 429: {"error": {"code": "1312", "message": "rate limited"}}"#;
+        let msg =
+            r#"GLM web_search HTTP 429: {"error": {"code": "1312", "message": "rate limited"}}"#;
         let reason = cd.classify_and_record("glm", msg);
         assert_eq!(reason, FailoverReason::RateLimit);
         assert!(cd.is_cooled_down("glm"));

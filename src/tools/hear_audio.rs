@@ -1,14 +1,8 @@
-//! `hear_audio` tool — the audio twin of `view_image`. Lets a model that can't
-//! take audio natively "listen" to a voice clip by delegating to an audio-capable
-//! model in the chain.
-//!
-//! When the serving model lacks audio input, the provider layer
-//! ([`crate::providers::media`]) replaces the clip with a `[语音 #N]` marker. The
-//! model then calls this tool with the clip's index and its OWN question; the
-//! tool fetches the real audio from session history and asks the audio model that
-//! question — context-aware transcription, on demand.
+//! `hear_audio` tool — lets a model inspect an audio file by delegating to an
+//! audio-capable model in the chat routing chain.
 
 use async_trait::async_trait;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::agents::session::Session;
@@ -18,8 +12,6 @@ use crate::providers::provider_registry::ProviderRegistry;
 use crate::providers::{Tool, ToolResult};
 use serde_json::json;
 
-/// Audio delegation tool. Holds the provider registry so it can locate an
-/// audio-capable model at call time (`Tool::execute` only receives `&Session`).
 pub struct HearAudioTool {
     providers: Arc<dyn ProviderRegistry>,
 }
@@ -30,25 +22,53 @@ impl HearAudioTool {
     }
 }
 
-/// Return the `n`-th (1-based) audio part across the session history, in order.
-/// Numbering matches `providers::media::lower_media_for`, which assigns the
-/// `[语音 #N]` markers by the same scan.
-fn nth_audio_part(history: &[ChatMessage], n: usize) -> Option<ContentPart> {
-    if n == 0 {
-        return None;
+fn resolve_path(path: &str) -> PathBuf {
+    let p = PathBuf::from(path);
+    if p.is_absolute() {
+        p
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(p)
     }
-    let mut count = 0;
-    for msg in history {
-        for part in &msg.parts {
-            if matches!(part, ContentPart::AudioB64 { .. }) {
-                count += 1;
-                if count == n {
-                    return Some(part.clone());
-                }
-            }
-        }
+}
+
+fn infer_audio_mime(path: &str) -> Option<&'static str> {
+    match Path::new(path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "ogg" => Some("audio/ogg"),
+        "mp3" => Some("audio/mpeg"),
+        "wav" => Some("audio/wav"),
+        "flac" => Some("audio/flac"),
+        "m4a" => Some("audio/m4a"),
+        _ => None,
     }
-    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_relative_path_against_current_dir() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            resolve_path("sessions/s/files/voice.ogg"),
+            cwd.join("sessions/s/files/voice.ogg")
+        );
+    }
+
+    #[test]
+    fn infers_audio_mime_from_extension() {
+        assert_eq!(infer_audio_mime("x.OGG"), Some("audio/ogg"));
+        assert_eq!(infer_audio_mime("x.mp3"), Some("audio/mpeg"));
+        assert_eq!(infer_audio_mime("x.png"), None);
+    }
 }
 
 #[async_trait]
@@ -58,25 +78,17 @@ impl Tool for HearAudioTool {
     }
 
     fn description(&self) -> &str {
-        "听取用户发送的语音内容。当对话中出现 `[语音 #N]` 标记时，说明那里有一段你听不到的\
-         语音；调用本工具并附上你想了解的具体问题（默认是转写全文），即可获得该语音的内容。\
-         audio_id 对应标记里的编号 N。"
+        "听取语音/音频文件内容。当对话中出现 `[语音: sessions/.../files/xxx]` 标记时，调用本工具并传入 path。path 可以是 workspace-relative 路径或绝对路径。"
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "audio_id": {
-                    "type": "integer",
-                    "description": "语音编号，对应标记 [语音 #N] 里的 N（从 1 开始）。"
-                },
-                "question": {
-                    "type": "string",
-                    "description": "你想从这段语音了解的问题，例如『用户说了什么？』『把这段话翻译成英文』。留空则转写全文。"
-                }
+                "path": { "type": "string", "description": "音频文件路径；相对路径按 workspace-relative 解释，绝对路径直接使用。" },
+                "question": { "type": "string", "description": "你想从这段语音了解的问题，例如『用户说了什么？』『翻译成英文』。留空则转写全文。" }
             },
-            "required": ["audio_id"]
+            "required": ["path"]
         })
     }
 
@@ -87,25 +99,51 @@ impl Tool for HearAudioTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        session: &Session,
+        _session: &Session,
     ) -> anyhow::Result<ToolResult> {
-        let audio_id = args["audio_id"].as_u64().unwrap_or(1).max(1) as usize;
+        let path = args["path"].as_str().unwrap_or("").trim();
+        if path.is_empty() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("缺少 path 参数。".to_string()),
+            });
+        }
         let question = args["question"]
             .as_str()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or("请逐字转写这段语音的内容。")
             .to_string();
 
-        let Some(audio_part) = nth_audio_part(&session.history, audio_id) else {
+        let abs = resolve_path(path);
+        let meta = match std::fs::metadata(&abs) {
+            Ok(meta) if meta.is_file() => meta,
+            Ok(_) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("路径不是普通文件：{path}")),
+                });
+            }
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("无法访问音频文件 {path}：{e}")),
+                });
+            }
+        };
+        if meta.len() > 50 * 1024 * 1024 {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some(format!("未找到第 {audio_id} 段语音（请核对标记里的编号）。")),
+                error: Some("音频文件过大，当前 hear_audio 限制为 50MB。".to_string()),
             });
-        };
+        }
 
-        let Some((provider, model_id)) =
-            self.providers.find_chat_model_with_modality(Modality::Audio)
+        let Some((provider, model_id)) = self
+            .providers
+            .find_chat_model_with_modality(Modality::Audio)
         else {
             return Ok(ToolResult {
                 success: false,
@@ -116,7 +154,18 @@ impl Tool for HearAudioTool {
 
         let user_msg = ChatMessage {
             role: "user".into(),
-            parts: vec![audio_part, ContentPart::Text { text: question }],
+            parts: vec![
+                ContentPart::File {
+                    path: path.to_string(),
+                    mime_type: infer_audio_mime(path).map(str::to_string),
+                    name: std::path::Path::new(path)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string),
+                    size_bytes: Some(meta.len()),
+                },
+                ContentPart::Text { text: question },
+            ],
             name: None,
             tool_call_id: None,
             tool_calls: None,
@@ -134,7 +183,6 @@ impl Tool for HearAudioTool {
             tools: None,
             stream: true,
         };
-
         let stream = match provider.chat(req) {
             Ok(s) => s,
             Err(e) => {
@@ -162,37 +210,10 @@ impl Tool for HearAudioTool {
                 error: Some("语音模型返回了空结果。".to_string()),
             });
         }
-        Ok(ToolResult { success: true, output: text, error: None })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn aud(b: &str) -> ContentPart {
-        ContentPart::AudioB64 { b64_json: b.into(), media_type: None }
-    }
-    fn msg(parts: Vec<ContentPart>) -> ChatMessage {
-        ChatMessage {
-            role: "user".into(),
-            parts,
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-            is_error: None,
-        }
-    }
-
-    #[test]
-    fn nth_audio_part_picks_in_scan_order() {
-        let history = vec![
-            msg(vec![ContentPart::Text { text: "hi".into() }, aud("AAA")]),
-            msg(vec![aud("BBB")]),
-        ];
-        assert!(matches!(nth_audio_part(&history, 1), Some(ContentPart::AudioB64 { b64_json, .. }) if b64_json == "AAA"));
-        assert!(matches!(nth_audio_part(&history, 2), Some(ContentPart::AudioB64 { b64_json, .. }) if b64_json == "BBB"));
-        assert!(nth_audio_part(&history, 3).is_none());
-        assert!(nth_audio_part(&history, 0).is_none());
+        Ok(ToolResult {
+            success: true,
+            output: text,
+            error: None,
+        })
     }
 }

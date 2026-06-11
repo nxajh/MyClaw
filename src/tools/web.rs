@@ -1,7 +1,7 @@
 //! Web fetch tool — HTTP GET to fetch web page content.
 
-use async_trait::async_trait;
 use crate::providers::{Tool, ToolResult};
+use async_trait::async_trait;
 use serde_json::json;
 use tokio::time::{Duration, timeout};
 
@@ -81,7 +81,11 @@ impl Tool for WebFetchTool {
         8_000
     }
 
-    async fn execute(&self, args: serde_json::Value, _session: &crate::agents::session::Session) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _session: &crate::agents::session::Session,
+    ) -> anyhow::Result<ToolResult> {
         let url = args["url"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'url' is required"))?;
