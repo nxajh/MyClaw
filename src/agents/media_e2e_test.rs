@@ -7,7 +7,7 @@
 //!
 //! Scenario: a text-only primary + a vision model in the chain, and a user
 //! message carrying a real image. We assert the full loop:
-//!   1. the text-only model receives the image lowered to a `[图片 #N]` marker
+//!   1. the text-only model receives the image lowered to a `[图片: path]` marker
 //!      (provider-layer, per-model lowering — NOT pre-rendered by the agent);
 //!   2. the model's `view_image` call is dispatched (proving advertise+execute);
 //!   3. the tool sends the REAL image to the vision model;
@@ -185,6 +185,10 @@ fn joined_text(msgs: &[ChatMessage]) -> String {
 async fn text_only_primary_reaches_image_via_view_image_end_to_end() {
     // Primary "text" is text-only; "vision" is image-capable. Both are in the
     // chat routing chain (text first), so the fallback serves with "text".
+    let dir = tempfile::tempdir().unwrap();
+    let image_path = dir.path().join("image.png");
+    std::fs::write(&image_path, b"dummy").unwrap();
+
     let (text_provider, text_seen) = ScriptedProvider::new(vec![
         // Call 1: ask to look at image #1.
         vec![
@@ -196,7 +200,10 @@ async fn text_only_primary_reaches_image_via_view_image_end_to_end() {
             StreamEvent::ToolCallEnd {
                 id: "c1".into(),
                 name: "view_image".into(),
-                arguments: r#"{"image_id":1,"question":"图里是什么动物？"}"#.into(),
+                arguments: format!(
+                    r#"{{"path":"{}","question":"图里是什么动物？"}}"#,
+                    image_path.to_string_lossy()
+                ),
             },
             StreamEvent::Done {
                 reason: StopReason::ToolUse,
@@ -240,9 +247,6 @@ async fn text_only_primary_reaches_image_via_view_image_end_to_end() {
 
     let runtime = runtime_with(Arc::new(reg));
 
-    let dir = tempfile::tempdir().unwrap();
-    let image_path = dir.path().join("image.png");
-    std::fs::write(&image_path, b"dummy").unwrap();
     let mut session = Session::new("s-e2e".into());
     session.add_user_with_media(
         "图里是什么？".into(),
@@ -279,8 +283,8 @@ async fn text_only_primary_reaches_image_via_view_image_end_to_end() {
         "text-only model must NOT receive a native image part"
     );
     assert!(
-        joined_text(&text_seen[0]).contains("[图片 #1]"),
-        "image must be lowered to a [图片 #N] marker for the text-only model: {}",
+        joined_text(&text_seen[0]).contains("[图片:"),
+        "image must be lowered to a [图片: path] marker for the text-only model: {}",
         joined_text(&text_seen[0])
     );
 
@@ -325,6 +329,10 @@ fn audio_cfg() -> ChatModelConfig {
 async fn text_only_primary_reaches_audio_via_hear_audio_end_to_end() {
     // Primary "text" is text-only; "audio" is audio-capable. The user sends a
     // voice clip; the text model must reach it through `hear_audio`.
+    let dir = tempfile::tempdir().unwrap();
+    let audio_path = dir.path().join("voice.ogg");
+    std::fs::write(&audio_path, b"dummy").unwrap();
+
     let (text_provider, text_seen) = ScriptedProvider::new(vec![
         vec![
             StreamEvent::ToolCallStart {
@@ -335,7 +343,10 @@ async fn text_only_primary_reaches_audio_via_hear_audio_end_to_end() {
             StreamEvent::ToolCallEnd {
                 id: "a1".into(),
                 name: "hear_audio".into(),
-                arguments: r#"{"audio_id":1,"question":"用户说了什么？"}"#.into(),
+                arguments: format!(
+                    r#"{{"path":"{}","question":"用户说了什么？"}}"#,
+                    audio_path.to_string_lossy()
+                ),
             },
             StreamEvent::Done {
                 reason: StopReason::ToolUse,
@@ -378,9 +389,6 @@ async fn text_only_primary_reaches_audio_via_hear_audio_end_to_end() {
 
     let runtime = runtime_with(Arc::new(reg));
 
-    let dir = tempfile::tempdir().unwrap();
-    let audio_path = dir.path().join("voice.ogg");
-    std::fs::write(&audio_path, b"dummy").unwrap();
     let mut session = Session::new("s-e2e-audio".into());
     session.add_user_with_media(
         "听一下".into(),
