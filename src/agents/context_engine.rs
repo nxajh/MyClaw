@@ -73,6 +73,11 @@ impl ContextEngine {
         self.compact_threshold
     }
 
+    /// Public read of the configured retain_work_units.
+    pub fn retain_work_units(&self) -> usize {
+        self.retain_work_units
+    }
+
     /// Configured timezone offset in hours, sourced from the shared
     /// `ResourceProvider` (`[prompt] timezone_offset`). Used by the
     /// per-turn attachment diff for date injection.
@@ -97,13 +102,29 @@ impl ContextEngine {
         system_prompt_tokens: u64,
         tool_spec_tokens: u64,
     ) -> Option<usize> {
+        self.compaction_boundary_with_retain(history, context_window, system_prompt_tokens, tool_spec_tokens, None)
+    }
+
+    /// Find the boundary index for compaction with an optional override for
+    /// `retain_work_units`. When `Some(n)`, `n` is used instead of the
+    /// configured value. Used by `compact_until_fit` to progressively
+    /// lower the retain count when compaction stalls.
+    pub fn compaction_boundary_with_retain(
+        &self,
+        history: &[ChatMessage],
+        context_window: u64,
+        system_prompt_tokens: u64,
+        tool_spec_tokens: u64,
+        override_retain: Option<usize>,
+    ) -> Option<usize> {
         let budget = ((context_window as f64 * self.compact_threshold) as u64)
             .saturating_sub(system_prompt_tokens)
             .saturating_sub(tool_spec_tokens);
         if budget == 0 {
             return None;
         }
-        work_unit::find_compaction_boundary_for_budget(history, budget, self.retain_work_units.max(1))
+        let retain = override_retain.unwrap_or(self.retain_work_units).max(1);
+        work_unit::find_compaction_boundary_for_budget(history, budget, retain)
     }
 
     /// Generate a compaction summary for `history[0..boundary]`.

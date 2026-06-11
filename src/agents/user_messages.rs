@@ -56,6 +56,8 @@ pub fn user_facing_error_message(err: &anyhow::Error) -> String {
         || s.contains("no completion marker")
     {
         "⚠️ 模型响应超时，请重试。"
+    } else if s.contains("loop broken") || s.contains("tool call limit") {
+        "⚠️ 工具调用次数达到上限，已自动中断。如需继续，请发送新消息。"
     } else if s.contains("error sending request")
         || s.contains("connection")
         || s.contains("broken pipe")

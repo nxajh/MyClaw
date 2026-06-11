@@ -391,18 +391,10 @@ impl Agent {
             );
             persist_last(session);
 
-            for call in &response.tool_calls {
-                // The shared LoopBreakerCounter enforces max_tool_calls;
-                // the manual check below is replaced by its `MaxCalls`
-                // reason at `record_and_check` below. We keep a tiny
-                // early-exit so the per-call tool execution doesn't run
-                // when we're already over budget.
-                if loop_breaker.total_calls() >= loop_breaker.max_tool_calls() {
-                    return Err(anyhow::anyhow!(
-                        "tool call limit reached ({}), loop broken",
-                        loop_breaker.max_tool_calls()
-                    ));
-                }
+            for (i, call) in response.tool_calls.iter().enumerate() {
+                // Execute the tool call first, then check the limit.
+                // Checking before execution would leave orphan tool_calls
+                // (assistant declares a call but no result is appended).
 
                 // Emit ToolCall event before execution (streaming UIs show
                 // the call spinner).
@@ -442,6 +434,20 @@ impl Agent {
                     &result_content,
                 ) {
                     LoopBreak::Detected(reason) => {
+                        // Record-and-check triggered: append the result for
+                        // this call so the pair is complete, then strip any
+                        // remaining unexecuted tool_calls and abort.
+                        let mut tool_msg = ChatMessage::text("tool", &result_content);
+                        tool_msg.tool_call_id = Some(call.id.clone());
+                        tool_msg.is_error = Some(is_error);
+                        messages.push(tool_msg);
+                        session.add_tool_result(call.id.clone(), result_content.clone(), is_error);
+
+                        let remaining = response.tool_calls.len() - i - 1;
+                        if remaining > 0 {
+                            session.strip_trailing_tool_calls(remaining);
+                        }
+                        persist_last(session);
                         return Err(AgentError::LoopBreak {
                             reason: format!("{:?}", reason),
                         }
@@ -470,6 +476,21 @@ impl Agent {
 
                 session.add_tool_result(call.id.clone(), result_content, is_error);
                 persist_last(session);
+
+                // After executing this call, check if we've hit the hard
+                // limit. If so, strip remaining unexecuted tool_calls and
+                // abort — avoids orphan tool_calls in history.
+                if loop_breaker.total_calls() >= loop_breaker.max_tool_calls() {
+                    let remaining = response.tool_calls.len() - i - 1;
+                    if remaining > 0 {
+                        session.strip_trailing_tool_calls(remaining);
+                        persist_last(session);
+                    }
+                    return Err(anyhow::anyhow!(
+                        "tool call limit reached ({}), loop broken",
+                        loop_breaker.max_tool_calls()
+                    ));
+                }
             }
 
             // Loop back to the next LLM call with the appended tool_result messages.
@@ -750,7 +771,8 @@ async fn maybe_compact(
     model_id: &str,
     tool_specs: &[ToolSpec],
     force: bool,
-) -> Option<Vec<ChatMessage>> {
+    override_retain: Option<usize>,
+) -> Option<(Vec<ChatMessage>, u64, u64)> {
     let cfg = runtime.providers.get_chat_model_config(model_id).ok()?;
     let window = cfg.context_window?;
     let estimate = estimate_history_tokens(system_prompt, &session.history);
@@ -769,7 +791,7 @@ async fn maybe_compact(
         })
         .sum();
     let boundary =
-        context.compaction_boundary(&session.history, window, sys_prompt_tokens, tool_spec_tokens)?;
+        context.compaction_boundary_with_retain(&session.history, window, sys_prompt_tokens, tool_spec_tokens, override_retain)?;
 
     // Snapshot history for the summarizer (which reads a slice); the live
     // session is passed through for the memory tools inside the summarizer.
@@ -845,7 +867,7 @@ async fn maybe_compact(
                 window,
                 "compaction completed"
             );
-            Some(messages)
+            Some((messages, result.removed_tokens, result.summary_tokens))
         }
         Err(e) => {
             tracing::warn!(err = %e, "compaction failed, continuing");
@@ -881,9 +903,18 @@ async fn compact_until_fit(
     force: bool,
 ) -> Option<Vec<ChatMessage>> {
     const MAX_PASSES: usize = 10;
+    let configured_retain = context.retain_work_units();
+    let mut retain = configured_retain;
     let mut latest: Option<Vec<ChatMessage>> = None;
+    let mut stall_count: usize = 0;
+
     for pass in 0..MAX_PASSES {
         let force_pass = force && pass == 0;
+        let override_retain = if retain != configured_retain {
+            Some(retain)
+        } else {
+            None
+        };
         match maybe_compact(
             context,
             session,
@@ -892,10 +923,33 @@ async fn compact_until_fit(
             model_id,
             tool_specs,
             force_pass,
+            override_retain,
         )
         .await
         {
-            Some(messages) => latest = Some(messages),
+            Some((messages, removed, summary)) => {
+                // Stall detection: if net savings < 5% of the removed tokens
+                // (or effectively zero), we're re-summarising the same old
+                // summary. Lower retain_work_units to expand the compactable
+                // range, down to a minimum of 1.
+                let net = removed.saturating_sub(summary);
+                if removed > 0 && (net as f64) / (removed as f64) < 0.05 {
+                    stall_count += 1;
+                } else {
+                    stall_count = 0;
+                }
+
+                if stall_count >= 2 && retain > 1 {
+                    retain -= 1;
+                    tracing::info!(
+                        retain,
+                        pass,
+                        "compaction stalled, lowering retain_work_units"
+                    );
+                    stall_count = 0;
+                }
+                latest = Some(messages);
+            }
             None => break,
         }
     }

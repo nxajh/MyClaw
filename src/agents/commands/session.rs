@@ -36,21 +36,7 @@ pub async fn cmd_compact(ctx: CommandContext<'_>) -> String {
         Ok(s) => s,
         Err(_) => return "⏳ 会话正在响应中，请等待响应完成后再执行 /compact。".to_string(),
     };
-    let runtime_resources = crate::agents::resource_provider::ResourceProvider::new(
-        std::sync::Arc::clone(&ctx.runtime.skills),
-        ctx.runtime.agents.clone(),
-        Vec::new(),
-        std::path::PathBuf::new(),
-        std::path::PathBuf::new(),
-        String::new(),
-        0,
-    );
-    let engine = crate::agents::context_engine::ContextEngine::new(
-        &Default::default(),
-        std::sync::Arc::clone(&ctx.runtime.providers),
-        runtime_resources,
-        std::sync::Arc::clone(&ctx.runtime.tools),
-    );
+    let engine = &ctx.runtime.context_engine;
     // Build the system prompt once for both the token seed + the
     // compaction request — must match what Agent.run uses so the
     // summarizer hits the prefix cache.

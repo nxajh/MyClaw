@@ -297,6 +297,28 @@ impl Session {
         self.message_ids.push(0);
     }
 
+    /// Remove `count` trailing tool_calls from the last assistant message
+    /// in history. Used when a loop break or tool-call limit is hit after
+    /// the assistant message has already been persisted — the remaining
+    /// unexecuted calls are stripped so no orphan tool_calls remain.
+    /// If all tool_calls are removed, the assistant message is kept as-is
+    /// (it may still carry text content).
+    pub fn strip_trailing_tool_calls(&mut self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        // Walk history backwards to find the last assistant message.
+        for msg in self.history.iter_mut().rev() {
+            if msg.role == "assistant" {
+                if let Some(ref mut calls) = msg.tool_calls {
+                    let to_keep = calls.len().saturating_sub(count);
+                    calls.truncate(to_keep);
+                }
+                break;
+            }
+        }
+    }
+
     /// Remove the last assistant message (used when a loop break occurs).
     pub fn pop_last_assistant(&mut self) {
         if let Some(msg) = self.history.last() {
