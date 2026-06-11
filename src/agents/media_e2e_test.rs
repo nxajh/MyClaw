@@ -382,7 +382,9 @@ async fn text_only_primary_reaches_audio_via_hear_audio_end_to_end() {
         Box::new(audio_provider),
         "audio".into(),
         audio_cfg(),
-        None,
+        Some(crate::providers::ProviderId::new(
+            crate::providers::provider_id::well_known::OPENAI,
+        )),
         None,
     );
     reg.maybe_wrap_chat_fallback(&config_routing(&["text", "audio"]));
