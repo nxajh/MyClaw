@@ -37,8 +37,11 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use crate::channels::message::{
+    ChannelInboundMessage, ChannelMessageContent, MessageReceiver, MessageSender,
+};
 use crate::config::channel::WechatAccountConfig;
-use crate::{Channel, ChannelMessage, DedupState};
+use crate::{Channel, DedupState};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -841,9 +844,9 @@ impl Channel for WechatChannel {
         Ok(crate::channels::OutboundSendResult::empty())
     }
 
-    async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>> {
+    async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelInboundMessage>> {
         self.login().await?;
-        let (tx, rx) = mpsc::channel::<ChannelMessage>(100);
+        let (tx, rx) = mpsc::channel::<ChannelInboundMessage>(100);
 
         // Clone what the background task needs.
         let this = self.clone();
@@ -888,15 +891,13 @@ impl Channel for WechatChannel {
                                     .insert(event.chat_id.clone(), event.context_token.clone());
                             }
 
-                            let channel_msg = ChannelMessage {
+                            let channel_msg = ChannelInboundMessage {
                                 id: event.msg_id,
-                                sender: event.sender_wxid,
-                                reply_target: event.chat_id,
-                                content,
+                                sender: MessageSender::new(event.sender_wxid),
+                                receiver: MessageReceiver::new(event.chat_id),
+                                content: ChannelMessageContent::text(content),
                                 timestamp: event.raw_timestamp as u64,
-                                thread_ts: None,
                                 interruption_scope_id: None,
-                                files: vec![],
                             };
                             // tx is moved into the async block; we send on it directly.
                             if let Err(e) = tx.send(channel_msg).await {

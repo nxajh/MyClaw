@@ -197,6 +197,11 @@ pub struct ChannelFileMeta {
 #[async_trait]
 pub trait ChannelFileBody: Send + Sync {
     async fn open(&self) -> anyhow::Result<Pin<Box<dyn AsyncRead + Send>>>;
+
+    /// Best-effort path for providers that read files directly from disk.
+    fn path_hint(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// A local file body. The path is intentionally private: channel adapters consume
@@ -217,6 +222,10 @@ impl ChannelFileBody for LocalFileBody {
     async fn open(&self) -> anyhow::Result<Pin<Box<dyn AsyncRead + Send>>> {
         let file = tokio::fs::File::open(&self.path).await?;
         Ok(Box::pin(file))
+    }
+
+    fn path_hint(&self) -> Option<&str> {
+        self.path.to_str()
     }
 }
 
@@ -283,6 +292,21 @@ pub struct ChannelInboundMessage {
     pub content: ChannelMessageContent,
     pub timestamp: u64,
     pub interruption_scope_id: Option<String>,
+}
+
+impl ChannelInboundMessage {
+    /// Convert to the serializable form for session persistence.
+    /// File bodies (runtime-only) are dropped; only text and routing survive.
+    pub fn to_persisted(&self) -> PersistedChannelMessage {
+        PersistedChannelMessage {
+            id: self.id.clone(),
+            sender_id: self.sender.id.clone(),
+            receiver: self.receiver.clone(),
+            text: self.content.text.clone(),
+            timestamp: self.timestamp,
+            interruption_scope_id: self.interruption_scope_id.clone(),
+        }
+    }
 }
 
 /// Serializable inbound context kept on sessions. File bodies are runtime-only
@@ -451,7 +475,7 @@ pub trait Channel: Send + Sync {
         anyhow::bail!("send_message not implemented by {}", self.name())
     }
 
-    async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>>;
+    async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelInboundMessage>>;
     async fn health_check(&self) -> bool;
 
     /// Notify the channel about processing status changes.

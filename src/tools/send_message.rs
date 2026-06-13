@@ -168,7 +168,7 @@ impl Tool for SendMessageTool {
         let mut receiver = MessageReceiver::new(reply_target);
         if let Some(ref last_msg) = session.last_message {
             receiver.reply_to_message_id = Some(last_msg.id.clone());
-            receiver.thread_id = last_msg.thread_ts.clone();
+            receiver.thread_id = last_msg.receiver.thread_id.clone();
         }
 
         let message = ChannelOutboundMessage {

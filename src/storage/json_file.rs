@@ -68,12 +68,10 @@ struct SessionMeta {
     /// Per-session runtime overrides (JSON-encoded SessionOverride).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     session_override: Option<String>,
-    /// Last incoming ChannelMessage. Carries sender / reply_target /
-    /// attachments / images so startup recovery can replay the routing
-    /// context. RFC v2 §三.A made this the canonical replacement for
-    /// the older standalone `last_reply_target` field.
+    /// Last incoming message context. Carries sender / receiver / text so
+    /// startup recovery can replay the routing context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    last_message: Option<crate::channels::ChannelMessage>,
+    last_message: Option<crate::channels::PersistedChannelMessage>,
     /// Owning agent name. "main" for top-level sessions; sub-agent name for
     /// delegate-spawned sessions. Skipped when absent for forward compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -670,7 +668,7 @@ impl SessionBackend for JsonFileBackend {
     fn save_last_message(
         &self,
         session_id: &str,
-        msg: &crate::channels::ChannelMessage,
+        msg: &crate::channels::PersistedChannelMessage,
     ) -> std::io::Result<()> {
         if let Some(mut meta) = self.read_meta(session_id) {
             meta.last_message = Some(msg.clone());
@@ -679,7 +677,10 @@ impl SessionBackend for JsonFileBackend {
         Ok(())
     }
 
-    fn load_last_message(&self, session_id: &str) -> Option<crate::channels::ChannelMessage> {
+    fn load_last_message(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::channels::PersistedChannelMessage> {
         self.read_meta(session_id)?.last_message
     }
 

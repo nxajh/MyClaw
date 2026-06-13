@@ -298,18 +298,16 @@ impl DelegationCoordinator {
                 runtime.defaults.prompt.workspace_dir = worktree_path.to_string_lossy().to_string();
             }
 
-            // Synthetic ChannelMessage carries the delegated task. No channel
-            // — sub-agent output is returned to the parent's tool call via
-            // the TurnResult text.
-            let synthetic = crate::channels::ChannelMessage {
+            // Synthetic ChannelInboundMessage carries the delegated task. No
+            // channel — sub-agent output is returned to the parent's tool call
+            // via the TurnResult text.
+            let synthetic = crate::channels::ChannelInboundMessage {
                 id: format!("delegation:{}", task_id),
-                sender: format!("agent:{}", config.name),
-                reply_target: String::new(),
-                content: task.to_string(),
+                sender: crate::channels::MessageSender::new(format!("agent:{}", config.name)),
+                receiver: crate::channels::MessageReceiver::new(String::new()),
+                content: crate::channels::ChannelMessageContent::text(task.to_string()),
                 timestamp: chrono::Utc::now().timestamp() as u64,
-                thread_ts: None,
                 interruption_scope_id: None,
-                files: vec![],
             };
 
             tracing::debug!(agent = %config.name, "sub-agent started");

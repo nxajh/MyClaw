@@ -9,8 +9,12 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use crate::channels::message::{
+    ChannelFile, ChannelFileMeta, ChannelInboundMessage, ChannelMessageContent, LocalFileBody,
+    MessageReceiver, MessageSender,
+};
 use crate::config::channel::TelegramAccountConfig;
-use crate::{Channel, ChannelMessage, DedupState, ProcessingStatus};
+use crate::{Channel, DedupState, ProcessingStatus};
 
 use super::markdown::markdown_to_telegram_html;
 use super::types::{Chat, GetUpdatesResponse, Message, SendChatActionRequest, SendMessageRequest};
@@ -24,10 +28,10 @@ const CONTINUATION_OVERHEAD: usize = 30;
 
 /// Entry in the debounce buffer for merging rapid consecutive messages from the same sender.
 struct DebounceEntry {
-    sender: String,
-    reply_target: String,
-    contents: Vec<String>,
-    files: Vec<crate::channels::FileAttachment>,
+    sender: MessageSender,
+    receiver: MessageReceiver,
+    texts: Vec<String>,
+    files: Vec<ChannelFile>,
     first_ts: u64,
     timer: tokio::task::JoinHandle<()>,
 }
@@ -794,7 +798,11 @@ impl TelegramChannel {
     /// and dispatched as a single `ChannelMessage` after the debounce window
     /// expires. If debounce is disabled (`debounce_ms == 0`), the message is
     /// sent immediately via `tx`.
-    async fn debounce_send(&self, mut msg: ChannelMessage, tx: mpsc::Sender<ChannelMessage>) {
+    async fn debounce_send(
+        &self,
+        mut msg: ChannelInboundMessage,
+        tx: mpsc::Sender<ChannelInboundMessage>,
+    ) {
         if self.debounce_ms == 0 {
             if let Err(e) = tx.send(msg).await {
                 warn!("Telegram dispatch error: {e}");
@@ -802,7 +810,7 @@ impl TelegramChannel {
             return;
         }
 
-        let key = format!("{}|{}", msg.sender, msg.reply_target);
+        let key = format!("{}|{}", msg.sender.id, msg.receiver.id);
         let debounce_ms = self.debounce_ms;
         let buffer = self.debounce_buffer.clone();
         let sender_key = key.clone();
@@ -812,16 +820,17 @@ impl TelegramChannel {
             tokio::time::sleep(std::time::Duration::from_millis(debounce_ms)).await;
             let entry = buffer.lock().remove(&sender_key);
             if let Some(entry) = entry {
-                let merged = entry.contents.join("\n");
-                let channel_msg = ChannelMessage {
+                let channel_msg = ChannelInboundMessage {
                     id: format!("debounced_{}", entry.first_ts),
                     sender: entry.sender,
-                    reply_target: entry.reply_target,
-                    content: merged,
+                    receiver: entry.receiver,
+                    content: ChannelMessageContent {
+                        text: entry.texts.join("\n"),
+                        files: entry.files,
+                        buttons: vec![],
+                    },
                     timestamp: entry.first_ts,
-                    thread_ts: None,
                     interruption_scope_id: None,
-                    files: entry.files,
                 };
                 let _ = tx.send(channel_msg).await;
             }
@@ -832,11 +841,11 @@ impl TelegramChannel {
             let mut buf = self.debounce_buffer.lock();
             if let Some(entry) = buf.get_mut(&key) {
                 // Merge into existing entry.
-                if !msg.content.is_empty() {
-                    entry.contents.push(msg.content);
+                if !msg.content.text.is_empty() {
+                    entry.texts.push(msg.content.text);
                 }
-                if !msg.files.is_empty() {
-                    entry.files.extend(msg.files.drain(..));
+                if !msg.content.files.is_empty() {
+                    entry.files.extend(msg.content.files.drain(..));
                 }
                 // Cancel old timer, set new one.
                 entry.timer.abort();
@@ -847,13 +856,13 @@ impl TelegramChannel {
                     key,
                     DebounceEntry {
                         sender: msg.sender,
-                        reply_target: msg.reply_target,
-                        contents: if msg.content.is_empty() {
+                        receiver: msg.receiver,
+                        texts: if msg.content.text.is_empty() {
                             vec![]
                         } else {
-                            vec![msg.content]
+                            vec![msg.content.text]
                         },
-                        files: msg.files,
+                        files: msg.content.files,
                         first_ts: msg.timestamp,
                         timer: handle,
                     },
@@ -954,7 +963,7 @@ impl TelegramChannel {
     }
 
     /// The actual long-poll loop. Runs until channel is closed.
-    async fn poll_loop(&self, tx: mpsc::Sender<ChannelMessage>) {
+    async fn poll_loop(&self, tx: mpsc::Sender<ChannelInboundMessage>) {
         let mut offset: i64 = self.load_offset();
         if offset > 0 {
             info!("Resuming Telegram polling from persisted offset {offset}");
@@ -1064,22 +1073,24 @@ impl TelegramChannel {
                             chat.id.to_string()
                         };
 
-                    let channel_msg = ChannelMessage {
+                    let channel_msg = ChannelInboundMessage {
                         id: update_id,
-                        sender: sender_username
-                            .map(|u| u.to_string())
-                            .or_else(|| sender_id.map(|id| id.to_string()))
-                            .unwrap_or_default(),
-                        reply_target,
-                        content: data,
+                        sender: MessageSender::new(
+                            sender_username
+                                .map(|u| u.to_string())
+                                .or_else(|| sender_id.map(|id| id.to_string()))
+                                .unwrap_or_default(),
+                        ),
+                        receiver: MessageReceiver::new(reply_target).with_thread(
+                            cq.message
+                                .as_ref()
+                                .and_then(|m| m.message_thread_id)
+                                .map(|id| id.to_string())
+                                .unwrap_or_default(),
+                        ),
+                        content: ChannelMessageContent::text(data),
                         timestamp: chrono::Utc::now().timestamp_millis() as u64,
-                        thread_ts: cq
-                            .message
-                            .as_ref()
-                            .and_then(|m| m.message_thread_id)
-                            .map(|id| id.to_string()),
                         interruption_scope_id: None,
-                        files: vec![],
                     };
 
                     // Send ack reaction if enabled.
@@ -1089,7 +1100,7 @@ impl TelegramChannel {
                         self.ack_message(chat_id, msg_id).await;
                         self.pending_acks
                             .lock()
-                            .entry(channel_msg.reply_target.clone())
+                            .entry(channel_msg.receiver.id.clone())
                             .or_default()
                             .push((chat_id, msg_id));
                     }
@@ -1097,7 +1108,7 @@ impl TelegramChannel {
                     if let Err(e) = tx.send(channel_msg.clone()).await {
                         warn!("Telegram dispatch callback error: {e}");
                     }
-                    self.start_internal_typing(&channel_msg.reply_target);
+                    self.start_internal_typing(&channel_msg.receiver.id);
 
                     continue;
                 }
@@ -1158,7 +1169,7 @@ impl TelegramChannel {
                 }
 
                 let mut content = self.parse_message_content(&msg);
-                let mut files: Vec<crate::channels::FileAttachment> = Vec::new();
+                let mut files: Vec<ChannelFile> = Vec::new();
 
                 // Handle photo messages: download the largest photo and save to temp file
                 if let Some(photos) = &msg.photo {
@@ -1168,11 +1179,13 @@ impl TelegramChannel {
                                 let temp_path = std::env::temp_dir()
                                     .join(format!("myclaw-tg-img-{}.png", uuid::Uuid::new_v4()));
                                 if tokio::fs::write(&temp_path, &data).await.is_ok() {
-                                    files.push(crate::channels::FileAttachment {
-                                        path: temp_path.to_string_lossy().to_string(),
-                                        file_name: Some(format!("photo-{}.png", largest.file_id)),
-                                        mime_type: Some("image/png".to_string()),
-                                        size_bytes: Some(data.len() as u64),
+                                    files.push(ChannelFile {
+                                        meta: ChannelFileMeta {
+                                            file_name: format!("photo-{}.png", largest.file_id),
+                                            mime_type: Some("image/png".to_string()),
+                                            size_bytes: Some(data.len() as u64),
+                                        },
+                                        body: Arc::new(LocalFileBody::new(temp_path)),
                                     });
                                 }
                             }
@@ -1202,11 +1215,13 @@ impl TelegramChannel {
                             let temp_path = std::env::temp_dir()
                                 .join(format!("myclaw-tg-{}", uuid::Uuid::new_v4()));
                             if tokio::fs::write(&temp_path, &data).await.is_ok() {
-                                files.push(crate::channels::FileAttachment {
-                                    path: temp_path.to_string_lossy().to_string(),
-                                    file_name: Some(fname),
-                                    mime_type: Some(mime),
-                                    size_bytes: Some(data.len() as u64),
+                                files.push(ChannelFile {
+                                    meta: ChannelFileMeta {
+                                        file_name: fname,
+                                        mime_type: Some(mime),
+                                        size_bytes: Some(data.len() as u64),
+                                    },
+                                    body: Arc::new(LocalFileBody::new(temp_path)),
                                 });
                             }
                         }
@@ -1229,11 +1244,13 @@ impl TelegramChannel {
                             let temp_path = std::env::temp_dir()
                                 .join(format!("myclaw-tg-{}", uuid::Uuid::new_v4()));
                             if tokio::fs::write(&temp_path, &data).await.is_ok() {
-                                files.push(crate::channels::FileAttachment {
-                                    path: temp_path.to_string_lossy().to_string(),
-                                    file_name: Some(fname),
-                                    mime_type: Some(mime),
-                                    size_bytes: Some(data.len() as u64),
+                                files.push(ChannelFile {
+                                    meta: ChannelFileMeta {
+                                        file_name: fname,
+                                        mime_type: Some(mime),
+                                        size_bytes: Some(data.len() as u64),
+                                    },
+                                    body: Arc::new(LocalFileBody::new(temp_path)),
                                 });
                             }
                         }
@@ -1246,22 +1263,26 @@ impl TelegramChannel {
                     }
                 }
 
-                let channel_msg = ChannelMessage {
+                let channel_msg = ChannelInboundMessage {
                     id: update_id,
-                    sender: sender_username
-                        .map(|u| u.to_string())
-                        .or_else(|| sender_id.map(|id| id.to_string()))
-                        .unwrap_or_default(),
-                    reply_target: if let Some(tid) = msg.message_thread_id {
+                    sender: MessageSender::new(
+                        sender_username
+                            .map(|u| u.to_string())
+                            .or_else(|| sender_id.map(|id| id.to_string()))
+                            .unwrap_or_default(),
+                    ),
+                    receiver: MessageReceiver::new(if let Some(tid) = msg.message_thread_id {
                         format!("{}:{}", chat.id, tid)
                     } else {
                         chat.id.to_string()
+                    }),
+                    content: ChannelMessageContent {
+                        text: content,
+                        files,
+                        buttons: vec![],
                     },
-                    content,
                     timestamp: chrono::Utc::now().timestamp_millis() as u64,
-                    thread_ts: msg.message_thread_id.map(|id| id.to_string()),
                     interruption_scope_id: None,
-                    files,
                 };
 
                 if self.debounce_ms > 0 {
@@ -1269,7 +1290,7 @@ impl TelegramChannel {
                     let stale_status = self
                         .status_reactions
                         .lock()
-                        .remove(&channel_msg.reply_target);
+                        .remove(&channel_msg.receiver.id);
                     if let Some(msg_ids) = stale_status {
                         for (cid, mid) in msg_ids {
                             let _ = self.remove_reaction(cid, mid, "❌").await;
@@ -1281,16 +1302,16 @@ impl TelegramChannel {
                         self.ack_message(chat.id, msg.message_id).await;
                         self.pending_acks
                             .lock()
-                            .entry(channel_msg.reply_target.clone())
+                            .entry(channel_msg.receiver.id.clone())
                             .or_default()
                             .push((chat.id, msg.message_id));
                     }
 
                     let debounce_key =
-                        format!("{}|{}", channel_msg.sender, channel_msg.reply_target);
+                        format!("{}|{}", channel_msg.sender.id, channel_msg.receiver.id);
                     let is_new = !self.debounce_buffer.lock().contains_key(&debounce_key);
                     if is_new {
-                        self.start_internal_typing(&channel_msg.reply_target);
+                        self.start_internal_typing(&channel_msg.receiver.id);
                     }
                     self.debounce_send(channel_msg, tx.clone()).await;
                 } else {
@@ -1298,7 +1319,7 @@ impl TelegramChannel {
                     let stale_status = self
                         .status_reactions
                         .lock()
-                        .remove(&channel_msg.reply_target);
+                        .remove(&channel_msg.receiver.id);
                     if let Some(msg_ids) = stale_status {
                         for (cid, mid) in msg_ids {
                             let _ = self.remove_reaction(cid, mid, "❌").await;
@@ -1310,14 +1331,14 @@ impl TelegramChannel {
                         self.ack_message(chat.id, msg.message_id).await;
                         self.pending_acks
                             .lock()
-                            .entry(channel_msg.reply_target.clone())
+                            .entry(channel_msg.receiver.id.clone())
                             .or_default()
                             .push((chat.id, msg.message_id));
                     }
                     if let Err(e) = tx.send(channel_msg.clone()).await {
                         warn!("Telegram dispatch error: {e}");
                     }
-                    self.start_internal_typing(&channel_msg.reply_target);
+                    self.start_internal_typing(&channel_msg.receiver.id);
                 }
             }
         }
@@ -1559,14 +1580,14 @@ impl Channel for TelegramChannel {
         Ok(crate::channels::OutboundSendResult { message_ids: ids })
     }
 
-    async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>> {
+    async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelInboundMessage>> {
         // Lazily fetch bot username for mention detection.
         if let Some(username) = self.fetch_bot_username().await {
             info!("Telegram bot username: @{}", username);
             self.set_bot_username(username);
         }
 
-        let (tx, rx) = mpsc::channel::<ChannelMessage>(100);
+        let (tx, rx) = mpsc::channel::<ChannelInboundMessage>(100);
         let ch = self.clone();
 
         tokio::spawn(async move {

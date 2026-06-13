@@ -10,7 +10,7 @@
 use super::ctx::OrchestratorCtx;
 use super::key::SessionKey;
 use crate::agents::DelegationEvent;
-use crate::channels::ChannelMessage;
+use crate::channels::ChannelInboundMessage;
 
 /// Wake the parent agent on a `DelegationEvent` (sub-agent completion/failure).
 pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
@@ -58,15 +58,13 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
         return;
     }
 
-    let synthetic = ChannelMessage {
+    let synthetic = ChannelInboundMessage {
         id: format!("delegation:{}", task_id),
-        sender: key.sender.clone(),
-        reply_target,
-        content,
+        sender: crate::channels::MessageSender::new(key.sender.clone()),
+        receiver: crate::channels::MessageReceiver::new(reply_target),
+        content: crate::channels::ChannelMessageContent::text(content),
         timestamp: chrono::Utc::now().timestamp() as u64,
-        thread_ts: None,
         interruption_scope_id: None,
-        files: vec![],
     };
     super::inbound::dispatch_turn(ctx, &key, synthetic).await;
 }

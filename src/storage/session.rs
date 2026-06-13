@@ -301,19 +301,21 @@ pub trait SessionBackend: Send + Sync {
         None
     }
 
-    /// Persist the last incoming ChannelMessage as JSON. The
-    /// `reply_target` field is read back from this when recovery needs
-    /// to know where to deliver the resumed turn's response.
+    /// Persist the last incoming message context (sender / receiver /
+    /// text) so startup recovery can replay routing.
     fn save_last_message(
         &self,
         _session_id: &str,
-        _msg: &crate::channels::ChannelMessage,
+        _msg: &crate::channels::PersistedChannelMessage,
     ) -> std::io::Result<()> {
         Ok(())
     }
 
-    /// Load the persisted last ChannelMessage.
-    fn load_last_message(&self, _session_id: &str) -> Option<crate::channels::ChannelMessage> {
+    /// Load the persisted last message context.
+    fn load_last_message(
+        &self,
+        _session_id: &str,
+    ) -> Option<crate::channels::PersistedChannelMessage> {
         None
     }
 

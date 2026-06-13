@@ -1475,7 +1475,14 @@ mod tests {
     #[test]
     fn filter_turn_scoped_tools_hides_send_tools_without_channel() {
         let mut session = Session::new("s".into());
-        session.record_inbound(crate::channels::ChannelMessage::new("u", "hi"));
+        session.record_inbound(crate::channels::ChannelInboundMessage {
+            id: "test".into(),
+            sender: crate::channels::MessageSender::new("u"),
+            receiver: crate::channels::MessageReceiver::new("s"),
+            content: crate::channels::ChannelMessageContent::text("hi"),
+            timestamp: 0,
+            interruption_scope_id: None,
+        });
         let mut tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(NamedTool("send_message")),
             Arc::new(NamedTool("send_media")),

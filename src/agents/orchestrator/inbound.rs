@@ -20,7 +20,7 @@ use crate::agents::user_messages::{
     BTN_ABORT, BTN_RETRY, MSG_ABORT_ACK, MSG_INCOMPLETE_TURN, MSG_NO_PENDING_RETRY,
 };
 use crate::channels::{
-    CallbackAction, Channel, ChannelMessage, ChannelMessageContent, ChannelOutboundMessage,
+    CallbackAction, Channel, ChannelInboundMessage, ChannelMessageContent, ChannelOutboundMessage,
     InlineButton, MessageReceiver,
 };
 use tracing::error;
@@ -31,7 +31,7 @@ enum Flow {
     /// Message handled (replied to and/or spawned). Stop the chain.
     Stop,
     /// Pass the (possibly rewritten) message to the next interceptor.
-    Next(ChannelMessage),
+    Next(ChannelInboundMessage),
 }
 
 #[async_trait]
@@ -39,7 +39,12 @@ trait Interceptor: Send + Sync {
     /// Stable identifier — used by the chain-order test.
     #[cfg_attr(not(test), allow(dead_code))]
     fn name(&self) -> &'static str;
-    async fn handle(&self, ctx: &OrchestratorCtx, key: &SessionKey, msg: ChannelMessage) -> Flow;
+    async fn handle(
+        &self,
+        ctx: &OrchestratorCtx,
+        key: &SessionKey,
+        msg: ChannelInboundMessage,
+    ) -> Flow;
 }
 
 /// The ordered interceptor chain. Terminal stage (`DispatchTurn`) must be last.
@@ -57,7 +62,7 @@ fn chain() -> [&'static dyn Interceptor; 5] {
 pub(super) async fn dispatch(
     ctx: &OrchestratorCtx,
     account: (String, String),
-    msg: ChannelMessage,
+    msg: ChannelInboundMessage,
 ) {
     // Tell the Scheduler about this user message so cron / heartbeat jobs with
     // `target = "last"` know where to deliver their output. No-op when the
@@ -66,11 +71,11 @@ pub(super) async fn dispatch(
     if let Some(ref scheduler) = ctx.scheduler {
         let channel_key = format!("{}:{}", account.0, account.1);
         scheduler
-            .record_user_message(&channel_key, &msg.reply_target)
+            .record_user_message(&channel_key, &msg.receiver.id)
             .await;
     }
 
-    let key = SessionKey::new(&account.0, &account.1, &msg.sender);
+    let key = SessionKey::new(&account.0, &account.1, &msg.sender.id);
     let mut msg = msg;
     for stage in chain() {
         match stage.handle(ctx, &key, msg).await {
@@ -92,7 +97,12 @@ impl Interceptor for AskReply {
     fn name(&self) -> &'static str {
         "ask_reply"
     }
-    async fn handle(&self, ctx: &OrchestratorCtx, key: &SessionKey, msg: ChannelMessage) -> Flow {
+    async fn handle(
+        &self,
+        ctx: &OrchestratorCtx,
+        key: &SessionKey,
+        msg: ChannelInboundMessage,
+    ) -> Flow {
         let session_id = ctx.sessions.get_or_create(&key.to_string()).id.clone();
         if ctx.ask.fulfill(&session_id, msg.clone()) {
             tracing::debug!(session = %session_id, "ask_router fulfilled pending ask, consuming inbound");
@@ -120,15 +130,15 @@ impl Interceptor for Callback {
         &self,
         ctx: &OrchestratorCtx,
         key: &SessionKey,
-        mut msg: ChannelMessage,
+        mut msg: ChannelInboundMessage,
     ) -> Flow {
-        let is_retry = match CallbackAction::parse(&msg.content) {
+        let is_retry = match CallbackAction::parse(&msg.content.text) {
             Some(CallbackAction::Retry { .. }) => true,
             Some(CallbackAction::Abort { .. }) => false,
             _ => return Flow::Next(msg),
         };
 
-        let reply_target = msg.reply_target.clone();
+        let reply_target = msg.receiver.id.clone();
         let channel = match ctx.channel(&key.account_key()) {
             Some(c) => c,
             None => return Flow::Stop,
@@ -146,7 +156,7 @@ impl Interceptor for Callback {
             match pending {
                 Some(user_msg) => {
                     // Rewrite content and fall through to dispatch.
-                    msg.content = user_msg;
+                    msg.content.text = user_msg;
                     Flow::Next(msg)
                 }
                 None => {
@@ -172,7 +182,12 @@ impl Interceptor for CrashRecovery {
     fn name(&self) -> &'static str {
         "crash_recovery"
     }
-    async fn handle(&self, ctx: &OrchestratorCtx, key: &SessionKey, msg: ChannelMessage) -> Flow {
+    async fn handle(
+        &self,
+        ctx: &OrchestratorCtx,
+        key: &SessionKey,
+        msg: ChannelInboundMessage,
+    ) -> Flow {
         let sk = key.to_string();
         let session_ctx = ctx.session_context_for(&sk);
         if let Ok(mut session) = session_ctx.session.try_lock() {
@@ -193,7 +208,7 @@ impl Interceptor for CrashRecovery {
                     None => return Flow::Stop,
                 };
                 let message = ChannelOutboundMessage {
-                    receiver: MessageReceiver::new(msg.reply_target.clone())
+                    receiver: MessageReceiver::new(msg.receiver.id.clone())
                         .with_reply_to(msg.id.clone()),
                     content: retry_abort_content(MSG_INCOMPLETE_TURN, &sk),
                     options: Default::default(),
@@ -219,8 +234,13 @@ impl Interceptor for SlashCommand {
     fn name(&self) -> &'static str {
         "slash_command"
     }
-    async fn handle(&self, ctx: &OrchestratorCtx, key: &SessionKey, msg: ChannelMessage) -> Flow {
-        let content = msg.content.clone();
+    async fn handle(
+        &self,
+        ctx: &OrchestratorCtx,
+        key: &SessionKey,
+        msg: ChannelInboundMessage,
+    ) -> Flow {
+        let content = msg.content.text.clone();
         let Some((cmd, cmd_args)) = commands::parse_command(&content) else {
             return Flow::Next(msg);
         };
@@ -236,7 +256,7 @@ impl Interceptor for SlashCommand {
         let sm_cmd = ctx.sessions.clone();
         let runtime_cmd = ctx.runtime.clone();
         let channel_cmd = ctx.channel(&key.account_key());
-        let rt_cmd = msg.reply_target.clone();
+        let rt_cmd = msg.receiver.id.clone();
         let msg_id_cmd = msg.id.clone();
 
         tokio::spawn(async move {
@@ -275,7 +295,12 @@ impl Interceptor for DispatchTurn {
     fn name(&self) -> &'static str {
         "dispatch_turn"
     }
-    async fn handle(&self, ctx: &OrchestratorCtx, key: &SessionKey, msg: ChannelMessage) -> Flow {
+    async fn handle(
+        &self,
+        ctx: &OrchestratorCtx,
+        key: &SessionKey,
+        msg: ChannelInboundMessage,
+    ) -> Flow {
         dispatch_turn(ctx, key, msg).await;
         Flow::Stop
     }
@@ -285,15 +310,20 @@ impl Interceptor for DispatchTurn {
 /// terminal `DispatchTurn` interceptor and by delegation wakes (a delegation
 /// completion is a system note that should drive a turn directly, without
 /// re-running the user-message interceptors above).
-pub(super) async fn dispatch_turn(ctx: &OrchestratorCtx, key: &SessionKey, msg: ChannelMessage) {
+pub(super) async fn dispatch_turn(
+    ctx: &OrchestratorCtx,
+    key: &SessionKey,
+    msg: ChannelInboundMessage,
+) {
     let sk = key.to_string();
 
-    // B12: store the full inbound ChannelMessage on the session.
+    // B12: store the full inbound message on the session.
     {
         let mut session = ctx.sessions.get_or_create(&sk);
         session.record_inbound(msg.clone());
     }
-    if let Err(e) = ctx.sessions.backend().save_last_message(&sk, &msg) {
+    let persisted = msg.to_persisted();
+    if let Err(e) = ctx.sessions.backend().save_last_message(&sk, &persisted) {
         tracing::warn!(session = %sk, err = %e, "failed to persist last_message");
     }
 
@@ -304,11 +334,11 @@ pub(super) async fn dispatch_turn(ctx: &OrchestratorCtx, key: &SessionKey, msg: 
 
     // Dispatch via SessionContext.process_turn — the canonical RFC v2 per-turn
     // entry point. Spawn on a background task so the event loop is not blocked
-    // by the LLM round-trip. File attachments ride along on
-    // `session.last_message` (recorded above); Agent.run reads them from there.
+    // by the LLM round-trip. File attachments ride along on the
+    // inbound message; Agent.run reads them from there.
     let session_ctx = ctx.sessions.get_or_create_context(&sk);
     let runtime = ctx.runtime.clone();
-    let reply_target = msg.reply_target.clone();
+    let reply_target = msg.receiver.id.clone();
 
     tokio::spawn(async move {
         // Successful turns: process_turn does the final `channel.send_message(text)`

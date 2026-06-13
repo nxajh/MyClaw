@@ -125,10 +125,7 @@ impl Tool for AskUserTool {
             }
         };
 
-        // Surface any attached images alongside the text answer so the
-        // model sees the full reply (AskRouter delivers a ChannelMessage so
-        // image attachments survive the round trip).
-        let output = reply.content;
+        let output = reply.content.text;
 
         Ok(ToolResult {
             success: true,

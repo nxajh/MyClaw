@@ -7,7 +7,6 @@
 //! have a single injection point (`tx.send(OrchestratorEvent::*)`).
 
 use crate::agents::DelegationEvent;
-use crate::channels::ChannelMessage;
 
 /// Anything the orchestrator's main loop needs to react to.
 #[derive(Debug)]
@@ -19,7 +18,7 @@ pub enum OrchestratorEvent {
     Inbound {
         channel_type: String,
         account_id: String,
-        message: ChannelMessage,
+        message: crate::channels::ChannelInboundMessage,
     },
 
     /// Scheduler fired — either a heartbeat tick or a cron job. Carried
@@ -28,7 +27,7 @@ pub enum OrchestratorEvent {
     Scheduled(super::SchedulerEvent),
 
     /// Background sub-agent finished. The orchestrator synthesizes a
-    /// `ChannelMessage` from this event and feeds it back into the parent
+    /// `ChannelInboundMessage` from this event and feeds it back into the parent
     /// session so the LLM can react.
     Delegation(DelegationEvent),
 
@@ -37,7 +36,7 @@ pub enum OrchestratorEvent {
     /// routing_key, so cross-channel ask_user works for sub-agents).
     AskReply {
         session_id: String,
-        reply: crate::channels::ChannelMessage,
+        reply: crate::channels::ChannelInboundMessage,
     },
 
     /// Graceful shutdown signal — main loop should drain and exit.

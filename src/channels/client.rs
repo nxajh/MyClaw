@@ -32,7 +32,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agents::TurnEvent;
 use crate::channels::message::{
-    Channel, ChannelMessage, ChannelOutboundMessage, OutboundSendResult,
+    Channel, ChannelFile, ChannelFileMeta, ChannelInboundMessage, ChannelMessageContent,
+    ChannelOutboundMessage, LocalFileBody, MessageReceiver, MessageSender, OutboundSendResult,
 };
 use crate::config::channel::ClientConfig;
 
@@ -62,9 +63,9 @@ struct ClientConnection {
 pub struct ClientChannel {
     config: ClientConfig,
     /// Outgoing messages for Orchestrator (filled by WS handlers).
-    message_tx: mpsc::Sender<ChannelMessage>,
+    message_tx: mpsc::Sender<ChannelInboundMessage>,
     /// One-time take for listen().
-    message_rx: Mutex<Option<mpsc::Receiver<ChannelMessage>>>,
+    message_rx: Mutex<Option<mpsc::Receiver<ChannelInboundMessage>>>,
     /// Pre-bound listener passed from the old process during hot switch.
     /// When set, start() reuses it instead of calling bind().
     pre_bound: SyncMutex<Option<std::net::TcpListener>>,
@@ -388,9 +389,7 @@ impl ClientChannel {
                                             }
 
                                             // Decode base64 images and save to temp files.
-                                            let mut image_files: Vec<
-                                                crate::channels::FileAttachment,
-                                            > = Vec::new();
+                                            let mut image_files: Vec<ChannelFile> = Vec::new();
                                             if let Some(arr) = parsed["image_base64"].as_array() {
                                                 use base64::Engine;
                                                 for (idx, v) in arr.iter().enumerate() {
@@ -406,11 +405,13 @@ impl ClientChannel {
                                                                 uuid::Uuid::new_v4()
                                                             ));
                                                             if tokio::fs::write(&temp_path, &bytes).await.is_ok() {
-                                                                image_files.push(crate::channels::FileAttachment {
-                                                                    path: temp_path.to_string_lossy().to_string(),
-                                                                    file_name: Some(fname),
-                                                                    mime_type: Some("image/png".to_string()),
-                                                                    size_bytes: Some(bytes.len() as u64),
+                                                                image_files.push(ChannelFile {
+                                                                    meta: ChannelFileMeta {
+                                                                        file_name: fname,
+                                                                        mime_type: Some("image/png".to_string()),
+                                                                        size_bytes: Some(bytes.len() as u64),
+                                                                    },
+                                                                    body: std::sync::Arc::new(LocalFileBody::new(temp_path)),
                                                                 });
                                                             }
                                                         }
@@ -471,20 +472,24 @@ impl ClientChannel {
                                                 }
                                             });
 
-                                            // Create ChannelMessage for Orchestrator.
-                                            let channel_msg = ChannelMessage {
+                                            // Create ChannelInboundMessage for Orchestrator.
+                                            let channel_msg = ChannelInboundMessage {
                                                 id: format!(
                                                     "{}-{}",
                                                     conn_id_clone,
                                                     chrono::Utc::now().timestamp_millis()
                                                 ),
-                                                sender: client_id.clone(),
-                                                reply_target: session_key_clone.clone(),
-                                                content,
+                                                sender: MessageSender::new(client_id.clone()),
+                                                receiver: MessageReceiver::new(
+                                                    session_key_clone.clone(),
+                                                ),
+                                                content: ChannelMessageContent {
+                                                    text: content,
+                                                    files: image_files,
+                                                    buttons: vec![],
+                                                },
                                                 timestamp: chrono::Utc::now().timestamp() as u64,
-                                                thread_ts: None,
                                                 interruption_scope_id: None,
-                                                files: image_files,
                                             };
 
                                             if message_tx_clone.send(channel_msg).await.is_err() {
@@ -662,7 +667,7 @@ impl Channel for ClientChannel {
         Ok(OutboundSendResult::empty())
     }
 
-    async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>> {
+    async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelInboundMessage>> {
         // Lazily start the WebSocket server on first listen() call.
         self.start().await?;
         let rx =

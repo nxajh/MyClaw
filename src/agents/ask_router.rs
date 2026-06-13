@@ -23,11 +23,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use dashmap::DashMap;
 use tokio::sync::oneshot;
 
-use crate::channels::ChannelMessage;
+use crate::channels::ChannelInboundMessage;
 
 /// One pending ask: a generation tag (to disambiguate replacements) + the
 /// oneshot sender that wakes the waiting `ask_user`.
-type Pending = (u64, oneshot::Sender<ChannelMessage>);
+type Pending = (u64, oneshot::Sender<ChannelInboundMessage>);
 
 /// Manages outstanding `ask_user` calls. The API mirrors RFC v2 §三.B:
 /// `wait_for_reply` (caller-facing) + `fulfill` (orchestrator-facing).
@@ -69,7 +69,7 @@ impl AskRouter {
     /// real event: the reply arrives (`fulfill`), a newer ask supersedes this
     /// one, or the future is cancelled (turn interrupted / shutdown). In every
     /// case the `PendingGuard` clears this session's slot on the way out.
-    pub async fn wait_for_reply(&self, session_id: &str) -> anyhow::Result<ChannelMessage> {
+    pub async fn wait_for_reply(&self, session_id: &str) -> anyhow::Result<ChannelInboundMessage> {
         let (tx, rx) = oneshot::channel();
         let generation = self.next_gen.fetch_add(1, Ordering::Relaxed);
         if self
@@ -105,7 +105,7 @@ impl AskRouter {
     /// `process_turn` — if `fulfill` returns true, the inbound message
     /// is consumed by the ask_user resolution and should NOT trigger a
     /// fresh turn.
-    pub fn fulfill(&self, session_id: &str, reply: ChannelMessage) -> bool {
+    pub fn fulfill(&self, session_id: &str, reply: ChannelInboundMessage) -> bool {
         match self.pending.remove(session_id) {
             Some((_, (_gen, sender))) => {
                 // Send result is Ok unless the receiver has been dropped
@@ -124,16 +124,14 @@ impl AskRouter {
 mod tests {
     use super::*;
 
-    fn msg(content: &str) -> ChannelMessage {
-        ChannelMessage {
+    fn msg(content: &str) -> ChannelInboundMessage {
+        ChannelInboundMessage {
             id: "test".into(),
-            sender: "s".into(),
-            reply_target: "rt".into(),
-            content: content.into(),
+            sender: crate::channels::MessageSender::new("s"),
+            receiver: crate::channels::MessageReceiver::new("rt"),
+            content: crate::channels::ChannelMessageContent::text(content),
             timestamp: 0,
-            thread_ts: None,
             interruption_scope_id: None,
-            files: vec![],
         }
     }
 

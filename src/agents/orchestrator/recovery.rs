@@ -43,7 +43,7 @@ impl CompletionSink {
             } => {
                 let recipient = backend
                     .load_last_message(&key)
-                    .map(|m| m.reply_target)
+                    .map(|m| m.receiver.id)
                     .unwrap_or_else(|| {
                         SessionKey::parse(&key)
                             .map(|k| k.sender)

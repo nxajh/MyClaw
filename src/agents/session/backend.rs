@@ -263,9 +263,9 @@ pub trait PersistHook: Send + Sync {
     fn save_token_count(&self, session_id: &str, total: u64);
     /// Persist the session override so it survives restarts.
     fn save_session_override(&self, session_id: &str, override_json: &str);
-    /// Persist the last incoming ChannelMessage (sender / reply_target /
-    /// attachments / images) so startup recovery can replay routing.
-    fn save_last_message(&self, session_id: &str, msg: &crate::channels::ChannelMessage);
+    /// Persist the last incoming message context (sender / receiver /
+    /// text) so startup recovery can replay routing.
+    fn save_last_message(&self, session_id: &str, msg: &crate::channels::PersistedChannelMessage);
     /// Truncate message history to keep only the first `keep_count` messages.
     /// Used for rollback when a turn fails completely.
     fn truncate_messages(&self, session_id: &str, keep_count: usize);
@@ -339,7 +339,7 @@ impl PersistHook for BackendPersistHook {
         }
     }
 
-    fn save_last_message(&self, session_id: &str, msg: &crate::channels::ChannelMessage) {
+    fn save_last_message(&self, session_id: &str, msg: &crate::channels::PersistedChannelMessage) {
         if let Err(e) = self.backend.save_last_message(session_id, msg) {
             tracing::warn!(session = %session_id, err = %e, "save last message failed");
         }

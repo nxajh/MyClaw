@@ -5,7 +5,7 @@ use std::sync::Arc;
 use super::backend::PersistHook;
 use super::session_override::SessionOverride;
 use crate::agents::tokens::TokenTracker;
-use crate::channels::{Channel, ChannelMessage, TurnStream};
+use crate::channels::{Channel, ChannelInboundMessage, PersistedChannelMessage, TurnStream};
 use crate::providers::capability_chat::ChatMessage;
 
 /// Summary metadata stored in Session memory (no text parsing needed).
@@ -59,11 +59,9 @@ pub struct Session {
     /// orchestrator will prompt the user to retry or abort on the next
     /// interaction. Not persisted — rebuilt on every session load.
     pub incomplete_turn: bool,
-    /// Last incoming ChannelMessage. Carries sender, reply_target, attachments,
-    /// images. Persisted so startup recovery can reconstruct the routing
-    /// context and resume an interrupted turn. RFC v2 §三.A replaces the old
-    /// `last_reply_target: Option<String>` field with this richer message.
-    pub last_message: Option<ChannelMessage>,
+    /// Last incoming message context. Persisted so startup recovery can
+    /// reconstruct the routing context and resume an interrupted turn.
+    pub last_message: Option<PersistedChannelMessage>,
     /// Token usage tracker. Owned by the session so `Agent.run` /
     /// `ContextEngine` can read budgets without needing a parallel struct.
     /// Seeded by `SessionManager` from `backend.load_token_count` on
@@ -165,10 +163,10 @@ impl Session {
     }
 
     /// Persist the session's per-turn metadata to disk via the installed
-    /// `PersistHook`. Currently flushes `last_message.reply_target`, the
-    /// session override JSON, and the most recent total token count. Per-
-    /// message persistence is handled inline by `Agent.run`; this is the
-    /// "after-turn settle" call for snapshot fields.
+    /// `PersistHook`. Currently flushes `last_message`, the session override
+    /// JSON, and the most recent total token count. Per-message persistence
+    /// is handled inline by `Agent.run`; this is the "after-turn settle"
+    /// call for snapshot fields.
     ///
     /// No-op when no persist hook is installed.
     pub fn save_to_disk(&self) {
@@ -189,14 +187,16 @@ impl Session {
     }
 
     /// Return the routing target for the next outbound message, derived from
-    /// the most recently stored ChannelMessage.
+    /// the most recently stored message context.
     pub fn reply_target(&self) -> Option<&str> {
-        self.last_message.as_ref().map(|m| m.reply_target.as_str())
+        self.last_message.as_ref().map(|m| m.receiver.id.as_str())
     }
 
-    /// Store the incoming message context.
-    pub fn record_inbound(&mut self, msg: ChannelMessage) {
-        self.last_message = Some(msg);
+    /// Store the incoming message context. Converts the runtime
+    /// `ChannelInboundMessage` to the serializable `PersistedChannelMessage`
+    /// (file bodies are dropped — only text and routing survive).
+    pub fn record_inbound(&mut self, msg: ChannelInboundMessage) {
+        self.last_message = Some(msg.to_persisted());
     }
 
     /// Append a user message to history.

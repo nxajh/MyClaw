@@ -17,7 +17,7 @@ use crate::agents::resource_provider::ResourceProvider;
 use crate::agents::session::SessionManager;
 use crate::agents::tool_executor::ToolExecutor;
 use crate::agents::{AgentRegistry, AgentRuntime, AskRouter, LoopBreaker, LoopBreakerConfig};
-use crate::channels::{Channel, ChannelMessage, ChannelOutboundMessage, OutboundSendResult};
+use crate::channels::{Channel, ChannelInboundMessage, ChannelOutboundMessage, OutboundSendResult};
 use crate::providers::{
     Capability, ChatModelConfig, ChatProvider, EmbeddingProvider, ImageGenerationProvider,
     ProviderRegistry, ProviderSummary, SearchProvider, SttProvider, TtsProvider,
@@ -59,7 +59,7 @@ impl Channel for MockChannel {
         self.sent.lock().unwrap().push(msg.clone());
         Ok(OutboundSendResult::empty())
     }
-    async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>> {
+    async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelInboundMessage>> {
         let (_tx, rx) = mpsc::channel(1);
         Ok(rx)
     }
@@ -140,16 +140,14 @@ pub(crate) fn test_ctx(channels: Vec<((String, String), Arc<dyn Channel>)>) -> O
     }
 }
 
-/// A minimal inbound `ChannelMessage` with the given sender and content.
-pub(crate) fn inbound_msg(sender: &str, content: &str) -> ChannelMessage {
-    ChannelMessage {
+/// A minimal inbound `ChannelInboundMessage` with the given sender and content.
+pub(crate) fn inbound_msg(sender: &str, content: &str) -> ChannelInboundMessage {
+    ChannelInboundMessage {
         id: "test-msg".to_string(),
-        sender: sender.to_string(),
-        reply_target: sender.to_string(),
-        content: content.to_string(),
+        sender: crate::channels::MessageSender::new(sender.to_string()),
+        receiver: crate::channels::MessageReceiver::new(sender.to_string()),
+        content: crate::channels::ChannelMessageContent::text(content.to_string()),
         timestamp: 0,
-        thread_ts: None,
         interruption_scope_id: None,
-        files: Vec::new(),
     }
 }

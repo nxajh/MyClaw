@@ -15,7 +15,7 @@ use crate::agents::attachment::AttachmentManager;
 use crate::agents::session::Session;
 use crate::agents::turn::TurnResult;
 use crate::agents::{Agent, AgentRuntime, TurnContext, UserProfile};
-use crate::channels::{Channel, ChannelMessage};
+use crate::channels::{Channel, ChannelInboundMessage};
 /// Per-session bundle held by the SessionManager's session-context table.
 ///
 /// Fields:
@@ -106,7 +106,7 @@ impl SessionContext {
     /// same session can offer a retry prompt.
     pub async fn process_turn(
         self: &Arc<Self>,
-        inbound_msg: ChannelMessage,
+        inbound_msg: ChannelInboundMessage,
         channel: Option<Arc<dyn Channel>>,
         runtime: AgentRuntime,
     ) -> anyhow::Result<TurnResult> {
@@ -114,8 +114,26 @@ impl SessionContext {
         let mut session = self.session.lock().await;
 
         let inbound_msg = inbound_msg;
-        let content = inbound_msg.content.clone();
-        let reply_target = inbound_msg.reply_target.clone();
+        let content = inbound_msg.content.text.clone();
+        let reply_target = inbound_msg.receiver.id.clone();
+
+        // Build file content parts from the inbound message's files before
+        // record_inbound converts to the persistable form.
+        let media_parts: Vec<crate::providers::ContentPart> = {
+            use crate::providers::ContentPart;
+            let mut parts = Vec::new();
+            for file in &inbound_msg.content.files {
+                if let Some(path) = file.body.path_hint() {
+                    parts.push(ContentPart::File {
+                        path: path.to_string(),
+                        mime_type: file.meta.mime_type.clone(),
+                        name: Some(file.meta.file_name.clone()),
+                        size_bytes: file.meta.size_bytes,
+                    });
+                }
+            }
+            parts
+        };
 
         // Session.persist was wired at SessionContext creation by
         // SessionManager; capture a clone so the post-turn `add_user`
@@ -181,24 +199,6 @@ impl SessionContext {
         let user_content = match reminder {
             Some(rem) => format!("{}\n\n{}", rem, content),
             None => content,
-        };
-        // Build file content parts from the inbound message so media is
-        // recorded in history as session-local file references. Channel adapters
-        // now save media to temp files and populate `msg.files` directly.
-        let media_parts: Vec<crate::providers::ContentPart> = {
-            use crate::providers::ContentPart;
-            let mut parts = Vec::new();
-            if let Some(msg) = session.last_message.as_ref() {
-                for file in &msg.files {
-                    parts.push(ContentPart::File {
-                        path: file.path.clone(),
-                        mime_type: file.mime_type.clone(),
-                        name: file.file_name.clone(),
-                        size_bytes: file.size_bytes,
-                    });
-                }
-            }
-            parts
         };
         if media_parts.is_empty() {
             session.add_user(user_content);

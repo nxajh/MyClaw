@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use super::{OrchestratorCtx, is_silent_ok};
-use crate::channels::ChannelMessage;
+use crate::channels::ChannelInboundMessage;
 
 /// Run a scheduled turn for `session_key` with `prompt`, forcing Background
 /// run_mode and applying an optional per-call model override. Returns the
@@ -39,19 +39,16 @@ pub(crate) async fn run_scheduled_turn(
         session.session_override.model = Some(m.clone());
     }
 
-    // Synthetic ChannelMessage so process_turn drives the same code path
+    // Synthetic ChannelInboundMessage so process_turn drives the same code path
     // as user inbound turns. No channel — scheduled output is delivered
-    // by the caller via `send_to_target_internal` after process_turn
-    // returns.
-    let inbound = ChannelMessage {
+    // by the caller via `send_to_target_internal` after process_turn returns.
+    let inbound = ChannelInboundMessage {
         id: format!("scheduled:{}", session_key),
-        sender: format!("scheduler:{}", session_key),
-        reply_target: String::new(),
-        content: prompt.to_string(),
+        sender: crate::channels::MessageSender::new(format!("scheduler:{}", session_key)),
+        receiver: crate::channels::MessageReceiver::new(String::new()),
+        content: crate::channels::ChannelMessageContent::text(prompt.to_string()),
         timestamp: chrono::Utc::now().timestamp() as u64,
-        thread_ts: None,
         interruption_scope_id: None,
-        files: vec![],
     };
     let runtime = orch.runtime.clone();
     session_ctx

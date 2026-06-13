@@ -27,7 +27,7 @@ pub(crate) use scheduled::run_scheduled_turn;
 
 use crate::agents::DelegationCoordinator;
 use crate::agents::delegation::DelegationEvent;
-use crate::channels::{Channel, ChannelMessage};
+use crate::channels::{Channel, ChannelInboundMessage};
 use anyhow::Context;
 use std::sync::Arc;
 use std::time::Duration;
@@ -71,7 +71,7 @@ pub enum SchedulerEvent {
 }
 
 /// Type alias for the channel message sender.
-pub type ChannelMsgSender = mpsc::Sender<((String, String), ChannelMessage)>;
+pub type ChannelMsgSender = mpsc::Sender<((String, String), ChannelInboundMessage)>;
 
 /// Orchestrator — Application Service for message routing and session lifecycle.
 ///
@@ -83,7 +83,7 @@ pub struct Orchestrator {
     ctx: Arc<OrchestratorCtx>,
     /// Inbound user-message receiver. Consumed by `run(self)`.
     #[allow(clippy::type_complexity)]
-    msg_rx: Option<mpsc::Receiver<((String, String), ChannelMessage)>>,
+    msg_rx: Option<mpsc::Receiver<((String, String), ChannelInboundMessage)>>,
     /// Listener task handles — aborted when `run` returns (it owns `self`).
     listener_handles: Vec<JoinHandle<()>>,
     /// Delegation event receiver (None when sub-agents are disabled).

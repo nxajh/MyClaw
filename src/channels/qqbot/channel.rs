@@ -17,8 +17,12 @@ use super::keyboard::*;
 use super::message::split_message_chunk;
 use super::token::TokenManager;
 use super::types::*;
+use crate::channels::message::{
+    ChannelFile, ChannelFileMeta, ChannelInboundMessage, ChannelMessageContent, LocalFileBody,
+    MessageReceiver, MessageSender,
+};
 use crate::config::channel::QQBotAccountConfig;
-use crate::{Channel, ChannelMessage, DedupState};
+use crate::{Channel, DedupState};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -201,7 +205,7 @@ impl QQBotChannel {
         &self,
         event_type: &str,
         data: &serde_json::Value,
-    ) -> Option<ChannelMessage> {
+    ) -> Option<ChannelInboundMessage> {
         fn apply_auth(
             ch: &QQBotChannel,
             sender: &str,
@@ -237,14 +241,14 @@ impl QQBotChannel {
                     debug!(msg_id = %msg.id, "duplicate C2C message, skipping");
                     return None;
                 }
-                if !apply_auth(self, &msg.sender, crate::channels::MessageScope::Direct) {
+                if !apply_auth(self, &msg.sender.id, crate::channels::MessageScope::Direct) {
                     return None;
                 }
-                if !msg.files.is_empty() {
+                if !msg.content.files.is_empty() {
                     tracing::info!(
                         msg_id = %msg.id,
-                        files = msg.files.len(),
-                        content_len = msg.content.len(),
+                        files = msg.content.files.len(),
+                        content_len = msg.content.text.len(),
                         "C2C message with file attachments received"
                     );
                 }
@@ -265,12 +269,12 @@ impl QQBotChannel {
                     debug!(msg_id = %msg.id, "duplicate group message, skipping");
                     return None;
                 }
-                let group_id = msg.reply_target.strip_prefix("group:").unwrap_or("");
+                let group_id = msg.receiver.id.strip_prefix("group:").unwrap_or("");
                 // GROUP_AT_MESSAGE_CREATE is by definition an @-mention, so
                 // has_mention=true. Policy decides whether the group itself is allowed.
                 if !apply_auth(
                     self,
-                    &msg.sender,
+                    &msg.sender.id,
                     crate::channels::MessageScope::Group {
                         id: group_id,
                         has_mention: true,
@@ -355,18 +359,17 @@ impl QQBotChannel {
                     debug!(msg_id = %mid, "INTERACTION_CREATE: extracted original message_id for passive reply");
                 }
 
-                Some(ChannelMessage {
+                Some(ChannelInboundMessage {
                     id: event_id.to_string(),
-                    sender,
-                    reply_target,
-                    content: button_data.to_string(),
+                    sender: MessageSender::new(sender),
+                    receiver: MessageReceiver::new(reply_target)
+                        .with_thread(original_msg_id.unwrap_or_default()),
+                    content: ChannelMessageContent::text(button_data.to_string()),
                     timestamp: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs(),
-                    thread_ts: original_msg_id,
                     interruption_scope_id: None,
-                    files: vec![],
                 })
             }
             _ => {
@@ -377,7 +380,7 @@ impl QQBotChannel {
     }
 
     /// Parse a C2C_MESSAGE_CREATE event into a ChannelMessage.
-    fn parse_c2c_message(&self, data: &serde_json::Value) -> Option<ChannelMessage> {
+    fn parse_c2c_message(&self, data: &serde_json::Value) -> Option<ChannelInboundMessage> {
         let author = data.get("author")?;
         let user_openid = author.get("user_openid")?.as_str()?;
         // content may be absent or empty for image-only messages — don't bail on it
@@ -402,23 +405,21 @@ impl QQBotChannel {
             }
         }
 
-        Some(ChannelMessage {
+        Some(ChannelInboundMessage {
             id: msg_id.to_string(),
-            sender: user_openid.to_string(),
-            reply_target: format!("c2c:{}", user_openid),
-            content,
+            sender: MessageSender::new(user_openid.to_string()),
+            receiver: MessageReceiver::new(format!("c2c:{}", user_openid)),
+            content: ChannelMessageContent::text(content),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
-            thread_ts: None,
             interruption_scope_id: None,
-            files: vec![],
         })
     }
 
-    /// Parse a GROUP_AT_MESSAGE_CREATE event into a ChannelMessage.
-    fn parse_group_message(&self, data: &serde_json::Value) -> Option<ChannelMessage> {
+    /// Parse a GROUP_AT_MESSAGE_CREATE event into a ChannelInboundMessage.
+    fn parse_group_message(&self, data: &serde_json::Value) -> Option<ChannelInboundMessage> {
         let author = data.get("author")?;
         let member_openid = author.get("member_openid")?.as_str()?;
         let group_openid = data.get("group_openid")?.as_str()?;
@@ -443,18 +444,16 @@ impl QQBotChannel {
             }
         }
 
-        Some(ChannelMessage {
+        Some(ChannelInboundMessage {
             id: msg_id.to_string(),
-            sender: member_openid.to_string(),
-            reply_target: format!("group:{}", group_openid),
-            content,
+            sender: MessageSender::new(member_openid.to_string()),
+            receiver: MessageReceiver::new(format!("group:{}", group_openid)),
+            content: ChannelMessageContent::text(content),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
-            thread_ts: None,
             interruption_scope_id: None,
-            files: vec![],
         })
     }
 
@@ -469,7 +468,11 @@ impl QQBotChannel {
     /// 1. `asr_refer_text` present → inject text directly, skip download.
     /// 2. `voice_wav_url` present → download WAV (no SILK decoding needed).
     /// 3. Fallback → download `url` (SILK; requires SILK-aware audio model).
-    async fn ingest_voice_attachments(&self, data: &serde_json::Value, msg: &mut ChannelMessage) {
+    async fn ingest_voice_attachments(
+        &self,
+        data: &serde_json::Value,
+        msg: &mut ChannelInboundMessage,
+    ) {
         let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) else {
             return;
         };
@@ -490,10 +493,10 @@ impl QQBotChannel {
                 .map(str::trim)
                 .filter(|s| !s.is_empty());
             if let Some(text) = asr {
-                if msg.content.trim().is_empty() {
-                    msg.content = text.to_string();
+                if msg.content.text.trim().is_empty() {
+                    msg.content.text = text.to_string();
                 } else {
-                    msg.content = format!("{}\n[语音] {}", msg.content, text);
+                    msg.content.text = format!("{}\n[语音] {}", msg.content.text, text);
                 }
                 continue;
             }
@@ -582,18 +585,24 @@ impl QQBotChannel {
                 warn!("qqbot: failed to save voice to temp file");
                 continue;
             }
-            msg.files.push(crate::channels::FileAttachment {
-                path: temp_path.to_string_lossy().to_string(),
-                file_name: Some(file_name),
-                mime_type: Some(mime),
-                size_bytes: Some(bytes.len() as u64),
+            msg.content.files.push(ChannelFile {
+                meta: ChannelFileMeta {
+                    file_name,
+                    mime_type: Some(mime),
+                    size_bytes: Some(bytes.len() as u64),
+                },
+                body: std::sync::Arc::new(LocalFileBody::new(temp_path)),
             });
         }
     }
 
     /// Download image attachments from the raw inbound `data` payload,
     /// save to temp files, and store in `msg.files`.
-    async fn ingest_image_attachments(&self, data: &serde_json::Value, msg: &mut ChannelMessage) {
+    async fn ingest_image_attachments(
+        &self,
+        data: &serde_json::Value,
+        msg: &mut ChannelInboundMessage,
+    ) {
         let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) else {
             return;
         };
@@ -626,11 +635,13 @@ impl QQBotChannel {
                             .join(format!("myclaw-qq-img-{}", uuid::Uuid::new_v4()));
                         if tokio::fs::write(&temp_path, &bytes).await.is_ok() {
                             tracing::debug!(url = %full_url, size = bytes.len(), "qqbot: image downloaded and saved to temp file");
-                            msg.files.push(crate::channels::FileAttachment {
-                                path: temp_path.to_string_lossy().to_string(),
-                                file_name: Some(format!("image-{}", uuid::Uuid::new_v4())),
-                                mime_type: Some(ct.to_string()),
-                                size_bytes: Some(bytes.len() as u64),
+                            msg.content.files.push(ChannelFile {
+                                meta: ChannelFileMeta {
+                                    file_name: format!("image-{}", uuid::Uuid::new_v4()),
+                                    mime_type: Some(ct.to_string()),
+                                    size_bytes: Some(bytes.len() as u64),
+                                },
+                                body: std::sync::Arc::new(LocalFileBody::new(temp_path)),
                             });
                         }
                     }
@@ -1424,11 +1435,11 @@ impl Channel for QQBotChannel {
         })
     }
 
-    async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>> {
+    async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelInboundMessage>> {
         // Start proactive background token refresh (OpenClaw-style).
         self.token_manager.start_background_refresh().await;
 
-        let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
+        let (tx, rx) = mpsc::channel::<ChannelInboundMessage>(256);
 
         let channel = self.clone();
         tokio::spawn(async move {
@@ -1448,7 +1459,7 @@ impl Channel for QQBotChannel {
 
 impl QQBotChannel {
     /// Main WebSocket loop with auto-reconnect and incremental delay.
-    async fn ws_loop(&self, tx: mpsc::Sender<ChannelMessage>) {
+    async fn ws_loop(&self, tx: mpsc::Sender<ChannelInboundMessage>) {
         let mut attempt = 0usize;
         let mut last_disconnect = std::time::Instant::now();
 
@@ -1520,7 +1531,10 @@ impl QQBotChannel {
     ///
     /// Uses `tokio::select!` to multiplex heartbeat sending and message reading
     /// in a single task, avoiding the need to clone `SplitSink`.
-    async fn ws_connect(&self, tx: &mpsc::Sender<ChannelMessage>) -> anyhow::Result<WsDisconnect> {
+    async fn ws_connect(
+        &self,
+        tx: &mpsc::Sender<ChannelInboundMessage>,
+    ) -> anyhow::Result<WsDisconnect> {
         // 1. Get gateway URL.
         let ws_url = self.fetch_gateway_url().await?;
         info!(url = %ws_url, "connecting to QQ Bot WebSocket gateway");
@@ -1632,7 +1646,7 @@ impl QQBotChannel {
     async fn handle_ws_message(
         &self,
         ws_msg: Message,
-        tx: &mpsc::Sender<ChannelMessage>,
+        tx: &mpsc::Sender<ChannelInboundMessage>,
     ) -> Option<WsDisconnect> {
         let text = match ws_msg {
             Message::Text(t) => t,
@@ -1712,8 +1726,8 @@ impl QQBotChannel {
                         let msg_id = payload.d.get("id").and_then(|v| v.as_str()).unwrap_or("");
                         if self
                             .try_bot_command(
-                                &channel_msg.content,
-                                &channel_msg.reply_target,
+                                &channel_msg.content.text,
+                                &channel_msg.receiver.id,
                                 msg_id,
                             )
                             .await
@@ -1737,7 +1751,7 @@ impl QQBotChannel {
                             return Some(WsDisconnect::Clean);
                         }
                         // Start typing keep-alive for C2C messages.
-                        self.start_internal_typing(&channel_msg.reply_target);
+                        self.start_internal_typing(&channel_msg.receiver.id);
                     }
                 }
             }
