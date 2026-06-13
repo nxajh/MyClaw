@@ -795,7 +795,7 @@ impl TelegramChannel {
     /// Buffer an inbound message for debounce merging.
     ///
     /// Messages from the same sender in the same conversation are merged
-    /// and dispatched as a single `ChannelMessage` after the debounce window
+    /// and dispatched as a single `ChannelInboundMessage` after the debounce window
     /// expires. If debounce is disabled (`debounce_ms == 0`), the message is
     /// sent immediately via `tx`.
     async fn debounce_send(

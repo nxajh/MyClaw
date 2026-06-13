@@ -65,7 +65,7 @@ impl AskRouter {
     }
 
     /// Register a pending ask for `session_id` and wait — with NO artificial
-    /// timeout — for the user's next ChannelMessage. The wait ends only on a
+    /// timeout — for the user's next ChannelInboundMessage. The wait ends only on a
     /// real event: the reply arrives (`fulfill`), a newer ask supersedes this
     /// one, or the future is cancelled (turn interrupted / shutdown). In every
     /// case the `PendingGuard` clears this session's slot on the way out.

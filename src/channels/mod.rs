@@ -15,10 +15,9 @@ pub mod wechat;
 pub use client::ClientChannel;
 pub use message::{
     CallbackAction, Channel, ChannelCapabilities, ChannelFile, ChannelFileBody, ChannelFileMeta,
-    ChannelInboundMessage, ChannelMessage, ChannelMessageContent, ChannelOutboundMessage,
-    DedupState, FileAttachment, InlineButton, LenUnit, LocalFileBody, MINIMAL_CAPABILITIES,
-    MessageId, MessageReceiver, MessageSender, OutboundSendResult, PersistedChannelMessage,
-    ProcessingStatus, SendOptions,
+    ChannelInboundMessage, ChannelMessageContent, ChannelOutboundMessage, DedupState, InlineButton,
+    LenUnit, LocalFileBody, MINIMAL_CAPABILITIES, MessageId, MessageReceiver, MessageSender,
+    OutboundSendResult, PersistedChannelMessage, ProcessingStatus, SendOptions,
 };
 #[cfg(feature = "qqbot")]
 pub use qqbot::QQBotChannel;

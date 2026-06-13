@@ -379,7 +379,7 @@ impl QQBotChannel {
         }
     }
 
-    /// Parse a C2C_MESSAGE_CREATE event into a ChannelMessage.
+    /// Parse a C2C_MESSAGE_CREATE event into a ChannelInboundMessage.
     fn parse_c2c_message(&self, data: &serde_json::Value) -> Option<ChannelInboundMessage> {
         let author = data.get("author")?;
         let user_openid = author.get("user_openid")?.as_str()?;

@@ -37,8 +37,7 @@ pub use agents::{
     TurnContext, TurnResult, UserProfile, UserResolver,
 };
 pub use channels::{
-    Channel, ChannelMessage, ChannelOutboundMessage, DedupState, OutboundSendResult,
-    ProcessingStatus,
+    Channel, ChannelOutboundMessage, DedupState, OutboundSendResult, ProcessingStatus,
 };
 pub use config::{AppConfig, ConfigLoader};
 pub use providers::ProviderRegistry;

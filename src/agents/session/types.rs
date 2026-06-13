@@ -20,7 +20,7 @@ pub struct SummaryMetadata {
 ///
 /// Per RFC v2 §三.A the Session holds:
 /// - The incremental conversation history and its persistence-bookkeeping.
-/// - The last incoming ChannelMessage so retry / recovery / ask_user replies
+/// - The last incoming message so retry / recovery / ask_user replies
 ///   land back on the same channel + reply_target.
 /// - Optional `parent_session_id` for sub-sessions spawned by `agent_delegate`.
 /// - `agent_name` identifying which agent in `workspace/agents/` owns this

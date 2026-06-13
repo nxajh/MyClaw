@@ -1,7 +1,7 @@
 //! Delegation wakes.
 //!
 //! A sub-agent completing (or failing) a background task is a *system* event,
-//! not a user message. We synthesize a system-note `ChannelMessage` and drive
+//! not a user message. We synthesize a system-note `ChannelInboundMessage` and drive
 //! it straight into the parent session via [`inbound::dispatch_turn`], skipping
 //! the user-message interceptors (ask-reply / callback / crash-recovery /
 //! slash-command) that could never apply to a system note — and, deliberately,

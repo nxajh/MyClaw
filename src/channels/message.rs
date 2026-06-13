@@ -356,24 +356,6 @@ impl MessageId {
 
 // ── Core message types ─────────────────────────────────────────────────────────
 
-/// A message received from a channel.
-///
-/// Serializable so it can be persisted on `Session.last_message`—the
-/// orchestrator needs the original incoming message context (sender,
-/// reply_target, attached images) for ask_user, push_event, and recovery.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChannelMessage {
-    pub id: String,
-    pub sender: String,
-    pub reply_target: String,
-    pub content: String,
-    pub timestamp: u64,
-    pub thread_ts: Option<String>,
-    pub interruption_scope_id: Option<String>,
-    #[serde(default)]
-    pub files: Vec<FileAttachment>,
-}
-
 /// An inline button for interactive messages.
 /// Used by channels that support inline keyboards (e.g. Telegram).
 /// Channels that don't support buttons ignore the `inline_buttons` field.
@@ -434,18 +416,6 @@ impl CallbackAction {
             }),
         }
     }
-}
-
-/// A persisted/session-local file attachment.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileAttachment {
-    pub path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub file_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mime_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size_bytes: Option<u64>,
 }
 
 /// Processing status notification from Orchestrator to Channel.
