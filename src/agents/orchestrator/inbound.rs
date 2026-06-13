@@ -20,7 +20,8 @@ use crate::agents::user_messages::{
     BTN_ABORT, BTN_RETRY, MSG_ABORT_ACK, MSG_INCOMPLETE_TURN, MSG_NO_PENDING_RETRY,
 };
 use crate::channels::{
-    CallbackAction, Channel, ChannelMessage, InlineButton, MessagePayload, SendTarget,
+    CallbackAction, Channel, ChannelMessage, ChannelMessageContent, ChannelOutboundMessage,
+    InlineButton, MessageReceiver,
 };
 use tracing::error;
 
@@ -191,13 +192,13 @@ impl Interceptor for CrashRecovery {
                     Some(c) => c,
                     None => return Flow::Stop,
                 };
-                let (target, payload) = retry_abort_prompt(
-                    MSG_INCOMPLETE_TURN,
-                    &sk,
-                    msg.reply_target.clone(),
-                    Some(msg.id.clone()),
-                );
-                if let Err(e) = channel.send_payload(&target, &payload).await {
+                let message = ChannelOutboundMessage {
+                    receiver: MessageReceiver::new(msg.reply_target.clone())
+                        .with_reply_to(msg.id.clone()),
+                    content: retry_abort_content(MSG_INCOMPLETE_TURN, &sk),
+                    options: Default::default(),
+                };
+                if let Err(e) = channel.send_message(&message).await {
                     error!(session = %sk, err = %e, "failed to send incomplete-turn prompt");
                 }
                 return Flow::Stop;
@@ -236,7 +237,7 @@ impl Interceptor for SlashCommand {
         let runtime_cmd = ctx.runtime.clone();
         let channel_cmd = ctx.channel(&key.account_key());
         let rt_cmd = msg.reply_target.clone();
-        let rid_cmd = Some(msg.id.clone());
+        let msg_id_cmd = msg.id.clone();
 
         tokio::spawn(async move {
             let cmd_ctx = commands::CommandContext {
@@ -248,12 +249,12 @@ impl Interceptor for SlashCommand {
             };
             if let Some(response) = commands::dispatch(&cmd_owned, &cmd_args_owned, cmd_ctx).await {
                 if let Some(channel) = channel_cmd {
-                    let mut target = SendTarget::new(rt_cmd);
-                    target.thread_id = rid_cmd;
-                    if let Err(e) = channel
-                        .send_payload(&target, &MessagePayload::text(response))
-                        .await
-                    {
+                    let message = ChannelOutboundMessage {
+                        receiver: MessageReceiver::new(rt_cmd).with_reply_to(msg_id_cmd.clone()),
+                        content: ChannelMessageContent::text(response),
+                        options: Default::default(),
+                    };
+                    if let Err(e) = channel.send_message(&message).await {
                         error!(session = %sk, err = %e, "command response send failed");
                     }
                 }
@@ -310,17 +311,19 @@ pub(super) async fn dispatch_turn(ctx: &OrchestratorCtx, key: &SessionKey, msg: 
     let reply_target = msg.reply_target.clone();
 
     tokio::spawn(async move {
-        // Successful turns: process_turn does the fallback `channel.send(text)`
-        // internally per RFC §三.B. We only handle the error notice here.
+        // Successful turns: process_turn does the final `channel.send_message(text)`
+        // fallback internally. We only handle the error notice here.
         let result = session_ctx
             .process_turn(msg, Some(channel.clone()), runtime)
             .await;
         if let Err(ref e) = result {
-            let target = SendTarget::new(reply_target);
             let text = crate::agents::user_messages::user_facing_error_message(e);
-            let _ = channel
-                .send_payload(&target, &MessagePayload::text(text))
-                .await;
+            let message = ChannelOutboundMessage {
+                receiver: MessageReceiver::new(reply_target),
+                content: ChannelMessageContent::text(text),
+                options: Default::default(),
+            };
+            let _ = channel.send_message(&message).await;
         }
     });
 }
@@ -328,28 +331,23 @@ pub(super) async fn dispatch_turn(ctx: &OrchestratorCtx, key: &SessionKey, msg: 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 async fn send_text(channel: &Arc<dyn Channel>, reply_target: &str, text: &str) {
-    let target = SendTarget::new(reply_target);
-    let _ = channel
-        .send_payload(&target, &MessagePayload::text(text))
-        .await;
+    let message = ChannelOutboundMessage {
+        receiver: MessageReceiver::new(reply_target),
+        content: ChannelMessageContent::text(text),
+        options: Default::default(),
+    };
+    let _ = channel.send_message(&message).await;
 }
 
-/// Build a `(SendTarget, MessagePayload::Interactive)` pair for the
-/// **Retry / Abort** inline buttons prompt (RFC §6.2 / Phase 2).
+/// Build the **Retry / Abort** inline buttons prompt content.
 ///
 /// The callback data carries a 32-char prefix of the session key so it fits
 /// within Telegram's 64-byte limit.
-pub(super) fn retry_abort_prompt(
-    content: impl Into<String>,
-    sk: &str,
-    reply_target: impl Into<String>,
-    thread_ts: Option<String>,
-) -> (SendTarget, MessagePayload) {
+pub(super) fn retry_abort_content(content: impl Into<String>, sk: &str) -> ChannelMessageContent {
     let sk_prefix: String = sk.chars().take(32).collect();
-    let mut target = SendTarget::new(reply_target);
-    target.thread_id = thread_ts;
-    let payload = MessagePayload::Interactive {
+    ChannelMessageContent {
         text: content.into(),
+        files: vec![],
         buttons: vec![
             InlineButton {
                 label: BTN_RETRY.to_string(),
@@ -366,8 +364,7 @@ pub(super) fn retry_abort_prompt(
                 .serialize(),
             },
         ],
-    };
-    (target, payload)
+    }
 }
 
 #[cfg(test)]
@@ -533,21 +530,16 @@ mod tests {
         assert!(matches!(flow, Flow::Stop));
         // The incomplete-turn prompt is an Interactive payload (retry + abort).
         let sent = ch.sent.lock().unwrap();
-        assert!(
-            sent.iter()
-                .any(|m| m.inline_buttons.as_ref().is_some_and(|b| b.len() == 2))
-        );
+        assert!(sent.iter().any(|m| m.content.buttons.len() == 2));
     }
 
-    // ── retry_abort_prompt helper ─────────────────────────────────────────
+    // ── retry_abort_content helper ─────────────────────────────────────────
 
     #[test]
-    fn retry_abort_prompt_truncates_long_session_key() {
+    fn retry_abort_content_truncates_long_session_key() {
         let long_sk = "telegram:account:".to_string() + &"u".repeat(100);
-        let (_target, payload) = retry_abort_prompt("turn interrupted", &long_sk, "rt", None);
-        let MessagePayload::Interactive { buttons, .. } = payload else {
-            panic!("expected Interactive payload");
-        };
+        let content = retry_abort_content("turn interrupted", &long_sk);
+        let buttons = content.buttons;
         assert_eq!(buttons.len(), 2);
         // Callback data embeds a <=32-char session-key prefix (Telegram's
         // 64-byte callback_data limit).

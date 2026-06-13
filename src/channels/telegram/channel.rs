@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::config::channel::TelegramAccountConfig;
-use crate::{Channel, ChannelMessage, DedupState, ProcessingStatus, SendMessage};
+use crate::{Channel, ChannelMessage, DedupState, ProcessingStatus};
 
 use super::markdown::markdown_to_telegram_html;
 use super::types::{Chat, GetUpdatesResponse, Message, SendChatActionRequest, SendMessageRequest};
@@ -473,9 +473,6 @@ impl TelegramChannel {
     }
 
     /// Low-level `deleteMessage` API wrapper using primitive i64 ids.
-    /// Distinct from the trait method `Channel::delete_message` which
-    /// takes the abstract `&SendTarget` + `&MessageId`. Matches the
-    /// `send_raw` convention for inherent Telegram API helpers.
     async fn delete_message_raw(&self, chat_id: i64, message_id: i64) -> anyhow::Result<()> {
         let client = self.http_client();
         let body = serde_json::json!({
@@ -495,9 +492,6 @@ impl TelegramChannel {
     }
 
     /// Low-level `editMessageText` API wrapper using primitive i64 ids.
-    /// Distinct from the trait method `Channel::edit_message` which
-    /// takes the abstract `&SendTarget` + `&MessageId` + `&MessagePayload`.
-    /// Matches the `send_raw` convention for inherent Telegram API helpers.
     async fn edit_message_text_raw(
         &self,
         chat_id: i64,
@@ -1405,11 +1399,14 @@ impl Channel for TelegramChannel {
         }
     }
 
-    async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
-        let (chat_id, thread_id) = Self::parse_reply_target(&message.recipient);
+    async fn send_message(
+        &self,
+        msg: &crate::channels::ChannelOutboundMessage,
+    ) -> anyhow::Result<crate::channels::OutboundSendResult> {
+        let (chat_id, thread_id) = Self::parse_reply_target(&msg.receiver.id);
 
         // Delete any stall watchdog messages before sending the real reply.
-        let stall_msgs = self.stall_messages.lock().remove(&message.recipient);
+        let stall_msgs = self.stall_messages.lock().remove(&msg.receiver.id);
         if let Some(msgs) = stall_msgs {
             for (chat_id, msg_id) in msgs {
                 if let Err(e) = self.delete_message_raw(chat_id, msg_id).await {
@@ -1422,27 +1419,30 @@ impl Channel for TelegramChannel {
         // We use a conservative limit because markdown_to_telegram_html() can
         // expand the text (HTML escaping + tags). If a chunk's HTML exceeds
         // 4096 after conversion, we re-split it using plain text.
-        let chunks = Self::chunk_for_telegram(&message.content);
+        let chunks = Self::chunk_for_telegram(&msg.content.text);
 
         let count = chunks.len();
         let mut last_error = None;
+        let mut ids = Vec::new();
 
-        // Build reply_markup from inline_buttons (attached to last chunk only).
-        let reply_markup: Option<serde_json::Value> =
-            message.inline_buttons.as_ref().map(|buttons| {
-                let keyboard: Vec<Vec<serde_json::Value>> = vec![
-                    buttons
-                        .iter()
-                        .map(|b| {
-                            serde_json::json!({
-                                "text": b.label,
-                                "callback_data": b.callback_data,
-                            })
+        // Build reply_markup from inline buttons (attached to last chunk only).
+        let reply_markup: Option<serde_json::Value> = if msg.content.buttons.is_empty() {
+            None
+        } else {
+            let keyboard: Vec<Vec<serde_json::Value>> = vec![
+                msg.content
+                    .buttons
+                    .iter()
+                    .map(|b| {
+                        serde_json::json!({
+                            "text": b.label,
+                            "callback_data": b.callback_data,
                         })
-                        .collect(),
-                ];
-                serde_json::json!({ "inline_keyboard": keyboard })
-            });
+                    })
+                    .collect(),
+            ];
+            Some(serde_json::json!({ "inline_keyboard": keyboard }))
+        };
 
         for (i, chunk) in chunks.into_iter().enumerate() {
             let text = if count > 1 && i < count - 1 {
@@ -1456,13 +1456,17 @@ impl Channel for TelegramChannel {
             } else {
                 None
             };
-            if let Err(e) = self
+            match self
                 .send_raw(&chat_id, &text, thread_id.as_deref(), markup)
                 .await
             {
-                warn!("Failed to send chunk {}/{}: {}", i + 1, count, e);
-                last_error = Some(e);
-                // Continue trying subsequent chunks
+                Ok(Some(id)) => ids.push(crate::channels::MessageId::new(id.to_string())),
+                Ok(None) => {}
+                Err(e) => {
+                    warn!("Failed to send chunk {}/{}: {}", i + 1, count, e);
+                    last_error = Some(e);
+                    // Continue trying subsequent chunks
+                }
             }
             // Throttle between chunks to avoid 429 rate limiting
             if i + 1 < count {
@@ -1471,10 +1475,10 @@ impl Channel for TelegramChannel {
         }
 
         // Stop typing indicator for this recipient now that the response is sent.
-        self.stop_internal_typing(&message.recipient);
+        self.stop_internal_typing(&msg.receiver.id);
 
         // Remove ack reactions (👀) for all tracked messages.
-        let ack_info = self.pending_acks.lock().remove(&message.recipient);
+        let ack_info = self.pending_acks.lock().remove(&msg.receiver.id);
         if let Some(msg_ids) = ack_info {
             for (chat_id, msg_id) in msg_ids {
                 self.remove_ack(chat_id, msg_id).await;
@@ -1482,7 +1486,7 @@ impl Channel for TelegramChannel {
         }
 
         // Clean up status reactions (🤔) for all tracked messages.
-        let status_info = self.status_reactions.lock().remove(&message.recipient);
+        let status_info = self.status_reactions.lock().remove(&msg.receiver.id);
         if let Some(msg_ids) = status_info {
             for (chat_id, msg_id) in msg_ids {
                 let _ = self.remove_reaction(chat_id, msg_id, "🤔").await;
@@ -1492,145 +1496,66 @@ impl Channel for TelegramChannel {
         if let Some(e) = last_error {
             return Err(e);
         }
-        Ok(())
-    }
 
-    /// Send media (image/file) via Telegram Bot API.
-    async fn send_payload(
-        &self,
-        target: &crate::channels::SendTarget,
-        payload: &crate::channels::MessagePayload,
-    ) -> anyhow::Result<crate::channels::SendResult> {
-        let (chat_id, _thread_id) = Self::parse_reply_target(&target.recipient);
+        for (idx, file) in msg.content.files.iter().enumerate() {
+            let caption = if idx == 0 && !msg.content.text.trim().is_empty() {
+                Some(msg.content.text.as_str())
+            } else {
+                None
+            };
+            use tokio_util::io::ReaderStream;
 
-        match payload {
-            // Media: upload file via multipart.
-            crate::channels::MessagePayload::Media { source, caption } => {
-                let (data, mime_type, file_name) = match source {
-                    crate::channels::MediaSource::Inline {
-                        data,
-                        mime_type,
-                        file_name,
-                    } => (data.clone(), mime_type.clone(), file_name.clone()),
-                    crate::channels::MediaSource::Url(url) => {
-                        // Download the URL first.
-                        let resp =
-                            self.http.get(url).send().await.map_err(|e| {
-                                anyhow::anyhow!("failed to download media URL: {e}")
-                            })?;
-                        let data = resp
-                            .bytes()
-                            .await
-                            .map_err(|e| anyhow::anyhow!("failed to read media bytes: {e}"))?;
-                        (data.to_vec(), None, None)
-                    }
-                };
+            let mime = file.meta.mime_type.as_deref().unwrap_or_default();
+            let (method, part_name) = if mime.starts_with("image/") {
+                ("sendPhoto", "photo")
+            } else if mime.starts_with("audio/") {
+                ("sendAudio", "audio")
+            } else if mime.starts_with("video/") {
+                ("sendVideo", "video")
+            } else {
+                ("sendDocument", "document")
+            };
 
-                let fname = file_name.unwrap_or_else(|| "file".to_string());
-                let is_image = mime_type
-                    .as_deref()
-                    .map(|m| m.starts_with("image/"))
-                    .unwrap_or_else(|| {
-                        let ext = fname.rsplit('.').next().unwrap_or("");
-                        matches!(ext, "png" | "jpg" | "jpeg" | "gif" | "webp")
-                    });
-
-                let method = if is_image {
-                    "sendPhoto"
-                } else {
-                    "sendDocument"
-                };
-                let part_name = if is_image { "photo" } else { "document" };
-
-                let form = reqwest::multipart::Form::new()
-                    .text("chat_id", chat_id.clone())
-                    .part(
-                        part_name.to_string(),
-                        reqwest::multipart::Part::bytes(data).file_name(fname),
-                    );
-
-                // Add caption if present.
-                let form = match caption {
-                    Some(c) if !c.is_empty() => form.text("caption", c.clone()),
-                    _ => form,
-                };
-
-                let url = self.api_url(method);
-                let resp = self
-                    .http
-                    .post(&url)
-                    .multipart(form)
-                    .send()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Telegram {method} failed: {e}"))?;
-
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
-                    return Err(anyhow::anyhow!(
-                        "Telegram {method} returned {status}: {text}"
-                    ));
-                }
-
-                Ok(None)
+            let reader = file.body.open().await?;
+            let stream = ReaderStream::new(reader);
+            let body = reqwest::Body::wrap_stream(stream);
+            let part =
+                reqwest::multipart::Part::stream(body).file_name(file.meta.file_name.clone());
+            let mut form = reqwest::multipart::Form::new()
+                .text("chat_id", chat_id.clone())
+                .part(part_name.to_string(), part);
+            if let Some(thread_id) = thread_id.clone() {
+                form = form.text("message_thread_id", thread_id);
             }
-            // Everything else: delegate to default impl (text fallback).
-            _ => {
-                let msg = crate::channels::SendMessage::new(
-                    payload.to_fallback_text(),
-                    &target.recipient,
-                );
-                self.send(&msg).await?;
-                Ok(None)
+            if let Some(caption) = caption.filter(|c| !c.is_empty()) {
+                form = form.text("caption", caption.to_string());
+            }
+
+            let resp = self
+                .http
+                .post(self.api_url(method))
+                .multipart(form)
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("Telegram {method} failed: {e}"))?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                anyhow::bail!("Telegram {method} returned {status}: {text}");
+            }
+
+            let resp_json: serde_json::Value = resp.json().await?;
+            if let Some(id) = resp_json
+                .get("result")
+                .and_then(|r| r.get("message_id"))
+                .and_then(|m| m.as_i64())
+            {
+                ids.push(crate::channels::MessageId::new(id.to_string()));
             }
         }
-    }
 
-    /// RFC §7.1 Phase 3: edit a previously sent Telegram message.
-    /// `target.recipient` carries the chat_id; `message_id` is the
-    /// Telegram message_id as a decimal string.
-    async fn edit_message(
-        &self,
-        target: &crate::channels::SendTarget,
-        message_id: &crate::channels::MessageId,
-        payload: &crate::channels::MessagePayload,
-    ) -> anyhow::Result<()> {
-        let (chat_id, _thread_id) = Self::parse_reply_target(&target.recipient);
-        let chat_id_i64: i64 = chat_id
-            .parse()
-            .map_err(|e| anyhow::anyhow!("invalid chat_id '{chat_id}': {e}"))?;
-        let msg_id_i64: i64 = message_id
-            .as_str()
-            .parse()
-            .map_err(|e| anyhow::anyhow!("invalid message_id '{}': {e}", message_id.as_str()))?;
-        // Telegram editMessageText takes plain/HTML text only; downgrade
-        // Media → fallback text. Interactive (inline buttons) edit requires
-        // a separate editMessageReplyMarkup call we don't expose yet.
-        let text = payload.to_fallback_text();
-        let ok = self
-            .edit_message_text_raw(chat_id_i64, msg_id_i64, &text)
-            .await?;
-        if !ok {
-            anyhow::bail!("editMessageText reported failure");
-        }
-        Ok(())
-    }
-
-    /// RFC §7.1 Phase 3: delete a Telegram message.
-    async fn delete_message(
-        &self,
-        target: &crate::channels::SendTarget,
-        message_id: &crate::channels::MessageId,
-    ) -> anyhow::Result<()> {
-        let (chat_id, _thread_id) = Self::parse_reply_target(&target.recipient);
-        let chat_id_i64: i64 = chat_id
-            .parse()
-            .map_err(|e| anyhow::anyhow!("invalid chat_id '{chat_id}': {e}"))?;
-        let msg_id_i64: i64 = message_id
-            .as_str()
-            .parse()
-            .map_err(|e| anyhow::anyhow!("invalid message_id '{}': {e}", message_id.as_str()))?;
-        self.delete_message_raw(chat_id_i64, msg_id_i64).await
+        Ok(crate::channels::OutboundSendResult { message_ids: ids })
     }
 
     async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>> {

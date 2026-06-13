@@ -325,11 +325,16 @@ impl SessionContext {
                 if delivery != crate::channels::StreamDelivery::FinalDelivered {
                     if let Some(ch) = channel_for_send {
                         if !turn_result.text.trim().is_empty() {
-                            let send_msg = crate::channels::SendMessage::new(
-                                turn_result.text.clone(),
-                                reply_target.clone(),
-                            );
-                            if let Err(e) = ch.send(&send_msg).await {
+                            let message = crate::channels::ChannelOutboundMessage {
+                                receiver: crate::channels::MessageReceiver::new(
+                                    reply_target.clone(),
+                                ),
+                                content: crate::channels::ChannelMessageContent::text(
+                                    turn_result.text.clone(),
+                                ),
+                                options: Default::default(),
+                            };
+                            if let Err(e) = ch.send_message(&message).await {
                                 tracing::error!(
                                     session = %session.id,
                                     err = %e,

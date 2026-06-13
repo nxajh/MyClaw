@@ -55,11 +55,12 @@ impl CompletionSink {
                 let Some(channel) = channels.get(&parsed.account_key()) else {
                     return;
                 };
-                let target = crate::channels::SendTarget::new(&recipient);
-                if let Err(e) = channel
-                    .send_payload(&target, &crate::channels::MessagePayload::text(&text))
-                    .await
-                {
+                let message = crate::channels::ChannelOutboundMessage {
+                    receiver: crate::channels::MessageReceiver::new(&recipient),
+                    content: crate::channels::ChannelMessageContent::text(&text),
+                    options: Default::default(),
+                };
+                if let Err(e) = channel.send_message(&message).await {
                     tracing::warn!(session = %key, err = %e, "startup recovery: failed to send response");
                 }
             }

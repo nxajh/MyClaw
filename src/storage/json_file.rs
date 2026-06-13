@@ -264,7 +264,11 @@ impl JsonFileBackend {
     }
 
     /// Path-only content no longer needs externalization before serialization.
-    fn externalize(&self, _session_id: &str, message: &ChatMessage) -> std::io::Result<ChatMessage> {
+    fn externalize(
+        &self,
+        _session_id: &str,
+        message: &ChatMessage,
+    ) -> std::io::Result<ChatMessage> {
         Ok(message.clone())
     }
 
@@ -736,7 +740,9 @@ mod tests {
                     name: Some("image.png".into()),
                     size_bytes: Some(12),
                 },
-                ContentPart::Text { text: "hello".into() },
+                ContentPart::Text {
+                    text: "hello".into(),
+                },
             ],
             name: None,
             tool_call_id: None,

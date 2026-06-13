@@ -60,6 +60,7 @@ impl Agent {
     ) -> Result<TurnResult> {
         // Resolve filtered tool view from runtime + per-agent config.
         let mut allowed_tools = self.allowed_tools(runtime);
+        filter_turn_scoped_tools(&mut allowed_tools, session);
         // Convert capability_tool::ToolSpec → capability_chat::ToolSpec
         // (the LLM request type). Same fields, different module homes —
         // a unification candidate for a separate cleanup.
@@ -188,9 +189,11 @@ impl Agent {
         );
         // If a media tool isn't declared this turn but history references it, fold
         // those calls to text so no orphan tool call reaches the provider.
-        fold_absent_media_tool(&mut messages, &tool_specs, "view_image", "图片查看结果");
-        fold_absent_media_tool(&mut messages, &tool_specs, "hear_audio", "语音内容");
-        fold_absent_media_tool(&mut messages, &tool_specs, "view_video", "视频查看结果");
+        fold_absent_tool(&mut messages, &tool_specs, "view_image", "图片查看结果");
+        fold_absent_tool(&mut messages, &tool_specs, "hear_audio", "语音内容");
+        fold_absent_tool(&mut messages, &tool_specs, "view_video", "视频查看结果");
+        fold_absent_tool(&mut messages, &tool_specs, "send_message", "消息发送结果");
+        fold_absent_tool(&mut messages, &tool_specs, "send_media", "媒体发送结果");
 
         loop {
             // Shutdown checkpoint between LLM calls (mirrors AgentLoop chat_loop).
@@ -650,6 +653,25 @@ impl Agent {
     }
 }
 
+fn filter_turn_scoped_tools(
+    allowed_tools: &mut Vec<Arc<dyn crate::providers::Tool>>,
+    session: &Session,
+) {
+    allowed_tools.retain(|tool| match tool.name() {
+        "send_message" => {
+            let Some(channel) = session.channel.as_ref() else {
+                return false;
+            };
+            let has_receiver = session.reply_target().is_some();
+            let has_text_send = has_receiver;
+            let has_file_send = channel.capabilities().supports_file_send;
+            has_text_send || has_file_send
+        }
+        "send_media" => false,
+        _ => true,
+    });
+}
+
 /// True if any message in `history` carries an image part.
 fn history_has_images(history: &[ChatMessage]) -> bool {
     history.iter().any(|m| {
@@ -736,7 +758,7 @@ fn advertise_media_tool(
 /// on the calling assistant message and drop the tool-result message, so no
 /// orphan tool call survives to be rejected by the provider. No-op when the tool
 /// is declared. Operates on the cloned `messages` only.
-fn fold_absent_media_tool(
+fn fold_absent_tool(
     messages: &mut Vec<ChatMessage>,
     tool_specs: &[ToolSpec],
     tool_name: &str,
@@ -926,9 +948,11 @@ async fn maybe_compact(
                     .chain(session.history.iter().cloned())
                     .collect();
             crate::agents::session::sanitize_history(&mut messages);
-            fold_absent_media_tool(&mut messages, tool_specs, "view_image", "图片查看结果");
-            fold_absent_media_tool(&mut messages, tool_specs, "hear_audio", "语音内容");
-            fold_absent_media_tool(&mut messages, tool_specs, "view_video", "视频查看结果");
+            fold_absent_tool(&mut messages, tool_specs, "view_image", "图片查看结果");
+            fold_absent_tool(&mut messages, tool_specs, "hear_audio", "语音内容");
+            fold_absent_tool(&mut messages, tool_specs, "view_video", "视频查看结果");
+            fold_absent_tool(&mut messages, tool_specs, "send_message", "消息发送结果");
+            fold_absent_tool(&mut messages, tool_specs, "send_media", "媒体发送结果");
             tracing::info!(
                 summary_tokens = result.summary_tokens,
                 removed_tokens = result.removed_tokens,
@@ -1285,6 +1309,8 @@ mod tests {
     use super::*;
     use crate::agents::session::Session;
     use crate::config::sub_agent::SubAgentConfig;
+    use crate::providers::{Tool, ToolResult};
+    use async_trait::async_trait;
 
     fn img_msg(path: &str) -> ChatMessage {
         let mut m = ChatMessage::user_text("");
@@ -1321,7 +1347,7 @@ mod tests {
         let mut messages = vec![ChatMessage::user_text("这是什么"), asst, tool_res];
 
         // No view_image in tool_specs → fold.
-        fold_absent_media_tool(&mut messages, &[], "view_image", "图片查看结果");
+        fold_absent_tool(&mut messages, &[], "view_image", "图片查看结果");
 
         assert!(
             !messages.iter().any(|m| m.role == "tool"),
@@ -1363,7 +1389,7 @@ mod tests {
             description: None,
             input_schema: serde_json::json!({}),
         }];
-        fold_absent_media_tool(&mut messages, &specs, "view_image", "图片查看结果");
+        fold_absent_tool(&mut messages, &specs, "view_image", "图片查看结果");
         // Tool declared → calls preserved untouched.
         assert!(
             messages[0]
@@ -1411,6 +1437,99 @@ mod tests {
             model: None,
             isolation: Default::default(),
         }
+    }
+
+    struct NamedTool(&'static str);
+
+    #[async_trait]
+    impl Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        fn description(&self) -> &str {
+            self.0
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+            _session: &Session,
+        ) -> anyhow::Result<ToolResult> {
+            Ok(ToolResult {
+                success: true,
+                output: String::new(),
+                error: None,
+            })
+        }
+    }
+
+    fn tool_names(tools: &[Arc<dyn Tool>]) -> Vec<String> {
+        tools.iter().map(|tool| tool.name().to_string()).collect()
+    }
+
+    #[test]
+    fn filter_turn_scoped_tools_hides_send_tools_without_channel() {
+        let mut session = Session::new("s".into());
+        session.record_inbound(crate::channels::ChannelMessage::new("u", "hi"));
+        let mut tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(NamedTool("send_message")),
+            Arc::new(NamedTool("send_media")),
+            Arc::new(NamedTool("calculator")),
+        ];
+
+        filter_turn_scoped_tools(&mut tools, &session);
+
+        assert_eq!(tool_names(&tools), vec!["calculator"]);
+    }
+
+    #[test]
+    fn fold_send_message_inlines_results_when_tool_absent() {
+        let mut asst = ChatMessage::assistant_text("发送一下");
+        asst.tool_calls = Some(vec![ToolCall {
+            id: "s1".into(),
+            name: "send_message".into(),
+            arguments: "{}".into(),
+        }]);
+        let mut tool_res = ChatMessage::text("tool", "已发送消息。");
+        tool_res.tool_call_id = Some("s1".into());
+        let mut messages = vec![ChatMessage::user_text("发给我"), asst, tool_res];
+
+        fold_absent_tool(&mut messages, &[], "send_message", "消息发送结果");
+
+        assert!(!messages.iter().any(|m| m.role == "tool"));
+        assert!(messages.iter().all(|m| {
+            m.tool_calls
+                .as_ref()
+                .map(|tcs| tcs.iter().all(|tc| tc.name != "send_message"))
+                .unwrap_or(true)
+        }));
+        assert!(messages.iter().flat_map(|m| &m.parts).any(|p| match p {
+            ContentPart::Text { text } => text.contains("已发送消息"),
+            _ => false,
+        }));
+    }
+
+    #[test]
+    fn fold_send_media_legacy_calls_when_tool_absent() {
+        let mut asst = ChatMessage::assistant_text("发媒体");
+        asst.tool_calls = Some(vec![ToolCall {
+            id: "m1".into(),
+            name: "send_media".into(),
+            arguments: "{}".into(),
+        }]);
+        let mut tool_res = ChatMessage::text("tool", "已发送媒体。");
+        tool_res.tool_call_id = Some("m1".into());
+        let mut messages = vec![asst, tool_res];
+
+        fold_absent_tool(&mut messages, &[], "send_media", "媒体发送结果");
+
+        assert!(!messages.iter().any(|m| m.role == "tool"));
+        assert!(messages[0].tool_calls.is_none());
     }
 
     #[test]

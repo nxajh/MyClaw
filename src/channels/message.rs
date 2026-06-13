@@ -2,7 +2,12 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::{
+    path::PathBuf,
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
+use tokio::io::AsyncRead;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -30,7 +35,8 @@ pub struct ChannelCapabilities {
     pub supports_edit: bool,
     pub supports_delete: bool,
     pub supports_inline_buttons: bool,
-    pub supports_media: bool,
+    pub supports_file_send: bool,
+    pub supports_file_receive: bool,
     pub supports_threads: bool,
     /// Maximum length of a single message; messages longer than this must be split.
     pub message_chunk_limit: usize,
@@ -47,7 +53,8 @@ impl ChannelCapabilities {
             supports_edit: false,
             supports_delete: false,
             supports_inline_buttons: false,
-            supports_media: false,
+            supports_file_send: false,
+            supports_file_receive: false,
             supports_threads: false,
             message_chunk_limit: 65_536,
             message_len_unit: LenUnit::Codepoints,
@@ -61,7 +68,8 @@ impl ChannelCapabilities {
             supports_edit: false,
             supports_delete: false,
             supports_inline_buttons: true,
-            supports_media: true,
+            supports_file_send: false,
+            supports_file_receive: true,
             supports_threads: false,
             message_chunk_limit: 65_536,
             message_len_unit: LenUnit::Codepoints,
@@ -75,7 +83,8 @@ impl ChannelCapabilities {
             supports_edit: true,
             supports_delete: true,
             supports_inline_buttons: true,
-            supports_media: true,
+            supports_file_send: true,
+            supports_file_receive: true,
             supports_threads: true,
             message_chunk_limit: 4096,
             message_len_unit: LenUnit::Utf16Units,
@@ -89,7 +98,8 @@ impl ChannelCapabilities {
             supports_edit: false,
             supports_delete: false,
             supports_inline_buttons: true,
-            supports_media: false,
+            supports_file_send: true,
+            supports_file_receive: true,
             supports_threads: false,
             message_chunk_limit: 2000,
             message_len_unit: LenUnit::Codepoints,
@@ -103,7 +113,8 @@ impl ChannelCapabilities {
             supports_edit: false,
             supports_delete: false,
             supports_inline_buttons: false,
-            supports_media: false,
+            supports_file_send: false,
+            supports_file_receive: false,
             supports_threads: false,
             message_chunk_limit: 2048,
             message_len_unit: LenUnit::Codepoints,
@@ -115,7 +126,195 @@ impl ChannelCapabilities {
 /// implementation doesn't override it. Zero-cost reference.
 pub static MINIMAL_CAPABILITIES: ChannelCapabilities = ChannelCapabilities::minimal();
 
-// ── MessagePayload (RFC §6.2-§6.4) ─────────────────────────────────────────────
+// ── Outbound-message RFC phase-1 types ──────────────────────────────────────
+
+/// Identity of the party that sent a message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageSender {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
+impl MessageSender {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            display_name: None,
+        }
+    }
+}
+
+/// Where to deliver a channel message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageReceiver {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_message_id: Option<String>,
+}
+
+impl MessageReceiver {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            thread_id: None,
+            reply_to_message_id: None,
+        }
+    }
+
+    pub fn with_thread(mut self, thread_id: impl Into<String>) -> Self {
+        self.thread_id = Some(thread_id.into());
+        self
+    }
+
+    pub fn with_reply_to(mut self, message_id: impl Into<String>) -> Self {
+        self.reply_to_message_id = Some(message_id.into());
+        self
+    }
+}
+
+/// Optional parameters for outbound sends via `Channel::send_message`.
+#[derive(Debug, Clone, Default)]
+pub struct SendOptions {
+    pub cancellation_token: Option<CancellationToken>,
+}
+
+// ── File types ──────────────────────────────────────────────────────────────
+
+/// Metadata for a file attached to a channel message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelFileMeta {
+    pub file_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+}
+
+/// A repeat-openable file body provider passed across the channel/session boundary.
+#[async_trait]
+pub trait ChannelFileBody: Send + Sync {
+    async fn open(&self) -> anyhow::Result<Pin<Box<dyn AsyncRead + Send>>>;
+}
+
+/// A local file body. The path is intentionally private: channel adapters consume
+/// the body through `open()` and do not depend on session filesystem layout.
+#[derive(Debug, Clone)]
+pub struct LocalFileBody {
+    path: PathBuf,
+}
+
+impl LocalFileBody {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+}
+
+#[async_trait]
+impl ChannelFileBody for LocalFileBody {
+    async fn open(&self) -> anyhow::Result<Pin<Box<dyn AsyncRead + Send>>> {
+        let file = tokio::fs::File::open(&self.path).await?;
+        Ok(Box::pin(file))
+    }
+}
+
+/// A complete file attachment for the channel message model: metadata + body.
+#[derive(Clone)]
+pub struct ChannelFile {
+    pub meta: ChannelFileMeta,
+    pub body: Arc<dyn ChannelFileBody>,
+}
+
+impl std::fmt::Debug for ChannelFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChannelFile")
+            .field("meta", &self.meta)
+            .field("body", &"<ChannelFileBody>")
+            .finish()
+    }
+}
+
+// ── ChannelMessageContent ───────────────────────────────────────────────────
+
+/// The content of an outbound or inbound channel message.
+#[derive(Debug, Clone)]
+pub struct ChannelMessageContent {
+    pub text: String,
+    pub files: Vec<ChannelFile>,
+    pub buttons: Vec<InlineButton>,
+}
+
+impl ChannelMessageContent {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            files: vec![],
+            buttons: vec![],
+        }
+    }
+}
+
+/// A message to be sent out through a channel.
+#[derive(Debug, Clone)]
+pub struct ChannelOutboundMessage {
+    pub receiver: MessageReceiver,
+    pub content: ChannelMessageContent,
+    pub options: SendOptions,
+}
+
+impl ChannelOutboundMessage {
+    pub fn text(receiver: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            receiver: MessageReceiver::new(receiver),
+            content: ChannelMessageContent::text(text),
+            options: SendOptions::default(),
+        }
+    }
+}
+
+/// A runtime message received from a channel.
+#[derive(Debug, Clone)]
+pub struct ChannelInboundMessage {
+    pub id: String,
+    pub sender: MessageSender,
+    pub receiver: MessageReceiver,
+    pub content: ChannelMessageContent,
+    pub timestamp: u64,
+    pub interruption_scope_id: Option<String>,
+}
+
+/// Serializable inbound context kept on sessions. File bodies are runtime-only
+/// and must not be persisted here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedChannelMessage {
+    pub id: String,
+    pub sender_id: String,
+    pub receiver: MessageReceiver,
+    pub text: String,
+    pub timestamp: u64,
+    pub interruption_scope_id: Option<String>,
+}
+
+/// Result of sending one logical outbound message. Multi-file messages may map
+/// to several platform messages, so ids are returned in send order.
+#[derive(Debug, Clone, Default)]
+pub struct OutboundSendResult {
+    pub message_ids: Vec<MessageId>,
+}
+
+impl OutboundSendResult {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    pub fn single(id: MessageId) -> Self {
+        Self {
+            message_ids: vec![id],
+        }
+    }
+}
 
 /// Platform-specific message id (e.g. Telegram message_id, QQBot msg_id).
 /// Returned by `send_payload` / `edit_message` and accepted by
@@ -129,118 +328,6 @@ impl MessageId {
     }
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-/// Result of `send_payload`. `Some(id)` when the platform returns a
-/// message identifier (Telegram, QQBot do); `None` for fire-and-forget
-/// transports (current ClientChannel / Wechat).
-pub type SendResult = Option<MessageId>;
-
-/// Where to deliver a message. Replaces the routing fields of
-/// `SendMessage` (recipient + thread_ts + cancellation_token).
-#[derive(Debug, Clone)]
-pub struct SendTarget {
-    pub recipient: String,
-    pub thread_id: Option<String>,
-    pub cancellation_token: Option<CancellationToken>,
-}
-
-impl SendTarget {
-    pub fn new(recipient: impl Into<String>) -> Self {
-        Self {
-            recipient: recipient.into(),
-            thread_id: None,
-            cancellation_token: None,
-        }
-    }
-
-    pub fn with_thread(mut self, thread_id: impl Into<String>) -> Self {
-        self.thread_id = Some(thread_id.into());
-        self
-    }
-
-    pub fn with_cancel(mut self, token: CancellationToken) -> Self {
-        self.cancellation_token = Some(token);
-        self
-    }
-}
-
-/// Source of media content for `MessagePayload::Media`.
-#[derive(Debug, Clone)]
-pub enum MediaSource {
-    /// Remote URL (HTTP/HTTPS).
-    Url(String),
-    /// In-memory bytes (e.g. from Telegram file API decryption).
-    Inline {
-        data: Vec<u8>,
-        mime_type: Option<String>,
-        file_name: Option<String>,
-    },
-}
-
-/// What to send. Replaces the content/attachments/image_urls/inline_buttons
-/// salad of `SendMessage` with a closed enum.
-///
-/// Channels that don't support a variant downgrade via `to_fallback_text`
-/// or return an error from `send_payload` (implementation choice).
-#[derive(Debug, Clone)]
-pub enum MessagePayload {
-    /// Plain text.
-    Text { text: String },
-    /// Text + inline action buttons. Channels without button support
-    /// downgrade by sending the text alone.
-    Interactive {
-        text: String,
-        buttons: Vec<InlineButton>,
-    },
-    /// Media (image/file) with optional caption.
-    Media {
-        source: MediaSource,
-        caption: Option<String>,
-    },
-}
-
-impl MessagePayload {
-    pub fn text(text: impl Into<String>) -> Self {
-        Self::Text { text: text.into() }
-    }
-
-    /// Lossy downgrade to a plain-text representation. Used by the default
-    /// `send_payload` impl to keep non-overriding channels functional.
-    pub fn to_fallback_text(&self) -> String {
-        match self {
-            MessagePayload::Text { text } => text.clone(),
-            MessagePayload::Interactive { text, buttons } => {
-                let mut s = text.clone();
-                if !buttons.is_empty() {
-                    s.push_str("\n[");
-                    for (i, b) in buttons.iter().enumerate() {
-                        if i > 0 {
-                            s.push_str(" | ");
-                        }
-                        s.push_str(&b.label);
-                    }
-                    s.push(']');
-                }
-                s
-            }
-            MessagePayload::Media { caption, source } => {
-                let url_or_size = match source {
-                    MediaSource::Url(u) => format!("<media: {}>", u),
-                    MediaSource::Inline {
-                        data, file_name, ..
-                    } => match file_name {
-                        Some(f) => format!("<media: {} ({} bytes)>", f, data.len()),
-                        None => format!("<media: {} bytes>", data.len()),
-                    },
-                };
-                match caption {
-                    Some(c) => format!("{}\n{}", c, url_or_size),
-                    None => url_or_size,
-                }
-            }
-        }
     }
 }
 
@@ -333,39 +420,6 @@ impl CallbackAction {
     }
 }
 
-/// A message to send through a channel.
-#[derive(Debug, Clone)]
-pub struct SendMessage {
-    pub content: String,
-    pub recipient: String,
-    pub subject: Option<String>,
-    pub thread_ts: Option<String>,
-    pub cancellation_token: Option<CancellationToken>,
-    pub attachments: Vec<MediaAttachment>,
-    pub image_urls: Option<Vec<String>>,
-    /// Optional inline buttons (Telegram inline_keyboard, etc.)
-    /// Channels that don't support buttons silently ignore this field.
-    pub inline_buttons: Option<Vec<InlineButton>>,
-}
-
-impl SendMessage {
-    pub fn new(content: impl Into<String>, recipient: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            recipient: recipient.into(),
-            subject: None,
-            thread_ts: None,
-            cancellation_token: None,
-            attachments: vec![],
-            image_urls: None,
-            inline_buttons: None,
-        }
-    }
-    pub fn is_verbose(&self, chunk_limit: usize) -> bool {
-        self.content.chars().count() > chunk_limit
-    }
-}
-
 /// A persisted/session-local file attachment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileAttachment {
@@ -401,47 +455,16 @@ pub enum ProcessingStatus {
 #[async_trait]
 pub trait Channel: Send + Sync {
     fn name(&self) -> &str;
-    async fn send(&self, msg: &SendMessage) -> anyhow::Result<()>;
 
-    /// Structured send (RFC §6.2 / Phase 2). Default downgrades to
-    /// `send()` using `payload.to_fallback_text()`; channels override to
-    /// natively render `Interactive` (inline keyboards) and `Media`
-    /// (image / file uploads). Returns the platform message id when one
-    /// is produced.
-    async fn send_payload(
+    /// Send a fully-typed outbound message.
+    async fn send_message(
         &self,
-        target: &SendTarget,
-        payload: &MessagePayload,
-    ) -> anyhow::Result<SendResult> {
-        let mut msg = SendMessage::new(payload.to_fallback_text(), &target.recipient);
-        msg.thread_ts = target.thread_id.clone();
-        msg.cancellation_token = target.cancellation_token.clone();
-        if let MessagePayload::Interactive { buttons, .. } = payload {
-            msg.inline_buttons = Some(buttons.clone());
+        msg: &ChannelOutboundMessage,
+    ) -> anyhow::Result<OutboundSendResult> {
+        if !msg.content.files.is_empty() {
+            anyhow::bail!("send_message with files not supported by {}", self.name());
         }
-        self.send(&msg).await?;
-        Ok(None)
-    }
-
-    /// Edit a previously sent message in-place. Default returns Err for
-    /// channels that don't support edit (RFC §7.1; Phase 3 will add
-    /// real impls on Telegram).
-    async fn edit_message(
-        &self,
-        _target: &SendTarget,
-        _message_id: &MessageId,
-        _payload: &MessagePayload,
-    ) -> anyhow::Result<()> {
-        anyhow::bail!("edit_message not supported by {}", self.name())
-    }
-
-    /// Delete a previously sent message. Default returns Err.
-    async fn delete_message(
-        &self,
-        _target: &SendTarget,
-        _message_id: &MessageId,
-    ) -> anyhow::Result<()> {
-        anyhow::bail!("delete_message not supported by {}", self.name())
+        anyhow::bail!("send_message not implemented by {}", self.name())
     }
 
     async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>>;
@@ -482,7 +505,7 @@ pub trait Channel: Send + Sync {
     /// `Session.turn_stream` before invoking `Agent::run`; the agent
     /// pushes via `session.turn_stream.as_mut()`. Non-streaming channels
     /// return `None`; the agent then falls through to the
-    /// `send_payload` / `send` fallback at end of turn.
+    /// `send_message` fallback at end of turn.
     fn create_stream(&self, _reply_target: &str) -> Option<Box<dyn crate::channels::TurnStream>> {
         None
     }
@@ -1090,27 +1113,6 @@ mod tests {
         assert_eq!(CallbackAction::parse("hello world"), None);
         assert_eq!(CallbackAction::parse("__noseparator"), None);
         assert_eq!(CallbackAction::parse(""), None);
-    }
-
-    #[test]
-    fn message_payload_fallback_text() {
-        let t = MessagePayload::text("hi");
-        assert_eq!(t.to_fallback_text(), "hi");
-
-        let i = MessagePayload::Interactive {
-            text: "Pick one".into(),
-            buttons: vec![
-                InlineButton {
-                    label: "A".into(),
-                    callback_data: "a".into(),
-                },
-                InlineButton {
-                    label: "B".into(),
-                    callback_data: "b".into(),
-                },
-            ],
-        };
-        assert_eq!(i.to_fallback_text(), "Pick one\n[A | B]");
     }
 
     #[test]

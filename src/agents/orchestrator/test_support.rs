@@ -17,7 +17,7 @@ use crate::agents::resource_provider::ResourceProvider;
 use crate::agents::session::SessionManager;
 use crate::agents::tool_executor::ToolExecutor;
 use crate::agents::{AgentRegistry, AgentRuntime, AskRouter, LoopBreaker, LoopBreakerConfig};
-use crate::channels::{Channel, ChannelMessage, SendMessage};
+use crate::channels::{Channel, ChannelMessage, ChannelOutboundMessage, OutboundSendResult};
 use crate::providers::{
     Capability, ChatModelConfig, ChatProvider, EmbeddingProvider, ImageGenerationProvider,
     ProviderRegistry, ProviderSummary, SearchProvider, SttProvider, TtsProvider,
@@ -25,11 +25,9 @@ use crate::providers::{
 };
 use tokio::sync::mpsc;
 
-/// A `Channel` that records every `SendMessage` it is handed. `send_payload`'s
-/// default impl funnels through `send`, so interactive prompts land here too
-/// (with `inline_buttons` populated).
+/// A `Channel` that records every `ChannelOutboundMessage` it is handed.
 pub(crate) struct MockChannel {
-    pub sent: Arc<Mutex<Vec<SendMessage>>>,
+    pub sent: Arc<Mutex<Vec<ChannelOutboundMessage>>>,
 }
 
 impl MockChannel {
@@ -44,7 +42,7 @@ impl MockChannel {
             .lock()
             .unwrap()
             .iter()
-            .map(|m| m.content.clone())
+            .map(|m| m.content.text.clone())
             .collect()
     }
 }
@@ -54,9 +52,12 @@ impl Channel for MockChannel {
     fn name(&self) -> &str {
         "mock"
     }
-    async fn send(&self, msg: &SendMessage) -> anyhow::Result<()> {
+    async fn send_message(
+        &self,
+        msg: &ChannelOutboundMessage,
+    ) -> anyhow::Result<OutboundSendResult> {
         self.sent.lock().unwrap().push(msg.clone());
-        Ok(())
+        Ok(OutboundSendResult::empty())
     }
     async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>> {
         let (_tx, rx) = mpsc::channel(1);

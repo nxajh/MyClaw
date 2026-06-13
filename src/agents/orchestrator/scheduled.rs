@@ -208,14 +208,12 @@ async fn send_to_target_internal(
         None => String::new(),
     };
 
-    let target = crate::channels::SendTarget::new(recipient);
-    if let Err(e) = channel
-        .send_payload(
-            &target,
-            &crate::channels::MessagePayload::text(content.to_string()),
-        )
-        .await
-    {
+    let message = crate::channels::ChannelOutboundMessage {
+        receiver: crate::channels::MessageReceiver::new(recipient),
+        content: crate::channels::ChannelMessageContent::text(content.to_string()),
+        options: Default::default(),
+    };
+    if let Err(e) = channel.send_message(&message).await {
         tracing::warn!(channel = %ch_type, account = %acc_id, err = %e, "failed to send scheduled response");
     }
 }

@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::agents::ask_router::AskRouter;
-use crate::channels::{MessagePayload, SendTarget};
+use crate::channels::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
 use crate::providers::{Tool, ToolResult};
 
 pub struct AskUserTool {
@@ -98,11 +98,12 @@ impl Tool for AskUserTool {
             }
         };
 
-        let target = SendTarget::new(reply_target);
-        if let Err(e) = channel
-            .send_payload(&target, &MessagePayload::text(question))
-            .await
-        {
+        let message = ChannelOutboundMessage {
+            receiver: MessageReceiver::new(reply_target),
+            content: ChannelMessageContent::text(question),
+            options: Default::default(),
+        };
+        if let Err(e) = channel.send_message(&message).await {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),

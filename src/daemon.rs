@@ -439,7 +439,7 @@ async fn build_tools(
     tools.register(Arc::new(crate::tools::AskUserTool::new(ask_router)));
 
     // Register additional built-in tools.
-    tools.register(Arc::new(crate::tools::SendMediaTool::new()));
+    tools.register(Arc::new(crate::tools::SendMessageTool::new()));
     tools.register(Arc::new(crate::tools::ListDirTool::new()));
     tools.register(Arc::new(crate::tools::TaskManagerTool::new(
         crate::tools::TaskManagerTool::shared_state(),

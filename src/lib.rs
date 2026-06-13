@@ -36,7 +36,10 @@ pub use agents::{
     SessionManager, SkillManager, SystemPromptBuilder, SystemPromptConfig, ToolRegistry,
     TurnContext, TurnResult, UserProfile, UserResolver,
 };
-pub use channels::{Channel, ChannelMessage, DedupState, ProcessingStatus, SendMessage};
+pub use channels::{
+    Channel, ChannelMessage, ChannelOutboundMessage, DedupState, OutboundSendResult,
+    ProcessingStatus,
+};
 pub use config::{AppConfig, ConfigLoader};
 pub use providers::ProviderRegistry;
 pub use providers::capability_chat::ToolSpec;

@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::agents::orchestrator::SchedulerEvent;
 use crate::agents::scheduling::cron_types::{DeliveryConfig, RunRecord, RunStatus, ScheduleKind};
 use crate::agents::webhook_loader::{WebhookAuth, WebhookJobDef, render_template};
-use crate::channels::SendMessage;
+use crate::channels::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
 use crate::config::scheduler::{HeartbeatConfig, WebhookConfig};
 
 /// Shared handle to the Scheduler for concurrent access.
@@ -1150,18 +1150,13 @@ pub async fn send_to_target(ctx: &WebhookContext, target: &str, content: &str) {
         }
     };
 
-    let msg = SendMessage {
-        content: content.to_string(),
-        recipient: String::new(),
-        subject: None,
-        thread_ts: None,
-        cancellation_token: None,
-        attachments: vec![],
-        image_urls: None,
-        inline_buttons: None,
+    let msg = ChannelOutboundMessage {
+        receiver: MessageReceiver::new(String::new()),
+        content: ChannelMessageContent::text(content),
+        options: Default::default(),
     };
 
-    if let Err(e) = channel.send(&msg).await {
+    if let Err(e) = channel.send_message(&msg).await {
         tracing::warn!(channel = %ch_type, account = %acc_id, err = %e, "failed to send scheduled response");
     }
 }

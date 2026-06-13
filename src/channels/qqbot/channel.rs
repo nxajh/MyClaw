@@ -18,7 +18,7 @@ use super::message::split_message_chunk;
 use super::token::TokenManager;
 use super::types::*;
 use crate::config::channel::QQBotAccountConfig;
-use crate::{Channel, ChannelMessage, DedupState, SendMessage};
+use crate::{Channel, ChannelMessage, DedupState};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -1221,18 +1221,21 @@ impl Channel for QQBotChannel {
         self.build_security_policy()
     }
 
-    async fn send(&self, msg: &SendMessage) -> anyhow::Result<()> {
+    async fn send_message(
+        &self,
+        msg: &crate::channels::ChannelOutboundMessage,
+    ) -> anyhow::Result<crate::channels::OutboundSendResult> {
         let chunks = split_message_chunk(
-            &msg.content,
+            &msg.content.text,
             self.capabilities().message_chunk_limit,
             self.capabilities().message_len_unit,
         );
-        // thread_ts carries the original message event ID for passive replies.
-        let msg_id = msg.thread_ts.as_deref().unwrap_or("");
+        // reply_to_message_id carries the original message event ID for passive replies.
+        let msg_id = msg.receiver.reply_to_message_id.as_deref().unwrap_or("");
 
         // Normalize recipient: bare openids (from startup recovery fallback)
         // are treated as c2c: prefixed.
-        let raw_recipient = msg.recipient.clone();
+        let raw_recipient = msg.receiver.id.clone();
         if raw_recipient.is_empty() {
             anyhow::bail!("QQBot send failed: no recipient");
         }
@@ -1244,13 +1247,17 @@ impl Channel for QQBotChannel {
         };
 
         // Build keyboard from inline_buttons (attached to last chunk only).
-        let keyboard: Option<Keyboard> = msg.inline_buttons.as_ref().map(|buttons| {
-            let pairs: Vec<(String, String)> = buttons
+        let keyboard: Option<Keyboard> = if msg.content.buttons.is_empty() {
+            None
+        } else {
+            let pairs: Vec<(String, String)> = msg
+                .content
+                .buttons
                 .iter()
                 .map(|b| (b.label.clone(), b.callback_data.clone()))
                 .collect();
-            Keyboard::from_pairs(&pairs)
-        });
+            Some(Keyboard::from_pairs(&pairs))
+        };
 
         let count = chunks.len();
         for (i, chunk) in chunks.iter().enumerate() {
@@ -1331,153 +1338,111 @@ impl Channel for QQBotChannel {
         // Stop typing indicator for this recipient now that the response is sent.
         self.stop_internal_typing(&recipient);
 
-        Ok(())
-    }
+        for (idx, file) in msg.content.files.iter().enumerate() {
+            let mut reader = file.body.open().await?;
+            let mut data = Vec::new();
+            tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut data).await?;
+            let fname = file.meta.file_name.clone();
 
-    /// Send media (image/file) via QQ Bot rich media API.
-    ///
-    /// Two-step process:
-    /// 1. POST /v2/users/{openid}/files — upload file (base64), get file_info
-    /// 2. POST /v2/users/{openid}/messages — send message with msg_type=7 + media
-    async fn send_payload(
-        &self,
-        target: &crate::channels::SendTarget,
-        payload: &crate::channels::MessagePayload,
-    ) -> anyhow::Result<crate::channels::SendResult> {
-        match payload {
-            crate::channels::MessagePayload::Media { source, caption } => {
-                let (data, mime_type, file_name) = match source {
-                    crate::channels::MediaSource::Inline {
-                        data,
-                        mime_type,
-                        file_name,
-                    } => (data.clone(), mime_type.clone(), file_name.clone()),
-                    crate::channels::MediaSource::Url(url) => {
-                        let full = if url.starts_with("http") {
-                            url.to_string()
-                        } else {
-                            format!("https://{url}")
-                        };
-                        let resp = self
-                            .http_client
-                            .get(&full)
-                            .send()
-                            .await
-                            .map_err(|e| anyhow::anyhow!("download failed: {e}"))?;
-                        let bytes = resp
-                            .bytes()
-                            .await
-                            .map_err(|e| anyhow::anyhow!("read bytes failed: {e}"))?;
-                        (bytes.to_vec(), None, None)
+            // Determine file_type: 1=image, 2=video, 3=voice, 4=file
+            let file_type = match file.meta.mime_type.as_deref() {
+                Some(m) if m.starts_with("image/") => 1,
+                Some(m) if m.starts_with("video/") => 2,
+                Some(m) if m.starts_with("audio/") => 3,
+                _ => {
+                    let ext = fname.rsplit('.').next().unwrap_or("");
+                    match ext {
+                        "png" | "jpg" | "jpeg" | "gif" | "webp" => 1,
+                        "mp4" => 2,
+                        "mp3" | "wav" | "ogg" | "flac" | "silk" => 3,
+                        _ => 4,
                     }
-                };
-
-                let fname = file_name.unwrap_or_else(|| "file".to_string());
-
-                // Determine file_type: 1=image, 2=video, 3=voice, 4=file
-                let file_type = match mime_type.as_deref() {
-                    Some(m) if m.starts_with("image/") => 1,
-                    Some(m) if m.starts_with("video/") => 2,
-                    Some(m) if m.starts_with("audio/") => 3,
-                    _ => {
-                        let ext = fname.rsplit('.').next().unwrap_or("");
-                        match ext {
-                            "png" | "jpg" | "jpeg" | "gif" | "webp" => 1,
-                            "mp4" => 2,
-                            "mp3" | "wav" | "ogg" | "flac" | "silk" => 3,
-                            _ => 4,
-                        }
-                    }
-                };
-
-                use base64::Engine;
-                let file_data = base64::engine::general_purpose::STANDARD.encode(&data);
-
-                // Parse recipient to determine c2c vs group
-                let (openid, is_group) = {
-                    let raw = &target.recipient;
-                    if let Some(oid) = raw.strip_prefix("c2c:") {
-                        (oid.to_string(), false)
-                    } else if let Some(oid) = raw.strip_prefix("group:") {
-                        (oid.to_string(), true)
-                    } else {
-                        (raw.clone(), false)
-                    }
-                };
-
-                // Step 1: upload file
-                let files_url = if is_group {
-                    format!("{}/v2/groups/{}/files", API_BASE, openid)
-                } else {
-                    format!("{}/v2/users/{}/files", API_BASE, openid)
-                };
-
-                let upload_body = serde_json::json!({
-                    "file_type": file_type,
-                    "srv_send_msg": false,
-                    "file_data": file_data,
-                });
-
-                let token = self.token_manager.get_token().await?;
-                let ua = user_agent();
-                let upload_resp = self
-                    .http_client
-                    .post(&files_url)
-                    .header("Authorization", format!("QQBot {}", token))
-                    .header("Content-Type", "application/json")
-                    .header("User-Agent", &ua)
-                    .json(&upload_body)
-                    .send()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("upload failed: {e}"))?;
-
-                if !upload_resp.status().is_success() {
-                    let status = upload_resp.status();
-                    let text = upload_resp.text().await.unwrap_or_default();
-                    return Err(anyhow::anyhow!("upload returned {status}: {text}"));
                 }
+            };
 
-                let upload_result: serde_json::Value = upload_resp
-                    .json()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("upload parse failed: {e}"))?;
-                let file_info = upload_result
-                    .get("file_info")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("upload response missing file_info: {upload_result}")
-                    })?;
+            use base64::Engine;
+            let file_data = base64::engine::general_purpose::STANDARD.encode(&data);
 
-                // Step 2: send message with media
-                let msg_url = if is_group {
-                    format!("{}/v2/groups/{}/messages", API_BASE, openid)
+            let (openid, is_group) = {
+                let raw = &msg.receiver.id;
+                if let Some(oid) = raw.strip_prefix("c2c:") {
+                    (oid.to_string(), false)
+                } else if let Some(oid) = raw.strip_prefix("group:") {
+                    (oid.to_string(), true)
                 } else {
-                    format!("{}/v2/users/{}/messages", API_BASE, openid)
-                };
-
-                let caption_text = caption.as_deref().unwrap_or(" ");
-                let mut msg_body = serde_json::json!({
-                    "content": caption_text,
-                    "msg_type": 7,
-                    "media": { "file_info": file_info },
-                });
-                // Include msg_id for passive reply (avoids consuming active quota).
-                if let Some(ref msg_id) = target.thread_id {
-                    msg_body["msg_id"] = serde_json::json!(msg_id);
+                    (raw.clone(), false)
                 }
-                self.send_rest_with_retry(&msg_url, &msg_body).await?;
-                Ok(None)
+            };
+
+            let files_url = if is_group {
+                format!("{}/v2/groups/{}/files", API_BASE, openid)
+            } else {
+                format!("{}/v2/users/{}/files", API_BASE, openid)
+            };
+
+            let upload_body = serde_json::json!({
+                "file_type": file_type,
+                "srv_send_msg": false,
+                "file_data": file_data,
+            });
+
+            let token = self.token_manager.get_token().await?;
+            let ua = user_agent();
+            let upload_resp = self
+                .http_client
+                .post(&files_url)
+                .header("Authorization", format!("QQBot {}", token))
+                .header("Content-Type", "application/json")
+                .header("User-Agent", &ua)
+                .json(&upload_body)
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("upload failed: {e}"))?;
+
+            if !upload_resp.status().is_success() {
+                let status = upload_resp.status();
+                let text = upload_resp.text().await.unwrap_or_default();
+                return Err(anyhow::anyhow!("upload returned {status}: {text}"));
             }
-            // Everything else: delegate to default impl (text fallback).
-            _ => {
-                let msg = crate::channels::SendMessage::new(
-                    payload.to_fallback_text(),
-                    &target.recipient,
-                );
-                self.send(&msg).await?;
-                Ok(None)
+
+            let upload_result: serde_json::Value = upload_resp
+                .json()
+                .await
+                .map_err(|e| anyhow::anyhow!("upload parse failed: {e}"))?;
+            let file_info = upload_result
+                .get("file_info")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("upload response missing file_info: {upload_result}")
+                })?;
+
+            let msg_url = if is_group {
+                format!("{}/v2/groups/{}/messages", API_BASE, openid)
+            } else {
+                format!("{}/v2/users/{}/messages", API_BASE, openid)
+            };
+
+            let caption_text = if idx == 0 && !msg.content.text.trim().is_empty() {
+                msg.content.text.as_str()
+            } else {
+                " "
+            };
+            let mut msg_body = serde_json::json!({
+                "content": caption_text,
+                "msg_type": 7,
+                "media": { "file_info": file_info },
+            });
+            if let Some(ref msg_id) = msg.receiver.reply_to_message_id {
+                msg_body["msg_id"] = serde_json::json!(msg_id);
+            } else if let Some(ref thread_id) = msg.receiver.thread_id {
+                msg_body["msg_id"] = serde_json::json!(thread_id);
             }
+            self.send_rest_with_retry(&msg_url, &msg_body).await?;
         }
+
+        Ok(crate::channels::OutboundSendResult {
+            message_ids: Vec::new(),
+        })
     }
 
     async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>> {

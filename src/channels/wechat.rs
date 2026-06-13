@@ -38,7 +38,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::config::channel::WechatAccountConfig;
-use crate::{Channel, ChannelMessage, DedupState, SendMessage};
+use crate::{Channel, ChannelMessage, DedupState};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -814,25 +814,31 @@ impl Channel for WechatChannel {
         self.build_security_policy()
     }
 
-    async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
+    async fn send_message(
+        &self,
+        message: &crate::channels::ChannelOutboundMessage,
+    ) -> anyhow::Result<crate::channels::OutboundSendResult> {
+        if !message.content.files.is_empty() {
+            anyhow::bail!("wechat channel does not support outbound file sending");
+        }
         let ctx_token = self
             .api
             .state
             .read()
             .context_tokens
-            .get(&message.recipient)
+            .get(&message.receiver.id)
             .cloned();
         let chunks = crate::channels::message::split_message_chunk(
-            &message.content,
+            &message.content.text,
             self.capabilities().message_chunk_limit,
             self.capabilities().message_len_unit,
         );
         for chunk in chunks {
             self.api
-                .send_text(&message.recipient, &chunk, ctx_token.as_deref())
+                .send_text(&message.receiver.id, &chunk, ctx_token.as_deref())
                 .await?;
         }
-        Ok(())
+        Ok(crate::channels::OutboundSendResult::empty())
     }
 
     async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>> {
