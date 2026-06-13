@@ -150,9 +150,6 @@ pub(crate) fn inbound_msg(sender: &str, content: &str) -> ChannelMessage {
         timestamp: 0,
         thread_ts: None,
         interruption_scope_id: None,
-        attachments: Vec::new(),
-        image_urls: None,
-        image_base64: None,
         files: Vec::new(),
     }
 }

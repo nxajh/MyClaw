@@ -349,13 +349,6 @@ pub struct ChannelMessage {
     pub interruption_scope_id: Option<String>,
     #[serde(default)]
     pub files: Vec<FileAttachment>,
-    #[serde(default)]
-    pub attachments: Vec<MediaAttachment>,
-    /// URLs of images attached to this message (e.g. from Telegram photo messages).
-    pub image_urls: Option<Vec<String>>,
-    /// Base64-encoded image data (used when the source URL is not directly
-    /// accessible by the LLM provider, e.g. Telegram file API).
-    pub image_base64: Option<Vec<String>>,
 }
 
 /// An inline button for interactive messages.
@@ -430,14 +423,6 @@ pub struct FileAttachment {
     pub mime_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<u64>,
-}
-
-/// A media attachment.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MediaAttachment {
-    pub file_name: String,
-    pub data: Vec<u8>,
-    pub mime_type: Option<String>,
 }
 
 /// Processing status notification from Orchestrator to Channel.

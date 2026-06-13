@@ -12,65 +12,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::agents::attachment::AttachmentManager;
-use crate::agents::session::{PersistHook, Session};
+use crate::agents::session::Session;
 use crate::agents::turn::TurnResult;
 use crate::agents::{Agent, AgentRuntime, TurnContext, UserProfile};
-use crate::channels::{Channel, ChannelMessage, FileAttachment};
-
-fn normalize_inbound_files(
-    session_id: &str,
-    msg: &mut ChannelMessage,
-    persist: Option<&dyn PersistHook>,
-) {
-    let Some(persist) = persist else {
-        return;
-    };
-
-    if let Some(b64s) = msg.image_base64.take() {
-        use base64::Engine as _;
-        for (idx, raw) in b64s.into_iter().enumerate() {
-            let b64 = raw
-                .split_once("base64,")
-                .map(|(_, b)| b)
-                .unwrap_or(raw.as_str());
-            match base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
-                Ok(bytes) => {
-                    let name = format!("image-{}.png", idx + 1);
-                    if let Some(saved) =
-                        persist.save_file(session_id, Some(&name), &bytes, Some("image/png"))
-                    {
-                        msg.files.push(FileAttachment {
-                            path: saved.path,
-                            file_name: Some(saved.file_name),
-                            mime_type: saved.mime_type,
-                            size_bytes: Some(saved.size_bytes),
-                        });
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(session = %session_id, err = %e, "failed to decode inbound image base64")
-                }
-            }
-        }
-    }
-
-    for att in std::mem::take(&mut msg.attachments) {
-        if let Some(saved) = persist.save_file(
-            session_id,
-            Some(&att.file_name),
-            &att.data,
-            att.mime_type.as_deref(),
-        ) {
-            msg.files.push(FileAttachment {
-                path: saved.path,
-                file_name: Some(saved.file_name),
-                mime_type: saved.mime_type,
-                size_bytes: Some(saved.size_bytes),
-            });
-        }
-    }
-}
-
+use crate::channels::{Channel, ChannelMessage};
 /// Per-session bundle held by the SessionManager's session-context table.
 ///
 /// Fields:
@@ -168,7 +113,7 @@ impl SessionContext {
         let _turn_guard = self.turn_lock.lock().await;
         let mut session = self.session.lock().await;
 
-        let mut inbound_msg = inbound_msg;
+        let inbound_msg = inbound_msg;
         let content = inbound_msg.content.clone();
         let reply_target = inbound_msg.reply_target.clone();
 
@@ -176,7 +121,6 @@ impl SessionContext {
         // SessionManager; capture a clone so the post-turn `add_user`
         // persistence call sees the same hook.
         let persist_hook = session.persist.clone();
-        normalize_inbound_files(&session.id, &mut inbound_msg, persist_hook.as_deref());
         session.record_inbound(inbound_msg);
         let channel_for_send = channel.clone();
         // RFC §7.6: install per-turn streaming handle BEFORE Agent::run.
@@ -238,28 +182,13 @@ impl SessionContext {
             Some(rem) => format!("{}\n\n{}", rem, content),
             None => content,
         };
-        // Build file content parts from the normalized inbound message so media is
-        // recorded in history as session-local file references. Legacy image URLs are
-        // preserved only as plain text so models can use fetch/http tools when needed;
-        // legacy base64/raw attachment fields are converted by `normalize_inbound_files`
-        // before `record_inbound`.
+        // Build file content parts from the inbound message so media is
+        // recorded in history as session-local file references. Channel adapters
+        // now save media to temp files and populate `msg.files` directly.
         let media_parts: Vec<crate::providers::ContentPart> = {
             use crate::providers::ContentPart;
             let mut parts = Vec::new();
             if let Some(msg) = session.last_message.as_ref() {
-                if let Some(urls) = msg.image_urls.as_ref() {
-                    for url in urls {
-                        parts.push(ContentPart::Text {
-                            text: format!("\n[图片URL: {url}]"),
-                        });
-                    }
-                }
-                if let Some(_b64s) = msg.image_base64.as_ref() {
-                    tracing::warn!(session = %session.id, "inbound image base64 was not normalized to a file; dropping inline payload")
-                }
-                if !msg.attachments.is_empty() {
-                    tracing::warn!(session = %session.id, count = msg.attachments.len(), "inbound raw attachments were not normalized to files; dropping inline payloads")
-                }
                 for file in &msg.files {
                     parts.push(ContentPart::File {
                         path: file.path.clone(),

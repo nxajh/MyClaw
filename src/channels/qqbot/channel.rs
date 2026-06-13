@@ -240,15 +240,13 @@ impl QQBotChannel {
                 if !apply_auth(self, &msg.sender, crate::channels::MessageScope::Direct) {
                     return None;
                 }
-                if let Some(ref urls) = msg.image_urls {
-                    if !urls.is_empty() {
-                        tracing::info!(
-                            msg_id = %msg.id,
-                            images = urls.len(),
-                            content_len = msg.content.len(),
-                            "C2C message with image attachments received"
-                        );
-                    }
+                if !msg.files.is_empty() {
+                    tracing::info!(
+                        msg_id = %msg.id,
+                        files = msg.files.len(),
+                        content_len = msg.content.len(),
+                        "C2C message with file attachments received"
+                    );
                 }
                 Some(msg)
             }
@@ -369,9 +367,6 @@ impl QQBotChannel {
                     thread_ts: original_msg_id,
                     interruption_scope_id: None,
                     files: vec![],
-                    attachments: vec![],
-                    image_urls: None,
-                    image_base64: None,
                 })
             }
             _ => {
@@ -394,25 +389,18 @@ impl QQBotChannel {
             .to_string();
         let msg_id = data.get("id")?.as_str()?;
 
-        // Parse image URLs from attachments.
-        // QQ Bot uses MIME types (e.g. "image/jpeg"), not bare "image".
-        let image_urls =
-            if let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) {
-                let urls: Vec<String> = attachments
-                    .iter()
-                    .filter_map(|a| {
-                        let ct = a.get("content_type").and_then(|v| v.as_str()).unwrap_or("");
-                        if ct == "image" || ct.starts_with("image/") {
-                            a.get("url").and_then(|v| v.as_str()).map(String::from)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                if urls.is_empty() { None } else { Some(urls) }
-            } else {
-                None
-            };
+        // Append image URLs as text markers so models can use fetch/http tools.
+        let mut content = content;
+        if let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) {
+            for a in attachments {
+                let ct = a.get("content_type").and_then(|v| v.as_str()).unwrap_or("");
+                if ct == "image" || ct.starts_with("image/") {
+                    if let Some(url) = a.get("url").and_then(|v| v.as_str()) {
+                        content.push_str(&format!("\n[图片URL: {url}]"));
+                    }
+                }
+            }
+        }
 
         Some(ChannelMessage {
             id: msg_id.to_string(),
@@ -426,9 +414,6 @@ impl QQBotChannel {
             thread_ts: None,
             interruption_scope_id: None,
             files: vec![],
-            attachments: vec![],
-            image_urls,
-            image_base64: None,
         })
     }
 
@@ -445,25 +430,18 @@ impl QQBotChannel {
             .to_string();
         let msg_id = data.get("id")?.as_str()?;
 
-        // Parse image URLs from attachments.
-        // QQ Bot uses MIME types (e.g. "image/jpeg"), not bare "image".
-        let image_urls =
-            if let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) {
-                let urls: Vec<String> = attachments
-                    .iter()
-                    .filter_map(|a| {
-                        let ct = a.get("content_type").and_then(|v| v.as_str()).unwrap_or("");
-                        if ct == "image" || ct.starts_with("image/") {
-                            a.get("url").and_then(|v| v.as_str()).map(String::from)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                if urls.is_empty() { None } else { Some(urls) }
-            } else {
-                None
-            };
+        // Append image URLs as text markers so models can use fetch/http tools.
+        let mut content = content;
+        if let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) {
+            for a in attachments {
+                let ct = a.get("content_type").and_then(|v| v.as_str()).unwrap_or("");
+                if ct == "image" || ct.starts_with("image/") {
+                    if let Some(url) = a.get("url").and_then(|v| v.as_str()) {
+                        content.push_str(&format!("\n[图片URL: {url}]"));
+                    }
+                }
+            }
+        }
 
         Some(ChannelMessage {
             id: msg_id.to_string(),
@@ -477,9 +455,6 @@ impl QQBotChannel {
             thread_ts: None,
             interruption_scope_id: None,
             files: vec![],
-            attachments: vec![],
-            image_urls,
-            image_base64: None,
         })
     }
 
@@ -601,26 +576,27 @@ impl QQBotChannel {
                 .and_then(|v| v.as_str())
                 .unwrap_or("voice")
                 .to_string();
-            msg.attachments
-                .push(crate::channels::message::MediaAttachment {
-                    file_name,
-                    data: bytes.to_vec(),
-                    mime_type: Some(mime),
-                });
+            let temp_path =
+                std::env::temp_dir().join(format!("myclaw-qq-voice-{}", uuid::Uuid::new_v4()));
+            if tokio::fs::write(&temp_path, &bytes).await.is_err() {
+                warn!("qqbot: failed to save voice to temp file");
+                continue;
+            }
+            msg.files.push(crate::channels::FileAttachment {
+                path: temp_path.to_string_lossy().to_string(),
+                file_name: Some(file_name),
+                mime_type: Some(mime),
+                size_bytes: Some(bytes.len() as u64),
+            });
         }
     }
 
     /// Download image attachments from the raw inbound `data` payload,
-    /// convert to base64, and store in `msg.image_base64`.
-    ///
-    /// The API proxy (`us.jinl.in/cpa`) does not support `{"type":"url"}` image
-    /// sources — it silently drops them, causing the vision model to hallucinate.
-    /// Downloading upfront and inlining as base64 guarantees the image is seen.
+    /// save to temp files, and store in `msg.files`.
     async fn ingest_image_attachments(&self, data: &serde_json::Value, msg: &mut ChannelMessage) {
         let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) else {
             return;
         };
-        let mut images = Vec::new();
         for att in attachments {
             let ct = att
                 .get("content_type")
@@ -646,10 +622,17 @@ impl QQBotChannel {
             {
                 Ok(resp) => match resp.bytes().await {
                     Ok(bytes) => {
-                        use base64::Engine;
-                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                        tracing::debug!(url = %full_url, size = bytes.len(), "qqbot: image downloaded and base64-encoded");
-                        images.push(b64);
+                        let temp_path = std::env::temp_dir()
+                            .join(format!("myclaw-qq-img-{}", uuid::Uuid::new_v4()));
+                        if tokio::fs::write(&temp_path, &bytes).await.is_ok() {
+                            tracing::debug!(url = %full_url, size = bytes.len(), "qqbot: image downloaded and saved to temp file");
+                            msg.files.push(crate::channels::FileAttachment {
+                                path: temp_path.to_string_lossy().to_string(),
+                                file_name: Some(format!("image-{}", uuid::Uuid::new_v4())),
+                                mime_type: Some(ct.to_string()),
+                                size_bytes: Some(bytes.len() as u64),
+                            });
+                        }
                     }
                     Err(e) => {
                         tracing::warn!("qqbot: reading image bytes failed for {full_url}: {e}");
@@ -659,10 +642,6 @@ impl QQBotChannel {
                     tracing::warn!("qqbot: image download failed for {full_url}: {e}");
                 }
             }
-        }
-        if !images.is_empty() {
-            msg.image_base64 = Some(images);
-            msg.image_urls = None; // base64 supersedes URLs; fallback on download failure.
         }
     }
 

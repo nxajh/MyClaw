@@ -128,18 +128,7 @@ impl Tool for AskUserTool {
         // Surface any attached images alongside the text answer so the
         // model sees the full reply (AskRouter delivers a ChannelMessage so
         // image attachments survive the round trip).
-        let mut output = reply.content;
-        if let Some(ref urls) = reply.image_urls {
-            for url in urls {
-                output.push_str("\n[image] ");
-                output.push_str(url);
-            }
-        }
-        if let Some(ref b64) = reply.image_base64 {
-            if !b64.is_empty() {
-                output.push_str(&format!("\n[{} inline image(s) attached]", b64.len()));
-            }
-        }
+        let output = reply.content;
 
         Ok(ToolResult {
             success: true,

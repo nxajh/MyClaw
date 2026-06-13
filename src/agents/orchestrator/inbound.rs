@@ -304,7 +304,7 @@ pub(super) async fn dispatch_turn(ctx: &OrchestratorCtx, key: &SessionKey, msg: 
 
     // Dispatch via SessionContext.process_turn — the canonical RFC v2 per-turn
     // entry point. Spawn on a background task so the event loop is not blocked
-    // by the LLM round-trip. image_urls / image_base64 ride along on
+    // by the LLM round-trip. File attachments ride along on
     // `session.last_message` (recorded above); Agent.run reads them from there.
     let session_ctx = ctx.sessions.get_or_create_context(&sk);
     let runtime = ctx.runtime.clone();

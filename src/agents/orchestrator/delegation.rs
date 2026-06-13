@@ -67,9 +67,6 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
         thread_ts: None,
         interruption_scope_id: None,
         files: vec![],
-        attachments: Vec::new(),
-        image_urls: None,
-        image_base64: None,
     };
     super::inbound::dispatch_turn(ctx, &key, synthetic).await;
 }

@@ -387,20 +387,37 @@ impl ClientChannel {
                                                 }
                                             }
 
-                                            // Decode base64 images; strip any data: URL prefix.
-                                            let images: Vec<String> = parsed["image_base64"]
-                                                .as_array()
-                                                .map(|arr| {
-                                                    arr.iter()
-                                                        .filter_map(|v| v.as_str())
-                                                        .map(|s| match s.split_once("base64,") {
-                                                            Some((_, b)) => b.to_string(),
-                                                            None => s.to_string(),
-                                                        })
-                                                        .collect()
-                                                })
-                                                .unwrap_or_default();
-                                            let has_images = !images.is_empty();
+                                            // Decode base64 images and save to temp files.
+                                            let mut image_files: Vec<
+                                                crate::channels::FileAttachment,
+                                            > = Vec::new();
+                                            if let Some(arr) = parsed["image_base64"].as_array() {
+                                                use base64::Engine;
+                                                for (idx, v) in arr.iter().enumerate() {
+                                                    if let Some(raw) = v.as_str() {
+                                                        let b64 = raw
+                                                            .split_once("base64,")
+                                                            .map(|(_, b)| b)
+                                                            .unwrap_or(raw);
+                                                        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
+                                                            let fname = format!("image-{}.png", idx + 1);
+                                                            let temp_path = std::env::temp_dir().join(format!(
+                                                                "myclaw-client-img-{}.png",
+                                                                uuid::Uuid::new_v4()
+                                                            ));
+                                                            if tokio::fs::write(&temp_path, &bytes).await.is_ok() {
+                                                                image_files.push(crate::channels::FileAttachment {
+                                                                    path: temp_path.to_string_lossy().to_string(),
+                                                                    file_name: Some(fname),
+                                                                    mime_type: Some("image/png".to_string()),
+                                                                    size_bytes: Some(bytes.len() as u64),
+                                                                });
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            let has_images = !image_files.is_empty();
 
                                             if content.trim().is_empty() && !has_images {
                                                 let err = serde_json::json!({"type":"error","message":"empty content"});
@@ -467,14 +484,7 @@ impl ClientChannel {
                                                 timestamp: chrono::Utc::now().timestamp() as u64,
                                                 thread_ts: None,
                                                 interruption_scope_id: None,
-                                                files: vec![],
-                                                attachments: vec![],
-                                                image_urls: None,
-                                                image_base64: if has_images {
-                                                    Some(images)
-                                                } else {
-                                                    None
-                                                },
+                                                files: image_files,
                                             };
 
                                             if message_tx_clone.send(channel_msg).await.is_err() {

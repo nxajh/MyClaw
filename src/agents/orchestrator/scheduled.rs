@@ -52,9 +52,6 @@ pub(crate) async fn run_scheduled_turn(
         thread_ts: None,
         interruption_scope_id: None,
         files: vec![],
-        attachments: Vec::new(),
-        image_urls: None,
-        image_base64: None,
     };
     let runtime = orch.runtime.clone();
     session_ctx

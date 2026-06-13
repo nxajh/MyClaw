@@ -27,7 +27,7 @@ struct DebounceEntry {
     sender: String,
     reply_target: String,
     contents: Vec<String>,
-    images: Option<Vec<String>>,
+    files: Vec<crate::channels::FileAttachment>,
     first_ts: u64,
     timer: tokio::task::JoinHandle<()>,
 }
@@ -594,12 +594,6 @@ impl TelegramChannel {
         Ok(file_resp.bytes().await?.to_vec())
     }
 
-    async fn download_file_base64(&self, file_id: &str) -> anyhow::Result<String> {
-        let bytes = self.download_file_bytes(file_id).await?;
-        use base64::Engine;
-        Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
-    }
-
     /// Send an acknowledgement reaction (👀) to a message.
     async fn ack_message(&self, chat_id: i64, message_id: i64) {
         if !self.ack_reactions {
@@ -800,7 +794,7 @@ impl TelegramChannel {
     /// and dispatched as a single `ChannelMessage` after the debounce window
     /// expires. If debounce is disabled (`debounce_ms == 0`), the message is
     /// sent immediately via `tx`.
-    async fn debounce_send(&self, msg: ChannelMessage, tx: mpsc::Sender<ChannelMessage>) {
+    async fn debounce_send(&self, mut msg: ChannelMessage, tx: mpsc::Sender<ChannelMessage>) {
         if self.debounce_ms == 0 {
             if let Err(e) = tx.send(msg).await {
                 warn!("Telegram dispatch error: {e}");
@@ -827,10 +821,7 @@ impl TelegramChannel {
                     timestamp: entry.first_ts,
                     thread_ts: None,
                     interruption_scope_id: None,
-                    files: vec![],
-                    attachments: vec![],
-                    image_urls: None,
-                    image_base64: entry.images,
+                    files: entry.files,
                 };
                 let _ = tx.send(channel_msg).await;
             }
@@ -844,12 +835,8 @@ impl TelegramChannel {
                 if !msg.content.is_empty() {
                     entry.contents.push(msg.content);
                 }
-                if let Some(imgs) = msg.image_base64 {
-                    if let Some(ref mut existing) = entry.images {
-                        existing.extend(imgs);
-                    } else {
-                        entry.images = Some(imgs);
-                    }
+                if !msg.files.is_empty() {
+                    entry.files.extend(msg.files.drain(..));
                 }
                 // Cancel old timer, set new one.
                 entry.timer.abort();
@@ -866,7 +853,7 @@ impl TelegramChannel {
                         } else {
                             vec![msg.content]
                         },
-                        images: msg.image_base64,
+                        files: msg.files,
                         first_ts: msg.timestamp,
                         timer: handle,
                     },
@@ -1093,9 +1080,6 @@ impl TelegramChannel {
                             .map(|id| id.to_string()),
                         interruption_scope_id: None,
                         files: vec![],
-                        attachments: vec![],
-                        image_urls: None,
-                        image_base64: None,
                     };
 
                     // Send ack reaction if enabled.
@@ -1174,15 +1158,23 @@ impl TelegramChannel {
                 }
 
                 let mut content = self.parse_message_content(&msg);
-                let mut image_base64: Option<Vec<String>> = None;
-                let mut attachments: Vec<crate::channels::message::MediaAttachment> = vec![];
+                let mut files: Vec<crate::channels::FileAttachment> = Vec::new();
 
-                // Handle photo messages: download the largest photo as base64
+                // Handle photo messages: download the largest photo and save to temp file
                 if let Some(photos) = &msg.photo {
                     if let Some(largest) = photos.last() {
-                        match self.download_file_base64(&largest.file_id).await {
-                            Ok(b64) => {
-                                image_base64 = Some(vec![b64]);
+                        match self.download_file_bytes(&largest.file_id).await {
+                            Ok(data) => {
+                                let temp_path = std::env::temp_dir()
+                                    .join(format!("myclaw-tg-img-{}.png", uuid::Uuid::new_v4()));
+                                if tokio::fs::write(&temp_path, &data).await.is_ok() {
+                                    files.push(crate::channels::FileAttachment {
+                                        path: temp_path.to_string_lossy().to_string(),
+                                        file_name: Some(format!("photo-{}.png", largest.file_id)),
+                                        mime_type: Some("image/png".to_string()),
+                                        size_bytes: Some(data.len() as u64),
+                                    });
+                                }
                             }
                             Err(e) => {
                                 warn!(
@@ -1198,21 +1190,26 @@ impl TelegramChannel {
                     }
                 }
 
-                // Handle voice / audio messages: download as a generic audio
-                // attachment. A text-only model reaches it on demand via the
-                // `hear_audio` tool (the provider lowers it to a `[语音 #N]` marker).
+                // Handle voice / audio messages: download and save to temp file.
                 if let Some(voice) = &msg.voice {
+                    let mime = voice
+                        .mime_type
+                        .clone()
+                        .unwrap_or_else(|| "audio/ogg".to_string());
+                    let fname = format!("voice-{}.ogg", voice.file_id);
                     match self.download_file_bytes(&voice.file_id).await {
-                        Ok(data) => attachments.push(crate::channels::message::MediaAttachment {
-                            file_name: format!("voice-{}.ogg", voice.file_id),
-                            data,
-                            mime_type: Some(
-                                voice
-                                    .mime_type
-                                    .clone()
-                                    .unwrap_or_else(|| "audio/ogg".to_string()),
-                            ),
-                        }),
+                        Ok(data) => {
+                            let temp_path = std::env::temp_dir()
+                                .join(format!("myclaw-tg-{}", uuid::Uuid::new_v4()));
+                            if tokio::fs::write(&temp_path, &data).await.is_ok() {
+                                files.push(crate::channels::FileAttachment {
+                                    path: temp_path.to_string_lossy().to_string(),
+                                    file_name: Some(fname),
+                                    mime_type: Some(mime),
+                                    size_bytes: Some(data.len() as u64),
+                                });
+                            }
+                        }
                         Err(e) => {
                             warn!("Telegram download failed for voice {}: {e}", voice.file_id)
                         }
@@ -1222,17 +1219,24 @@ impl TelegramChannel {
                     }
                 }
                 if let Some(audio) = &msg.audio {
+                    let mime = audio
+                        .mime_type
+                        .clone()
+                        .unwrap_or_else(|| "audio/mpeg".to_string());
+                    let fname = format!("audio-{}", audio.file_id);
                     match self.download_file_bytes(&audio.file_id).await {
-                        Ok(data) => attachments.push(crate::channels::message::MediaAttachment {
-                            file_name: format!("audio-{}", audio.file_id),
-                            data,
-                            mime_type: Some(
-                                audio
-                                    .mime_type
-                                    .clone()
-                                    .unwrap_or_else(|| "audio/mpeg".to_string()),
-                            ),
-                        }),
+                        Ok(data) => {
+                            let temp_path = std::env::temp_dir()
+                                .join(format!("myclaw-tg-{}", uuid::Uuid::new_v4()));
+                            if tokio::fs::write(&temp_path, &data).await.is_ok() {
+                                files.push(crate::channels::FileAttachment {
+                                    path: temp_path.to_string_lossy().to_string(),
+                                    file_name: Some(fname),
+                                    mime_type: Some(mime),
+                                    size_bytes: Some(data.len() as u64),
+                                });
+                            }
+                        }
                         Err(e) => {
                             warn!("Telegram download failed for audio {}: {e}", audio.file_id)
                         }
@@ -1257,10 +1261,7 @@ impl TelegramChannel {
                     timestamp: chrono::Utc::now().timestamp_millis() as u64,
                     thread_ts: msg.message_thread_id.map(|id| id.to_string()),
                     interruption_scope_id: None,
-                    files: vec![],
-                    attachments,
-                    image_urls: None,
-                    image_base64,
+                    files,
                 };
 
                 if self.debounce_ms > 0 {
