@@ -1080,7 +1080,7 @@ struct CollectedResponse {
 /// Without this short-circuit, `Agent::run` would keep generating chunks
 /// for a disconnected client and waste LLM output budget. After drop,
 /// subsequent `push_or_drop` calls become no-ops; the end-of-turn fallback
-/// `send_payload` in `SessionContext::process_turn` then ensures the user
+/// `send_message` in `SessionContext::process_turn` then ensures the user
 /// still receives the final text via the non-streaming path.
 async fn push_or_drop(
     turn_stream: &mut Option<Box<dyn crate::channels::TurnStream>>,

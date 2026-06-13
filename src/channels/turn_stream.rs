@@ -43,7 +43,7 @@ pub enum StreamDelivery {
 pub trait TurnStream: Send + Sync {
     /// Push one event. Returns the current delivery state, or `Err` if
     /// the transport has permanently failed (caller should stop pushing
-    /// but is NOT expected to fall back to `send_payload`).
+    /// but is NOT expected to fall back to `send_message`).
     async fn push(&mut self, event: TurnEvent) -> anyhow::Result<StreamDelivery>;
 
     /// Current cumulative delivery state. Read-only; does not trigger

@@ -239,7 +239,7 @@ impl SessionContext {
                 }
                 // RFC §7.6: consume the stream first; its `finish()` reports
                 // how far the streaming path actually got. Fall back to
-                // `send_payload`/`send` whenever delivery did NOT reach
+                // `send_message` whenever delivery did NOT reach
                 // `FinalDelivered` — covers three cases uniformly:
                 //   1. No stream at all (non-streaming channel) → Pending
                 //   2. Stream existed but transport failed mid-turn → Visible

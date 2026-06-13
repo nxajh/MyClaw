@@ -317,8 +317,7 @@ impl OutboundSendResult {
 }
 
 /// Platform-specific message id (e.g. Telegram message_id, QQBot msg_id).
-/// Returned by `send_payload` / `edit_message` and accepted by
-/// `edit_message` / `delete_message` to identify a previously sent message.
+/// Returned by `send_message` to identify a previously sent message.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MessageId(pub String);
 
