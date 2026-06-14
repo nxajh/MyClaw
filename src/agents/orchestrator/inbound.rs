@@ -455,7 +455,7 @@ mod tests {
 
     fn next_content(flow: Flow) -> Option<String> {
         match flow {
-            Flow::Next(m) => Some(m.content),
+            Flow::Next(m) => Some(m.content.text),
             Flow::Stop => None,
         }
     }
@@ -490,7 +490,7 @@ mod tests {
             matches!(flow, Flow::Stop),
             "pending ask should consume the inbound"
         );
-        assert_eq!(waiter.await.unwrap().unwrap().content, "the answer");
+        assert_eq!(waiter.await.unwrap().unwrap().content.text, "the answer");
     }
 
     // ── Callback (retry / abort) ──────────────────────────────────────────

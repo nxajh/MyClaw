@@ -144,7 +144,7 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(r.fulfill("s1", msg("yes")));
         let reply = waiter.await.unwrap().unwrap();
-        assert_eq!(reply.content, "yes");
+        assert_eq!(reply.content.text, "yes");
     }
 
     #[tokio::test]
@@ -191,6 +191,6 @@ mod tests {
             "newer ask's slot must survive the old guard"
         );
         let reply = new.await.unwrap().unwrap();
-        assert_eq!(reply.content, "answer");
+        assert_eq!(reply.content.text, "answer");
     }
 }
