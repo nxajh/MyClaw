@@ -49,27 +49,6 @@ fn infer_video_mime(path: &str) -> Option<&'static str> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolves_relative_path_against_current_dir() {
-        let cwd = std::env::current_dir().unwrap();
-        assert_eq!(
-            resolve_path("sessions/s/files/clip.mp4"),
-            cwd.join("sessions/s/files/clip.mp4")
-        );
-    }
-
-    #[test]
-    fn infers_video_mime_from_extension() {
-        assert_eq!(infer_video_mime("x.MP4"), Some("video/mp4"));
-        assert_eq!(infer_video_mime("x.webm"), Some("video/webm"));
-        assert_eq!(infer_video_mime("x.png"), None);
-    }
-}
-
 #[async_trait]
 impl Tool for ViewVideoTool {
     fn name(&self) -> &str {
@@ -214,5 +193,26 @@ impl Tool for ViewVideoTool {
             output: text,
             error: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_relative_path_against_current_dir() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            resolve_path("sessions/s/files/clip.mp4"),
+            cwd.join("sessions/s/files/clip.mp4")
+        );
+    }
+
+    #[test]
+    fn infers_video_mime_from_extension() {
+        assert_eq!(infer_video_mime("x.MP4"), Some("video/mp4"));
+        assert_eq!(infer_video_mime("x.webm"), Some("video/webm"));
+        assert_eq!(infer_video_mime("x.png"), None);
     }
 }

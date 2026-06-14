@@ -364,8 +364,8 @@ pub(super) async fn dispatch_turn(
         if let Err(ref e) = result {
             let text = crate::agents::user_messages::user_facing_error_message(e);
             let receiver = {
-                let mut r = MessageReceiver::new(reply_target)
-                    .with_reply_to(passive_reply_id.clone());
+                let mut r =
+                    MessageReceiver::new(reply_target).with_reply_to(passive_reply_id.clone());
                 if let Some(tid) = inbound_thread_id.clone() {
                     r = r.with_thread(tid);
                 }

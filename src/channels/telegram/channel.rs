@@ -845,7 +845,7 @@ impl TelegramChannel {
                     entry.texts.push(msg.content.text);
                 }
                 if !msg.content.files.is_empty() {
-                    entry.files.extend(msg.content.files.drain(..));
+                    entry.files.append(&mut msg.content.files);
                 }
                 // Cancel old timer, set new one.
                 entry.timer.abort();

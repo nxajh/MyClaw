@@ -49,27 +49,6 @@ fn infer_image_mime(path: &str) -> Option<&'static str> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolves_relative_path_against_current_dir() {
-        let cwd = std::env::current_dir().unwrap();
-        assert_eq!(
-            resolve_path("sessions/s/files/photo.png"),
-            cwd.join("sessions/s/files/photo.png")
-        );
-    }
-
-    #[test]
-    fn infers_image_mime_from_extension() {
-        assert_eq!(infer_image_mime("x.JPG"), Some("image/jpeg"));
-        assert_eq!(infer_image_mime("x.webp"), Some("image/webp"));
-        assert_eq!(infer_image_mime("x.pdf"), None);
-    }
-}
-
 #[async_trait]
 impl Tool for ViewImageTool {
     fn name(&self) -> &str {
@@ -214,5 +193,26 @@ impl Tool for ViewImageTool {
             output: text,
             error: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_relative_path_against_current_dir() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            resolve_path("sessions/s/files/photo.png"),
+            cwd.join("sessions/s/files/photo.png")
+        );
+    }
+
+    #[test]
+    fn infers_image_mime_from_extension() {
+        assert_eq!(infer_image_mime("x.JPG"), Some("image/jpeg"));
+        assert_eq!(infer_image_mime("x.webp"), Some("image/webp"));
+        assert_eq!(infer_image_mime("x.pdf"), None);
     }
 }

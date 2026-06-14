@@ -50,27 +50,6 @@ fn infer_audio_mime(path: &str) -> Option<&'static str> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolves_relative_path_against_current_dir() {
-        let cwd = std::env::current_dir().unwrap();
-        assert_eq!(
-            resolve_path("sessions/s/files/voice.ogg"),
-            cwd.join("sessions/s/files/voice.ogg")
-        );
-    }
-
-    #[test]
-    fn infers_audio_mime_from_extension() {
-        assert_eq!(infer_audio_mime("x.OGG"), Some("audio/ogg"));
-        assert_eq!(infer_audio_mime("x.mp3"), Some("audio/mpeg"));
-        assert_eq!(infer_audio_mime("x.png"), None);
-    }
-}
-
 #[async_trait]
 impl Tool for HearAudioTool {
     fn name(&self) -> &str {
@@ -215,5 +194,26 @@ impl Tool for HearAudioTool {
             output: text,
             error: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_relative_path_against_current_dir() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            resolve_path("sessions/s/files/voice.ogg"),
+            cwd.join("sessions/s/files/voice.ogg")
+        );
+    }
+
+    #[test]
+    fn infers_audio_mime_from_extension() {
+        assert_eq!(infer_audio_mime("x.OGG"), Some("audio/ogg"));
+        assert_eq!(infer_audio_mime("x.mp3"), Some("audio/mpeg"));
+        assert_eq!(infer_audio_mime("x.png"), None);
     }
 }

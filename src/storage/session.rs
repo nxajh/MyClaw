@@ -153,55 +153,6 @@ pub fn write_session_file(
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn session_file_name_sanitizes_and_adds_mime_extension() {
-        assert_eq!(
-            session_file_name(Some(" ../危险/name\0 "), b"abc", Some("image/png")),
-            "_危险_name_.png"
-        );
-        assert_eq!(
-            session_file_name(Some("voice"), b"abc", Some("audio/ogg")),
-            "voice.ogg"
-        );
-    }
-
-    #[test]
-    fn write_session_file_uses_workspace_relative_path_and_dedups() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = write_session_file(
-            dir.path(),
-            "abc123",
-            &session_file_name(Some("photo.png"), b"one", Some("image/png")),
-            b"one",
-            Some("image/png"),
-        )
-        .unwrap();
-        let second = write_session_file(
-            dir.path(),
-            "abc123",
-            &session_file_name(Some("photo.png"), b"two", Some("image/png")),
-            b"two",
-            Some("image/png"),
-        )
-        .unwrap();
-
-        assert_eq!(first.path, "sessions/abc123/files/photo.png");
-        assert_eq!(second.path, "sessions/abc123/files/photo-2.png");
-        assert_eq!(
-            std::fs::read(dir.path().join("abc123/files/photo.png")).unwrap(),
-            b"one"
-        );
-        assert_eq!(
-            std::fs::read(dir.path().join("abc123/files/photo-2.png")).unwrap(),
-            b"two"
-        );
-    }
-}
-
 /// Trait for session persistence backends.
 pub trait SessionBackend: Send + Sync {
     // ── Session CRUD ───────────────────────────────────────────────────────
@@ -360,4 +311,53 @@ pub trait SessionBackend: Send + Sync {
 
     /// Clean up sessions older than ttl_hours.
     fn cleanup_stale(&self, ttl_hours: u32) -> std::io::Result<usize>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_file_name_sanitizes_and_adds_mime_extension() {
+        assert_eq!(
+            session_file_name(Some(" ../危险/name\0 "), b"abc", Some("image/png")),
+            "_危险_name_.png"
+        );
+        assert_eq!(
+            session_file_name(Some("voice"), b"abc", Some("audio/ogg")),
+            "voice.ogg"
+        );
+    }
+
+    #[test]
+    fn write_session_file_uses_workspace_relative_path_and_dedups() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = write_session_file(
+            dir.path(),
+            "abc123",
+            &session_file_name(Some("photo.png"), b"one", Some("image/png")),
+            b"one",
+            Some("image/png"),
+        )
+        .unwrap();
+        let second = write_session_file(
+            dir.path(),
+            "abc123",
+            &session_file_name(Some("photo.png"), b"two", Some("image/png")),
+            b"two",
+            Some("image/png"),
+        )
+        .unwrap();
+
+        assert_eq!(first.path, "sessions/abc123/files/photo.png");
+        assert_eq!(second.path, "sessions/abc123/files/photo-2.png");
+        assert_eq!(
+            std::fs::read(dir.path().join("abc123/files/photo.png")).unwrap(),
+            b"one"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("abc123/files/photo-2.png")).unwrap(),
+            b"two"
+        );
+    }
 }

@@ -413,6 +413,33 @@ pub fn lower_media_for(messages: &[ChatMessage], policy: MediaPolicy) -> Option<
     Some(out)
 }
 
+pub struct MediaLoweringProvider {
+    inner: Arc<dyn ChatProvider>,
+    policy: MediaPolicy,
+}
+
+impl MediaLoweringProvider {
+    pub fn new(inner: Arc<dyn ChatProvider>, policy: MediaPolicy) -> Self {
+        Self { inner, policy }
+    }
+}
+
+#[async_trait]
+impl ChatProvider for MediaLoweringProvider {
+    fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
+        match lower_media_for(req.messages, self.policy) {
+            None => self.inner.chat(req),
+            Some(lowered) => {
+                let req = ChatRequest {
+                    messages: &lowered,
+                    ..req
+                };
+                self.inner.chat(req)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,33 +556,6 @@ mod tests {
                 assert_eq!(mime_type.as_deref(), Some("audio/ogg"));
             }
             other => panic!("expected File, got {other:?}"),
-        }
-    }
-}
-
-pub struct MediaLoweringProvider {
-    inner: Arc<dyn ChatProvider>,
-    policy: MediaPolicy,
-}
-
-impl MediaLoweringProvider {
-    pub fn new(inner: Arc<dyn ChatProvider>, policy: MediaPolicy) -> Self {
-        Self { inner, policy }
-    }
-}
-
-#[async_trait]
-impl ChatProvider for MediaLoweringProvider {
-    fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
-        match lower_media_for(req.messages, self.policy) {
-            None => self.inner.chat(req),
-            Some(lowered) => {
-                let req = ChatRequest {
-                    messages: &lowered,
-                    ..req
-                };
-                self.inner.chat(req)
-            }
         }
     }
 }
