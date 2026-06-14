@@ -18,7 +18,7 @@ use futures_util::StreamExt;
 use crate::agents::AgentRuntime;
 use crate::agents::context_engine::ContextEngine;
 use crate::agents::error::AgentError;
-use crate::agents::loop_breaker::LoopBreak;
+use crate::agents::loop_breaker::{LoopBreak, LoopBreakReason};
 use crate::agents::session::Session;
 use crate::agents::tokens::{estimate_history_tokens, estimate_tokens};
 use crate::agents::turn::{TurnContext, TurnResult};
@@ -473,10 +473,7 @@ impl Agent {
                             session.strip_trailing_tool_calls(remaining);
                         }
                         persist_last(session);
-                        return Err(AgentError::LoopBreak {
-                            reason: format!("{:?}", reason),
-                        }
-                        .into());
+                        return Err(AgentError::LoopBreak { reason }.into());
                     }
                     LoopBreak::None => {}
                 }
@@ -511,10 +508,13 @@ impl Agent {
                         session.strip_trailing_tool_calls(remaining);
                         persist_last(session);
                     }
-                    return Err(anyhow::anyhow!(
-                        "tool call limit reached ({}), loop broken",
-                        loop_breaker.max_tool_calls()
-                    ));
+                    return Err(AgentError::LoopBreak {
+                        reason: LoopBreakReason::MaxCalls {
+                            count: loop_breaker.total_calls(),
+                            limit: loop_breaker.max_tool_calls(),
+                        },
+                    }
+                    .into());
                 }
             }
 

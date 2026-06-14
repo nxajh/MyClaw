@@ -27,8 +27,16 @@ pub const MSG_TURN_FAILED: &str = "⚠️ 处理超时，未收到模型回复�
 /// (carries the real HTTP status) and falls back to substring heuristics on the
 /// error message for connection/timeout/chain-exhausted cases.
 pub fn user_facing_error_message(err: &anyhow::Error) -> String {
+    use crate::agents::error::AgentError;
     use crate::providers::ProviderHttpError;
     use crate::providers::fallback::{CHAIN_ALL_COOLING_TAG, CHAIN_EXHAUSTED_TAG};
+
+    // Typed agent errors — matched structurally, not via string heuristics.
+    if let Some(agent_err) = err.downcast_ref::<AgentError>() {
+        if let AgentError::LoopBreak { .. } = agent_err {
+            return "⚠️ 检测到重复操作，已自动中断。如需继续，请发送新消息。".to_string();
+        }
+    }
 
     if let Some(http) = err.downcast_ref::<ProviderHttpError>() {
         let too_long = http.message.contains("too long")
@@ -56,8 +64,6 @@ pub fn user_facing_error_message(err: &anyhow::Error) -> String {
         || s.contains("no completion marker")
     {
         "⚠️ 模型响应超时，请重试。"
-    } else if s.contains("loop broken") || s.contains("tool call limit") {
-        "⚠️ 工具调用次数达到上限，已自动中断。如需继续，请发送新消息。"
     } else if s.contains("error sending request")
         || s.contains("connection")
         || s.contains("broken pipe")
@@ -123,5 +129,32 @@ mod tests {
     fn unknown_falls_back_to_generic() {
         let e = anyhow::anyhow!("some unexpected internal state");
         assert_eq!(user_facing_error_message(&e), MSG_TURN_FAILED);
+    }
+
+    #[test]
+    fn loop_break_exact_repeat_maps_to_loop_message() {
+        let e: anyhow::Error = crate::agents::AgentError::LoopBreak {
+            reason: crate::agents::LoopBreakReason::ExactRepeat {
+                tool: "shell".into(),
+                count: 3,
+                threshold: 3,
+            },
+        }
+        .into();
+        let msg = user_facing_error_message(&e);
+        assert!(msg.contains("自动中断"), "got: {msg}");
+    }
+
+    #[test]
+    fn loop_break_max_calls_maps_to_loop_message() {
+        let e: anyhow::Error = crate::agents::AgentError::LoopBreak {
+            reason: crate::agents::LoopBreakReason::MaxCalls {
+                count: 200,
+                limit: 200,
+            },
+        }
+        .into();
+        let msg = user_facing_error_message(&e);
+        assert!(msg.contains("自动中断"), "got: {msg}");
     }
 }

@@ -7,13 +7,9 @@
 /// Errors produced by [`Agent::run`](crate::agents::Agent::run).
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
-    /// The loop-breaker aborted the turn due to a repetitive tool pattern.
-    #[error("loop breaker triggered: {reason}")]
-    LoopBreak { reason: String },
-
-    /// The per-turn tool call hard limit was exceeded.
-    #[error("tool call limit reached ({limit})")]
-    ToolLimitReached { limit: usize },
+    /// The loop-breaker aborted the turn (repetitive pattern or hard limit).
+    #[error("loop breaker triggered: {reason:?}")]
+    LoopBreak { reason: crate::agents::LoopBreakReason },
 
     /// The LLM stream produced no data within the configured timeout.
     #[error("stream chunk timeout after {secs}s")]
