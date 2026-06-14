@@ -113,24 +113,60 @@ impl SessionContext {
         let _turn_guard = self.turn_lock.lock().await;
         let mut session = self.session.lock().await;
 
-        let inbound_msg = inbound_msg;
         let content = inbound_msg.content.text.clone();
         let reply_target = inbound_msg.receiver.id.clone();
 
-        // Build file content parts from the inbound message's files before
-        // record_inbound converts to the persistable form.
+        // Persist inbound files to session-local storage so their lifetime
+        // matches the session.  Read the body stream (via
+        // ChannelFileBody::open) and write it under <session_dir>/files/.
+        // Falls back to the adapter's temp-file path_hint when the backend
+        // cannot persist (e.g. MemoryBackend in tests).
+        let session_id = session.id.clone();
         let media_parts: Vec<crate::providers::ContentPart> = {
             use crate::providers::ContentPart;
             let mut parts = Vec::new();
             for file in &inbound_msg.content.files {
-                if let Some(path) = file.body.path_hint() {
-                    parts.push(ContentPart::File {
-                        path: path.to_string(),
-                        mime_type: file.meta.mime_type.clone(),
-                        name: Some(file.meta.file_name.clone()),
-                        size_bytes: file.meta.size_bytes,
-                    });
-                }
+                let path = match &session.persist {
+                    Some(hook) => {
+                        let mut reader = file.body.open().await?;
+                        let mut data = Vec::new();
+                        tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut data).await?;
+                        match hook.save_file(
+                            &session_id,
+                            Some(&file.meta.file_name),
+                            &data,
+                            file.meta.mime_type.as_deref(),
+                        ) {
+                            Some(saved) => saved.path,
+                            None => match file.body.path_hint() {
+                                Some(hint) => hint.to_string(),
+                                None => {
+                                    tracing::warn!(
+                                        file = %file.meta.file_name,
+                                        "inbound file persist failed and no path_hint; skipping"
+                                    );
+                                    continue;
+                                }
+                            },
+                        }
+                    }
+                    None => match file.body.path_hint() {
+                        Some(hint) => hint.to_string(),
+                        None => {
+                            tracing::warn!(
+                                file = %file.meta.file_name,
+                                "no persist hook and no path_hint; skipping"
+                            );
+                            continue;
+                        }
+                    },
+                };
+                parts.push(ContentPart::File {
+                    path,
+                    mime_type: file.meta.mime_type.clone(),
+                    name: Some(file.meta.file_name.clone()),
+                    size_bytes: file.meta.size_bytes,
+                });
             }
             parts
         };
@@ -139,7 +175,8 @@ impl SessionContext {
         // SessionManager; capture a clone so the post-turn `add_user`
         // persistence call sees the same hook.
         let persist_hook = session.persist.clone();
-        session.record_inbound(inbound_msg);
+        // record_inbound is already done by dispatch_turn in the orchestrator
+        // inbound chain, so we don't repeat it here.
         let channel_for_send = channel.clone();
         // RFC §7.6: install per-turn streaming handle BEFORE Agent::run.
         // Channels that don't support streaming return None; the

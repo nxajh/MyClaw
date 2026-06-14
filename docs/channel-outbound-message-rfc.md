@@ -1,7 +1,7 @@
 # RFC: Channel Outbound 文件发送与统一 Message 接口
 
-> 状态：草案  
-> 日期：2026-06-12  
+> 状态：已实现
+> 日期：2026-06-14（实现完成）
 > 范围：Channel ↔ Session 消息边界、outbound 文件发送、`send_media` 升级为通用 `send_message` 工具
 
 ---
@@ -360,8 +360,8 @@ pub trait Channel: Send + Sync {
 
     async fn send_message(
         &self,
-        message: ChannelOutboundMessage,
-    ) -> anyhow::Result<SendResult>;
+        msg: &ChannelOutboundMessage,
+    ) -> anyhow::Result<OutboundSendResult>;
 
     async fn edit_message(
         &self,
@@ -674,7 +674,7 @@ legacy `image_urls` 不再是 channel 多模态输入；URL 作为普通文本�
 旧 `send_media.rs` 内部曾有 `infer_mime(file_name, data)`，provider/media/channel 也各有类似判断。建议抽到共享模块：
 
 ```rust
-pub enum FileKind {
+pub enum FileModality {
     Image,
     Audio,
     Video,
@@ -682,9 +682,8 @@ pub enum FileKind {
 }
 
 pub fn infer_mime_from_name(file_name: &str) -> Option<String>;
-pub async fn infer_mime_from_file_head(path: &Path) -> anyhow::Result<Option<String>>;
-pub fn kind_from_mime(mime_type: Option<&str>) -> FileKind;
-pub fn marker_for_file_kind(kind: FileKind, display: &str) -> String;
+pub async fn infer_mime_from_file_head(path: &Path) -> Option<String>;
+pub fn modality_from_mime(mime_type: Option<&str>, file_name: &str) -> FileModality;
 ```
 
 要求：
@@ -1008,7 +1007,7 @@ pub type SendResult = Option<MessageId>;
 
 ```rust
 #[derive(Debug, Clone, Default)]
-pub struct SendResult {
+pub struct OutboundSendResult {
     pub message_ids: Vec<MessageId>,
 }
 ```
@@ -1019,7 +1018,7 @@ pub struct SendResult {
 - 单条消息返回一个 id；
 - 多文件顺序发送返回多个 id；
 - `edit_message` / `delete_message` 仍针对单个 `MessageId` 操作；
-- 调用方如果只关心是否成功，只看 `Result<SendResult>` 的 `Ok/Err`。
+- 调用方如果只关心是否成功，只看 `Result<OutboundSendResult>` 的 `Ok/Err`。
 
 ### 14.5 多文件发送语义
 
@@ -1071,7 +1070,7 @@ pub struct ChannelCapabilities {
 
 ## 15. 最终形态示例
 
-### 14.1 工具调用
+### 15.1 工具调用
 
 模型调用：
 
@@ -1102,7 +1101,7 @@ let message = ChannelOutboundMessage {
     options: SendOptions::default(),
 };
 
-channel.send_message(message).await?;
+channel.send_message(&message).await?;
 ```
 
 channel adapter 看到的是：
@@ -1124,7 +1123,7 @@ channel adapter 看不到：
 - `Vec<u8>`；
 - base64。
 
-### 14.2 普通文本发送
+### 15.2 普通文本发送
 
 `SessionContext::process_turn` final answer fallback：
 
@@ -1135,12 +1134,19 @@ let message = ChannelOutboundMessage {
     options: SendOptions::default(),
 };
 
-channel.send_message(message).await?;
+channel.send_message(&message).await?;
 ```
 
 ---
 
-## 16. 结论
+## 16. 已知限制
+
+- **`SendOptions.cancellation_token`**：已在类型中声明但尚未在任何 adapter 发送路径中使用，作为预留扩展点保留。
+- **ClientChannel / WeChat outbound 文件**：当前 `supports_file_send: false`，不支持 outbound 文件发送。
+
+---
+
+## 17. 结论
 
 最终推荐方案：
 
