@@ -47,6 +47,12 @@ pub struct Message {
     #[serde(default)]
     pub audio: Option<Audio>,
     #[serde(default)]
+    pub video: Option<Video>,
+    #[serde(default)]
+    pub video_note: Option<VideoNote>,
+    #[serde(default)]
+    pub document: Option<Document>,
+    #[serde(default)]
     pub forward_from: Option<User>,
     #[serde(default)]
     pub forward_from_chat: Option<Chat>,
@@ -56,6 +62,33 @@ pub struct Message {
     pub forward_date: Option<i64>,
     #[serde(default)]
     pub reply_to_message: Option<Box<Message>>,
+}
+
+/// Telegram video message.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Video {
+    #[serde(default)]
+    pub file_id: String,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+}
+
+/// Telegram generic document (any non-media file).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Document {
+    #[serde(default)]
+    pub file_id: String,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub file_name: Option<String>,
+}
+
+/// Telegram video note (round video message).
+#[derive(Debug, Clone, Deserialize)]
+pub struct VideoNote {
+    #[serde(default)]
+    pub file_id: String,
 }
 
 /// Telegram voice message (OGG/Opus). `mime_type` is usually "audio/ogg".

@@ -68,7 +68,7 @@ impl ChannelCapabilities {
             supports_edit: false,
             supports_delete: false,
             supports_inline_buttons: true,
-            supports_file_send: false,
+            supports_file_send: true,
             supports_file_receive: true,
             supports_threads: false,
             message_chunk_limit: 65_536,
@@ -176,6 +176,10 @@ impl MessageReceiver {
 }
 
 /// Optional parameters for outbound sends via `Channel::send_message`.
+///
+/// Reserved extension point — `cancellation_token` is declared but not yet
+/// wired through any adapter send path. Kept so future send options
+/// (cancellation, priority, TTL) can be added without an API break.
 #[derive(Debug, Clone, Default)]
 pub struct SendOptions {
     pub cancellation_token: Option<CancellationToken>,

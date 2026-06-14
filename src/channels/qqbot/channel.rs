@@ -392,19 +392,6 @@ impl QQBotChannel {
             .to_string();
         let msg_id = data.get("id")?.as_str()?;
 
-        // Append image URLs as text markers so models can use fetch/http tools.
-        let mut content = content;
-        if let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) {
-            for a in attachments {
-                let ct = a.get("content_type").and_then(|v| v.as_str()).unwrap_or("");
-                if ct == "image" || ct.starts_with("image/") {
-                    if let Some(url) = a.get("url").and_then(|v| v.as_str()) {
-                        content.push_str(&format!("\n[图片URL: {url}]"));
-                    }
-                }
-            }
-        }
-
         Some(ChannelInboundMessage {
             id: msg_id.to_string(),
             sender: MessageSender::new(user_openid.to_string()),
@@ -430,19 +417,6 @@ impl QQBotChannel {
             .trim()
             .to_string();
         let msg_id = data.get("id")?.as_str()?;
-
-        // Append image URLs as text markers so models can use fetch/http tools.
-        let mut content = content;
-        if let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) {
-            for a in attachments {
-                let ct = a.get("content_type").and_then(|v| v.as_str()).unwrap_or("");
-                if ct == "image" || ct.starts_with("image/") {
-                    if let Some(url) = a.get("url").and_then(|v| v.as_str()) {
-                        content.push_str(&format!("\n[图片URL: {url}]"));
-                    }
-                }
-            }
-        }
 
         Some(ChannelInboundMessage {
             id: msg_id.to_string(),
@@ -651,6 +625,94 @@ impl QQBotChannel {
                 },
                 Err(e) => {
                     tracing::warn!("qqbot: image download failed for {full_url}: {e}");
+                }
+            }
+        }
+    }
+
+    /// Download video and generic file attachments from the raw inbound `data`
+    /// payload, save to temp files, and store in `msg.files`.
+    async fn ingest_video_file_attachments(
+        &self,
+        data: &serde_json::Value,
+        msg: &mut ChannelInboundMessage,
+    ) {
+        let Some(attachments) = data.get("attachments").and_then(|a| a.as_array()) else {
+            return;
+        };
+        for att in attachments {
+            let ct = att
+                .get("content_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            // Accept "video", "video/*", "file" (generic).
+            if !(ct == "video"
+                || ct.starts_with("video/")
+                || ct == "file"
+                || ct.starts_with("application/"))
+            {
+                continue;
+            }
+            let Some(url) = att.get("url").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let full_url = if url.starts_with("http") {
+                url.to_string()
+            } else {
+                format!("https://{url}")
+            };
+            match self
+                .http_client
+                .get(&full_url)
+                .send()
+                .await
+                .and_then(|r| r.error_for_status())
+            {
+                Ok(resp) => match resp.bytes().await {
+                    Ok(bytes) => {
+                        let mime = if ct.contains('/') {
+                            ct.to_string()
+                        } else if ct == "video" {
+                            "video/mp4".to_string()
+                        } else {
+                            "application/octet-stream".to_string()
+                        };
+                        let ext = att
+                            .get("filename")
+                            .and_then(|v| v.as_str())
+                            .and_then(|n| n.rsplit_once('.').map(|(_, e)| e.to_string()))
+                            .unwrap_or_else(|| {
+                                if ct == "video" || ct.starts_with("video/") {
+                                    "mp4".to_string()
+                                } else {
+                                    "bin".to_string()
+                                }
+                            });
+                        let file_name = att
+                            .get("filename")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| format!("attachment-{}.{}", uuid::Uuid::new_v4(), ext));
+                        let temp_path =
+                            std::env::temp_dir().join(format!("myclaw-qq-file-{}", uuid::Uuid::new_v4()));
+                        if tokio::fs::write(&temp_path, &bytes).await.is_ok() {
+                            tracing::debug!(url = %full_url, size = bytes.len(), %mime, "qqbot: attachment downloaded and saved to temp file");
+                            msg.content.files.push(ChannelFile {
+                                meta: ChannelFileMeta {
+                                    file_name,
+                                    mime_type: Some(mime),
+                                    size_bytes: Some(bytes.len() as u64),
+                                },
+                                body: std::sync::Arc::new(LocalFileBody::new(temp_path)),
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("qqbot: reading attachment bytes failed for {full_url}: {e}");
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("qqbot: attachment download failed for {full_url}: {e}");
                 }
             }
         }
@@ -1215,11 +1277,17 @@ impl Channel for QQBotChannel {
         &self,
         msg: &crate::channels::ChannelOutboundMessage,
     ) -> anyhow::Result<crate::channels::OutboundSendResult> {
-        let chunks = split_message_chunk(
-            &msg.content.text,
-            self.capabilities().message_chunk_limit,
-            self.capabilities().message_len_unit,
-        );
+        // When files are present, text is used as caption on the first file,
+        // not as a separate text message (RFC §14.5).
+        let chunks = if msg.content.files.is_empty() {
+            split_message_chunk(
+                &msg.content.text,
+                self.capabilities().message_chunk_limit,
+                self.capabilities().message_len_unit,
+            )
+        } else {
+            Vec::new()
+        };
         // reply_to_message_id carries the original message event ID for passive replies.
         let msg_id = msg.receiver.reply_to_message_id.as_deref().unwrap_or("");
 
@@ -1735,9 +1803,13 @@ impl QQBotChannel {
                         self.ingest_voice_attachments(&payload.d, &mut channel_msg)
                             .await;
 
-                        // Image: download and convert to base64 so vision models
+                        // Image: download and save to temp file so vision models
                         // can see the image without relying on proxy URL fetching.
                         self.ingest_image_attachments(&payload.d, &mut channel_msg)
+                            .await;
+
+                        // Video / file: download and save to temp file.
+                        self.ingest_video_file_attachments(&payload.d, &mut channel_msg)
                             .await;
 
                         if tx.send(channel_msg.clone()).await.is_err() {

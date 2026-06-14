@@ -388,8 +388,63 @@ impl ClientChannel {
                                                 }
                                             }
 
-                                            // Decode base64 images and save to temp files.
+                                            // Decode base64 files (images, audio, video, docs)
+                                            // and save to temp files. Accept both the legacy
+                                            // `image_base64` array (bare strings) and a richer
+                                            // `files_base64` array of {data, mime_type, file_name}.
                                             let mut image_files: Vec<ChannelFile> = Vec::new();
+                                            if let Some(arr) = parsed["files_base64"].as_array() {
+                                                use base64::Engine;
+                                                for (idx, entry) in arr.iter().enumerate() {
+                                                    let raw = match entry.get("data").and_then(|v| v.as_str()) {
+                                                        Some(s) => s,
+                                                        None => continue,
+                                                    };
+                                                    let b64 = raw
+                                                        .split_once("base64,")
+                                                        .map(|(_, b)| b)
+                                                        .unwrap_or(raw);
+                                                    let bytes = match base64::engine::general_purpose::STANDARD.decode(b64) {
+                                                        Ok(b) => b,
+                                                        Err(_) => continue,
+                                                    };
+                                                    let mime = entry
+                                                        .get("mime_type")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or("application/octet-stream")
+                                                        .to_string();
+                                                    let file_name = entry
+                                                        .get("file_name")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or(&format!("file-{}", idx + 1))
+                                                        .to_string();
+                                                    let ext = crate::providers::media::modality_from_mime(
+                                                        Some(&mime),
+                                                        &file_name,
+                                                    );
+                                                    let suffix = match ext {
+                                                        crate::providers::media::FileModality::Image => "img",
+                                                        crate::providers::media::FileModality::Audio => "audio",
+                                                        crate::providers::media::FileModality::Video => "video",
+                                                        crate::providers::media::FileModality::Other => "file",
+                                                    };
+                                                    let temp_path = std::env::temp_dir().join(format!(
+                                                        "myclaw-client-{suffix}-{}",
+                                                        uuid::Uuid::new_v4()
+                                                    ));
+                                                    if tokio::fs::write(&temp_path, &bytes).await.is_ok() {
+                                                        image_files.push(ChannelFile {
+                                                            meta: ChannelFileMeta {
+                                                                file_name,
+                                                                mime_type: Some(mime),
+                                                                size_bytes: Some(bytes.len() as u64),
+                                                            },
+                                                            body: std::sync::Arc::new(LocalFileBody::new(temp_path)),
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                            // Legacy: bare image_base64 array (backwards compat).
                                             if let Some(arr) = parsed["image_base64"].as_array() {
                                                 use base64::Engine;
                                                 for (idx, v) in arr.iter().enumerate() {
@@ -636,9 +691,6 @@ impl Channel for ClientChannel {
         &self,
         msg: &ChannelOutboundMessage,
     ) -> anyhow::Result<OutboundSendResult> {
-        if !msg.content.files.is_empty() {
-            anyhow::bail!("client channel does not support outbound file sending");
-        }
         // msg.receiver.id is the session_key (e.g. "client:ws-1")
         // Find the connection that owns this session.
         let ws_sender = {
@@ -657,12 +709,38 @@ impl Channel for ClientChannel {
         }; // Lock released here.
 
         if let Some(sender) = ws_sender {
-            let outgoing = serde_json::json!({
-                "type": "message",
-                "session": msg.receiver.id,
-                "content": msg.content.text,
-            });
-            let _ = sender.send(outgoing.to_string()).await;
+            if msg.content.files.is_empty() {
+                let outgoing = serde_json::json!({
+                    "type": "message",
+                    "session": msg.receiver.id,
+                    "content": msg.content.text,
+                });
+                let _ = sender.send(outgoing.to_string()).await;
+            } else {
+                // Send each file as a separate WebSocket message with base64 data.
+                use base64::Engine;
+                for (idx, file) in msg.content.files.iter().enumerate() {
+                    let mut reader = file.body.open().await?;
+                    let mut data = Vec::new();
+                    tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut data).await?;
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+                    let caption = if idx == 0 && !msg.content.text.trim().is_empty() {
+                        Some(msg.content.text.as_str())
+                    } else {
+                        None
+                    };
+                    let outgoing = serde_json::json!({
+                        "type": "file",
+                        "session": msg.receiver.id,
+                        "file_name": file.meta.file_name,
+                        "mime_type": file.meta.mime_type,
+                        "size": file.meta.size_bytes,
+                        "data": b64,
+                        "caption": caption,
+                    });
+                    let _ = sender.send(outgoing.to_string()).await;
+                }
+            }
         }
         Ok(OutboundSendResult::empty())
     }

@@ -1123,11 +1123,24 @@ impl TelegramChannel {
 
                 let has_text = msg.text.is_some();
                 let has_photo = msg.photo.is_some();
+                let has_voice = msg.voice.is_some();
+                let has_audio = msg.audio.is_some();
+                let has_video = msg.video.is_some();
+                let has_video_note = msg.video_note.is_some();
+                let has_document = msg.document.is_some();
                 let has_forward = msg.forward_from.is_some()
                     || msg.forward_from_chat.is_some()
                     || msg.forward_sender_name.is_some();
 
-                if !has_text && !has_photo && !has_forward {
+                if !has_text
+                    && !has_photo
+                    && !has_voice
+                    && !has_audio
+                    && !has_video
+                    && !has_video_note
+                    && !has_document
+                    && !has_forward
+                {
                     continue;
                 }
 
@@ -1256,6 +1269,99 @@ impl TelegramChannel {
                         }
                         Err(e) => {
                             warn!("Telegram download failed for audio {}: {e}", audio.file_id)
+                        }
+                    }
+                    if content.is_empty() {
+                        content = msg.caption.clone().unwrap_or_default();
+                    }
+                }
+
+                // Handle video / video_note / document messages.
+                if let Some(video) = &msg.video {
+                    let mime = video
+                        .mime_type
+                        .clone()
+                        .unwrap_or_else(|| "video/mp4".to_string());
+                    let fname = format!("video-{}", video.file_id);
+                    match self.download_file_bytes(&video.file_id).await {
+                        Ok(data) => {
+                            let temp_path = std::env::temp_dir()
+                                .join(format!("myclaw-tg-{}", uuid::Uuid::new_v4()));
+                            if tokio::fs::write(&temp_path, &data).await.is_ok() {
+                                files.push(ChannelFile {
+                                    meta: ChannelFileMeta {
+                                        file_name: fname,
+                                        mime_type: Some(mime),
+                                        size_bytes: Some(data.len() as u64),
+                                    },
+                                    body: Arc::new(LocalFileBody::new(temp_path)),
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Telegram download failed for video {}: {e}", video.file_id)
+                        }
+                    }
+                    if content.is_empty() {
+                        content = msg.caption.clone().unwrap_or_default();
+                    }
+                }
+                if let Some(vn) = &msg.video_note {
+                    let fname = format!("videonote-{}", vn.file_id);
+                    match self.download_file_bytes(&vn.file_id).await {
+                        Ok(data) => {
+                            let temp_path = std::env::temp_dir()
+                                .join(format!("myclaw-tg-{}", uuid::Uuid::new_v4()));
+                            if tokio::fs::write(&temp_path, &data).await.is_ok() {
+                                files.push(ChannelFile {
+                                    meta: ChannelFileMeta {
+                                        file_name: fname,
+                                        mime_type: Some("video/mp4".to_string()),
+                                        size_bytes: Some(data.len() as u64),
+                                    },
+                                    body: Arc::new(LocalFileBody::new(temp_path)),
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Telegram download failed for video_note {}: {e}", vn.file_id)
+                        }
+                    }
+                    if content.is_empty() {
+                        content = msg.caption.clone().unwrap_or_default();
+                    }
+                }
+                if let Some(doc) = &msg.document {
+                    let mime = doc
+                        .mime_type
+                        .clone()
+                        .or_else(|| {
+                            doc.file_name
+                                .as_deref()
+                                .and_then(crate::providers::media::infer_mime_from_name)
+                        })
+                        .unwrap_or_else(|| "application/octet-stream".to_string());
+                    let fname = doc
+                        .file_name
+                        .clone()
+                        .unwrap_or_else(|| format!("file-{}", doc.file_id));
+                    match self.download_file_bytes(&doc.file_id).await {
+                        Ok(data) => {
+                            let temp_path = std::env::temp_dir()
+                                .join(format!("myclaw-tg-{}", uuid::Uuid::new_v4()));
+                            if tokio::fs::write(&temp_path, &data).await.is_ok() {
+                                files.push(ChannelFile {
+                                    meta: ChannelFileMeta {
+                                        file_name: fname,
+                                        mime_type: Some(mime),
+                                        size_bytes: Some(data.len() as u64),
+                                    },
+                                    body: Arc::new(LocalFileBody::new(temp_path)),
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Telegram download failed for document {}: {e}", doc.file_id)
                         }
                     }
                     if content.is_empty() {
@@ -1441,7 +1547,14 @@ impl Channel for TelegramChannel {
         // We use a conservative limit because markdown_to_telegram_html() can
         // expand the text (HTML escaping + tags). If a chunk's HTML exceeds
         // 4096 after conversion, we re-split it using plain text.
-        let chunks = Self::chunk_for_telegram(&msg.content.text);
+        //
+        // When files are present, text is used as caption on the first file,
+        // not as a separate text message (RFC §14.5).
+        let chunks = if msg.content.files.is_empty() {
+            Self::chunk_for_telegram(&msg.content.text)
+        } else {
+            Vec::new()
+        };
 
         let count = chunks.len();
         let mut last_error = None;
@@ -1834,6 +1947,9 @@ mod tests {
             photo: None,
             voice: None,
             audio: None,
+            video: None,
+            video_note: None,
+            document: None,
             forward_from: Some(User {
                 id: 42,
                 username: Some("bob".into()),
@@ -1867,6 +1983,9 @@ mod tests {
             photo: None,
             voice: None,
             audio: None,
+            video: None,
+            video_note: None,
+            document: None,
             forward_from: None,
             forward_from_chat: Some(Chat {
                 id: -1_001_234_567_890_i64,
@@ -1901,6 +2020,9 @@ mod tests {
             photo: None,
             voice: None,
             audio: None,
+            video: None,
+            video_note: None,
+            document: None,
             forward_from: None,
             forward_from_chat: None,
             forward_sender_name: Some("Hidden User".into()),
@@ -1934,6 +2056,9 @@ mod tests {
             photo: None,
             voice: None,
             audio: None,
+            video: None,
+            video_note: None,
+            document: None,
             forward_from: None,
             forward_from_chat: None,
             forward_sender_name: None,
