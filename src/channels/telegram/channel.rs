@@ -1580,6 +1580,42 @@ impl Channel for TelegramChannel {
         Ok(crate::channels::OutboundSendResult { message_ids: ids })
     }
 
+    async fn edit_message(
+        &self,
+        receiver: &crate::channels::MessageReceiver,
+        message_id: &crate::channels::MessageId,
+        content: crate::channels::ChannelMessageContent,
+    ) -> anyhow::Result<()> {
+        let (chat_id_str, _) = Self::parse_reply_target(&receiver.id);
+        let chat_id: i64 = chat_id_str
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid chat_id: {chat_id_str}"))?;
+        let mid: i64 = message_id
+            .as_str()
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid message_id: {}", message_id.as_str()))?;
+        self.edit_message_text_raw(chat_id, mid, &content.text)
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_message(
+        &self,
+        receiver: &crate::channels::MessageReceiver,
+        message_id: &crate::channels::MessageId,
+    ) -> anyhow::Result<()> {
+        let (chat_id_str, _) = Self::parse_reply_target(&receiver.id);
+        let chat_id: i64 = chat_id_str
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid chat_id: {chat_id_str}"))?;
+        let mid: i64 = message_id
+            .as_str()
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid message_id: {}", message_id.as_str()))?;
+        self.delete_message_raw(chat_id, mid).await?;
+        Ok(())
+    }
+
     async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelInboundMessage>> {
         // Lazily fetch bot username for mention detection.
         if let Some(username) = self.fetch_bot_username().await {

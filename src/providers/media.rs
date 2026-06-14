@@ -79,6 +79,89 @@ pub fn marker_for_file(path: &str, mime: Option<&str>) -> String {
     }
 }
 
+/// Infer MIME type from file name extension. Returns `None` if unknown.
+pub fn infer_mime_from_name(file_name: &str) -> Option<String> {
+    let ext = file_name
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "bmp" => Some("image/bmp"),
+        "svg" => Some("image/svg+xml"),
+        "mp4" => Some("video/mp4"),
+        "webm" => Some("video/webm"),
+        "mov" => Some("video/quicktime"),
+        "mkv" => Some("video/x-matroska"),
+        "mp3" => Some("audio/mpeg"),
+        "wav" => Some("audio/wav"),
+        "ogg" => Some("audio/ogg"),
+        "flac" => Some("audio/flac"),
+        "m4a" => Some("audio/mp4"),
+        "aac" => Some("audio/aac"),
+        "pdf" => Some("application/pdf"),
+        "zip" => Some("application/zip"),
+        "txt" => Some("text/plain"),
+        "json" => Some("application/json"),
+        "csv" => Some("text/csv"),
+        "html" | "htm" => Some("text/html"),
+        "xml" => Some("application/xml"),
+        _ => None,
+    }
+    .map(|s| s.to_string())
+}
+
+/// Infer MIME type from the first bytes of a file (magic bytes).
+/// Reads at most 512 bytes. Returns `None` if unrecognised.
+pub async fn infer_mime_from_file_head(path: &Path) -> Option<String> {
+    const HEAD_LEN: usize = 512;
+    let mut buf = vec![0u8; HEAD_LEN];
+    let n = match tokio::fs::File::open(path).await {
+        Ok(mut f) => {
+            use tokio::io::AsyncReadExt;
+            f.read(&mut buf).await.unwrap_or(0)
+        }
+        Err(_) => return None,
+    };
+    let data = &buf[..n];
+
+    if data.len() >= 4 && &data[0..4] == b"\x89PNG" {
+        return Some("image/png".to_string());
+    }
+    if data.len() >= 2 && &data[0..2] == b"\xff\xd8" {
+        return Some("image/jpeg".to_string());
+    }
+    if data.len() >= 4 && &data[0..4] == b"GIF8" {
+        return Some("image/gif".to_string());
+    }
+    if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WAVE" {
+        return Some("audio/wav".to_string());
+    }
+    if data.len() >= 3 && &data[0..3] == b"ID3" {
+        return Some("audio/mpeg".to_string());
+    }
+    if data.len() >= 5 && &data[0..5] == b"%PDF-" {
+        return Some("application/pdf".to_string());
+    }
+    None
+}
+
+/// Combined inference: name extension first, then magic bytes, then
+/// `application/octet-stream` as final fallback.
+pub async fn infer_mime(file_name: &str, path: &Path) -> String {
+    if let Some(mime) = infer_mime_from_name(file_name) {
+        return mime;
+    }
+    if let Some(mime) = infer_mime_from_file_head(path).await {
+        return mime;
+    }
+    "application/octet-stream".to_string()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaTransport {
     Marker,

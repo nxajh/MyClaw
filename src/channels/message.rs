@@ -445,6 +445,27 @@ pub trait Channel: Send + Sync {
         anyhow::bail!("send_message not implemented by {}", self.name())
     }
 
+    /// Edit a previously sent message's content.
+    /// Default: not supported — channels that support edit override this.
+    async fn edit_message(
+        &self,
+        _receiver: &MessageReceiver,
+        _message_id: &MessageId,
+        _content: ChannelMessageContent,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("edit_message not supported by {}", self.name())
+    }
+
+    /// Delete a previously sent message.
+    /// Default: not supported — channels that support delete override this.
+    async fn delete_message(
+        &self,
+        _receiver: &MessageReceiver,
+        _message_id: &MessageId,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("delete_message not supported by {}", self.name())
+    }
+
     async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelInboundMessage>>;
     async fn health_check(&self) -> bool;
 

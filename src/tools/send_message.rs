@@ -14,7 +14,6 @@ use crate::channels::{
 use crate::providers::{Tool, ToolResult};
 
 const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB
-const MAGIC_READ_LEN: usize = 512;
 
 pub struct SendMessageTool;
 
@@ -244,54 +243,5 @@ async fn prepare_file(file_arg: SendMessageFileArg) -> anyhow::Result<ChannelFil
 }
 
 async fn infer_mime(file_name: &str, path: &Path) -> String {
-    let ext = file_name.rsplit('.').next().unwrap_or("").to_lowercase();
-    match ext.as_str() {
-        "png" => return "image/png".to_string(),
-        "jpg" | "jpeg" => return "image/jpeg".to_string(),
-        "gif" => return "image/gif".to_string(),
-        "webp" => return "image/webp".to_string(),
-        "mp4" => return "video/mp4".to_string(),
-        "mov" => return "video/quicktime".to_string(),
-        "mp3" => return "audio/mpeg".to_string(),
-        "wav" => return "audio/wav".to_string(),
-        "ogg" => return "audio/ogg".to_string(),
-        "flac" => return "audio/flac".to_string(),
-        "pdf" => return "application/pdf".to_string(),
-        "zip" => return "application/zip".to_string(),
-        "txt" => return "text/plain".to_string(),
-        "json" => return "application/json".to_string(),
-        "csv" => return "text/csv".to_string(),
-        _ => {}
-    }
-
-    let mut buf = vec![0u8; MAGIC_READ_LEN];
-    let n = match tokio::fs::File::open(path).await {
-        Ok(mut file) => {
-            use tokio::io::AsyncReadExt;
-            file.read(&mut buf).await.unwrap_or(0)
-        }
-        Err(_) => 0,
-    };
-    let data = &buf[..n];
-
-    if data.len() >= 4 && &data[0..4] == b"\x89PNG" {
-        return "image/png".to_string();
-    }
-    if data.len() >= 2 && &data[0..2] == b"\xff\xd8" {
-        return "image/jpeg".to_string();
-    }
-    if data.len() >= 4 && &data[0..4] == b"GIF8" {
-        return "image/gif".to_string();
-    }
-    if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WAVE" {
-        return "audio/wav".to_string();
-    }
-    if data.len() >= 3 && &data[0..3] == b"ID3" {
-        return "audio/mpeg".to_string();
-    }
-    if data.len() >= 5 && &data[0..5] == b"%PDF-" {
-        return "application/pdf".to_string();
-    }
-
-    "application/octet-stream".to_string()
+    crate::providers::media::infer_mime(file_name, path).await
 }
