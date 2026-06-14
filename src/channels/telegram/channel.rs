@@ -1527,15 +1527,15 @@ impl Channel for TelegramChannel {
             };
             use tokio_util::io::ReaderStream;
 
-            let mime = file.meta.mime_type.as_deref().unwrap_or_default();
-            let (method, part_name) = if mime.starts_with("image/") {
-                ("sendPhoto", "photo")
-            } else if mime.starts_with("audio/") {
-                ("sendAudio", "audio")
-            } else if mime.starts_with("video/") {
-                ("sendVideo", "video")
-            } else {
-                ("sendDocument", "document")
+            let modality = crate::providers::media::modality_from_mime(
+                file.meta.mime_type.as_deref(),
+                &file.meta.file_name,
+            );
+            let (method, part_name) = match modality {
+                crate::providers::media::FileModality::Image => ("sendPhoto", "photo"),
+                crate::providers::media::FileModality::Audio => ("sendAudio", "audio"),
+                crate::providers::media::FileModality::Video => ("sendVideo", "video"),
+                crate::providers::media::FileModality::Other => ("sendDocument", "document"),
             };
 
             let reader = file.body.open().await?;

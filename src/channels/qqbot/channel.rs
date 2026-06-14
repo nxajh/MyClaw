@@ -1332,22 +1332,16 @@ impl Channel for QQBotChannel {
             let mut reader = file.body.open().await?;
             let mut data = Vec::new();
             tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut data).await?;
-            let fname = file.meta.file_name.clone();
 
             // Determine file_type: 1=image, 2=video, 3=voice, 4=file
-            let file_type = match file.meta.mime_type.as_deref() {
-                Some(m) if m.starts_with("image/") => 1,
-                Some(m) if m.starts_with("video/") => 2,
-                Some(m) if m.starts_with("audio/") => 3,
-                _ => {
-                    let ext = fname.rsplit('.').next().unwrap_or("");
-                    match ext {
-                        "png" | "jpg" | "jpeg" | "gif" | "webp" => 1,
-                        "mp4" => 2,
-                        "mp3" | "wav" | "ogg" | "flac" | "silk" => 3,
-                        _ => 4,
-                    }
-                }
+            let file_type = match crate::providers::media::modality_from_mime(
+                file.meta.mime_type.as_deref(),
+                &file.meta.file_name,
+            ) {
+                crate::providers::media::FileModality::Image => 1,
+                crate::providers::media::FileModality::Video => 2,
+                crate::providers::media::FileModality::Audio => 3,
+                crate::providers::media::FileModality::Other => 4,
             };
 
             use base64::Engine;
