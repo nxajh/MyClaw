@@ -363,7 +363,7 @@ impl QQBotChannel {
                     id: event_id.to_string(),
                     sender: MessageSender::new(sender),
                     receiver: MessageReceiver::new(reply_target)
-                        .with_thread(original_msg_id.unwrap_or_default()),
+                        .with_reply_to(original_msg_id.unwrap_or_default()),
                     content: ChannelMessageContent::text(button_data.to_string()),
                     timestamp: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)

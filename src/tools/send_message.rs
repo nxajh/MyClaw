@@ -166,7 +166,16 @@ impl Tool for SendMessageTool {
 
         let mut receiver = MessageReceiver::new(reply_target);
         if let Some(ref last_msg) = session.last_message {
-            receiver.reply_to_message_id = Some(last_msg.id.clone());
+            // Prefer the inbound receiver's reply_to_message_id (set by
+            // QQBot INTERACTION_CREATE for button callbacks) over the
+            // generic message id (used by C2C/group passive replies).
+            receiver.reply_to_message_id = Some(
+                last_msg
+                    .receiver
+                    .reply_to_message_id
+                    .clone()
+                    .unwrap_or_else(|| last_msg.id.clone()),
+            );
             receiver.thread_id = last_msg.receiver.thread_id.clone();
         }
 

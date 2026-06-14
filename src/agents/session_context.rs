@@ -254,10 +254,23 @@ impl SessionContext {
                 if delivery != crate::channels::StreamDelivery::FinalDelivered {
                     if let Some(ch) = channel_for_send {
                         if !turn_result.text.trim().is_empty() {
+                            let receiver = {
+                                let mut r =
+                                    crate::channels::MessageReceiver::new(reply_target.clone());
+                                if let Some(ref last_msg) = session.last_message {
+                                    r.reply_to_message_id = Some(
+                                        last_msg
+                                            .receiver
+                                            .reply_to_message_id
+                                            .clone()
+                                            .unwrap_or_else(|| last_msg.id.clone()),
+                                    );
+                                    r.thread_id = last_msg.receiver.thread_id.clone();
+                                }
+                                r
+                            };
                             let message = crate::channels::ChannelOutboundMessage {
-                                receiver: crate::channels::MessageReceiver::new(
-                                    reply_target.clone(),
-                                ),
+                                receiver,
                                 content: crate::channels::ChannelMessageContent::text(
                                     turn_result.text.clone(),
                                 ),

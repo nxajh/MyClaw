@@ -98,8 +98,19 @@ impl Tool for AskUserTool {
             }
         };
 
+        let mut receiver = MessageReceiver::new(reply_target);
+        if let Some(ref last_msg) = session.last_message {
+            receiver.reply_to_message_id = Some(
+                last_msg
+                    .receiver
+                    .reply_to_message_id
+                    .clone()
+                    .unwrap_or_else(|| last_msg.id.clone()),
+            );
+            receiver.thread_id = last_msg.receiver.thread_id.clone();
+        }
         let message = ChannelOutboundMessage {
-            receiver: MessageReceiver::new(reply_target),
+            receiver,
             content: ChannelMessageContent::text(question),
             options: Default::default(),
         };

@@ -208,8 +208,12 @@ impl Interceptor for CrashRecovery {
                     None => return Flow::Stop,
                 };
                 let message = ChannelOutboundMessage {
-                    receiver: MessageReceiver::new(msg.receiver.id.clone())
-                        .with_reply_to(msg.id.clone()),
+                    receiver: MessageReceiver::new(msg.receiver.id.clone()).with_reply_to(
+                        msg.receiver
+                            .reply_to_message_id
+                            .clone()
+                            .unwrap_or_else(|| msg.id.clone()),
+                    ),
                     content: retry_abort_content(MSG_INCOMPLETE_TURN, &sk),
                     options: Default::default(),
                 };
@@ -257,7 +261,11 @@ impl Interceptor for SlashCommand {
         let runtime_cmd = ctx.runtime.clone();
         let channel_cmd = ctx.channel(&key.account_key());
         let rt_cmd = msg.receiver.id.clone();
-        let msg_id_cmd = msg.id.clone();
+        let msg_id_cmd = msg
+            .receiver
+            .reply_to_message_id
+            .clone()
+            .unwrap_or_else(|| msg.id.clone());
 
         tokio::spawn(async move {
             let cmd_ctx = commands::CommandContext {
@@ -339,6 +347,13 @@ pub(super) async fn dispatch_turn(
     let session_ctx = ctx.sessions.get_or_create_context(&sk);
     let runtime = ctx.runtime.clone();
     let reply_target = msg.receiver.id.clone();
+    // Capture passive-reply routing before msg is moved into process_turn.
+    let passive_reply_id = msg
+        .receiver
+        .reply_to_message_id
+        .clone()
+        .unwrap_or_else(|| msg.id.clone());
+    let inbound_thread_id = msg.receiver.thread_id.clone();
 
     tokio::spawn(async move {
         // Successful turns: process_turn does the final `channel.send_message(text)`
@@ -348,8 +363,16 @@ pub(super) async fn dispatch_turn(
             .await;
         if let Err(ref e) = result {
             let text = crate::agents::user_messages::user_facing_error_message(e);
+            let receiver = {
+                let mut r = MessageReceiver::new(reply_target)
+                    .with_reply_to(passive_reply_id.clone());
+                if let Some(tid) = inbound_thread_id.clone() {
+                    r = r.with_thread(tid);
+                }
+                r
+            };
             let message = ChannelOutboundMessage {
-                receiver: MessageReceiver::new(reply_target),
+                receiver,
                 content: ChannelMessageContent::text(text),
                 options: Default::default(),
             };
