@@ -32,10 +32,8 @@ pub fn user_facing_error_message(err: &anyhow::Error) -> String {
     use crate::providers::fallback::{CHAIN_ALL_COOLING_TAG, CHAIN_EXHAUSTED_TAG};
 
     // Typed agent errors — matched structurally, not via string heuristics.
-    if let Some(agent_err) = err.downcast_ref::<AgentError>() {
-        if let AgentError::LoopBreak { .. } = agent_err {
-            return "⚠️ 检测到重复操作，已自动中断。如需继续，请发送新消息。".to_string();
-        }
+    if let Some(AgentError::LoopBreak { .. }) = err.downcast_ref::<AgentError>() {
+        return "⚠️ 检测到重复操作，已自动中断。如需继续，请发送新消息。".to_string();
     }
 
     if let Some(http) = err.downcast_ref::<ProviderHttpError>() {
