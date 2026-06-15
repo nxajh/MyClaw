@@ -99,19 +99,21 @@ impl TokenManager {
         }
     }
 
-    /// Get a valid access token from cache.
-    /// The background task ensures the token is always fresh; this is a read-only fast path.
+    /// Get a valid access token from cache, refreshing automatically if expired.
+    /// The background task proactively refreshes tokens before expiry; this
+    /// method acts as a safety net for the race where the cached token has
+    /// expired between background refresh cycles.
     pub async fn get_token(&self) -> anyhow::Result<String> {
-        let state = self.state.read().await;
-        if let Some(ref s) = *state {
-            if s.expires_at > std::time::SystemTime::now() {
-                return Ok(s.access_token.clone());
+        {
+            let state = self.state.read().await;
+            if let Some(ref s) = *state {
+                if s.expires_at > std::time::SystemTime::now() {
+                    return Ok(s.access_token.clone());
+                }
             }
         }
-        drop(state);
-        Err(anyhow::anyhow!(
-            "QQ Bot token not available (expired or not initialized)"
-        ))
+        // Token expired or not yet initialized — refresh now.
+        self.do_refresh().await
     }
 
     /// Force refresh the access token.
