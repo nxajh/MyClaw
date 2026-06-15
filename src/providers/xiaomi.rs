@@ -1,33 +1,22 @@
-//! Xiaomi MiMo provider — dual-protocol: Anthropic (default) + OpenAI (media).
+//! Xiaomi MiMo provider — dual-protocol: Anthropic or OpenAI.
 //!
-//! Text and image requests use the Anthropic Messages API (with MiMo-specific
-//! thinking patches). When messages contain video or audio `ContentPart::File`
-//! entries, the provider transparently switches to the OpenAI Chat Completions
-//! endpoint which supports `video_url` and `input_audio` content types.
-//!
-//! Supported models (per official docs https://mimo.mi.com/docs/zh-CN/api/chat/openai-api):
-//! - mimo-v2.5-pro  — text + image only (Anthropic)
-//! - mimo-v2.5      — text + image + video + audio (OpenAI)
-//! - mimo-v2-omni   — text + image + video + audio (OpenAI)
+//! The protocol is determined by the user's config (`protocol = "anthropic"` or
+//! `protocol = "openai"`). When Anthropic, uses mimo-v2.5-pro with MiMo-specific
+//! thinking patches. When OpenAI, uses the standard OpenAI Chat Completions
+//! client which supports text, image, video, and audio inputs.
 
 use async_trait::async_trait;
 
-use crate::providers::capability_chat::ContentPart;
-use crate::providers::media::FileModality;
-use crate::providers::protocols::anthropic::message_rendering::build_anthropic_body;
 use crate::providers::{BoxStream, ChatProvider, ChatRequest, StreamEvent};
 
 const DEFAULT_BASE_URL: &str = "https://api.xiaomimimo.com/anthropic";
-
-/// Model name used for video/audio requests (OpenAI endpoint).
-/// mimo-v2.5 supports video + audio per official documentation.
-const MEDIA_MODEL: &str = "mimo-v2.5";
 
 #[derive(Clone)]
 pub struct XiaomiProvider {
     base_url: String,
     api_key: String,
     user_agent: Option<String>,
+    openai: bool,
 }
 
 impl XiaomiProvider {
@@ -36,6 +25,7 @@ impl XiaomiProvider {
             base_url: DEFAULT_BASE_URL.to_string(),
             api_key,
             user_agent: None,
+            openai: false,
         }
     }
 
@@ -44,11 +34,18 @@ impl XiaomiProvider {
             base_url,
             api_key,
             user_agent: None,
+            openai: false,
         }
     }
 
     pub fn with_user_agent(mut self, user_agent: String) -> Self {
         self.user_agent = Some(user_agent);
+        self
+    }
+
+    /// When set, requests are sent via OpenAI Chat Completions protocol.
+    pub fn with_openai(mut self) -> Self {
+        self.openai = true;
         self
     }
 
@@ -62,26 +59,6 @@ impl XiaomiProvider {
             base.to_string()
         }
     }
-}
-
-/// Returns true if any message contains a `ContentPart::File` with video or
-/// audio modality. These require the OpenAI endpoint.
-fn has_media_content(messages: &[crate::providers::ChatMessage]) -> bool {
-    messages.iter().any(|m| {
-        m.parts.iter().any(|p| {
-            if let ContentPart::File {
-                path, mime_type, ..
-            } = p
-            {
-                matches!(
-                    crate::providers::media::modality_from_mime(mime_type.as_deref(), path),
-                    FileModality::Video | FileModality::Audio
-                )
-            } else {
-                false
-            }
-        })
-    })
 }
 
 /// MiMo requires that every assistant message with tool_calls also contains a
@@ -119,23 +96,16 @@ fn patch_mimo_thinking(body: &mut serde_json::Value) {
 #[async_trait]
 impl ChatProvider for XiaomiProvider {
     fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
-        if has_media_content(req.messages) {
-            // ── OpenAI path for video / audio ────────────────────────────────
-            tracing::info!(
-                model = %req.model,
-                media_model = MEDIA_MODEL,
-                "XiaomiProvider: detected video/audio content, routing via OpenAI protocol"
-            );
-
+        if self.openai {
+            // ── OpenAI path ──────────────────────────────────────────────
             use crate::providers::protocols::openai::chat_completions::OpenAiChatCompletionsClient;
 
             let openai_base = self.openai_base_url();
-
-            // Override model to the media-capable one.
-            let media_req = ChatRequest {
-                model: MEDIA_MODEL,
-                ..req
-            };
+            tracing::debug!(
+                base_url = %openai_base,
+                model = %req.model,
+                "XiaomiProvider: using OpenAI protocol"
+            );
 
             let client = OpenAiChatCompletionsClient::new(
                 self.api_key.clone(),
@@ -146,23 +116,20 @@ impl ChatProvider for XiaomiProvider {
             } else {
                 client
             };
-            // OpenAiChatCompletionsClient.chat() builds the body internally
-            // via render_openai_chat_body which already handles video_url,
-            // input_audio, and image_url content parts.
-            client.chat(media_req)
+            client.chat(req)
         } else {
-            // ── Anthropic path (default) ─────────────────────────────────────
+            // ── Anthropic path (default) ─────────────────────────────────
             use crate::providers::protocols::anthropic::messages::AnthropicMessagesClient;
 
             let thinking_enabled = req.thinking.as_ref().is_some_and(|t| t.enabled);
-            let mut body = build_anthropic_body(&req);
+            let mut body = crate::providers::protocols::anthropic::message_rendering::build_anthropic_body(&req);
 
-            // MiMo-specific: MiMo ALWAYS requires a thinking block in every assistant
-            // message that contains tool_use, regardless of whether the thinking
-            // parameter is enabled.
+            // MiMo-specific: MiMo ALWAYS requires a thinking block in every
+            // assistant message that contains tool_use.
             patch_mimo_thinking(&mut body);
 
-            let client = AnthropicMessagesClient::new(self.api_key.clone(), self.base_url.clone());
+            let client =
+                AnthropicMessagesClient::new(self.api_key.clone(), self.base_url.clone());
             let client = if let Some(ref ua) = self.user_agent {
                 client.with_user_agent(ua.clone())
             } else {

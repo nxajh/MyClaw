@@ -250,18 +250,14 @@ impl MediaPolicy {
 
         let audio_policy = match provider_id.as_str() {
             well_known::OPENAI => MediaInputPolicy::inline_base64(audio, Some(25 * 1024 * 1024)),
-            well_known::XIAOMI | well_known::MINIMAX
+            // Xiaomi OpenAI protocol supports input_audio natively.
+            well_known::XIAOMI
                 if protocol == crate::config::provider::Protocol::OpenAi =>
             {
                 MediaInputPolicy::inline_base64(audio, Some(25 * 1024 * 1024))
             }
-            // Xiaomi uses Anthropic protocol by default but has a dual-protocol
-            // fallback: when messages contain audio, the provider switches to
-            // OpenAI format on-the-fly. Always pass through (model_supports=true)
-            // regardless of the current model's declared modalities.
-            well_known::XIAOMI => {
-                MediaInputPolicy::inline_base64(true, Some(25 * 1024 * 1024))
-            }
+            // Xiaomi Anthropic protocol: audio/video not supported by the
+            // Anthropic Messages wire format; fall back to text markers.
             _ => MediaInputPolicy::marker(audio),
         };
 
@@ -269,16 +265,11 @@ impl MediaPolicy {
             well_known::GLM | well_known::GENERIC => {
                 MediaInputPolicy::inline_base64(video, Some(50 * 1024 * 1024))
             }
-            well_known::XIAOMI | well_known::MINIMAX
+            // Xiaomi OpenAI protocol supports video_url natively.
+            well_known::XIAOMI
                 if protocol == crate::config::provider::Protocol::OpenAi =>
             {
                 MediaInputPolicy::inline_base64(video, Some(50 * 1024 * 1024))
-            }
-            // Xiaomi dual-protocol: always pass video through so the provider
-            // can detect it and switch to OpenAI format regardless of the
-            // current model's declared modalities.
-            well_known::XIAOMI => {
-                MediaInputPolicy::inline_base64(true, Some(50 * 1024 * 1024))
             }
             _ => MediaInputPolicy::marker(video),
         };

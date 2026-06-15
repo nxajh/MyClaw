@@ -154,12 +154,15 @@ impl ProviderFactory {
                 }
                 Ok(Box::new(p))
             }
-            // ── Xiaomi: dual-protocol provider (Anthropic default, OpenAI for media) ──
+            // ── Xiaomi: config-driven protocol (Anthropic or OpenAI) ──
             (well_known::XIAOMI, _) => {
                 let mut p = crate::providers::xiaomi::XiaomiProvider::with_base_url(
                     request.api_key,
                     request.base_url,
                 );
+                if protocol == Protocol::OpenAi {
+                    p = p.with_openai();
+                }
                 if let Some(ua) = request.user_agent {
                     p = p.with_user_agent(ua);
                 }
