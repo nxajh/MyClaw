@@ -176,7 +176,10 @@ impl SessionContext {
         // persistence call sees the same hook.
         let persist_hook = session.persist.clone();
         // record_inbound is already done by dispatch_turn in the orchestrator
-        // inbound chain, so we don't repeat it here.
+        // inbound chain on a *standalone* Session clone.  We must repeat it
+        // here on the SessionContext-owned Session so that tools like
+        // `send_message` can resolve `session.reply_target()`.
+        session.record_inbound(inbound_msg.clone());
         let channel_for_send = channel.clone();
         // RFC §7.6: install per-turn streaming handle BEFORE Agent::run.
         // Channels that don't support streaming return None; the
