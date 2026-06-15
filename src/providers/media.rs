@@ -257,10 +257,10 @@ impl MediaPolicy {
             }
             // Xiaomi uses Anthropic protocol by default but has a dual-protocol
             // fallback: when messages contain audio, the provider switches to
-            // OpenAI format on-the-fly. Allow the file to pass through so the
-            // provider can make that decision.
+            // OpenAI format on-the-fly. Always pass through (model_supports=true)
+            // regardless of the current model's declared modalities.
             well_known::XIAOMI => {
-                MediaInputPolicy::inline_base64(audio, Some(25 * 1024 * 1024))
+                MediaInputPolicy::inline_base64(true, Some(25 * 1024 * 1024))
             }
             _ => MediaInputPolicy::marker(audio),
         };
@@ -274,9 +274,11 @@ impl MediaPolicy {
             {
                 MediaInputPolicy::inline_base64(video, Some(50 * 1024 * 1024))
             }
-            // Xiaomi dual-protocol: see audio_policy comment above.
+            // Xiaomi dual-protocol: always pass video through so the provider
+            // can detect it and switch to OpenAI format regardless of the
+            // current model's declared modalities.
             well_known::XIAOMI => {
-                MediaInputPolicy::inline_base64(video, Some(50 * 1024 * 1024))
+                MediaInputPolicy::inline_base64(true, Some(50 * 1024 * 1024))
             }
             _ => MediaInputPolicy::marker(video),
         };
