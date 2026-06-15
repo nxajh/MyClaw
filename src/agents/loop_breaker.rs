@@ -8,6 +8,7 @@
 //!      the same result hash (suggesting the tool keeps returning the same output).
 
 use std::collections::{HashSet, VecDeque};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -66,6 +67,12 @@ pub struct LoopBreakerConfig {
     /// (empty grep, exit code 0) across different args without actually looping.
     #[serde(default = "default_relaxed_tools")]
     pub relaxed_tools: Vec<String>,
+    /// Rapid-repeat window (seconds). ExactRepeat only triggers when the
+    /// threshold is reached *within* this time span. Calls spread over a
+    /// longer period (e.g. polling with `sleep 120` between checks) are
+    /// legitimate and will not trigger.
+    #[serde(default = "default_rapid_repeat_window")]
+    pub rapid_repeat_window_secs: u64,
 }
 
 fn default_max_tool_calls() -> usize {
@@ -86,6 +93,9 @@ fn default_no_progress_threshold() -> usize {
 fn default_relaxed_tools() -> Vec<String> {
     vec!["shell".to_string()]
 }
+fn default_rapid_repeat_window() -> u64 {
+    60
+}
 
 impl Default for LoopBreakerConfig {
     fn default() -> Self {
@@ -96,6 +106,7 @@ impl Default for LoopBreakerConfig {
             ping_pong_rounds: default_ping_pong_rounds(),
             no_progress_threshold: default_no_progress_threshold(),
             relaxed_tools: default_relaxed_tools(),
+            rapid_repeat_window_secs: default_rapid_repeat_window(),
         }
     }
 }
@@ -112,6 +123,11 @@ struct ToolInvocation {
     /// normal tool output). Timeout retries are expected behaviour and
     /// must not count towards exact-repeat detection.
     is_timeout: bool,
+    /// When this invocation was recorded. Used by ExactRepeat to
+    /// distinguish a tight loop (3 identical calls within seconds) from
+    /// a legitimate polling pattern (same command, same result, but each
+    /// call spans minutes — e.g. `sleep 120 && tail build.log`).
+    timestamp: Instant,
 }
 
 // ── LoopBreaker ───────────────────────────────────────────────────────────────
@@ -183,6 +199,7 @@ impl LoopBreakerCounter {
             args_hash: simple_hash(args),
             result_hash: simple_hash(result),
             is_timeout: result.contains("timed out"),
+            timestamp: Instant::now(),
         };
         self.window.push_back(invocation);
 
@@ -244,6 +261,9 @@ impl LoopBreakerCounter {
             return None;
         }
         let mut count = 1usize;
+        // Track the earliest invocation in the current streak for the
+        // rapid-repeat window check below.
+        let mut streak_start = first.timestamp;
         for inv in window.iter().skip(1) {
             if inv.tool_name == first.tool_name && inv.args_hash == first.args_hash {
                 // Timeout entries are skipped — they are infrastructure
@@ -256,6 +276,7 @@ impl LoopBreakerCounter {
                 if inv.result_hash != first.result_hash {
                     break;
                 }
+                streak_start = inv.timestamp;
                 count += 1;
             } else {
                 break;
@@ -263,6 +284,14 @@ impl LoopBreakerCounter {
         }
 
         if count >= self.config.exact_repeat_threshold {
+            // Rapid-repeat gate: only break if the streak fits within the
+            // configured window. Calls spread over a longer period (e.g.
+            // `sleep 120 && tail build.log` repeated 3 times over 6 minutes)
+            // are legitimate polling, not a tight loop.
+            let span = first.timestamp.duration_since(streak_start);
+            if span.as_secs() >= self.config.rapid_repeat_window_secs {
+                return None;
+            }
             return Some(LoopBreakReason::ExactRepeat {
                 tool: first.tool_name.clone(),
                 count,
@@ -814,5 +843,61 @@ mod tests {
         let long_a = format!("{}middle_A{}", "a".repeat(200), "z".repeat(200));
         let long_b = format!("{}middle_B{}", "a".repeat(200), "z".repeat(200));
         assert_ne!(simple_hash(&long_a), simple_hash(&long_b));
+    }
+
+    // ── Rapid-repeat window ───────────────────────────────────────────────
+
+    #[test]
+    fn exact_repeat_not_triggered_for_slow_polling() {
+        // Same tool + same args + same result 3 times, but with timestamps
+        // spread out to simulate `sleep 120` between calls.
+        let mut lb = default_breaker();
+
+        // First call.
+        assert_eq!(
+            lb.record_and_check("shell", r#"{"c":"sleep 120 && tail log"}"#, "still running"),
+            LoopBreak::None
+        );
+
+        // Second call.
+        assert_eq!(
+            lb.record_and_check("shell", r#"{"c":"sleep 120 && tail log"}"#, "still running"),
+            LoopBreak::None
+        );
+
+        // Backdate the two existing window entries by 100s to simulate
+        // that significant time has elapsed between calls.
+        let old = std::time::Instant::now() - std::time::Duration::from_secs(100);
+        for inv in lb.window.iter_mut() {
+            inv.timestamp = old;
+        }
+
+        // Third call now — the streak spans > 60s, should NOT trigger.
+        let result = lb.record_and_check("shell", r#"{"c":"sleep 120 && tail log"}"#, "still running");
+        assert_eq!(
+            result,
+            LoopBreak::None,
+            "slow polling (span > 60s) should not trigger ExactRepeat"
+        );
+    }
+
+    #[test]
+    fn exact_repeat_triggered_for_rapid_loop() {
+        // Same tool + same args + same result 3 times, all within seconds.
+        let mut lb = default_breaker();
+        let tool = "shell";
+        let args = r#"{"c":"cat /tmp/x"}"#;
+        let result = "empty";
+
+        assert_eq!(lb.record_and_check(tool, args, result), LoopBreak::None);
+        assert_eq!(lb.record_and_check(tool, args, result), LoopBreak::None);
+
+        // Third call within the rapid-repeat window → triggers.
+        match lb.record_and_check(tool, args, result) {
+            LoopBreak::Detected(LoopBreakReason::ExactRepeat { count, .. }) => {
+                assert_eq!(count, 3);
+            }
+            other => panic!("expected ExactRepeat for rapid loop, got {:?}", other),
+        }
     }
 }
