@@ -1440,6 +1440,8 @@ impl Channel for QQBotChannel {
 
             let token = self.token_manager.get_token().await?;
             let ua = user_agent();
+
+            // Upload with token-expired retry (same pattern as send_rest_with_retry).
             let upload_resp = self
                 .http_client
                 .post(&files_url)
@@ -1451,11 +1453,36 @@ impl Channel for QQBotChannel {
                 .await
                 .map_err(|e| anyhow::anyhow!("upload failed: {e}"))?;
 
-            if !upload_resp.status().is_success() {
+            let upload_resp = if !upload_resp.status().is_success() {
                 let status = upload_resp.status();
                 let text = upload_resp.text().await.unwrap_or_default();
-                return Err(anyhow::anyhow!("upload returned {status}: {text}"));
-            }
+
+                // Token expired? Force-refresh and retry once.
+                if status.as_u16() == 401 || text.contains("11244") {
+                    warn!(status = %status, "file upload got token-expired error, refreshing and retrying");
+                    let new_token = self.token_manager.refresh().await?;
+                    let retry_resp = self
+                        .http_client
+                        .post(&files_url)
+                        .header("Authorization", format!("QQBot {}", new_token))
+                        .header("Content-Type", "application/json")
+                        .header("User-Agent", &ua)
+                        .json(&upload_body)
+                        .send()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("upload retry failed: {e}"))?;
+                    if !retry_resp.status().is_success() {
+                        let s = retry_resp.status();
+                        let t = retry_resp.text().await.unwrap_or_default();
+                        return Err(anyhow::anyhow!("upload returned {s}: {t}"));
+                    }
+                    retry_resp
+                } else {
+                    return Err(anyhow::anyhow!("upload returned {status}: {text}"));
+                }
+            } else {
+                upload_resp
+            };
 
             let upload_result: serde_json::Value = upload_resp
                 .json()
