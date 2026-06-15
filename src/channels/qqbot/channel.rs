@@ -1436,6 +1436,7 @@ impl Channel for QQBotChannel {
                 "file_type": file_type,
                 "srv_send_msg": false,
                 "file_data": file_data,
+                "file_name": file.meta.file_name,
             });
 
             let token = self.token_manager.get_token().await?;
