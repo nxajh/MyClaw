@@ -1,26 +1,27 @@
-//! Xiaomi MiMo provider — implements ChatProvider via Anthropic-compatible API.
+//! Xiaomi MiMo provider — dual-protocol: Anthropic (default) + OpenAI (media).
 //!
-//! Xiaomi MiMo uses the Anthropic Messages API protocol.
-//! Endpoint: https://api.xiaomimimo.com/anthropic/v1/messages
-//! Auth: Bearer token or api-key header.
+//! Text and image requests use the Anthropic Messages API (with MiMo-specific
+//! thinking patches). When messages contain video or audio `ContentPart::File`
+//! entries, the provider transparently switches to the OpenAI Chat Completions
+//! endpoint which supports `video_url` and `input_audio` content types.
 //!
-//! Key differences from Anthropic:
-//! - Different base URL
-//! - Usage includes `cache_read_input_tokens`
-//! - Extra stop reason: `repetition_truncation`
-//! - MiMo ALWAYS returns reasoning_content and requires it on every assistant
-//!   tool_call message in subsequent turns (empty thinking block inserted if
-//!   missing).
-//!
-//! The SSE parsing is identical to Anthropic, so this provider delegates
-//! to `AnthropicMessagesClient` from the protocols layer.
+//! Supported models (per official docs https://mimo.mi.com/docs/zh-CN/api/chat/openai-api):
+//! - mimo-v2.5-pro  — text + image only (Anthropic)
+//! - mimo-v2.5      — text + image + video + audio (OpenAI)
+//! - mimo-v2-omni   — text + image + video + audio (OpenAI)
 
 use async_trait::async_trait;
 
+use crate::providers::capability_chat::ContentPart;
+use crate::providers::media::FileModality;
 use crate::providers::protocols::anthropic::message_rendering::build_anthropic_body;
 use crate::providers::{BoxStream, ChatProvider, ChatRequest, StreamEvent};
 
 const DEFAULT_BASE_URL: &str = "https://api.xiaomimimo.com/anthropic";
+
+/// Model name used for video/audio requests (OpenAI endpoint).
+/// mimo-v2.5 supports video + audio per official documentation.
+const MEDIA_MODEL: &str = "mimo-v2.5";
 
 #[derive(Clone)]
 pub struct XiaomiProvider {
@@ -50,6 +51,37 @@ impl XiaomiProvider {
         self.user_agent = Some(user_agent);
         self
     }
+
+    /// Derive the OpenAI-compatible base URL from the Anthropic base URL.
+    /// e.g. `https://api.xiaomimimo.com/anthropic` → `https://api.xiaomimimo.com`
+    fn openai_base_url(&self) -> String {
+        let base = self.base_url.trim_end_matches('/');
+        if let Some(pos) = base.rfind("/anthropic") {
+            base[..pos].to_string()
+        } else {
+            base.to_string()
+        }
+    }
+}
+
+/// Returns true if any message contains a `ContentPart::File` with video or
+/// audio modality. These require the OpenAI endpoint.
+fn has_media_content(messages: &[crate::providers::ChatMessage]) -> bool {
+    messages.iter().any(|m| {
+        m.parts.iter().any(|p| {
+            if let ContentPart::File {
+                path, mime_type, ..
+            } = p
+            {
+                matches!(
+                    crate::providers::media::modality_from_mime(mime_type.as_deref(), path),
+                    FileModality::Video | FileModality::Audio
+                )
+            } else {
+                false
+            }
+        })
+    })
 }
 
 /// MiMo requires that every assistant message with tool_calls also contains a
@@ -87,23 +119,56 @@ fn patch_mimo_thinking(body: &mut serde_json::Value) {
 #[async_trait]
 impl ChatProvider for XiaomiProvider {
     fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
-        use crate::providers::protocols::anthropic::messages::AnthropicMessagesClient;
+        if has_media_content(req.messages) {
+            // ── OpenAI path for video / audio ────────────────────────────────
+            tracing::info!(
+                model = %req.model,
+                media_model = MEDIA_MODEL,
+                "XiaomiProvider: detected video/audio content, routing via OpenAI protocol"
+            );
 
-        let thinking_enabled = req.thinking.as_ref().is_some_and(|t| t.enabled);
-        let mut body = build_anthropic_body(&req);
+            use crate::providers::protocols::openai::chat_completions::OpenAiChatCompletionsClient;
 
-        // MiMo-specific: MiMo ALWAYS requires a thinking block in every assistant
-        // message that contains tool_use, regardless of whether the thinking
-        // parameter is enabled. When switching from a non-thinking model via
-        // fallback routing, history may lack thinking blocks — inject empty ones.
-        patch_mimo_thinking(&mut body);
+            let openai_base = self.openai_base_url();
 
-        let client = AnthropicMessagesClient::new(self.api_key.clone(), self.base_url.clone());
-        let client = if let Some(ref ua) = self.user_agent {
-            client.with_user_agent(ua.clone())
+            // Override model to the media-capable one.
+            let media_req = ChatRequest {
+                model: MEDIA_MODEL,
+                ..req
+            };
+
+            let client = OpenAiChatCompletionsClient::new(
+                self.api_key.clone(),
+                openai_base,
+            );
+            let client = if let Some(ref ua) = self.user_agent {
+                client.with_user_agent(ua.clone())
+            } else {
+                client
+            };
+            // OpenAiChatCompletionsClient.chat() builds the body internally
+            // via render_openai_chat_body which already handles video_url,
+            // input_audio, and image_url content parts.
+            client.chat(media_req)
         } else {
-            client
-        };
-        client.chat_with_body(body, thinking_enabled)
+            // ── Anthropic path (default) ─────────────────────────────────────
+            use crate::providers::protocols::anthropic::messages::AnthropicMessagesClient;
+
+            let thinking_enabled = req.thinking.as_ref().is_some_and(|t| t.enabled);
+            let mut body = build_anthropic_body(&req);
+
+            // MiMo-specific: MiMo ALWAYS requires a thinking block in every assistant
+            // message that contains tool_use, regardless of whether the thinking
+            // parameter is enabled.
+            patch_mimo_thinking(&mut body);
+
+            let client = AnthropicMessagesClient::new(self.api_key.clone(), self.base_url.clone());
+            let client = if let Some(ref ua) = self.user_agent {
+                client.with_user_agent(ua.clone())
+            } else {
+                client
+            };
+            client.chat_with_body(body, thinking_enabled)
+        }
     }
 }

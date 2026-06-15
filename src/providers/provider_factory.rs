@@ -154,6 +154,17 @@ impl ProviderFactory {
                 }
                 Ok(Box::new(p))
             }
+            // ── Xiaomi: dual-protocol provider (Anthropic default, OpenAI for media) ──
+            (well_known::XIAOMI, _) => {
+                let mut p = crate::providers::xiaomi::XiaomiProvider::with_base_url(
+                    request.api_key,
+                    request.base_url,
+                );
+                if let Some(ua) = request.user_agent {
+                    p = p.with_user_agent(ua);
+                }
+                Ok(Box::new(p))
+            }
             // ── OpenAI-compatible providers ──
             (_, Protocol::OpenAi) if id != well_known::GOOGLE => {
                 let client = crate::providers::protocols::openai::chat_completions::OpenAiChatCompletionsClient::new(
