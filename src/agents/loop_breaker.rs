@@ -108,6 +108,10 @@ struct ToolInvocation {
     tool_name: String,
     args_hash: u64,
     result_hash: u64,
+    /// True when the result was a timeout (infrastructure failure, not a
+    /// normal tool output). Timeout retries are expected behaviour and
+    /// must not count towards exact-repeat detection.
+    is_timeout: bool,
 }
 
 // ── LoopBreaker ───────────────────────────────────────────────────────────────
@@ -178,6 +182,7 @@ impl LoopBreakerCounter {
             tool_name: tool_name.to_string(),
             args_hash: simple_hash(args),
             result_hash: simple_hash(result),
+            is_timeout: result.contains("timed out"),
         };
         self.window.push_back(invocation);
 
@@ -232,9 +237,20 @@ impl LoopBreakerCounter {
         }
 
         let first = window[0];
+        // Timeout is an infrastructure failure, not a normal tool output.
+        // The model retrying the same command after a timeout is expected
+        // behaviour — do not count it towards exact-repeat detection.
+        if first.is_timeout {
+            return None;
+        }
         let mut count = 1usize;
         for inv in window.iter().skip(1) {
             if inv.tool_name == first.tool_name && inv.args_hash == first.args_hash {
+                // Timeout entries are skipped — they are infrastructure
+                // failures, not evidence of a loop.
+                if inv.is_timeout {
+                    break;
+                }
                 // If the result differs, this is a polling pattern (same args,
                 // evolving output) — not a true loop. Reset the count.
                 if inv.result_hash != first.result_hash {
