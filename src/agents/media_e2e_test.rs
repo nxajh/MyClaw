@@ -97,7 +97,21 @@ fn empty_config() -> SubAgentConfig {
 
 fn runtime_with(providers: Arc<dyn ProviderRegistry>) -> AgentRuntime {
     use parking_lot::RwLock;
-    let tools = Arc::new(crate::agents::ToolRegistry::new());
+    let mut tools = crate::agents::ToolRegistry::new();
+    // Register media retrieval tools — same as daemon.rs::build_tools.
+    for builtin in crate::tools::builtin_tools() {
+        tools.register(builtin);
+    }
+    tools.register(Arc::new(crate::tools::ViewImageTool::new(Arc::clone(
+        &providers,
+    ))));
+    tools.register(Arc::new(crate::tools::HearAudioTool::new(Arc::clone(
+        &providers,
+    ))));
+    tools.register(Arc::new(crate::tools::ViewVideoTool::new(Arc::clone(
+        &providers,
+    ))));
+    let tools = Arc::new(tools);
     let skills = Arc::new(RwLock::new(crate::agents::SkillManager::new()));
     let agents = Arc::new(crate::agents::AgentRegistry::default());
     let resources = crate::agents::resource_provider::ResourceProvider::new(

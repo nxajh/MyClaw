@@ -817,6 +817,17 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     )));
     tracing::debug!("web_search tool registered (connected to ProviderRegistry)");
 
+    // Register media retrieval tools — require ProviderRegistry for model lookup.
+    tools.register(Arc::new(crate::tools::ViewImageTool::new(Arc::clone(
+        &registry_arc,
+    ))));
+    tools.register(Arc::new(crate::tools::HearAudioTool::new(Arc::clone(
+        &registry_arc,
+    ))));
+    tools.register(Arc::new(crate::tools::ViewVideoTool::new(Arc::clone(
+        &registry_arc,
+    ))));
+
     // WorkspaceWatcher for hot-reload.
     let _watcher =
         crate::agents::WorkspaceWatcher::new(&config.workspace_dir, &config.knowledge_dir)?;
