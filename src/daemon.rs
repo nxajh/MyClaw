@@ -815,19 +815,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         registry_arc.clone(),
         Arc::clone(&search_cooldown),
     )));
-    // Register media delegation tools — require ProviderRegistry to find
-    // vision/audio/video-capable models for delegation.
-    tools.register(Arc::new(crate::tools::ViewImageTool::new(
-        registry_arc.clone(),
-    )));
-    tools.register(Arc::new(crate::tools::HearAudioTool::new(
-        registry_arc.clone(),
-    )));
-    tools.register(Arc::new(crate::tools::ViewVideoTool::new(
-        registry_arc.clone(),
-    )));
-    tracing::debug!("media delegation tools registered (view_image, hear_audio, view_video)");
-
     tracing::debug!("web_search tool registered (connected to ProviderRegistry)");
 
     // WorkspaceWatcher for hot-reload.
