@@ -64,7 +64,7 @@ impl Agent {
         // Convert capability_tool::ToolSpec → capability_chat::ToolSpec
         // (the LLM request type). Same fields, different module homes —
         // a unification candidate for a separate cleanup.
-        let mut tool_specs: Vec<ToolSpec> = allowed_tools
+        let tool_specs: Vec<ToolSpec> = allowed_tools
             .iter()
             .map(|t| {
                 let s = t.spec();
@@ -134,64 +134,8 @@ impl Agent {
         const MAX_EMPTY_RETRIES: usize = 3;
         let mut overflow_retries: usize = 0;
         const MAX_OVERFLOW_RETRIES: usize = 3;
-        // Media (images, audio, video) is lowered per concrete model inside the provider
-        // layer (each chat provider is wrapped in `MediaLoweringProvider`): a
-        // multimodal model gets the real file, while a model without the modality gets
-        // a marker. The agent sends the canonical format — session-local files — and
-        // never pre-renders them, so whichever model the fallback/override actually
-        // serves with sees the right thing. It only owns the retrieval tools
-        // (advertise + execute in the loop, since retrieval is a multi-round,
-        // model-calling concern): `view_image`, `hear_audio`, and `view_video`.
-        //
-        // Advertise each tool when its aux model exists in the chain AND this turn
-        // carries that media or history already references the tool (the latter
-        // keeps it present across a /model switch so prior calls don't become
-        // orphan tool calls the provider would reject).
-        use crate::providers::capability::Modality;
-        advertise_media_tool(
-            &mut tool_specs,
-            &mut allowed_tools,
-            runtime.providers.as_ref(),
-            Modality::Image,
-            history_has_images(&session.history)
-                || history_has_tool_calls(&session.history, "view_image"),
-            || {
-                Arc::new(crate::tools::ViewImageTool::new(Arc::clone(
-                    &runtime.providers,
-                )))
-            },
-        );
-        advertise_media_tool(
-            &mut tool_specs,
-            &mut allowed_tools,
-            runtime.providers.as_ref(),
-            Modality::Audio,
-            history_has_audio(&session.history)
-                || history_has_tool_calls(&session.history, "hear_audio"),
-            || {
-                Arc::new(crate::tools::HearAudioTool::new(Arc::clone(
-                    &runtime.providers,
-                )))
-            },
-        );
-        advertise_media_tool(
-            &mut tool_specs,
-            &mut allowed_tools,
-            runtime.providers.as_ref(),
-            Modality::Video,
-            history_has_video(&session.history)
-                || history_has_tool_calls(&session.history, "view_video"),
-            || {
-                Arc::new(crate::tools::ViewVideoTool::new(Arc::clone(
-                    &runtime.providers,
-                )))
-            },
-        );
-        // If a media tool isn't declared this turn but history references it, fold
-        // those calls to text so no orphan tool call reaches the provider.
-        fold_absent_tool(&mut messages, &tool_specs, "view_image", "图片查看结果");
-        fold_absent_tool(&mut messages, &tool_specs, "hear_audio", "语音内容");
-        fold_absent_tool(&mut messages, &tool_specs, "view_video", "视频查看结果");
+        // Send tools are not always declared (loaded on demand), so fold any
+        // prior references that would become orphan tool calls.
         fold_absent_tool(&mut messages, &tool_specs, "send_message", "消息发送结果");
         fold_absent_tool(&mut messages, &tool_specs, "send_media", "媒体发送结果");
 
@@ -672,86 +616,6 @@ fn filter_turn_scoped_tools(
     });
 }
 
-/// True if any message in `history` carries an image part.
-fn history_has_images(history: &[ChatMessage]) -> bool {
-    history.iter().any(|m| {
-        m.parts.iter().any(|p| match p {
-            ContentPart::File {
-                path, mime_type, ..
-            } => {
-                crate::providers::media::modality_from_mime(mime_type.as_deref(), path)
-                    == crate::providers::media::FileModality::Image
-            }
-            _ => false,
-        })
-    })
-}
-
-/// True if any message in `history` carries an audio part.
-fn history_has_audio(history: &[ChatMessage]) -> bool {
-    history.iter().any(|m| {
-        m.parts.iter().any(|p| match p {
-            ContentPart::File {
-                path, mime_type, ..
-            } => {
-                crate::providers::media::modality_from_mime(mime_type.as_deref(), path)
-                    == crate::providers::media::FileModality::Audio
-            }
-            _ => false,
-        })
-    })
-}
-
-/// True if any message in `history` carries a video part.
-fn history_has_video(history: &[ChatMessage]) -> bool {
-    history.iter().any(|m| {
-        m.parts.iter().any(|p| match p {
-            ContentPart::File {
-                path, mime_type, ..
-            } => {
-                crate::providers::media::modality_from_mime(mime_type.as_deref(), path)
-                    == crate::providers::media::FileModality::Video
-            }
-            _ => false,
-        })
-    })
-}
-
-/// True if `history` contains a prior tool call named `name`. Used to keep a
-/// media-retrieval tool present after a model switch so those calls don't become
-/// orphan tool calls (declared in history but absent from the request's tools).
-fn history_has_tool_calls(history: &[ChatMessage], name: &str) -> bool {
-    history.iter().any(|m| {
-        m.role == "assistant"
-            && m.tool_calls
-                .as_ref()
-                .is_some_and(|tcs| tcs.iter().any(|tc| tc.name == name))
-    })
-}
-
-/// Advertise (and make dispatchable) a media-retrieval tool when `want` (this
-/// turn carries that media or history references the tool) AND its aux model
-/// exists in the chain. The tool is only constructed when it will be offered.
-fn advertise_media_tool(
-    tool_specs: &mut Vec<ToolSpec>,
-    allowed_tools: &mut Vec<Arc<dyn crate::providers::Tool>>,
-    providers: &dyn crate::providers::ProviderRegistry,
-    modality: crate::providers::capability::Modality,
-    want: bool,
-    make: impl FnOnce() -> Arc<dyn crate::providers::Tool>,
-) {
-    if !want || providers.find_chat_model_with_modality(modality).is_none() {
-        return;
-    }
-    let tool = make();
-    tool_specs.push(ToolSpec {
-        name: tool.name().to_string(),
-        description: Some(tool.description().to_string()),
-        input_schema: tool.parameters_schema(),
-    });
-    allowed_tools.push(tool);
-}
-
 /// Backstop for a rare edge (e.g. config hot-reload drops the aux model
 /// mid-session): if the request won't declare `tool_name` but history still
 /// references it, fold each such call + its result into inline `[label]: …` text
@@ -948,9 +812,6 @@ async fn maybe_compact(
                     .chain(session.history.iter().cloned())
                     .collect();
             crate::agents::session::sanitize_history(&mut messages);
-            fold_absent_tool(&mut messages, tool_specs, "view_image", "图片查看结果");
-            fold_absent_tool(&mut messages, tool_specs, "hear_audio", "语音内容");
-            fold_absent_tool(&mut messages, tool_specs, "view_video", "视频查看结果");
             fold_absent_tool(&mut messages, tool_specs, "send_message", "消息发送结果");
             fold_absent_tool(&mut messages, tool_specs, "send_media", "媒体发送结果");
             tracing::info!(
@@ -1312,28 +1173,6 @@ mod tests {
     use crate::providers::{Tool, ToolResult};
     use async_trait::async_trait;
 
-    fn img_msg(path: &str) -> ChatMessage {
-        let mut m = ChatMessage::user_text("");
-        m.parts = vec![
-            ContentPart::Text {
-                text: "看图".into(),
-            },
-            ContentPart::File {
-                path: path.into(),
-                mime_type: Some("image/png".into()),
-                name: None,
-                size_bytes: None,
-            },
-        ];
-        m
-    }
-
-    #[test]
-    fn history_has_images_detects_image_parts() {
-        assert!(!history_has_images(&[ChatMessage::user_text("hi")]));
-        assert!(history_has_images(&[img_msg("AAA")]));
-    }
-
     #[test]
     fn fold_view_image_inlines_results_when_tool_absent() {
         let mut asst = ChatMessage::assistant_text("让我看看");
@@ -1397,29 +1236,6 @@ mod tests {
                 .as_ref()
                 .is_some_and(|tcs| tcs.iter().any(|tc| tc.name == "view_image"))
         );
-    }
-
-    #[test]
-    fn history_has_tool_calls_detects_prior_tool_use() {
-        let mut asst = ChatMessage::assistant_text("");
-        asst.tool_calls = Some(vec![ToolCall {
-            id: "c1".into(),
-            name: "view_image".into(),
-            arguments: "{}".into(),
-        }]);
-        assert!(history_has_tool_calls(&[asst], "view_image"));
-
-        let mut other = ChatMessage::assistant_text("");
-        other.tool_calls = Some(vec![ToolCall {
-            id: "c2".into(),
-            name: "calculator".into(),
-            arguments: "{}".into(),
-        }]);
-        assert!(!history_has_tool_calls(&[other], "view_image"));
-        assert!(!history_has_tool_calls(
-            &[ChatMessage::user_text("hi")],
-            "view_image"
-        ));
     }
 
     // (Image placeholdering moved to `providers::media::lower_media_for`, which
