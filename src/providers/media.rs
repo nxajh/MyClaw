@@ -251,10 +251,12 @@ impl MediaPolicy {
         let audio_policy = match provider_id.as_str() {
             well_known::OPENAI => MediaInputPolicy::inline_base64(audio, Some(25 * 1024 * 1024)),
             // Xiaomi OpenAI protocol supports input_audio natively.
+            // Always pass through regardless of model config — the
+            // XiaomiProvider uses mimo-v2.5 (not mimo-v2.5-pro) for media.
             well_known::XIAOMI
                 if protocol == crate::config::provider::Protocol::OpenAi =>
             {
-                MediaInputPolicy::inline_base64(audio, Some(25 * 1024 * 1024))
+                MediaInputPolicy::inline_base64(true, Some(25 * 1024 * 1024))
             }
             // Xiaomi Anthropic protocol: audio/video not supported by the
             // Anthropic Messages wire format; fall back to text markers.
@@ -266,10 +268,12 @@ impl MediaPolicy {
                 MediaInputPolicy::inline_base64(video, Some(50 * 1024 * 1024))
             }
             // Xiaomi OpenAI protocol supports video_url natively.
+            // Always pass through so ContentPart::File survives in history,
+            // enabling view_video tool registration and fallback to mimo-v2.5.
             well_known::XIAOMI
                 if protocol == crate::config::provider::Protocol::OpenAi =>
             {
-                MediaInputPolicy::inline_base64(video, Some(50 * 1024 * 1024))
+                MediaInputPolicy::inline_base64(true, Some(50 * 1024 * 1024))
             }
             _ => MediaInputPolicy::marker(video),
         };
