@@ -4,12 +4,22 @@
 //! `protocol = "openai"`). When Anthropic, uses mimo-v2.5-pro with MiMo-specific
 //! thinking patches. When OpenAI, uses the standard OpenAI Chat Completions
 //! client which supports text, image, video, and audio inputs.
+//!
+//! When the request contains video or audio ContentPart::File entries and the
+//! current model doesn't support those modalities, the provider automatically
+//! switches to `mimo-v2.5` (which supports video_url / input_audio).
 
 use async_trait::async_trait;
 
+use crate::providers::capability_chat::ContentPart;
+use crate::providers::media::FileModality;
 use crate::providers::{BoxStream, ChatProvider, ChatRequest, StreamEvent};
 
 const DEFAULT_BASE_URL: &str = "https://api.xiaomimimo.com/anthropic";
+
+/// Model name used when the request contains video or audio content.
+/// mimo-v2.5 supports video_url and input_audio per official documentation.
+const MEDIA_MODEL: &str = "mimo-v2.5";
 
 #[derive(Clone)]
 pub struct XiaomiProvider {
@@ -61,6 +71,26 @@ impl XiaomiProvider {
     }
 }
 
+/// Returns true if any message contains a `ContentPart::File` with video or
+/// audio modality.
+fn has_media_content(messages: &[crate::providers::ChatMessage]) -> bool {
+    messages.iter().any(|m| {
+        m.parts.iter().any(|p| {
+            if let ContentPart::File {
+                path, mime_type, ..
+            } = p
+            {
+                matches!(
+                    crate::providers::media::modality_from_mime(mime_type.as_deref(), path),
+                    FileModality::Video | FileModality::Audio
+                )
+            } else {
+                false
+            }
+        })
+    })
+}
+
 /// MiMo requires that every assistant message with tool_calls also contains a
 /// `reasoning_content` (thinking) block when thinking mode is active. If the
 /// model didn't produce one (or it was lost during compaction), we insert an
@@ -96,6 +126,24 @@ fn patch_mimo_thinking(body: &mut serde_json::Value) {
 #[async_trait]
 impl ChatProvider for XiaomiProvider {
     fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
+        // Detect video/audio in the request and switch to media-capable model.
+        let needs_media_model = has_media_content(req.messages);
+        let effective_model = if needs_media_model {
+            tracing::info!(
+                original_model = %req.model,
+                media_model = MEDIA_MODEL,
+                "XiaomiProvider: request contains video/audio, switching to media model"
+            );
+            MEDIA_MODEL
+        } else {
+            req.model
+        };
+
+        let media_req = ChatRequest {
+            model: effective_model,
+            ..req
+        };
+
         if self.openai {
             // ── OpenAI path ──────────────────────────────────────────────
             use crate::providers::protocols::openai::chat_completions::OpenAiChatCompletionsClient;
@@ -103,7 +151,7 @@ impl ChatProvider for XiaomiProvider {
             let openai_base = self.openai_base_url();
             tracing::debug!(
                 base_url = %openai_base,
-                model = %req.model,
+                model = %media_req.model,
                 "XiaomiProvider: using OpenAI protocol"
             );
 
@@ -116,13 +164,13 @@ impl ChatProvider for XiaomiProvider {
             } else {
                 client
             };
-            client.chat(req)
+            client.chat(media_req)
         } else {
             // ── Anthropic path (default) ─────────────────────────────────
             use crate::providers::protocols::anthropic::messages::AnthropicMessagesClient;
 
-            let thinking_enabled = req.thinking.as_ref().is_some_and(|t| t.enabled);
-            let mut body = crate::providers::protocols::anthropic::message_rendering::build_anthropic_body(&req);
+            let thinking_enabled = media_req.thinking.as_ref().is_some_and(|t| t.enabled);
+            let mut body = crate::providers::protocols::anthropic::message_rendering::build_anthropic_body(&media_req);
 
             // MiMo-specific: MiMo ALWAYS requires a thinking block in every
             // assistant message that contains tool_use.

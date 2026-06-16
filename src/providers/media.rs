@@ -268,8 +268,8 @@ impl MediaPolicy {
                 MediaInputPolicy::inline_base64(video, Some(50 * 1024 * 1024))
             }
             // Xiaomi OpenAI protocol supports video_url natively.
-            // Always pass through so ContentPart::File survives in history,
-            // enabling view_video tool registration and fallback to mimo-v2.5.
+            // Always pass through so XiaomiProvider can detect video/audio
+            // and auto-switch to mimo-v2.5 which supports these modalities.
             well_known::XIAOMI
                 if protocol == crate::config::provider::Protocol::OpenAi =>
             {
