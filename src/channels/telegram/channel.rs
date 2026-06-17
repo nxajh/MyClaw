@@ -16,12 +16,11 @@ use crate::channels::message::{
 use crate::config::channel::TelegramAccountConfig;
 use crate::{Channel, DedupState, ProcessingStatus};
 
-use super::markdown::markdown_to_telegram_html;
-use super::types::{Chat, GetUpdatesResponse, Message, SendChatActionRequest, SendMessageRequest};
+use super::types::{Chat, GetUpdatesResponse, Message, SendChatActionRequest};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const MAX_MESSAGE_LENGTH: usize = 4096;
+const RICH_MESSAGE_LENGTH: usize = 32768;
 const CONTINUATION_OVERHEAD: usize = 30;
 
 // ── TelegramChannel ────────────────────────────────────────────────────────────
@@ -344,7 +343,7 @@ impl TelegramChannel {
         }
     }
 
-    async fn send_raw(
+    async fn send_text(
         &self,
         chat_id: &str,
         text: &str,
@@ -352,19 +351,23 @@ impl TelegramChannel {
         reply_markup: Option<serde_json::Value>,
     ) -> anyhow::Result<Option<i64>> {
         let client = self.http_client();
-        let html_text = markdown_to_telegram_html(text);
 
-        // Try sending with HTML parse_mode first.
-        let req = SendMessageRequest {
-            chat_id: chat_id.to_string(),
-            message_thread_id: thread_id.map(String::from),
-            text: html_text.clone(),
-            parse_mode: Some("HTML".to_string()),
-            reply_markup,
-        };
+        let mut rich_body = serde_json::json!({
+            "chat_id": chat_id,
+            "rich_message": {
+                "markdown": text,
+            },
+        });
+        if let Some(tid) = thread_id {
+            rich_body["message_thread_id"] = serde_json::Value::from(tid);
+        }
+        if let Some(ref markup) = reply_markup {
+            rich_body["reply_markup"] = markup.clone();
+        }
+
         let resp = client
-            .post(self.api_url("sendMessage"))
-            .json(&req)
+            .post(self.api_url("sendRichMessage"))
+            .json(&rich_body)
             .send()
             .await?;
 
@@ -378,102 +381,34 @@ impl TelegramChannel {
                 .unwrap_or(1);
             warn!("Telegram 429 rate limited, retrying after {}s", retry_after);
             tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
-            // Retry once
-            let resp2 = client
-                .post(self.api_url("sendMessage"))
-                .json(&req)
+            let resp = client
+                .post(self.api_url("sendRichMessage"))
+                .json(&rich_body)
                 .send()
                 .await?;
-            if !resp2.status().is_success() {
-                let status = resp2.status();
-                let body_text = resp2.text().await.unwrap_or_default();
-                return Err(anyhow::anyhow!(
-                    "Telegram API error after 429 retry: {} {}",
-                    status,
-                    body_text
-                ));
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                anyhow::bail!("sendRichMessage failed after 429 retry: {status} {body}");
             }
-            let resp_json: serde_json::Value = resp2.json().await?;
-            let msg_id = resp_json
-                .get("result")
-                .and_then(|r| r.get("message_id"))
-                .and_then(|m| m.as_i64());
-            return Ok(msg_id);
-        }
-
-        if resp.status().is_success() {
             let resp_json: serde_json::Value = resp.json().await?;
-            let msg_id = resp_json
+            return Ok(resp_json
                 .get("result")
                 .and_then(|r| r.get("message_id"))
-                .and_then(|m| m.as_i64());
-            return Ok(msg_id);
+                .and_then(|m| m.as_i64()));
         }
 
-        // HTML parse failed — fall back to plain text.
-        let html_status = resp.status();
-        let html_body = resp.text().await.unwrap_or_default();
-        warn!(
-            "sendMessage with HTML parse_mode failed (status={html_status}, body={html_body}), \
-             falling back to plain text"
-        );
-
-        // Ensure plain text fits Telegram's limit (truncate if necessary).
-        // Telegram measures in UTF-16 code units — emoji counts as 2.
-        let plain_units = text.encode_utf16().count();
-        let plain_text = if plain_units > MAX_MESSAGE_LENGTH {
-            warn!(
-                original_units = plain_units,
-                limit = MAX_MESSAGE_LENGTH,
-                "plain text exceeds Telegram limit, truncating"
-            );
-            // Reserve room for the suffix so that truncated body + suffix
-            // still fits within MAX_MESSAGE_LENGTH (Telegram counts UTF-16
-            // units; the suffix is ASCII so its char count == UTF-16 units).
-            const TRUNCATION_SUFFIX: &str = "\n\n[... message truncated ...]";
-            let suffix_units = TRUNCATION_SUFFIX.encode_utf16().count();
-            let body_limit = MAX_MESSAGE_LENGTH.saturating_sub(suffix_units);
-            let mut acc = 0usize;
-            let mut end_byte = text.len();
-            for (i, ch) in text.char_indices() {
-                let cost = ch.len_utf16();
-                if acc + cost > body_limit {
-                    end_byte = i;
-                    break;
-                }
-                acc += cost;
-            }
-            let mut truncated = text[..end_byte].to_string();
-            truncated.push_str(TRUNCATION_SUFFIX);
-            truncated
-        } else {
-            text.to_string()
-        };
-
-        let fallback_req = SendMessageRequest {
-            chat_id: chat_id.to_string(),
-            message_thread_id: thread_id.map(String::from),
-            text: plain_text,
-            parse_mode: None,
-            reply_markup: None,
-        };
-        let fallback_resp = client
-            .post(self.api_url("sendMessage"))
-            .json(&fallback_req)
-            .send()
-            .await?;
-
-        if !fallback_resp.status().is_success() {
-            let status = fallback_resp.status();
-            let body = fallback_resp.text().await.unwrap_or_default();
-            anyhow::bail!("sendMessage failed: status={status}, body={body}");
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("sendRichMessage failed: {status} {body}");
         }
-        let resp_json: serde_json::Value = fallback_resp.json().await?;
-        let msg_id = resp_json
+
+        let resp_json: serde_json::Value = resp.json().await?;
+        Ok(resp_json
             .get("result")
             .and_then(|r| r.get("message_id"))
-            .and_then(|m| m.as_i64());
-        Ok(msg_id)
+            .and_then(|m| m.as_i64()))
     }
 
     /// Low-level `deleteMessage` API wrapper using primitive i64 ids.
@@ -503,13 +438,13 @@ impl TelegramChannel {
         text: &str,
     ) -> anyhow::Result<bool> {
         let client = self.http_client();
-        let html_text = markdown_to_telegram_html(text);
 
         let body = serde_json::json!({
             "chat_id": chat_id,
             "message_id": message_id,
-            "text": html_text,
-            "parse_mode": "HTML",
+            "rich_message": {
+                "markdown": text,
+            },
         });
 
         let resp = client
@@ -518,26 +453,14 @@ impl TelegramChannel {
             .send()
             .await?;
 
-        if resp.status().is_success() {
-            return Ok(true);
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            warn!("editMessageText failed: {status} {body}");
+            return Ok(false);
         }
 
-        // HTML parse failed — fallback to plain text.
-        if resp.status().as_u16() == 400 {
-            let body_plain = serde_json::json!({
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "text": text,
-            });
-            let resp2 = client
-                .post(self.api_url("editMessageText"))
-                .json(&body_plain)
-                .send()
-                .await?;
-            return Ok(resp2.status().is_success());
-        }
-
-        Ok(false)
+        Ok(true)
     }
 
     async fn send_chat_action(
@@ -931,7 +854,7 @@ impl TelegramChannel {
                 // First time over threshold — send a new stall message.
                 warn!("Stall detected for {target}: typing for {secs}s without response");
                 match self
-                    .send_raw(
+                    .send_text(
                         &chat_id,
                         &format!("🤔 还在思考中... (已等待 {secs}s)"),
                         None,
@@ -1450,47 +1373,16 @@ impl TelegramChannel {
         }
     }
 
-    /// Split message content into chunks that fit Telegram's 4096-char limit.
+    /// Split message content into chunks that fit Telegram's rich message limit.
     ///
-    /// `markdown_to_telegram_html()` can significantly expand text (HTML escaping
-    /// of `<>&"` chars, plus `<b>`, `<code>`, `<pre>` tags). A 4000-char Markdown
-    /// chunk can easily exceed 4096 chars as HTML.
-    ///
-    /// Strategy:
-    /// 1. Split by raw Markdown chars (conservative limit)
-    /// 2. For each chunk, check if its HTML conversion exceeds 4096
-    /// 3. If it does, re-split that chunk more aggressively using plain text limit
+    /// Rich messages (Bot API 10.1 `sendRichMessage`) support up to 32 768
+    /// UTF-8 characters. We leave a margin for the `(continues...)` suffix
+    /// and for Telegram's own overhead.
     fn chunk_for_telegram(content: &str) -> Vec<String> {
-        use crate::channels::message::LenUnit;
-        let html_overhead_per_chunk = 200; // conservative estimate for HTML expansion
-        let raw_limit = MAX_MESSAGE_LENGTH
-            .saturating_sub(CONTINUATION_OVERHEAD)
-            .saturating_sub(html_overhead_per_chunk);
+        use crate::channels::message::{split_message_chunk, LenUnit};
 
-        // Telegram measures in UTF-16 code units; splitting by codepoints
-        // under-counts emoji-heavy text and trips the 4096 limit.
-        let raw_chunks =
-            crate::channels::message::split_message_chunk(content, raw_limit, LenUnit::Utf16Units);
-
-        let mut final_chunks = Vec::new();
-        for chunk in raw_chunks {
-            let html = markdown_to_telegram_html(&chunk);
-            if html.encode_utf16().count() <= MAX_MESSAGE_LENGTH {
-                final_chunks.push(chunk);
-            } else {
-                let plain_limit = MAX_MESSAGE_LENGTH
-                    .saturating_sub(CONTINUATION_OVERHEAD)
-                    .saturating_sub(CONTINUATION_OVERHEAD);
-                let sub_chunks = crate::channels::message::split_message_chunk(
-                    &chunk,
-                    plain_limit,
-                    LenUnit::Utf16Units,
-                );
-                final_chunks.extend(sub_chunks);
-            }
-        }
-
-        final_chunks
+        let rich_limit = RICH_MESSAGE_LENGTH.saturating_sub(CONTINUATION_OVERHEAD * 2);
+        split_message_chunk(content, rich_limit, LenUnit::Codepoints)
     }
 }
 
@@ -1543,10 +1435,8 @@ impl Channel for TelegramChannel {
             }
         }
 
-        // Split into chunks that fit Telegram's 4096-char limit.
-        // We use a conservative limit because markdown_to_telegram_html() can
-        // expand the text (HTML escaping + tags). If a chunk's HTML exceeds
-        // 4096 after conversion, we re-split it using plain text.
+        // Split into chunks that fit Telegram's rich message limit (32 768 chars).
+        // Each chunk is sent via sendRichMessage with Markdown formatting.
         //
         // When files are present, text is used as caption on the first file,
         // not as a separate text message (RFC §14.5).
@@ -1592,7 +1482,7 @@ impl Channel for TelegramChannel {
                 None
             };
             match self
-                .send_raw(&chat_id, &text, thread_id.as_deref(), markup)
+                .send_text(&chat_id, &text, thread_id.as_deref(), markup)
                 .await
             {
                 Ok(Some(id)) => ids.push(crate::channels::MessageId::new(id.to_string())),
@@ -2129,177 +2019,5 @@ mod tests {
                 "each chunk must fit Telegram UTF-16 limit"
             );
         }
-    }
-
-    // ── Markdown → Telegram HTML tests ──────────────────────────────────────
-
-    #[test]
-    fn test_md_bold() {
-        assert_eq!(
-            markdown_to_telegram_html("this is **bold** text"),
-            "this is <b>bold</b> text"
-        );
-    }
-
-    #[test]
-    fn test_md_italic_asterisk() {
-        assert_eq!(
-            markdown_to_telegram_html("this is *italic* text"),
-            "this is <i>italic</i> text"
-        );
-    }
-
-    #[test]
-    fn test_md_italic_underscore() {
-        assert_eq!(
-            markdown_to_telegram_html("this is _italic_ text"),
-            "this is <i>italic</i> text"
-        );
-    }
-
-    #[test]
-    fn test_md_strikethrough() {
-        assert_eq!(
-            markdown_to_telegram_html("this is ~~deleted~~ text"),
-            "this is <s>deleted</s> text"
-        );
-    }
-
-    #[test]
-    fn test_md_inline_code() {
-        assert_eq!(
-            markdown_to_telegram_html("use `println!()` for output"),
-            "use <code>println!()</code> for output"
-        );
-    }
-
-    #[test]
-    fn test_md_code_block_plain() {
-        let input = "```\nfn main() {\n    println!(\"hi\");\n}\n```";
-        assert_eq!(
-            markdown_to_telegram_html(input),
-            "<pre>fn main() {\n    println!(&quot;hi&quot;);\n}</pre>"
-        );
-    }
-
-    #[test]
-    fn test_md_code_block_with_lang() {
-        let input = "```rust\nfn main() {}\n```";
-        assert_eq!(
-            markdown_to_telegram_html(input),
-            "<pre><code class=\"language-rust\">fn main() {}</code></pre>"
-        );
-    }
-
-    #[test]
-    fn test_md_link() {
-        assert_eq!(
-            markdown_to_telegram_html("[Rust](https://rust-lang.org)"),
-            "<a href=\"https://rust-lang.org\">Rust</a>"
-        );
-    }
-
-    #[test]
-    fn test_md_heading() {
-        assert_eq!(
-            markdown_to_telegram_html("# Hello World\nSome text"),
-            "<b>Hello World</b>\nSome text"
-        );
-    }
-
-    #[test]
-    fn test_md_blockquote() {
-        assert_eq!(
-            markdown_to_telegram_html("> important note"),
-            "❝ important note"
-        );
-    }
-
-    #[test]
-    fn test_md_horizontal_rule() {
-        assert_eq!(markdown_to_telegram_html("---"), "───");
-        assert_eq!(markdown_to_telegram_html("***"), "───");
-    }
-
-    #[test]
-    fn test_md_html_escape_in_plain_text() {
-        assert_eq!(
-            markdown_to_telegram_html("a < b & c > d"),
-            "a &lt; b &amp; c &gt; d"
-        );
-    }
-
-    #[test]
-    fn test_md_no_formatting() {
-        let input = "just plain text, no markup";
-        assert_eq!(markdown_to_telegram_html(input), input);
-    }
-
-    #[test]
-    fn test_md_mixed_formatting() {
-        let input = "**bold** and *italic* and `code`";
-        assert_eq!(
-            markdown_to_telegram_html(input),
-            "<b>bold</b> and <i>italic</i> and <code>code</code>"
-        );
-    }
-
-    #[test]
-    fn test_md_formatting_not_inside_code_block() {
-        let input = "```text\n**not bold** and *not italic*\n```";
-        assert_eq!(
-            markdown_to_telegram_html(input),
-            "<pre>**not bold** and *not italic*</pre>"
-        );
-    }
-
-    #[test]
-    fn test_md_formatting_not_inside_inline_code() {
-        assert_eq!(
-            markdown_to_telegram_html("`**not bold**`"),
-            "<code>**not bold**</code>"
-        );
-    }
-
-    #[test]
-    fn test_md_unclosed_bold_closed_at_end() {
-        assert_eq!(
-            markdown_to_telegram_html("start **never closed"),
-            "start <b>never closed</b>"
-        );
-    }
-
-    #[test]
-    fn test_md_multiline_heading() {
-        let input = "# First\n## Second\n### Third";
-        assert_eq!(
-            markdown_to_telegram_html(input),
-            "<b>First</b>\n<b>Second</b>\n<b>Third</b>"
-        );
-    }
-
-    #[test]
-    fn test_md_complex_message() {
-        let input = "\
-**Summary**
-
-Here is some `inline code` and a [link](https://example.com).
-
-```python
-print('hello')
-```
-
-> A blockquote";
-
-        let expected = "\
-<b>Summary</b>
-
-Here is some <code>inline code</code> and a <a href=\"https://example.com\">link</a>.
-
-<pre><code class=\"language-python\">print('hello')</code></pre>
-
-❝ A blockquote";
-
-        assert_eq!(markdown_to_telegram_html(input), expected);
     }
 }

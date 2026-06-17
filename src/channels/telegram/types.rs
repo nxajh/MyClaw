@@ -144,20 +144,6 @@ pub struct CallbackQuery {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct SendMessageRequest {
-    #[serde(rename = "chat_id")]
-    pub chat_id: String,
-    #[serde(rename = "message_thread_id", skip_serializing_if = "Option::is_none")]
-    pub message_thread_id: Option<String>,
-    #[serde(default)]
-    pub text: String,
-    #[serde(rename = "parse_mode", skip_serializing_if = "Option::is_none")]
-    pub parse_mode: Option<String>,
-    #[serde(rename = "reply_markup", skip_serializing_if = "Option::is_none")]
-    pub reply_markup: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub struct SendChatActionRequest {
     #[serde(rename = "chat_id")]
     pub chat_id: String,

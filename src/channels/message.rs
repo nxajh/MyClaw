@@ -76,7 +76,7 @@ impl ChannelCapabilities {
         }
     }
 
-    /// Telegram bot: 4096 UTF-16 code units, edit/delete/buttons/media.
+    /// Telegram bot: 32 768 codepoints (rich messages), edit/delete/buttons/media.
     pub const fn telegram() -> Self {
         Self {
             supports_streaming: false,
@@ -86,8 +86,8 @@ impl ChannelCapabilities {
             supports_file_send: true,
             supports_file_receive: true,
             supports_threads: true,
-            message_chunk_limit: 4096,
-            message_len_unit: LenUnit::Utf16Units,
+            message_chunk_limit: 32768,
+            message_len_unit: LenUnit::Codepoints,
         }
     }
 
