@@ -47,8 +47,9 @@
 | **SkillsManager** | `src/agents/skills.rs` | 97 | 工具注册与管理 |
 | **SessionManager** | `src/agents/session_manager.rs` | 209 | 会话生命周期管理 |
 | **McpManager** | `src/agents/mcp_manager.rs` | 179 | MCP 服务器生命周期管理 |
-| **SubAgentDelegator** | `src/agents/sub_agent.rs` | 229 | 子 Agent 委托（同步+异步） |
-| **DelegationManager** | `src/agents/delegation.rs` | 68 | 异步委托事件系统 |
+| **DelegationCoordinator** | `src/agents/delegation_coordinator.rs` | 542 | 子代理委派编排（同步+异步+worktree） |
+| **AgentDelegator** | `src/agents/delegator.rs` | 36 | 委派 trait 定义 |
+| **DelegationEvent** | `src/agents/delegation.rs` | 33 | 异步委托事件类型 |
 
 #### Channel 通道
 
@@ -276,13 +277,15 @@ daemon.rs (Composition Root) ✅
 | `src/agents/agent_impl.rs` | AgentLoop（核心循环，607 行） |
 | `src/agents/orchestrator.rs` | Orchestrator（编排层，512 行） |
 | `src/agents/prompt.rs` | SystemPromptBuilder（371 行） |
-| `src/agents/loop_breaker.rs` | LoopBreaker 循环熔断（593 行） |
-| `src/agents/skills.rs` | SkillsManager（97 行） |
-| `src/agents/session_manager.rs` | SessionManager + InMemoryBackend（209 行） |
-| `src/agents/mcp_manager.rs` | McpManager（179 行） |
-| `src/agents/sub_agent.rs` | SubAgentDelegator（229 行） |
-| `src/agents/delegation.rs` | DelegationManager 异步事件（68 行） |
-| `src/channels/telegram.rs` | TelegramChannel（1,234 行） |
+| `src/agents/loop_breaker.rs` | LoopBreaker 循环熔断（903 行） |
+| `src/agents/workspace/skills.rs` | SkillsManager |
+| `src/agents/session/manager.rs` | SessionManager（675 行） |
+| `src/agents/session_context.rs` | SessionContext（340 行） |
+| `src/agents/mcp_manager.rs` | McpManager（193 行） |
+| `src/agents/delegation_coordinator.rs` | DelegationCoordinator（542 行） |
+| `src/agents/delegator.rs` | AgentDelegator trait（36 行） |
+| `src/agents/delegation.rs` | DelegationEvent 类型（33 行） |
+| `src/channels/telegram/channel.rs` | TelegramChannel（2,023 行） |
 | `src/channels/wechat.rs` | WechatChannel（819 行） |
 | `src/providers/openai.rs` | OpenAI Provider（492 行） |
 | `src/providers/minimax.rs` | MiniMax Provider（433 行） |
@@ -324,7 +327,7 @@ daemon.rs (Composition Root) ✅
 | MCP vs Skills | MCP 是 Tool，MCP Server 动态发现 | ✅ |
 | Provider 路由 | ServiceRegistry 按 Capability 路由 | ✅ |
 | MCP 工具延迟加载 | Deferred Loading，按需拉取 schema | ✅ |
-| 多 Agent 委托 | SubAgentDelegator + 异步 DelegationManager | ✅ |
+| 多 Agent 委托 | DelegationCoordinator + AgentDelegator trait | ✅ |
 | 配置结构 | 模型挂在能力下面（providers.openai.chat.models.gpt-4o） | ✅ |
 | 输入模态 | 用 `input = ["text", "image"]` 描述，不再是 Capability 枚举 | ✅ |
 | 认证合并 | 能力级 api_key 优先，fallback 到 provider 级 | ✅ |

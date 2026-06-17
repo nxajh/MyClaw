@@ -1,5 +1,8 @@
 # MyClaw Prompt Engine 设计方案
 
+> ⚠️ **RFC 历史文档**：本文档反映设计阶段的讨论，部分细节已随实现变更。
+> 以 `architecture.md` 和源码为准。Telegram 已切换至 Rich Messages（sendRichMessage）。
+>
 > 状态：Draft
 > 日期：2026-05-17
 > 作者：张小二 & Albert

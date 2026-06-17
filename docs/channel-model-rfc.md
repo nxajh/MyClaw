@@ -1,5 +1,8 @@
 # RFC: Channel 模型重构
 
+> ⚠️ **RFC 历史文档**：本文档反映设计阶段的讨论，部分细节已随实现变更。
+> 以 `architecture.md` 和源码为准。
+>
 > 状态：草案
 > 日期：2026-05-29
 > 参考：OpenClaw `ChannelPlugin` / Hermes-agent `BasePlatformAdapter`

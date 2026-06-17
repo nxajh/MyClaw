@@ -4609,12 +4609,12 @@ pub struct GatewayPayload {
 
 ### `channels/telegram/`
 
-**子模块说明**: Telegram 适配：消息发送/接收/编辑/删除、Markdown 转换
+**子模块说明**: Telegram 适配：消息发送/接收/编辑/删除、Rich Messages（Bot API 10.1）
 
 #### `channels/telegram/channel.rs`
 
 ```rust
-const MAX_MESSAGE_LENGTH: usize = 4096
+const RICH_MESSAGE_LENGTH: usize = 32768
 ```
 
 ```rust
@@ -4695,12 +4695,12 @@ pub struct TelegramChannel {
   fn is_group_message(chat: &Chat) -> bool
   fn format_forward_attribution(msg: &Message) -> Option<String>
   fn parse_reply_target(reply_target: &str) -> (String, Option<String>)
-  async fn send_raw(
+  async fn send_text(
   async fn delete_message_raw(&self, chat_id: i64, message_id: i64) -> anyhow::Result<()>
   async fn edit_message_text_raw(&self, chat_id: i64, message_id: i64, text: &str) -> anyhow::Result<bool>
   async fn send_chat_action(
   fn parse_message_content(&self, msg: &Message) -> String
-  async fn download_file_base64(&self, file_id: &str) -> anyhow::Result<String>
+  async fn download_file_bytes(&self, file_id: &str) -> anyhow::Result<Vec<u8>>
   async fn ack_message(&self, chat_id: i64, message_id: i64)
   async fn remove_ack(&self, chat_id: i64, message_id: i64)
   async fn set_reaction(&self, chat_id: i64, message_id: i64, emoji: &str) -> anyhow::Result<()>
@@ -4723,7 +4723,7 @@ pub struct TelegramChannel {
   fn name(&self) -> &str
   fn capabilities(&self) -> &crate::channels::message::ChannelCapabilities
   fn security_policy(&self) -> crate::channels::ChannelSecurityPolicy
-  async fn send(&self, message: &SendMessage) -> anyhow::Result<()>
+  async fn send_message(&self, msg: &ChannelOutboundMessage) -> anyhow::Result<OutboundSendResult>
   async fn edit_message(
   async fn delete_message(
   async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelMessage>>
@@ -4793,92 +4793,6 @@ fn test_message_chunking()
 
 ```rust
 fn test_utf16_chunking_emoji()
-```
-
-```rust
-fn test_md_bold()
-```
-
-```rust
-fn test_md_italic_asterisk()
-```
-
-```rust
-fn test_md_italic_underscore()
-```
-
-```rust
-fn test_md_strikethrough()
-```
-
-```rust
-fn test_md_inline_code()
-```
-
-```rust
-fn test_md_code_block_plain()
-```
-
-```rust
-fn test_md_code_block_with_lang()
-```
-
-```rust
-fn test_md_link()
-```
-
-```rust
-fn test_md_heading()
-```
-
-```rust
-fn test_md_blockquote()
-```
-
-```rust
-fn test_md_horizontal_rule()
-```
-
-```rust
-fn test_md_html_escape_in_plain_text()
-```
-
-```rust
-fn test_md_no_formatting()
-```
-
-```rust
-fn test_md_mixed_formatting()
-```
-
-```rust
-fn test_md_formatting_not_inside_code_block()
-```
-
-```rust
-fn test_md_formatting_not_inside_inline_code()
-```
-
-```rust
-fn test_md_unclosed_bold_closed_at_end()
-```
-
-```rust
-fn test_md_multiline_heading()
-```
-
-```rust
-fn test_md_complex_message()
-```
-
-#### `channels/telegram/markdown.rs`
-
-```rust
-pub fn escape_html(text: &str) -> String
-```
-
-```rust
-pub fn markdown_to_telegram_html(markdown: &str) -> String
 ```
 
 #### `channels/telegram/mod.rs`

@@ -1,6 +1,6 @@
 # MyClaw 当前架构图
 
-> 生成日期：2026-05-21
+> 生成日期：2026-06-17
 > 基于 master 分支代码分析
 
 ## 组件关系总览
@@ -18,8 +18,8 @@
 │         └──────────┬───────┴──────────┬──────┘                      │
 │                    ▼                  ▼                              │
 │              ┌──────────┐    ┌────────────────┐                     │
-│              │  Agent   │    │SubAgentDelegator│──┐                  │
-│              │ (factory) │    │DelegationManager │  │                  │
+│              │  Agent   │    │DelegationCoord.│──┐                  │
+│              │ (factory) │    │ (coordinator)   │  │                  │
 │              └────┬─────┘    └────────────────┘  │                  │
 │                   │                              │                  │
 │                   │  ┌───────────────────────┐   │                  │
@@ -169,8 +169,7 @@ LoopRegistry (Orchestrator 内部)
   ├─ ref:  session_manager ────→ SessionManager (Arc)
   ├─ ref:  channels ───────────→ DashMap<(type,account), Arc<dyn Channel>>
   ├─ ref:  pending_asks ───────→ DashMap<sk, (oneshot::Sender, target)>
-  ├─ ref:  sub_delegator ──────→ Option<SubAgentDelegator>
-  ├─ ref:  delegation_manager ─→ Option<DelegationManager>
+  ├─ ref:  delegation ────────→ Arc<DelegationCoordinator>
   ├─ ref:  persist_backend ────→ Arc<dyn SessionBackend>
   └─ ref:  change_rx ──────────→ Option<watch::Receiver<ChangeSet>>
 
@@ -192,18 +191,18 @@ Orchestrator (全局单例)
   ├─ owns: mcp_manager ────────→ Option<Arc<McpManager>>
   └─ owns: listener_handles ───→ Vec<JoinHandle<()>>
 
-SubAgentDelegator (全局单例)
-  ├─ owns: registry ───────────→ ServiceRegistry (Arc)
-  ├─ owns: tool_impls ─────────→ ToolRegistry (Arc)
-  ├─ owns: skills ─────────────→ SkillManager (Arc<RwLock>)
-  ├─ owns: sub_agent_configs ──→ Vec<SubAgentConfig> (Arc<RwLock>)
-  └─ owns: agent_config ───────→ AgentConfig
-       └─ 委派时临时构建 AgentLoop（不走 LoopRegistry）
+DelegationCoordinator (全局单例)
+  ├─ owns: configs ───────────→ Arc<AgentRegistry>
+  ├─ owns: session_manager ──→ Arc<SessionManager>
+  ├─ owns: worktrees_root ───→ PathBuf
+  ├─ owns: runtime_cell ─────→ Arc<OnceLock<AgentRuntime>>
+  └─ owns: running ───────────→ Arc<DashMap<task_id, JoinHandle>>
+       └─ delegate_async() 通过 SessionManager.open_sub_session()
 
 Channel 实现
   TelegramChannel
     ├─ owns: bot_token, api_base
-    └─ method: listen() → poll getUpdates, send() → sendMessage API
+    └─ method: listen() → poll getUpdates, send() → sendRichMessage API (Bot API 10.1)
 
   ClientChannel (WebUI)
     ├─ owns: config (bind addr, auth_token)
@@ -243,8 +242,8 @@ WebUI API ──WebSocket JSON──→ ClientChannel.handle_api_request()
 Scheduler (cron/heartbeat) ──SchedulerEvent──→ Orchestrator.run()
                                            └── 复用同一套 get_or_create + SessionHandle
 
-SubAgentDelegator ──delegate_async()──→ spawn tokio task
-                                       └── 临时构建 AgentLoop（不经过 LoopRegistry）
+DelegationCoordinator ──delegate_async()──→ spawn tokio task
+                                       └── SessionManager.open_sub_session()
                                            session_key = "sub:<parent_sk>:<agent_name>"
 ```
 
@@ -264,8 +263,8 @@ SubAgentDelegator ──delegate_async()──→ spawn tokio task
 ❹ run_session_actor 纯粹为了串行化
    channel + actor + mutex 三层间接，mutex 只有 actor 自己用
 
-❺ SubAgentDelegator 绕过 LoopRegistry
-   临时构建 AgentLoop，不经过统一的 session 管理
+❺ DelegationCoordinator 通过 SessionManager 统一管理子会话
+   不再绕过 LoopRegistry，走统一路径
 
 ❻ Agent 既是配置又是工厂
    loop_for_with_persist() 每次 new 一个 AgentLoop，职责不清

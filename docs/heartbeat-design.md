@@ -1,5 +1,8 @@
 # MyClaw 三轨调度设计：Heartbeat + Cron + Webhook
 
+> ⚠️ **RFC 历史文档**：本文档反映设计阶段的讨论，部分细节已随实现变更。
+> 以 `architecture.md` 和源码为准。
+
 ## 1. 设计目标
 
 让 MyClaw Daemon 成为常驻自主 Agent。三种触发源共享同一套执行基础设施：
