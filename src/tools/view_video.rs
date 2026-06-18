@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::agents::session::Session;
 use crate::providers::capability::Modality;
-use crate::providers::capability_chat::{ChatMessage, ChatRequest, ChatResponse, ContentPart};
+use crate::providers::capability_chat::{ChatMessage, ChatProvider, ChatRequest, ChatResponse, ContentPart};
 use crate::providers::provider_registry::ProviderRegistry;
 use crate::providers::{Tool, ToolResult};
 use serde_json::json;
@@ -52,6 +52,141 @@ fn infer_video_mime(path: &str) -> Option<&'static str> {
         "mkv" => Some("video/x-matroska"),
         _ => None,
     }
+}
+
+/// Try each candidate in order. On HTTP 4xx, fall back to the next model.
+async fn try_with_fallback(
+    candidates: &[(Arc<dyn ChatProvider>, String)],
+    messages: &[ChatMessage],
+    file_path: &str,
+    file_size_mb: f64,
+) -> anyhow::Result<ToolResult> {
+    let total = candidates.len();
+    for (i, (provider, model_id)) in candidates.iter().enumerate() {
+        let req = ChatRequest {
+            model: model_id,
+            messages,
+            temperature: Some(0.3),
+            max_tokens: Some(1536),
+            thinking: None,
+            stop: None,
+            seed: None,
+            tools: None,
+            stream: true,
+        };
+        let t0 = std::time::Instant::now();
+        let stream = match provider.chat(req) {
+            Ok(s) => s,
+            Err(e) => {
+                let err_str = e.to_string();
+                let is_http_4xx = err_str.contains("HTTP 4");
+                tracing::warn!(
+                    path = %file_path,
+                    size_mb = %format!("{:.1}", file_size_mb),
+                    model = %model_id,
+                    attempt = i + 1,
+                    total,
+                    elapsed_ms = t0.elapsed().as_millis(),
+                    err = %e,
+                    "view_video: provider.chat() failed"
+                );
+                if is_http_4xx && i + 1 < total {
+                    tracing::info!(
+                        model = %model_id,
+                        next_model = %candidates[i + 1].1,
+                        "view_video: HTTP 4xx, falling back to next model"
+                    );
+                    continue;
+                }
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("视频模型调用失败：{e}")),
+                });
+            }
+        };
+        let resp = match ChatResponse::from_stream(stream).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                let err_str = e.to_string();
+                let is_http_4xx = err_str.contains("HTTP 4");
+                tracing::warn!(
+                    path = %file_path,
+                    size_mb = %format!("{:.1}", file_size_mb),
+                    model = %model_id,
+                    attempt = i + 1,
+                    total,
+                    elapsed_ms = t0.elapsed().as_millis(),
+                    err = %e,
+                    "view_video: stream collection failed"
+                );
+                if is_http_4xx && i + 1 < total {
+                    tracing::info!(
+                        model = %model_id,
+                        next_model = %candidates[i + 1].1,
+                        "view_video: HTTP 4xx, falling back to next model"
+                    );
+                    continue;
+                }
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("视频模型响应失败：{e}")),
+                });
+            }
+        };
+
+        let elapsed_ms = t0.elapsed().as_millis();
+        let input_tokens = resp.usage.as_ref().and_then(|u| u.input_tokens);
+        let output_tokens = resp.usage.as_ref().and_then(|u| u.output_tokens);
+
+        if resp.text.trim().is_empty() {
+            tracing::warn!(
+                path = %file_path,
+                size_mb = %format!("{:.1}", file_size_mb),
+                model = %model_id,
+                attempt = i + 1,
+                total,
+                elapsed_ms,
+                stop_reason = ?resp.stop_reason,
+                input_tokens,
+                output_tokens,
+                has_reasoning = resp.reasoning_content.is_some(),
+                reasoning_len = resp.reasoning_content.as_ref().map(|r| r.len()).unwrap_or(0),
+                "view_video: empty result — model returned no text content"
+            );
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("视频模型返回了空结果。".to_string()),
+            });
+        }
+
+        tracing::info!(
+            path = %file_path,
+            size_mb = %format!("{:.1}", file_size_mb),
+            model = %model_id,
+            attempt = i + 1,
+            total,
+            elapsed_ms,
+            stop_reason = ?resp.stop_reason,
+            input_tokens,
+            output_tokens,
+            text_len = resp.text.len(),
+            "view_video: success"
+        );
+        return Ok(ToolResult {
+            success: true,
+            output: resp.text,
+            error: None,
+        });
+    }
+
+    Ok(ToolResult {
+        success: false,
+        output: String::new(),
+        error: Some("所有视频模型均不可用。".to_string()),
+    })
 }
 
 #[async_trait]
@@ -128,22 +263,23 @@ impl Tool for ViewVideoTool {
             });
         }
 
-        let Some((provider, model_id)) = self
+        let candidates = self
             .providers
-            .find_chat_model_with_modality(Modality::Video)
-        else {
+            .find_all_chat_models_with_modality(Modality::Video);
+        if candidates.is_empty() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some("当前没有可用的视频模型，无法查看视频。".to_string()),
             });
-        };
+        }
 
         let file_size_mb = meta.len() as f64 / (1024.0 * 1024.0);
         tracing::info!(
             path = %abs.display(),
             size_mb = %format!("{:.1}", file_size_mb),
-            model = %model_id,
+            candidates = candidates.len(),
+            models = ?candidates.iter().map(|(_, m)| m.as_str()).collect::<Vec<_>>(),
             question = %question,
             "view_video: starting analysis"
         );
@@ -168,95 +304,8 @@ impl Tool for ViewVideoTool {
             is_error: None,
         };
         let messages = [user_msg];
-        let req = ChatRequest {
-            model: &model_id,
-            messages: &messages,
-            temperature: Some(0.3),
-            max_tokens: Some(1536),
-            thinking: None,
-            stop: None,
-            seed: None,
-            tools: None,
-            stream: true,
-        };
 
-        let t0 = std::time::Instant::now();
-        let stream = match provider.chat(req) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(
-                    path = %abs.display(),
-                    model = %model_id,
-                    elapsed_ms = t0.elapsed().as_millis(),
-                    err = %e,
-                    "view_video: provider.chat() failed"
-                );
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("视频模型调用失败：{e}")),
-                });
-            }
-        };
-        let resp = match ChatResponse::from_stream(stream).await {
-            Ok(resp) => resp,
-            Err(e) => {
-                tracing::warn!(
-                    path = %abs.display(),
-                    model = %model_id,
-                    elapsed_ms = t0.elapsed().as_millis(),
-                    err = %e,
-                    "view_video: stream collection failed"
-                );
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("视频模型响应失败：{e}")),
-                });
-            }
-        };
-
-        let elapsed_ms = t0.elapsed().as_millis();
-        let input_tokens = resp.usage.as_ref().and_then(|u| u.input_tokens);
-        let output_tokens = resp.usage.as_ref().and_then(|u| u.output_tokens);
-
-        if resp.text.trim().is_empty() {
-            tracing::warn!(
-                path = %abs.display(),
-                size_mb = %format!("{:.1}", file_size_mb),
-                model = %model_id,
-                elapsed_ms,
-                stop_reason = ?resp.stop_reason,
-                input_tokens,
-                output_tokens,
-                has_reasoning = resp.reasoning_content.is_some(),
-                reasoning_len = resp.reasoning_content.as_ref().map(|r| r.len()).unwrap_or(0),
-                "view_video: empty result — model returned no text content"
-            );
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("视频模型返回了空结果。".to_string()),
-            });
-        }
-
-        tracing::info!(
-            path = %abs.display(),
-            size_mb = %format!("{:.1}", file_size_mb),
-            model = %model_id,
-            elapsed_ms,
-            stop_reason = ?resp.stop_reason,
-            input_tokens,
-            output_tokens,
-            text_len = resp.text.len(),
-            "view_video: success"
-        );
-
-        Ok(ToolResult {
-            success: true,
-            output: resp.text,
-            error: None,
-        })
+        try_with_fallback(&candidates, &messages, &abs.display().to_string(), file_size_mb).await
     }
 }
 

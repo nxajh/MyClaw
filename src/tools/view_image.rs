@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::agents::session::Session;
 use crate::providers::capability::Modality;
-use crate::providers::capability_chat::{ChatMessage, ChatRequest, ChatResponse, ContentPart};
+use crate::providers::capability_chat::{ChatMessage, ChatProvider, ChatRequest, ChatResponse, ContentPart};
 use crate::providers::provider_registry::ProviderRegistry;
 use crate::providers::{Tool, ToolResult};
 use serde_json::json;
@@ -47,6 +47,144 @@ fn infer_image_mime(path: &str) -> Option<&'static str> {
         "webp" => Some("image/webp"),
         _ => None,
     }
+}
+
+/// Try each candidate in order. On HTTP 4xx (model doesn't actually support
+/// the request), log a warning and fall back to the next model. Only bail on
+/// a successful response (including empty-text) or a non-HTTP error (network,
+/// timeout, etc.).
+async fn try_with_fallback(
+    candidates: &[(Arc<dyn ChatProvider>, String)],
+    messages: &[ChatMessage],
+    file_path: &str,
+    file_size_mb: f64,
+) -> anyhow::Result<ToolResult> {
+    let total = candidates.len();
+    for (i, (provider, model_id)) in candidates.iter().enumerate() {
+        let req = ChatRequest {
+            model: model_id,
+            messages,
+            temperature: Some(0.3),
+            max_tokens: Some(1536),
+            thinking: None,
+            stop: None,
+            seed: None,
+            tools: None,
+            stream: true,
+        };
+        let t0 = std::time::Instant::now();
+        let stream = match provider.chat(req) {
+            Ok(s) => s,
+            Err(e) => {
+                let err_str = e.to_string();
+                let is_http_4xx = err_str.contains("HTTP 4");
+                tracing::warn!(
+                    path = %file_path,
+                    size_mb = %format!("{:.1}", file_size_mb),
+                    model = %model_id,
+                    attempt = i + 1,
+                    total,
+                    elapsed_ms = t0.elapsed().as_millis(),
+                    err = %e,
+                    "view_image: provider.chat() failed"
+                );
+                if is_http_4xx && i + 1 < total {
+                    tracing::info!(
+                        model = %model_id,
+                        next_model = %candidates[i + 1].1,
+                        "view_image: HTTP 4xx, falling back to next model"
+                    );
+                    continue;
+                }
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("视觉模型调用失败：{e}")),
+                });
+            }
+        };
+        let resp = match ChatResponse::from_stream(stream).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                let err_str = e.to_string();
+                let is_http_4xx = err_str.contains("HTTP 4");
+                tracing::warn!(
+                    path = %file_path,
+                    size_mb = %format!("{:.1}", file_size_mb),
+                    model = %model_id,
+                    attempt = i + 1,
+                    total,
+                    elapsed_ms = t0.elapsed().as_millis(),
+                    err = %e,
+                    "view_image: stream collection failed"
+                );
+                if is_http_4xx && i + 1 < total {
+                    tracing::info!(
+                        model = %model_id,
+                        next_model = %candidates[i + 1].1,
+                        "view_image: HTTP 4xx, falling back to next model"
+                    );
+                    continue;
+                }
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("视觉模型响应失败：{e}")),
+                });
+            }
+        };
+
+        let elapsed_ms = t0.elapsed().as_millis();
+        let input_tokens = resp.usage.as_ref().and_then(|u| u.input_tokens);
+        let output_tokens = resp.usage.as_ref().and_then(|u| u.output_tokens);
+
+        if resp.text.trim().is_empty() {
+            tracing::warn!(
+                path = %file_path,
+                size_mb = %format!("{:.1}", file_size_mb),
+                model = %model_id,
+                attempt = i + 1,
+                total,
+                elapsed_ms,
+                stop_reason = ?resp.stop_reason,
+                input_tokens,
+                output_tokens,
+                "view_image: empty result"
+            );
+            // Empty result from this model — don't try others, same root cause.
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("视觉模型返回了空结果。".to_string()),
+            });
+        }
+
+        tracing::info!(
+            path = %file_path,
+            size_mb = %format!("{:.1}", file_size_mb),
+            model = %model_id,
+            attempt = i + 1,
+            total,
+            elapsed_ms,
+            stop_reason = ?resp.stop_reason,
+            input_tokens,
+            output_tokens,
+            text_len = resp.text.len(),
+            "view_image: success"
+        );
+        return Ok(ToolResult {
+            success: true,
+            output: resp.text,
+            error: None,
+        });
+    }
+
+    // All candidates exhausted (shouldn't reach here unless all fail with 4xx).
+    Ok(ToolResult {
+        success: false,
+        output: String::new(),
+        error: Some("所有视觉模型均不可用。".to_string()),
+    })
 }
 
 #[async_trait]
@@ -119,16 +257,26 @@ impl Tool for ViewImageTool {
             });
         }
 
-        let Some((provider, model_id)) = self
+        let candidates = self
             .providers
-            .find_chat_model_with_modality(Modality::Image)
-        else {
+            .find_all_chat_models_with_modality(Modality::Image);
+        if candidates.is_empty() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some("当前没有可用的视觉模型，无法查看图片。".to_string()),
             });
-        };
+        }
+
+        let file_size_mb = meta.len() as f64 / (1024.0 * 1024.0);
+        tracing::info!(
+            path = %abs.display(),
+            size_mb = %format!("{:.1}", file_size_mb),
+            candidates = candidates.len(),
+            models = ?candidates.iter().map(|(_, m)| m.as_str()).collect::<Vec<_>>(),
+            question = %question,
+            "view_image: starting analysis"
+        );
 
         let user_msg = ChatMessage {
             role: "user".into(),
@@ -150,49 +298,8 @@ impl Tool for ViewImageTool {
             is_error: None,
         };
         let messages = [user_msg];
-        let req = ChatRequest {
-            model: &model_id,
-            messages: &messages,
-            temperature: Some(0.3),
-            max_tokens: Some(1536),
-            thinking: None,
-            stop: None,
-            seed: None,
-            tools: None,
-            stream: true,
-        };
-        let stream = match provider.chat(req) {
-            Ok(s) => s,
-            Err(e) => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("视觉模型调用失败：{e}")),
-                });
-            }
-        };
-        let text = match ChatResponse::from_stream(stream).await {
-            Ok(resp) => resp.text,
-            Err(e) => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("视觉模型响应失败：{e}")),
-                });
-            }
-        };
-        if text.trim().is_empty() {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("视觉模型返回了空结果。".to_string()),
-            });
-        }
-        Ok(ToolResult {
-            success: true,
-            output: text,
-            error: None,
-        })
+
+        try_with_fallback(&candidates, &messages, &abs.display().to_string(), file_size_mb).await
     }
 }
 

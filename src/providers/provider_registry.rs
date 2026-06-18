@@ -86,4 +86,24 @@ pub trait ProviderRegistry: Send + Sync {
         }
         None
     }
+
+    /// Find ALL registered chat models that support the given input modality,
+    /// in routing-chain order. Used by media tools to fall back to the next
+    /// model when the first one rejects the request (e.g. HTTP 404).
+    fn find_all_chat_models_with_modality(
+        &self,
+        modality: Modality,
+    ) -> Vec<(Arc<dyn ChatProvider>, String)> {
+        let mut result = Vec::new();
+        for model_id in self.get_chat_routing_models() {
+            if let Ok(cfg) = self.get_chat_model_config(&model_id) {
+                if cfg.supports_input(modality.clone()) {
+                    if let Some(found) = self.get_chat_provider_by_model(&model_id) {
+                        result.push(found);
+                    }
+                }
+            }
+        }
+        result
+    }
 }
