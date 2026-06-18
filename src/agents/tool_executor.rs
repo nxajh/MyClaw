@@ -74,13 +74,17 @@ impl ToolExecutor {
         session: &Session,
     ) -> anyhow::Result<ToolResult> {
         let raw = if self.timeout_secs > 0 && !tool.blocks_on_human() {
-            let timeout = Duration::from_secs(self.timeout_secs);
+            let effective_secs = tool
+                .preferred_timeout_secs()
+                .map(|p| p.max(self.timeout_secs))
+                .unwrap_or(self.timeout_secs);
+            let timeout = Duration::from_secs(effective_secs);
             tokio::time::timeout(timeout, tool.execute(args, session))
                 .await
                 .unwrap_or_else(|_| {
                     Ok(ToolResult {
                         success: false,
-                        output: format!("Tool '{}' timed out after {}s", name, self.timeout_secs),
+                        output: format!("Tool '{}' timed out after {}s", name, effective_secs),
                         error: Some("timeout".to_string()),
                     })
                 })?

@@ -75,6 +75,14 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Per-tool timeout override in seconds. When `Some(secs)`, the executor
+    /// uses `max(global_timeout, preferred_timeout_secs())` so tools that
+    /// legitimately need more time (e.g. video analysis with large uploads)
+    /// can override without changing the global config. Default: `None`.
+    fn preferred_timeout_secs(&self) -> Option<u64> {
+        None
+    }
+
     /// Execute the tool with the given arguments.
     ///
     /// `session` carries the calling session's identity, owner (routing_key),

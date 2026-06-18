@@ -12,6 +12,11 @@ use crate::providers::provider_registry::ProviderRegistry;
 use crate::providers::{Tool, ToolResult};
 use serde_json::json;
 
+/// Video analysis needs more time than generic tools: base64-encoding a
+/// multi-MB file, uploading it, and waiting for the model to reason over
+/// frames/audio can easily exceed the default 180 s.
+const VIDEO_TIMEOUT_SECS: u64 = 300;
+
 pub struct ViewVideoTool {
     providers: Arc<dyn ProviderRegistry>,
 }
@@ -74,6 +79,10 @@ impl Tool for ViewVideoTool {
         2_000
     }
 
+    fn preferred_timeout_secs(&self) -> Option<u64> {
+        Some(VIDEO_TIMEOUT_SECS)
+    }
+
     async fn execute(
         &self,
         args: serde_json::Value,
@@ -130,6 +139,15 @@ impl Tool for ViewVideoTool {
             });
         };
 
+        let file_size_mb = meta.len() as f64 / (1024.0 * 1024.0);
+        tracing::info!(
+            path = %abs.display(),
+            size_mb = %format!("{:.1}", file_size_mb),
+            model = %model_id,
+            question = %question,
+            "view_video: starting analysis"
+        );
+
         let user_msg = ChatMessage {
             role: "user".into(),
             parts: vec![
@@ -161,9 +179,18 @@ impl Tool for ViewVideoTool {
             tools: None,
             stream: true,
         };
+
+        let t0 = std::time::Instant::now();
         let stream = match provider.chat(req) {
             Ok(s) => s,
             Err(e) => {
+                tracing::warn!(
+                    path = %abs.display(),
+                    model = %model_id,
+                    elapsed_ms = t0.elapsed().as_millis(),
+                    err = %e,
+                    "view_video: provider.chat() failed"
+                );
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
@@ -171,9 +198,16 @@ impl Tool for ViewVideoTool {
                 });
             }
         };
-        let text = match ChatResponse::from_stream(stream).await {
-            Ok(resp) => resp.text,
+        let resp = match ChatResponse::from_stream(stream).await {
+            Ok(resp) => resp,
             Err(e) => {
+                tracing::warn!(
+                    path = %abs.display(),
+                    model = %model_id,
+                    elapsed_ms = t0.elapsed().as_millis(),
+                    err = %e,
+                    "view_video: stream collection failed"
+                );
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
@@ -181,16 +215,46 @@ impl Tool for ViewVideoTool {
                 });
             }
         };
-        if text.trim().is_empty() {
+
+        let elapsed_ms = t0.elapsed().as_millis();
+        let input_tokens = resp.usage.as_ref().and_then(|u| u.input_tokens);
+        let output_tokens = resp.usage.as_ref().and_then(|u| u.output_tokens);
+
+        if resp.text.trim().is_empty() {
+            tracing::warn!(
+                path = %abs.display(),
+                size_mb = %format!("{:.1}", file_size_mb),
+                model = %model_id,
+                elapsed_ms,
+                stop_reason = ?resp.stop_reason,
+                input_tokens,
+                output_tokens,
+                has_reasoning = resp.reasoning_content.is_some(),
+                reasoning_len = resp.reasoning_content.as_ref().map(|r| r.len()).unwrap_or(0),
+                "view_video: empty result — model returned no text content"
+            );
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some("视频模型返回了空结果。".to_string()),
             });
         }
+
+        tracing::info!(
+            path = %abs.display(),
+            size_mb = %format!("{:.1}", file_size_mb),
+            model = %model_id,
+            elapsed_ms,
+            stop_reason = ?resp.stop_reason,
+            input_tokens,
+            output_tokens,
+            text_len = resp.text.len(),
+            "view_video: success"
+        );
+
         Ok(ToolResult {
             success: true,
-            output: text,
+            output: resp.text,
             error: None,
         })
     }
