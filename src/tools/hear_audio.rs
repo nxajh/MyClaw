@@ -63,7 +63,7 @@ async fn try_with_fallback(
             model: model_id,
             messages,
             temperature: Some(0.2),
-            max_tokens: Some(1536),
+            max_tokens: None,
             thinking: None,
             stop: None,
             seed: None,
