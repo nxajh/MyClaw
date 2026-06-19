@@ -95,8 +95,9 @@ pub fn build_google_body(req: &ChatRequest<'_>) -> serde_json::Value {
                     "name": t.name,
                     "description": t.description,
                 });
-                if let Some(ref schema) = t.input_schema {
-                    decl["parameters"] = schema.clone();
+                // Only include parameters when the schema is non-null.
+                if !t.input_schema.is_null() {
+                    decl["parameters"] = t.input_schema.clone();
                 }
                 decl
             })
