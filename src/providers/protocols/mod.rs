@@ -5,4 +5,5 @@
 //! the same protocol, while keeping vendor-specific quirks in profiles.
 
 pub mod anthropic;
+pub mod google;
 pub mod openai;

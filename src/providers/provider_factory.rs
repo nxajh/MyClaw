@@ -192,12 +192,14 @@ impl ProviderFactory {
                 };
                 Ok(Box::new(client))
             }
-            // ── Google: not supported as a chat provider ──
+            // ── Google Generate Content API ──────────────────────────────
             (well_known::GOOGLE, _) => {
-                anyhow::bail!(
-                    "Google provider ('{}') does not support the chat capability",
-                    request.provider_key
-                )
+                let client =
+                    crate::providers::protocols::google::generate_content::GoogleGenerateContentClient::new(
+                        request.api_key,
+                        request.base_url,
+                    );
+                Ok(Box::new(client))
             }
             // ── Unreachable guard ──
             _ => anyhow::bail!(
