@@ -25,6 +25,8 @@ pub enum Protocol {
     OpenAi,
     /// Anthropic Messages protocol (or Anthropic-compatible).
     Anthropic,
+    /// Google Generate Content API protocol (Gemini).
+    Google,
 }
 
 // ── AuthStyle ─────────────────────────────────────────────────────────────────

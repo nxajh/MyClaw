@@ -122,6 +122,7 @@ impl ProviderFactory {
             well_known::ANTHROPIC => Protocol::Anthropic,
             well_known::XIAOMI => Protocol::Anthropic,
             well_known::MINIMAX => Protocol::Anthropic,
+            well_known::GOOGLE => Protocol::Google,
             _ => Protocol::OpenAi,
         }
     }
