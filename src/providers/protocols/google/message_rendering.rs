@@ -36,7 +36,7 @@ pub fn build_google_body(req: &ChatRequest<'_>) -> serde_json::Value {
         .messages
         .iter()
         .filter(|m| m.role != "system")
-        .filter_map(|msg| render_content(msg))
+        .filter_map(render_content)
         .collect();
 
     // ── Assemble body ────────────────────────────────────────────────────
