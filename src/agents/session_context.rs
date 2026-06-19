@@ -230,7 +230,7 @@ impl SessionContext {
             // Date injection respects the configured [prompt] timezone_offset
             // (sourced from the shared ResourceProvider via ContextEngine).
             attachments.diff_date(runtime.context_engine.timezone_offset(), &session.history);
-            attachments.diff_autonomy(&prompt_config.permission_mode);
+            attachments.diff_autonomy(&prompt_config.permission_mode, &session.history);
             let text = attachments.build_text(&skills_snap);
             attachments.clear_pending();
             text

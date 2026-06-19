@@ -414,12 +414,28 @@ impl AttachmentManager {
 
     /// Notify the model that the autonomy level has changed.
     /// Called from `apply_session_override` when `autonomy` is updated.
-    pub fn diff_autonomy(&mut self, new_level: &crate::config::agent::PermissionMode) {
+    ///
+    /// Only generates a delta when the level differs from what is already
+    /// announced in the session history — prevents injecting redundant
+    /// `## Autonomy Level Changed` notices on every turn.
+    pub fn diff_autonomy(&mut self, new_level: &crate::config::agent::PermissionMode, history: &[ChatMessage]) {
         let label = match new_level {
             crate::config::agent::PermissionMode::Full => "full",
             crate::config::agent::PermissionMode::Default => "default",
             crate::config::agent::PermissionMode::ReadOnly => "read_only",
         };
+
+        // Check if history already contains an autonomy notice at this level.
+        let marker = format!("Current autonomy: **{}**", label);
+        let already_announced = history.iter().any(|msg| {
+            let text = msg.text_content();
+            text.contains("<system-reminder>") && text.contains(&marker)
+        });
+
+        if already_announced {
+            return;
+        }
+
         self.pending.insert(
             AttachmentKind::AutonomyNotice,
             Delta {
@@ -792,5 +808,87 @@ mod tests {
         let msg = am.build_message(&SkillManager::new()).unwrap();
         let text = msg.text_content();
         assert!(text.contains("The date has changed"));
+    }
+
+    #[test]
+    fn autonomy_injected_on_empty_history() {
+        let mut am = AttachmentManager::new();
+        am.diff_autonomy(
+            &crate::config::agent::PermissionMode::Default,
+            &empty_history(),
+        );
+        let msg = am.build_message(&SkillManager::new()).unwrap();
+        let text = msg.text_content();
+        assert!(text.contains("## Autonomy Level Changed"));
+        assert!(text.contains("default"));
+    }
+
+    #[test]
+    fn autonomy_skips_if_already_in_history() {
+        let mut am = AttachmentManager::new();
+
+        // First injection
+        am.diff_autonomy(
+            &crate::config::agent::PermissionMode::Default,
+            &empty_history(),
+        );
+        let msg = am.build_message(&SkillManager::new()).unwrap();
+        am.clear_pending();
+
+        // History now contains the autonomy notice
+        let history = vec![msg];
+
+        // Second diff with same level — should NOT generate a delta
+        am.diff_autonomy(
+            &crate::config::agent::PermissionMode::Default,
+            &history,
+        );
+        assert!(am.build_message(&SkillManager::new()).is_none());
+    }
+
+    #[test]
+    fn autonomy_injects_on_level_change() {
+        let mut am = AttachmentManager::new();
+
+        // Inject "default" into history
+        am.diff_autonomy(
+            &crate::config::agent::PermissionMode::Default,
+            &empty_history(),
+        );
+        let msg = am.build_message(&SkillManager::new()).unwrap();
+        am.clear_pending();
+        let history = vec![msg];
+
+        // Change to "full" — should generate a delta
+        am.diff_autonomy(
+            &crate::config::agent::PermissionMode::Full,
+            &history,
+        );
+        let msg2 = am.build_message(&SkillManager::new()).unwrap();
+        let text = msg2.text_content();
+        assert!(text.contains("full"));
+        assert!(text.contains("All tools are permitted"));
+    }
+
+    #[test]
+    fn autonomy_reinjects_after_compaction() {
+        let mut am = AttachmentManager::new();
+
+        // First injection
+        am.diff_autonomy(
+            &crate::config::agent::PermissionMode::Default,
+            &empty_history(),
+        );
+        let msg = am.build_message(&SkillManager::new()).unwrap();
+        am.clear_pending();
+
+        // Simulate compaction: history is empty
+        let compacted: Vec<ChatMessage> = vec![];
+        am.diff_autonomy(
+            &crate::config::agent::PermissionMode::Default,
+            &compacted,
+        );
+        let msg2 = am.build_message(&SkillManager::new()).unwrap();
+        assert!(msg2.text_content().contains("## Autonomy Level Changed"));
     }
 }
