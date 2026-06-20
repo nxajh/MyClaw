@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use super::key::{SessionKey, SubAgentKey};
 use super::turn::ResolvedTurn;
-use crate::agents::session::{BackendPersistHook, PersistHook, SessionManager};
+use crate::agents::session::SessionManager;
 use crate::agents::{
     AgentRuntime, DelegationCoordinator, DelegationEvent, SessionContext, UnfinishedSubAgent,
 };
