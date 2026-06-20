@@ -127,9 +127,15 @@ fn sanitize_schema_for_google(value: &mut serde_json::Value) {
     obj.remove("$schema");
     obj.remove("$defs");
     obj.remove("definitions");
+    // Google does not support anyOf / oneOf in functionDeclarations
+    // schemas. Remove them entirely — fields become implicitly optional.
+    // The semantic constraint (e.g. "at least one of text/files") is lost,
+    // but the tool description should already convey this to the model.
+    obj.remove("anyOf");
+    obj.remove("oneOf");
     // Google requires "required" to be paired with "type": "object".
-    // Schema nodes like anyOf branches that carry "required" without an
-    // explicit object type trigger 400 "required: only allowed for OBJECT type".
+    // After removing anyOf, any remaining standalone "required" without
+    // an explicit object type triggers 400.
     if obj.contains_key("required") {
         let is_object = obj
             .get("type")
@@ -365,6 +371,8 @@ mod tests {
     fn sanitize_anyof_branch_required_gets_type_object() {
         // Reproduces the send_message tool schema that triggered
         // "required: only allowed for OBJECT type" (400) on Google.
+        // Google does not support anyOf in functionDeclarations, so the
+        // sanitizer strips it entirely.
         let mut schema = json!({
             "type": "object",
             "properties": {
@@ -377,12 +385,13 @@ mod tests {
             ]
         });
         sanitize_schema_for_google(&mut schema);
-        for branch in schema["anyOf"].as_array().unwrap() {
-            assert_eq!(
-                branch["type"].as_str().unwrap(),
-                "object",
-                "anyOf branch with required must get type: object"
-            );
-        }
+        assert!(
+            schema.get("anyOf").is_none(),
+            "anyOf must be stripped for Google"
+        );
+        assert!(
+            schema.get("oneOf").is_none(),
+            "oneOf must be stripped for Google"
+        );
     }
 }
