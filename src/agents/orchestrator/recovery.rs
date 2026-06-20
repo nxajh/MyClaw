@@ -93,16 +93,13 @@ impl CompletionSink {
 fn spawn_recovery(
     session_ctx: Arc<SessionContext>,
     runtime: AgentRuntime,
-    backend: Arc<dyn SessionBackend>,
     label: &'static str,
     id: String,
     sink: CompletionSink,
 ) {
-    let persist_hook: Arc<dyn PersistHook> = Arc::new(BackendPersistHook::new(backend));
     tokio::spawn(async move {
         let _turn_guard = session_ctx.turn_lock.lock().await;
         let mut session = session_ctx.session.lock().await;
-        session.persist = Some(persist_hook.clone());
 
         let resolved = ResolvedTurn::resolve(&session, &runtime);
         let turn_ctx = resolved.turn_context();
@@ -123,8 +120,6 @@ fn spawn_recovery(
                 tracing::warn!(id = %id, err = %e, "{label} failed");
             }
         }
-
-        session.persist = None;
     });
 }
 
@@ -160,7 +155,6 @@ pub(super) fn run_startup(
         spawn_recovery(
             session_ctx,
             runtime.clone(),
-            Arc::clone(sessions.backend()),
             "startup recovery",
             key.clone(),
             CompletionSink::Channel {
@@ -186,7 +180,6 @@ pub(super) fn run_startup(
         spawn_recovery(
             session_ctx,
             runtime.clone(),
-            Arc::clone(sessions.backend()),
             "sub-agent startup recovery",
             sa.task_id.clone(),
             CompletionSink::Delegate {

@@ -238,7 +238,7 @@ impl MediaPolicy {
         let video = model_config.supports_input(Modality::Video);
 
         let image_policy = match provider_id.as_str() {
-            well_known::OPENAI | well_known::ANTHROPIC | well_known::GLM | well_known::GENERIC => {
+            well_known::OPENAI | well_known::ANTHROPIC | well_known::GLM | well_known::GENERIC | well_known::GOOGLE => {
                 MediaInputPolicy::inline_base64(image, Some(25 * 1024 * 1024))
             }
             well_known::XIAOMI | well_known::MINIMAX => {
@@ -249,7 +249,9 @@ impl MediaPolicy {
         };
 
         let audio_policy = match provider_id.as_str() {
-            well_known::OPENAI => MediaInputPolicy::inline_base64(audio, Some(25 * 1024 * 1024)),
+            well_known::OPENAI | well_known::GOOGLE => {
+                MediaInputPolicy::inline_base64(audio, Some(25 * 1024 * 1024))
+            }
             // Xiaomi OpenAI protocol supports input_audio natively when the
             // model declares audio support. Models without audio support get
             // a marker so the agent can delegate via hear_audio tool.
@@ -264,7 +266,7 @@ impl MediaPolicy {
         };
 
         let video_policy = match provider_id.as_str() {
-            well_known::GLM | well_known::GENERIC => {
+            well_known::GLM | well_known::GENERIC | well_known::GOOGLE => {
                 MediaInputPolicy::inline_base64(video, Some(50 * 1024 * 1024))
             }
             // Xiaomi OpenAI protocol supports video_url natively when the
