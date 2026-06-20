@@ -97,7 +97,12 @@ pub fn build_google_body(req: &ChatRequest<'_>) -> serde_json::Value {
                 });
                 // Only include parameters when the schema is non-null.
                 if !t.input_schema.is_null() {
-                    decl["parameters"] = t.input_schema.clone();
+                    // Google's functionDeclarations supports only a subset of
+                    // JSON Schema. Strip unsupported fields recursively to
+                    // avoid "Unknown name X: Cannot find field" 400 errors.
+                    let mut schema = t.input_schema.clone();
+                    sanitize_schema_for_google(&mut schema);
+                    decl["parameters"] = schema;
                 }
                 decl
             })
@@ -106,6 +111,34 @@ pub fn build_google_body(req: &ChatRequest<'_>) -> serde_json::Value {
     }
 
     body
+}
+
+/// Recursively remove JSON Schema fields that Google's functionDeclarations
+/// endpoint does not understand.
+///
+/// Google supports a subset of OpenAPI 3.0 schema. Known-unsupported fields
+/// include `additionalProperties`, `$schema`, `$defs`, and `definitions`.
+fn sanitize_schema_for_google(value: &mut serde_json::Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    // Remove fields Google rejects.
+    obj.remove("additionalProperties");
+    obj.remove("$schema");
+    obj.remove("$defs");
+    obj.remove("definitions");
+    // Recurse into nested objects/arrays.
+    for (_, v) in obj.iter_mut() {
+        match v {
+            serde_json::Value::Object(_) => sanitize_schema_for_google(v),
+            serde_json::Value::Array(arr) => {
+                for item in arr {
+                    sanitize_schema_for_google(item);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Render a single `ChatMessage` into a Google `Content` object.
@@ -259,4 +292,59 @@ fn inline_file_as_part(
             "data": data,
         }
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_removes_unsupported_fields() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }
+            },
+            "additionalProperties": true,
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "$defs": {},
+        });
+        sanitize_schema_for_google(&mut schema);
+        let s = schema.to_string();
+        assert!(!s.contains("additionalProperties"));
+        assert!(!s.contains("$schema"));
+        assert!(!s.contains("$defs"));
+    }
+
+    #[test]
+    fn sanitize_recurses_into_arrays() {
+        let mut schema = json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+            }
+        });
+        sanitize_schema_for_google(&mut schema);
+        assert!(!schema.to_string().contains("additionalProperties"));
+    }
+
+    #[test]
+    fn sanitize_preserves_supported_fields() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "test"}
+            },
+            "required": ["query"]
+        });
+        sanitize_schema_for_google(&mut schema);
+        assert_eq!(schema["properties"]["query"]["description"], "test");
+        assert_eq!(schema["required"][0], "query");
+    }
 }
