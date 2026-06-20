@@ -127,6 +127,19 @@ fn sanitize_schema_for_google(value: &mut serde_json::Value) {
     obj.remove("$schema");
     obj.remove("$defs");
     obj.remove("definitions");
+    // Google requires "required" to be paired with "type": "object".
+    // Schema nodes like anyOf branches that carry "required" without an
+    // explicit object type trigger 400 "required: only allowed for OBJECT type".
+    if obj.contains_key("required") {
+        let is_object = obj
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(|s| s == "object")
+            .unwrap_or(false);
+        if !is_object {
+            obj.insert("type".to_string(), serde_json::json!("object"));
+        }
+    }
     // Recurse into nested objects/arrays.
     for (_, v) in obj.iter_mut() {
         match v {
@@ -346,5 +359,30 @@ mod tests {
         sanitize_schema_for_google(&mut schema);
         assert_eq!(schema["properties"]["query"]["description"], "test");
         assert_eq!(schema["required"][0], "query");
+    }
+
+    #[test]
+    fn sanitize_anyof_branch_required_gets_type_object() {
+        // Reproduces the send_message tool schema that triggered
+        // "required: only allowed for OBJECT type" (400) on Google.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+                "files": {"type": "array", "items": {"type": "string"}}
+            },
+            "anyOf": [
+                {"required": ["text"]},
+                {"required": ["files"]}
+            ]
+        });
+        sanitize_schema_for_google(&mut schema);
+        for branch in schema["anyOf"].as_array().unwrap() {
+            assert_eq!(
+                branch["type"].as_str().unwrap(),
+                "object",
+                "anyOf branch with required must get type: object"
+            );
+        }
     }
 }
