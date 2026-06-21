@@ -205,9 +205,13 @@ fn render_content(msg: &crate::providers::ChatMessage) -> Option<serde_json::Val
                             parts.push(json!({ "text": text }));
                         }
                     }
-                    crate::providers::ContentPart::Thinking { thinking, .. } => {
+                    crate::providers::ContentPart::Thinking { thinking, signature } => {
                         if !thinking.is_empty() {
-                            parts.push(json!({ "text": thinking, "thought": true }));
+                            let mut part = json!({ "text": thinking, "thought": true });
+                            if let Some(ref sig) = signature {
+                                part["thoughtSignature"] = json!(sig);
+                            }
+                            parts.push(part);
                         }
                     }
                     crate::providers::ContentPart::File { path, mime_type, .. } => {

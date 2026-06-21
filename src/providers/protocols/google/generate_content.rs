@@ -249,6 +249,16 @@ fn parse_google_sse(line: &str) -> Vec<StreamEvent> {
                             events.push(StreamEvent::Thinking {
                                 text: text.to_string(),
                             });
+                            // Google thinking blocks carry a thoughtSignature that
+                            // must be echoed back in subsequent turns.
+                            if let Some(sig) = part
+                                .get("thoughtSignature")
+                                .and_then(|v| v.as_str())
+                            {
+                                events.push(StreamEvent::ThinkingSignature {
+                                    signature: sig.to_string(),
+                                });
+                            }
                         } else {
                             events.push(StreamEvent::Delta {
                                 text: text.to_string(),
