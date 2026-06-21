@@ -59,6 +59,27 @@ pub const RECONNECT_DELAYS: &[u64] = &[1, 2, 5, 10, 30, 60];
 pub const RAPID_RECONNECT_LIMIT: usize = 3;
 pub const RAPID_RECONNECT_WINDOW_SECS: u64 = 5;
 
+/// Derive a file extension from a QQ attachment content_type string.
+/// QQ sends content_type as either a category ("image", "video") or a MIME
+/// ("image/jpeg", "video/mp4"). We need the extension for temp file paths so
+/// that downstream modality detection (which falls back to extension) works.
+fn mime_ext_from_content_type(ct: &str) -> &'static str {
+    match ct {
+        "image" | "image/jpeg" | "image/jpg" => "jpg",
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/bmp" => "bmp",
+        "video" | "video/mp4" => "mp4",
+        "video/webm" => "webm",
+        "video/quicktime" => "mov",
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        "audio/ogg" => "ogg",
+        "audio/wav" => "wav",
+        _ => "bin",
+    }
+}
+
 /// Build User-Agent string for QQ Bot HTTP requests.
 pub fn user_agent() -> String {
     let os = std::env::consts::OS;
@@ -553,8 +574,15 @@ impl QQBotChannel {
                 .and_then(|v| v.as_str())
                 .unwrap_or("voice")
                 .to_string();
-            let temp_path =
-                std::env::temp_dir().join(format!("myclaw-qq-voice-{}", uuid::Uuid::new_v4()));
+            let voice_ext = if mime == "audio/wav" {
+                "wav"
+            } else if mime == "audio/ogg" {
+                "ogg"
+            } else {
+                "silk"
+            };
+            let temp_path = std::env::temp_dir()
+                .join(format!("myclaw-qq-voice-{}.{}", uuid::Uuid::new_v4(), voice_ext));
             if tokio::fs::write(&temp_path, &bytes).await.is_err() {
                 warn!("qqbot: failed to save voice to temp file");
                 continue;
@@ -605,13 +633,14 @@ impl QQBotChannel {
             {
                 Ok(resp) => match resp.bytes().await {
                     Ok(bytes) => {
+                        let ext = mime_ext_from_content_type(ct);
                         let temp_path = std::env::temp_dir()
-                            .join(format!("myclaw-qq-img-{}", uuid::Uuid::new_v4()));
+                            .join(format!("myclaw-qq-img-{}.{}", uuid::Uuid::new_v4(), ext));
                         if tokio::fs::write(&temp_path, &bytes).await.is_ok() {
                             tracing::debug!(url = %full_url, size = bytes.len(), "qqbot: image downloaded and saved to temp file");
                             msg.content.files.push(ChannelFile {
                                 meta: ChannelFileMeta {
-                                    file_name: format!("image-{}", uuid::Uuid::new_v4()),
+                                    file_name: format!("image-{}.{}", uuid::Uuid::new_v4(), ext),
                                     mime_type: Some(ct.to_string()),
                                     size_bytes: Some(bytes.len() as u64),
                                 },
@@ -694,7 +723,7 @@ impl QQBotChannel {
                             .map(|s| s.to_string())
                             .unwrap_or_else(|| format!("attachment-{}.{}", uuid::Uuid::new_v4(), ext));
                         let temp_path =
-                            std::env::temp_dir().join(format!("myclaw-qq-file-{}", uuid::Uuid::new_v4()));
+                            std::env::temp_dir().join(format!("myclaw-qq-file-{}.{}", uuid::Uuid::new_v4(), ext));
                         if tokio::fs::write(&temp_path, &bytes).await.is_ok() {
                             tracing::debug!(url = %full_url, size = bytes.len(), %mime, "qqbot: attachment downloaded and saved to temp file");
                             msg.content.files.push(ChannelFile {

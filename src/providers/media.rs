@@ -66,8 +66,62 @@ pub fn modality_from_mime(mime: Option<&str>, path: &str) -> FileModality {
         "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" => FileModality::Image,
         "ogg" | "mp3" | "wav" | "flac" | "m4a" | "aac" => FileModality::Audio,
         "mp4" | "webm" | "mov" | "mkv" => FileModality::Video,
-        _ => FileModality::Other,
+        _ => sniff_modality_from_path(path),
     }
+}
+
+/// Last-resort modality detection by reading file magic bytes.
+/// Only called when both mime_type and file extension are unavailable.
+fn sniff_modality_from_path(path: &str) -> FileModality {
+    let abs = resolve_path(path);
+    let Ok(bytes) = std::fs::read(&abs) else {
+        return FileModality::Other;
+    };
+    sniff_modality_from_bytes(&bytes)
+}
+
+/// Detect file modality from magic bytes (file signature).
+fn sniff_modality_from_bytes(bytes: &[u8]) -> FileModality {
+    if bytes.len() < 4 {
+        return FileModality::Other;
+    }
+    // Image magic bytes
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return FileModality::Image; // JPEG
+    }
+    if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        return FileModality::Image; // PNG
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return FileModality::Image; // GIF
+    }
+    if bytes.starts_with(b"RIFF") && bytes.len() >= 12 && &bytes[8..12] == b"WEBP" {
+        return FileModality::Image; // WebP
+    }
+    if bytes.starts_with(&[0x42, 0x4D]) {
+        return FileModality::Image; // BMP
+    }
+    // Audio magic bytes
+    if bytes.starts_with(b"ID3") || (bytes.len() >= 2 && bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0) {
+        return FileModality::Audio; // MP3
+    }
+    if bytes.starts_with(b"OggS") {
+        return FileModality::Audio; // OGG
+    }
+    if bytes.starts_with(b"RIFF") && bytes.len() >= 12 && &bytes[8..12] == b"WAVE" {
+        return FileModality::Audio; // WAV
+    }
+    if bytes.starts_with(b"fLaC") {
+        return FileModality::Audio; // FLAC
+    }
+    // Video magic bytes
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        return FileModality::Video; // MP4/MOV (ISO BMFF)
+    }
+    if bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        return FileModality::Video; // WebM/MKV (EBML)
+    }
+    FileModality::Other
 }
 
 pub fn marker_for_file(path: &str, mime: Option<&str>) -> String {
@@ -571,5 +625,38 @@ mod tests {
             }
             other => panic!("expected File, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn sniff_detects_image_magic_bytes() {
+        assert_eq!(sniff_modality_from_bytes(&[0xFF, 0xD8, 0xFF, 0xE0]), FileModality::Image); // JPEG
+        assert_eq!(
+            sniff_modality_from_bytes(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A]), 
+            FileModality::Image // PNG
+        );
+    }
+
+    #[test]
+    fn sniff_detects_video_magic_bytes() {
+        // MP4 ftyp box
+        let mp4_header = [0x00, 0x00, 0x00, 0x20, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm'];
+        assert_eq!(sniff_modality_from_bytes(&mp4_header), FileModality::Video);
+        // WebM/MKV EBML
+        assert_eq!(
+            sniff_modality_from_bytes(&[0x1A, 0x45, 0xDF, 0xA3, 0x01, 0x00]),
+            FileModality::Video
+        );
+    }
+
+    #[test]
+    fn sniff_detects_audio_magic_bytes() {
+        assert_eq!(sniff_modality_from_bytes(b"ID3\x03\x00"), FileModality::Audio); // MP3
+        assert_eq!(sniff_modality_from_bytes(b"OggS\x00"), FileModality::Audio); // OGG
+    }
+
+    #[test]
+    fn sniff_returns_other_for_unknown() {
+        assert_eq!(sniff_modality_from_bytes(b"XXXX"), FileModality::Other);
+        assert_eq!(sniff_modality_from_bytes(&[0x01, 0x02]), FileModality::Other);
     }
 }

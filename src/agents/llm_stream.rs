@@ -14,9 +14,9 @@ use crate::providers::{BoxStream, StreamEvent};
 
 /// Time to wait for the first stream chunk before giving up.
 ///
-/// 600 s covers slow models (DeepSeek reasoning, GPT-5 thinking) on long
+/// 300 s covers slow models (DeepSeek reasoning, GPT-5 thinking) on long
 /// prompts. Triggered on cold inference or a stalled upstream.
-pub const STREAM_FIRST_CHUNK_TIMEOUT: Duration = Duration::from_secs(600);
+pub const STREAM_FIRST_CHUNK_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Time to wait between chunks once streaming has started.
 ///
