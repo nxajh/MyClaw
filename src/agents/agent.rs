@@ -410,7 +410,7 @@ impl Agent {
                         tool_msg.tool_call_id = Some(call.id.clone());
                         tool_msg.is_error = Some(is_error);
                         messages.push(tool_msg);
-                        session.add_tool_result(call.id.clone(), result_content.clone(), is_error);
+                        session.add_tool_result(call.id.clone(), &call.name, result_content.clone(), is_error);
 
                         let remaining = response.tool_calls.len() - i - 1;
                         if remaining > 0 {
@@ -440,7 +440,7 @@ impl Agent {
                 )
                 .await;
 
-                session.add_tool_result(call.id.clone(), result_content, is_error);
+                session.add_tool_result(call.id.clone(), &call.name, result_content, is_error);
                 persist_last(session);
 
                 // After executing this call, check if we've hit the hard
@@ -562,7 +562,7 @@ impl Agent {
                     }
                     Err(e) => (format!("error: {}", e), true),
                 };
-                session.add_tool_result(call.id.clone(), result_content, is_error);
+                session.add_tool_result(call.id.clone(), &call.name, result_content, is_error);
                 persist_last(session);
             }
         }
