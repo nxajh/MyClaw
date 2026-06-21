@@ -208,7 +208,7 @@ fn render_content(msg: &crate::providers::ChatMessage) -> Option<serde_json::Val
                     crate::providers::ContentPart::Thinking { thinking, signature } => {
                         if !thinking.is_empty() {
                             let mut part = json!({ "text": thinking, "thought": true });
-                            if let Some(ref sig) = signature {
+                            if let Some(sig) = signature {
                                 part["thoughtSignature"] = json!(sig);
                             }
                             parts.push(part);
