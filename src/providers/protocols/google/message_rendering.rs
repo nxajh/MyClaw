@@ -270,7 +270,7 @@ fn render_content(msg: &crate::providers::ChatMessage) -> Option<serde_json::Val
                     if i == 0 {
                         if let Some(sig) = pending_fc_sig.take() {
                             part["thoughtSignature"] = json!(sig);
-                        } else if msg.model.as_deref().map_or(true, |m| !m.starts_with("gemini")) {
+                        } else if msg.model.as_deref().is_none_or(|m| !m.starts_with("gemini")) {
                             // functionCall from a non-Google model has no
                             // real signature. Use the dummy bypass value
                             // documented by Google to avoid 400.
