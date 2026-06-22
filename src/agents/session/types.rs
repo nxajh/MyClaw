@@ -220,6 +220,7 @@ impl Session {
             tool_call_id: None,
             tool_calls: None,
             is_error: None,
+            model: None,
         });
         self.message_ids.push(0);
     }
@@ -257,19 +258,19 @@ impl Session {
         tool_calls: Vec<crate::providers::ToolCall>,
         thinking: Option<String>,
         thinking_signature: Option<String>,
+        model: Option<String>,
     ) {
         if text.trim().is_empty() && tool_calls.is_empty() {
             return;
         }
         let mut msg = ChatMessage::assistant_text(&text);
         msg.tool_calls = Some(tool_calls);
-        // Persist whatever reasoning the provider returned, signature or not.
-        // Non-Anthropic providers (Xiaomi MiMo, …) emit thinking without a
-        // signature_delta — that's their normal protocol, not a bug.
-        // Provider-specific renderers (anthropic/message_rendering.rs) decide
-        // whether to include the block when replaying; Anthropic's renderer
-        // already drops signature-less blocks via filter_map to avoid the
-        // `Field required` 400.
+        msg.model = model;
+        // Persist reasoning and/or signature. Even when there's no thinking
+        // text, a signature may be present (e.g. Google functionCall
+        // thoughtSignature). In that case we store an empty-thinking block to
+        // carry the signature — the Google renderer will extract it and attach
+        // it to the functionCall part during rendering.
         if let Some(thinking) = thinking {
             use crate::providers::ContentPart;
             msg.parts.insert(
@@ -277,6 +278,15 @@ impl Session {
                 ContentPart::Thinking {
                     thinking,
                     signature: thinking_signature,
+                },
+            );
+        } else if let Some(sig) = thinking_signature {
+            use crate::providers::ContentPart;
+            msg.parts.insert(
+                0,
+                ContentPart::Thinking {
+                    thinking: String::new(),
+                    signature: Some(sig),
                 },
             );
         }

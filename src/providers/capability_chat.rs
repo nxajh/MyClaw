@@ -73,6 +73,12 @@ pub struct ChatMessage {
     /// Whether this tool result message indicates an error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
+    /// Model that generated this message (for assistant messages only).
+    /// Used by renderers to decide whether thinking blocks / thought
+    /// signatures originated from a different provider and must be
+    /// dropped or replaced with dummy values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 impl ChatMessage {
@@ -84,6 +90,7 @@ impl ChatMessage {
             tool_call_id: None,
             tool_calls: None,
             is_error: None,
+            model: None,
         }
     }
     pub fn user_text(text: impl Into<String>) -> Self {

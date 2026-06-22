@@ -82,6 +82,16 @@ pub fn render_anthropic_messages<'a>(req: &ChatRequest<'a>) -> RenderedAnthropic
                         }}))
                     }
                     crate::providers::ContentPart::Thinking { thinking, signature } => {
+                        // Cross-provider signature safety: Google (gemini-*)
+                        // thoughtSignatures are cryptographically incompatible
+                        // with Anthropic's verification and cause a 400.
+                        // Drop thinking blocks from Gemini-originated messages.
+                        let is_gemini_origin = msg.model.as_deref()
+                            .map(|m| m.starts_with("gemini"))
+                            .unwrap_or(false);
+                        if is_gemini_origin {
+                            return None;
+                        }
                         // Anthropic Messages API requires every thinking block to
                         // carry a `signature`; sending one without (e.g. because
                         // the SSE stream was truncated before `signature_delta`
@@ -89,6 +99,11 @@ pub fn render_anthropic_messages<'a>(req: &ChatRequest<'a>) -> RenderedAnthropic
                         // block in that case — losing the model's reasoning on a
                         // single replay is much better than failing the request.
                         let sig = signature.as_deref()?;
+                        // Skip empty-thinking blocks (they carry Google
+                        // functionCall signatures, not Anthropic reasoning).
+                        if thinking.is_empty() {
+                            return None;
+                        }
                         Some(serde_json::json!({
                             "type": "thinking",
                             "thinking": thinking,

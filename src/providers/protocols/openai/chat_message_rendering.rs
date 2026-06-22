@@ -217,6 +217,7 @@ mod tests {
             tool_call_id: None,
             tool_calls: None,
             is_error: None,
+            model: None,
         }];
         let req = ChatRequest {
             model: "m",

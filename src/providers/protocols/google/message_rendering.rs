@@ -196,6 +196,9 @@ fn render_content(msg: &crate::providers::ChatMessage) -> Option<serde_json::Val
         // ── Assistant → model message ──────────────────────────────────
         "assistant" => {
             let mut parts = Vec::new();
+            // A signature extracted from an empty-thinking Thinking block,
+            // waiting to be attached to the next functionCall part.
+            let mut pending_fc_sig: Option<String> = None;
 
             // Text + Thinking parts
             for part in &msg.parts {
@@ -208,10 +211,24 @@ fn render_content(msg: &crate::providers::ChatMessage) -> Option<serde_json::Val
                     crate::providers::ContentPart::Thinking { thinking, signature } => {
                         if !thinking.is_empty() {
                             let mut part = json!({ "text": thinking, "thought": true });
+                            // Only include signature if this message originated
+                            // from a Gemini model; cross-provider signatures
+                            // are incompatible (though non-FC signatures are
+                            // not strictly validated by Google).
+                            let is_gemini = msg.model.as_deref()
+                                .map(|m| m.starts_with("gemini"))
+                                .unwrap_or(true);
                             if let Some(sig) = signature {
-                                part["thoughtSignature"] = json!(sig);
+                                if is_gemini {
+                                    part["thoughtSignature"] = json!(sig);
+                                }
                             }
                             parts.push(part);
+                        } else if let Some(sig) = signature {
+                            // Empty thinking with a signature — this carries
+                            // the thoughtSignature for the following
+                            // functionCall part.
+                            pending_fc_sig = Some(sig.clone());
                         }
                     }
                     crate::providers::ContentPart::File { path, mime_type, .. } => {
@@ -230,7 +247,7 @@ fn render_content(msg: &crate::providers::ChatMessage) -> Option<serde_json::Val
 
             // Tool calls → functionCall parts
             if let Some(ref tcs) = msg.tool_calls {
-                for tc in tcs {
+                for (i, tc) in tcs.iter().enumerate() {
                     let args: serde_json::Value =
                         serde_json::from_str(&tc.arguments).unwrap_or_else(|e| {
                             tracing::warn!(
@@ -241,12 +258,26 @@ fn render_content(msg: &crate::providers::ChatMessage) -> Option<serde_json::Val
                             );
                             serde_json::Value::Object(Default::default())
                         });
-                    parts.push(json!({
+                    let mut part = json!({
                         "functionCall": {
                             "name": tc.name,
                             "args": args,
                         }
-                    }));
+                    });
+                    // Attach thoughtSignature to the first functionCall part
+                    // if we have one from the thinking block. Gemini 3
+                    // requires this on the first FC of each step.
+                    if i == 0 {
+                        if let Some(sig) = pending_fc_sig.take() {
+                            part["thoughtSignature"] = json!(sig);
+                        } else if msg.model.as_deref().map_or(true, |m| !m.starts_with("gemini")) {
+                            // functionCall from a non-Google model has no
+                            // real signature. Use the dummy bypass value
+                            // documented by Google to avoid 400.
+                            part["thoughtSignature"] = json!("skip_thought_signature_validator");
+                        }
+                    }
+                    parts.push(part);
                 }
             }
 

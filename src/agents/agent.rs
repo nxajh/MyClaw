@@ -332,7 +332,10 @@ impl Agent {
                     );
                     continue;
                 }
-                session.add_assistant(response.text.clone());
+                let mut msg = ChatMessage::assistant_text(response.text.clone());
+                msg.model = Some(model_id.clone());
+                session.history.push(msg);
+                session.message_ids.push(0);
                 persist_last(session);
                 return Ok(TurnResult {
                     text: response.text,
@@ -361,6 +364,7 @@ impl Agent {
                 response.tool_calls.clone(),
                 response.reasoning_content.clone(),
                 response.thinking_signature.clone(),
+                Some(model_id.clone()),
             );
             persist_last(session);
 

@@ -290,6 +290,17 @@ fn parse_google_sse(line: &str) -> Vec<StreamEvent> {
                             initial_arguments: args_str,
                         });
                     }
+                    // functionCall parts may carry a thoughtSignature at the
+                    // same level (Gemini 3+ thinking models). Emit it so the
+                    // caller can store and replay it in subsequent turns.
+                    if let Some(sig) = part
+                        .get("thoughtSignature")
+                        .and_then(|v| v.as_str())
+                    {
+                        events.push(StreamEvent::ThinkingSignature {
+                            signature: sig.to_string(),
+                        });
+                    }
                 }
             }
         }
