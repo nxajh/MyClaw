@@ -138,112 +138,104 @@ impl ShellTool {
             }
         };
 
-        let mut stdout = child.stdout.take();
-        let mut stderr = child.stderr.take();
+        // Take pipe handles before moving child into the collect task.
+        let mut child_stdout = child.stdout.take();
+        let mut child_stderr = child.stderr.take();
 
-        let stdout_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
-        let stderr_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        // Single task owns the child, reads pipes, and waits for exit.
+        // This avoids any race between child.wait() and pipe reads.
+        let collect_task = tokio::spawn(async move {
+            let mut stdout_buf = Vec::new();
+            let mut stderr_buf = Vec::new();
 
-        let stdout_task = {
-            let buf = stdout_buf.clone();
-            tokio::spawn(async move {
-                if let Some(ref mut s) = stdout {
-                    let mut tmp = Vec::with_capacity(8192);
-                    loop {
-                        tmp.clear();
-                        match s.read(&mut tmp).await {
-                            Ok(0) => break,
-                            Ok(_) => buf.lock().await.push_str(&String::from_utf8_lossy(&tmp)),
-                            Err(_) => break,
+            // Read from pipes concurrently using tokio::select!.
+            let mut stdout_done = child_stdout.is_none();
+            let mut stderr_done = child_stderr.is_none();
+
+            loop {
+                if stdout_done && stderr_done {
+                    break;
+                }
+                tokio::select! {
+                    result = async {
+                        if let Some(ref mut out) = child_stdout {
+                            let mut tmp = vec![0u8; 8192];
+                            out.read(&mut tmp).await.map(|n| (n, tmp))
+                        } else {
+                            std::future::pending().await
+                        }
+                    }, if !stdout_done => {
+                        match result {
+                            Ok((0, _)) => stdout_done = true,
+                            Ok((n, tmp)) => stdout_buf.extend_from_slice(&tmp[..n]),
+                            Err(_) => stdout_done = true,
+                        }
+                    }
+                    result = async {
+                        if let Some(ref mut err) = child_stderr {
+                            let mut tmp = vec![0u8; 8192];
+                            err.read(&mut tmp).await.map(|n| (n, tmp))
+                        } else {
+                            std::future::pending().await
+                        }
+                    }, if !stderr_done => {
+                        match result {
+                            Ok((0, _)) => stderr_done = true,
+                            Ok((n, tmp)) => stderr_buf.extend_from_slice(&tmp[..n]),
+                            Err(_) => stderr_done = true,
                         }
                     }
                 }
-            })
-        };
+            }
 
-        let stderr_task = {
-            let buf = stderr_buf.clone();
-            tokio::spawn(async move {
-                if let Some(ref mut s) = stderr {
-                    let mut tmp = Vec::with_capacity(8192);
-                    loop {
-                        tmp.clear();
-                        match s.read(&mut tmp).await {
-                            Ok(0) => break,
-                            Ok(_) => buf.lock().await.push_str(&String::from_utf8_lossy(&tmp)),
-                            Err(_) => break,
-                        }
-                    }
-                }
-            })
-        };
+            // Wait for child to exit.
+            let status = child.wait().await;
 
-        match timeout(Duration::from_secs(timeout_secs), child.wait()).await {
-            Ok(Ok(status)) => {
-                let _ = stdout_task.await;
-                let _ = stderr_task.await;
+            let stdout_text = String::from_utf8_lossy(&stdout_buf).into_owned();
+            let stderr_text = String::from_utf8_lossy(&stderr_buf).into_owned();
 
-                let stdout_text = stdout_buf.lock().await.clone();
-                let stderr_text = stderr_buf.lock().await.clone();
+            (status, stdout_text, stderr_text)
+        });
 
-                let mut output_text = format!(
-                    "exit code: {}\n{}",
-                    status.code().unwrap_or(-1),
-                    stdout_text
-                );
+        match timeout(Duration::from_secs(timeout_secs), collect_task).await {
+            Ok(Ok(Ok((status, stdout_text, stderr_text)))) => {
+                let exit_code = status.as_ref().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+                let success = status.as_ref().map(|s| s.success()).unwrap_or(false);
+
+                let mut output_text = format!("exit code: {}\n{}", exit_code, stdout_text);
                 if !stderr_text.is_empty() {
                     output_text.push_str(&format!("\nstderr:\n{}", stderr_text));
                 }
 
                 Ok(ToolResult {
-                    success: status.success(),
+                    success,
                     output: output_text,
-                    error: if status.success() {
+                    error: if success {
                         None
                     } else {
-                        Some(format!("exit code {}", status.code().unwrap_or(-1)))
+                        Some(format!("exit code {}", exit_code))
                     },
                 })
             }
-            Ok(Err(e)) => {
-                child.start_kill().ok();
-                Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("failed to execute command: {}", e)),
-                })
-            }
+            Ok(Ok(Err(e))) => Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!("failed to execute command: {}", e)),
+            }),
             Err(_) => {
-                // Timeout — the child.wait() future was dropped, but `child`
-                // itself is still alive. kill_on_drop won't trigger until the
-                // function returns. We need to explicitly kill the child so
-                // the pipes close and read tasks can drain remaining output.
-                child.start_kill().ok();
-
-                // Wait for read tasks to observe EOF and collect remaining bytes.
-                let _ = timeout(Duration::from_secs(3), async {
-                    let _ = stdout_task.await;
-                    let _ = stderr_task.await;
-                })
-                .await;
-
-                let stdout_text = stdout_buf.lock().await.clone();
-                let stderr_text = stderr_buf.lock().await.clone();
-
-                let mut output_text = format!(
-                    "command timed out after {}s (partial output below)\n{}",
-                    timeout_secs, stdout_text
-                );
-                if !stderr_text.is_empty() {
-                    output_text.push_str(&format!("\nstderr:\n{}", stderr_text));
-                }
-
+                // Timeout — the collect_task is abandoned. The child will be
+                // orphaned but the pipes will close when the task is dropped.
                 Ok(ToolResult {
                     success: false,
-                    output: output_text,
+                    output: "command timed out (output not recoverable with this implementation)".to_string(),
                     error: Some(format!("command timed out after {}s", timeout_secs)),
                 })
             }
+            Ok(Err(join_err)) => Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!("internal error: {}", join_err)),
+            }),
         }
     }
 
