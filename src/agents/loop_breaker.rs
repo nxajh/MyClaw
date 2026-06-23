@@ -39,8 +39,7 @@ pub enum LoopBreakReason {
     },
     /// Same tool, different args, same results.
     NoProgress { tool: String, count: usize },
-    /// Same tool called consecutively too many times (different args/results).
-    SameToolRepeat { tool: String, count: usize, threshold: usize },
+
     /// Hard limit exceeded.
     MaxCalls { count: usize, limit: usize },
 }
@@ -58,11 +57,7 @@ pub struct LoopBreakerConfig {
     /// Exact repeat threshold: same tool + same args N times → break.
     #[serde(default = "default_exact_repeat_threshold")]
     pub exact_repeat_threshold: usize,
-    /// Same-tool consecutive threshold: same tool called N times in a row
-    /// (with different args/results) → break. Catches "retry with different
-    /// prompt" loops that ExactRepeat/NoProgress miss.
-    #[serde(default = "default_same_tool_threshold")]
-    pub same_tool_threshold: usize,
+
     /// Ping-pong threshold: alternating rounds before breaking.
     #[serde(default = "default_ping_pong_rounds")]
     pub ping_pong_rounds: usize,
@@ -91,9 +86,6 @@ fn default_window_size() -> usize {
 fn default_exact_repeat_threshold() -> usize {
     3
 }
-fn default_same_tool_threshold() -> usize {
-    5
-}
 fn default_ping_pong_rounds() -> usize {
     6
 }
@@ -113,7 +105,6 @@ impl Default for LoopBreakerConfig {
             max_tool_calls: default_max_tool_calls(),
             window_size: default_window_size(),
             exact_repeat_threshold: default_exact_repeat_threshold(),
-            same_tool_threshold: default_same_tool_threshold(),
             ping_pong_rounds: default_ping_pong_rounds(),
             no_progress_threshold: default_no_progress_threshold(),
             relaxed_tools: default_relaxed_tools(),
@@ -234,13 +225,6 @@ impl LoopBreakerCounter {
 
         // 4. No-progress check.
         if let Some(reason) = self.check_no_progress() {
-            return LoopBreak::Detected(reason);
-        }
-
-        // 5. Same-tool consecutive check: same tool called N times in a row
-        //    with different args/results. Catches "retry with different prompt"
-        //    loops (e.g. Gemini calling view_video 4x with different questions).
-        if let Some(reason) = self.check_same_tool_repeat() {
             return LoopBreak::Detected(reason);
         }
 
@@ -412,43 +396,6 @@ impl LoopBreakerCounter {
             return Some(LoopBreakReason::NoProgress {
                 tool: target_tool.clone(),
                 count,
-            });
-        }
-        None
-    }
-
-    fn check_same_tool_repeat(&self) -> Option<LoopBreakReason> {
-        // Count consecutive calls of the SAME tool from the end of the window,
-        // regardless of args or result. This catches patterns like calling
-        // view_video 5 times with different questions — each call is "unique"
-        // but the model is clearly stuck retrying the same operation.
-        let window: Vec<_> = self.window.iter().rev().collect();
-        if window.is_empty() {
-            return None;
-        }
-
-        let target_tool = &window[0].tool_name;
-        let mut count = 1usize;
-
-        for inv in window.iter().skip(1) {
-            if inv.tool_name != *target_tool {
-                break;
-            }
-            count += 1;
-        }
-
-        // Use relaxed threshold for exploratory tools.
-        let threshold = if self.config.relaxed_tools.iter().any(|t| t == target_tool) {
-            self.config.same_tool_threshold.saturating_mul(2)
-        } else {
-            self.config.same_tool_threshold
-        };
-
-        if count >= threshold {
-            return Some(LoopBreakReason::SameToolRepeat {
-                tool: target_tool.clone(),
-                count,
-                threshold,
             });
         }
         None
@@ -784,54 +731,6 @@ mod tests {
         }
     }
 
-    // ── Same-tool repeat ───────────────────────────────────────────────────
-
-    #[test]
-    fn same_tool_repeat_triggers_after_threshold() {
-        let mut lb = default_breaker();
-        // 4 calls with different args and results — no break (threshold = 5).
-        for i in 0..4 {
-            let args = format!(r#"{{"question": "attempt {}"}}"#, i);
-            let result = format!("answer {}", i);
-            assert_eq!(
-                lb.record_and_check("view_video", &args, &result),
-                LoopBreak::None,
-                "call {} should not trigger", i
-            );
-        }
-        // 5th call triggers SameToolRepeat.
-        let result = lb.record_and_check(
-            "view_video",
-            r#"{"question": "attempt 4"}"#,
-            "answer 4",
-        );
-        match result {
-            LoopBreak::Detected(LoopBreakReason::SameToolRepeat { tool, count, threshold }) => {
-                assert_eq!(tool, "view_video");
-                assert_eq!(count, 5);
-                assert_eq!(threshold, 5);
-            }
-            other => panic!("expected SameToolRepeat, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn same_tool_repeat_broken_by_different_tool() {
-        let mut lb = default_breaker();
-        // 3 view_video calls then a different tool resets the streak.
-        for i in 0..3 {
-            let args = format!(r#"{{"question": "q{}"}}"#, i);
-            lb.record_and_check("view_video", &args, &format!("a{}", i));
-        }
-        lb.record_and_check("shell", r#"{"command": "ls"}"#, "file.txt");
-        // 3 more view_video calls — streak started fresh, should not trigger.
-        for i in 0..3 {
-            let args = format!(r#"{{"question": "q2_{}"}}"#, i);
-            let result = lb.record_and_check("view_video", &args, &format!("a2_{}", i));
-            assert_eq!(result, LoopBreak::None, "call after different tool should not trigger");
-        }
-    }
-
     // ── Max calls ──────────────────────────────────────────────────────────
 
     #[test]
@@ -842,7 +741,7 @@ mod tests {
         };
         let mut lb = LoopBreakerCounter::new(config);
 
-        // Alternate tool names to avoid SameToolRepeat triggering first.
+        // Alternate tool names to avoid ExactRepeat triggering first.
         for i in 0..5 {
             let tool = if i % 2 == 0 { "tool_a" } else { "tool_b" };
             assert_eq!(
