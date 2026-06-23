@@ -198,7 +198,7 @@ impl ShellTool {
         });
 
         match timeout(Duration::from_secs(timeout_secs), collect_task).await {
-            Ok(Ok(Ok((status, stdout_text, stderr_text)))) => {
+            Ok(Ok((status, stdout_text, stderr_text))) => {
                 let exit_code = status.as_ref().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
                 let success = status.as_ref().map(|s| s.success()).unwrap_or(false);
 
@@ -217,25 +217,20 @@ impl ShellTool {
                     },
                 })
             }
-            Ok(Ok(Err(e))) => Ok(ToolResult {
+            Ok(Err(join_err)) => Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some(format!("failed to execute command: {}", e)),
+                error: Some(format!("internal error: {}", join_err)),
             }),
             Err(_) => {
                 // Timeout — the collect_task is abandoned. The child will be
                 // orphaned but the pipes will close when the task is dropped.
                 Ok(ToolResult {
                     success: false,
-                    output: "command timed out (output not recoverable with this implementation)".to_string(),
+                    output: "command timed out".to_string(),
                     error: Some(format!("command timed out after {}s", timeout_secs)),
                 })
             }
-            Ok(Err(join_err)) => Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!("internal error: {}", join_err)),
-            }),
         }
     }
 
