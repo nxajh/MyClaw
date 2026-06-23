@@ -4,8 +4,6 @@
 //! Uses UTF-8 byte counts (not character counts) for budget calculations,
 //! which gives more consistent behavior across ASCII and CJK text.
 
-use std::cmp;
-
 /// Estimate token count (rough heuristic).
 /// Uses a byte-based ratio that works better for CJK: ~4 bytes ≈ 1 token
 /// for ASCII, but CJK characters are 3 bytes each and roughly 1-2 tokens

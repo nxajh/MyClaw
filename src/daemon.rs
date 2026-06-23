@@ -426,7 +426,7 @@ async fn build_tools(
     _knowledge_dir: &str,
     user_resolver: &Arc<crate::agents::UserResolver>,
     ask_router: Arc<crate::agents::AskRouter>,
-) -> ToolRegistry {
+) -> (ToolRegistry, Arc<tokio::sync::RwLock<crate::tools::TaskState>>) {
     let mut tools = ToolRegistry::new();
     let builtin = crate::tools::builtin_tools();
     for tool in builtin {
@@ -495,7 +495,7 @@ async fn build_tools(
     }
 
     tracing::info!(tool_count = tools.tool_count(), "tool registry built");
-    tools
+    (tools, task_state)
 }
 
 /// Build SkillManager from SKILL.md files in workspace.
@@ -791,7 +791,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let ask_router = Arc::new(crate::agents::AskRouter::new());
 
     // Build tool registry (all built-in + MCP + skill tools + ask_user).
-    let mut tools = build_tools(
+    let (mut tools, task_state) = build_tools(
         &mcp_manager,
         &skills_arc,
         &shared_scheduler,

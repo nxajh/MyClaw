@@ -281,34 +281,35 @@ impl ShellTool {
         tokio::spawn(async move {
             let mut stdout = stdout;
             let mut stderr = stderr;
-            let mut tmp = Vec::with_capacity(8192);
+            let mut stdout_tmp = Vec::with_capacity(8192);
+            let mut stderr_tmp = Vec::with_capacity(8192);
 
             loop {
                 tokio::select! {
                     r = async {
                         if let Some(ref mut s) = stdout {
-                            tmp.clear();
-                            s.read(&mut tmp).await
+                            stdout_tmp.clear();
+                            s.read(&mut stdout_tmp).await
                         } else {
                             std::future::pending::<std::io::Result<usize>>().await
                         }
                     } => {
                         match r {
                             Ok(0) | Err(_) => stdout = None,
-                            Ok(_) => stdout_buf_clone.lock().await.push_str(&String::from_utf8_lossy(&tmp)),
+                            Ok(_) => stdout_buf_clone.lock().await.push_str(&String::from_utf8_lossy(&stdout_tmp)),
                         }
                     }
                     r = async {
                         if let Some(ref mut s) = stderr {
-                            tmp.clear();
-                            s.read(&mut tmp).await
+                            stderr_tmp.clear();
+                            s.read(&mut stderr_tmp).await
                         } else {
                             std::future::pending::<std::io::Result<usize>>().await
                         }
                     } => {
                         match r {
                             Ok(0) | Err(_) => stderr = None,
-                            Ok(_) => stderr_buf_clone.lock().await.push_str(&String::from_utf8_lossy(&tmp)),
+                            Ok(_) => stderr_buf_clone.lock().await.push_str(&String::from_utf8_lossy(&stderr_tmp)),
                         }
                     }
                 }

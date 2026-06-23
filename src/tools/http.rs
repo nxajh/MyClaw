@@ -181,7 +181,6 @@ impl Tool for HttpRequestTool {
         let body = response.text().await.unwrap_or_default();
 
         let output = if strip_html_flag {
-            let content_type = ""; // Already consumed; check body for HTML.
             let looks_like_html = body.trim_start().starts_with('<');
             if looks_like_html || body.contains("<html") || body.contains("<!DOCTYPE") {
                 format!("HTTP {}\n\n{}", status, strip_html(&body))

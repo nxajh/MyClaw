@@ -362,7 +362,7 @@ impl Tool for ContentSearchTool {
             walk_dir(&base, &mut all_files, 5000)?;
         }
 
-        let mut results = Vec::new();
+        let mut results: Vec<String> = Vec::new();
         for file_path_str in &all_files {
             let file_path = Path::new(file_path_str);
             // Apply include filter.
