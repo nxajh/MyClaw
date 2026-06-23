@@ -10,6 +10,64 @@ use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{Duration, timeout};
 
+/// Maximum output size returned inline to the model (in bytes).
+/// Outputs exceeding this are truncated; the full output is saved to
+/// a temp file that the model can read with `file_read`.
+const MAX_OUTPUT_INLINE: usize = 30_000;
+
+/// Truncate large output for inline return to the model.
+///
+/// If `output` exceeds `MAX_OUTPUT_INLINE` bytes, the full text is persisted
+/// to a temp file and a head + footer is returned. Otherwise the input is
+/// returned unchanged.
+///
+/// Inspired by Claude Code's persisted-output mechanism: no data is lost —
+/// the model gets enough context inline to understand the result, and can
+/// `file_read` the saved file (with offset/limit) for specific sections.
+async fn truncate_large_output(output: &str) -> String {
+    if output.len() <= MAX_OUTPUT_INLINE {
+        return output.to_string();
+    }
+
+    let total_lines = output.lines().count();
+    let cut = safe_char_boundary(output, MAX_OUTPUT_INLINE);
+    let head_lines = output[..cut].lines().count();
+    let remaining_lines = total_lines.saturating_sub(head_lines);
+
+    // Persist full output to a temp file.
+    let file_path = format!("/tmp/myclaw-shell-{}.txt", uuid::Uuid::new_v4().simple());
+    match tokio::fs::write(&file_path, output).await {
+        Ok(()) => format!(
+            "{}\n\n... [{} of {} lines truncated. Full output saved to: {}] ...\n... [Read this file with file_read (use offset/limit to view specific sections)] ...",
+            &output[..cut],
+            remaining_lines,
+            total_lines,
+            file_path,
+        ),
+        Err(_) => {
+            // Fallback: head-only truncation without persistence.
+            format!(
+                "{}\n\n... [{} of {} lines truncated] ...",
+                &output[..cut],
+                remaining_lines,
+                total_lines,
+            )
+        }
+    }
+}
+
+/// Find the largest byte index ≤ `max_bytes` that is a valid UTF-8 char boundary.
+fn safe_char_boundary(s: &str, max_bytes: usize) -> usize {
+    if max_bytes >= s.len() {
+        return s.len();
+    }
+    let mut idx = max_bytes;
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
 /// Entry for a tracked background process.
 pub struct BgProcEntry {
     stdout: Arc<Mutex<String>>,
@@ -57,7 +115,9 @@ impl Tool for ShellTool {
         "Execute a shell command and return stdout, stderr, and exit code. \
          On timeout, partial output collected so far is returned (not discarded). \
          Set `background: true` for fire-and-forget execution — returns a process_id \
-         you can poll later with `shell_poll`."
+         you can poll later with `shell_poll`. \
+         Large output (>30K chars) is truncated: the first 30K is returned inline \
+         and the full output is saved to a temp file that you can read with file_read."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -206,6 +266,8 @@ impl ShellTool {
                 if !stderr_text.is_empty() {
                     output_text.push_str(&format!("\nstderr:\n{}", stderr_text));
                 }
+
+                let output_text = truncate_large_output(&output_text).await;
 
                 Ok(ToolResult {
                     success,
@@ -378,7 +440,7 @@ impl Tool for ShellPollTool {
     }
 
     fn description(&self) -> &str {
-        "Poll a background shell process started with `background: true`. Returns accumulated stdout/stderr and process status. Set `remove: true` to clean up the process entry after reading."
+        "Poll a background shell process started with `background: true`. Returns accumulated stdout/stderr and process status. Set `remove: true` to clean up the process entry after reading. Large output (>30K chars) is truncated: the first 30K is returned inline and the full output is saved to a temp file that you can read with file_read."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -452,6 +514,8 @@ impl Tool for ShellPollTool {
         if !stderr.is_empty() {
             output.push_str(&format!("\nstderr:\n{}", stderr));
         }
+
+        let output = truncate_large_output(&output).await;
 
         Ok(ToolResult {
             success: true,
