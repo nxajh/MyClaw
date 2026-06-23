@@ -99,7 +99,7 @@ async fn try_with_fallback(
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("视觉模型调用失败：{e}")),
+                    error: Some(format!("vision model call failed: {e}")),
                 });
             }
         };
@@ -129,7 +129,7 @@ async fn try_with_fallback(
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("视觉模型响应失败：{e}")),
+                    error: Some(format!("vision model response failed: {e}")),
                 });
             }
         };
@@ -155,7 +155,7 @@ async fn try_with_fallback(
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some("视觉模型返回了空结果。".to_string()),
+                error: Some("vision model returned empty result".to_string()),
             });
         }
 
@@ -183,7 +183,7 @@ async fn try_with_fallback(
     Ok(ToolResult {
         success: false,
         output: String::new(),
-        error: Some("所有视觉模型均不可用。".to_string()),
+        error: Some("no vision models available".to_string()),
     })
 }
 
@@ -194,15 +194,15 @@ impl Tool for ViewImageTool {
     }
 
     fn description(&self) -> &str {
-        "查看图片文件内容。当对话中出现 `[图片: sessions/.../files/xxx]` 标记时，调用本工具并传入 path 与具体问题。path 可以是 workspace-relative 路径或绝对路径。"
+        "View image file content. When the conversation contains an `[image: sessions/.../files/xxx]` marker, call this tool with the path and a specific question. Path can be workspace-relative or absolute."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "图片文件路径；相对路径按 workspace-relative 解释，绝对路径直接使用。" },
-                "question": { "type": "string", "description": "你想从这张图片了解的具体问题，例如『图里有几个人？』『识别图中的文字』。" }
+                "path": { "type": "string", "description": "Image file path. Relative paths are interpreted as workspace-relative; absolute paths are used directly." },
+                "question": { "type": "string", "description": "The specific question you want answered about this image, e.g. 'how many people are in the image?', 'identify text in the image'." }
             },
             "required": ["path", "question"]
         })
@@ -222,13 +222,13 @@ impl Tool for ViewImageTool {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some("缺少 path 参数。".to_string()),
+                error: Some("missing 'path' parameter".to_string()),
             });
         }
         let question = args["question"]
             .as_str()
             .filter(|s| !s.trim().is_empty())
-            .unwrap_or("请详细描述这张图片的内容，包括其中的文字、物体和场景。")
+            .unwrap_or("Describe this image in detail, including text, objects, and scenes.")
             .to_string();
 
         let abs = resolve_path(path);
@@ -238,14 +238,14 @@ impl Tool for ViewImageTool {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("路径不是普通文件：{path}")),
+                    error: Some(format!("path is not a regular file: {path}")),
                 });
             }
             Err(e) => {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("无法访问图片文件 {path}：{e}")),
+                    error: Some(format!("cannot access image file {path}: {e}")),
                 });
             }
         };
@@ -253,7 +253,7 @@ impl Tool for ViewImageTool {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some("图片文件过大，当前 view_image 限制为 25MB。".to_string()),
+                error: Some("image file too large, view_image limit is 25MB".to_string()),
             });
         }
 
@@ -264,7 +264,7 @@ impl Tool for ViewImageTool {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some("当前没有可用的视觉模型，无法查看图片。".to_string()),
+                error: Some("no vision models available, cannot view image".to_string()),
             });
         }
 
