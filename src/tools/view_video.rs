@@ -2,7 +2,7 @@
 //! video-capable model in the chat routing chain.
 
 use async_trait::async_trait;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::agents::session::Session;

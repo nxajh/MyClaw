@@ -2,7 +2,6 @@
 //! delegating to a vision-capable model in the chat routing chain.
 
 use async_trait::async_trait;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::agents::session::Session;
