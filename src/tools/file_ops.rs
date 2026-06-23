@@ -402,7 +402,8 @@ impl Tool for FileEditTool {
                         "type": "object",
                         "properties": {
                             "old_string": { "type": "string", "description": "Text to find." },
-                            "new_string": { "type": "string", "description": "Replacement text." }
+                            "new_string": { "type": "string", "description": "Replacement text." },
+                            "replace_all": { "type": "boolean", "description": "Replace all occurrences (default: false)." }
                         },
                         "required": ["old_string", "new_string"]
                     }
@@ -446,6 +447,7 @@ impl Tool for FileEditTool {
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("edits[{}].old_string is required", i))?;
                 let new = edit["new_string"].as_str().unwrap_or("");
+                let replace_all = edit["replace_all"].as_bool().unwrap_or(false);
 
                 let count = current.matches(old).count();
                 if count == 0 {
@@ -455,23 +457,32 @@ impl Tool for FileEditTool {
                         error: Some(format!("edits[{}].old_string not found", i)),
                     });
                 }
-                if count > 1 {
+                if count > 1 && !replace_all {
                     return Ok(ToolResult {
                         success: false,
-                        output: format!("edits[{}]: old_string found {} times (must be unique)", i, count),
-                        error: Some(format!("edits[{}].old_string matched {} times, expected exactly 1", i, count)),
+                        output: format!("edits[{}]: old_string found {} times (must be unique, or set replace_all=true)", i, count),
+                        error: Some(format!("edits[{}].old_string matched {} times, expected exactly 1 (set replace_all=true to replace all)", i, count)),
                     });
                 }
 
-                current = current.replacen(old, new, 1);
-                applied += 1;
+                let replaced = if replace_all {
+                    let before = current.clone();
+                    current = current.replace(old, new);
+                    before.matches(old).count()
+                } else {
+                    current = current.replacen(old, new, 1);
+                    1
+                };
+                applied += replaced;
                 report.push(format!(
-                    "  [{}/{}] line {}: \"{}\" → \"{}\"",
+                    "  [{}/{}] line {}: \"{}\" → \"{}\" ({} occurrence{})",
                     i + 1,
                     edits.len(),
                     find_line_number(&content, old),
                     str_utils::truncate_line(old, 60),
                     str_utils::truncate_line(new, 60),
+                    replaced,
+                    if replaced > 1 { "s" } else { "" },
                 ));
             }
 

@@ -255,6 +255,7 @@ impl ShellTool {
         let mut cmd = Command::new("sh");
         cmd.arg("-c")
             .arg(command)
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
