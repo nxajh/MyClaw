@@ -11,7 +11,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::{Duration, timeout};
 
 /// Entry for a tracked background process.
-struct BgProcEntry {
+pub struct BgProcEntry {
     stdout: Arc<Mutex<String>>,
     stderr: Arc<Mutex<String>>,
     started_at: std::time::Instant,
