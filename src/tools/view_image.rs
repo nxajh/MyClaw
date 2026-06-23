@@ -22,16 +22,6 @@ impl ViewImageTool {
     }
 }
 
-fn resolve_path(path: &str) -> PathBuf {
-    let p = PathBuf::from(path);
-    if p.is_absolute() {
-        p
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(p)
-    }
-}
 
 fn infer_image_mime(path: &str) -> Option<&'static str> {
     match std::path::Path::new(path)
@@ -314,7 +304,7 @@ mod tests {
     fn resolves_relative_path_against_current_dir() {
         let cwd = std::env::current_dir().unwrap();
         assert_eq!(
-            resolve_path("sessions/s/files/photo.png"),
+            std::path::PathBuf::from("sessions/s/files/photo.png"),
             cwd.join("sessions/s/files/photo.png")
         );
     }
