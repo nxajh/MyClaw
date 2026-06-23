@@ -1,7 +1,7 @@
-//! Task Manager — 统一的任务/目标管理
+//! Task Manager — unified task/goal management.
 //!
-//! 合并了 goal_manager、task_manager、update_plan 三个工具。
-//! 支持树形结构：goal（无 parent）→ task（有 parent）→ sub-task（嵌套）。
+//! Merges goal_manager, task_manager, and update_plan into one tool.
+//! Supports tree structure: goal (no parent) → task (with parent) → sub-task (nested).
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -41,7 +41,7 @@ impl TaskState {
         self.tasks.iter_mut().find(|t| t.id == id)
     }
 
-    /// 收集一个 task 及其所有后代的 id
+    /// Collect the id of a task and all its descendants.
     fn collect_descendant_ids(&self, id: &str) -> Vec<String> {
         let mut result = vec![id.to_string()];
         let mut stack = vec![id.to_string()];
@@ -54,6 +54,31 @@ impl TaskState {
             }
         }
         result
+    }
+
+    /// Render the task tree as a text block suitable for injection after
+    /// context compaction, so the model retains its planning state.
+    pub fn format_for_injection(&self) -> Option<String> {
+        let goals: Vec<&Task> = self.tasks.iter().filter(|t| t.parent_id.is_none()).collect();
+        if goals.is_empty() {
+            return None;
+        }
+
+        let mut lines = vec!["[Your active task list was preserved across context compaction]".to_string()];
+        for goal in &goals {
+            lines.push(format!("- [{}] {} ({})", goal.status, goal.id, goal.subject));
+
+            // Show direct children.
+            let children: Vec<&Task> = self
+                .tasks
+                .iter()
+                .filter(|t| t.parent_id.as_deref() == Some(&goal.id))
+                .collect();
+            for child in &children {
+                lines.push(format!("    - [{}] {} ({})", child.status, child.id, child.subject));
+            }
+        }
+        Some(lines.join("\n"))
     }
 }
 
@@ -160,7 +185,7 @@ impl TaskManagerTool {
 
         let mut state = self.state.write().await;
 
-        // 校验 parent 存在
+        // Verify parent exists
         if let Some(parent_id) = parent {
             if state.find_task(parent_id).is_none() {
                 return Ok(ToolResult {
@@ -173,7 +198,7 @@ impl TaskManagerTool {
 
         let kind = if parent.is_some() { "task" } else { "goal" };
 
-        // 支持 string 或 array
+        // Support string or array
         let subjects: Vec<String> = match &args["subject"] {
             Value::String(s) => vec![s.clone()],
             Value::Array(arr) => arr
@@ -251,7 +276,7 @@ impl TaskManagerTool {
             .iter()
             .filter(|t| match parent {
                 Some(pid) => t.parent_id.as_deref() == Some(pid),
-                None => t.parent_id.is_none(), // 无 parent = 只列 goals
+                None => t.parent_id.is_none(), // no parent = list only goals
             })
             .map(|t| {
                 json!({
@@ -332,7 +357,7 @@ impl TaskManagerTool {
             });
         }
 
-        // 收集所有要删除的 id（自身 + 所有后代）
+        // Collect all ids to delete (self + all descendants)
         let ids_to_remove = state.collect_descendant_ids(task_id);
         let count = ids_to_remove.len();
 
@@ -360,7 +385,7 @@ impl TaskManagerTool {
             .find_task(task_id)
             .ok_or_else(|| anyhow::anyhow!("task not found: {}", task_id))?;
 
-        // 收集直接子任务
+        // Collect direct children
         let children: Vec<&Task> = state
             .tasks
             .iter()

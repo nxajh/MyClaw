@@ -256,7 +256,7 @@ impl Tool for FileEditTool {
     }
 
     fn description(&self) -> &str {
-        "Edit a file by replacing an exact string match with new content. The old_string must appear exactly once in the file."
+        "Edit a file by replacing an exact string match with new content. By default the old_string must appear exactly once; set replace_all=true to replace all occurrences."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -269,11 +269,15 @@ impl Tool for FileEditTool {
                 },
                 "old_string": {
                     "type": "string",
-                    "description": "The exact text to find (must appear exactly once)."
+                    "description": "The exact text to find (must appear exactly once, unless replace_all is true)."
                 },
                 "new_string": {
                     "type": "string",
                     "description": "The replacement text (use empty string to delete)."
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "If true, replace all occurrences of old_string (default: false)."
                 }
             },
             "required": ["path", "old_string", "new_string"]
@@ -294,6 +298,7 @@ impl Tool for FileEditTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'old_string' is required"))?;
         let new_string = args["new_string"].as_str().unwrap_or("");
+        let replace_all = args["replace_all"].as_bool().unwrap_or(false);
 
         let content = tokio::fs::read_to_string(path)
             .await
@@ -307,27 +312,33 @@ impl Tool for FileEditTool {
                 error: Some("old_string not found in file".to_string()),
             });
         }
-        if count > 1 {
+        if count > 1 && !replace_all {
             return Ok(ToolResult {
                 success: false,
-                output: format!("old_string found {} times, must be unique", count),
+                output: format!("old_string found {} times, must be unique (or set replace_all=true)", count),
                 error: Some(format!(
-                    "old_string matched {} times, expected exactly 1",
+                    "old_string matched {} times, expected exactly 1 (set replace_all=true to replace all)",
                     count
                 )),
             });
         }
 
-        let new_content = content.replacen(old_string, new_string, 1);
+        let new_content = if replace_all {
+            content.replace(old_string, new_string)
+        } else {
+            content.replacen(old_string, new_string, 1)
+        };
 
         tokio::fs::write(path, &new_content)
             .await
             .map_err(|e| anyhow::anyhow!("failed to write '{}': {}", path, e))?;
 
+        let replaced_count = if replace_all { count } else { 1 };
         Ok(ToolResult {
             success: true,
             output: format!(
-                "replaced 1 occurrence in {} (line {}):\n  - {}\n  + {}",
+                "replaced {} occurrence(s) in {} (line {}):\n  - {}\n  + {}",
+                replaced_count,
                 path,
                 find_line_number(&content, old_string),
                 str_utils::truncate_line(old_string, 80),

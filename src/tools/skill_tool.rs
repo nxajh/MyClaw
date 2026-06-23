@@ -1,4 +1,4 @@
-//! SkillTool — LLM 通过此工具按需加载 skill 全文或辅助文件。
+//! SkillTool — loads skill full text or auxiliary file on demand via the LLM.
 
 use async_trait::async_trait;
 use parking_lot::RwLock;

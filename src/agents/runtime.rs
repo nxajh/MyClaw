@@ -81,6 +81,9 @@ pub struct AgentRuntime {
     /// (the tool writes timestamps on rate-limit; `/status` reads them
     /// to render ⏱️ markers next to cooled-down providers).
     pub search_cooldown: Option<Arc<SearchProviderCooldown>>,
+    /// Shared task/goal state from `TaskManagerTool`. Injected into the
+    /// compaction summary so the model retains its plan across context resets.
+    pub task_state: Option<Arc<tokio::sync::RwLock<crate::tools::TaskState>>>,
 }
 
 impl AgentRuntime {
@@ -106,6 +109,7 @@ impl AgentRuntime {
             defaults: RuntimeDefaults::default(),
             mcp_manager: None,
             search_cooldown: None,
+            task_state: None,
         }
     }
 
@@ -121,6 +125,11 @@ impl AgentRuntime {
 
     pub fn with_search_cooldown(mut self, cooldown: Arc<SearchProviderCooldown>) -> Self {
         self.search_cooldown = Some(cooldown);
+        self
+    }
+
+    pub fn with_task_state(mut self, state: Arc<tokio::sync::RwLock<crate::tools::TaskState>>) -> Self {
+        self.task_state = Some(state);
         self
     }
 

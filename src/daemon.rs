@@ -441,8 +441,9 @@ async fn build_tools(
     // Register additional built-in tools.
     tools.register(Arc::new(crate::tools::SendMessageTool::new()));
     tools.register(Arc::new(crate::tools::ListDirTool::new()));
+    let task_state = crate::tools::TaskManagerTool::shared_state();
     tools.register(Arc::new(crate::tools::TaskManagerTool::new(
-        crate::tools::TaskManagerTool::shared_state(),
+        Arc::clone(&task_state),
     )));
 
     // SkillTool — loads skill body on demand.
@@ -1056,6 +1057,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         .with_defaults(defaults)
         .with_mcp_manager(Arc::clone(&mcp_manager_arc))
         .with_search_cooldown(Arc::clone(&search_cooldown))
+        .with_task_state(task_state)
     };
 
     // DelegationCoordinator was constructed before the runtime existed

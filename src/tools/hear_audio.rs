@@ -97,7 +97,7 @@ async fn try_with_fallback(
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("语音模型调用失败：{e}")),
+                    error: Some(format!("audio model call failed: {e}")),
                 });
             }
         };
@@ -127,7 +127,7 @@ async fn try_with_fallback(
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("语音模型响应失败：{e}")),
+                    error: Some(format!("audio model response failed: {e}")),
                 });
             }
         };
@@ -152,7 +152,7 @@ async fn try_with_fallback(
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some("语音模型返回了空结果。".to_string()),
+                error: Some("audio model returned empty result".to_string()),
             });
         }
 
@@ -179,7 +179,7 @@ async fn try_with_fallback(
     Ok(ToolResult {
         success: false,
         output: String::new(),
-        error: Some("所有语音模型均不可用。".to_string()),
+        error: Some("no audio models available".to_string()),
     })
 }
 
@@ -190,15 +190,15 @@ impl Tool for HearAudioTool {
     }
 
     fn description(&self) -> &str {
-        "听取语音/音频文件内容。当对话中出现 `[语音: sessions/.../files/xxx]` 标记时，调用本工具并传入 path。path 可以是 workspace-relative 路径或绝对路径。"
+        "Listen to voice/audio file content. When the conversation contains a `[voice: sessions/.../files/xxx]` marker, call this tool with the path. Path can be workspace-relative or absolute."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "音频文件路径；相对路径按 workspace-relative 解释，绝对路径直接使用。" },
-                "question": { "type": "string", "description": "你想从这段语音了解的问题，例如『用户说了什么？』『翻译成英文』。留空则转写全文。" }
+                "path": { "type": "string", "description": "Audio file path. Relative paths are interpreted as workspace-relative; absolute paths are used directly." },
+                "question": { "type": "string", "description": "The question you want answered about this audio, e.g. 'what did the user say?', 'translate to English'. Leave empty for full transcription." }
             },
             "required": ["path"]
         })
@@ -218,13 +218,13 @@ impl Tool for HearAudioTool {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some("缺少 path 参数。".to_string()),
+                error: Some("missing 'path' parameter".to_string()),
             });
         }
         let question = args["question"]
             .as_str()
             .filter(|s| !s.trim().is_empty())
-            .unwrap_or("请逐字转写这段语音的内容。")
+            .unwrap_or("Transcribe this audio verbatim.")
             .to_string();
 
         let abs = resolve_path(path);
@@ -234,14 +234,14 @@ impl Tool for HearAudioTool {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("路径不是普通文件：{path}")),
+                    error: Some(format!("path is not a regular file: {path}")),
                 });
             }
             Err(e) => {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("无法访问音频文件 {path}：{e}")),
+                    error: Some(format!("cannot access audio file {path}: {e}")),
                 });
             }
         };
@@ -249,7 +249,7 @@ impl Tool for HearAudioTool {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some("音频文件过大，当前 hear_audio 限制为 50MB。".to_string()),
+                error: Some("audio file too large, hear_audio limit is 50MB".to_string()),
             });
         }
 
@@ -260,7 +260,7 @@ impl Tool for HearAudioTool {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some("当前没有可用的语音模型，无法听取语音。".to_string()),
+                error: Some("no audio models available, cannot transcribe".to_string()),
             });
         }
 

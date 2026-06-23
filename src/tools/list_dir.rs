@@ -1,6 +1,6 @@
-//! List Directory 工具 — 列出目录内容
+//! List Directory tool — lists directory contents.
 //!
-//! 比 glob_search 更直观，不需要 pattern。
+//! More intuitive than glob_search for browsing; no pattern required.
 
 use async_trait::async_trait;
 use serde_json::{Value, json};

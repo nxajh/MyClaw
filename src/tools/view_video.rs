@@ -101,7 +101,7 @@ async fn try_with_fallback(
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("视频模型调用失败：{e}")),
+                    error: Some(format!("video model call failed: {e}")),
                 });
             }
         };
@@ -131,7 +131,7 @@ async fn try_with_fallback(
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("视频模型响应失败：{e}")),
+                    error: Some(format!("video model response failed: {e}")),
                 });
             }
         };
@@ -158,7 +158,7 @@ async fn try_with_fallback(
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some("视频模型返回了空结果。".to_string()),
+                error: Some("video model returned empty result".to_string()),
             });
         }
 
@@ -185,7 +185,7 @@ async fn try_with_fallback(
     Ok(ToolResult {
         success: false,
         output: String::new(),
-        error: Some("所有视频模型均不可用。".to_string()),
+        error: Some("no video models available".to_string()),
     })
 }
 
@@ -196,15 +196,15 @@ impl Tool for ViewVideoTool {
     }
 
     fn description(&self) -> &str {
-        "查看视频文件内容。当对话中出现 `[视频: sessions/.../files/xxx]` 标记时，调用本工具并传入 path 与具体问题。path 可以是 workspace-relative 路径或绝对路径。"
+        "View video file content. When the conversation contains a `[video: sessions/.../files/xxx]` marker, call this tool with the path and a specific question. Path can be workspace-relative or absolute."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "视频文件路径；相对路径按 workspace-relative 解释，绝对路径直接使用。" },
-                "question": { "type": "string", "description": "你想从这段视频了解的具体问题，例如『总结视频内容』『视频里发生了什么？』『识别视频中的文字』。" }
+                "path": { "type": "string", "description": "Video file path. Relative paths are interpreted as workspace-relative; absolute paths are used directly." },
+                "question": { "type": "string", "description": "The specific question you want answered about this video, e.g. 'summarize the video', 'what happened?', 'identify text in the video'." }
             },
             "required": ["path", "question"]
         })
@@ -228,13 +228,13 @@ impl Tool for ViewVideoTool {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some("缺少 path 参数。".to_string()),
+                error: Some("missing 'path' parameter".to_string()),
             });
         }
         let question = args["question"]
             .as_str()
             .filter(|s| !s.trim().is_empty())
-            .unwrap_or("请详细描述这段视频的内容，包括主要事件、人物、场景、文字和声音。")
+            .unwrap_or("Describe the video content in detail, including main events, people, scenes, text, and audio.")
             .to_string();
 
         let abs = resolve_path(path);
@@ -244,14 +244,14 @@ impl Tool for ViewVideoTool {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("路径不是普通文件：{path}")),
+                    error: Some(format!("path is not a regular file: {path}")),
                 });
             }
             Err(e) => {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("无法访问视频文件 {path}：{e}")),
+                    error: Some(format!("cannot access video file {path}: {e}")),
                 });
             }
         };
@@ -259,7 +259,7 @@ impl Tool for ViewVideoTool {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some("视频文件过大，当前 view_video 限制为 200MB。".to_string()),
+                error: Some("video file too large, view_video limit is 200MB".to_string()),
             });
         }
 
@@ -270,7 +270,7 @@ impl Tool for ViewVideoTool {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some("当前没有可用的视频模型，无法查看视频。".to_string()),
+                error: Some("no video models available, cannot view video".to_string()),
             });
         }
 

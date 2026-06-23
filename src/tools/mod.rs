@@ -2,8 +2,8 @@
 //!
 //! Concrete implementations of `crate::providers::Tool` (Domain trait).
 //!
-//! **Core:** ShellTool, FileReadTool, FileWriteTool, FileEditTool, GlobSearchTool, ContentSearchTool
-//! **Web:** WebFetchTool, HttpRequestTool, WebSearchTool
+//! **Core:** ShellTool, ShellPollTool, FileReadTool, FileWriteTool, FileEditTool, GlobSearchTool, ContentSearchTool
+//! **Web:** HttpRequestTool (subsumes web_fetch via `strip_html` param), WebSearchTool
 //! **Utility:** CalculatorTool, AskUserTool
 //! **Multi-Agent:** AgentDelegateTool, AgentListTool, AgentKillTool
 //! **Planning:** TaskManagerTool
@@ -32,7 +32,6 @@ pub mod tool_search;
 pub mod truncation;
 mod view_image;
 mod view_video;
-mod web;
 mod web_search;
 
 // Re-export tools.
@@ -50,7 +49,7 @@ pub use memory_tool::{MemoryListTool, MemoryManageTool, MemorySearchTool, Memory
 pub use search::{ContentSearchTool, GlobSearchTool};
 pub use search_cooldown::SearchProviderCooldown;
 pub use send_message::SendMessageTool;
-pub use shell::ShellTool;
+pub use shell::{ShellPollTool, ShellTool};
 pub use skill_manage_tool::SkillManageTool;
 pub use skill_tool::SkillTool;
 pub use skills_list_tool::SkillsListTool;
@@ -59,7 +58,6 @@ pub use tool_search::ToolSearchTool;
 pub use truncation::{truncate_output, truncate_tool_result};
 pub use view_image::ViewImageTool;
 pub use view_video::ViewVideoTool;
-pub use web::WebFetchTool;
 pub use web_search::WebSearchTool;
 
 use crate::providers::Tool;
@@ -70,16 +68,18 @@ use std::sync::Arc;
 /// state — `ask_user`, `web_search`, `agent_delegate`, `agent_list`,
 /// `agent_kill`, `tool_search` — are registered by daemon.rs::build_tools.
 pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
+    let shell = ShellTool::new();
+    let shell_poll = ShellPollTool::new(shell.bg_registry());
     vec![
         // Core tools
-        Arc::new(ShellTool::new()),
+        Arc::new(shell),
+        Arc::new(shell_poll),
         Arc::new(FileReadTool::new()),
         Arc::new(FileWriteTool::new()),
         Arc::new(FileEditTool::new()),
         Arc::new(GlobSearchTool::new()),
         Arc::new(ContentSearchTool::new()),
-        // Web tools
-        Arc::new(WebFetchTool::new()),
+        // Web tools — http_request subsumes web_fetch (use strip_html=true)
         Arc::new(HttpRequestTool::new()),
         // Utility tools
         Arc::new(CalculatorTool::new()),

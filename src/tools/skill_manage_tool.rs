@@ -1,4 +1,4 @@
-//! SkillManageTool — Skill 的 CRUD 管理工具（6 个 action）。
+//! SkillManageTool — CRUD management for skills (6 actions).
 
 use async_trait::async_trait;
 use parking_lot::RwLock;

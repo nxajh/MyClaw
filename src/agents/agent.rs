@@ -765,8 +765,21 @@ async fn maybe_compact(
         Ok(result) => {
             let version = session.compact_version + 1;
             let summary_prefix = "[CONTEXT COMPACTION — REFERENCE ONLY] ";
-            let summary_msg =
-                ChatMessage::user_text(format!("{}{}", summary_prefix, result.summary));
+
+            // Inject active task/goal state so the model retains its plan
+            // across context compaction (similar to Hermes' format_for_injection).
+            let task_injection = if let Some(ref task_state) = runtime.task_state {
+                let state = task_state.read().await;
+                state.format_for_injection()
+            } else {
+                None
+            };
+
+            let summary_text = match &task_injection {
+                Some(tasks) => format!("{}{}\n\n{}", summary_prefix, result.summary, tasks),
+                None => format!("{}{}", summary_prefix, result.summary),
+            };
+            let summary_msg = ChatMessage::user_text(summary_text);
             let last_compacted_id = session
                 .message_ids
                 .get(boundary.saturating_sub(1))

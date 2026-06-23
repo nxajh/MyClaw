@@ -1,4 +1,4 @@
-//! SkillsListTool — 列出所有 skill 的元数据。
+//! SkillsListTool — list metadata of all skills.
 
 use async_trait::async_trait;
 use parking_lot::RwLock;

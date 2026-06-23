@@ -1,52 +1,79 @@
-//! 工具输出截断 — 框架层统一处理
+//! Tool output truncation — framework-level uniform handling.
 //!
-//! 保留头部和尾部，中间用截断标记替代。
+//! Preserves head and tail, replacing the middle with a truncation marker.
+//! Uses UTF-8 byte counts (not character counts) for budget calculations,
+//! which gives more consistent behavior across ASCII and CJK text.
 
 use std::cmp;
 
-/// 估算 token 数（粗略：4 字符 ≈ 1 token）
+/// Estimate token count (rough heuristic).
+/// Uses a byte-based ratio that works better for CJK: ~4 bytes ≈ 1 token
+/// for ASCII, but CJK characters are 3 bytes each and roughly 1-2 tokens
+/// per character, so the byte ratio is a closer approximation than char count.
 pub fn approx_tokens(text: &str) -> usize {
     text.len().div_ceil(4)
 }
 
-/// 截断工具输出文本
+/// Truncate tool output text to fit within a token budget.
 ///
-/// 策略：保留头部 80% 和尾部 15%，中间标记截断
-/// 如果文本未超过限制，原样返回
+/// Strategy: preserve head (80%) and tail (15%), mark middle as truncated.
+/// If text fits within the limit, return unchanged.
 pub fn truncate_output(text: &str, max_tokens: usize) -> String {
     let est_tokens = approx_tokens(text);
     if est_tokens <= max_tokens {
         return text.to_string();
     }
 
-    // 按 token 预算计算字符数
-    let max_chars = max_tokens * 4;
-    let head_chars = max_chars * 80 / 100;
-    let tail_chars = max_chars * 15 / 100;
+    // Calculate byte budget from token budget.
+    let max_bytes = max_tokens * 4;
+    let head_bytes = max_bytes * 80 / 100;
+    let tail_bytes = max_bytes * 15 / 100;
 
-    // 确保不越界
-    let char_count = text.chars().count();
-    let head_chars = cmp::min(head_chars, char_count);
-    let tail_chars = cmp::min(tail_chars, char_count - head_chars);
+    let total_bytes = text.len();
 
-    // 按字符边界截取
-    let head: String = text.chars().take(head_chars).collect();
-    let tail: String = text.chars().skip(char_count - tail_chars).collect();
+    // Find char boundaries near the byte offsets to avoid splitting multi-byte chars.
+    let head_end = find_char_boundary_near(text, head_bytes.min(total_bytes));
+    let tail_start = find_char_boundary_near_from_end(text, total_bytes.saturating_sub(tail_bytes));
 
-    let omitted_chars = char_count - head_chars - tail_chars;
-    let omitted_tokens = approx_tokens(&text[head.len()..text.len() - tail.len()]);
+    let head = &text[..head_end];
+    let tail = &text[tail_start..];
+
+    let omitted_bytes = tail_start - head_end;
+    let omitted_tokens = approx_tokens(&text[head_end..tail_start]);
 
     format!(
-        "{}\n\n... [~{} chars / ~{} tokens omitted] ...\n\n{}",
-        head, omitted_chars, omitted_tokens, tail
+        "{}\n\n... [~{} bytes / ~{} tokens omitted] ...\n\n{}",
+        head, omitted_bytes, omitted_tokens, tail
     )
 }
 
-/// 截断工具输出的 ToolResult 字段
-///
-/// 截断 `output` 字符串内容
+/// Truncate tool output ToolResult field.
 pub fn truncate_tool_result(output: &str, max_tokens: usize) -> String {
     truncate_output(output, max_tokens)
+}
+
+/// Find the nearest char boundary at or before `byte_pos`.
+fn find_char_boundary_near(text: &str, byte_pos: usize) -> usize {
+    if byte_pos >= text.len() {
+        return text.len();
+    }
+    let mut pos = byte_pos;
+    while !text.is_char_boundary(pos) && pos > 0 {
+        pos -= 1;
+    }
+    pos
+}
+
+/// Find the nearest char boundary at or after `byte_pos`.
+fn find_char_boundary_near_from_end(text: &str, byte_pos: usize) -> usize {
+    if byte_pos >= text.len() {
+        return text.len();
+    }
+    let mut pos = byte_pos;
+    while !text.is_char_boundary(pos) && pos < text.len() {
+        pos += 1;
+    }
+    pos
 }
 
 #[cfg(test)]
@@ -81,7 +108,7 @@ mod tests {
     #[test]
     fn test_approx_tokens() {
         assert_eq!(approx_tokens("hello"), 2); // 5 chars → 2 tokens
-        assert_eq!(approx_tokens("a".repeat(40).as_str()), 10);
+        assert_eq!(approx_tokens(&"a".repeat(40)), 10);
     }
 
     #[test]
@@ -97,5 +124,19 @@ mod tests {
         let text = "a".repeat(40_000); // 10000 tokens
         let result = truncate_output(&text, 10_000);
         assert_eq!(result, text);
+    }
+
+    #[test]
+    fn test_cjk_truncation_no_split() {
+        // CJK text should not split multi-byte chars at truncation boundary.
+        let head = "开始标记_";
+        let tail = "_结束标记";
+        let middle = "中".repeat(50_000);
+        let text = format!("{}{}{}", head, middle, tail);
+        let result = truncate_output(&text, 5000);
+        assert!(result.starts_with("开始标记_"));
+        assert!(result.contains("结束标记"));
+        // Result should be valid UTF-8 (no panic = success)
+        let _ = result.chars().count();
     }
 }

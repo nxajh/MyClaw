@@ -53,8 +53,8 @@ impl Tool for SendMessageTool {
     }
 
     fn description(&self) -> &str {
-        "向当前对话发送消息。支持纯文本、文本加本地文件、或多个本地文件。\
-         文件参数只接受本地路径，不支持 URL；路径只由工具解析，不会暴露给 channel。"
+        "Send a message to the current conversation. Supports plain text, text with local files, or multiple local files. \
+         File parameters only accept local paths (not URLs). Paths are resolved by the tool and not exposed to the channel."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -63,25 +63,25 @@ impl Tool for SendMessageTool {
             "properties": {
                 "text": {
                     "type": "string",
-                    "description": "要发送给用户的文本。可单独发送，也可作为文件说明。"
+                    "description": "Text to send to the user. Can be sent alone or as a description for files."
                 },
                 "files": {
                     "type": "array",
-                    "description": "要发送的本地文件列表。仅支持本地路径，不支持 URL。",
+                    "description": "List of local files to send. Only local paths are supported (not URLs).",
                     "items": {
                         "type": "object",
                         "properties": {
                             "path": {
                                 "type": "string",
-                                "description": "本地文件路径。"
+                                "description": "Local file path."
                             },
                             "name": {
                                 "type": "string",
-                                "description": "可选，发送时显示的文件名。"
+                                "description": "Optional display name for the file when sent."
                             },
                             "mime_type": {
                                 "type": "string",
-                                "description": "可选，文件 MIME 类型；未提供时由工具推断。"
+                                "description": "Optional file MIME type; inferred by the tool if not provided."
                             }
                         },
                         "required": ["path"]
@@ -110,7 +110,7 @@ impl Tool for SendMessageTool {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("参数错误: {e}")),
+                    error: Some(format!("parameter error: {e}")),
                 });
             }
         };
@@ -193,10 +193,10 @@ impl Tool for SendMessageTool {
             Ok(_) => Ok(ToolResult {
                 success: true,
                 output: if file_names.is_empty() {
-                    "已发送消息。".to_string()
+                    "message sent".to_string()
                 } else {
                     format!(
-                        "已发送消息，包含 {} 个文件：{}。",
+                        "message sent with {} file(s): {}",
                         file_names.len(),
                         file_names.join(", ")
                     )
@@ -206,7 +206,7 @@ impl Tool for SendMessageTool {
             Err(e) => Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some(format!("发送失败: {e}")),
+                error: Some(format!("send failed: {e}")),
             }),
         }
     }
@@ -215,17 +215,17 @@ impl Tool for SendMessageTool {
 async fn prepare_file(file_arg: SendMessageFileArg) -> anyhow::Result<ChannelFile> {
     let path = PathBuf::from(&file_arg.path);
     if !path.exists() {
-        anyhow::bail!("文件不存在: {}", file_arg.path);
+        anyhow::bail!("file not found: {}", file_arg.path);
     }
     if !path.is_file() {
-        anyhow::bail!("不是文件: {}", file_arg.path);
+        anyhow::bail!("not a file: {}", file_arg.path);
     }
 
     let metadata = tokio::fs::metadata(&path).await?;
     let file_size = metadata.len();
     if file_size > MAX_FILE_SIZE {
         anyhow::bail!(
-            "文件过大: {} bytes (上限 {} bytes)",
+            "file too large: {} bytes (limit {} bytes)",
             file_size,
             MAX_FILE_SIZE
         );

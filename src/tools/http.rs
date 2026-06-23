@@ -1,4 +1,8 @@
-//! HTTP request tool — generic HTTP client (GET/POST/PUT/DELETE).
+//! HTTP request tool — generic HTTP client (GET/POST/PUT/DELETE/PATCH).
+//!
+//! Also subsumes the former `web_fetch` tool: set `strip_html: true` to
+//! automatically convert HTML responses to clean text (removing scripts,
+//! styles, tags, and decoding entities).
 
 use crate::providers::{Tool, ToolResult};
 use async_trait::async_trait;
@@ -13,6 +17,7 @@ impl HttpRequestTool {
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::limited(5))
             .build()
             .unwrap_or_default();
         Self { client }
@@ -25,6 +30,34 @@ impl Default for HttpRequestTool {
     }
 }
 
+/// Naive HTML tag stripper — removes tags and decodes basic entities.
+fn strip_html(html: &str) -> String {
+    // Remove <script> and <style> blocks entirely.
+    let re_script = regex::Regex::new(r"(?is)<script[^>]*>.*?</script>").unwrap();
+    let re_style = regex::Regex::new(r"(?is)<style[^>]*>.*?</style>").unwrap();
+    let text = re_script.replace_all(html, "");
+    let text = re_style.replace_all(&text, "");
+
+    // Remove HTML tags.
+    let re_tag = regex::Regex::new(r"<[^>]+>").unwrap();
+    let text = re_tag.replace_all(&text, "");
+
+    // Decode basic entities.
+    let text = text
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ");
+
+    // Collapse whitespace.
+    let re_ws = regex::Regex::new(r"\n{3,}").unwrap();
+    let text = re_ws.replace_all(&text, "\n\n");
+
+    text.trim().to_string()
+}
+
 #[async_trait]
 impl Tool for HttpRequestTool {
     fn name(&self) -> &str {
@@ -32,7 +65,8 @@ impl Tool for HttpRequestTool {
     }
 
     fn description(&self) -> &str {
-        "Make an HTTP request (GET, POST, PUT, DELETE, PATCH) to any URL. Returns status code, headers, and body."
+        "Make an HTTP request (GET, POST, PUT, DELETE, PATCH) to any URL. Returns status code and body. \
+         Follows up to 5 redirects automatically. Set strip_html=true for web pages to get clean text instead of raw HTML."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -60,6 +94,10 @@ impl Tool for HttpRequestTool {
                 "timeout_secs": {
                     "type": "integer",
                     "description": "Timeout in seconds (default 30)."
+                },
+                "strip_html": {
+                    "type": "boolean",
+                    "description": "If true and the response is HTML, strip tags and return clean text (default: false)."
                 }
             },
             "required": ["url"]
@@ -81,6 +119,7 @@ impl Tool for HttpRequestTool {
 
         let method_str = args["method"].as_str().unwrap_or("GET").to_uppercase();
         let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(30);
+        let strip_html_flag = args["strip_html"].as_bool().unwrap_or(false);
 
         let method = match method_str.as_str() {
             "GET" => reqwest::Method::GET,
@@ -141,7 +180,17 @@ impl Tool for HttpRequestTool {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
 
-        let output = format!("HTTP {}\n\n{}", status, body);
+        let output = if strip_html_flag {
+            let content_type = ""; // Already consumed; check body for HTML.
+            let looks_like_html = body.trim_start().starts_with('<');
+            if looks_like_html || body.contains("<html") || body.contains("<!DOCTYPE") {
+                format!("HTTP {}\n\n{}", status, strip_html(&body))
+            } else {
+                format!("HTTP {}\n\n{}", status, body)
+            }
+        } else {
+            format!("HTTP {}\n\n{}", status, body)
+        };
 
         Ok(ToolResult {
             success: status.is_success(),

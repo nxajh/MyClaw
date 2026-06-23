@@ -1,7 +1,7 @@
-//! CronJobTool — LLM 通过此工具管理定时任务。
+//! CronJobTool — manage scheduled jobs from the LLM.
 //!
-//! 支持 create / update / list / pause / resume / run / remove / log 八个 action。
-//! 包含完整的 schedule 验证、retry 策略、失败告警、per-job model/provider 等。
+//! Supports create / update / list / pause / resume / run / remove / log actions.
+//! Includes schedule validation, retry strategy, failure alerts, per-job model/provider settings.
 
 use async_trait::async_trait;
 

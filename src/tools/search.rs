@@ -3,7 +3,7 @@
 use crate::providers::{Tool, ToolResult};
 use async_trait::async_trait;
 use serde_json::json;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // ── GlobSearchTool ───────────────────────────────────────────────────────────
 
@@ -57,6 +57,20 @@ fn glob_to_regex(pattern: &str) -> String {
     regex
 }
 
+/// Resolve the search base directory.
+/// If `path` is None or "." or empty, falls back to the workspace root
+/// (the MyClaw working directory), NOT the process cwd which may differ.
+fn resolve_search_base(path: Option<&str>) -> PathBuf {
+    let raw = path.unwrap_or(".").trim();
+    if raw.is_empty() || raw == "." {
+        // Use the MyClaw workspace directory, not the OS process cwd.
+        // The workspace dir is set as the daemon's working directory at startup.
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    } else {
+        PathBuf::from(raw)
+    }
+}
+
 fn walk_dir(dir: &Path, results: &mut Vec<String>, max: usize) -> std::io::Result<()> {
     if results.len() >= max {
         return Ok(());
@@ -93,7 +107,7 @@ impl Tool for GlobSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search for files matching a glob pattern. Supports *, **, and ? wildcards."
+        "Search for files matching a glob pattern. Supports *, **, and ? wildcards. Optionally returns file metadata (size, mtime)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -107,6 +121,10 @@ impl Tool for GlobSearchTool {
                 "path": {
                     "type": "string",
                     "description": "Base directory to search in (default: current directory)."
+                },
+                "include_metadata": {
+                    "type": "boolean",
+                    "description": "If true, include file size and last-modified time for each match (default: false)."
                 }
             },
             "required": ["pattern"]
@@ -125,8 +143,9 @@ impl Tool for GlobSearchTool {
         let pattern = args["pattern"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'pattern' is required"))?;
-        let base = args["path"].as_str().unwrap_or(".");
-        let base = Path::new(base);
+        let include_metadata = args["include_metadata"].as_bool().unwrap_or(false);
+
+        let base = resolve_search_base(args["path"].as_str());
 
         if !base.exists() {
             return Ok(ToolResult {
@@ -141,13 +160,13 @@ impl Tool for GlobSearchTool {
             .map_err(|e| anyhow::anyhow!("invalid glob pattern '{}': {}", pattern, e))?;
 
         let mut files = Vec::new();
-        walk_dir(base, &mut files, 1000)?;
+        walk_dir(&base, &mut files, 1000)?;
 
         // Match against relative paths from base.
         let matches: Vec<String> = files
             .iter()
             .filter_map(|f| {
-                let rel = Path::new(f).strip_prefix(base).ok()?;
+                let rel = Path::new(f).strip_prefix(&base).ok()?;
                 let rel_str = rel.to_string_lossy();
                 if re.is_match(&rel_str) {
                     Some(f.clone())
@@ -165,9 +184,27 @@ impl Tool for GlobSearchTool {
                 base.display()
             )
         } else {
-            let display: Vec<&str> = matches.iter().take(500).map(|s| s.as_str()).collect();
             let mut out = format!("{} files found:\n", matches.len());
-            out.push_str(&display.join("\n"));
+            if include_metadata {
+                for f in matches.iter().take(500) {
+                    let meta_info = std::fs::metadata(f)
+                        .ok()
+                        .map(|m| {
+                            let size = m.len();
+                            let mtime = m.modified()
+                                .ok()
+                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            format!("  [{} bytes, mtime={}]", size, mtime)
+                        })
+                        .unwrap_or_default();
+                    out.push_str(&format!("{}{}\n", f, meta_info));
+                }
+            } else {
+                let display: Vec<&str> = matches.iter().take(500).map(|s| s.as_str()).collect();
+                out.push_str(&display.join("\n"));
+            }
             if truncated {
                 out.push_str("\n... (truncated at 500 results)");
             }
@@ -193,20 +230,52 @@ impl ContentSearchTool {
     }
 }
 
-fn search_in_file(path: &Path, re: &regex::Regex, max_lines: usize) -> Option<Vec<String>> {
+/// Search a single file for regex matches, optionally including context lines.
+fn search_in_file(
+    path: &Path,
+    re: &regex::Regex,
+    max_lines: usize,
+    context_lines: usize,
+) -> Option<Vec<String>> {
     let content = std::fs::read_to_string(path).ok()?;
     if !re.is_match(&content) {
         return None;
     }
+    let lines: Vec<&str> = content.lines().collect();
     let mut results = Vec::new();
-    for (i, line) in content.lines().enumerate() {
+    let mut prev_match_end: Option<usize> = None; // for merging overlapping context
+
+    for (i, line) in lines.iter().enumerate() {
         if re.is_match(line) {
-            results.push(format!("{}:{}\t{}", path.display(), i + 1, line.trim()));
-            if results.len() >= max_lines {
+            // Determine context range, merging with previous if overlapping.
+            let ctx_start = i.saturating_sub(context_lines);
+            let ctx_end = (i + context_lines + 1).min(lines.len());
+
+            // If this overlaps with the previous match's context, continue seamlessly.
+            let start_from = match prev_match_end {
+                Some(prev_end) if prev_end >= ctx_start => prev_end,
+                _ => {
+                    if context_lines > 0 && ctx_start > 0 {
+                        results.push(format!("{}-{}-\t...", path.display(), ctx_start));
+                    }
+                    ctx_start
+                }
+            };
+
+            for j in start_from..ctx_end {
+                let prefix = if j == i { "" } else { "-" };
+                results.push(format!("{}:{}{}\t{}", path.display(), j + 1, prefix, lines[j]));
+            }
+            prev_match_end = Some(ctx_end);
+
+            // Check if we've hit max results (count only actual matches, not context).
+            let match_count = results.iter().filter(|r| !r.contains(":\t-")).count();
+            if match_count >= max_lines {
                 break;
             }
         }
     }
+
     if results.is_empty() {
         None
     } else {
@@ -221,7 +290,7 @@ impl Tool for ContentSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search file contents by regex pattern. Returns matching lines with file path and line numbers."
+        "Search file contents by regex pattern. Returns matching lines with file path and line numbers. Supports context_lines to show surrounding lines (like grep -A/-B)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -243,6 +312,10 @@ impl Tool for ContentSearchTool {
                 "max_results": {
                     "type": "integer",
                     "description": "Maximum number of matching lines to return (default 200)."
+                },
+                "context_lines": {
+                    "type": "integer",
+                    "description": "Number of context lines to show before and after each match (like grep -C). Default: 0 (no context)."
                 }
             },
             "required": ["regex"]
@@ -261,9 +334,9 @@ impl Tool for ContentSearchTool {
         let pattern = args["regex"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'regex' is required"))?;
-        let base = args["path"].as_str().unwrap_or(".");
         let include = args["include"].as_str();
         let max_results = args["max_results"].as_u64().unwrap_or(200) as usize;
+        let context_lines = args["context_lines"].as_u64().unwrap_or(0) as usize;
 
         let re = regex::Regex::new(pattern)
             .map_err(|e| anyhow::anyhow!("invalid regex '{}': {}", pattern, e))?;
@@ -281,12 +354,12 @@ impl Tool for ContentSearchTool {
                 .unwrap_or_else(|_| regex::Regex::new(".*").unwrap())
         });
 
-        let base = Path::new(base);
+        let base = resolve_search_base(args["path"].as_str());
         let mut all_files = Vec::new();
         if base.is_file() {
             all_files.push(base.to_string_lossy().into_owned());
         } else {
-            walk_dir(base, &mut all_files, 5000)?;
+            walk_dir(&base, &mut all_files, 5000)?;
         }
 
         let mut results = Vec::new();
@@ -305,11 +378,20 @@ impl Tool for ContentSearchTool {
                     continue;
                 }
             }
-            if let Some(matches) = search_in_file(file_path, &re, max_results - results.len()) {
+
+            // Count actual matches so far to enforce max_results.
+            let current_match_count = results.iter().filter(|r| !r.contains(":-\t") && !r.contains(":\t...")).count();
+            if current_match_count >= max_results {
+                break;
+            }
+
+            if let Some(matches) = search_in_file(
+                file_path,
+                &re,
+                max_results - current_match_count,
+                context_lines,
+            ) {
                 results.extend(matches);
-                if results.len() >= max_results {
-                    break;
-                }
             }
         }
 
