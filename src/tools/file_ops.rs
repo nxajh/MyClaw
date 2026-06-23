@@ -63,7 +63,9 @@ impl Tool for FileReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read file contents. Supports partial reading via offset and limit."
+        "Read file contents. Supports partial reading via offset and limit. \
+         Set outline=true to extract an overview (function/class names for code, \
+         headings for markdown)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -81,6 +83,10 @@ impl Tool for FileReadTool {
                 "limit": {
                     "type": "integer",
                     "description": "Maximum number of lines to return (default: all)."
+                },
+                "outline": {
+                    "type": "boolean",
+                    "description": "If true, extract only structural overview: function/struct/impl names for Rust, def/class for Python, function/class/const for JS/TS, headings for Markdown. (default: false)."
                 }
             },
             "required": ["path"]
@@ -103,12 +109,27 @@ impl Tool for FileReadTool {
         let resolved = validate_path(path)?;
         let path = resolved.to_str().unwrap_or(path);
 
-        let offset = args["offset"].as_u64().unwrap_or(0) as usize; // 0 means from start
-        let limit = args["limit"].as_u64().map(|l| l as usize);
+        let outline = args["outline"].as_bool().unwrap_or(false);
 
         let content = tokio::fs::read_to_string(path)
             .await
             .map_err(|e| anyhow::anyhow!("failed to read '{}': {}", path, e))?;
+
+        if outline {
+            let outline_text = extract_outline(path, &content);
+            return Ok(ToolResult {
+                success: true,
+                output: if outline_text.is_empty() {
+                    format!("{} ({} lines) — no structural elements found", path, content.lines().count())
+                } else {
+                    format!("{} ({} lines) — outline:\n{}", path, content.lines().count(), outline_text)
+                },
+                error: None,
+            });
+        }
+
+        let offset = args["offset"].as_u64().unwrap_or(0) as usize; // 0 means from start
+        let limit = args["limit"].as_u64().map(|l| l as usize);
 
         let lines: Vec<&str> = content.lines().collect();
         let start = if offset > 0 {
@@ -143,6 +164,97 @@ impl Tool for FileReadTool {
             },
             error: None,
         })
+    }
+}
+
+/// Extract a structural outline from a file based on its extension.
+fn extract_outline(path: &str, content: &str) -> String {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+
+    let total_lines = content.lines().count();
+    let patterns: Vec<(&str, &str)> = match ext {
+        "rs" => vec![
+            (r"^\s*(pub\s+)?(async\s+)?fn\s+(\w+)", "fn"),
+            (r"^\s*(pub\s+)?struct\s+(\w+)", "struct"),
+            (r"^\s*(pub\s+)?enum\s+(\w+)", "enum"),
+            (r"^\s*(pub\s+)?trait\s+(\w+)", "trait"),
+            (r"^\s*impl\s+", "impl"),
+            (r"^\s*mod\s+(\w+)", "mod"),
+            (r"^\s*type\s+(\w+)", "type"),
+        ],
+        "py" => vec![
+            (r"^\s*def\s+(\w+)", "def"),
+            (r"^\s*class\s+(\w+)", "class"),
+            (r"^\s*async\s+def\s+(\w+)", "async def"),
+        ],
+        "js" | "ts" | "jsx" | "tsx" | "mjs" => vec![
+            (r"^\s*(export\s+)?(async\s+)?function\s+(\w+)", "function"),
+            (r"^\s*(export\s+)?class\s+(\w+)", "class"),
+            (r"^\s*(export\s+)?const\s+(\w+)\s*=", "const"),
+            (r"^\s*(export\s+)?(default\s+)?interface\s+(\w+)", "interface"),
+            (r"^\s*(export\s+)?type\s+(\w+)", "type"),
+        ],
+        "md" | "markdown" => vec![
+            (r"^#{1,6}\s+.*", "heading"),
+        ],
+        "toml" => vec![
+            (r"^\[[\w.-]+\]", "section"),
+        ],
+        "yaml" | "yml" => vec![
+            (r"^[\w-]+\s*:", "key"),
+        ],
+        "json" => {
+            // For JSON, just show top-level keys
+            return extract_json_outline(content);
+        }
+        _ => {
+            // Generic: look for function-like patterns
+            vec![
+                (r"(?i)^\s*(pub|public|private|protected)?\s*(static\s+)?(async\s+)?function\s+(\w+)", "function"),
+                (r"(?i)^\s*(pub|public|private|protected)?\s*class\s+(\w+)", "class"),
+            ]
+        }
+    };
+
+    if patterns.is_empty() {
+        return String::new();
+    }
+
+    let mut result = Vec::new();
+    for (i, line) in content.lines().enumerate() {
+        for (pattern, kind) in &patterns {
+            if let Ok(re) = regex::Regex::new(pattern) {
+                if re.is_match(line) {
+                    result.push(format!("{:>6}  [{:>10}]  {}", i + 1, kind, line.trim()));
+                    break;
+                }
+            }
+        }
+    }
+
+    if result.is_empty() {
+        String::new()
+    } else {
+        format!("total {} lines, {} structural elements\n{}", total_lines, result.len(), result.join("\n"))
+    }
+}
+
+fn extract_json_outline(content: &str) -> String {
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(content) else {
+        return String::new();
+    };
+    match val {
+        serde_json::Value::Object(map) => {
+            let keys: Vec<String> = map.keys().map(|k| format!("  {}", k)).collect();
+            format!("JSON object with {} top-level keys:\n{}", keys.len(), keys.join("\n"))
+        }
+        serde_json::Value::Array(arr) => {
+            format!("JSON array with {} elements", arr.len())
+        }
+        _ => "JSON primitive value".to_string(),
     }
 }
 
@@ -256,7 +368,11 @@ impl Tool for FileEditTool {
     }
 
     fn description(&self) -> &str {
-        "Edit a file by replacing an exact string match with new content. By default the old_string must appear exactly once; set replace_all=true to replace all occurrences."
+        "Edit a file by replacing exact string matches with new content. \
+         Supports two modes: (1) single edit with old_string/new_string, \
+         (2) multi-edit with an `edits` array of {old_string, new_string} objects. \
+         In single mode, old_string must appear exactly once unless replace_all=true. \
+         In multi-edit mode, each edit is applied sequentially to the file."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -269,18 +385,30 @@ impl Tool for FileEditTool {
                 },
                 "old_string": {
                     "type": "string",
-                    "description": "The exact text to find (must appear exactly once, unless replace_all is true)."
+                    "description": "The exact text to find (must appear exactly once, unless replace_all is true). Used in single-edit mode."
                 },
                 "new_string": {
                     "type": "string",
-                    "description": "The replacement text (use empty string to delete)."
+                    "description": "The replacement text (use empty string to delete). Used in single-edit mode."
                 },
                 "replace_all": {
                     "type": "boolean",
-                    "description": "If true, replace all occurrences of old_string (default: false)."
+                    "description": "If true, replace all occurrences of old_string (default: false). Single-edit mode only."
+                },
+                "edits": {
+                    "type": "array",
+                    "description": "Multi-edit mode: an array of {old_string, new_string} objects. Applied sequentially. Cannot be used together with old_string/new_string.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_string": { "type": "string", "description": "Text to find." },
+                            "new_string": { "type": "string", "description": "Replacement text." }
+                        },
+                        "required": ["old_string", "new_string"]
+                    }
                 }
             },
-            "required": ["path", "old_string", "new_string"]
+            "required": ["path"]
         })
     }
 
@@ -294,15 +422,81 @@ impl Tool for FileEditTool {
             .ok_or_else(|| anyhow::anyhow!("'path' is required"))?;
         let resolved = validate_path(path)?;
         let path = resolved.to_str().unwrap_or(path);
-        let old_string = args["old_string"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("'old_string' is required"))?;
-        let new_string = args["new_string"].as_str().unwrap_or("");
-        let replace_all = args["replace_all"].as_bool().unwrap_or(false);
 
         let content = tokio::fs::read_to_string(path)
             .await
             .map_err(|e| anyhow::anyhow!("failed to read '{}': {}", path, e))?;
+
+        // Multi-edit mode: edits[] array
+        if let Some(edits) = args.get("edits").and_then(|e| e.as_array()) {
+            if args.get("old_string").is_some() || args.get("new_string").is_some() {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some("cannot use both edits[] and old_string/new_string at the same time".to_string()),
+                });
+            }
+
+            let mut current = content.clone();
+            let mut applied = 0;
+            let mut report = Vec::new();
+
+            for (i, edit) in edits.iter().enumerate() {
+                let old = edit["old_string"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("edits[{}].old_string is required", i))?;
+                let new = edit["new_string"].as_str().unwrap_or("");
+
+                let count = current.matches(old).count();
+                if count == 0 {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: format!("edits[{}]: old_string not found in file", i),
+                        error: Some(format!("edits[{}].old_string not found", i)),
+                    });
+                }
+                if count > 1 {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: format!("edits[{}]: old_string found {} times (must be unique)", i, count),
+                        error: Some(format!("edits[{}].old_string matched {} times, expected exactly 1", i, count)),
+                    });
+                }
+
+                current = current.replacen(old, new, 1);
+                applied += 1;
+                report.push(format!(
+                    "  [{}/{}] line {}: \"{}\" → \"{}\"",
+                    i + 1,
+                    edits.len(),
+                    find_line_number(&content, old),
+                    str_utils::truncate_line(old, 60),
+                    str_utils::truncate_line(new, 60),
+                ));
+            }
+
+            tokio::fs::write(path, &current)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to write '{}': {}", path, e))?;
+
+            return Ok(ToolResult {
+                success: true,
+                output: format!(
+                    "applied {} edit(s) to {}:\n{}",
+                    applied,
+                    path,
+                    report.join("\n")
+                ),
+                error: None,
+            });
+        }
+
+        // Single-edit mode: old_string / new_string
+        let old_string = args["old_string"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("'old_string' is required (or use edits[] for multi-edit mode)"))?;
+        let new_string = args["new_string"].as_str().unwrap_or("");
+        let replace_all = args["replace_all"].as_bool().unwrap_or(false);
 
         let count = content.matches(old_string).count();
         if count == 0 {

@@ -190,14 +190,14 @@ impl Tool for HearAudioTool {
     }
 
     fn description(&self) -> &str {
-        "Listen to voice/audio file content. When the conversation contains a `[voice: sessions/.../files/xxx]` marker, call this tool with the path. Path can be workspace-relative or absolute."
+        "Listen to voice/audio file content. When the conversation contains a `[voice: sessions/.../files/xxx]` marker, call this tool with the path. Path can be workspace-relative, absolute, or a URL (http/https)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Audio file path. Relative paths are interpreted as workspace-relative; absolute paths are used directly." },
+                "path": { "type": "string", "description": "Audio file path or URL. Relative paths are interpreted as workspace-relative; absolute paths are used directly; URLs (http/https) are downloaded automatically." },
                 "question": { "type": "string", "description": "The question you want answered about this audio, e.g. 'what did the user say?', 'translate to English'. Leave empty for full transcription." }
             },
             "required": ["path"]
@@ -227,7 +227,9 @@ impl Tool for HearAudioTool {
             .unwrap_or("Transcribe this audio verbatim.")
             .to_string();
 
-        let abs = resolve_path(path);
+        let abs = crate::tools::media_download::resolve_path_or_url(path)
+            .await
+            .map_err(|e| anyhow::anyhow!("cannot resolve path/URL '{path}': {e}"))?;
         let meta = match std::fs::metadata(&abs) {
             Ok(meta) if meta.is_file() => meta,
             Ok(_) => {

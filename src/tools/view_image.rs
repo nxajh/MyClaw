@@ -194,14 +194,14 @@ impl Tool for ViewImageTool {
     }
 
     fn description(&self) -> &str {
-        "View image file content. When the conversation contains an `[image: sessions/.../files/xxx]` marker, call this tool with the path and a specific question. Path can be workspace-relative or absolute."
+        "View image file content. When the conversation contains an `[image: sessions/.../files/xxx]` marker, call this tool with the path and a specific question. Path can be workspace-relative, absolute, or a URL (http/https)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Image file path. Relative paths are interpreted as workspace-relative; absolute paths are used directly." },
+                "path": { "type": "string", "description": "Image file path or URL. Relative paths are interpreted as workspace-relative; absolute paths are used directly; URLs (http/https) are downloaded automatically." },
                 "question": { "type": "string", "description": "The specific question you want answered about this image, e.g. 'how many people are in the image?', 'identify text in the image'." }
             },
             "required": ["path", "question"]
@@ -231,7 +231,9 @@ impl Tool for ViewImageTool {
             .unwrap_or("Describe this image in detail, including text, objects, and scenes.")
             .to_string();
 
-        let abs = resolve_path(path);
+        let abs = crate::tools::media_download::resolve_path_or_url(path)
+            .await
+            .map_err(|e| anyhow::anyhow!("cannot resolve path/URL '{path}': {e}"))?;
         let meta = match std::fs::metadata(&abs) {
             Ok(meta) if meta.is_file() => meta,
             Ok(_) => {

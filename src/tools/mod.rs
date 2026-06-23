@@ -19,6 +19,7 @@ mod file_ops;
 mod hear_audio;
 mod http;
 mod list_dir;
+mod media_download;
 mod memory_tool;
 mod search;
 mod search_cooldown;

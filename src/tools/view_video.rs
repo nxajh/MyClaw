@@ -196,14 +196,14 @@ impl Tool for ViewVideoTool {
     }
 
     fn description(&self) -> &str {
-        "View video file content. When the conversation contains a `[video: sessions/.../files/xxx]` marker, call this tool with the path and a specific question. Path can be workspace-relative or absolute."
+        "View video file content. When the conversation contains a `[video: sessions/.../files/xxx]` marker, call this tool with the path and a specific question. Path can be workspace-relative, absolute, or a URL (http/https)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Video file path. Relative paths are interpreted as workspace-relative; absolute paths are used directly." },
+                "path": { "type": "string", "description": "Video file path or URL. Relative paths are interpreted as workspace-relative; absolute paths are used directly; URLs (http/https) are downloaded automatically." },
                 "question": { "type": "string", "description": "The specific question you want answered about this video, e.g. 'summarize the video', 'what happened?', 'identify text in the video'." }
             },
             "required": ["path", "question"]
@@ -237,7 +237,9 @@ impl Tool for ViewVideoTool {
             .unwrap_or("Describe the video content in detail, including main events, people, scenes, text, and audio.")
             .to_string();
 
-        let abs = resolve_path(path);
+        let abs = crate::tools::media_download::resolve_path_or_url(path)
+            .await
+            .map_err(|e| anyhow::anyhow!("cannot resolve path/URL '{path}': {e}"))?;
         let meta = match std::fs::metadata(&abs) {
             Ok(meta) if meta.is_file() => meta,
             Ok(_) => {
