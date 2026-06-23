@@ -23,6 +23,23 @@ use super::types::{Chat, GetUpdatesResponse, Message, SendChatActionRequest};
 const RICH_MESSAGE_LENGTH: usize = 32768;
 const CONTINUATION_OVERHEAD: usize = 30;
 
+/// A GFM table delimiter row, e.g. `| --- | :--: |`.
+fn is_table_delimiter_local(line: &str) -> bool {
+    let t = line.trim();
+    if t.is_empty() {
+        return false;
+    }
+    let mut has_dash = false;
+    for c in t.chars() {
+        match c {
+            '-' => has_dash = true,
+            '|' | ':' | ' ' | '\t' => {}
+            _ => return false,
+        }
+    }
+    has_dash
+}
+
 // ── TelegramChannel ────────────────────────────────────────────────────────────
 
 /// Entry in the debounce buffer for merging rapid consecutive messages from the same sender.
@@ -343,6 +360,43 @@ impl TelegramChannel {
         }
     }
 
+    /// Ensure a blank line before GFM table blocks so Telegram's markdown
+    /// parser recognises them. Without a preceding blank line (or message
+    /// start), the parser treats `| col | col |` as literal text.
+    fn normalize_markdown_tables(text: &str) -> String {
+        let lines: Vec<&str> = text.lines().collect();
+        let mut result: Vec<String> = Vec::with_capacity(lines.len() + 4);
+
+        for (i, &line) in lines.iter().enumerate() {
+            // Detect a table delimiter row preceded by a header row.
+            if is_table_delimiter_local(line) && i > 0 {
+                let header = lines[i - 1].trim_end();
+                if header.contains('|') && !header.is_empty() {
+                    // Check if the line before the header is already blank
+                    // or the header is the first line. We look at what's
+                    // currently last in `result` (which includes lines[0..=i-1]).
+                    // The header was pushed as `result`'s last entry. We need
+                    // a blank line before it if the entry before it is non-blank.
+                    let header_idx = result.len() - 1; // header is last pushed
+                    let need_blank = if header_idx == 0 {
+                        false // header is first line — fine
+                    } else {
+                        !result[header_idx - 1].trim().is_empty()
+                    };
+                    if need_blank {
+                        // Insert blank line before the header.
+                        let hdr = result.pop().unwrap();
+                        result.push(String::new()); // blank line
+                        result.push(hdr);
+                    }
+                }
+            }
+            result.push(line.to_string());
+        }
+
+        result.join("\n")
+    }
+
     async fn send_text(
         &self,
         chat_id: &str,
@@ -352,10 +406,11 @@ impl TelegramChannel {
     ) -> anyhow::Result<Option<i64>> {
         let client = self.http_client();
 
+        let normalized = Self::normalize_markdown_tables(text);
         let mut rich_body = serde_json::json!({
             "chat_id": chat_id,
             "rich_message": {
-                "markdown": text,
+                "markdown": normalized,
             },
         });
         if let Some(tid) = thread_id {
@@ -439,11 +494,12 @@ impl TelegramChannel {
     ) -> anyhow::Result<bool> {
         let client = self.http_client();
 
+        let normalized = Self::normalize_markdown_tables(text);
         let body = serde_json::json!({
             "chat_id": chat_id,
             "message_id": message_id,
             "rich_message": {
-                "markdown": text,
+                "markdown": normalized,
             },
         });
 
@@ -2019,5 +2075,32 @@ mod tests {
                 "each chunk must fit Telegram UTF-16 limit"
             );
         }
+    }
+
+    #[test]
+    fn test_normalize_markdown_tables() {
+        // No blank line before table → should insert one.
+        let input = "Here are the results:\n| A | B |\n| --- | --- |\n| 1 | 2 |";
+        let out = TelegramChannel::normalize_markdown_tables(input);
+        assert!(
+            out.contains("Here are the results:\n\n| A | B |"),
+            "expected blank line before table, got:\n{out}"
+        );
+
+        // Already has a blank line → unchanged.
+        let input2 = "Intro:\n\n| A | B |\n| --- | --- |\n| 1 | 2 |";
+        let out2 = TelegramChannel::normalize_markdown_tables(input2);
+        assert_eq!(out2, input2);
+
+        // Table at start of message → no blank needed.
+        let input3 = "| A | B |\n| --- | --- |\n| 1 | 2 |";
+        let out3 = TelegramChannel::normalize_markdown_tables(input3);
+        assert_eq!(out3, input3);
+
+        // Multiple tables in one message.
+        let input4 = "Text1\n| A |\n| - |\n| x |\n\nText2\n| B |\n| - |\n| y |";
+        let out4 = TelegramChannel::normalize_markdown_tables(input4);
+        assert!(out4.contains("Text1\n\n| A |"), "first table missing blank");
+        assert!(out4.contains("Text2\n\n| B |"), "second table missing blank");
     }
 }
