@@ -121,8 +121,7 @@ impl ShellTool {
         cmd.arg("-c")
             .arg(command)
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
+            .stderr(std::process::Stdio::piped());
 
         if let Some(dir) = workdir {
             cmd.current_dir(dir);
@@ -206,16 +205,23 @@ impl ShellTool {
                     },
                 })
             }
-            Ok(Err(e)) => Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!("failed to execute command: {}", e)),
-            }),
+            Ok(Err(e)) => {
+                child.start_kill().ok();
+                Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("failed to execute command: {}", e)),
+                })
+            }
             Err(_) => {
-                // Timeout — kill_on_drop kills the child when the dropped
-                // timeout future releases the child handle. Wait briefly for
-                // read tasks to observe EOF and flush remaining bytes.
-                let _ = timeout(Duration::from_secs(2), async {
+                // Timeout — the child.wait() future was dropped, but `child`
+                // itself is still alive. kill_on_drop won't trigger until the
+                // function returns. We need to explicitly kill the child so
+                // the pipes close and read tasks can drain remaining output.
+                child.start_kill().ok();
+
+                // Wait for read tasks to observe EOF and collect remaining bytes.
+                let _ = timeout(Duration::from_secs(3), async {
                     let _ = stdout_task.await;
                     let _ = stderr_task.await;
                 })
