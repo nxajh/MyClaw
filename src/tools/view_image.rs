@@ -299,13 +299,13 @@ impl Tool for ViewImageTool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn resolves_relative_path_against_current_dir() {
+    #[tokio::test]
+    async fn resolves_relative_path_against_current_dir() {
         let cwd = std::env::current_dir().unwrap();
-        assert_eq!(
-            std::path::PathBuf::from("sessions/s/files/photo.png"),
-            cwd.join("sessions/s/files/photo.png")
-        );
+        let result = crate::tools::media_download::resolve_path_or_url("sessions/s/files/photo.png")
+            .await
+            .unwrap();
+        assert_eq!(result, cwd.join("sessions/s/files/photo.png"));
     }
 
     #[test]

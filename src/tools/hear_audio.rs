@@ -296,13 +296,13 @@ impl Tool for HearAudioTool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn resolves_relative_path_against_current_dir() {
+    #[tokio::test]
+    async fn resolves_relative_path_against_current_dir() {
         let cwd = std::env::current_dir().unwrap();
-        assert_eq!(
-            std::path::PathBuf::from("sessions/s/files/voice.ogg"),
-            cwd.join("sessions/s/files/voice.ogg")
-        );
+        let result = crate::tools::media_download::resolve_path_or_url("sessions/s/files/voice.ogg")
+            .await
+            .unwrap();
+        assert_eq!(result, cwd.join("sessions/s/files/voice.ogg"));
     }
 
     #[test]
