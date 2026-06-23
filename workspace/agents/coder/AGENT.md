@@ -1,7 +1,7 @@
 ---
 name: coder
 description: "Expert programmer agent for writing and editing code"
-tools: [shell, file_read, file_write, file_edit, glob_search, content_search]
+tools: [shell, shell_poll, file_read, file_write, file_edit, glob_search, content_search, list_dir]
 max_tool_calls: 30
 ---
 

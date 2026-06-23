@@ -275,41 +275,55 @@ impl ShellTool {
         tokio::spawn(async move {
             let mut stdout = stdout;
             let mut stderr = stderr;
-            let mut stdout_tmp = Vec::with_capacity(8192);
-            let mut stderr_tmp = Vec::with_capacity(8192);
+            let mut stdout_buf_local = Vec::new();
+            let mut stderr_buf_local = Vec::new();
+
+            // Read pipes concurrently using select! with read_to_end.
+            let mut stdout_done = stdout.is_none();
+            let mut stderr_done = stderr.is_none();
 
             loop {
-                tokio::select! {
-                    r = async {
-                        if let Some(ref mut s) = stdout {
-                            stdout_tmp.clear();
-                            s.read(&mut stdout_tmp).await
-                        } else {
-                            std::future::pending::<std::io::Result<usize>>().await
-                        }
-                    } => {
-                        match r {
-                            Ok(0) | Err(_) => stdout = None,
-                            Ok(_) => stdout_buf_clone.lock().await.push_str(&String::from_utf8_lossy(&stdout_tmp)),
-                        }
-                    }
-                    r = async {
-                        if let Some(ref mut s) = stderr {
-                            stderr_tmp.clear();
-                            s.read(&mut stderr_tmp).await
-                        } else {
-                            std::future::pending::<std::io::Result<usize>>().await
-                        }
-                    } => {
-                        match r {
-                            Ok(0) | Err(_) => stderr = None,
-                            Ok(_) => stderr_buf_clone.lock().await.push_str(&String::from_utf8_lossy(&stderr_tmp)),
-                        }
-                    }
-                }
-                if stdout.is_none() && stderr.is_none() {
+                if stdout_done && stderr_done {
                     break;
                 }
+                tokio::select! {
+                    result = async {
+                        if let Some(ref mut s) = stdout {
+                            let mut tmp = vec![0u8; 8192];
+                            s.read(&mut tmp).await.map(|n| (n, tmp))
+                        } else {
+                            std::future::pending().await
+                        }
+                    }, if !stdout_done => {
+                        match result {
+                            Ok((0, _)) => stdout_done = true,
+                            Ok((n, tmp)) => stdout_buf_local.extend_from_slice(&tmp[..n]),
+                            Err(_) => stdout_done = true,
+                        }
+                    }
+                    result = async {
+                        if let Some(ref mut s) = stderr {
+                            let mut tmp = vec![0u8; 8192];
+                            s.read(&mut tmp).await.map(|n| (n, tmp))
+                        } else {
+                            std::future::pending().await
+                        }
+                    }, if !stderr_done => {
+                        match result {
+                            Ok((0, _)) => stderr_done = true,
+                            Ok((n, tmp)) => stderr_buf_local.extend_from_slice(&tmp[..n]),
+                            Err(_) => stderr_done = true,
+                        }
+                    }
+                }
+            }
+
+            // Copy collected output to shared buffers.
+            if !stdout_buf_local.is_empty() {
+                stdout_buf_clone.lock().await.push_str(&String::from_utf8_lossy(&stdout_buf_local));
+            }
+            if !stderr_buf_local.is_empty() {
+                stderr_buf_clone.lock().await.push_str(&String::from_utf8_lossy(&stderr_buf_local));
             }
 
             let status = child.wait().await.ok();
