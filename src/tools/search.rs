@@ -262,9 +262,9 @@ fn search_in_file(
                 }
             };
 
-            for j in start_from..ctx_end {
+            for (j, line) in lines.iter().enumerate().take(ctx_end).skip(start_from) {
                 let prefix = if j == i { "" } else { "-" };
-                results.push(format!("{}:{}{}\t{}", path.display(), j + 1, prefix, lines[j]));
+                results.push(format!("{}:{}{}\t{}", path.display(), j + 1, prefix, line));
             }
             prev_match_end = Some(ctx_end);
 
