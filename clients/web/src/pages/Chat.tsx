@@ -9,12 +9,6 @@ export default function Chat() {
   const containerRef = useRef<HTMLDivElement>(null)
   const loadedFor = useRef<string | null>(null)
 
-  // Scroll to bottom whenever messages update.
-  useEffect(() => {
-    const el = containerRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [messages])
-
   // Load the active session's history from the server once per connection.
   useEffect(() => {
     if (status === 'connected' && loadedFor.current !== 'connected' && !isGenerating) {

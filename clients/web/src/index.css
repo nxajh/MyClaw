@@ -1,6 +1,9 @@
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
 
+/* ── highlight.js theme (github-dark) ─────────────────────────────────────── */
+@import "highlight.js/styles/github-dark.css";
+
 /* ── Scrollbar styling ────────────────────────────────────────────────────── */
 
 /* Webkit (Chrome, Safari, Edge) */
@@ -26,4 +29,10 @@
 * {
   scrollbar-width: thin;
   scrollbar-color: #3f3f46 transparent;
+}
+
+/* ── highlight.js overrides for code blocks ───────────────────────────────── */
+.hljs {
+  background: transparent !important;
+  padding: 0 !important;
 }
