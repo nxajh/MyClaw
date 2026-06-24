@@ -24,7 +24,7 @@ use crate::agents::tokens::{estimate_history_tokens, estimate_tokens};
 use crate::agents::turn::{TurnContext, TurnResult};
 use crate::agents::turn_event::TurnEvent;
 use crate::config::sub_agent::SubAgentConfig;
-use crate::providers::capability_chat::{ChatMessage, ChatRequest, StopReason, ToolSpec};
+use crate::providers::capability_chat::{ChatMessage, ChatProvider, ChatRequest, StopReason, ToolSpec};
 use crate::providers::{BoxStream, Capability, ContentPart, StreamEvent, ToolCall};
 use crate::storage::SummaryRecord;
 
@@ -175,6 +175,7 @@ impl Agent {
                 runtime,
                 turn_ctx.system_prompt,
                 &model_id,
+                Arc::clone(&provider),
                 &tool_specs,
                 false,
             )
@@ -258,6 +259,7 @@ impl Agent {
                         runtime,
                         turn_ctx.system_prompt,
                         &model_id,
+                        Arc::clone(&provider),
                         &tool_specs,
                         true, // force: bypass the threshold, we know it overflowed
                     )
@@ -719,6 +721,7 @@ async fn maybe_compact(
     runtime: &AgentRuntime,
     system_prompt: &str,
     model_id: &str,
+    provider: Arc<dyn ChatProvider>,
     tool_specs: &[ToolSpec],
     force: bool,
     override_retain: Option<usize>,
@@ -758,6 +761,7 @@ async fn maybe_compact(
             tool_specs,
             boundary,
             model_id,
+            Arc::clone(&provider),
             session,
         )
         .await
@@ -870,6 +874,7 @@ async fn compact_until_fit(
     runtime: &AgentRuntime,
     system_prompt: &str,
     model_id: &str,
+    provider: Arc<dyn ChatProvider>,
     tool_specs: &[ToolSpec],
     force: bool,
 ) -> Option<Vec<ChatMessage>> {
@@ -892,6 +897,7 @@ async fn compact_until_fit(
             runtime,
             system_prompt,
             model_id,
+            Arc::clone(&provider),
             tool_specs,
             force_pass,
             override_retain,

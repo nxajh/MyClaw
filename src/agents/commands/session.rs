@@ -1,5 +1,7 @@
 //! Session management slash commands: new, compact, history, sessions, switch, rename, delete.
 
+use std::sync::Arc;
+
 use super::CommandContext;
 use super::get_history;
 
@@ -26,11 +28,11 @@ pub async fn cmd_compact(ctx: CommandContext<'_>) -> String {
         Some(c) => c,
         None => return "ℹ️ 当前没有活跃会话，无需压缩。".to_string(),
     };
-    let model_id = match ctx
+    let (provider, model_id) = match ctx
         .registry
         .get_chat_provider(crate::providers::Capability::Chat)
     {
-        Ok((_, id)) => id,
+        Ok((p, id)) => (p, id),
         Err(e) => return format!("❌ 无法获取当前模型: {}", e),
     };
     // /compact runs an unconditional compaction. We mirror Agent.run's
@@ -110,6 +112,7 @@ pub async fn cmd_compact(ctx: CommandContext<'_>) -> String {
                 .collect::<Vec<_>>(),
             boundary,
             &model_id,
+            Arc::clone(&provider),
             &session,
         )
         .await

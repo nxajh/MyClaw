@@ -18,8 +18,7 @@ use crate::agents::tokens::estimate_message_tokens;
 use crate::agents::tool_executor::MemoryToolExecutor;
 use crate::agents::tool_registry::ToolRegistry;
 use crate::config::agent::ContextConfig;
-use crate::providers::Capability;
-use crate::providers::capability_chat::ToolSpec;
+use crate::providers::capability_chat::{ChatProvider, ToolSpec};
 use crate::providers::{
     BoxStream, ChatMessage, ChatRequest, ChatUsage, ContentPart, ProviderRegistry, StreamEvent,
     ThinkingConfig, ToolCall,
@@ -147,6 +146,7 @@ impl ContextEngine {
         tool_specs: &[ToolSpec],
         boundary: usize,
         model_id: &str,
+        provider: Arc<dyn ChatProvider>,
         session: &crate::agents::session::Session,
     ) -> anyhow::Result<CompactionResult> {
         let (compact_start, compact_end, existing_summary) =
@@ -175,6 +175,7 @@ impl ContextEngine {
                 system_prompt,
                 tool_specs,
                 model_id,
+                provider,
                 session,
             )
             .await?;
@@ -203,6 +204,7 @@ impl ContextEngine {
         system_prompt: &str,
         tool_specs: &[ToolSpec],
         model_id: &str,
+        provider: Arc<dyn ChatProvider>,
         session: &crate::agents::session::Session,
     ) -> anyhow::Result<String> {
         match self
@@ -212,6 +214,7 @@ impl ContextEngine {
                 system_prompt,
                 tool_specs,
                 model_id,
+                provider,
                 session,
             )
             .await
@@ -235,16 +238,9 @@ impl ContextEngine {
         system_prompt: &str,
         tool_specs: &[ToolSpec],
         model_id: &str,
+        provider: Arc<dyn ChatProvider>,
         session: &crate::agents::session::Session,
     ) -> anyhow::Result<String> {
-        let provider = match self.registry.get_chat_provider_by_model(model_id) {
-            Some((p, _)) => p,
-            None => {
-                let (p, _) = self.registry.get_chat_provider(Capability::Chat)?;
-                p
-            }
-        };
-
         let mut messages: Vec<ChatMessage> = Vec::new();
 
         if !system_prompt.is_empty() {
