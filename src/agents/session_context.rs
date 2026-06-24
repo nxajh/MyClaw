@@ -332,7 +332,7 @@ impl SessionContext {
                 if let Some(s) = stream {
                     s.abort().await;
                 }
-                let channel_name = channel.as_ref().map(|ch| ch.name()).unwrap_or("none");
+                let channel_name = channel_for_send.as_ref().map(|ch| ch.name()).unwrap_or("none");
                 tracing::error!(
                     session = %session.id,
                     channel = %channel_name,
