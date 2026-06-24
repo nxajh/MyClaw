@@ -5,7 +5,7 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import rehypeHighlight from 'rehype-highlight'
-import { ChevronDown, ChevronRight, Copy, Check, ArrowDown } from 'lucide-react'
+import { ChevronDown, ChevronRight, Copy, Check, ArrowDown, RotateCcw } from 'lucide-react'
 import type { ChatMessage, MessageBlock } from '../hooks/useWebSocket'
 import ToolCallCard from './ToolCallCard'
 
@@ -70,7 +70,7 @@ function GeneratingDots() {
   )
 }
 
-// ── Thinking block ───────────────────────────────────────────────────────
+// ── Thinking block (P1-2: with Markdown rendering) ───────────────────────
 
 function ThinkingBlock({ text, defaultOpen }: { text: string; defaultOpen?: boolean }) {
   const [open, setOpen] = useState(defaultOpen ?? false)
@@ -91,8 +91,18 @@ function ThinkingBlock({ text, defaultOpen }: { text: string; defaultOpen?: bool
         <span>Thinking</span>
       </button>
       {open && (
-        <div className="px-3.5 py-3 text-zinc-500 whitespace-pre-wrap leading-5 border-t border-zinc-800 bg-zinc-900/40">
-          {text}
+        <div className="px-3.5 py-3 text-zinc-500 leading-5 border-t border-zinc-800 bg-zinc-900/40
+          prose prose-invert prose-sm max-w-none prose-p:my-1 prose-li:my-0
+          prose-code:text-zinc-400 prose-code:bg-zinc-800/60 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:text-[0.8em] prose-code:before:content-none prose-code:after:content-none
+          prose-strong:text-zinc-400 prose-a:text-blue-400/70">
+          <Markdown
+            remarkPlugins={[remarkGfm]}
+            components={{
+              pre: ({ children }) => <pre className="!bg-transparent !p-0 !my-1 overflow-x-auto">{children}</pre>,
+            }}
+          >
+            {text}
+          </Markdown>
         </div>
       )}
     </div>
@@ -157,14 +167,73 @@ function renderBlock(block: MessageBlock, index: number, isGenerating: boolean) 
   return <ToolCallCard key={block.id} block={block} />
 }
 
+// ── Message actions (P1-1: copy / retry) ─────────────────────────────────
+
+function extractText(blocks: MessageBlock[]): string {
+  return blocks
+    .filter((b): b is { type: 'content'; text: string } => b.type === 'content')
+    .map((b) => b.text)
+    .join('\n\n')
+}
+
+function MessageActions({
+  blocks,
+  isLast,
+  isGenerating,
+  onRetry,
+}: {
+  blocks: MessageBlock[]
+  isLast: boolean
+  isGenerating: boolean
+  onRetry?: () => void
+}) {
+  const [copied, setCopied] = useState(false)
+
+  const handleCopy = async () => {
+    const text = extractText(blocks)
+    if (!text) return
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      // ignore
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-1 mt-1 opacity-0 group-hover/msg:opacity-100 transition-opacity">
+      <button
+        onClick={handleCopy}
+        className="flex items-center gap-1 px-1.5 py-1 rounded-md text-[11px] text-zinc-600 hover:text-zinc-300 hover:bg-zinc-800 transition-colors"
+        title="Copy message"
+      >
+        {copied ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
+        <span>{copied ? 'Copied' : 'Copy'}</span>
+      </button>
+      {isLast && !isGenerating && onRetry && (
+        <button
+          onClick={onRetry}
+          className="flex items-center gap-1 px-1.5 py-1 rounded-md text-[11px] text-zinc-600 hover:text-zinc-300 hover:bg-zinc-800 transition-colors"
+          title="Regenerate response"
+        >
+          <RotateCcw size={12} />
+          <span>Retry</span>
+        </button>
+      )}
+    </div>
+  )
+}
+
 // ── MessageList ──────────────────────────────────────────────────────────
 
 interface Props {
   messages: ChatMessage[]
   containerRef: RefObject<HTMLDivElement | null>
+  onRetry?: (userContent: string) => void
 }
 
-export default function MessageList({ messages, containerRef }: Props) {
+export default function MessageList({ messages, containerRef, onRetry }: Props) {
   const [isNearBottom, setIsNearBottom] = useState(true)
 
   // Track whether user is scrolled near the bottom.
@@ -210,11 +279,17 @@ export default function MessageList({ messages, containerRef }: Props) {
     )
   }
 
+  // Find the last assistant message index for retry targeting.
+  const lastAssistantIdx = messages.reduce(
+    (acc, m, i) => (m.role === 'assistant' ? i : acc),
+    -1,
+  )
+
   return (
     <div className="flex-1 relative">
       <div ref={containerRef} className="absolute inset-0 overflow-y-auto">
         <div className="max-w-3xl mx-auto px-4 py-8 space-y-8">
-          {messages.map((msg) => {
+          {messages.map((msg, msgIdx) => {
             if (msg.role === 'user') {
               return (
                 <div key={msg.id} className="flex justify-end gap-3.5">
@@ -230,8 +305,14 @@ export default function MessageList({ messages, containerRef }: Props) {
             }
 
             // Assistant
+            const isLast = msgIdx === lastAssistantIdx
+            // Find the preceding user message for retry.
+            const prevUser = isLast
+              ? [...messages.slice(0, msgIdx)].reverse().find((m) => m.role === 'user')
+              : undefined
+
             return (
-              <div key={msg.id} className="flex gap-3.5">
+              <div key={msg.id} className="flex gap-3.5 group/msg">
                 {/* Avatar */}
                 <div className="mt-0.5 h-7 w-7 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-base shrink-0 select-none shadow-md">
                   🦀
@@ -242,6 +323,20 @@ export default function MessageList({ messages, containerRef }: Props) {
 
                   {/* Generating indicator — shown only before any content arrives */}
                   {!msg.done && msg.blocks.length === 0 && <GeneratingDots />}
+
+                  {/* P1-1: Message actions — visible on hover */}
+                  {msg.done && (
+                    <MessageActions
+                      blocks={msg.blocks}
+                      isLast={isLast}
+                      isGenerating={!msg.done}
+                      onRetry={
+                        onRetry && prevUser
+                          ? () => onRetry((prevUser as { content: string }).content)
+                          : undefined
+                      }
+                    />
+                  )}
                 </div>
               </div>
             )

@@ -26,7 +26,6 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const { setMessages } = ws
 
   const reloadHistory = useCallback(async () => {
-    setMessages([])
     try {
       const result = await request('sessions.history')
       setMessages((result as ChatMessage[] | null) ?? [])
