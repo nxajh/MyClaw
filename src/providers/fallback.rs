@@ -179,6 +179,7 @@ impl ChatProvider for FallbackChatProvider {
                                 category = %classified.category,
                                 reason = ?classified.reason,
                                 cooldown = ?classified.cooldown_duration(),
+                                retry_after = ?classified.retry_after,
                                 body = %classified.message,
                                 "classified HTTP error"
                             );
@@ -244,6 +245,10 @@ impl ChatProvider for FallbackChatProvider {
 
                 if !should_failover {
                     // Stream ended normally — we're done.
+                    tracing::info!(
+                        model = %entry.model_id,
+                        "chat completed via fallback chain"
+                    );
                     return;
                 }
                 // else: continue to next provider in chain

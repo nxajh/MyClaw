@@ -332,7 +332,13 @@ impl SessionContext {
                 if let Some(s) = stream {
                     s.abort().await;
                 }
-                tracing::error!(session = %session.id, err = %e, "Agent turn failed");
+                let channel_name = channel.as_ref().map(|ch| ch.name()).unwrap_or("none");
+                tracing::error!(
+                    session = %session.id,
+                    channel = %channel_name,
+                    err = %e,
+                    "Agent turn failed"
+                );
                 Err(e)
             }
         }

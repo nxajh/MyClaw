@@ -106,7 +106,14 @@ pub fn init_tracing(config: &crate::config::AppConfig) {
 
     let level = config.logging.level.as_deref().unwrap_or("info");
     // Build RUST_LOG-style directives: global level + per-module overrides.
-    let mut parts = vec![level.to_string()];
+    // Suppress noisy connection-pool / TLS layers that add no diagnostic value.
+    let mut parts = vec![
+        level.to_string(),
+        "hyper_util=off".to_string(),
+        "hyper=off".to_string(),
+        "rustls=off".to_string(),
+        "h2=off".to_string(),
+    ];
     for (module, mod_level) in &config.logging.modules {
         parts.push(format!("{}={}", module, mod_level));
     }

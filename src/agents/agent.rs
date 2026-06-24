@@ -845,7 +845,13 @@ async fn maybe_compact(
             Some((messages, result.removed_tokens, result.summary_tokens))
         }
         Err(e) => {
-            tracing::warn!(err = %e, "compaction failed, continuing");
+            tracing::warn!(
+                session = %session.id,
+                model = %model_id,
+                msg_count = session.history.len(),
+                err = %e,
+                "compaction failed, continuing"
+            );
             None
         }
     }
@@ -930,6 +936,17 @@ async fn compact_until_fit(
             None => break,
         }
     }
+
+    // If we never succeeded and history is well above threshold, emit a
+    // warning so operators know context is growing uncontrolled.
+    if latest.is_none() && force {
+        tracing::warn!(
+            session = %session.id,
+            msg_count = session.history.len(),
+            "compaction repeatedly failed; context will continue growing"
+        );
+    }
+
     latest
 }
 

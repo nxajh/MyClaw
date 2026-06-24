@@ -223,11 +223,20 @@ impl ContextEngine {
         {
             Ok(s) if !s.trim().is_empty() => Ok(s),
             Ok(_) => {
-                tracing::warn!("summarize returned empty text");
+                tracing::warn!(
+                    session = %session.id,
+                    model = %model_id,
+                    "summarize returned empty text"
+                );
                 anyhow::bail!("summarize returned empty text")
             }
             Err(e) => {
-                tracing::warn!(err = %e, "summarize failed");
+                tracing::warn!(
+                    session = %session.id,
+                    model = %model_id,
+                    err = %e,
+                    "summarize failed"
+                );
                 Err(e)
             }
         }
