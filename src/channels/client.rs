@@ -897,10 +897,11 @@ fn handle_api_request(
 
         "sessions.create" => {
             let name = params["name"].as_str();
+            // Evict cached SessionContext so the next message materializes
+            // a fresh one for the newly-active session (mirrors /new).
+            sm.drop_context(user_id);
             match sm.new_session(user_id, name) {
                 Ok(info) => {
-                    // H57: SessionContext eviction handled by slash command paths;
-                    // ClientChannel no longer caches AgentLoop instances.
                     serde_json::json!({
                         "type": "api_response",
                         "id": id,
@@ -930,10 +931,11 @@ fn handle_api_request(
                     }).to_string();
                 }
             };
+            // Evict cached SessionContext so the next message loads the
+            // switched-to session's history (mirrors /switch).
+            sm.drop_context(user_id);
             match sm.switch_session(user_id, session_id) {
                 Ok(info) => {
-                    // H57: SessionContext eviction handled by slash command paths;
-                    // ClientChannel no longer caches AgentLoop instances.
                     serde_json::json!({
                         "type": "api_response",
                         "id": id,
@@ -964,8 +966,6 @@ fn handle_api_request(
             };
             match sm.delete_session(user_id, session_id) {
                 Ok(()) => {
-                    // H57: SessionContext eviction handled by slash command paths;
-                    // ClientChannel no longer caches AgentLoop instances.
                     serde_json::json!({
                         "type": "api_response",
                         "id": id,
