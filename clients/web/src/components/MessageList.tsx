@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react'
+import { useState, useEffect, useRef, useCallback, memo, type ReactNode } from 'react'
 import type { RefObject } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -138,6 +138,11 @@ function ContentBlock({ text, done }: { text: string; done: boolean }) {
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeKatex, rehypeHighlight]}
         components={{
+          table: ({ children }) => (
+            <div className="overflow-x-auto my-2">
+              <table className="border-collapse text-xs">{children}</table>
+            </div>
+          ),
           pre: ({ children, ...props }) => {
             // Extract language class from the <code> child for the header label.
             const codeChild = Array.isArray(children)
@@ -225,6 +230,64 @@ function MessageActions({
   )
 }
 
+// ── Memoized message bubbles (P2-3) ────────────────────────────────────
+
+const UserBubble = memo(function UserBubble({ content }: { content: string }) {
+  return (
+    <div className="flex justify-end gap-3.5">
+      <div className="max-w-[78%] rounded-2xl rounded-tr-lg bg-zinc-800 px-5 py-3.5 text-sm text-zinc-100 whitespace-pre-wrap leading-relaxed">
+        {content}
+      </div>
+      <div className="mt-0.5 h-7 w-7 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-base shrink-0 select-none shadow-md">
+        👤
+      </div>
+    </div>
+  )
+})
+
+interface AssistantBubbleProps {
+  msgId: string
+  blocks: MessageBlock[]
+  done: boolean
+  isLast: boolean
+  isGenerating: boolean
+  onRetry?: () => void
+}
+
+const AssistantBubble = memo(function AssistantBubble({
+  msgId, blocks, done, isLast, isGenerating, onRetry,
+}: AssistantBubbleProps) {
+  return (
+    <div className="flex gap-3.5 group/msg">
+      <div className="mt-0.5 h-7 w-7 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-base shrink-0 select-none shadow-md">
+        🦀
+      </div>
+      <div className="flex-1 min-w-0 rounded-2xl border border-zinc-800/80 bg-zinc-900/25 px-5 py-4 space-y-3 shadow-sm hover:border-zinc-800 transition-colors">
+        {blocks.map((block, i) => renderBlock(block, i, isGenerating))}
+        {!isGenerating && blocks.length === 0 && <GeneratingDots />}
+        {done && (
+          <MessageActions
+            blocks={blocks}
+            isLast={isLast}
+            isGenerating={isGenerating}
+            onRetry={onRetry}
+          />
+        )}
+      </div>
+    </div>
+  )
+}, (prev, next) => {
+  // Custom comparison: skip re-render if message is done and unchanged.
+  return (
+    prev.msgId === next.msgId &&
+    prev.done === next.done &&
+    prev.isLast === next.isLast &&
+    prev.isGenerating === next.isGenerating &&
+    prev.blocks === next.blocks &&
+    prev.onRetry === next.onRetry
+  )
+})
+
 // ── MessageList ──────────────────────────────────────────────────────────
 
 interface Props {
@@ -291,54 +354,28 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
         <div className="max-w-3xl mx-auto px-4 py-8 space-y-8">
           {messages.map((msg, msgIdx) => {
             if (msg.role === 'user') {
-              return (
-                <div key={msg.id} className="flex justify-end gap-3.5">
-                  <div className="max-w-[78%] rounded-2xl rounded-tr-lg bg-zinc-800 px-5 py-3.5 text-sm text-zinc-100 whitespace-pre-wrap leading-relaxed">
-                    {msg.content}
-                  </div>
-                  {/* Avatar */}
-                  <div className="mt-0.5 h-7 w-7 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-base shrink-0 select-none shadow-md">
-                    👤
-                  </div>
-                </div>
-              )
+              return <UserBubble key={msg.id} content={msg.content} />
             }
 
-            // Assistant
             const isLast = msgIdx === lastAssistantIdx
-            // Find the preceding user message for retry.
             const prevUser = isLast
               ? [...messages.slice(0, msgIdx)].reverse().find((m) => m.role === 'user')
               : undefined
 
             return (
-              <div key={msg.id} className="flex gap-3.5 group/msg">
-                {/* Avatar */}
-                <div className="mt-0.5 h-7 w-7 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-base shrink-0 select-none shadow-md">
-                  🦀
-                </div>
-
-                <div className="flex-1 min-w-0 rounded-2xl border border-zinc-800/80 bg-zinc-900/25 px-5 py-4 space-y-3 shadow-sm hover:border-zinc-800 transition-colors">
-                  {msg.blocks.map((block, i) => renderBlock(block, i, !msg.done))}
-
-                  {/* Generating indicator — shown only before any content arrives */}
-                  {!msg.done && msg.blocks.length === 0 && <GeneratingDots />}
-
-                  {/* P1-1: Message actions — visible on hover */}
-                  {msg.done && (
-                    <MessageActions
-                      blocks={msg.blocks}
-                      isLast={isLast}
-                      isGenerating={!msg.done}
-                      onRetry={
-                        onRetry && prevUser
-                          ? () => onRetry((prevUser as { content: string }).content)
-                          : undefined
-                      }
-                    />
-                  )}
-                </div>
-              </div>
+              <AssistantBubble
+                key={msg.id}
+                msgId={msg.id}
+                blocks={msg.blocks}
+                done={msg.done}
+                isLast={isLast}
+                isGenerating={!msg.done}
+                onRetry={
+                  onRetry && prevUser
+                    ? () => onRetry((prevUser as { content: string }).content)
+                    : undefined
+                }
+              />
             )
           })}
         </div>

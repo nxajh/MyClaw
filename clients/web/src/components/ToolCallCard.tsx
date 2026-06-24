@@ -1,11 +1,27 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { ChevronDown, ChevronRight, Loader2, Zap } from 'lucide-react'
 import type { ToolCallBlock } from '../hooks/useWebSocket'
+
+function formatOutput(raw: string): string {
+  if (!raw) return '(empty)'
+  // Try to pretty-print JSON output.
+  try {
+    const parsed = JSON.parse(raw)
+    return JSON.stringify(parsed, null, 2)
+  } catch {
+    return raw
+  }
+}
 
 export default function ToolCallCard({ block }: { block: ToolCallBlock }) {
   const [userExpanded, setUserExpanded] = useState<boolean | null>(null)
   const running = block.output === undefined
   const expanded = userExpanded !== null ? userExpanded : running
+
+  const formattedOutput = useMemo(
+    () => (block.output !== undefined ? formatOutput(block.output) : undefined),
+    [block.output],
+  )
 
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 text-xs overflow-hidden">
@@ -39,13 +55,13 @@ export default function ToolCallCard({ block }: { block: ToolCallBlock }) {
               </pre>
             </div>
           )}
-          {block.output !== undefined && (
+          {formattedOutput !== undefined && (
             <div className="px-3.5 py-2.5">
               <div className="text-zinc-600 uppercase tracking-widest mb-2" style={{ fontSize: 9 }}>
                 Output
               </div>
               <pre className="text-zinc-400 whitespace-pre-wrap break-all font-mono max-h-52 overflow-y-auto leading-5">
-                {block.output || '(empty)'}
+                {formattedOutput}
               </pre>
             </div>
           )}
