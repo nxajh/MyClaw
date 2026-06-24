@@ -139,6 +139,7 @@ impl ContextEngine {
     /// system_prompt + tool_definitions) matches and the summarizer
     /// call hits the cache. Execution is gated separately by
     /// `MemoryToolExecutor`, which permits only the memory tools.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_compaction(
         &self,
         history: &[ChatMessage],
@@ -197,6 +198,7 @@ impl ContextEngine {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn summarize(
         &self,
         to_compact: &[ChatMessage],
@@ -231,6 +233,7 @@ impl ContextEngine {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn do_summarize(
         &self,
         to_compact: &[ChatMessage],
