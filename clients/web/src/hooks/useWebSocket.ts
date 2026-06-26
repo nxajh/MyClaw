@@ -83,6 +83,13 @@ export function useWebSocket() {
   const [isGenerating, setIsGenerating] = useState(false)
   // true = auth was attempted and rejected by the server
   const [authFailed, setAuthFailed] = useState(false)
+  // Track active session so we can filter stale stream events after session switch
+  const activeSessionIdRef = useRef<string | null>(null)
+  const [activeSessionId, setActiveSessionIdState] = useState<string | null>(null)
+  const setActiveSessionId = useCallback((id: string | null) => {
+    activeSessionIdRef.current = id
+    setActiveSessionIdState(id)
+  }, [])
 
   // Registry of listeners for raw server messages (used by useApi)
   const listenersRef = useRef<Set<(data: Record<string, unknown>) => void>>(new Set())
@@ -94,6 +101,54 @@ export function useWebSocket() {
   const authPending = useRef(false)
   // When true, suppress the automatic reconnect (e.g. after auth failure).
   const suppressReconnect = useRef(false)
+
+  // ── Streaming buffer: batch rapid chunk updates ──────────────────────
+  // Instead of calling setMessages on every token (causing O(n) array copy),
+  // we accumulate deltas in a mutable ref and flush to state on rAF.
+  const pendingDeltaRef = useRef<{ type: 'content' | 'thinking'; delta: string } | null>(null)
+  const flushRafRef = useRef<number | null>(null)
+
+  const flushPendingDelta = useCallback(() => {
+    const pending = pendingDeltaRef.current
+    if (!pending) return
+    pendingDeltaRef.current = null
+    const { type, delta } = pending
+    setMessages((prev) => {
+      const last = prev[prev.length - 1]
+      if (last && last.role === 'assistant' && !last.done) {
+        const blocks = [...last.blocks]
+        const lb = blocks[blocks.length - 1]
+        if (lb?.type === type) {
+          blocks[blocks.length - 1] = { type, text: lb.text + delta }
+        } else {
+          blocks.push({ type, text: delta })
+        }
+        return [...prev.slice(0, -1), { ...last, blocks }]
+      }
+      const id = uid()
+      currentAssistantId.current = id
+      return [...prev, { role: 'assistant', blocks: [{ type, text: delta }], id, done: false }]
+    })
+  }, [])
+
+  const enqueueDelta = useCallback((type: 'content' | 'thinking', delta: string) => {
+    // Accumulate: if same type, concat; otherwise flush old and start new
+    if (pendingDeltaRef.current && pendingDeltaRef.current.type === type) {
+      pendingDeltaRef.current.delta += delta
+    } else {
+      // Different type or first delta — flush previous immediately, then start new
+      if (pendingDeltaRef.current) {
+        flushPendingDelta()
+      }
+      pendingDeltaRef.current = { type, delta }
+    }
+    if (!flushRafRef.current) {
+      flushRafRef.current = requestAnimationFrame(() => {
+        flushRafRef.current = null
+        flushPendingDelta()
+      })
+    }
+  }, [flushPendingDelta])
 
   // -----------------------------------------------------------------------
   // Listener management
@@ -182,6 +237,16 @@ export function useWebSocket() {
   const handleServerMessage = useCallback((data: Record<string, unknown>) => {
     const type = data.type as string
 
+    // Filter stale stream events from a previous session.
+    // Stream events (chunk/thinking/tool_call/etc.) carry session_id
+    // injected by the server. If it doesn't match the active session,
+    // the user has switched away — silently discard the event.
+    const eventSessionId = data.session_id as string | undefined
+    if (eventSessionId && activeSessionIdRef.current && eventSessionId !== activeSessionIdRef.current) {
+      // Stale event from old session — ignore
+      return
+    }
+
     switch (type) {
       case 'auth_ok': {
         authPending.current = false
@@ -192,44 +257,12 @@ export function useWebSocket() {
       }
 
       case 'chunk': {
-        const delta = (data.delta as string) || ''
-        setMessages((prev) => {
-          const last = prev[prev.length - 1]
-          if (last && last.role === 'assistant' && !last.done) {
-            const blocks = [...last.blocks]
-            const lb = blocks[blocks.length - 1]
-            if (lb?.type === 'content') {
-              blocks[blocks.length - 1] = { type: 'content', text: lb.text + delta }
-            } else {
-              blocks.push({ type: 'content', text: delta })
-            }
-            return [...prev.slice(0, -1), { ...last, blocks }]
-          }
-          const id = uid()
-          currentAssistantId.current = id
-          return [...prev, { role: 'assistant', blocks: [{ type: 'content', text: delta }], id, done: false }]
-        })
+        enqueueDelta('content', (data.delta as string) || '')
         break
       }
 
       case 'thinking': {
-        const delta = (data.delta as string) || ''
-        setMessages((prev) => {
-          const last = prev[prev.length - 1]
-          if (last && last.role === 'assistant' && !last.done) {
-            const blocks = [...last.blocks]
-            const lb = blocks[blocks.length - 1]
-            if (lb?.type === 'thinking') {
-              blocks[blocks.length - 1] = { type: 'thinking', text: lb.text + delta }
-            } else {
-              blocks.push({ type: 'thinking', text: delta })
-            }
-            return [...prev.slice(0, -1), { ...last, blocks }]
-          }
-          const id = uid()
-          currentAssistantId.current = id
-          return [...prev, { role: 'assistant', blocks: [{ type: 'thinking', text: delta }], id, done: false }]
-        })
+        enqueueDelta('thinking', (data.delta as string) || '')
         break
       }
 
@@ -270,6 +303,7 @@ export function useWebSocket() {
       }
 
       case 'done': {
+        flushPendingDelta()
         setMessages((prev) => {
           const last = prev[prev.length - 1]
           if (last && last.role === 'assistant' && !last.done) {
@@ -283,6 +317,7 @@ export function useWebSocket() {
       }
 
       case 'error': {
+        flushPendingDelta()
         const message = (data.message as string) || 'Unknown error'
         if (authPending.current) {
           // Auth was rejected — show login overlay, stop reconnecting.
@@ -301,6 +336,7 @@ export function useWebSocket() {
       }
 
       case 'cancelled': {
+        flushPendingDelta()
         setMessages((prev) => {
           const last = prev[prev.length - 1]
           if (last && last.role === 'assistant' && !last.done) {
@@ -316,6 +352,7 @@ export function useWebSocket() {
       // Non-streamed server reply (slash-command output, ask_user prompts,
       // acks). Fills the pending assistant placeholder, or appends a new one.
       case 'message': {
+        flushPendingDelta()
         const content = (data.content as string) || ''
         if (!content) break
         setMessages((prev) => {
@@ -342,7 +379,7 @@ export function useWebSocket() {
         break
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [enqueueDelta, flushPendingDelta])
 
   // -----------------------------------------------------------------------
   // Send helpers
@@ -441,6 +478,8 @@ export function useWebSocket() {
       clearInterval(interval)
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
       if (pongTimeoutTimer.current) clearTimeout(pongTimeoutTimer.current)
+      if (flushRafRef.current) cancelAnimationFrame(flushRafRef.current)
+      flushPendingDelta()
       wsRef.current?.close()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -451,6 +490,8 @@ export function useWebSocket() {
     messages,
     isGenerating,
     authFailed,
+    activeSessionId,
+    setActiveSessionId,
     submitToken,
     sendMessage,
     cancel,

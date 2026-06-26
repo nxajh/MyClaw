@@ -63,18 +63,19 @@ export function useApi(
   }, [addMessageListener])
 
   const request = useCallback(
-    (method: string, params?: Record<string, unknown>): Promise<unknown> => {
+    (method: string, params?: Record<string, unknown>, timeoutMs?: number): Promise<unknown> => {
       return new Promise((resolve, reject) => {
         const req = buildApiRequest(method, params)
         pending.current.set(req.id as string, { resolve, reject })
         sendRaw(req)
-        // Timeout after 10 s
+        // Timeout: default 15s, override for slow operations
+        const timeout = timeoutMs ?? 15_000
         setTimeout(() => {
           if (pending.current.has(req.id as string)) {
             pending.current.delete(req.id as string)
             reject(new Error('API request timed out'))
           }
-        }, 10_000)
+        }, timeout)
       })
     },
     [sendRaw],

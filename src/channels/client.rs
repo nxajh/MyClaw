@@ -508,11 +508,19 @@ impl ClientChannel {
                                             // removes the entry atomically before processing
                                             // begins.  Removing it here would race with the next
                                             // message's context insertion and silently drop it.
+                                            //
+                                            // Capture the active session_id at send time so the
+                                            // frontend can filter stale events after a session switch.
+                                            let fwd_api_user = format!("client:default:{}", client_id);
+                                            let fwd_session_id = session_manager_clone
+                                                .get()
+                                                .and_then(|sm| sm.active_session_id(&fwd_api_user))
+                                                .unwrap_or_default();
                                             let fwd_sender = ws_sender.clone();
                                             tokio::spawn(async move {
                                                 while let Some(event) = event_rx.recv().await {
-                                                    let json = match serde_json::to_string(&event) {
-                                                        Ok(j) => j,
+                                                    let mut json_val = match serde_json::to_value(&event) {
+                                                        Ok(v) => v,
                                                         Err(e) => {
                                                             tracing::warn!(
                                                                 "failed to serialize TurnEvent: {}",
@@ -521,6 +529,11 @@ impl ClientChannel {
                                                             continue;
                                                         }
                                                     };
+                                                    // Inject session_id so the frontend can filter
+                                                    if let serde_json::Value::Object(ref mut map) = json_val {
+                                                        map.insert("session_id".to_string(), serde_json::Value::String(fwd_session_id.clone()));
+                                                    }
+                                                    let json = json_val.to_string();
                                                     if fwd_sender.send(json).await.is_err() {
                                                         break; // Client gone
                                                     }

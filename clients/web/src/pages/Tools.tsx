@@ -1,7 +1,6 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
 import { Wrench, BookOpen, Terminal, Copy, Check, Search, Cpu } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
-import { useApi } from '../lib/api'
 import { ErrorBanner, LoadingRow, EmptyState } from '../components/PageLayout'
 
 interface Tool {
@@ -58,194 +57,23 @@ interface ToolSpec {
   example: string
 }
 
-const toolRegistry: Record<string, ToolSpec> = {
-  memory_list: {
-    description: 'List all persistent memory entries and core facts with comprehensive metadata.',
-    parameters: {
-      type: 'object',
-      properties: {}
-    },
-    example: '{}'
-  },
-  memory_view: {
-    description: 'Read the full contents of a specific persistent memory file by its unique name.',
-    parameters: {
-      type: 'object',
-      properties: {
-        name: {
-          type: 'string',
-          description: 'Unique file-based identifier of the memory entry (without .md extension).',
-          required: true
-        }
-      }
-    },
-    example: '{\n  "name": "myclaw_development_preferences"\n}'
-  },
-  memory_search: {
-    description: 'Perform keyword-based semantic search across name, summary, and contents of all memory entries.',
-    parameters: {
-      type: 'object',
-      properties: {
-        query: {
-          type: 'string',
-          description: 'Keyword search query matching abstract headers or bodies.',
-          required: true
-        }
-      }
-    },
-    example: '{\n  "query": "qqbot token"\n}'
-  },
-  memory_manage: {
-    description: 'Directly add, replace, or remove persistent memory records with frontmatter validation.',
-    parameters: {
-      type: 'object',
-      properties: {
-        action: {
-          type: 'string',
-          description: 'Action execution type.',
-          required: true,
-          enum: ['add', 'replace', 'remove']
-        },
-        name: {
-          type: 'string',
-          description: 'Unique memory identifier key.',
-          required: true
-        },
-        content: {
-          type: 'string',
-          description: 'Memory markdown body (required for add / replace).'
-        },
-        memory_type: {
-          type: 'string',
-          description: 'Scope classification.',
-          enum: ['user', 'feedback', 'project', 'reference']
-        },
-        abstract: {
-          type: 'string',
-          description: 'Brief 1-2 sentence header summary.'
-        },
-        tags: {
-          type: 'array',
-          description: 'Category keyword tag tags list, e.g. ["rust", "qqbot"].'
-        }
-      }
-    },
-    example: '{\n  "action": "add",\n  "name": "user_preferences",\n  "memory_type": "user",\n  "content": "User prefers concise summaries in Chinese.",\n  "abstract": "User localization preferences."\n}'
-  },
-  web_search: {
-    description: 'Search the web for real-time information, news, or technical documentation using external APIs.',
-    parameters: {
-      type: 'object',
-      properties: {
-        query: {
-          type: 'string',
-          description: 'Search phrase or keywords.',
-          required: true
-        },
-        limit: {
-          type: 'integer',
-          description: 'Maximum search snippets to return (defaults to 5).'
-        }
-      }
-    },
-    example: '{\n  "query": "Rust actix-web websocket configuration 2026"\n}'
-  },
-  file_read: {
-    description: 'Read the contents of a local workspace file with optional offset limit pagination.',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: {
-          type: 'string',
-          description: 'Absolute or relative workspace path of target file.',
-          required: true
-        },
-        limit: {
-          type: 'integer',
-          description: 'Maximum text lines to return (defaults to read all).'
-        },
-        offset: {
-          type: 'integer',
-          description: '1-based starting line number offset.'
-        }
-      }
-    },
-    example: '{\n  "path": "MyClaw/src/channels/client.rs",\n  "limit": 100\n}'
-  },
-  file_edit: {
-    description: 'Apply high-precision atomic modification by replacing an exact string pattern in a target workspace file.',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: {
-          type: 'string',
-          description: 'Path to target source file.',
-          required: true
-        },
-        old_string: {
-          type: 'string',
-          description: 'Exact text segment to search for (must exist exactly once).',
-          required: true
-        },
-        new_string: {
-          type: 'string',
-          description: 'Replacement string value (pass empty string to delete old segment).',
-          required: true
-        }
-      }
-    },
-    example: '{\n  "path": "clients/web/src/App.tsx",\n  "old_string": "const hasToken = false",\n  "new_string": "const hasToken = true"\n}'
-  },
-  cronjob: {
-    description: 'Schedule, update, pause, or run background automation tasks with retry policies.',
-    parameters: {
-      type: 'object',
-      properties: {
-        action: {
-          type: 'string',
-          description: 'Scheduler operation action type.',
-          required: true,
-          enum: ['create', 'update', 'list', 'pause', 'resume', 'run', 'remove', 'log']
-        },
-        id: {
-          type: 'string',
-          description: 'Unique task scheduler registration identifier.'
-        },
-        schedule: {
-          type: 'string',
-          description: 'Cron format string (sec min hour day month weekday) or interval specifier e.g. "every 30m".'
-        },
-        prompt: {
-          type: 'string',
-          description: 'Instruction prompt delivered to the agent model on trigger.'
-        }
-      }
-    },
-    example: '{\n  "action": "create",\n  "name": "system_heartbeat",\n  "schedule": "every 5m",\n  "prompt": "Check all system metrics and print a diagnostics log."\n}'
-  },
-  skill_view: {
-    description: 'Inspect full instruction files or supporting asset files inside the skill repository.',
-    parameters: {
-      type: 'object',
-      properties: {
-        name: {
-          type: 'string',
-          description: 'Skill folder name identifier.',
-          required: true
-        },
-        file_path: {
-          type: 'string',
-          description: 'Supporting file path under references/ scripts/ templates/.'
-        }
-      }
-    },
-    example: '{\n  "name": "github",\n  "file_path": "scripts/run.py"\n}'
+function generateToolSpec(tool: Tool): ToolSpec {
+  const requiredSet = new Set(tool.parameters?.required || [])
+  const properties: Record<string, { type: string; description: string; required?: boolean; enum?: string[] }> = {}
+  if (tool.parameters?.properties) {
+    for (const [key, val] of Object.entries(tool.parameters.properties)) {
+      properties[key] = { ...val, required: val.required || requiredSet.has(key) }
+    }
+  }
+  return {
+    description: tool.description || 'No description available.',
+    parameters: { type: tool.parameters?.type || 'object', properties },
+    example: generateExampleJson(tool.parameters),
   }
 }
 
 export default function Tools() {
-  const { status, sendRaw, addMessageListener } = useWebSocketContext()
-  const { request } = useApi(sendRaw, addMessageListener)
+  const { status, request } = useWebSocketContext()
   const [tools, setTools] = useState<Tool[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -297,39 +125,9 @@ export default function Tools() {
   // Retrieve current active tool spec
   const activeToolSpec = useMemo<ToolSpec | null>(() => {
     if (!selectedToolName) return null
-    
-    // Find from dynamic tools
     const found = tools.find(t => t.name === selectedToolName)
-    if (found && found.description && found.parameters) {
-      // Standardize the properties' required status from standard JSON Schema required array
-      const requiredSet = new Set(found.parameters.required || [])
-      const properties: Record<string, any> = {}
-      
-      if (found.parameters.properties) {
-        for (const [key, val] of Object.entries<any>(found.parameters.properties)) {
-          properties[key] = {
-            ...val,
-            required: val.required || requiredSet.has(key)
-          }
-        }
-      }
-      
-      return {
-        description: found.description,
-        parameters: {
-          type: found.parameters.type || 'object',
-          properties
-        },
-        example: generateExampleJson(found.parameters)
-      }
-    }
-    
-    // Check local registry (handles both raw names and minimax__ prefixed ones)
-    const cleanName = selectedToolName.includes('__') 
-      ? selectedToolName.split('__')[1] 
-      : selectedToolName
-      
-    return toolRegistry[cleanName] || null
+    if (!found) return null
+    return generateToolSpec(found)
   }, [tools, selectedToolName])
 
   const handleCopyExample = (exampleText: string) => {

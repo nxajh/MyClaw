@@ -1,22 +1,30 @@
+import { lazy, Suspense } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { WebSocketProvider } from './contexts/WebSocketContext'
 import { useWebSocketContext } from './contexts/WebSocketContext'
 import Sidebar from './components/Sidebar'
 import LoginOverlay from './components/LoginOverlay'
 import CommandPalette from './components/CommandPalette'
-import Chat from './pages/Chat'
-import Sessions from './pages/Sessions'
-import Tools from './pages/Tools'
-import Skills from './pages/Skills'
-import Memory from './pages/Memory'
-import Config from './pages/Config'
 import { AUTH_TOKEN_KEY } from './hooks/useWebSocket'
+
+const Chat = lazy(() => import('./pages/Chat'))
+const Sessions = lazy(() => import('./pages/Sessions'))
+const Tools = lazy(() => import('./pages/Tools'))
+const Skills = lazy(() => import('./pages/Skills'))
+const Memory = lazy(() => import('./pages/Memory'))
+const Config = lazy(() => import('./pages/Config'))
+
+function PageLoader() {
+  return (
+    <div className="flex-1 flex items-center justify-center">
+      <div className="h-5 w-5 border-2 border-zinc-700 border-t-zinc-300 rounded-full animate-spin" />
+    </div>
+  )
+}
 
 function AppShell() {
   const { authFailed, submitToken, status } = useWebSocketContext()
 
-  // Show login overlay when auth was rejected, or when there is no stored
-  // token and we haven't connected yet (first-time / unauthenticated visitor).
   const hasStoredToken = !!localStorage.getItem(AUTH_TOKEN_KEY)
   const showLogin = authFailed || (!hasStoredToken && status !== 'connected')
 
@@ -28,15 +36,17 @@ function AppShell() {
       <CommandPalette />
       <Sidebar />
       <main className="flex-1 flex flex-col min-w-0">
-        <Routes>
-          <Route path="/" element={<Chat />} />
-          <Route path="/sessions" element={<Sessions />} />
-          <Route path="/tools" element={<Tools />} />
-          <Route path="/skills" element={<Skills />} />
-          <Route path="/memory" element={<Memory />} />
-          <Route path="/config" element={<Config />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
+        <Suspense fallback={<PageLoader />}>
+          <Routes>
+            <Route path="/" element={<Chat />} />
+            <Route path="/sessions" element={<Sessions />} />
+            <Route path="/tools" element={<Tools />} />
+            <Route path="/skills" element={<Skills />} />
+            <Route path="/memory" element={<Memory />} />
+            <Route path="/config" element={<Config />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </Suspense>
       </main>
     </div>
   )

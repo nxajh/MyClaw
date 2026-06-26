@@ -18,7 +18,7 @@ function useOutsideClose(onClose: () => void) {
 }
 
 export default function ChatHeader() {
-  const { status, request, reloadHistory } = useWebSocketContext()
+  const { status, request, reloadHistory, setActiveSessionId } = useWebSocketContext()
   const [sessions, setSessions] = useState<Session[]>([])
   const [models, setModels] = useState<ModelInfo[]>([])
   const [activeModel, setActiveModel] = useState<string | null>(null)
@@ -39,8 +39,11 @@ export default function ChatHeader() {
       setSessions(s || [])
       setModels(m?.models || [])
       setActiveModel(m?.active ?? null)
+      // Sync active session ID
+      const active = (s || []).find((sess) => sess.is_active)
+      if (active) setActiveSessionId(active.id)
     } catch { /* ignore */ }
-  }, [status, request])
+  }, [status, request, setActiveSessionId])
 
   useEffect(() => { if (status === 'connected') refresh() }, [status, refresh])
 
@@ -52,6 +55,7 @@ export default function ChatHeader() {
     setBusy(true)
     try {
       await request('sessions.switch', { id })
+      setActiveSessionId(id)
       await reloadHistory()
       await refresh()
     } finally { setBusy(false) }
@@ -61,7 +65,8 @@ export default function ChatHeader() {
     setSessOpen(false)
     setBusy(true)
     try {
-      await request('sessions.create', { name: `Chat ${new Date().toLocaleString()}` })
+      const res = await request('sessions.create', { name: `Chat ${new Date().toLocaleString()}` }) as { id: string } | undefined
+      if (res?.id) setActiveSessionId(res.id)
       await reloadHistory()
       await refresh()
     } finally { setBusy(false) }
@@ -126,7 +131,7 @@ export default function ChatHeader() {
         {modelOpen && (
           <div className={menu}>
             {models.length === 0 && (
-              <div className="px-3 py-2 text-xs text-zinc-600">No models</div>
+              <div className="px-3 py-2 text-xs text-zinc-600">No models available</div>
             )}
             {models.map((m) => (
               <button key={m.id} className={item} onClick={() => pickModel(m.id)}>
@@ -135,6 +140,11 @@ export default function ChatHeader() {
                 {m.supports_image && <span className="ml-auto text-[10px] text-zinc-600 shrink-0">vision</span>}
               </button>
             ))}
+            {models.length > 0 && !models.some(m => m.id === activeModel) && activeModel && (
+              <div className="px-3 py-1.5 text-[10px] text-zinc-600 border-t border-zinc-800 mt-1">
+                Active: <span className="font-mono text-zinc-500">{activeModel}</span> (not in fallback chain)
+              </div>
+            )}
           </div>
         )}
       </div>

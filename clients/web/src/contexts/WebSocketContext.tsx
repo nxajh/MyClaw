@@ -8,13 +8,15 @@ interface WebSocketContextValue {
   messages: ChatMessage[]
   isGenerating: boolean
   authFailed: boolean
+  activeSessionId: string | null
+  setActiveSessionId: (id: string | null) => void
   submitToken: (token: string) => void
   sendMessage: (content: string, opts?: SendOptions) => void
   cancel: () => void
   sendRaw: (obj: Record<string, unknown>) => void
   setMessages: Dispatch<SetStateAction<ChatMessage[]>>
   addMessageListener: (fn: (data: Record<string, unknown>) => void) => () => void
-  request: (method: string, params?: Record<string, unknown>) => Promise<unknown>
+  request: (method: string, params?: Record<string, unknown>, timeoutMs?: number) => Promise<unknown>
   reloadHistory: () => Promise<void>
 }
 
