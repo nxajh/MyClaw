@@ -83,6 +83,8 @@ export function useWebSocket() {
   const [isGenerating, setIsGenerating] = useState(false)
   // true = auth was attempted and rejected by the server
   const [authFailed, setAuthFailed] = useState(false)
+  // true = token submitted, waiting for server to validate
+  const [authValidating, setAuthValidating] = useState(false)
   // Track active session so we can filter stale stream events after session switch
   const activeSessionIdRef = useRef<string | null>(null)
   const [activeSessionId, setActiveSessionIdState] = useState<string | null>(null)
@@ -251,6 +253,7 @@ export function useWebSocket() {
       case 'auth_ok': {
         authPending.current = false
         setAuthFailed(false)
+        setAuthValidating(false)
         setStatus('connected')
         reconnectAttempts.current = 0
         break
@@ -324,6 +327,9 @@ export function useWebSocket() {
           authPending.current = false
           suppressReconnect.current = true
           setAuthFailed(true)
+          setAuthValidating(false)
+          // Clear the bad token so reload shows login instead of silent retry.
+          try { localStorage.removeItem(AUTH_TOKEN_KEY) } catch { /* ignore */ }
           break
         }
         setMessages((prev) => [
@@ -455,13 +461,19 @@ export function useWebSocket() {
     }
     suppressReconnect.current = false
     setAuthFailed(false)
+    setAuthValidating(true)
+    // Close existing connection so we reconnect fresh with the new token.
     const ws = wsRef.current
     if (ws && ws.readyState === WebSocket.OPEN) {
       // Already connected — send auth directly.
       authPending.current = true
       ws.send(JSON.stringify({ type: 'auth', token, client_id: getClientId() }))
     } else {
-      // Reconnect; onopen will send auth automatically.
+      // If ws exists but is closing/closed, null it out so connect() proceeds.
+      if (ws && ws.readyState !== WebSocket.OPEN) {
+        wsRef.current = null
+      }
+      reconnectAttempts.current = 0
       connect()
     }
   }, [connect])
@@ -490,6 +502,7 @@ export function useWebSocket() {
     messages,
     isGenerating,
     authFailed,
+    authValidating,
     activeSessionId,
     setActiveSessionId,
     submitToken,

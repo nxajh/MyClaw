@@ -8,6 +8,7 @@ interface WebSocketContextValue {
   messages: ChatMessage[]
   isGenerating: boolean
   authFailed: boolean
+  authValidating: boolean
   activeSessionId: string | null
   setActiveSessionId: (id: string | null) => void
   submitToken: (token: string) => void

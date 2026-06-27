@@ -1,31 +1,44 @@
-import { useState, type FormEvent } from 'react'
-import { KeyRound } from 'lucide-react'
+import { useState, useEffect, type FormEvent } from 'react'
+import { KeyRound, Loader2 } from 'lucide-react'
 
 interface Props {
   onSubmit: (token: string) => void
   isRetry?: boolean
+  /** true while the server is validating the submitted token */
+  isConnecting?: boolean
 }
 
-export default function LoginOverlay({ onSubmit, isRetry = false }: Props) {
+export default function LoginOverlay({ onSubmit, isRetry = false, isConnecting = false }: Props) {
   const [token, setToken] = useState('')
+
+  // When a retry occurs (auth failed), clear the input so the user can re-enter.
+  useEffect(() => {
+    if (isRetry) {
+      setToken('')
+    }
+  }, [isRetry])
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault()
-    if (token.trim()) onSubmit(token.trim())
+    if (token.trim() && !isConnecting) onSubmit(token.trim())
   }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/80 backdrop-blur-sm">
       <div className="w-full max-w-sm mx-4 rounded-2xl border border-zinc-700/60 bg-zinc-900 p-8 shadow-2xl">
         <div className="flex flex-col items-center gap-2 mb-6">
-          <div className="rounded-full bg-zinc-800 p-3">
-            <KeyRound size={24} className="text-zinc-300" />
+          <div className={`rounded-full p-3 ${isRetry ? 'bg-red-900/40' : 'bg-zinc-800'}`}>
+            {isConnecting
+              ? <Loader2 size={24} className="text-zinc-300 animate-spin" />
+              : <KeyRound size={24} className={isRetry ? 'text-red-400' : 'text-zinc-300'} />}
           </div>
           <h1 className="text-lg font-semibold text-zinc-100">MyClaw</h1>
-          <p className="text-sm text-zinc-400 text-center">
+          <p className="text-sm text-center" style={{ color: isRetry ? '#f87171' : '#a1a1aa' }}>
             {isRetry
-              ? 'Invalid token. Please check your access token and try again.'
-              : 'Enter your access token to continue.'}
+              ? 'Token validation failed — please re-enter your access token.'
+              : isConnecting
+                ? 'Validating token…'
+                : 'Enter your access token to continue.'}
           </p>
         </div>
 
@@ -36,14 +49,16 @@ export default function LoginOverlay({ onSubmit, isRetry = false }: Props) {
             onChange={(e) => setToken(e.target.value)}
             placeholder="Access token"
             autoFocus
-            className="w-full rounded-xl border border-zinc-700/50 bg-zinc-800 px-4 py-3 text-sm text-zinc-100 placeholder-zinc-500 outline-none focus:border-zinc-600 focus:ring-1 focus:ring-zinc-600"
+            disabled={isConnecting}
+            className="w-full rounded-xl border border-zinc-700/50 bg-zinc-800 px-4 py-3 text-sm text-zinc-100 placeholder-zinc-500 outline-none focus:border-zinc-600 focus:ring-1 focus:ring-zinc-600 disabled:opacity-50"
           />
           <button
             type="submit"
-            disabled={!token.trim()}
-            className="w-full rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed px-4 py-3 text-sm font-medium transition"
+            disabled={!token.trim() || isConnecting}
+            className="w-full rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed px-4 py-3 text-sm font-medium transition flex items-center justify-center gap-2"
           >
-            Connect
+            {isConnecting && <Loader2 size={14} className="animate-spin" />}
+            {isConnecting ? 'Connecting…' : 'Connect'}
           </button>
         </form>
       </div>

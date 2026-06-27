@@ -33,16 +33,17 @@ function useIsMobile() {
 }
 
 function AppShell() {
-  const { authFailed, submitToken, status } = useWebSocketContext()
+  const { authFailed, authValidating, submitToken, status } = useWebSocketContext()
   const isMobile = useIsMobile()
 
   const hasStoredToken = !!localStorage.getItem(AUTH_TOKEN_KEY)
-  const showLogin = authFailed || (!hasStoredToken && status !== 'connected')
+  // Show login overlay when: auth failed, validating after submit, or no token stored
+  const showLogin = authFailed || authValidating || (!hasStoredToken && status !== 'connected')
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-zinc-950 text-zinc-100">
       {showLogin && (
-        <LoginOverlay onSubmit={submitToken} isRetry={authFailed} />
+        <LoginOverlay onSubmit={submitToken} isRetry={authFailed} isConnecting={authValidating} />
       )}
       <CommandPalette />
       <Sidebar />
