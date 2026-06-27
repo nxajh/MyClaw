@@ -136,7 +136,7 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
   const canSend = !disabled && (text.trim().length > 0 || hasAttachments)
 
   return (
-    <div className="px-2 sm:px-4 pb-3 sm:pb-5 pt-2 sm:pt-3 shrink-0">
+    <div className="px-2 sm:px-4 pb-3 sm:pb-5 pt-2 sm:pt-3 shrink-0 safe-area-bottom">
       <div className="max-w-3xl mx-auto relative">
         {/* Slash command dropdown */}
         {showCmds && (
