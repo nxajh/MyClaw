@@ -163,11 +163,11 @@ export default function CommandPalette() {
   if (!isOpen) return null
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh] px-4 bg-black/40 backdrop-blur-[2px]">
+    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[10vh] sm:pt-[15vh] px-3 sm:px-4 bg-black/40 backdrop-blur-[2px]">
       <div 
         ref={containerRef}
         onKeyDown={handleKeyDown}
-        className="w-full max-w-lg bg-zinc-950/95 border border-zinc-800 shadow-2xl rounded-2xl overflow-hidden flex flex-col max-h-[50vh] transition-all duration-200"
+        className="w-full max-w-lg bg-zinc-950/95 border border-zinc-800 shadow-2xl rounded-2xl overflow-hidden flex flex-col max-h-[60vh] sm:max-h-[50vh] transition-all duration-200"
       >
         {/* Search header input */}
         <div className="relative border-b border-zinc-900 flex items-center shrink-0">

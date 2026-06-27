@@ -36,3 +36,34 @@
   background: transparent !important;
   padding: 0 !important;
 }
+
+/* ── Mobile viewport fix ──────────────────────────────────────────────────── */
+html {
+  -webkit-text-size-adjust: 100%;
+  overflow: hidden;
+}
+
+body {
+  overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Prevent horizontal scroll on mobile */
+#root {
+  overflow: hidden;
+  width: 100vw;
+  height: 100dvh;
+}
+
+/* Ensure code blocks don't overflow on mobile */
+pre {
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Prevent long words/URLs from breaking layout */
+.min-w-0 {
+  min-width: 0;
+}

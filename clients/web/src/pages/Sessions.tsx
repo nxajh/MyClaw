@@ -193,7 +193,7 @@ export default function Sessions() {
   return (
     <div className="flex flex-col h-full">
       <div className="flex-1 overflow-y-auto">
-        <div className="max-w-2xl mx-auto px-6 py-6 space-y-4">
+        <div className="max-w-2xl mx-auto px-3 sm:px-6 py-4 sm:py-6 space-y-4">
       {/* Create */}
       <div className="flex gap-2">
         <input

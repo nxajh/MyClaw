@@ -181,9 +181,9 @@ function MessageActions({ blocks, isLast, isGenerating, onRetry }: { blocks: Mes
 
 const UserBubble = memo(function UserBubble({ content }: { content: string }) {
   return (
-    <div className="flex justify-end gap-3.5">
-      <div className="max-w-[78%] rounded-2xl rounded-tr-lg bg-zinc-800 px-5 py-3.5 text-sm text-zinc-100 whitespace-pre-wrap leading-relaxed">{content}</div>
-      <div className="mt-0.5 h-7 w-7 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-base shrink-0 select-none shadow-md">👤</div>
+    <div className="flex justify-end gap-2.5 sm:gap-3.5">
+      <div className="max-w-[85%] sm:max-w-[78%] rounded-2xl rounded-tr-lg bg-zinc-800 px-3.5 sm:px-5 py-2.5 sm:py-3.5 text-sm text-zinc-100 whitespace-pre-wrap leading-relaxed">{content}</div>
+      <div className="mt-0.5 h-6 w-6 sm:h-7 sm:w-7 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-sm sm:text-base shrink-0 select-none shadow-md">👤</div>
     </div>
   )
 })
@@ -198,9 +198,9 @@ interface AssistantBubbleProps {
 
 const AssistantBubble = memo(function AssistantBubble({ blocks, done, isLast, isGenerating, onRetry }: AssistantBubbleProps) {
   return (
-    <div className="flex gap-3.5 group/msg">
-      <div className="mt-0.5 h-7 w-7 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-base shrink-0 select-none shadow-md">🦀</div>
-      <div className="flex-1 min-w-0 rounded-2xl border border-zinc-800/80 bg-zinc-900/25 px-5 py-4 space-y-3 shadow-sm hover:border-zinc-800 transition-colors">
+    <div className="flex gap-2.5 sm:gap-3.5 group/msg">
+      <div className="mt-0.5 h-6 w-6 sm:h-7 sm:w-7 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-sm sm:text-base shrink-0 select-none shadow-md">🦀</div>
+      <div className="flex-1 min-w-0 rounded-2xl border border-zinc-800/80 bg-zinc-900/25 px-3 sm:px-5 py-3 sm:py-4 space-y-3 shadow-sm hover:border-zinc-800 transition-colors">
         {blocks.map((block, i) => renderBlock(block, i, isGenerating))}
         {!isGenerating && blocks.length === 0 && <GeneratingDots />}
         {done && <MessageActions blocks={blocks} isLast={isLast} isGenerating={isGenerating} onRetry={onRetry} />}
@@ -258,7 +258,7 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
 
   if (messages.length === 0) {
     return (
-      <div ref={containerRef} className="flex-1 overflow-y-auto flex flex-col items-center justify-center gap-4 px-6 text-center">
+      <div ref={containerRef} className="flex-1 overflow-y-auto flex flex-col items-center justify-center gap-4 px-4 sm:px-6 text-center">
         <div className="text-5xl select-none">🦀</div>
         <div>
           <h2 className="text-lg font-semibold text-zinc-200 mb-1">How can I help?</h2>
@@ -278,7 +278,7 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
             {virtualItems.map((vi) => {
               const msg = messages[vi.index]
               return (
-                <div key={vi.key} data-index={vi.index} ref={(el) => { if (el) virtualizer.measureElement(el) }} className="max-w-3xl mx-auto px-4 py-4">
+                <div key={vi.key} data-index={vi.index} ref={(el) => { if (el) virtualizer.measureElement(el) }} className="max-w-3xl mx-auto px-2 sm:px-4 py-3 sm:py-4">
                   {msg.role === 'user' ? (
                     <UserBubble content={msg.content} />
                   ) : (

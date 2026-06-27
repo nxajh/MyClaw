@@ -136,12 +136,14 @@ export default function Tools() {
     setTimeout(() => setCopied(false), 2000)
   }
 
+  const [mobileShowDetail, setMobileShowDetail] = useState(false)
+
   return (
     <div className="flex flex-col h-full bg-zinc-950">
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left Side: Tool List */}
-        <div className="w-80 border-r border-zinc-900 flex flex-col shrink-0">
-          <div className="p-4 border-b border-zinc-900 space-y-2.5">
+      <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
+        {/* Left Side: Tool List — hidden on mobile when detail is shown */}
+        <div className={`${mobileShowDetail ? 'hidden md:flex' : 'flex'} w-full md:w-80 border-b md:border-b-0 md:border-r border-zinc-900 flex-col shrink-0`}>
+          <div className="p-3 sm:p-4 border-b border-zinc-900 space-y-2.5">
             <div>
               <h1 className="text-sm font-bold text-zinc-100 flex items-center gap-1.5">
                 <Cpu size={14} className="text-amber-400" />
@@ -179,7 +181,7 @@ export default function Tools() {
                 return (
                   <button
                     key={tool.name}
-                    onClick={() => setSelectedToolName(tool.name)}
+                    onClick={() => { setSelectedToolName(tool.name); setMobileShowDetail(true) }}
                     className={`w-full flex items-center gap-2.5 px-3 py-2 text-left rounded-xl transition-all relative ${
                       isSelected ? 'bg-zinc-900 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/30'
                     }`}
@@ -196,8 +198,17 @@ export default function Tools() {
           </div>
         </div>
 
-        {/* Right Side: Swagger Spec Showcase Panel */}
-        <div className="flex-1 overflow-y-auto bg-zinc-950 p-6">
+        {/* Right Side: Swagger Spec Showcase Panel — shown on mobile when detail is selected */}
+        <div className={`${mobileShowDetail ? 'flex' : 'hidden md:flex'} flex-1 overflow-y-auto bg-zinc-950 p-3 sm:p-6 flex-col`}>
+          {/* Mobile back button */}
+          {mobileShowDetail && (
+            <button
+              onClick={() => setMobileShowDetail(false)}
+              className="md:hidden mb-3 flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-200 transition-colors"
+            >
+              ← Back to tools
+            </button>
+          )}
           {selectedToolName ? (
             <div className="max-w-2xl mx-auto space-y-6 animate-fadeIn">
               
@@ -223,24 +234,24 @@ export default function Tools() {
                 
                 {activeToolSpec && Object.keys(activeToolSpec.parameters.properties).length > 0 ? (
                   <div className="rounded-2xl border border-zinc-900 bg-zinc-900/10 overflow-hidden text-xs">
-                    <div className="grid grid-cols-4 bg-zinc-900/40 border-b border-zinc-900 px-4 py-2 text-zinc-500 font-bold">
+                    <div className="hidden sm:grid grid-cols-4 bg-zinc-900/40 border-b border-zinc-900 px-4 py-2 text-zinc-500 font-bold">
                       <div className="col-span-1">Field</div>
                       <div className="col-span-1 text-center">Type</div>
                       <div className="col-span-2">Description</div>
                     </div>
                     <div className="divide-y divide-zinc-900">
                       {Object.entries(activeToolSpec.parameters.properties).map(([name, val]) => (
-                        <div key={name} className="grid grid-cols-4 px-4 py-3 items-baseline">
-                          <div className="col-span-1 font-mono text-[11px] text-zinc-300 font-bold flex items-center gap-1">
+                        <div key={name} className="grid grid-cols-2 sm:grid-cols-4 px-3 sm:px-4 py-3 items-baseline gap-1 sm:gap-0">
+                          <div className="col-span-2 sm:col-span-1 font-mono text-[11px] text-zinc-300 font-bold flex items-center gap-1">
                             {name}
                             {val.required && <span className="text-red-500 font-bold" title="Required">*</span>}
                           </div>
-                          <div className="col-span-1 text-center">
+                          <div className="col-span-2 sm:col-span-1 text-left sm:text-center">
                             <span className="text-[10px] bg-zinc-900 border border-zinc-800 text-zinc-400 font-semibold px-2 py-0.5 rounded-md font-mono">
                               {val.type}
                             </span>
                           </div>
-                          <div className="col-span-2 space-y-1.5">
+                          <div className="col-span-2 sm:col-span-2 space-y-1.5 mt-1 sm:mt-0">
                             <p className="text-zinc-400 font-normal leading-relaxed">{val.description}</p>
                             {val.enum && (
                               <div className="flex flex-wrap items-center gap-1">

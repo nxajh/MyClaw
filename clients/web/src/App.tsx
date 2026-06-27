@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react'
+import { lazy, Suspense, useState, useEffect } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { WebSocketProvider } from './contexts/WebSocketContext'
 import { useWebSocketContext } from './contexts/WebSocketContext'
@@ -22,8 +22,19 @@ function PageLoader() {
   )
 }
 
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth < 768)
+  useEffect(() => {
+    const handler = () => setIsMobile(window.innerWidth < 768)
+    window.addEventListener('resize', handler)
+    return () => window.removeEventListener('resize', handler)
+  }, [])
+  return isMobile
+}
+
 function AppShell() {
   const { authFailed, submitToken, status } = useWebSocketContext()
+  const isMobile = useIsMobile()
 
   const hasStoredToken = !!localStorage.getItem(AUTH_TOKEN_KEY)
   const showLogin = authFailed || (!hasStoredToken && status !== 'connected')
@@ -35,7 +46,7 @@ function AppShell() {
       )}
       <CommandPalette />
       <Sidebar />
-      <main className="flex-1 flex flex-col min-w-0">
+      <main className={`flex-1 flex flex-col min-w-0 ${isMobile ? 'pt-12' : ''}`}>
         <Suspense fallback={<PageLoader />}>
           <Routes>
             <Route path="/" element={<Chat />} />

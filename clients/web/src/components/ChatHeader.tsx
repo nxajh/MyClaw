@@ -81,22 +81,22 @@ export default function ChatHeader() {
     } finally { setBusy(false) }
   }
 
-  const btn = 'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs text-zinc-300 hover:bg-zinc-800 border border-zinc-800 transition-colors disabled:opacity-50'
-  const menu = 'absolute z-20 mt-1 w-64 max-h-80 overflow-y-auto rounded-xl border border-zinc-800 bg-zinc-900 shadow-2xl py-1'
+  const btn = 'flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-xs text-zinc-300 hover:bg-zinc-800 border border-zinc-800 transition-colors disabled:opacity-50 min-w-0'
+  const menu = 'absolute z-20 mt-1 w-56 sm:w-64 max-h-80 overflow-y-auto rounded-xl border border-zinc-800 bg-zinc-900 shadow-2xl py-1 right-0 sm:left-0'
   const item = 'w-full flex items-center gap-2 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 text-left transition-colors'
 
   return (
-    <header className="border-b border-zinc-800 px-4 h-12 flex items-center gap-2 shrink-0">
+    <header className="border-b border-zinc-800 px-2 sm:px-4 h-10 sm:h-12 flex items-center gap-1.5 sm:gap-2 shrink-0">
       {/* Session selector */}
-      <div className="relative" ref={sessRef}>
+      <div className="relative min-w-0 flex-1 sm:flex-none" ref={sessRef}>
         <button
-          className={btn}
+          className={btn + ' w-full sm:w-auto'}
           disabled={status !== 'connected' || busy}
           onClick={() => { setSessOpen((v) => !v); setModelOpen(false) }}
         >
-          <Layers size={13} className="text-zinc-500" />
-          <span className="max-w-[180px] truncate">{activeSession?.name ?? 'No session'}</span>
-          <ChevronDown size={12} className="text-zinc-600" />
+          <Layers size={13} className="text-zinc-500 shrink-0" />
+          <span className="truncate">{activeSession?.name ?? 'No session'}</span>
+          <ChevronDown size={12} className="text-zinc-600 shrink-0" />
         </button>
         {sessOpen && (
           <div className={menu}>
@@ -118,15 +118,15 @@ export default function ChatHeader() {
       </div>
 
       {/* Model selector */}
-      <div className="relative" ref={modelRef}>
+      <div className="relative min-w-0" ref={modelRef}>
         <button
-          className={btn}
+          className={btn + ' w-full sm:w-auto'}
           disabled={status !== 'connected' || busy}
           onClick={() => { setModelOpen((v) => !v); setSessOpen(false) }}
         >
-          <Cpu size={13} className="text-zinc-500" />
-          <span className="max-w-[200px] truncate font-mono">{activeModel ?? 'default'}</span>
-          <ChevronDown size={12} className="text-zinc-600" />
+          <Cpu size={13} className="text-zinc-500 shrink-0" />
+          <span className="truncate font-mono">{activeModel ?? 'default'}</span>
+          <ChevronDown size={12} className="text-zinc-600 shrink-0" />
         </button>
         {modelOpen && (
           <div className={menu}>

@@ -136,7 +136,7 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
   const canSend = !disabled && (text.trim().length > 0 || hasAttachments)
 
   return (
-    <div className="px-4 pb-5 pt-3 shrink-0">
+    <div className="px-2 sm:px-4 pb-3 sm:pb-5 pt-2 sm:pt-3 shrink-0">
       <div className="max-w-3xl mx-auto relative">
         {/* Slash command dropdown */}
         {showCmds && (
@@ -218,7 +218,7 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
             placeholder={disabled ? 'Connecting…' : 'Message MyClaw…  (/ for commands)'}
             disabled={disabled && !isGenerating}
             rows={1}
-            className="w-full resize-none bg-transparent px-4 pt-4 pb-14 text-sm text-zinc-100 placeholder-zinc-600 outline-none disabled:opacity-50 leading-relaxed"
+            className="w-full resize-none bg-transparent px-3 sm:px-4 pt-3 sm:pt-4 pb-14 text-sm text-zinc-100 placeholder-zinc-600 outline-none disabled:opacity-50 leading-relaxed"
             style={{ maxHeight: 200 }}
           />
 
@@ -244,7 +244,7 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
               <span className="text-xs text-zinc-600 select-none">
                 {note ? <span className="text-amber-500">{note}</span>
                   : isGenerating ? 'Generating…'
-                  : <span className="flex items-center gap-1"><ImageIcon size={11} /> Shift+Enter for newline</span>}
+                  : <span className="hidden sm:flex items-center gap-1"><ImageIcon size={11} /> Shift+Enter for newline</span>}
               </span>
             </div>
             {isGenerating ? (
