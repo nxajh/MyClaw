@@ -245,12 +245,19 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
     return () => el.removeEventListener('scroll', checkNearBottom)
   }, [checkNearBottom])
 
-  // Auto-scroll when near bottom
+  // Auto-scroll when near bottom — triggers on new messages AND content growth.
+  // Track total content length of the last assistant message to detect streaming updates.
+  const lastMsg = messages[messages.length - 1]
+  const lastContentLen = lastMsg?.role === 'assistant'
+    ? lastMsg.blocks.reduce((n, b) => n + (b.type === 'content' ? b.text.length : b.type === 'thinking' ? b.text.length : 0), 0)
+    : 0
+
   useEffect(() => {
     if (isNearBottom) {
       virtualizer.scrollToIndex(messages.length - 1, { align: 'end' })
     }
-  }, [messages.length, isNearBottom, virtualizer])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages.length, lastContentLen, isNearBottom, virtualizer])
 
   const scrollToBottom = () => {
     virtualizer.scrollToIndex(messages.length - 1, { align: 'end', behavior: 'smooth' })
