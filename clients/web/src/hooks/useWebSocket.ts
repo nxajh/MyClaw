@@ -8,6 +8,8 @@ export interface UserMessage {
   role: 'user'
   content: string
   id: string
+  /** Image file references from history (loaded on demand via file.read). */
+  images?: { path: string; mime?: string; name?: string }[]
 }
 
 export interface ContentBlock { type: 'content'; text: string }

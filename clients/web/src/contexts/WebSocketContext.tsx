@@ -1,4 +1,4 @@
-import { createContext, useContext, useCallback, type ReactNode, type Dispatch, type SetStateAction } from 'react'
+import { createContext, useContext, useCallback, useEffect, type ReactNode, type Dispatch, type SetStateAction } from 'react'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useApi } from '../lib/api'
 import type { ChatMessage, ConnectionStatus, SendOptions } from '../hooks/useWebSocket'
@@ -27,6 +27,9 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const ws = useWebSocket()
   const { request } = useApi(ws.sendRaw, ws.addMessageListener)
   const { setMessages } = ws
+
+  // Expose request globally for components that can't use context (e.g. LazyImage in memo'd UserBubble)
+  useEffect(() => { (window as any).myclawRequest = request }, [request])
 
   const reloadHistory = useCallback(async () => {
     try {

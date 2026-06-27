@@ -177,12 +177,73 @@ function MessageActions({ blocks, isLast, isGenerating, onRetry }: { blocks: Mes
   )
 }
 
+// ── Lazy-loading image for history ────────────────────────────────────────
+
+const imageCache = new Map<string, string>() // path -> data URL
+
+function LazyImage({ path, mime, name }: { path: string; mime?: string; name?: string }) {
+  const [src, setSrc] = useState<string | null>(() => imageCache.get(path) ?? null)
+  const [error, setError] = useState(false)
+
+  useEffect(() => {
+    if (imageCache.has(path)) { setSrc(imageCache.get(path)!); return }
+    // Use global request function exposed by useApi via window
+    const fetchImage = async () => {
+      try {
+        const res = await (window as any).myclawRequest?.('file.read', { path }) as { data?: string; mime?: string } | undefined
+        if (res?.data) {
+          const mimeStr = res.mime || mime || 'image/png'
+          const url = `data:${mimeStr};base64,${res.data}`
+          imageCache.set(path, url)
+          setSrc(url)
+        } else {
+          setError(true)
+        }
+      } catch {
+        setError(true)
+      }
+    }
+    fetchImage()
+  }, [path, mime])
+
+  if (error) {
+    return <div className="text-xs text-zinc-600 italic">🖼️ {name || 'Image unavailable'}</div>
+  }
+
+  if (!src) {
+    return (
+      <div className="w-32 h-24 rounded-lg bg-zinc-800 border border-zinc-700 flex items-center justify-center">
+        <div className="h-4 w-4 border-2 border-zinc-600 border-t-zinc-300 rounded-full animate-spin" />
+      </div>
+    )
+  }
+
+  return (
+    <img
+      src={src}
+      alt={name || 'Attached image'}
+      className="max-w-full max-h-64 rounded-lg border border-zinc-700 object-contain cursor-pointer hover:border-zinc-500 transition-colors"
+      onClick={() => window.open(src, '_blank')}
+    />
+  )
+}
+
 // ── Memoized bubbles ─────────────────────────────────────────────────────
 
-const UserBubble = memo(function UserBubble({ content }: { content: string }) {
+const UserBubble = memo(function UserBubble({ content, images }: {
+  content: string
+  images?: { path: string; mime?: string; name?: string }[]
+}) {
   return (
     <div className="flex justify-end gap-2.5 sm:gap-3.5">
-      <div className="max-w-[85%] sm:max-w-[78%] rounded-2xl rounded-tr-lg bg-zinc-800 px-3.5 sm:px-5 py-2.5 sm:py-3.5 text-sm text-zinc-100 whitespace-pre-wrap leading-relaxed">{content}</div>
+      <div className="max-w-[85%] sm:max-w-[78%] rounded-2xl rounded-tr-lg bg-zinc-800 px-3.5 sm:px-5 py-2.5 sm:py-3.5 text-sm text-zinc-100 whitespace-pre-wrap leading-relaxed">
+        {images && images.length > 0 && (
+          <div className="flex flex-wrap gap-2 mb-2">
+            {images.map((img, i) => <LazyImage key={i} path={img.path} mime={img.mime} name={img.name} />)}
+          </div>
+        )}
+        {content}
+      </div>
       <div className="mt-0.5 h-6 w-6 sm:h-7 sm:w-7 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-sm sm:text-base shrink-0 select-none shadow-md">👤</div>
     </div>
   )
@@ -287,7 +348,7 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
               return (
                 <div key={vi.key} data-index={vi.index} ref={(el) => { if (el) virtualizer.measureElement(el) }} className="max-w-3xl mx-auto px-2 sm:px-4 py-3 sm:py-4">
                   {msg.role === 'user' ? (
-                    <UserBubble content={msg.content} />
+                    <UserBubble content={msg.content} images={'images' in msg ? (msg as any).images : undefined} />
                   ) : (
                     (() => {
                       const isLast = vi.index === lastAssistantIdx

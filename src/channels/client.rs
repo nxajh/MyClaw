@@ -1153,6 +1153,73 @@ fn handle_api_request(
             }
         }
 
+        // ── file.read: read a workspace-relative file and return base64 ──
+        "file.read" => {
+            let rel_path = match params["path"].as_str() {
+                Some(s) => s,
+                None => {
+                    return serde_json::json!({
+                        "type": "api_error",
+                        "id": id,
+                        "error": "missing path parameter"
+                    }).to_string();
+                }
+            };
+            // Reject absolute paths and traversal attempts.
+            if rel_path.starts_with('/') || rel_path.starts_with('\\')
+                || rel_path.contains("..") || rel_path.contains('~')
+            {
+                return serde_json::json!({
+                    "type": "api_error",
+                    "id": id,
+                    "error": "invalid path"
+                }).to_string();
+            }
+            match ctx.workspace_dir.get() {
+                Some(dir) => {
+                    let abs = dir.join(rel_path);
+                    match std::fs::read(&abs) {
+                        Ok(bytes) => {
+                            use base64::Engine;
+                            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                            // Infer MIME from extension.
+                            let mime = match abs.extension().and_then(|e| e.to_str()).unwrap_or("") {
+                                "jpg" | "jpeg" => "image/jpeg",
+                                "png" => "image/png",
+                                "gif" => "image/gif",
+                                "webp" => "image/webp",
+                                "svg" => "image/svg+xml",
+                                "bmp" => "image/bmp",
+                                "ico" => "image/x-icon",
+                                "mp3" => "audio/mpeg",
+                                "ogg" => "audio/ogg",
+                                "wav" => "audio/wav",
+                                "mp4" => "video/mp4",
+                                "webm" => "video/webm",
+                                "pdf" => "application/pdf",
+                                _ => "application/octet-stream",
+                            };
+                            serde_json::json!({
+                                "type": "api_response",
+                                "id": id,
+                                "result": { "path": rel_path, "data": b64, "mime": mime }
+                            }).to_string()
+                        }
+                        Err(e) => serde_json::json!({
+                            "type": "api_error",
+                            "id": id,
+                            "error": format!("failed to read file: {}", e)
+                        }).to_string(),
+                    }
+                }
+                None => serde_json::json!({
+                    "type": "api_error",
+                    "id": id,
+                    "error": "workspace directory not configured"
+                }).to_string(),
+            }
+        }
+
         "config.get" => {
             let specs = ctx.tool_specs.read();
             let ws_dir = ctx.workspace_dir.get();
@@ -1337,12 +1404,32 @@ fn reconstruct_history(
                 } else {
                     continue;
                 };
+                // Collect image file references for the frontend to display.
+                let images: Vec<serde_json::Value> = m.parts.iter().filter_map(|p| {
+                    if let ContentPart::File { path, mime_type, name, .. } = p {
+                        let is_image = crate::providers::media::modality_from_mime(
+                            mime_type.as_deref(), path
+                        ) == crate::providers::media::FileModality::Image;
+                        if is_image {
+                            return Some(serde_json::json!({
+                                "path": path,
+                                "mime": mime_type,
+                                "name": name,
+                            }));
+                        }
+                    }
+                    None
+                }).collect();
                 counter += 1;
-                out.push(serde_json::json!({
+                let mut msg = serde_json::json!({
                     "role": "user",
                     "content": content,
                     "id": format!("h-{}", counter),
-                }));
+                });
+                if !images.is_empty() {
+                    msg["images"] = serde_json::Value::Array(images);
+                }
+                out.push(msg);
             }
             "assistant" => {
                 let mut blocks: Vec<serde_json::Value> = Vec::new();
