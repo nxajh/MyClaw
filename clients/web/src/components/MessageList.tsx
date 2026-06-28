@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, memo, type ReactNode } from 'react'
+import { useState, useEffect, useRef, useCallback, memo, createContext, useContext, type ReactNode } from 'react'
 import type { RefObject } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -6,6 +6,11 @@ import remarkMath from 'remark-math'
 import rehypeHighlight from 'rehype-highlight'
 import { ChevronDown, ChevronRight, Copy, Check, ArrowDown, RotateCcw } from 'lucide-react'
 import { useVirtualizer } from '@tanstack/react-virtual'
+import Lightbox from 'yet-another-react-lightbox'
+import Zoom from 'yet-another-react-lightbox/plugins/zoom'
+import Download from 'yet-another-react-lightbox/plugins/download'
+import Fullscreen from 'yet-another-react-lightbox/plugins/fullscreen'
+import 'yet-another-react-lightbox/styles.css'
 import type { ChatMessage, MessageBlock } from '../hooks/useWebSocket'
 import ToolCallCard from './ToolCallCard'
 
@@ -177,25 +182,65 @@ function MessageActions({ blocks, isLast, isGenerating, onRetry }: { blocks: Mes
   )
 }
 
-// ── Lazy-loading image for history ────────────────────────────────────────
+// ── Image lightbox context ───────────────────────────────────────────────
+// Module-level registry: tracks all loaded image blob URLs for the lightbox.
 
-const imageCache = new Map<string, string>() // path -> data URL
+const imageCache = new Map<string, string>() // path -> blob URL
+
+/** Ordered list of all registered slides (blob URLs). */
+const slideRegistry: string[] = []
+/** Map from blob URL to its position in slideRegistry. */
+const slideIndex = new Map<string, number>()
+
+function registerSlide(blobUrl: string): number {
+  let idx = slideIndex.get(blobUrl)
+  if (idx !== undefined) return idx
+  idx = slideRegistry.length
+  slideRegistry.push(blobUrl)
+  slideIndex.set(blobUrl, idx)
+  return idx
+}
+
+interface LightboxCtx {
+  open: (blobUrl: string) => void
+}
+
+const LightboxContext = createContext<LightboxCtx>({ open: () => {} })
+
+/** Convert a data-URL (data:mime;base64,...) to a blob-URL. */
+function dataUrlToBlobUrl(dataUrl: string): string {
+  const [header, b64] = dataUrl.split(',')
+  const mime = header.match(/data:(.*?);/)?.[1] || 'application/octet-stream'
+  const bin = atob(b64)
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  const blob = new Blob([bytes], { type: mime })
+  return URL.createObjectURL(blob)
+}
 
 function LazyImage({ path, mime, name }: { path: string; mime?: string; name?: string }) {
   const [src, setSrc] = useState<string | null>(() => imageCache.get(path) ?? null)
   const [error, setError] = useState(false)
+  const ctx = useContext(LightboxContext)
 
   useEffect(() => {
-    if (imageCache.has(path)) { setSrc(imageCache.get(path)!); return }
+    if (imageCache.has(path)) {
+      const cached = imageCache.get(path)!
+      setSrc(cached)
+      registerSlide(cached)
+      return
+    }
     // Use global request function exposed by useApi via window
     const fetchImage = async () => {
       try {
         const res = await (window as any).myclawRequest?.('file.read', { path }) as { data?: string; mime?: string } | undefined
         if (res?.data) {
           const mimeStr = res.mime || mime || 'image/png'
-          const url = `data:${mimeStr};base64,${res.data}`
-          imageCache.set(path, url)
-          setSrc(url)
+          const dataUrl = `data:${mimeStr};base64,${res.data}`
+          const blobUrl = dataUrlToBlobUrl(dataUrl)
+          imageCache.set(path, blobUrl)
+          registerSlide(blobUrl)
+          setSrc(blobUrl)
         } else {
           setError(true)
         }
@@ -223,16 +268,132 @@ function LazyImage({ path, mime, name }: { path: string; mime?: string; name?: s
       src={src}
       alt={name || 'Attached image'}
       className="max-w-full max-h-64 rounded-lg border border-zinc-700 object-contain cursor-pointer hover:border-zinc-500 transition-colors"
-      onClick={() => window.open(src, '_blank')}
+      onClick={() => ctx.open(src)}
     />
   )
 }
 
+// ── Non-image file components (audio, video, PDF, generic) ──────────────
+
+function AudioFileCard({ path, name }: { path: string; name?: string }) {
+  const [src, setSrc] = useState<string | null>(() => imageCache.get(path) ?? null)
+  const [error, setError] = useState(false)
+
+  useEffect(() => {
+    if (imageCache.has(path)) { setSrc(imageCache.get(path)!); return }
+    const fetchFile = async () => {
+      try {
+        const res = await (window as any).myclawRequest?.('file.read', { path }) as { data?: string; mime?: string } | undefined
+        if (res?.data) {
+          const mimeStr = res.mime || 'audio/mpeg'
+          const dataUrl = `data:${mimeStr};base64,${res.data}`
+          const blobUrl = dataUrlToBlobUrl(dataUrl)
+          imageCache.set(path, blobUrl)
+          setSrc(blobUrl)
+        } else { setError(true) }
+      } catch { setError(true) }
+    }
+    fetchFile()
+  }, [path])
+
+  if (error) return <div className="text-xs text-zinc-600 italic">🎵 {name || 'Audio unavailable'}</div>
+  if (!src) return <div className="w-48 h-10 rounded-lg bg-zinc-800 border border-zinc-700 animate-pulse" />
+
+  return (
+    <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-zinc-800/60 border border-zinc-700">
+      <span className="text-xs text-zinc-400 truncate max-w-[120px]">{name || 'Audio'}</span>
+      <audio controls src={src} className="h-8 flex-1 min-w-0" style={{ filter: 'invert(0.85) hue-rotate(180deg)' }} />
+    </div>
+  )
+}
+
+function VideoFileCard({ path, name }: { path: string; name?: string }) {
+  const [src, setSrc] = useState<string | null>(() => imageCache.get(path) ?? null)
+  const [error, setError] = useState(false)
+
+  useEffect(() => {
+    if (imageCache.has(path)) { setSrc(imageCache.get(path)!); return }
+    const fetchFile = async () => {
+      try {
+        const res = await (window as any).myclawRequest?.('file.read', { path }) as { data?: string; mime?: string } | undefined
+        if (res?.data) {
+          const mimeStr = res.mime || 'video/mp4'
+          const dataUrl = `data:${mimeStr};base64,${res.data}`
+          const blobUrl = dataUrlToBlobUrl(dataUrl)
+          imageCache.set(path, blobUrl)
+          setSrc(blobUrl)
+        } else { setError(true) }
+      } catch { setError(true) }
+    }
+    fetchFile()
+  }, [path])
+
+  if (error) return <div className="text-xs text-zinc-600 italic">🎬 {name || 'Video unavailable'}</div>
+  if (!src) return <div className="w-48 h-32 rounded-lg bg-zinc-800 border border-zinc-700 animate-pulse" />
+
+  return (
+    <video
+      controls
+      src={src}
+      className="max-w-full max-h-64 rounded-lg border border-zinc-700"
+      preload="metadata"
+    />
+  )
+}
+
+function FileCard({ path, mime, name }: { path: string; mime?: string; name?: string }) {
+  const [downloading, setDownloading] = useState(false)
+
+  const handleDownload = async () => {
+    setDownloading(true)
+    try {
+      let blobUrl = imageCache.get(path)
+      if (!blobUrl) {
+        const res = await (window as any).myclawRequest?.('file.read', { path }) as { data?: string; mime?: string } | undefined
+        if (!res?.data) return
+        const mimeStr = res.mime || mime || 'application/octet-stream'
+        const dataUrl = `data:${mimeStr};base64,${res.data}`
+        blobUrl = dataUrlToBlobUrl(dataUrl)
+        imageCache.set(path, blobUrl)
+      }
+      const a = document.createElement('a')
+      a.href = blobUrl
+      a.download = name || 'file'
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+    } finally { setDownloading(false) }
+  }
+
+  return (
+    <button
+      onClick={handleDownload}
+      disabled={downloading}
+      className="flex items-center gap-2 px-3 py-2 rounded-lg bg-zinc-800/60 border border-zinc-700 hover:border-zinc-500 transition-colors text-left"
+    >
+      <span className="text-lg">📄</span>
+      <div className="flex-1 min-w-0">
+        <div className="text-xs text-zinc-300 truncate">{name || 'File'}</div>
+        {mime && <div className="text-[10px] text-zinc-600">{mime}</div>}
+      </div>
+      {downloading && <div className="h-3 w-3 border-2 border-zinc-600 border-t-zinc-300 rounded-full animate-spin" />}
+    </button>
+  )
+}
+
+function renderFileRef(file: { path: string; mime?: string; name?: string }, index: number) {
+  const mime = file.mime || ''
+  if (mime.startsWith('audio/')) return <AudioFileCard key={index} path={file.path} name={file.name} />
+  if (mime.startsWith('video/')) return <VideoFileCard key={index} path={file.path} name={file.name} />
+  return <FileCard key={index} path={file.path} mime={file.mime} name={file.name} />
+}
+
 // ── Memoized bubbles ─────────────────────────────────────────────────────
 
-const UserBubble = memo(function UserBubble({ content, images }: {
+const UserBubble = memo(function UserBubble({ content, images, files }: {
   content: string
   images?: { path: string; mime?: string; name?: string }[]
+  files?: { path: string; mime?: string; name?: string }[]
 }) {
   return (
     <div className="flex justify-end gap-2.5 sm:gap-3.5">
@@ -240,6 +401,11 @@ const UserBubble = memo(function UserBubble({ content, images }: {
         {images && images.length > 0 && (
           <div className="flex flex-wrap gap-2 mb-2">
             {images.map((img, i) => <LazyImage key={i} path={img.path} mime={img.mime} name={img.name} />)}
+          </div>
+        )}
+        {files && files.length > 0 && (
+          <div className="flex flex-col gap-2 mb-2">
+            {files.map((f, i) => renderFileRef(f, i))}
           </div>
         )}
         {content}
@@ -284,6 +450,21 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
   const [isNearBottom, setIsNearBottom] = useState(true)
   const scrollElementRef = useRef<HTMLDivElement>(null)
   const lastAssistantIdx = messages.reduce((acc, m, i) => (m.role === 'assistant' ? i : acc), -1)
+
+  // Lightbox state
+  const [lightboxOpen, setLightboxOpen] = useState(false)
+  const [lightboxIndex, setLightboxIndex] = useState(0)
+
+  const openLightbox = useCallback((blobUrl: string) => {
+    const idx = slideIndex.get(blobUrl)
+    if (idx !== undefined) {
+      setLightboxIndex(idx)
+      setLightboxOpen(true)
+    }
+  }, [])
+
+  const lightboxCtx = useRef<LightboxCtx>({ open: openLightbox })
+  lightboxCtx.current = { open: openLightbox }
 
   const virtualizer = useVirtualizer({
     count: messages.length,
@@ -338,44 +519,67 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
 
   const virtualItems = virtualizer.getVirtualItems()
 
+  // Build slides array from the ordered registry for the lightbox
+  const slides = slideRegistry.map((url) => ({ src: url }))
+
   return (
-    <div className="flex-1 relative">
-      <div ref={(el) => { scrollElementRef.current = el; if (containerRef) (containerRef as any).current = el }} className="absolute inset-0 overflow-y-auto">
-        <div style={{ height: virtualizer.getTotalSize(), width: '100%', position: 'relative' }}>
-          <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${virtualItems[0]?.start ?? 0}px)` }}>
-            {virtualItems.map((vi) => {
-              const msg = messages[vi.index]
-              return (
-                <div key={vi.key} data-index={vi.index} ref={(el) => { if (el) virtualizer.measureElement(el) }} className="max-w-3xl mx-auto px-2 sm:px-4 py-3 sm:py-4">
-                  {msg.role === 'user' ? (
-                    <UserBubble content={msg.content} images={'images' in msg ? (msg as any).images : undefined} />
-                  ) : (
-                    (() => {
-                      const isLast = vi.index === lastAssistantIdx
-                      const prevUser = isLast ? [...messages.slice(0, vi.index)].reverse().find((m) => m.role === 'user') : undefined
-                      return (
-                        <AssistantBubble
-                          blocks={msg.blocks}
-                          done={msg.done}
-                          isLast={isLast}
-                          isGenerating={!msg.done}
-                          onRetry={onRetry && prevUser ? () => onRetry((prevUser as { content: string }).content) : undefined}
-                        />
-                      )
-                    })()
-                  )}
-                </div>
-              )
-            })}
+    <LightboxContext.Provider value={lightboxCtx.current}>
+      <div className="flex-1 relative">
+        <div ref={(el) => { scrollElementRef.current = el; if (containerRef) (containerRef as any).current = el }} className="absolute inset-0 overflow-y-auto">
+          <div style={{ height: virtualizer.getTotalSize(), width: '100%', position: 'relative' }}>
+            <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${virtualItems[0]?.start ?? 0}px)` }}>
+              {virtualItems.map((vi) => {
+                const msg = messages[vi.index]
+                return (
+                  <div key={vi.key} data-index={vi.index} ref={(el) => { if (el) virtualizer.measureElement(el) }} className="max-w-3xl mx-auto px-2 sm:px-4 py-3 sm:py-4">
+                    {msg.role === 'user' ? (
+                      <UserBubble content={msg.content} images={'images' in msg ? (msg as any).images : undefined} files={'files' in msg ? (msg as any).files : undefined} />
+                    ) : (
+                      (() => {
+                        const isLast = vi.index === lastAssistantIdx
+                        const prevUser = isLast ? [...messages.slice(0, vi.index)].reverse().find((m) => m.role === 'user') : undefined
+                        return (
+                          <AssistantBubble
+                            blocks={msg.blocks}
+                            done={msg.done}
+                            isLast={isLast}
+                            isGenerating={!msg.done}
+                            onRetry={onRetry && prevUser ? () => onRetry((prevUser as { content: string }).content) : undefined}
+                          />
+                        )
+                      })()
+                    )}
+                  </div>
+                )
+              })}
+            </div>
           </div>
         </div>
-      </div>
 
-      {!isNearBottom && (
-        <button onClick={scrollToBottom} className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-zinc-800 border border-zinc-700 text-xs text-zinc-300 hover:bg-zinc-700 shadow-lg transition-colors z-10">
-          <ArrowDown size={12} /><span>Scroll to bottom</span>
-        </button>
-      )}
-    </div>
+        {!isNearBottom && (
+          <button onClick={scrollToBottom} className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-zinc-800 border border-zinc-700 text-xs text-zinc-300 hover:bg-zinc-700 shadow-lg transition-colors z-10">
+            <ArrowDown size={12} /><span>Scroll to bottom</span>
+          </button>
+        )}
+
+        <Lightbox
+          open={lightboxOpen}
+          close={() => setLightboxOpen(false)}
+          index={lightboxIndex}
+          slides={slides}
+          plugins={[Zoom, Download, Fullscreen]}
+          zoom={{
+            maxZoomPixelRatio: 5,
+            zoomInMultiplier: 2,
+          }}
+          carousel={{ finite: slideRegistry.length <= 1 }}
+          animation={{ fade: 300 }}
+          controller={{ closeOnBackdropClick: true }}
+          styles={{
+            container: { backgroundColor: 'rgba(0, 0, 0, 0.85)' },
+          }}
+        />
+      </div>
+    </LightboxContext.Provider>
   )
 }

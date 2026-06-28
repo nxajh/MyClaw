@@ -4,12 +4,16 @@ import { useRef, useState, useCallback, useEffect } from 'react'
 // Types
 // ---------------------------------------------------------------------------
 
+export interface FileRef { path: string; mime?: string; name?: string }
+
 export interface UserMessage {
   role: 'user'
   content: string
   id: string
   /** Image file references from history (loaded on demand via file.read). */
-  images?: { path: string; mime?: string; name?: string }[]
+  images?: FileRef[]
+  /** Non-image file references from history (audio, video, PDF, etc.). */
+  files?: FileRef[]
 }
 
 export interface ContentBlock { type: 'content'; text: string }
@@ -38,7 +42,8 @@ export const AUTH_TOKEN_KEY = 'myclaw_auth_token'
 const CLIENT_ID_KEY = 'myclaw_client_id'
 
 export interface Attachment { name: string; content: string }
-export interface SendOptions { images?: string[]; attachments?: Attachment[] }
+export interface FileAttachment { data: string; mime_type: string; file_name: string }
+export interface SendOptions { images?: string[]; attachments?: Attachment[]; files?: FileAttachment[] }
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -382,6 +387,42 @@ export function useWebSocket() {
         break
       }
 
+      // Inbound file from server (e.g. tool-generated files, channel forwards).
+      case 'file': {
+        const fileName = (data.file_name as string) || 'file'
+        const fileMime = (data.mime_type as string) || 'application/octet-stream'
+        const fileData = (data.data as string) || ''
+        const caption = (data.caption as string) || ''
+        if (fileData) {
+          // Convert base64 to blob URL for display
+          const bin = atob(fileData)
+          const bytes = new Uint8Array(bin.length)
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+          const blob = new Blob([bytes], { type: fileMime })
+          const blobUrl = URL.createObjectURL(blob)
+          const isImage = fileMime.startsWith('image/')
+          const marker = isImage
+            ? `[image: ${fileName}](${blobUrl})`
+            : `[file: ${fileName}](${blobUrl})`
+          const text = caption ? `${caption}\n${marker}` : marker
+          setMessages((prev) => {
+            const last = prev[prev.length - 1]
+            if (last && last.role === 'assistant' && !last.done) {
+              const blocks = [...last.blocks]
+              const lb = blocks[blocks.length - 1]
+              if (lb?.type === 'content') {
+                blocks[blocks.length - 1] = { type: 'content', text: lb.text ? `${lb.text}\n${text}` : text }
+              } else {
+                blocks.push({ type: 'content', text })
+              }
+              return [...prev.slice(0, -1), { ...last, blocks }]
+            }
+            return [...prev, { role: 'assistant', blocks: [{ type: 'content', text }], id: uid(), done: false }]
+          })
+        }
+        break
+      }
+
       // api_response / api_error are handled by external listeners (useApi)
       default:
         break
@@ -404,10 +445,12 @@ export function useWebSocket() {
     (content: string, opts?: SendOptions) => {
       const images = opts?.images ?? []
       const attachments = opts?.attachments ?? []
+      const files = opts?.files ?? []
       // What the user sees in their bubble (server inlines file bodies itself).
       const hints: string[] = []
       if (images.length) hints.push(`🖼️ ${images.length} image${images.length > 1 ? 's' : ''}`)
       attachments.forEach((a) => hints.push(`📎 ${a.name}`))
+      files.forEach((f) => hints.push(`📎 ${f.file_name}`))
       const display = [content, hints.join('  ')].filter(Boolean).join('\n\n')
 
       const userMsg: ChatMessage = { role: 'user', content: display || '(empty)', id: uid() }
@@ -423,6 +466,7 @@ export function useWebSocket() {
       const payload: Record<string, unknown> = { type: 'message', content }
       if (images.length) payload.image_base64 = images
       if (attachments.length) payload.attachments = attachments
+      if (files.length) payload.files_base64 = files
       sendRaw(payload)
     },
     [sendRaw],

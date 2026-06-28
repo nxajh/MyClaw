@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback, type KeyboardEvent } from 'react'
-import { ArrowUp, Square, Paperclip, X, FileText, Image as ImageIcon } from 'lucide-react'
+import { ArrowUp, Square, Paperclip, X, FileText, Image as ImageIcon, Film, Music, File } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
-import type { SendOptions } from '../hooks/useWebSocket'
+import type { SendOptions, FileAttachment } from '../hooks/useWebSocket'
 
 interface Props {
   onSend: (content: string, opts?: SendOptions) => void
@@ -13,16 +13,19 @@ interface Props {
 interface Command { name: string; description: string }
 interface PickedImage { name: string; dataUrl: string }
 interface PickedText { name: string; content: string }
+interface PickedBinary { name: string; mime: string; dataUrl: string }
 
-const IMAGE_MAX = 5 * 1024 * 1024
+const IMAGE_MAX = 10 * 1024 * 1024
 const TEXT_MAX = 256 * 1024
-const ACCEPT = 'image/*,.txt,.md,.json,.js,.ts,.tsx,.jsx,.py,.rs,.go,.java,.c,.cpp,.h,.hpp,.css,.html,.yml,.yaml,.toml,.sh,.log,.csv,.xml,.sql'
+const BINARY_MAX = 50 * 1024 * 1024
+const ACCEPT = '*/*'
 
 export default function MessageInput({ onSend, onCancel, disabled, isGenerating }: Props) {
   const { status, request } = useWebSocketContext()
   const [text, setText] = useState('')
   const [images, setImages] = useState<PickedImage[]>([])
   const [texts, setTexts] = useState<PickedText[]>([])
+  const [binaries, setBinaries] = useState<PickedBinary[]>([])
   const [note, setNote] = useState<string | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -75,21 +78,30 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
   }, [])
 
   // ── File handling ─────────────────────────────────────────────────────────
+  const isTextMime = (t: string) => t.startsWith('text/') || ['application/json', 'application/xml', 'application/javascript', 'application/x-sh'].includes(t)
+  const isTextExt = (name: string) => /\.(txt|md|json|js|ts|tsx|jsx|py|rs|go|java|c|cpp|h|hpp|css|html|yml|yaml|toml|sh|log|csv|xml|sql|rb|php|swift|kt|scala|lua|r|jl|m|mm|vue|svelte|astro|mdx|conf|cfg|ini|env|dockerfile|makefile)$/i.test(name)
+
   const handleFiles = useCallback((files: FileList | null) => {
     if (!files) return
     setNote(null)
     Array.from(files).forEach((file) => {
       const isImage = file.type.startsWith('image/')
+      const isText = isTextMime(file.type) || isTextExt(file.name)
       if (isImage) {
-        if (file.size > IMAGE_MAX) { setNote(`${file.name} skipped (image > 5MB)`); return }
+        if (file.size > IMAGE_MAX) { setNote(`${file.name} skipped (image > 10MB)`); return }
         const reader = new FileReader()
         reader.onload = () => setImages((p) => [...p, { name: file.name, dataUrl: reader.result as string }])
         reader.readAsDataURL(file)
-      } else {
+      } else if (isText) {
         if (file.size > TEXT_MAX) { setNote(`${file.name} skipped (file > 256KB)`); return }
         const reader = new FileReader()
         reader.onload = () => setTexts((p) => [...p, { name: file.name, content: reader.result as string }])
         reader.readAsText(file)
+      } else {
+        if (file.size > BINARY_MAX) { setNote(`${file.name} skipped (file > 50MB)`); return }
+        const reader = new FileReader()
+        reader.onload = () => setBinaries((p) => [...p, { name: file.name, mime: file.type || 'application/octet-stream', dataUrl: reader.result as string }])
+        reader.readAsDataURL(file)
       }
     })
   }, [])
@@ -98,14 +110,20 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
   const handleSend = () => {
     const trimmed = text.trim()
     if (disabled) return
-    if (!trimmed && images.length === 0 && texts.length === 0) return
+    if (!trimmed && images.length === 0 && texts.length === 0 && binaries.length === 0) return
+    const fileAttachments: FileAttachment[] = binaries.map((b) => {
+      const b64 = b.dataUrl.split(',')[1] || b.dataUrl
+      return { data: b64, mime_type: b.mime, file_name: b.name }
+    })
     onSend(trimmed, {
       images: images.map((i) => i.dataUrl),
       attachments: texts.map((t) => ({ name: t.name, content: t.content })),
+      files: fileAttachments,
     })
     setText('')
     setImages([])
     setTexts([])
+    setBinaries([])
     setNote(null)
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
   }
@@ -132,8 +150,14 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
     el.style.height = Math.min(el.scrollHeight, 200) + 'px'
   }
 
-  const hasAttachments = images.length > 0 || texts.length > 0
+  const hasAttachments = images.length > 0 || texts.length > 0 || binaries.length > 0
   const canSend = !disabled && (text.trim().length > 0 || hasAttachments)
+
+  const fileIcon = (_name: string, mime: string) => {
+    if (mime.startsWith('video/')) return <Film size={12} className="text-purple-400 shrink-0" />
+    if (mime.startsWith('audio/')) return <Music size={12} className="text-green-400 shrink-0" />
+    return <File size={12} className="text-blue-400 shrink-0" />
+  }
 
   return (
     <div className="px-2 sm:px-4 pb-3 sm:pb-5 pt-2 sm:pt-3 shrink-0 safe-area-bottom">
@@ -196,6 +220,15 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
                   <FileText size={12} className="text-blue-400 shrink-0" />
                   <span className="max-w-[140px] truncate">{t.name}</span>
                   <button onClick={() => setTexts((p) => p.filter((_, j) => j !== i))} className="ml-1 text-zinc-500 hover:text-zinc-300">
+                    <X size={11} />
+                  </button>
+                </div>
+              ))}
+              {binaries.map((b, i) => (
+                <div key={`b${i}`} className="flex items-center gap-1.5 h-8 px-2.5 rounded-lg bg-zinc-800 border border-zinc-700 text-xs text-zinc-300">
+                  {fileIcon(b.name, b.mime)}
+                  <span className="max-w-[140px] truncate">{b.name}</span>
+                  <button onClick={() => setBinaries((p) => p.filter((_, j) => j !== i))} className="ml-1 text-zinc-500 hover:text-zinc-300">
                     <X size={11} />
                   </button>
                 </div>

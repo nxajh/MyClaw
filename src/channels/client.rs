@@ -1397,29 +1397,36 @@ fn reconstruct_history(
         }
         match m.role.as_str() {
             "user" => {
+                let has_files = m.parts.iter().any(|p| matches!(p, ContentPart::File { .. }));
                 let content = if !text.is_empty() {
                     text
                 } else if has_image {
                     "🖼️ (image)".to_string()
+                } else if has_files {
+                    "📎 (file)".to_string()
                 } else {
                     continue;
                 };
-                // Collect image file references for the frontend to display.
-                let images: Vec<serde_json::Value> = m.parts.iter().filter_map(|p| {
+                // Collect file references for the frontend to display.
+                let mut images: Vec<serde_json::Value> = Vec::new();
+                let mut files: Vec<serde_json::Value> = Vec::new();
+                for p in &m.parts {
                     if let ContentPart::File { path, mime_type, name, .. } = p {
+                        let entry = serde_json::json!({
+                            "path": path,
+                            "mime": mime_type,
+                            "name": name,
+                        });
                         let is_image = crate::providers::media::modality_from_mime(
                             mime_type.as_deref(), path
                         ) == crate::providers::media::FileModality::Image;
                         if is_image {
-                            return Some(serde_json::json!({
-                                "path": path,
-                                "mime": mime_type,
-                                "name": name,
-                            }));
+                            images.push(entry);
+                        } else {
+                            files.push(entry);
                         }
                     }
-                    None
-                }).collect();
+                }
                 counter += 1;
                 let mut msg = serde_json::json!({
                     "role": "user",
@@ -1428,6 +1435,9 @@ fn reconstruct_history(
                 });
                 if !images.is_empty() {
                     msg["images"] = serde_json::Value::Array(images);
+                }
+                if !files.is_empty() {
+                    msg["files"] = serde_json::Value::Array(files);
                 }
                 out.push(msg);
             }
