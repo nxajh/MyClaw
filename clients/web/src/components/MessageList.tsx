@@ -57,7 +57,7 @@ function PreCodeBlock({ children, className }: { children: ReactNode; className?
           {copied ? <><Check size={10} className="text-emerald-400" /><span className="text-emerald-400">Copied</span></> : <><Copy size={10} /><span>Copy</span></>}
         </button>
       </div>
-      <pre ref={preRef} className="p-4 overflow-x-auto text-xs leading-6 text-zinc-350 focus:outline-none !my-0 !bg-transparent !border-none">{children}</pre>
+      <pre ref={preRef} className="p-2 sm:p-3 lg:p-4 overflow-x-auto text-[11px] sm:text-xs leading-5 sm:leading-6 text-zinc-350 focus:outline-none !my-0 !bg-transparent !border-none">{children}</pre>
     </div>
   )
 }
@@ -96,7 +96,7 @@ function ThinkingBlock({ text, defaultOpen }: { text: string; defaultOpen?: bool
   }, [text])
 
   return (
-    <div className="rounded-xl border border-zinc-800 overflow-hidden text-xs">
+    <div className="rounded-xl border border-zinc-800 overflow-hidden text-[11px] sm:text-xs">
       <button onClick={() => setOpen(!open)} className="w-full flex items-center gap-2 px-3.5 py-2.5 text-left text-zinc-500 hover:text-zinc-400 hover:bg-zinc-800/30 transition-colors">
         {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}<span>Thinking</span>
       </button>
@@ -123,7 +123,7 @@ function ContentBlock({ text, done }: { text: string; done: boolean }) {
     }
   }, [done, needsMath, katexReady])
 
-  const proseClasses = `prose prose-invert prose-sm max-w-none prose-p:leading-7 prose-p:my-2 first:prose-p:mt-0 prose-headings:text-zinc-100 prose-headings:font-semibold prose-headings:mt-5 prose-headings:mb-2 prose-code:text-zinc-200 prose-code:bg-zinc-800 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-md prose-code:text-[0.8em] prose-code:before:content-none prose-code:after:content-none prose-blockquote:border-zinc-700 prose-blockquote:text-zinc-400 prose-a:text-blue-400 prose-a:no-underline hover:prose-a:underline prose-strong:text-zinc-200 prose-strong:font-semibold prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-hr:border-zinc-800`
+  const proseClasses = `prose prose-invert prose-sm lg:prose-base max-w-none prose-p:leading-6 sm:prose-p:leading-7 prose-p:my-2 first:prose-p:mt-0 prose-headings:text-zinc-100 prose-headings:font-semibold prose-headings:mt-5 prose-headings:mb-2 prose-code:text-zinc-200 prose-code:bg-zinc-800 prose-code:px-1 sm:prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-md prose-code:text-[0.8em] prose-code:before:content-none prose-code:after:content-none prose-blockquote:border-zinc-700 prose-blockquote:text-zinc-400 prose-a:text-blue-400 prose-a:no-underline hover:prose-a:underline prose-strong:text-zinc-200 prose-strong:font-semibold prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-hr:border-zinc-800`
 
   if (!done) return <div className={`${proseClasses} whitespace-pre-wrap`}>{text}</div>
 
@@ -267,7 +267,7 @@ function LazyImage({ path, mime, name }: { path: string; mime?: string; name?: s
     <img
       src={src}
       alt={name || 'Attached image'}
-      className="max-w-full max-h-64 rounded-lg border border-zinc-700 object-contain cursor-pointer hover:border-zinc-500 transition-colors"
+      className="max-w-full max-h-48 sm:max-h-64 lg:max-h-80 rounded-lg border border-zinc-700 object-contain cursor-pointer hover:border-zinc-500 transition-colors"
       onClick={() => ctx.open(src)}
     />
   )
@@ -335,7 +335,7 @@ function VideoFileCard({ path, name }: { path: string; name?: string }) {
     <video
       controls
       src={src}
-      className="max-w-full max-h-64 rounded-lg border border-zinc-700"
+      className="max-w-full max-h-48 sm:max-h-64 lg:max-h-80 rounded-lg border border-zinc-700"
       preload="metadata"
     />
   )
@@ -397,7 +397,7 @@ const UserBubble = memo(function UserBubble({ content, images, files }: {
 }) {
   return (
     <div className="flex justify-end gap-2.5 sm:gap-3.5">
-      <div className="max-w-[85%] sm:max-w-[78%] rounded-2xl rounded-tr-lg bg-zinc-800 px-3.5 sm:px-5 py-2.5 sm:py-3.5 text-sm text-zinc-100 whitespace-pre-wrap leading-relaxed">
+      <div className="max-w-[85%] sm:max-w-[78%] lg:max-w-[72%] rounded-2xl rounded-tr-lg bg-zinc-800 px-3 sm:px-4 lg:px-5 py-2.5 sm:py-3 lg:py-3.5 text-sm text-zinc-100 whitespace-pre-wrap leading-relaxed">
         {images && images.length > 0 && (
           <div className="flex flex-wrap gap-2 mb-2">
             {images.map((img, i) => <LazyImage key={i} path={img.path} mime={img.mime} name={img.name} />)}
@@ -427,7 +427,7 @@ const AssistantBubble = memo(function AssistantBubble({ blocks, done, isLast, is
   return (
     <div className="flex gap-2.5 sm:gap-3.5 group/msg">
       <div className="mt-0.5 h-6 w-6 sm:h-7 sm:w-7 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-sm sm:text-base shrink-0 select-none shadow-md">🦀</div>
-      <div className="flex-1 min-w-0 rounded-2xl border border-zinc-800/80 bg-zinc-900/25 px-3 sm:px-5 py-3 sm:py-4 space-y-3 shadow-sm hover:border-zinc-800 transition-colors">
+      <div className="flex-1 min-w-0 rounded-2xl border border-zinc-800/80 bg-zinc-900/25 px-3 sm:px-4 lg:px-5 py-3 sm:py-4 space-y-3 shadow-sm hover:border-zinc-800 transition-colors">
         {blocks.map((block, i) => renderBlock(block, i, isGenerating))}
         {!isGenerating && blocks.length === 0 && <GeneratingDots />}
         {done && <MessageActions blocks={blocks} isLast={isLast} isGenerating={isGenerating} onRetry={onRetry} />}
@@ -531,7 +531,7 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
               {virtualItems.map((vi) => {
                 const msg = messages[vi.index]
                 return (
-                  <div key={vi.key} data-index={vi.index} ref={(el) => { if (el) virtualizer.measureElement(el) }} className="max-w-3xl mx-auto px-2 sm:px-4 py-3 sm:py-4">
+                  <div key={vi.key} data-index={vi.index} ref={(el) => { if (el) virtualizer.measureElement(el) }} className="max-w-3xl lg:max-w-4xl 2xl:max-w-5xl mx-auto px-2 sm:px-4 lg:px-6 py-3 sm:py-4">
                     {msg.role === 'user' ? (
                       <UserBubble content={msg.content} images={'images' in msg ? (msg as any).images : undefined} files={'files' in msg ? (msg as any).files : undefined} />
                     ) : (
