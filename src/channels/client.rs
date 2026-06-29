@@ -37,12 +37,104 @@ use crate::channels::message::{
 };
 use crate::config::channel::ClientConfig;
 
-// ── Stream Context ──────────────────────────────────────────────────────────
+// ── Session Output Bus ──────────────────────────────────────────────────────
 
-/// Per-session streaming state, stored in ClientChannel.
-struct StreamContext {
-    event_tx: mpsc::Sender<TurnEvent>,
+/// Per-session output bus. Decouples turn execution from WebSocket connection
+/// lifetime. Survives disconnects; buffers events and messages for replay on
+/// reconnect. This is the single source of truth for output delivery — the WS
+/// connection is just one (replaceable) subscriber.
+struct SessionOutputBus {
+    /// TurnEvent ring buffer — only accumulates while no subscriber is attached.
+    /// Drained on subscribe (replay). Capped at `event_buffer_capacity`.
+    event_buffer: std::collections::VecDeque<TurnEvent>,
+    event_buffer_capacity: usize,
+    /// Non-streaming messages (send_message output) queued while no subscriber.
+    message_queue: std::collections::VecDeque<String>,
+    /// Active WS subscriber: raw text mpsc → outgoing forwarder → ws_sink.
+    ws_sender: Option<mpsc::Sender<String>>,
+    /// Active session_id for event JSON injection (frontend filtering).
+    session_id: String,
+    /// Current turn's cancel token. Recreated each turn by create_stream.
     cancel: CancellationToken,
+    /// Whether a turn is in progress.
+    turn_active: bool,
+}
+
+impl SessionOutputBus {
+    fn new() -> Self {
+        Self {
+            event_buffer: std::collections::VecDeque::new(),
+            event_buffer_capacity: 256,
+            message_queue: std::collections::VecDeque::new(),
+            ws_sender: None,
+            session_id: String::new(),
+            cancel: CancellationToken::new(),
+            turn_active: false,
+        }
+    }
+
+    /// Install a WS subscriber. Call drain_messages / drain_events afterwards
+    /// to replay buffered content.
+    fn subscribe(&mut self, ws_sender: mpsc::Sender<String>, session_id: String) {
+        self.ws_sender = Some(ws_sender);
+        self.session_id = session_id;
+    }
+
+    /// Drain queued non-streaming messages for replay (clears the queue).
+    fn drain_messages(&mut self) -> Vec<String> {
+        self.message_queue.drain(..).collect()
+    }
+
+    /// Drain buffered TurnEvents for replay (clears the buffer).
+    fn drain_events(&mut self) -> Vec<TurnEvent> {
+        self.event_buffer.drain(..).collect()
+    }
+
+    /// Detach subscriber (on WS disconnect). Bus survives for replay.
+    fn detach(&mut self) {
+        self.ws_sender = None;
+    }
+
+    /// Push a TurnEvent. If subscriber is online, forwards directly via
+    /// try_send (non-blocking). If offline, buffers for replay.
+    /// **Never fails** — this is the core decoupling invariant.
+    fn push_event(&mut self, event: TurnEvent) {
+        if self.ws_sender.is_some() {
+            if let Some(ref tx) = self.ws_sender {
+                let mut json_val = match serde_json::to_value(&event) {
+                    Ok(v) => v,
+                    Err(_) => return,
+                };
+                if let serde_json::Value::Object(ref mut map) = json_val {
+                    if !self.session_id.is_empty() {
+                        map.insert(
+                            "session_id".to_string(),
+                            serde_json::Value::String(self.session_id.clone()),
+                        );
+                    }
+                }
+                let json = json_val.to_string();
+                let _ = tx.try_send(json);
+            }
+        } else {
+            if self.event_buffer.len() >= self.event_buffer_capacity {
+                self.event_buffer.pop_front();
+            }
+            self.event_buffer.push_back(event);
+        }
+    }
+
+    /// Push a non-streaming message (send_message output).
+    /// If subscriber is online, forwards immediately; else queues for replay.
+    fn push_message(&mut self, json: String) {
+        if let Some(ref tx) = self.ws_sender {
+            if tx.try_send(json).is_ok() {
+                return;
+            }
+            // Channel full — fall through to queue
+        }
+        self.message_queue.push_back(json);
+    }
 }
 
 // ── Client Connection ───────────────────────────────────────────────────────
@@ -69,8 +161,8 @@ pub struct ClientChannel {
     /// Pre-bound listener passed from the old process during hot switch.
     /// When set, start() reuses it instead of calling bind().
     pre_bound: SyncMutex<Option<std::net::TcpListener>>,
-    /// Per-session streaming context.
-    stream_contexts: Arc<RwLock<HashMap<String, StreamContext>>>,
+    /// Per-session output buses (survive WS disconnects).
+    session_buses: Arc<RwLock<HashMap<String, Arc<SyncMutex<SessionOutputBus>>>>>,
     /// Active connections: connection_id → ClientConnection.
     connections: Arc<RwLock<HashMap<String, ClientConnection>>>,
     /// Reverse map: session_key → connection_id.
@@ -99,7 +191,7 @@ impl ClientChannel {
             message_tx,
             message_rx: Mutex::new(Some(message_rx)),
             pre_bound: SyncMutex::new(None),
-            stream_contexts: Arc::new(RwLock::new(HashMap::new())),
+            session_buses: Arc::new(RwLock::new(HashMap::new())),
             connections: Arc::new(RwLock::new(HashMap::new())),
             session_owners: Arc::new(RwLock::new(HashMap::new())),
             session_manager: Arc::new(OnceLock::new()),
@@ -180,7 +272,7 @@ impl ClientChannel {
         let max_connections = self.config.max_connections;
         let auth_token = self.config.auth_token.clone();
         let message_tx = self.message_tx.clone();
-        let stream_contexts = self.stream_contexts.clone();
+        let session_buses = self.session_buses.clone();
         let connections = self.connections.clone();
         let session_owners = self.session_owners.clone();
         let session_manager = self.session_manager.clone();
@@ -255,9 +347,9 @@ impl ClientChannel {
                         }
 
                         let conn_id_clone = conn_id.clone();
-                        let session_key_clone = session_key.clone();
+                        let mut session_key_clone = session_key.clone();
                         let message_tx_clone = message_tx.clone();
-                        let stream_contexts_clone = stream_contexts.clone();
+                        let session_buses_clone = session_buses.clone();
                         let connections_clone = connections.clone();
                         let session_owners_clone = session_owners.clone();
                         let session_manager_clone = session_manager.clone();
@@ -338,7 +430,76 @@ impl ClientChannel {
                                             if let Some(cid) = parsed["client_id"].as_str() {
                                                 let cid = cid.trim();
                                                 if !cid.is_empty() {
-                                                    client_id = format!("web:{}", cid);
+                                                    let new_client_id = format!("web:{}", cid);
+
+                                                    // Phase 6: migrate bus to stable session_key
+                                                    // so reconnects route to the same bus.
+                                                    let old_sk = session_key_clone.clone();
+                                                    let new_sk = format!("client:default:{}", new_client_id);
+                                                    if new_sk != old_sk {
+                                                        // Migrate bus
+                                                        {
+                                                            let mut buses = session_buses_clone.write();
+                                                            if let Some(bus) = buses.remove(&old_sk) {
+                                                                buses.insert(new_sk.clone(), bus);
+                                                            } else {
+                                                                buses.entry(new_sk.clone())
+                                                                    .or_insert_with(|| Arc::new(SyncMutex::new(SessionOutputBus::new())));
+                                                            }
+                                                        }
+                                                        // Migrate session_owners
+                                                        {
+                                                            let mut owners = session_owners_clone.write();
+                                                            owners.remove(&old_sk);
+                                                            owners.insert(new_sk.clone(), conn_id_clone.clone());
+                                                        }
+                                                        // Update connection sessions set
+                                                        {
+                                                            let mut conns = connections_clone.write();
+                                                            if let Some(conn) = conns.get_mut(&conn_id_clone) {
+                                                                conn.sessions.remove(&old_sk);
+                                                                conn.sessions.insert(new_sk.clone());
+                                                                conn.active_session = new_sk.clone();
+                                                            }
+                                                        }
+                                                        session_key_clone = new_sk;
+                                                        client_id = new_client_id;
+
+                                                        // Subscribe + replay buffered content
+                                                        let api_user = format!("client:default:{}", client_id);
+                                                        let session_id = session_manager_clone.get()
+                                                            .and_then(|sm| sm.active_session_id(&api_user))
+                                                            .unwrap_or_default();
+                                                        let bus = {
+                                                            let mut buses = session_buses_clone.write();
+                                                            buses.entry(session_key_clone.clone())
+                                                                .or_insert_with(|| Arc::new(SyncMutex::new(SessionOutputBus::new())))
+                                                                .clone()
+                                                        };
+                                                        let (queued_msgs, replay_events) = {
+                                                            let mut bg = bus.lock();
+                                                            bg.subscribe(ws_sender.clone(), session_id.clone());
+                                                            (bg.drain_messages(), bg.drain_events())
+                                                        };
+                                                        for msg_json in queued_msgs {
+                                                            let _ = ws_sender.send(msg_json).await;
+                                                        }
+                                                        for event in replay_events {
+                                                            let mut jv = serde_json::to_value(&event).unwrap_or_default();
+                                                            if let serde_json::Value::Object(ref mut map) = jv {
+                                                                map.insert("session_id".to_string(), serde_json::Value::String(session_id.clone()));
+                                                            }
+                                                            let _ = ws_sender.send(jv.to_string()).await;
+                                                        }
+                                                        tracing::info!(
+                                                            conn_id = %conn_id_clone,
+                                                            old_session = %old_sk,
+                                                            new_session = %session_key_clone,
+                                                            "session migrated to stable key on auth"
+                                                        );
+                                                    } else {
+                                                        client_id = new_client_id;
+                                                    }
                                                 }
                                             }
                                             let _ = ws_sender
@@ -481,64 +642,39 @@ impl ClientChannel {
                                                 continue;
                                             }
 
-                                            // E32: stream context indexed by reply_target.
-                                            // For ClientChannel today reply_target ==
-                                            // session_key, but using reply_target
-                                            // semantically lets sub-agents push events
-                                            // to the parent's UI when their session
-                                            // inherits the parent's reply_target.
-                                            let (event_tx, mut event_rx) =
-                                                mpsc::channel::<TurnEvent>(64);
-                                            let cancel = CancellationToken::new();
-                                            let reply_target_key = session_key_clone.clone();
-                                            {
-                                                let mut contexts = stream_contexts_clone.write();
-                                                contexts.insert(
-                                                    reply_target_key.clone(),
-                                                    StreamContext {
-                                                        event_tx: event_tx.clone(),
-                                                        cancel: cancel.clone(),
-                                                    },
-                                                );
-                                            }
-
-                                            // Spawn event forwarder: event_rx → ws_sender.
-                                            // NOTE: do NOT remove the stream_context entry here.
-                                            // The orchestrator calls take_stream_context() which
-                                            // removes the entry atomically before processing
-                                            // begins.  Removing it here would race with the next
-                                            // message's context insertion and silently drop it.
-                                            //
-                                            // Capture the active session_id at send time so the
-                                            // frontend can filter stale events after a session switch.
+                                            // Ensure session bus exists + subscribe (in case
+                                            // auth wasn't called, e.g. TUI). For WebUI the
+                                            // bus was already subscribed during auth migration.
                                             let fwd_api_user = format!("client:default:{}", client_id);
                                             let fwd_session_id = session_manager_clone
                                                 .get()
                                                 .and_then(|sm| sm.active_session_id(&fwd_api_user))
                                                 .unwrap_or_default();
-                                            let fwd_sender = ws_sender.clone();
-                                            tokio::spawn(async move {
-                                                while let Some(event) = event_rx.recv().await {
-                                                    let mut json_val = match serde_json::to_value(&event) {
-                                                        Ok(v) => v,
-                                                        Err(e) => {
-                                                            tracing::warn!(
-                                                                "failed to serialize TurnEvent: {}",
-                                                                e
-                                                            );
-                                                            continue;
-                                                        }
-                                                    };
-                                                    // Inject session_id so the frontend can filter
-                                                    if let serde_json::Value::Object(ref mut map) = json_val {
-                                                        map.insert("session_id".to_string(), serde_json::Value::String(fwd_session_id.clone()));
+                                            {
+                                                let bus = {
+                                                    let mut buses = session_buses_clone.write();
+                                                    buses.entry(session_key_clone.clone())
+                                                        .or_insert_with(|| Arc::new(SyncMutex::new(SessionOutputBus::new())))
+                                                        .clone()
+                                                };
+                                                let mut bg = bus.lock();
+                                                if bg.ws_sender.is_none() {
+                                                    bg.subscribe(ws_sender.clone(), fwd_session_id.clone());
+                                                    let queued = bg.drain_messages();
+                                                    let events = bg.drain_events();
+                                                    drop(bg);
+                                                    for msg_json in queued {
+                                                        let _ = ws_sender.send(msg_json).await;
                                                     }
-                                                    let json = json_val.to_string();
-                                                    if fwd_sender.send(json).await.is_err() {
-                                                        break; // Client gone
+                                                    for event in events {
+                                                        let mut jv = serde_json::to_value(&event).unwrap_or_default();
+                                                        if let serde_json::Value::Object(ref mut map) = jv {
+                                                            map.insert("session_id".to_string(), serde_json::Value::String(fwd_session_id.clone()));
+                                                        }
+                                                        let _ = ws_sender.send(jv.to_string()).await;
                                                     }
                                                 }
-                                            });
+                                            }
 
                                             // Create ChannelInboundMessage for Orchestrator.
                                             let channel_msg = ChannelInboundMessage {
@@ -569,10 +705,10 @@ impl ClientChannel {
                                         }
 
                                         "cancel" => {
-                                            // Cancel current turn.
-                                            let contexts = stream_contexts_clone.read();
-                                            if let Some(ctx) = contexts.get(&session_key_clone) {
-                                                ctx.cancel.cancel();
+                                            // Cancel current turn via the bus's cancel token.
+                                            let buses = session_buses_clone.read();
+                                            if let Some(bus) = buses.get(&session_key_clone) {
+                                                bus.lock().cancel.cancel();
                                                 tracing::debug!(session = %session_key_clone, "turn cancelled by client");
                                             }
                                         }
@@ -637,10 +773,12 @@ impl ClientChannel {
                             // Clean up on disconnect. Collect the
                             // connection's owned session_keys first, then
                             // drop the connections read-lock before taking
-                            // writes on session_owners + stream_contexts.
-                            // Also cancel any in-flight turns BEFORE the
-                            // stream_contexts removal so the cancel signal
-                            // actually reaches Agent::run.
+                            // writes on session_owners + session_buses.
+                            //
+                            // KEY CHANGE: detach subscribers but do NOT remove
+                            // buses or trigger cancel. The bus survives so
+                            // buffered events + queued messages can be replayed
+                            // on reconnect. Turns continue to completion.
                             let owned_keys: Vec<String> = {
                                 let conns = connections_clone.read();
                                 conns
@@ -648,17 +786,12 @@ impl ClientChannel {
                                     .map(|conn| conn.sessions.iter().cloned().collect())
                                     .unwrap_or_default()
                             };
-                            // F7: cancel + remove stream_contexts entries
-                            // for every session this connection owned —
-                            // without this, the StreamContext lingers in
-                            // the map forever (per-disconnect leak) and
-                            // any in-flight Agent::run keeps streaming
-                            // into a dead channel.
+                            // Detach subscriber on each bus (bus survives)
                             {
-                                let mut contexts = stream_contexts_clone.write();
+                                let buses = session_buses_clone.read();
                                 for sk in &owned_keys {
-                                    if let Some(ctx) = contexts.remove(sk) {
-                                        ctx.cancel.cancel();
+                                    if let Some(bus) = buses.get(sk) {
+                                        bus.lock().detach();
                                     }
                                 }
                             }
@@ -704,55 +837,63 @@ impl Channel for ClientChannel {
         &self,
         msg: &ChannelOutboundMessage,
     ) -> anyhow::Result<OutboundSendResult> {
-        // msg.receiver.id is the session_key (e.g. "client:ws-1")
-        // Find the connection that owns this session.
-        let ws_sender = {
-            let owners = self.session_owners.read();
-            let conn_id = match owners.get(&msg.receiver.id) {
-                Some(id) => id.clone(),
+        // Route through the session bus. If subscriber is online, forwards
+        // immediately. If offline (WS disconnected), queues for replay on
+        // reconnect. This replaces the old session_owners → connections →
+        // ws_sender chain which silently dropped messages on disconnect.
+        let recipient = msg.receiver.id.clone();
+
+        // Clone the Arc to the bus before any .await — parking_lot guards
+        // are not Send and must not cross await points.
+        let bus = {
+            let buses = self.session_buses.read();
+            match buses.get(&recipient) {
+                Some(b) => Arc::clone(b),
                 None => {
-                    tracing::warn!(recipient = %msg.receiver.id, "no connection found for session");
+                    tracing::warn!(recipient = %recipient, "no session bus found for send_message");
                     return Ok(OutboundSendResult::empty());
                 }
-            };
-            drop(owners); // Release lock before await.
+            }
+        };
 
-            let conns = self.connections.read();
-            conns.get(&conn_id).map(|conn| conn.ws_sender.clone())
-        }; // Lock released here.
-
-        if let Some(sender) = ws_sender {
-            if msg.content.files.is_empty() {
-                let outgoing = serde_json::json!({
-                    "type": "message",
-                    "session": msg.receiver.id,
-                    "content": msg.content.text,
-                });
-                let _ = sender.send(outgoing.to_string()).await;
-            } else {
-                // Send each file as a separate WebSocket message with base64 data.
-                use base64::Engine;
-                for (idx, file) in msg.content.files.iter().enumerate() {
-                    let mut reader = file.body.open().await?;
-                    let mut data = Vec::new();
-                    tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut data).await?;
-                    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-                    let caption = if idx == 0 && !msg.content.text.trim().is_empty() {
-                        Some(msg.content.text.as_str())
-                    } else {
-                        None
-                    };
-                    let outgoing = serde_json::json!({
-                        "type": "file",
-                        "session": msg.receiver.id,
-                        "file_name": file.meta.file_name,
-                        "mime_type": file.meta.mime_type,
-                        "size": file.meta.size_bytes,
-                        "data": b64,
-                        "caption": caption,
-                    });
-                    let _ = sender.send(outgoing.to_string()).await;
-                }
+        if msg.content.files.is_empty() {
+            let json = serde_json::json!({
+                "type": "message",
+                "session": recipient,
+                "content": msg.content.text,
+            }).to_string();
+            bus.lock().push_message(json);
+        } else {
+            // File messages: encode as base64 and push each as a separate
+            // message JSON. File messages are NOT queued on disconnect
+            // (base64 data may be large / stale) — only text is queued.
+            use base64::Engine;
+            // Check if subscriber is online before encoding files
+            let subscriber_online = bus.lock().ws_sender.is_some();
+            if !subscriber_online {
+                tracing::debug!(recipient = %recipient, "subscriber offline, skipping file messages");
+                return Ok(OutboundSendResult::empty());
+            }
+            for (idx, file) in msg.content.files.iter().enumerate() {
+                let mut reader = file.body.open().await?;
+                let mut data = Vec::new();
+                tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut data).await?;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+                let caption = if idx == 0 && !msg.content.text.trim().is_empty() {
+                    Some(msg.content.text.as_str())
+                } else {
+                    None
+                };
+                let json = serde_json::json!({
+                    "type": "file",
+                    "session": recipient,
+                    "file_name": file.meta.file_name,
+                    "mime_type": file.meta.mime_type,
+                    "size": file.meta.size_bytes,
+                    "data": b64,
+                    "caption": caption,
+                }).to_string();
+                bus.lock().push_message(json);
             }
         }
         Ok(OutboundSendResult::empty())
@@ -777,12 +918,14 @@ impl Channel for ClientChannel {
     /// is currently subscribed for this target — caller falls through to
     /// the non-streaming `send` path.
     fn create_stream(&self, reply_target: &str) -> Option<Box<dyn crate::channels::TurnStream>> {
-        let contexts = self.stream_contexts.read();
-        let ctx = contexts.get(reply_target)?;
+        let buses = self.session_buses.read();
+        let bus = buses.get(reply_target)?;
+        let mut bus_guard = bus.lock();
+        // Fresh cancel token per turn
+        bus_guard.cancel = CancellationToken::new();
+        bus_guard.turn_active = true;
         Some(Box::new(ClientTurnStream {
-            reply_target: reply_target.to_string(),
-            event_tx: ctx.event_tx.clone(),
-            cancel: ctx.cancel.clone(),
+            bus: Arc::clone(bus),
             status: crate::channels::StreamDelivery::Pending,
             finished: false,
         }))
@@ -791,14 +934,12 @@ impl Channel for ClientChannel {
 
 /// Per-turn streaming handle for ClientChannel (RFC §7.6).
 ///
-/// Wraps the already-registered `StreamContext.event_tx` plus its cancel
-/// token. The underlying `StreamContext` stays in `ClientChannel.stream_contexts`
-/// (it tracks "where to deliver" per active WebSocket); this struct
-/// represents "Agent's per-turn push handle into that channel".
+/// Holds a shared reference to the session's `SessionOutputBus`. `push`
+/// writes through the bus — it **never fails** because the bus buffers
+/// when no subscriber is attached. This is the core decoupling: Agent
+/// runs to completion regardless of WS connection state.
 pub(crate) struct ClientTurnStream {
-    reply_target: String,
-    event_tx: mpsc::Sender<TurnEvent>,
-    cancel: CancellationToken,
+    bus: Arc<SyncMutex<SessionOutputBus>>,
     status: crate::channels::StreamDelivery,
     finished: bool,
 }
@@ -806,16 +947,7 @@ pub(crate) struct ClientTurnStream {
 #[async_trait]
 impl crate::channels::TurnStream for ClientTurnStream {
     async fn push(&mut self, event: TurnEvent) -> anyhow::Result<crate::channels::StreamDelivery> {
-        if self.event_tx.send(event).await.is_err() {
-            tracing::debug!(
-                reply_target = %self.reply_target,
-                "ClientTurnStream::push: client disconnected"
-            );
-            anyhow::bail!("client stream closed");
-        }
-        // WebSocket layer takes the bytes from the mpsc; we model that as
-        // Visible. FinalDelivered happens at finish() when the consumer
-        // has had a chance to drain.
+        self.bus.lock().push_event(event);
         self.status = crate::channels::StreamDelivery::Visible;
         Ok(self.status)
     }
@@ -825,31 +957,30 @@ impl crate::channels::TurnStream for ClientTurnStream {
     }
 
     async fn finish(mut self: Box<Self>) -> crate::channels::StreamDelivery {
-        // ClientChannel ack semantics: once we've handed the bytes to the
-        // mpsc and the WS forwarder runs, the consumer has the data.
-        // Treat that as FinalDelivered.
         self.finished = true;
         self.status = crate::channels::StreamDelivery::FinalDelivered;
+        let mut bus = self.bus.lock();
+        bus.turn_active = false;
         self.status
     }
 
     async fn abort(mut self: Box<Self>) {
         self.finished = true;
-        self.cancel.cancel();
+        self.bus.lock().cancel.cancel();
     }
 
     fn cancel_token(&self) -> Option<CancellationToken> {
-        Some(self.cancel.clone())
+        Some(self.bus.lock().cancel.clone())
     }
 }
 
-// Drop-based safety net (RFC §7.6.5(b)): if a TurnStream is dropped
-// without finish/abort (panic, accidental field overwrite), cancel the
-// transport so the consumer isn't left hanging.
+// Drop-based safety net: if a TurnStream is dropped without finish/abort
+// (panic, accidental field overwrite), cancel the turn so Agent::run stops.
+// The bus itself survives — only the cancel token fires.
 impl Drop for ClientTurnStream {
     fn drop(&mut self) {
         if !self.finished {
-            self.cancel.cancel();
+            self.bus.lock().cancel.cancel();
         }
     }
 }
