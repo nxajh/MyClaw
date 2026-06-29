@@ -300,8 +300,11 @@ function AudioFileCard({ path, name }: { path: string; name?: string }) {
         const res = await (window as any).myclawRequest?.('file.read', { path }) as { data?: string; mime?: string } | undefined
         if (res?.data) {
           const mimeStr = res.mime || 'audio/mpeg'
-          const dataUrl = `data:${mimeStr};base64,${res.data}`
-          const blobUrl = dataUrlToBlobUrl(dataUrl)
+          const bin = atob(res.data)
+          const bytes = new Uint8Array(bin.length)
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+          const blob = new Blob([bytes], { type: mimeStr })
+          const blobUrl = URL.createObjectURL(blob)
           imageCache.set(path, blobUrl)
           setSrc(blobUrl)
         } else { setError(true) }
@@ -324,18 +327,24 @@ function AudioFileCard({ path, name }: { path: string; name?: string }) {
 function VideoFileCard({ path, name }: { path: string; name?: string }) {
   const [src, setSrc] = useState<string | null>(() => imageCache.get(path) ?? null)
   const [error, setError] = useState(false)
+  const [fileSize, setFileSize] = useState<number | null>(null)
 
   useEffect(() => {
     if (imageCache.has(path)) { setSrc(imageCache.get(path)!); return }
     const fetchFile = async () => {
       try {
-        const res = await (window as any).myclawRequest?.('file.read', { path }) as { data?: string; mime?: string } | undefined
+        const res = await (window as any).myclawRequest?.('file.read', { path }) as { data?: string; mime?: string; size?: number } | undefined
         if (res?.data) {
           const mimeStr = res.mime || 'video/mp4'
-          const dataUrl = `data:${mimeStr};base64,${res.data}`
-          const blobUrl = dataUrlToBlobUrl(dataUrl)
+          // Use Blob URL instead of data URL for better video playback.
+          const bin = atob(res.data)
+          const bytes = new Uint8Array(bin.length)
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+          const blob = new Blob([bytes], { type: mimeStr })
+          const blobUrl = URL.createObjectURL(blob)
           imageCache.set(path, blobUrl)
           setSrc(blobUrl)
+          setFileSize(res.size ?? null)
         } else { setError(true) }
       } catch { setError(true) }
     }
@@ -343,15 +352,26 @@ function VideoFileCard({ path, name }: { path: string; name?: string }) {
   }, [path])
 
   if (error) return <div className="text-xs text-zinc-600 italic">🎬 {name || 'Video unavailable'}</div>
-  if (!src) return <div className="w-48 h-32 rounded-lg bg-zinc-800 border border-zinc-700 animate-pulse" />
+  if (!src) return (
+    <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-zinc-800/60 border border-zinc-700">
+      <div className="h-4 w-4 border-2 border-zinc-600 border-t-zinc-300 rounded-full animate-spin" />
+      <span className="text-xs text-zinc-500">Loading video{name ? `: ${name}` : ''}…</span>
+    </div>
+  )
 
   return (
-    <video
-      controls
-      src={src}
-      className="max-w-full max-h-48 sm:max-h-64 lg:max-h-80 rounded-lg border border-zinc-700"
-      preload="metadata"
-    />
+    <div className="flex flex-col gap-1">
+      <video
+        controls
+        src={src}
+        className="max-w-full max-h-48 sm:max-h-64 lg:max-h-80 rounded-lg border border-zinc-700"
+        preload="metadata"
+      />
+      <div className="flex items-center gap-2 text-[10px] text-zinc-600">
+        <span className="truncate">{name || 'Video'}</span>
+        {fileSize != null && <span>({(fileSize / 1048576).toFixed(1)} MB)</span>}
+      </div>
+    </div>
   )
 }
 

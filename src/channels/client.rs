@@ -1347,7 +1347,7 @@ fn handle_api_request(
                             serde_json::json!({
                                 "type": "api_response",
                                 "id": id,
-                                "result": { "path": rel_path, "data": b64, "mime": mime }
+                                "result": { "path": rel_path, "data": b64, "mime": mime, "size": bytes.len() }
                             }).to_string()
                         }
                         Err(e) => serde_json::json!({
