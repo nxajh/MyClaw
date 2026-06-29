@@ -141,7 +141,9 @@ impl SessionOutputBus {
 
 /// A single connected client.
 struct ClientConnection {
-    /// WebSocket sender (clone of the split sink, wrapped as mpsc for simplicity).
+    /// WebSocket sender — kept for the outgoing forwarder task but no longer
+    /// read by send_message (which routes through session_buses instead).
+    #[allow(dead_code)]
     ws_sender: mpsc::Sender<String>,
     /// Current active session key for this connection.
     #[allow(dead_code)]
