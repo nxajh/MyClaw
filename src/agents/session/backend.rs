@@ -269,6 +269,13 @@ pub trait PersistHook: Send + Sync {
     /// Truncate message history to keep only the first `keep_count` messages.
     /// Used for rollback when a turn fails completely.
     fn truncate_messages(&self, session_id: &str, keep_count: usize);
+    /// Update (replace) an existing message by its backend ID.
+    /// Used by media aging to replace inline File parts with text markers
+    /// after the model has processed them in the current turn.
+    fn update_message(&self, session_id: &str, message_id: i64, message: &ChatMessage) -> bool {
+        let _ = (session_id, message_id, message);
+        false
+    }
 }
 
 /// PersistHook implementation backed by a SessionBackend.
@@ -348,6 +355,22 @@ impl PersistHook for BackendPersistHook {
     fn truncate_messages(&self, session_id: &str, keep_count: usize) {
         if let Err(e) = self.backend.truncate_messages(session_id, keep_count) {
             tracing::warn!(session = %session_id, err = %e, "truncate messages failed");
+        }
+    }
+
+    fn update_message(&self, session_id: &str, message_id: i64, message: &ChatMessage) -> bool {
+        match self.backend.update_message(session_id, message_id, message) {
+            Ok(true) => true,
+            Ok(false) => false,
+            Err(e) => {
+                tracing::warn!(
+                    session = %session_id,
+                    message_id,
+                    err = %e,
+                    "update_message failed"
+                );
+                false
+            }
         }
     }
 }

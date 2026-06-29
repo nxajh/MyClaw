@@ -133,6 +133,31 @@ pub fn marker_for_file(path: &str, mime: Option<&str>) -> String {
     }
 }
 
+/// Age media in a message: replace all `File` parts with compact text markers.
+///
+/// Called after a turn completes so that subsequent turns don't re-upload
+/// potentially large media payloads the model has already seen. The marker
+/// preserves the file path so the agent can still reference it (e.g. via
+/// `view_video` / `view_image` / `hear_audio` tools) if the user asks again.
+///
+/// Returns `true` if any part was changed.
+pub fn age_media_in_message(msg: &mut ChatMessage) -> bool {
+    let mut changed = false;
+    for part in &mut msg.parts {
+        if let ContentPart::File {
+            ref path,
+            ref mime_type,
+            ..
+        } = part
+        {
+            let marker = marker_for_file(path, mime_type.as_deref());
+            *part = ContentPart::Text { text: marker };
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Infer MIME type from file name extension. Returns `None` if unknown.
 pub fn infer_mime_from_name(file_name: &str) -> Option<String> {
     let ext = file_name

@@ -274,6 +274,21 @@ impl SessionContext {
 
         match (result, turn_stream) {
             (Ok(turn_result), stream) => {
+                // ── Media aging ────────────────────────────────────────────
+                // After the model has seen the media in this turn, replace
+                // inline File parts in history with compact text markers so
+                // subsequent turns don't re-upload large payloads (the root
+                // cause of 300s API timeouts with big videos).
+                //
+                // Skip when the turn ended with ContextOverflow — the model
+                // never successfully processed the request, so we want the
+                // media to remain inline for the retry / compaction path.
+                if turn_result.stop_reason
+                    != crate::providers::StopReason::ContextOverflow
+                {
+                    age_session_media(&mut session, persist_hook.as_deref());
+                }
+
                 if let Some(ref retry_msg) = turn_result.pending_retry {
                     *self.pending_retry.lock().await = Some(retry_msg.clone());
                 }
@@ -340,6 +355,35 @@ impl SessionContext {
                     "Agent turn failed"
                 );
                 Err(e)
+            }
+        }
+    }
+}
+
+/// Replace inline `File` parts in session history with text markers and
+/// persist the aged versions to the backend.
+///
+/// Iterates all user messages; after the first successful aging pass on a
+/// session, subsequent turns find only markers (idempotent). Each changed
+/// message is persisted via `PersistHook::update_message` so the aging
+/// survives session reloads.
+fn age_session_media(session: &mut Session, hook: Option<&dyn crate::agents::PersistHook>) {
+    use crate::providers::media::age_media_in_message;
+
+    let session_id = session.id.clone();
+    for i in 0..session.history.len() {
+        // Only age user messages — assistant messages don't carry File parts.
+        if session.history[i].role != "user" {
+            continue;
+        }
+        if !age_media_in_message(&mut session.history[i]) {
+            continue;
+        }
+        let msg_id = session.message_ids.get(i).copied().unwrap_or(0);
+        if msg_id > 0 {
+            if let Some(hook) = hook {
+                let aged = &session.history[i];
+                hook.update_message(&session_id, msg_id, aged);
             }
         }
     }

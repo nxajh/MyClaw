@@ -544,6 +544,36 @@ impl SessionBackend for JsonFileBackend {
         Ok(true)
     }
 
+    fn update_message(
+        &self,
+        session_id: &str,
+        message_id: i64,
+        message: &ChatMessage,
+    ) -> std::io::Result<bool> {
+        let path = self.history_path(session_id);
+        let Ok(content) = fs::read_to_string(&path) else {
+            return Ok(false);
+        };
+
+        let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+        let idx = (message_id - 1) as usize;
+        if idx >= lines.len() {
+            return Ok(false);
+        }
+        let externalized = self.externalize(session_id, message)?;
+        let json = serde_json::to_string(&externalized).map_err(std::io::Error::other)?;
+        lines[idx] = json;
+
+        fs::write(&path, lines.join("\n") + "\n")?;
+
+        if let Some(mut meta) = self.read_meta(session_id) {
+            meta.last_activity = Utc::now();
+            let _ = self.write_meta(&meta);
+        }
+
+        Ok(true)
+    }
+
     fn truncate_messages(&self, session_id: &str, keep_count: usize) -> std::io::Result<()> {
         let path = self.history_path(session_id);
         let content = fs::read_to_string(&path)?;

@@ -205,6 +205,19 @@ pub trait SessionBackend: Send + Sync {
         Ok(false)
     }
 
+    /// Update (replace) an existing message by its 1-based line ID.
+    /// Used by media aging to replace inline `File` parts with text markers
+    /// after the model has already processed the media in the current turn.
+    /// Default: no-op (backends that don't support in-place updates).
+    fn update_message(
+        &self,
+        _session_id: &str,
+        _message_id: i64,
+        _message: &ChatMessage,
+    ) -> std::io::Result<bool> {
+        Ok(false)
+    }
+
     /// Truncate message history to keep only the first `keep_count` messages.
     /// Used for rollback when a turn fails completely (e.g. empty LLM response).
     /// Default: no-op (in-memory backend truncates in `Session::rollback_to`).

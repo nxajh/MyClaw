@@ -65,7 +65,7 @@ pub use google::GoogleProvider;
 pub use kimi::KimiProvider;
 pub use media::{
     MediaCaps, MediaInputPolicy, MediaLoweringProvider, MediaPolicy, MediaTransport, audio_marker,
-    image_marker, lower_media_for,
+    image_marker, lower_media_for, age_media_in_message,
 };
 pub use minimax::MiniMaxProvider;
 pub use openai::OpenAiProvider;
