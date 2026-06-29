@@ -1341,6 +1341,12 @@ fn handle_api_request(
                                 "wav" => "audio/wav",
                                 "mp4" => "video/mp4",
                                 "webm" => "video/webm",
+                                "mov" => "video/quicktime",
+                                "mkv" => "video/x-matroska",
+                                "avi" => "video/x-msvideo",
+                                "flac" => "audio/flac",
+                                "m4a" => "audio/m4a",
+                                "aac" => "audio/aac",
                                 "pdf" => "application/pdf",
                                 _ => "application/octet-stream",
                             };
