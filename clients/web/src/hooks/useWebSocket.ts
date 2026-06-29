@@ -526,8 +526,30 @@ export function useWebSocket() {
     connect()
     // Keep-alive ping every 30 s
     const interval = setInterval(ping, 30_000)
+
+    // When the tab comes back to the foreground, reconnect immediately
+    // instead of waiting for the next throttled timer tick.
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        const ws = wsRef.current
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          // Reset backoff so we reconnect instantly.
+          reconnectAttempts.current = 0
+          if (reconnectTimer.current) {
+            clearTimeout(reconnectTimer.current)
+            reconnectTimer.current = null
+          }
+          connect()
+        }
+      }
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    window.addEventListener('focus', onVisibilityChange)
+
     return () => {
       clearInterval(interval)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      window.removeEventListener('focus', onVisibilityChange)
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
       if (pongTimeoutTimer.current) clearTimeout(pongTimeoutTimer.current)
       if (flushRafRef.current) cancelAnimationFrame(flushRafRef.current)
