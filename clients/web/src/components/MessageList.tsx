@@ -507,18 +507,19 @@ function FileCard({ path, mime, name }: { path: string; mime?: string; name?: st
     setLoading(true)
     try {
       let blobUrl = imageCache.get(path)
+      let resolvedMime = mime || 'application/octet-stream'
       if (!blobUrl) {
         const res = await (window as any).myclawRequest?.('file.read', { path }) as { data?: string; mime?: string } | undefined
         if (!res?.data) return
-        const mimeStr = res.mime || mime || 'application/octet-stream'
+        resolvedMime = res.mime || mime || 'application/octet-stream'
         const bin = atob(res.data)
         const bytes = new Uint8Array(bin.length)
         for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-        const blob = new Blob([bytes], { type: mimeStr })
+        const blob = new Blob([bytes], { type: resolvedMime })
         blobUrl = URL.createObjectURL(blob)
         imageCache.set(path, blobUrl)
       }
-      previewCtx.open({ src: blobUrl, mime: mime || 'application/octet-stream', name: name || 'file' })
+      previewCtx.open({ src: blobUrl, mime: resolvedMime, name: name || 'file' })
     } finally { setLoading(false) }
   }
 
