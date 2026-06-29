@@ -61,6 +61,14 @@ impl Agent {
         // Resolve filtered tool view from runtime + per-agent config.
         let mut allowed_tools = self.allowed_tools(runtime);
         filter_turn_scoped_tools(&mut allowed_tools, session);
+        // When the model natively supports a media modality (image, audio,
+        // video), drop the corresponding retrieval tool so the model uses its
+        // own understanding instead of routing through a tool call.
+        filter_modality_redundant_tools(
+            &mut allowed_tools,
+            turn_ctx.model_id,
+            runtime,
+        );
         // Convert capability_tool::ToolSpec → capability_chat::ToolSpec
         // (the LLM request type). Same fields, different module homes —
         // a unification candidate for a separate cleanup.
@@ -85,11 +93,27 @@ impl Agent {
         //   below on the SAME chosen model. We intentionally do NOT fall back
         //   to a different model — the user picked this one.
         let (provider, model_id) = match turn_ctx.model_id {
-            Some(m) => runtime
-                .providers
-                .get_chat_provider_by_model(m)
-                .ok_or_else(|| anyhow::anyhow!("model '{}' not found in registry", m))?,
-            None => runtime.providers.get_chat_provider(Capability::Chat)?,
+            Some(m) => {
+                let result = runtime
+                    .providers
+                    .get_chat_provider_by_model(m)
+                    .ok_or_else(|| anyhow::anyhow!("model '{}' not found in registry", m))?;
+                tracing::info!(
+                    model = %result.1,
+                    reason = "session_override",
+                    "model resolved"
+                );
+                result
+            }
+            None => {
+                let result = runtime.providers.get_chat_provider(Capability::Chat)?;
+                tracing::info!(
+                    model = %result.1,
+                    reason = "routing_default",
+                    "model resolved"
+                );
+                result
+            }
         };
 
         // Shared ToolExecutor singleton — per the target architecture,
@@ -607,18 +631,79 @@ fn filter_turn_scoped_tools(
     allowed_tools: &mut Vec<Arc<dyn crate::providers::Tool>>,
     session: &Session,
 ) {
-    allowed_tools.retain(|tool| match tool.name() {
-        "send_message" => {
-            let Some(channel) = session.channel.as_ref() else {
-                return false;
-            };
-            let has_receiver = session.reply_target().is_some();
-            let has_text_send = has_receiver;
-            let has_file_send = channel.capabilities().supports_file_send;
-            has_text_send || has_file_send
+    allowed_tools.retain(|tool| {
+        let keep = match tool.name() {
+            "send_message" => {
+                let Some(channel) = session.channel.as_ref() else {
+                    return false;
+                };
+                let has_receiver = session.reply_target().is_some();
+                let has_text_send = has_receiver;
+                let has_file_send = channel.capabilities().supports_file_send;
+                has_text_send || has_file_send
+            }
+            "send_media" => false,
+            _ => true,
+        };
+        if !keep {
+            tracing::debug!(
+                tool = tool.name(),
+                session = %session.id,
+                "filter_turn_scoped_tools: dropped"
+            );
         }
-        "send_media" => false,
-        _ => true,
+        keep
+    });
+}
+
+/// Remove media-retrieval tools (`view_video`, `view_image`, `hear_audio`)
+/// when the model that will handle the request natively supports that input
+/// modality. This prevents the model from choosing a tool call over inline
+/// content analysis.
+///
+/// - With an override: that model's capabilities determine the filter.
+/// - Without override: the primary model in the routing chain is used. On
+///   transient failure the FallbackChatProvider may retry with a different
+///   model — acceptable trade-off vs. always keeping redundant tools.
+fn filter_modality_redundant_tools(
+    allowed_tools: &mut Vec<Arc<dyn crate::providers::Tool>>,
+    model_override: Option<&str>,
+    runtime: &AgentRuntime,
+) {
+    use crate::providers::capability::Modality;
+
+    // Resolve the model that will handle this request.
+    let model_id = match model_override {
+        Some(m) => m.to_string(),
+        None => {
+            let models = runtime.providers.get_chat_routing_models();
+            match models.into_iter().next() {
+                Some(m) => m,
+                None => return,
+            }
+        }
+    };
+
+    let cfg = match runtime.providers.get_chat_model_config(&model_id) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    allowed_tools.retain(|tool| {
+        let drop = match tool.name() {
+            "view_video" => cfg.supports_input(Modality::Video),
+            "view_image" => cfg.supports_input(Modality::Image),
+            "hear_audio" => cfg.supports_input(Modality::Audio),
+            _ => false,
+        };
+        if drop {
+            tracing::info!(
+                model = %model_id,
+                tool = tool.name(),
+                "filter_modality_redundant_tools: dropping tool, model supports modality natively"
+            );
+        }
+        !drop
     });
 }
 
@@ -1158,6 +1243,18 @@ async fn collect_stream(
             StreamEvent::Error(e) => anyhow::bail!("stream error: {}", e),
         }
     };
+
+    // Log complete tool calls for debugging (not just SSE deltas).
+    if !tool_calls.is_empty() {
+        for tc in &tool_calls {
+            tracing::info!(
+                tool_call_id = %tc.id,
+                name = %tc.name,
+                arguments = %tc.arguments,
+                "tool call complete"
+            );
+        }
+    }
 
     Ok(CollectedResponse {
         text,

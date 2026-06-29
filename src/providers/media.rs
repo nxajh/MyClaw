@@ -379,13 +379,20 @@ fn lower_file_part(
     size_bytes: Option<u64>,
     policy: MediaPolicy,
 ) -> ContentPart {
-    let supported = match modality_from_mime(mime_type.as_deref(), &path) {
+    let modality = modality_from_mime(mime_type.as_deref(), &path);
+    let supported = match modality {
         FileModality::Image => policy.image.can_inline(size_bytes),
         FileModality::Audio => policy.audio.can_inline(size_bytes),
         FileModality::Video => policy.video.can_inline(size_bytes),
         FileModality::Other => policy.other.can_inline(size_bytes),
     };
     if supported {
+        tracing::debug!(
+            path = %path,
+            modality = ?modality,
+            size_bytes,
+            "lower_file_part: keeping inline"
+        );
         ContentPart::File {
             path,
             mime_type,
@@ -393,8 +400,16 @@ fn lower_file_part(
             size_bytes,
         }
     } else {
+        let marker = marker_for_file(&path, mime_type.as_deref());
+        tracing::info!(
+            path = %path,
+            modality = ?modality,
+            size_bytes,
+            marker = %marker,
+            "lower_file_part: converting to text marker (exceeds policy or unsupported)"
+        );
         ContentPart::Text {
-            text: marker_for_file(&path, mime_type.as_deref()),
+            text: marker,
         }
     }
 }

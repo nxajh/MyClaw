@@ -150,6 +150,43 @@ pub fn render_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
         })
         .collect();
 
+    // Log a content-type summary for debugging media handling.
+    {
+        let mut summaries = Vec::new();
+        for msg in req.messages {
+            let mut kinds = Vec::new();
+            for part in &msg.parts {
+                match part {
+                    ContentPart::Text { text } => {
+                        let preview: String = text.chars().take(40).collect();
+                        kinds.push(format!("text({})", preview));
+                    }
+                    ContentPart::File { mime_type, size_bytes, path, .. } => {
+                        let modality = crate::providers::media::modality_from_mime(mime_type.as_deref(), path);
+                        let label = match modality {
+                            crate::providers::media::FileModality::Image => "image",
+                            crate::providers::media::FileModality::Audio => "audio",
+                            crate::providers::media::FileModality::Video => "video",
+                            crate::providers::media::FileModality::Other => "file",
+                        };
+                        let mb = size_bytes.map(|b| format!("{:.1}MB", b as f64 / 1048576.0)).unwrap_or_default();
+                        kinds.push(format!("{}({})", label, mb));
+                    }
+                    ContentPart::Thinking { .. } => kinds.push("thinking".to_string()),
+                }
+            }
+            if !kinds.is_empty() {
+                summaries.push(format!("{}:[{}]", msg.role, kinds.join(",")));
+            }
+        }
+        tracing::info!(
+            model = req.model,
+            msg_count = req.messages.len(),
+            content = %summaries.join(" | "),
+            "render_openai_chat_body: content summary"
+        );
+    }
+
     let mut body = json!({
         "model": req.model,
         "messages": messages,
