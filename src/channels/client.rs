@@ -128,7 +128,7 @@ impl SessionOutputBus {
     /// If subscriber is online, forwards immediately; else queues for replay.
     fn push_message(&mut self, json: String) {
         if let Some(ref tx) = self.ws_sender {
-            if tx.try_send(json).is_ok() {
+            if tx.try_send(json.clone()).is_ok() {
                 return;
             }
             // Channel full — fall through to queue
@@ -650,7 +650,7 @@ impl ClientChannel {
                                                 .get()
                                                 .and_then(|sm| sm.active_session_id(&fwd_api_user))
                                                 .unwrap_or_default();
-                                            {
+                                            let replay_data = {
                                                 let bus = {
                                                     let mut buses = session_buses_clone.write();
                                                     buses.entry(session_key_clone.clone())
@@ -660,19 +660,22 @@ impl ClientChannel {
                                                 let mut bg = bus.lock();
                                                 if bg.ws_sender.is_none() {
                                                     bg.subscribe(ws_sender.clone(), fwd_session_id.clone());
-                                                    let queued = bg.drain_messages();
-                                                    let events = bg.drain_events();
-                                                    drop(bg);
-                                                    for msg_json in queued {
-                                                        let _ = ws_sender.send(msg_json).await;
+                                                    Some((bg.drain_messages(), bg.drain_events()))
+                                                } else {
+                                                    None
+                                                }
+                                                // bg dropped here, before any .await
+                                            };
+                                            if let Some((queued, events)) = replay_data {
+                                                for msg_json in queued {
+                                                    let _ = ws_sender.send(msg_json).await;
+                                                }
+                                                for event in events {
+                                                    let mut jv = serde_json::to_value(&event).unwrap_or_default();
+                                                    if let serde_json::Value::Object(ref mut map) = jv {
+                                                        map.insert("session_id".to_string(), serde_json::Value::String(fwd_session_id.clone()));
                                                     }
-                                                    for event in events {
-                                                        let mut jv = serde_json::to_value(&event).unwrap_or_default();
-                                                        if let serde_json::Value::Object(ref mut map) = jv {
-                                                            map.insert("session_id".to_string(), serde_json::Value::String(fwd_session_id.clone()));
-                                                        }
-                                                        let _ = ws_sender.send(jv.to_string()).await;
-                                                    }
+                                                    let _ = ws_sender.send(jv.to_string()).await;
                                                 }
                                             }
 
