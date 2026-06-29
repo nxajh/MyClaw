@@ -2,7 +2,8 @@ import { useEffect, useState, useCallback, useMemo } from 'react'
 import { Save, RotateCcw, Loader2, AlertTriangle, Settings, Code, FileText, Globe } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useApi } from '../lib/api'
-import { ErrorBanner, LoadingRow, btnPrimary, btnGhost, inputCls } from '../components/PageLayout'
+import { useToast } from '../components/Toast'
+import { ErrorBanner, LoadingRow, btnPrimary, btnGhost, btnDanger, inputCls } from '../components/PageLayout'
 
 interface ConfigMeta {
   tool_count: number
@@ -23,6 +24,7 @@ const PORT_REG = /^port\s*=\s*(\d+)/m
 export default function Config() {
   const { status, sendRaw, addMessageListener } = useWebSocketContext()
   const { request } = useApi(sendRaw, addMessageListener)
+  const { toast } = useToast()
   const [meta, setMeta] = useState<ConfigMeta | null>(null)
   const [raw, setRaw] = useState<RawConfig | null>(null)
   const [draft, setDraft] = useState('')
@@ -63,25 +65,39 @@ export default function Config() {
       // Keep dirty state clean on successful save
       setRaw(prev => prev ? { ...prev, content: draft } : prev)
       setSaved(true)
+      toast('Configuration saved successfully', 'success')
       setTimeout(() => setSaved(false), 3000)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
+      toast('Failed to save config', 'error')
     } finally {
       setSaving(false)
     }
   }, [request, draft])
 
+  const [confirmRestart, setConfirmRestart] = useState(false)
+
+  // Auto-reset confirm state after 5 seconds
+  useEffect(() => {
+    if (!confirmRestart) return
+    const timer = setTimeout(() => setConfirmRestart(false), 5000)
+    return () => clearTimeout(timer)
+  }, [confirmRestart])
+
   const handleRestart = useCallback(async () => {
+    if (!confirmRestart) { setConfirmRestart(true); return }
+    setConfirmRestart(false)
     setRestarting(true)
     setError(null)
     try {
       await request('daemon.restart')
+      toast('Restart signal sent', 'info')
     } catch {
       // Expected — connection may close before response.
     } finally {
       setTimeout(() => setRestarting(false), 5000)
     }
-  }, [request])
+  }, [request, confirmRestart, toast])
 
   useEffect(() => { if (status === 'connected') fetchAll() }, [status, fetchAll])
 
@@ -178,11 +194,11 @@ export default function Config() {
               <button
                 onClick={handleRestart}
                 disabled={restarting || status !== 'connected'}
-                className={btnGhost}
+                className={confirmRestart ? btnDanger : btnGhost}
                 title="Save first, then restart to apply changes"
               >
                 {restarting ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />}
-                Restart
+                {confirmRestart ? 'Confirm Restart?' : 'Restart'}
               </button>
             </div>
           </div>

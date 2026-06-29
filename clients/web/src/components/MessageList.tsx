@@ -53,7 +53,7 @@ function PreCodeBlock({ children, className }: { children: ReactNode; className?
     <div className="relative group/code my-4 overflow-hidden rounded-xl border border-zinc-850 bg-zinc-950 shadow-md">
       <div className="flex items-center justify-between px-4 py-1.5 border-b border-zinc-900 bg-zinc-900/40 text-[10px] text-zinc-500 font-mono select-none">
         <span>{lang || 'code'}</span>
-        <button onClick={handleCopy} className="flex items-center gap-1 px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-850 hover:text-zinc-200 border border-zinc-800/60 opacity-60 group-hover/code:opacity-100 transition-opacity">
+        <button onClick={handleCopy} className="flex items-center gap-1 px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-850 hover:text-zinc-200 border border-zinc-800/60 transition-opacity sm:opacity-60 sm:group-hover/code:opacity-100">
           {copied ? <><Check size={10} className="text-emerald-400" /><span className="text-emerald-400">Copied</span></> : <><Copy size={10} /><span>Copy</span></>}
         </button>
       </div>
@@ -76,13 +76,27 @@ function GeneratingDots() {
 
 // ── Thinking block with throttled updates ────────────────────────────────
 
-function ThinkingBlock({ text, defaultOpen }: { text: string; defaultOpen?: boolean }) {
-  const [open, setOpen] = useState(defaultOpen ?? false)
+function ThinkingBlock({ text, isStreaming }: { text: string; isStreaming?: boolean }) {
+  const [open, setOpen] = useState(false)
   const [displayText, setDisplayText] = useState(text)
   const rafRef = useRef<number | null>(null)
   const pendingTextRef = useRef(text)
+  const userToggled = useRef(false)
 
-  useEffect(() => { if (defaultOpen) setOpen(true) }, [defaultOpen])
+  // While streaming, auto-open on first content if user hasn't interacted.
+  // When streaming ends, auto-collapse if user hasn't manually opened it.
+  useEffect(() => {
+    if (isStreaming && text && !userToggled.current) {
+      setOpen(true)
+    } else if (!isStreaming && !userToggled.current) {
+      setOpen(false)
+    }
+  }, [isStreaming, text])
+
+  const handleToggle = () => {
+    userToggled.current = true
+    setOpen(prev => !prev)
+  }
 
   useEffect(() => {
     pendingTextRef.current = text
@@ -97,8 +111,8 @@ function ThinkingBlock({ text, defaultOpen }: { text: string; defaultOpen?: bool
 
   return (
     <div className="rounded-xl border border-zinc-800 overflow-hidden text-[11px] sm:text-xs">
-      <button onClick={() => setOpen(!open)} className="w-full flex items-center gap-2 px-3.5 py-2.5 text-left text-zinc-500 hover:text-zinc-400 hover:bg-zinc-800/30 transition-colors">
-        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}<span>Thinking</span>
+      <button onClick={handleToggle} className="w-full flex items-center gap-2 px-3.5 py-2.5 text-left text-zinc-500 hover:text-zinc-400 hover:bg-zinc-800/30 transition-colors">
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}<span>Thinking{isStreaming ? '…' : ''}</span>
       </button>
       {open && (
         <div className="px-3.5 py-3 text-zinc-500 leading-5 border-t border-zinc-800 bg-zinc-900/40 prose prose-invert prose-sm max-w-none prose-p:my-1 prose-li:my-0 prose-code:text-zinc-400 prose-code:bg-zinc-800/60 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:text-[0.8em] prose-code:before:content-none prose-code:after:content-none prose-strong:text-zinc-400 prose-a:text-blue-400/70">
@@ -151,7 +165,7 @@ function ContentBlock({ text, done }: { text: string; done: boolean }) {
 
 function renderBlock(block: MessageBlock, index: number, isGenerating: boolean) {
   if (block.type === 'content') return <ContentBlock key={index} text={block.text} done={!isGenerating} />
-  if (block.type === 'thinking') return <ThinkingBlock key={index} text={block.text} defaultOpen={isGenerating} />
+  if (block.type === 'thinking') return <ThinkingBlock key={index} text={block.text} isStreaming={isGenerating} />
   return <ToolCallCard key={block.id} block={block} />
 }
 
@@ -506,15 +520,7 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
   }
 
   if (messages.length === 0) {
-    return (
-      <div ref={containerRef} className="flex-1 overflow-y-auto flex flex-col items-center justify-center gap-4 px-4 sm:px-6 text-center">
-        <div className="text-5xl select-none">🦀</div>
-        <div>
-          <h2 className="text-lg font-semibold text-zinc-200 mb-1">How can I help?</h2>
-          <p className="text-sm text-zinc-500 max-w-xs">Ask me anything — I can use tools, write code, search, and more.</p>
-        </div>
-      </div>
-    )
+    return <div ref={containerRef} className="flex-1 overflow-y-auto" />
   }
 
   const virtualItems = virtualizer.getVirtualItems()

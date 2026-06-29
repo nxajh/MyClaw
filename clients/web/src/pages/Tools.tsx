@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
 import { Wrench, BookOpen, Terminal, Copy, Check, Search, Cpu } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
+import { useToast } from '../components/Toast'
 import { ErrorBanner, LoadingRow, EmptyState } from '../components/PageLayout'
 
 interface Tool {
@@ -74,6 +75,7 @@ function generateToolSpec(tool: Tool): ToolSpec {
 
 export default function Tools() {
   const { status, request } = useWebSocketContext()
+  const { toast } = useToast()
   const [tools, setTools] = useState<Tool[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -133,6 +135,7 @@ export default function Tools() {
   const handleCopyExample = (exampleText: string) => {
     navigator.clipboard.writeText(exampleText)
     setCopied(true)
+    toast('JSON copied to clipboard', 'success')
     setTimeout(() => setCopied(false), 2000)
   }
 
@@ -172,7 +175,12 @@ export default function Tools() {
             {loading && <div className="px-2"><LoadingRow /></div>}
             {!loading && status !== 'connected' && <EmptyState>Waiting for sync…</EmptyState>}
             {!loading && status === 'connected' && filteredTools.length === 0 && (
-              <div className="text-center py-8 text-xs text-zinc-600">No tools registered</div>
+              <div className="text-center py-8 space-y-1">
+                <p className="text-xs text-zinc-600">{searchQuery ? `No tools match “${searchQuery}”` : 'No tools registered'}</p>
+                {searchQuery && (
+                  <button onClick={() => setSearchQuery('')} className="text-xs text-blue-400 hover:text-blue-300">Clear filter</button>
+                )}
+              </div>
             )}
             
             {!loading && filteredTools.length > 0 && (

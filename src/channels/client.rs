@@ -311,7 +311,16 @@ impl ClientChannel {
                         // so for Phase 1 we skip header-based auth and rely on
                         // the first message being an auth message, or accept
                         // connections from localhost only (bind defaults to 127.0.0.1).
-                        let ws_result = tokio_tungstenite::accept_async(stream).await;
+                        let ws_config = {
+                            let mut cfg = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
+                            cfg.max_message_size = Some(200 << 20); // 200 MiB
+                            cfg.max_frame_size = Some(64 << 20);    // 64 MiB
+                            cfg
+                        };
+                        let ws_result = tokio_tungstenite::accept_async_with_config(
+                            stream,
+                            Some(ws_config),
+                        ).await;
                         let ws_stream = match ws_result {
                             Ok(ws) => ws,
                             Err(e) => {

@@ -2,6 +2,7 @@ import { lazy, Suspense, useState, useEffect } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { WebSocketProvider } from './contexts/WebSocketContext'
 import { useWebSocketContext } from './contexts/WebSocketContext'
+import { ToastProvider } from './components/Toast'
 import Sidebar from './components/Sidebar'
 import LoginOverlay from './components/LoginOverlay'
 import CommandPalette from './components/CommandPalette'
@@ -32,12 +33,22 @@ function useIsMobile() {
   return isMobile
 }
 
+function DisconnectBanner() {
+  const { status } = useWebSocketContext()
+  if (status === 'connected') return null
+  return (
+    <div className="shrink-0 bg-amber-950/60 border-b border-amber-800/40 px-4 py-1.5 text-center text-xs text-amber-300 flex items-center justify-center gap-2">
+      <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
+      {status === 'connecting' ? 'Reconnecting…' : 'Disconnected — messages may not be delivered'}
+    </div>
+  )
+}
+
 function AppShell() {
   const { authFailed, authValidating, submitToken, status } = useWebSocketContext()
   const isMobile = useIsMobile()
 
   const hasStoredToken = !!localStorage.getItem(AUTH_TOKEN_KEY)
-  // Show login overlay when: auth failed, validating after submit, or no token stored
   const showLogin = authFailed || authValidating || (!hasStoredToken && status !== 'connected')
 
   return (
@@ -48,6 +59,7 @@ function AppShell() {
       <CommandPalette />
       <Sidebar />
       <main className={`flex-1 flex flex-col min-w-0 min-h-0 ${isMobile ? 'pt-12' : ''}`}>
+        <DisconnectBanner />
         <Suspense fallback={<PageLoader />}>
           <Routes>
             <Route path="/" element={<Chat />} />
@@ -66,8 +78,10 @@ function AppShell() {
 
 export default function App() {
   return (
-    <WebSocketProvider>
-      <AppShell />
-    </WebSocketProvider>
+    <ToastProvider>
+      <WebSocketProvider>
+        <AppShell />
+      </WebSocketProvider>
+    </ToastProvider>
   )
 }

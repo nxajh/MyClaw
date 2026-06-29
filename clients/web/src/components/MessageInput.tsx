@@ -17,7 +17,10 @@ interface PickedBinary { name: string; mime: string; dataUrl: string }
 
 const IMAGE_MAX = 10 * 1024 * 1024
 const TEXT_MAX = 256 * 1024
-const BINARY_MAX = 50 * 1024 * 1024
+const BINARY_MAX = 150 * 1024 * 1024
+// After base64 encoding, a file grows ~33%. WS server limit is 200MiB.
+// Keep raw file under 140MiB so base64 payload stays under ~186MiB.
+const BINARY_SEND_MAX = 140 * 1024 * 1024
 const ACCEPT = '*/*'
 
 export default function MessageInput({ onSend, onCancel, disabled, isGenerating }: Props) {
@@ -27,9 +30,19 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
   const [texts, setTexts] = useState<PickedText[]>([])
   const [binaries, setBinaries] = useState<PickedBinary[]>([])
   const [note, setNote] = useState<string | null>(null)
+  const noteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+
+  // Auto-clear note after 5 seconds
+  const clearNote = useCallback(() => {
+    if (noteTimerRef.current) clearTimeout(noteTimerRef.current)
+    noteTimerRef.current = setTimeout(() => setNote(null), 5000)
+  }, [])
+
+  // Cleanup timer on unmount
+  useEffect(() => () => { if (noteTimerRef.current) clearTimeout(noteTimerRef.current) }, [])
 
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault()
@@ -84,33 +97,41 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
   const handleFiles = useCallback((files: FileList | null) => {
     if (!files) return
     setNote(null)
+    let hasNote = false
     Array.from(files).forEach((file) => {
       const isImage = file.type.startsWith('image/')
       const isText = isTextMime(file.type) || isTextExt(file.name)
       if (isImage) {
-        if (file.size > IMAGE_MAX) { setNote(`${file.name} skipped (image > 10MB)`); return }
+        if (file.size > IMAGE_MAX) { setNote(`${file.name} skipped (image > 10MB)`); hasNote = true; return }
         const reader = new FileReader()
         reader.onload = () => setImages((p) => [...p, { name: file.name, dataUrl: reader.result as string }])
         reader.readAsDataURL(file)
       } else if (isText) {
-        if (file.size > TEXT_MAX) { setNote(`${file.name} skipped (file > 256KB)`); return }
+        if (file.size > TEXT_MAX) { setNote(`${file.name} skipped (file > 256KB)`); hasNote = true; return }
         const reader = new FileReader()
         reader.onload = () => setTexts((p) => [...p, { name: file.name, content: reader.result as string }])
         reader.readAsText(file)
       } else {
-        if (file.size > BINARY_MAX) { setNote(`${file.name} skipped (file > 50MB)`); return }
+        if (file.size > BINARY_MAX) { setNote(`${file.name} skipped (file > ${Math.round(BINARY_MAX / 1024 / 1024)}MB)`); hasNote = true; return }
         const reader = new FileReader()
         reader.onload = () => setBinaries((p) => [...p, { name: file.name, mime: file.type || 'application/octet-stream', dataUrl: reader.result as string }])
         reader.readAsDataURL(file)
       }
     })
-  }, [])
+    if (hasNote) clearNote()
+  }, [clearNote])
 
   // ── Send ──────────────────────────────────────────────────────────────────
   const handleSend = () => {
     const trimmed = text.trim()
     if (disabled) return
     if (!trimmed && images.length === 0 && texts.length === 0 && binaries.length === 0) return
+    // Check total base64 payload size before sending
+    const totalRaw = binaries.reduce((n, b) => n + b.dataUrl.length, 0)
+    if (totalRaw > BINARY_SEND_MAX * 4 / 3) {
+      setNote(`Total attachment size too large (>${Math.round(BINARY_SEND_MAX / 1024 / 1024)}MB raw). Try smaller files.`)
+      return
+    }
     const fileAttachments: FileAttachment[] = binaries.map((b) => {
       const b64 = b.dataUrl.split(',')[1] || b.dataUrl
       return { data: b64, mime_type: b.mime, file_name: b.name }

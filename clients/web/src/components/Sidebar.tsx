@@ -2,9 +2,10 @@ import { useState, useEffect } from 'react'
 import { NavLink } from 'react-router-dom'
 import {
   MessageSquare, Layers, Wrench, Sparkles, Brain, Settings,
-  PanelLeftClose, PanelLeftOpen, Menu, X,
+  PanelLeftClose, PanelLeftOpen, Menu, X, LogOut,
 } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
+import { AUTH_TOKEN_KEY } from '../hooks/useWebSocket'
 
 const links = [
   { to: '/', icon: MessageSquare, label: 'Chat' },
@@ -83,6 +84,12 @@ function DesktopSidebar({ collapsed, setCollapsed }: { collapsed: boolean; setCo
     status === 'connecting' ? 'shadow-[0_0_8px_rgba(251,191,36,0.6)] animate-pulse' :
     'shadow-[0_0_8px_rgba(248,113,113,0.6)]'
 
+  const handleLogout = () => {
+    if (!window.confirm('Log out? You will need to re-enter your access token.')) return
+    localStorage.removeItem(AUTH_TOKEN_KEY)
+    window.location.reload()
+  }
+
   return (
     <aside className={`${collapsed ? 'w-14' : 'w-56'} hidden md:flex flex-col shrink-0 bg-zinc-900 border-r border-zinc-800 transition-[width] duration-200 overflow-hidden`}>
       <div className="flex items-center h-14 px-3 border-b border-zinc-800 shrink-0">
@@ -103,6 +110,11 @@ function DesktopSidebar({ collapsed, setCollapsed }: { collapsed: boolean; setCo
       <div className={`flex items-center gap-2.5 px-4 py-3.5 border-t border-zinc-800 shrink-0 ${collapsed ? 'justify-center' : ''}`}>
         <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${statusBgColor} ${statusShadow}`} />
         {!collapsed && <span className={`text-[10px] font-semibold tracking-wide truncate uppercase ${statusColor}`}>{statusText}</span>}
+        {!collapsed && (
+          <button onClick={handleLogout} title="Log out" className="ml-auto p-1 rounded-md text-zinc-600 hover:text-red-400 hover:bg-zinc-800 transition-colors">
+            <LogOut size={13} />
+          </button>
+        )}
       </div>
     </aside>
   )
@@ -154,6 +166,9 @@ function MobileDrawer({ open, onClose }: { open: boolean; onClose: () => void })
         <div className="flex items-center gap-2.5 px-4 py-3.5 border-t border-zinc-800">
           <span className={`h-2 w-2 rounded-full ${statusBgColor}`} />
           <span className={`text-[11px] font-semibold tracking-wide uppercase ${statusColor}`}>{statusText}</span>
+          <button onClick={() => { onClose(); localStorage.removeItem(AUTH_TOKEN_KEY); window.location.reload() }} title="Log out" className="ml-auto p-1.5 rounded-md text-zinc-600 hover:text-red-400 hover:bg-zinc-800 transition-colors">
+            <LogOut size={14} />
+          </button>
         </div>
       </div>
     </div>

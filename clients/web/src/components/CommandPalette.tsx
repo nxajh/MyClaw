@@ -26,7 +26,7 @@ export default function CommandPalette() {
   const inputRef = useRef<HTMLInputElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
 
-  // Toggle Command Palette with Cmd+K / Ctrl+K
+  // Toggle Command Palette with Cmd+K / Ctrl+K, 'N' for new chat
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
@@ -34,11 +34,18 @@ export default function CommandPalette() {
         setIsOpen(prev => !prev)
       } else if (e.key === 'Escape') {
         setIsOpen(false)
+      } else if (e.key === 'n' && !e.metaKey && !e.ctrlKey && !isOpen) {
+        // Only trigger when not typing in an input and palette is closed
+        const tag = (e.target as HTMLElement)?.tagName
+        if (tag !== 'INPUT' && tag !== 'TEXTAREA' && !(e.target as HTMLElement)?.isContentEditable) {
+          e.preventDefault()
+          handleNewSession()
+        }
       }
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [])
+  }, [isOpen])
 
   // Auto-focus search input when opened
   useEffect(() => {

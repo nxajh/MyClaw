@@ -1,15 +1,25 @@
 import { useRef, useEffect, useCallback } from 'react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
+import { useToast } from '../components/Toast'
 import MessageList from '../components/MessageList'
 import MessageInput from '../components/MessageInput'
 import ChatHeader from '../components/ChatHeader'
 
+import type { SendOptions } from '../hooks/useWebSocket'
+
+const EXAMPLES = [
+  { icon: '💡', text: 'Explain async/await in Rust' },
+  { icon: '🔧', text: 'Write a Python script to rename files' },
+  { icon: '📚', text: 'Summarize the concept of closures' },
+  { icon: '🏗️', text: 'Design a REST API for a todo app' },
+]
+
 export default function Chat() {
   const { status, messages, isGenerating, sendMessage, cancel, reloadHistory } = useWebSocketContext()
+  const { toast } = useToast()
   const containerRef = useRef<HTMLDivElement>(null)
   const loadedFor = useRef<string | null>(null)
 
-  // Load the active session's history from the server once per connection.
   useEffect(() => {
     if (status === 'connected' && loadedFor.current !== 'connected' && !isGenerating) {
       loadedFor.current = 'connected'
@@ -19,7 +29,6 @@ export default function Chat() {
     }
   }, [status, isGenerating, reloadHistory])
 
-  // P1-1: Retry — resend the user message that preceded the last assistant reply.
   const handleRetry = useCallback(
     (userContent: string) => {
       if (isGenerating || status !== 'connected') return
@@ -28,12 +37,49 @@ export default function Chat() {
     [isGenerating, status, sendMessage],
   )
 
+  const handleSend = useCallback(
+    (text: string, opts?: SendOptions) => {
+      if (status !== 'connected') {
+        toast('Not connected — message not sent', 'error')
+        return
+      }
+      sendMessage(text, opts)
+    },
+    [status, sendMessage, toast],
+  )
+
+  const showEmpty = messages.length === 0 && status === 'connected' && !isGenerating
+
   return (
     <div className="flex flex-col h-full">
       <ChatHeader />
-      <MessageList messages={messages} containerRef={containerRef} onRetry={handleRetry} />
+      {showEmpty ? (
+        <div className="flex-1 overflow-y-auto">
+          <div className="max-w-2xl mx-auto px-3 sm:px-6 py-8 flex flex-col items-center justify-center min-h-full">
+            <div className="text-center mb-8">
+              <div className="text-4xl mb-3">🐾</div>
+              <h2 className="text-lg font-semibold text-zinc-200 mb-1">How can I help you today?</h2>
+              <p className="text-sm text-zinc-500">Ask anything — coding, writing, analysis, and more.</p>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 w-full max-w-lg">
+              {EXAMPLES.map((ex) => (
+                <button
+                  key={ex.text}
+                  onClick={() => handleSend(ex.text)}
+                  className="flex items-center gap-3 text-left rounded-xl border border-zinc-800 px-4 py-3 hover:bg-zinc-900 hover:border-zinc-700 transition-colors text-sm text-zinc-300"
+                >
+                  <span className="text-lg shrink-0">{ex.icon}</span>
+                  <span>{ex.text}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : (
+        <MessageList messages={messages} containerRef={containerRef} onRetry={handleRetry} />
+      )}
       <MessageInput
-        onSend={sendMessage}
+        onSend={handleSend}
         onCancel={cancel}
         disabled={status !== 'connected'}
         isGenerating={isGenerating}

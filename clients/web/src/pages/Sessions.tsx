@@ -1,7 +1,9 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
-import { Plus, Pencil, Trash2, Check, X, Loader2 } from 'lucide-react'
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { Plus, Pencil, Trash2, Check, X, Loader2, Search } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useApi } from '../lib/api'
+import { useToast } from '../components/Toast'
 import { ErrorBanner, LoadingRow, EmptyState, inputCls, btnPrimary } from '../components/PageLayout'
 
 interface Session {
@@ -130,11 +132,14 @@ function SessionRow({
 export default function Sessions() {
   const { status, sendRaw, addMessageListener, reloadHistory } = useWebSocketContext()
   const { request } = useApi(sendRaw, addMessageListener)
+  const { toast } = useToast()
+  const navigate = useNavigate()
   const [sessions, setSessions] = useState<Session[]>([])
   const [newName, setNewName] = useState('')
   const [loading, setLoading] = useState(false)
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [searchQuery, setSearchQuery] = useState('')
 
   const fetchSessions = useCallback(async () => {
     if (status !== 'connected') return
@@ -154,10 +159,13 @@ export default function Sessions() {
     setError(null)
     try {
       await request('sessions.create', { name: newName.trim() })
+      toast('Session created', 'success')
       setNewName('')
       await fetchSessions()
+      navigate('/')
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
+      toast('Failed to create session', 'error')
     } finally {
       setCreating(false)
     }
@@ -167,28 +175,44 @@ export default function Sessions() {
     setError(null)
     try {
       await request('sessions.switch', { id })
+      toast('Session switched', 'success')
       await reloadHistory()
       await fetchSessions()
-    } catch (err) { setError(err instanceof Error ? err.message : String(err)) }
-  }, [request, reloadHistory, fetchSessions])
+      navigate('/')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      toast('Failed to switch session', 'error') }
+  }, [request, reloadHistory, fetchSessions, navigate, toast])
 
   const handleRename = useCallback(async (id: string, name: string) => {
     setError(null)
     try {
       await request('sessions.rename', { id, name })
+      toast('Renamed', 'success')
       await fetchSessions()
-    } catch (err) { setError(err instanceof Error ? err.message : String(err)) }
-  }, [request, fetchSessions])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      toast('Failed to rename', 'error') }
+  }, [request, fetchSessions, toast])
 
   const handleDelete = useCallback(async (id: string) => {
     setError(null)
     try {
       await request('sessions.delete', { id })
+      toast('Session deleted', 'success')
       await fetchSessions()
-    } catch (err) { setError(err instanceof Error ? err.message : String(err)) }
-  }, [request, fetchSessions])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      toast('Failed to delete', 'error') }
+  }, [request, fetchSessions, toast])
 
   useEffect(() => { if (status === 'connected') fetchSessions() }, [status, fetchSessions])
+
+  const filteredSessions = useMemo(() => {
+    if (!searchQuery.trim()) return sessions
+    const q = searchQuery.toLowerCase()
+    return sessions.filter(s => s.name.toLowerCase().includes(q))
+  }, [sessions, searchQuery])
 
   return (
     <div className="flex flex-col h-full">
@@ -221,18 +245,33 @@ export default function Sessions() {
         <EmptyState>No sessions yet. Create one above.</EmptyState>
       )}
       {!loading && sessions.length > 0 && (
-        <div className="space-y-1.5">
-          {sessions.map((s) => (
-            <SessionRow
-              key={s.id}
-              session={s}
-              disabled={status !== 'connected'}
-              onSwitch={handleSwitch}
-              onRename={handleRename}
-              onDelete={handleDelete}
+        <>
+          {/* Search filter */}
+          <div className="relative">
+            <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600 pointer-events-none" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search sessions…"
+              className={`${inputCls} pl-9`}
             />
-          ))}
-        </div>
+          </div>
+          <div className="space-y-1.5">
+            {filteredSessions.length === 0 ? (
+              <EmptyState>No sessions match “{searchQuery}”</EmptyState>
+            ) : filteredSessions.map((s) => (
+              <SessionRow
+                key={s.id}
+                session={s}
+                disabled={status !== 'connected'}
+                onSwitch={handleSwitch}
+                onRename={handleRename}
+                onDelete={handleDelete}
+              />
+            ))}
+          </div>
+        </>
       )}
         </div>
       </div>

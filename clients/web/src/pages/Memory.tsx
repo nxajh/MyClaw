@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
 import { Plus, Loader2, Search, Tag, AlertTriangle } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
+import { useToast } from '../components/Toast'
 import { ErrorBanner, LoadingRow, EmptyState, btnPrimary } from '../components/PageLayout'
 import MemoryEditor from '../components/MemoryEditor'
 import MemoryViewer from '../components/MemoryViewer'
@@ -8,6 +9,7 @@ import { typeStyles, type MemoryFile } from '../lib/memoryUtils'
 
 export default function Memory() {
   const { status, request } = useWebSocketContext()
+  const { toast } = useToast()
   const [files, setFiles] = useState<MemoryFile[]>([])
   const [loadingList, setLoadingList] = useState(false)
   const [loadingFile, setLoadingFile] = useState(false)
@@ -74,25 +76,29 @@ export default function Memory() {
     setError(null)
     try {
       await request('memory.write', { name, content })
+      toast('Memory fact saved', 'success')
       await fetchFiles()
       setView({ mode: 'view', name, content })
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
+      toast('Failed to save memory', 'error')
     } finally {
       setSaving(false)
     }
-  }, [request, fetchFiles])
+  }, [request, fetchFiles, toast])
 
   const handleDelete = useCallback(async (name: string) => {
     setError(null)
     try {
       await request('memory.delete', { name })
+      toast('Memory fact deleted', 'success')
       setView({ mode: 'list' })
       await fetchFiles()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
+      toast('Failed to delete', 'error')
     }
-  }, [request, fetchFiles])
+  }, [request, fetchFiles, toast])
 
   useEffect(() => {
     if (status === 'connected') fetchFiles()
