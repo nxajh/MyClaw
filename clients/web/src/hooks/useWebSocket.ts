@@ -246,15 +246,9 @@ export function useWebSocket() {
   const handleServerMessage = useCallback((data: Record<string, unknown>) => {
     const type = data.type as string
 
-    // Filter stale stream events from a previous session.
-    // Stream events (chunk/thinking/tool_call/etc.) carry session_id
-    // injected by the server. If it doesn't match the active session,
-    // the user has switched away — silently discard the event.
-    const eventSessionId = data.session_id as string | undefined
-    if (eventSessionId && activeSessionIdRef.current && eventSessionId !== activeSessionIdRef.current) {
-      // Stale event from old session — ignore
-      return
-    }
+    // NOTE: session_id filtering intentionally removed — the server bus
+    // key is a routing identifier, not the session UUID the frontend tracks.
+    // The backend already ensures correct per-session event routing.
 
     switch (type) {
       case 'auth_ok': {
