@@ -1138,6 +1138,46 @@ fn handle_api_request(
             }
         }
 
+        "sessions.delete_message" => {
+            let session_id = match params["id"].as_str() {
+                Some(s) => s,
+                None => {
+                    return serde_json::json!({
+                        "type": "api_error",
+                        "id": id,
+                        "error": "missing id parameter"
+                    }).to_string();
+                }
+            };
+            let message_id = match params["message_id"].as_i64() {
+                Some(n) => n,
+                None => {
+                    return serde_json::json!({
+                        "type": "api_error",
+                        "id": id,
+                        "error": "missing message_id parameter"
+                    }).to_string();
+                }
+            };
+            match sm.backend().delete_message_by_id(session_id, message_id) {
+                Ok(true) => serde_json::json!({
+                    "type": "api_response",
+                    "id": id,
+                    "result": null
+                }).to_string(),
+                Ok(false) => serde_json::json!({
+                    "type": "api_error",
+                    "id": id,
+                    "error": "message not found"
+                }).to_string(),
+                Err(e) => serde_json::json!({
+                    "type": "api_error",
+                    "id": id,
+                    "error": format!("failed to delete message: {}", e)
+                }).to_string(),
+            }
+        }
+
         "sessions.rename" => {
             let session_id = match params["id"].as_str() {
                 Some(s) => s,

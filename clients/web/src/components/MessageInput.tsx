@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect, useCallback, type KeyboardEvent } from 'react'
-import { ArrowUp, Square, Paperclip, X, FileText, Image as ImageIcon, Film, Music, File } from 'lucide-react'
+import { ArrowUp, Square, Paperclip, X, FileText, Image as ImageIcon, Film, Music, File, Eye, EyeOff } from 'lucide-react'
+import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import type { SendOptions, FileAttachment } from '../hooks/useWebSocket'
 
@@ -30,6 +32,7 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
   const [texts, setTexts] = useState<PickedText[]>([])
   const [binaries, setBinaries] = useState<PickedBinary[]>([])
   const [note, setNote] = useState<string | null>(null)
+  const [previewMode, setPreviewMode] = useState(false)
   const noteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -257,6 +260,12 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
             </div>
           )}
 
+          {/* Textarea or Preview */}
+          {previewMode && text.trim() ? (
+            <div className="px-3 sm:px-4 pt-3 sm:pt-4 pb-14 min-h-[120px] max-h-[200px] overflow-y-auto prose prose-invert prose-sm max-w-none prose-p:my-1 prose-li:my-0 prose-code:text-zinc-400 prose-code:bg-zinc-800/60 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:text-[0.8em] prose-code:before:content-none prose-code:after:content-none prose-a:text-blue-400 prose-table:text-xs">
+              <Markdown remarkPlugins={[remarkGfm]}>{text}</Markdown>
+            </div>
+          ) : (
           <textarea
             ref={textareaRef}
             value={text}
@@ -275,6 +284,7 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
             className="w-full resize-none bg-transparent px-3 sm:px-4 pt-3 sm:pt-4 pb-14 text-sm sm:text-base text-zinc-100 placeholder-zinc-600 outline-none disabled:opacity-50 leading-relaxed"
             style={{ maxHeight: 200 }}
           />
+          )}
 
           {/* Toolbar inside box */}
           <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between">
@@ -295,6 +305,14 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
                 className="hidden"
                 onChange={(e) => { handleFiles(e.target.files); e.target.value = '' }}
               />
+              <button
+                onClick={() => setPreviewMode((v) => !v)}
+                disabled={disabled || !text.trim()}
+                className={`flex items-center justify-center h-8 w-8 rounded-lg transition-colors disabled:opacity-30 ${previewMode ? 'text-blue-400 bg-zinc-800' : 'text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800'}`}
+                title={previewMode ? 'Edit mode' : 'Preview Markdown'}
+              >
+                {previewMode ? <EyeOff size={15} /> : <Eye size={15} />}
+              </button>
               <span className="text-xs text-zinc-600 select-none">
                 {note ? <span className="text-amber-500">{note}</span>
                   : isGenerating ? 'Generating…'

@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { ChevronDown, Plus, Check, Cpu, Layers, Loader2 } from 'lucide-react'
+import { ChevronDown, Plus, Check, Cpu, Layers, Loader2, Download } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 
 interface Session { id: string; name: string; is_active?: boolean }
@@ -18,7 +18,7 @@ function useOutsideClose(onClose: () => void) {
 }
 
 export default function ChatHeader() {
-  const { status, request, reloadHistory, setActiveSessionId } = useWebSocketContext()
+  const { status, messages, request, reloadHistory, setActiveSessionId } = useWebSocketContext()
   const [sessions, setSessions] = useState<Session[]>([])
   const [models, setModels] = useState<ModelInfo[]>([])
   const [activeModel, setActiveModel] = useState<string | null>(null)
@@ -79,6 +79,31 @@ export default function ChatHeader() {
       await request('models.set', { model: id })
       await refresh()
     } finally { setBusy(false) }
+  }
+
+  const exportChat = () => {
+    const lines: string[] = [`# ${activeSession?.name ?? 'Chat Export'}`, '', `*Exported: ${new Date().toLocaleString()}*`, '']
+    for (const msg of messages) {
+      if (msg.role === 'user') {
+        lines.push('## 👤 User', '')
+        lines.push(msg.content, '')
+      } else {
+        lines.push('## 🦀 Assistant', '')
+        for (const block of msg.blocks) {
+          if (block.type === 'content') lines.push(block.text, '')
+          else if (block.type === 'thinking') lines.push('<details><summary>Thinking</summary>', '', block.text, '', '</details>', '')
+          else if (block.type === 'tool_call') lines.push(`> 🔧 Tool: \`${block.name}\``, '')
+        }
+      }
+      lines.push('---', '')
+    }
+    const blob = new Blob([lines.join('\n')], { type: 'text/markdown' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${(activeSession?.name ?? 'chat').replace(/[^a-zA-Z0-9_-]/g, '_')}.md`
+    document.body.appendChild(a); a.click(); document.body.removeChild(a)
+    URL.revokeObjectURL(url)
   }
 
   const btn = 'flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-xs text-zinc-300 hover:bg-zinc-800 border border-zinc-800 transition-colors disabled:opacity-50 min-w-0'
@@ -150,6 +175,16 @@ export default function ChatHeader() {
       </div>
 
       {busy && <Loader2 size={13} className="animate-spin text-zinc-600" />}
+
+      {/* Export button */}
+      <button
+        onClick={exportChat}
+        disabled={status !== 'connected' || messages.length === 0}
+        className={btn + ' ml-auto'}
+        title="Export chat as Markdown"
+      >
+        <Download size={13} />
+      </button>
     </header>
   )
 }

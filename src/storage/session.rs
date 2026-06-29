@@ -199,6 +199,12 @@ pub trait SessionBackend: Send + Sync {
     /// Remove the last message from a session.
     fn remove_last_message(&self, session_id: &str) -> std::io::Result<bool>;
 
+    /// Delete a specific message by its 1-based line ID.
+    fn delete_message_by_id(&self, session_id: &str, message_id: i64) -> std::io::Result<bool> {
+        let _ = (session_id, message_id);
+        Ok(false)
+    }
+
     /// Truncate message history to keep only the first `keep_count` messages.
     /// Used for rollback when a turn fails completely (e.g. empty LLM response).
     /// Default: no-op (in-memory backend truncates in `Session::rollback_to`).

@@ -4,8 +4,9 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeHighlight from 'rehype-highlight'
-import { ChevronDown, ChevronRight, Copy, Check, ArrowDown, RotateCcw } from 'lucide-react'
+import { ChevronDown, ChevronRight, Copy, Check, ArrowDown, RotateCcw, Search, X, Pencil, Trash2 } from 'lucide-react'
 import { useVirtualizer } from '@tanstack/react-virtual'
+import { useWebSocketContext } from '../contexts/WebSocketContext'
 import Lightbox from 'yet-another-react-lightbox'
 import Zoom from 'yet-another-react-lightbox/plugins/zoom'
 import Download from 'yet-another-react-lightbox/plugins/download'
@@ -139,7 +140,10 @@ function ContentBlock({ text, done }: { text: string; done: boolean }) {
 
   const proseClasses = `prose prose-invert prose-sm lg:prose-base max-w-none prose-p:leading-6 sm:prose-p:leading-7 prose-p:my-2 first:prose-p:mt-0 prose-headings:text-zinc-100 prose-headings:font-semibold prose-headings:mt-5 prose-headings:mb-2 prose-code:text-zinc-200 prose-code:bg-zinc-800 prose-code:px-1 sm:prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-md prose-code:text-[0.8em] prose-code:before:content-none prose-code:after:content-none prose-blockquote:border-zinc-700 prose-blockquote:text-zinc-400 prose-a:text-blue-400 prose-a:no-underline hover:prose-a:underline prose-strong:text-zinc-200 prose-strong:font-semibold prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-hr:border-zinc-800`
 
-  if (!done) return <div className={`${proseClasses} whitespace-pre-wrap`}>{text}</div>
+  if (!done) {
+    const searchQ = useContext(SearchContext)
+    return <div className={`${proseClasses} whitespace-pre-wrap`}>{searchQ ? highlightText(text, searchQ) : text}</div>
+  }
 
   const rehypePlugins: any[] = [rehypeHighlight]
   if (needsMath && katexReady && RehypeKatex) rehypePlugins.push(RehypeKatex)
@@ -546,16 +550,72 @@ function renderFileRef(file: { path: string; mime?: string; name?: string }, ind
   return <FileCard key={index} path={file.path} mime={file.mime} name={file.name} />
 }
 
-// ── Memoized bubbles ─────────────────────────────────────────────────────
+// ── Search context ─────────────────────────────────────────────────────
 
-const UserBubble = memo(function UserBubble({ content, images, files }: {
-  content: string
-  images?: { path: string; mime?: string; name?: string }[]
-  files?: { path: string; mime?: string; name?: string }[]
+const SearchContext = createContext<string>('')
+
+function highlightText(text: string, query: string): ReactNode {
+  if (!query) return text
+  const regex = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi')
+  const parts = text.split(regex)
+  if (parts.length === 1) return text
+  return parts.map((part, i) =>
+    regex.test(part) ? <mark key={i} className="bg-amber-500/30 text-amber-200 rounded px-0.5">{part}</mark> : part
+  )
+}
+
+function SearchBar({ query, setQuery, matchCount, matchIdx, onPrev, onNext, onClose }: {
+  query: string; setQuery: (q: string) => void; matchCount: number; matchIdx: number
+  onPrev: () => void; onNext: () => void; onClose: () => void
 }) {
+  const inputRef = useRef<HTMLInputElement>(null)
+  useEffect(() => { inputRef.current?.focus() }, [])
+
   return (
-    <div className="flex justify-end gap-2.5 sm:gap-3.5">
-      <div className="max-w-[85%] sm:max-w-[78%] lg:max-w-[72%] rounded-2xl rounded-tr-lg bg-zinc-800 px-3 sm:px-4 lg:px-5 py-2.5 sm:py-3 lg:py-3.5 text-sm text-zinc-100 whitespace-pre-wrap leading-relaxed">
+    <div className="absolute top-2 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 px-3 py-2 rounded-xl bg-zinc-900 border border-zinc-700 shadow-2xl">
+      <Search size={14} className="text-zinc-500 shrink-0" />
+      <input
+        ref={inputRef}
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') { e.preventDefault(); e.shiftKey ? onPrev() : onNext() }
+          if (e.key === 'Escape') onClose()
+        }}
+        placeholder="Search messages…"
+        className="bg-transparent text-sm text-zinc-100 placeholder-zinc-600 outline-none w-48 sm:w-64"
+      />
+      <span className="text-xs text-zinc-500 shrink-0">
+        {matchCount > 0 ? `${matchIdx + 1}/${matchCount}` : query ? 'No results' : ''}
+      </span>
+      <button onClick={onPrev} disabled={matchCount === 0} className="p-1 rounded hover:bg-zinc-800 text-zinc-400 disabled:opacity-30"><ChevronDown size={14} className="rotate-180" /></button>
+      <button onClick={onNext} disabled={matchCount === 0} className="p-1 rounded hover:bg-zinc-800 text-zinc-400 disabled:opacity-30"><ChevronDown size={14} /></button>
+      <button onClick={onClose} className="p-1 rounded hover:bg-zinc-800 text-zinc-400"><X size={14} /></button>
+    </div>
+  )
+}
+
+// ── Editable user bubble ───────────────────────────────────────────────
+
+function EditableUserBubble({ content, images, files, onResend, onDelete, msgId }: {
+  content: string; images?: { path: string; mime?: string; name?: string }[]; files?: { path: string; mime?: string; name?: string }[]
+  onResend?: (text: string) => void; onDelete?: () => void; msgId?: string
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(content)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => { if (editing) { setDraft(content); setTimeout(() => textareaRef.current?.focus(), 0) } }, [editing, content])
+
+  const handleSave = () => {
+    const trimmed = draft.trim()
+    if (trimmed && trimmed !== content && onResend) onResend(trimmed)
+    setEditing(false)
+  }
+
+  return (
+    <div className="flex justify-end gap-2.5 sm:gap-3.5 group/msg">
+      <div className="max-w-[85%] sm:max-w-[78%] lg:max-w-[72%] rounded-2xl rounded-tr-lg bg-zinc-800 px-3 sm:px-4 lg:px-5 py-2.5 sm:py-3 lg:py-3.5 text-sm text-zinc-100 leading-relaxed">
         {images && images.length > 0 && (
           <div className="flex flex-wrap gap-2 mb-2">
             {images.map((img, i) => <LazyImage key={i} path={img.path} mime={img.mime} name={img.name} />)}
@@ -566,11 +626,52 @@ const UserBubble = memo(function UserBubble({ content, images, files }: {
             {files.map((f, i) => renderFileRef(f, i))}
           </div>
         )}
-        {content}
+        {editing ? (
+          <div className="space-y-2">
+            <textarea
+              ref={textareaRef}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSave() } if (e.key === 'Escape') setEditing(false) }}
+              className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-500 resize-none min-h-[60px]"
+              rows={3}
+            />
+            <div className="flex items-center gap-2 justify-end">
+              <button onClick={() => setEditing(false)} className="px-2 py-1 text-xs text-zinc-400 hover:text-zinc-200 rounded-lg hover:bg-zinc-700 transition-colors">Cancel</button>
+              <button onClick={handleSave} className="px-3 py-1 text-xs text-blue-400 hover:text-blue-300 rounded-lg hover:bg-zinc-700 transition-colors font-medium">Send</button>
+            </div>
+          </div>
+        ) : (
+          <div className="whitespace-pre-wrap">
+            <SearchContext.Consumer>{(q) => highlightText(content, q)}</SearchContext.Consumer>
+            {/* Edit/Delete actions */}
+            <div className="flex items-center gap-1 mt-1 opacity-0 group-hover/msg:opacity-100 transition-opacity">
+              {onResend && (
+                <button onClick={() => setEditing(true)} className="flex items-center gap-1 px-1.5 py-1 rounded-md text-[11px] text-zinc-600 hover:text-zinc-300 hover:bg-zinc-700 transition-colors" title="Edit & resend">
+                  <Pencil size={11} /><span>Edit</span>
+                </button>
+              )}
+              {onDelete && (
+                <button onClick={onDelete} className="flex items-center gap-1 px-1.5 py-1 rounded-md text-[11px] text-zinc-600 hover:text-red-400 hover:bg-zinc-700 transition-colors" title="Delete message">
+                  <Trash2 size={11} />
+                </button>
+              )}
+            </div>
+          </div>
+        )}
       </div>
       <div className="mt-0.5 h-6 w-6 sm:h-7 sm:w-7 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-sm sm:text-base shrink-0 select-none shadow-md">👤</div>
     </div>
   )
+}
+
+// ── Memoized bubbles ─────────────────────────────────────────────────────
+
+const UserBubble = memo(function UserBubble({ content, images, files, onResend, onDelete, msgId }: {
+  content: string; images?: { path: string; mime?: string; name?: string }[]; files?: { path: string; mime?: string; name?: string }[]
+  onResend?: (text: string) => void; onDelete?: () => void; msgId?: string
+}) {
+  return <EditableUserBubble content={content} images={images} files={files} onResend={onResend} onDelete={onDelete} msgId={msgId} />
 })
 
 interface AssistantBubbleProps {
@@ -605,6 +706,7 @@ interface Props {
 }
 
 export default function MessageList({ messages, containerRef, onRetry }: Props) {
+  const { sendMessage, setMessages } = useWebSocketContext()
   const [isNearBottom, setIsNearBottom] = useState(true)
   const scrollElementRef = useRef<HTMLDivElement>(null)
   const lastAssistantIdx = messages.reduce((acc, m, i) => (m.role === 'assistant' ? i : acc), -1)
@@ -615,6 +717,47 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
 
   // File preview state
   const [previewItem, setPreviewItem] = useState<PreviewItem | null>(null)
+
+  // Search state
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [matchIdx, setMatchIdx] = useState(0)
+
+  // Compute matching message indices
+  const matchIndices = searchQuery
+    ? messages.reduce<number[]>((acc, msg, i) => {
+        const content = msg.role === 'user' ? msg.content : msg.blocks.filter((b) => b.type === 'content').map((b) => b.text).join(' ')
+        if (content.toLowerCase().includes(searchQuery.toLowerCase())) acc.push(i)
+        return acc
+      }, [])
+    : []
+
+  // Ctrl+F handler
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault()
+        setSearchOpen(true)
+      }
+      if (e.key === 'Escape' && searchOpen) {
+        setSearchOpen(false)
+        setSearchQuery('')
+        setMatchIdx(0)
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [searchOpen])
+
+  // Delete message handler (removes from local view; persists on next session save)
+  const handleDelete = useCallback((msgId: string) => {
+    setMessages((prev) => prev.filter((m) => m.id !== msgId))
+  }, [setMessages])
+
+  // Resend edited message handler
+  const handleResend = useCallback((original: string, edited: string) => {
+    sendMessage(edited)
+  }, [sendMessage])
 
   const openLightbox = useCallback((blobUrl: string) => {
     const idx = slideIndex.get(blobUrl)
@@ -679,9 +822,21 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
   const slides = slideRegistry.map((url) => ({ src: url }))
 
   return (
+    <SearchContext.Provider value={searchQuery}>
     <LightboxContext.Provider value={lightboxCtx.current}>
     <PreviewContext.Provider value={previewCtx.current}>
       <div className="flex-1 relative">
+        {searchOpen && (
+          <SearchBar
+            query={searchQuery}
+            setQuery={setSearchQuery}
+            matchCount={matchIndices.length}
+            matchIdx={matchIdx < matchIndices.length ? matchIdx : 0}
+            onPrev={() => setMatchIdx((i) => matchIndices.length ? (i - 1 + matchIndices.length) % matchIndices.length : 0)}
+            onNext={() => setMatchIdx((i) => matchIndices.length ? (i + 1) % matchIndices.length : 0)}
+            onClose={() => { setSearchOpen(false); setSearchQuery(''); setMatchIdx(0) }}
+          />
+        )}
         <div ref={(el) => { scrollElementRef.current = el; if (containerRef) (containerRef as any).current = el }} className="absolute inset-0 overflow-y-auto">
           <div style={{ height: virtualizer.getTotalSize(), width: '100%', position: 'relative' }}>
             <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${virtualItems[0]?.start ?? 0}px)` }}>
@@ -690,19 +845,36 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
                 return (
                   <div key={vi.key} data-index={vi.index} ref={(el) => { if (el) virtualizer.measureElement(el) }} className="max-w-3xl lg:max-w-4xl 2xl:max-w-5xl mx-auto px-2 sm:px-4 lg:px-6 py-3 sm:py-4">
                     {msg.role === 'user' ? (
-                      <UserBubble content={msg.content} images={'images' in msg ? (msg as any).images : undefined} files={'files' in msg ? (msg as any).files : undefined} />
+                      <UserBubble
+                        content={msg.content}
+                        images={'images' in msg ? (msg as any).images : undefined}
+                        files={'files' in msg ? (msg as any).files : undefined}
+                        onResend={(edited) => handleResend(msg.content, edited)}
+                        onDelete={() => handleDelete(msg.id)}
+                        msgId={msg.id}
+                      />
                     ) : (
                       (() => {
                         const isLast = vi.index === lastAssistantIdx
                         const prevUser = isLast ? [...messages.slice(0, vi.index)].reverse().find((m) => m.role === 'user') : undefined
                         return (
-                          <AssistantBubble
-                            blocks={msg.blocks}
-                            done={msg.done}
-                            isLast={isLast}
-                            isGenerating={!msg.done}
-                            onRetry={onRetry && prevUser ? () => onRetry((prevUser as { content: string }).content) : undefined}
-                          />
+                          <div className="flex justify-start gap-2.5 sm:gap-3.5 group/msg">
+                            <div className="flex-1">
+                              <AssistantBubble
+                                blocks={msg.blocks}
+                                done={msg.done}
+                                isLast={isLast}
+                                isGenerating={!msg.done}
+                                onRetry={onRetry && prevUser ? () => onRetry((prevUser as { content: string }).content) : undefined}
+                              />
+                              {/* Delete button for assistant messages */}
+                              <div className="flex items-center gap-1 mt-1 opacity-0 group-hover/msg:opacity-100 transition-opacity ml-8 sm:ml-10 lg:ml-12">
+                                <button onClick={() => handleDelete(msg.id)} className="flex items-center gap-1 px-1.5 py-1 rounded-md text-[11px] text-zinc-600 hover:text-red-400 hover:bg-zinc-800/60 transition-colors" title="Delete message">
+                                  <Trash2 size={11} />
+                                </button>
+                              </div>
+                            </div>
+                          </div>
                         )
                       })()
                     )}
@@ -740,5 +912,6 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
       </div>
     </PreviewContext.Provider>
     </LightboxContext.Provider>
+    </SearchContext.Provider>
   )
 }

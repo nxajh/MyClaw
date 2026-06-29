@@ -511,6 +511,39 @@ impl SessionBackend for JsonFileBackend {
         Ok(true)
     }
 
+    fn delete_message_by_id(&self, session_id: &str, message_id: i64) -> std::io::Result<bool> {
+        let path = self.history_path(session_id);
+        let Ok(content) = fs::read_to_string(&path) else {
+            return Ok(false);
+        };
+
+        let mut lines: Vec<&str> = content.split('\n').collect();
+        // Remove trailing empty line if present
+        if lines.last().map(|l| l.is_empty()).unwrap_or(false) {
+            lines.pop();
+        }
+        // message_id is 1-based line number
+        let idx = (message_id - 1) as usize;
+        if idx >= lines.len() {
+            return Ok(false);
+        }
+        lines.remove(idx);
+
+        let new_content = if lines.is_empty() {
+            String::new()
+        } else {
+            lines.join("\n") + "\n"
+        };
+        fs::write(&path, new_content)?;
+
+        if let Some(mut meta) = self.read_meta(session_id) {
+            meta.last_activity = Utc::now();
+            let _ = self.write_meta(&meta);
+        }
+
+        Ok(true)
+    }
+
     fn truncate_messages(&self, session_id: &str, keep_count: usize) -> std::io::Result<()> {
         let path = self.history_path(session_id);
         let content = fs::read_to_string(&path)?;
