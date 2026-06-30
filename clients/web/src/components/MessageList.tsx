@@ -597,7 +597,7 @@ function SearchBar({ query, setQuery, matchCount, matchIdx, onPrev, onNext, onCl
 
 // ── Editable user bubble ───────────────────────────────────────────────
 
-function EditableUserBubble({ content, images, files, onResend, onDelete, msgId }: {
+function EditableUserBubble({ content, images, files, onResend, onDelete }: {
   content: string; images?: { path: string; mime?: string; name?: string }[]; files?: { path: string; mime?: string; name?: string }[]
   onResend?: (text: string) => void; onDelete?: () => void; msgId?: string
 }) {
@@ -709,6 +709,9 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
   const { sendMessage, setMessages, isGenerating: globalGenerating } = useWebSocketContext()
   const [isNearBottom, setIsNearBottom] = useState(true)
   const scrollElementRef = useRef<HTMLDivElement>(null)
+  // Track stick-to-bottom intent via ref to avoid race conditions during streaming
+  const stickToBottomRef = useRef(true)
+  const lastScrollTopRef = useRef(0)
   const lastAssistantIdx = messages.reduce((acc, m, i) => (m.role === 'assistant' ? i : acc), -1)
 
   // Lightbox state
@@ -755,7 +758,7 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
   }, [setMessages])
 
   // Resend edited message handler
-  const handleResend = useCallback((original: string, edited: string) => {
+  const handleResend = useCallback((_original: string, edited: string) => {
     sendMessage(edited)
   }, [sendMessage])
 
@@ -784,7 +787,19 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
   const checkNearBottom = useCallback(() => {
     const el = scrollElementRef.current
     if (!el) return
-    setIsNearBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 120)
+    const { scrollTop, scrollHeight, clientHeight } = el
+    const gap = scrollHeight - scrollTop - clientHeight
+    // Distinguish user scroll-up (scrollTop decreased) from content growth (scrollTop same, scrollHeight grew).
+    // Only unstick when the user intentionally scrolls up.
+    if (scrollTop < lastScrollTopRef.current - 2 && gap > 120) {
+      stickToBottomRef.current = false
+    }
+    // Re-stick when back near the bottom
+    if (gap < 60) {
+      stickToBottomRef.current = true
+    }
+    lastScrollTopRef.current = scrollTop
+    setIsNearBottom(stickToBottomRef.current)
   }, [])
 
   useEffect(() => {
@@ -802,13 +817,19 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
     : 0
 
   useEffect(() => {
-    if (isNearBottom) {
-      virtualizer.scrollToIndex(messages.length - 1, { align: 'end' })
+    if (stickToBottomRef.current) {
+      // Use requestAnimationFrame so the DOM has been painted with new content before scrolling
+      requestAnimationFrame(() => {
+        const el = scrollElementRef.current
+        if (el) el.scrollTop = el.scrollHeight
+      })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages.length, lastContentLen, isNearBottom, virtualizer])
+  }, [messages.length, lastContentLen])
 
   const scrollToBottom = () => {
+    stickToBottomRef.current = true
+    setIsNearBottom(true)
     virtualizer.scrollToIndex(messages.length - 1, { align: 'end', behavior: 'smooth' })
   }
 
