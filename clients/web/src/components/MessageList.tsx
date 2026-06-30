@@ -179,7 +179,7 @@ function extractText(blocks: MessageBlock[]): string {
   return blocks.filter((b): b is { type: 'content'; text: string } => b.type === 'content').map((b) => b.text).join('\n\n')
 }
 
-function MessageActions({ blocks, isLast, isGenerating, onRetry }: { blocks: MessageBlock[]; isLast: boolean; isGenerating: boolean; onRetry?: () => void }) {
+function MessageActions({ blocks, isLast, isGenerating, onRetry, onDelete }: { blocks: MessageBlock[]; isLast: boolean; isGenerating: boolean; onRetry?: () => void; onDelete?: () => void }) {
   const [copied, setCopied] = useState(false)
   const handleCopy = async () => {
     const text = extractText(blocks)
@@ -194,6 +194,11 @@ function MessageActions({ blocks, isLast, isGenerating, onRetry }: { blocks: Mes
       {isLast && !isGenerating && onRetry && (
         <button onClick={onRetry} className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-colors" title="Regenerate response">
           <RotateCcw size={14} />
+        </button>
+      )}
+      {onDelete && (
+        <button onClick={onDelete} className="p-1.5 rounded-md text-zinc-500 hover:text-red-400 hover:bg-zinc-800 transition-colors" title="Delete message">
+          <Trash2 size={14} />
         </button>
       )}
     </div>
@@ -682,21 +687,22 @@ interface AssistantBubbleProps {
   isLast: boolean
   isGenerating: boolean
   onRetry?: () => void
+  onDelete?: () => void
 }
 
-const AssistantBubble = memo(function AssistantBubble({ blocks, done, isLast, isGenerating, onRetry }: AssistantBubbleProps) {
+const AssistantBubble = memo(function AssistantBubble({ blocks, done, isLast, isGenerating, onRetry, onDelete }: AssistantBubbleProps) {
   return (
     <div className="flex gap-2.5 sm:gap-3.5 group/msg">
       <div className="mt-0.5 h-6 w-6 sm:h-7 sm:w-7 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-sm sm:text-base shrink-0 select-none shadow-md">🦀</div>
       <div className={`flex-1 min-w-0 rounded-2xl border bg-zinc-900/25 px-3 sm:px-4 lg:px-5 py-3 sm:py-4 space-y-3 shadow-sm transition-colors ${isGenerating ? 'generating-border' : 'border-zinc-800/80 hover:border-zinc-800'}`}>
         {blocks.map((block, i) => renderBlock(block, i, isGenerating))}
         {isGenerating && blocks.length === 0 && <GeneratingDots />}
-        {done && <MessageActions blocks={blocks} isLast={isLast} isGenerating={isGenerating} onRetry={onRetry} />}
+        {done && <MessageActions blocks={blocks} isLast={isLast} isGenerating={isGenerating} onRetry={onRetry} onDelete={onDelete} />}
       </div>
     </div>
   )
 }, (prev, next) => (
-  prev.blocks === next.blocks && prev.done === next.done && prev.isLast === next.isLast && prev.isGenerating === next.isGenerating && prev.onRetry === next.onRetry
+  prev.blocks === next.blocks && prev.done === next.done && prev.isLast === next.isLast && prev.isGenerating === next.isGenerating && prev.onRetry === next.onRetry && prev.onDelete === next.onDelete
 ))
 
 // ── MessageList with virtualization ──────────────────────────────────────
@@ -881,23 +887,14 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
                         const isLast = vi.index === lastAssistantIdx
                         const prevUser = isLast ? [...messages.slice(0, vi.index)].reverse().find((m) => m.role === 'user') : undefined
                         return (
-                          <div className="flex justify-start gap-2.5 sm:gap-3.5 group/msg">
-                            <div className="flex-1">
-                              <AssistantBubble
-                                blocks={msg.blocks}
-                                done={msg.done}
-                                isLast={isLast}
-                                isGenerating={!msg.done && globalGenerating}
-                                onRetry={onRetry && prevUser ? () => onRetry((prevUser as { content: string }).content) : undefined}
-                              />
-                              {/* Delete button for assistant messages */}
-                              <div className="flex items-center gap-0.5 mt-1 ml-1">
-                                <button onClick={() => handleDelete(msg.id)} className="p-1.5 rounded-md text-zinc-500 hover:text-red-400 hover:bg-zinc-800 transition-colors" title="Delete message">
-                                  <Trash2 size={14} />
-                                </button>
-                              </div>
-                            </div>
-                          </div>
+                          <AssistantBubble
+                            blocks={msg.blocks}
+                            done={msg.done}
+                            isLast={isLast}
+                            isGenerating={!msg.done && globalGenerating}
+                            onRetry={onRetry && prevUser ? () => onRetry((prevUser as { content: string }).content) : undefined}
+                            onDelete={() => handleDelete(msg.id)}
+                          />
                         )
                       })()
                     )}
