@@ -186,7 +186,8 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
     use crate::providers::{
         BuildChatProviderRequest, BuildEmbeddingProviderRequest, BuildImageProviderRequest,
         BuildSearchProviderRequest, BuildSttProviderRequest, BuildTtsProviderRequest,
-        BuildVideoProviderRequest, ProviderFactory,
+        BuildVideoProviderRequest, CredentialPool, ProviderFactory, SharedApiKey,
+        SharedCredentialPool,
     };
     use crate::providers::{ProviderId, detect_from_url};
 
@@ -226,8 +227,35 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
 
         // ── Chat ──────────────────────────────────────────────────────
         if let Some(ref chat) = provider_cfg.chat {
-            let api_key = provider_cfg.effective_api_key(chat.api_key.as_deref());
-            let api_key = api_key.with_context(|| format!("no API key for '{}'", provider_key))?;
+            let api_keys = provider_cfg.effective_api_keys(chat.api_key.as_deref());
+            anyhow::ensure!(
+                !api_keys.is_empty(),
+                "no API key for '{}'",
+                provider_key
+            );
+
+            // Shared API key cell — all models under this provider share one cell.
+            let shared_key = SharedApiKey::new(api_keys[0].clone());
+
+            // Create a credential pool only when multiple keys are configured.
+            let pool = if api_keys.len() > 1 {
+                let p = CredentialPool::new(
+                    provider_key.clone(),
+                    api_keys.clone(),
+                    provider_cfg.rotation_strategy,
+                );
+                let shared = SharedCredentialPool::new(p);
+                tracing::info!(
+                    provider = %provider_key,
+                    key_count = api_keys.len(),
+                    strategy = ?provider_cfg.rotation_strategy,
+                    "multi-key credential pool created"
+                );
+                Some(shared)
+            } else {
+                None
+            };
+
             let auth_style = provider_cfg.effective_auth_style(chat.auth_style);
             let user_agent = chat.user_agent.clone();
 
@@ -244,7 +272,7 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
                     provider_id: provider_id.clone(),
                     protocol: chat.protocol,
                     base_url: chat.base_url.clone(),
-                    api_key: api_key.clone(),
+                    api_key: shared_key.clone(),
                     auth_style: auth_style.into(),
                     user_agent: user_agent.clone(),
                 };
@@ -263,6 +291,15 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
                     Some(provider_id.clone()),
                     chat.protocol,
                 );
+
+                // Attach credential pool so the fallback chain can rotate keys.
+                if let Some(ref pool) = pool {
+                    registry.attach_credential_pool(
+                        model_id,
+                        pool.clone(),
+                        shared_key.clone(),
+                    );
+                }
             }
         }
 

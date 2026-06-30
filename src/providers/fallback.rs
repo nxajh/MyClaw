@@ -16,7 +16,7 @@ pub const CHAIN_ALL_COOLING_TAG: &str = "fallback_chain_all_cooling";
 use crate::providers::credential_pool::SharedCredentialPool;
 use crate::providers::{
     BoxStream, ChatMessage, ChatProvider, ChatRequest, ChatToolSpec, ClassifiedError,
-    ErrorCategory, StreamEvent, ThinkingConfig,
+    ErrorCategory, SharedApiKey, StreamEvent, ThinkingConfig,
 };
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -31,6 +31,9 @@ pub struct FallbackEntry {
     pub model_id: String,
     /// Optional credential pool for same-provider key rotation.
     pub credential_pool: Option<SharedCredentialPool>,
+    /// Shared API key cell — when present, credential rotation updates this
+    /// cell and the provider re-reads it on the next request.
+    pub shared_api_key: Option<SharedApiKey>,
 }
 
 /// Decorator that tries providers in order, falling back based on error classification.
@@ -127,131 +130,203 @@ impl ChatProvider for FallbackChatProvider {
                 }
                 any_attempted = true;
 
-                let req = ChatRequest {
-                    model: &entry.model_id,
-                    messages: &messages,
-                    temperature,
-                    max_tokens,
-                    thinking: thinking.clone(),
-                    stop: stop.clone(),
-                    seed,
-                    tools: tools.as_deref(),
-                    stream: stream_flag,
-                };
+                let max_rotations = entry.credential_pool.as_ref().map(|p| p.len()).unwrap_or(1);
+                let mut broke_for_failover = false;
 
-                let stream = match entry.provider.chat(req) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let classified = ClassifiedError::classify("fallback", 0, &e.to_string())
-                            .with_provider("fallback", &entry.model_id);
-                        tracing::warn!(
-                            model = %entry.model_id,
-                            category = %classified.category,
-                            reason = ?classified.reason,
-                            retryable = classified.recovery_hints().retry,
-                            "chat() failed: {}", classified.message
-                        );
-                        if is_provider_error(&classified.category)
-                            || classified.recovery_hints().retry
-                        {
-                            record_cooldown(&cooldowns, &entry.model_id, &classified);
-                            continue;
-                        }
-                        // Non-retryable setup error — propagate immediately.
-                        let _ = tx.send(StreamEvent::Error(e.to_string())).await;
-                        return;
-                    }
-                };
+                'credential_retry: for _rotation in 0..max_rotations {
+                    let req = ChatRequest {
+                        model: &entry.model_id,
+                        messages: &messages,
+                        temperature,
+                        max_tokens,
+                        thinking: thinking.clone(),
+                        stop: stop.clone(),
+                        seed,
+                        tools: tools.as_deref(),
+                        stream: stream_flag,
+                    };
 
-                // Drain the stream. Classify errors to decide whether to failover.
-                let mut should_failover = false;
-                let mut inner_stream = stream;
-
-                while let Some(event) = inner_stream.next().await {
-                    match &event {
-                        StreamEvent::HttpError { status, message } => {
-                            let classified =
-                                ClassifiedError::classify("fallback", *status, message)
-                                    .with_provider("fallback", &entry.model_id);
+                    let stream = match entry.provider.chat(req) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            let classified = ClassifiedError::classify("fallback", 0, &e.to_string())
+                                .with_provider("fallback", &entry.model_id);
                             tracing::warn!(
                                 model = %entry.model_id,
-                                status = *status,
                                 category = %classified.category,
                                 reason = ?classified.reason,
-                                cooldown = ?classified.cooldown_duration(),
-                                retry_after = ?classified.retry_after,
-                                body = %classified.message,
-                                "classified HTTP error"
+                                retryable = classified.recovery_hints().retry,
+                                "chat() failed: {}", classified.message
                             );
-                            if classified.should_rotate_credential {
-                                if let Some(ref pool) = entry.credential_pool {
-                                    if let Some(next_key) = pool.next_credential() {
-                                        tracing::info!(
-                                            model = %entry.model_id,
-                                            key_prefix = %next_key.chars().take(4).collect::<String>(),
-                                            "rotating to next credential"
-                                        );
+
+                            if classified.should_rotate_credential
+                                && entry.credential_pool.is_some()
+                                && entry.shared_api_key.is_some()
+                            {
+                                if let (Some(ref pool), Some(ref key)) = (&entry.credential_pool, &entry.shared_api_key) {
+                                    let old_key = key.get();
+                                    pool.mark_exhausted(&old_key, &classified.reason);
+                                    match pool.next_credential() {
+                                        Some(new_key) => {
+                                            key.set(&new_key);
+                                            tracing::info!(
+                                                model = %entry.model_id,
+                                                key_prefix = %new_key.chars().take(4).collect::<String>(),
+                                                "credential rotated (setup error), retrying same provider"
+                                            );
+                                            continue 'credential_retry;
+                                        }
+                                        None => {
+                                            tracing::warn!(
+                                                model = %entry.model_id,
+                                                "all credentials exhausted (setup error), failing over"
+                                            );
+                                        }
                                     }
                                 }
                             }
+
                             if is_provider_error(&classified.category)
                                 || classified.recovery_hints().retry
                             {
                                 record_cooldown(&cooldowns, &entry.model_id, &classified);
-                                should_failover = true;
-                                break;
+                                broke_for_failover = true;
+                                break 'credential_retry;
                             }
-                            // Non-retryable HTTP error — propagate and stop.
-                            let _ = tx.send(event).await;
+                            // Non-retryable setup error — propagate immediately.
+                            let _ = tx.send(StreamEvent::Error(e.to_string())).await;
                             return;
                         }
-                        StreamEvent::Error(msg) => {
-                            let classified = ClassifiedError::classify("fallback", 0, msg)
-                                .with_provider("fallback", &entry.model_id);
-                            if classified.should_rotate_credential {
-                                if let Some(ref pool) = entry.credential_pool {
-                                    if let Some(next_key) = pool.next_credential() {
-                                        tracing::info!(
-                                            model = %entry.model_id,
-                                            key_prefix = %next_key.chars().take(4).collect::<String>(),
-                                            "rotating to next credential"
-                                        );
-                                    }
-                                }
-                            }
-                            if is_provider_error(&classified.category)
-                                || classified.recovery_hints().retry
-                            {
-                                record_cooldown(&cooldowns, &entry.model_id, &classified);
+                    };
+
+                    // Drain the stream. Classify errors to decide whether to failover or rotate.
+                    let mut should_failover = false;
+                    let mut should_rotate = false;
+                    let mut last_classified: Option<ClassifiedError> = None;
+                    let mut inner_stream = stream;
+
+                    while let Some(event) = inner_stream.next().await {
+                        match &event {
+                            StreamEvent::HttpError { status, message } => {
+                                let classified =
+                                    ClassifiedError::classify("fallback", *status, message)
+                                        .with_provider("fallback", &entry.model_id);
                                 tracing::warn!(
                                     model = %entry.model_id,
+                                    status = *status,
                                     category = %classified.category,
                                     reason = ?classified.reason,
-                                    message = %classified.message,
-                                    "classified stream error, failing over"
+                                    cooldown = ?classified.cooldown_duration(),
+                                    retry_after = ?classified.retry_after,
+                                    body = %classified.message,
+                                    "classified HTTP error"
                                 );
-                                should_failover = true;
-                                break;
+
+                                if classified.should_rotate_credential
+                                    && entry.credential_pool.is_some()
+                                    && entry.shared_api_key.is_some()
+                                {
+                                    should_rotate = true;
+                                    last_classified = Some(classified);
+                                    break;
+                                }
+
+                                if is_provider_error(&classified.category)
+                                    || classified.recovery_hints().retry
+                                {
+                                    record_cooldown(&cooldowns, &entry.model_id, &classified);
+                                    should_failover = true;
+                                    break;
+                                }
+                                // Non-retryable HTTP error — propagate and stop.
+                                let _ = tx.send(event).await;
+                                return;
                             }
-                            // Non-retryable stream error — propagate.
-                            let _ = tx.send(event).await;
-                            return;
-                        }
-                        _ => {
-                            let _ = tx.send(event).await;
+                            StreamEvent::Error(msg) => {
+                                let classified = ClassifiedError::classify("fallback", 0, msg)
+                                    .with_provider("fallback", &entry.model_id);
+
+                                if classified.should_rotate_credential
+                                    && entry.credential_pool.is_some()
+                                    && entry.shared_api_key.is_some()
+                                {
+                                    should_rotate = true;
+                                    last_classified = Some(classified);
+                                    break;
+                                }
+
+                                if is_provider_error(&classified.category)
+                                    || classified.recovery_hints().retry
+                                {
+                                    record_cooldown(&cooldowns, &entry.model_id, &classified);
+                                    tracing::warn!(
+                                        model = %entry.model_id,
+                                        category = %classified.category,
+                                        reason = ?classified.reason,
+                                        message = %classified.message,
+                                        "classified stream error, failing over"
+                                    );
+                                    should_failover = true;
+                                    break;
+                                }
+                                // Non-retryable stream error — propagate.
+                                let _ = tx.send(event).await;
+                                return;
+                            }
+                            _ => {
+                                let _ = tx.send(event).await;
+                            }
                         }
                     }
+
+                    if !should_rotate && !should_failover {
+                        // Stream ended normally — we're done.
+                        tracing::info!(
+                            model = %entry.model_id,
+                            "chat completed via fallback chain"
+                        );
+                        return;
+                    }
+
+                    if should_rotate {
+                        if let (Some(ref pool), Some(ref key), Some(ref classified)) =
+                            (&entry.credential_pool, &entry.shared_api_key, &last_classified)
+                        {
+                            let old_key = key.get();
+                            pool.mark_exhausted(&old_key, &classified.reason);
+                            match pool.next_credential() {
+                                Some(new_key) => {
+                                    key.set(&new_key);
+                                    tracing::info!(
+                                        model = %entry.model_id,
+                                        key_prefix = %new_key.chars().take(4).collect::<String>(),
+                                        "credential rotated, retrying same provider"
+                                    );
+                                    continue 'credential_retry;
+                                }
+                                None => {
+                                    tracing::warn!(
+                                        model = %entry.model_id,
+                                        "all credentials exhausted, failing over"
+                                    );
+                                    record_cooldown(&cooldowns, &entry.model_id, classified);
+                                }
+                            }
+                        }
+                    }
+
+                    // If we get here (should_failover, or should_rotate with all credentials exhausted),
+                    // we break the inner loop to failover to the next entry in the outer loop.
+                    broke_for_failover = true;
+                    break 'credential_retry;
                 }
 
-                if !should_failover {
-                    // Stream ended normally — we're done.
-                    tracing::info!(
-                        model = %entry.model_id,
-                        "chat completed via fallback chain"
-                    );
-                    return;
+                if !broke_for_failover {
+                    // Safety guard: if the inner loop ended without broke_for_failover and didn't return,
+                    // it means all rotations were attempted but none succeeded. Record a default cooldown.
+                    let classified = ClassifiedError::classify("fallback", 503, "all credentials exhausted");
+                    record_cooldown(&cooldowns, &entry.model_id, &classified);
                 }
-                // else: continue to next provider in chain
             }
 
             // ── All entries processed ──────────────────────────────────────────

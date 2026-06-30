@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 use crate::providers::http::build_reqwest_client;
 use crate::providers::{
-    BoxStream, ChatProvider, ChatRequest, ContentPart, StopReason, StreamEvent,
+    BoxStream, ChatProvider, ChatRequest, ContentPart, SharedApiKey, StopReason, StreamEvent,
 };
 use crate::providers::{EmbedInput, EmbedRequest, EmbedResponse, EmbeddingProvider};
 use crate::providers::{SearchProvider, SearchRequest, SearchResult, SearchResults};
@@ -32,20 +32,20 @@ const DEFAULT_BASE_URL: &str = "https://open.bigmodel.cn/api/paas";
 #[derive(Clone)]
 pub struct GlmProvider {
     base_url: String,
-    api_key: String,
+    api_key: SharedApiKey,
     client: Client,
     user_agent: Option<String>,
 }
 
 impl GlmProvider {
-    pub fn new(api_key: String) -> Self {
+    pub fn new(api_key: impl Into<SharedApiKey>) -> Self {
         Self::with_base_url(api_key, DEFAULT_BASE_URL.to_string())
     }
 
-    pub fn with_base_url(api_key: String, base_url: String) -> Self {
+    pub fn with_base_url(api_key: impl Into<SharedApiKey>, base_url: String) -> Self {
         Self {
             base_url,
-            api_key,
+            api_key: api_key.into(),
             client: build_reqwest_client(),
             user_agent: None,
         }
@@ -59,7 +59,7 @@ impl GlmProvider {
     fn auth(&self) -> String {
         crate::providers::shared::build_auth(
             &crate::providers::shared::AuthStyle::Bearer,
-            &self.api_key,
+            &self.api_key.get(),
         )
     }
 

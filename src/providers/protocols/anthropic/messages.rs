@@ -9,14 +9,14 @@ use std::collections::HashMap;
 
 use crate::providers::http::build_reqwest_client;
 use crate::providers::protocols::anthropic::message_rendering::build_anthropic_body;
-use crate::providers::{BoxStream, ChatProvider, ChatRequest, StreamEvent};
+use crate::providers::{BoxStream, ChatProvider, ChatRequest, SharedApiKey, StreamEvent};
 use reqwest::Client;
 
 /// Anthropic Messages protocol client.
 #[derive(Clone)]
 pub struct AnthropicMessagesClient {
     base_url: String,
-    api_key: String,
+    api_key: SharedApiKey,
     client: Client,
     user_agent: Option<String>,
 }
@@ -31,10 +31,10 @@ impl ChatProvider for AnthropicMessagesClient {
 }
 
 impl AnthropicMessagesClient {
-    pub fn new(api_key: String, base_url: String) -> Self {
+    pub fn new(api_key: impl Into<SharedApiKey>, base_url: String) -> Self {
         Self {
             base_url,
-            api_key,
+            api_key: api_key.into(),
             client: build_reqwest_client(),
             user_agent: None,
         }
@@ -59,7 +59,7 @@ impl AnthropicMessagesClient {
         thinking_enabled: bool,
     ) -> anyhow::Result<BoxStream<StreamEvent>> {
         let url = self.chat_url();
-        let api_key = self.api_key.clone();
+        let api_key = self.api_key.get();
         let client = self.client.clone();
         let user_agent = self.user_agent.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(100);

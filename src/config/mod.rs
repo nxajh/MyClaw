@@ -251,6 +251,10 @@ impl ConfigLoader {
             if let Some(ref key) = provider.api_key {
                 provider.api_key = Some(Self::expand_string(key));
             }
+            // Expand multi-key rotation list
+            for key in provider.api_keys.iter_mut() {
+                *key = Self::expand_string(key);
+            }
             // Expand capability-level api_keys
             if let Some(ref mut chat) = provider.chat {
                 if let Some(ref key) = chat.api_key {

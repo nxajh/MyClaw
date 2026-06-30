@@ -13,7 +13,7 @@ use crate::providers::search::SearchProvider;
 use crate::providers::stt::SttProvider;
 use crate::providers::tts::TtsProvider;
 use crate::providers::video::VideoGenerationProvider;
-use crate::providers::{AuthStyle, ProviderId};
+use crate::providers::{AuthStyle, ProviderId, SharedApiKey};
 
 // ── Build requests ────────────────────────────────────────────────────────────
 
@@ -24,7 +24,7 @@ pub struct BuildChatProviderRequest {
     pub provider_id: ProviderId,
     pub protocol: Option<Protocol>,
     pub base_url: String,
-    pub api_key: String,
+    pub api_key: SharedApiKey,
     pub auth_style: AuthStyle,
     pub user_agent: Option<String>,
 }

@@ -4,7 +4,7 @@
 //! rotates to the next available key instead of failing over to a different
 //! provider (which may have higher cost or lower quality).
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::providers::FailoverReason;
@@ -206,6 +206,49 @@ impl CredentialPool {
         } else {
             format!("{}...{}", &key[..4], &key[key.len() - 4..])
         }
+    }
+}
+
+/// Shared, mutable API key that allows a credential pool to rotate keys at runtime.
+///
+/// All provider protocol clients that support credential rotation hold a clone
+/// of this cell. Each HTTP request reads the current key via [`get`](Self::get);
+/// the fallback layer swaps the active key via [`set`](Self::set) when a
+/// credential is exhausted.
+#[derive(Clone)]
+pub struct SharedApiKey(Arc<RwLock<String>>);
+
+impl SharedApiKey {
+    pub fn new(key: impl Into<String>) -> Self {
+        Self(Arc::new(RwLock::new(key.into())))
+    }
+
+    /// Read the current key (call before each HTTP request).
+    pub fn get(&self) -> String {
+        self.0.read().unwrap().clone()
+    }
+
+    /// Write a new key (called by credential rotation).
+    pub fn set(&self, key: impl Into<String>) {
+        *self.0.write().unwrap() = key.into();
+    }
+}
+
+impl From<String> for SharedApiKey {
+    fn from(s: String) -> Self {
+        Self::new(s)
+    }
+}
+
+impl std::fmt::Debug for SharedApiKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let key = self.get();
+        let masked = if key.len() > 8 {
+            format!("{}...{}", &key[..4], &key[key.len() - 4..])
+        } else {
+            "***".to_string()
+        };
+        f.debug_tuple("SharedApiKey").field(&masked).finish()
     }
 }
 

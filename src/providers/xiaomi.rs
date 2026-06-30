@@ -13,7 +13,7 @@ use async_trait::async_trait;
 
 use crate::providers::capability_chat::ContentPart;
 use crate::providers::media::FileModality;
-use crate::providers::{BoxStream, ChatProvider, ChatRequest, StreamEvent};
+use crate::providers::{BoxStream, ChatProvider, ChatRequest, SharedApiKey, StreamEvent};
 
 const DEFAULT_BASE_URL: &str = "https://api.xiaomimimo.com/anthropic";
 
@@ -24,25 +24,25 @@ const MEDIA_MODEL: &str = "mimo-v2.5";
 #[derive(Clone)]
 pub struct XiaomiProvider {
     base_url: String,
-    api_key: String,
+    api_key: SharedApiKey,
     user_agent: Option<String>,
     openai: bool,
 }
 
 impl XiaomiProvider {
-    pub fn new(api_key: String) -> Self {
+    pub fn new(api_key: impl Into<SharedApiKey>) -> Self {
         Self {
             base_url: DEFAULT_BASE_URL.to_string(),
-            api_key,
+            api_key: api_key.into(),
             user_agent: None,
             openai: false,
         }
     }
 
-    pub fn with_base_url(api_key: String, base_url: String) -> Self {
+    pub fn with_base_url(api_key: impl Into<SharedApiKey>, base_url: String) -> Self {
         Self {
             base_url,
-            api_key,
+            api_key: api_key.into(),
             user_agent: None,
             openai: false,
         }
@@ -156,7 +156,7 @@ impl ChatProvider for XiaomiProvider {
             );
 
             let client = OpenAiChatCompletionsClient::new(
-                self.api_key.clone(),
+                self.api_key.get(),
                 openai_base,
             );
             let client = if let Some(ref ua) = self.user_agent {
@@ -177,7 +177,7 @@ impl ChatProvider for XiaomiProvider {
             patch_mimo_thinking(&mut body);
 
             let client =
-                AnthropicMessagesClient::new(self.api_key.clone(), self.base_url.clone());
+                AnthropicMessagesClient::new(self.api_key.get(), self.base_url.clone());
             let client = if let Some(ref ua) = self.user_agent {
                 client.with_user_agent(ua.clone())
             } else {

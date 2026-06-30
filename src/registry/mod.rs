@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::providers::Capability;
+use crate::providers::SharedApiKey;
+use crate::providers::SharedCredentialPool;
 use crate::providers::capability_chat::ChatProvider;
 use crate::providers::capability_embedding::EmbeddingProvider;
 use crate::providers::image::ImageGenerationProvider;
@@ -62,6 +64,8 @@ pub struct Registry {
     // Stored separately so the primary model's raw entry in chat_providers is
     // never overwritten and remains reachable via get_chat_provider_by_model.
     fallback_chat_provider: Option<(Arc<dyn ChatProvider>, String)>,
+    /// Per-model credential pools + shared API key cells for key rotation.
+    credential_pools: HashMap<String, (SharedCredentialPool, SharedApiKey)>,
 }
 
 impl Registry {
@@ -87,6 +91,7 @@ impl Registry {
             search_providers: HashMap::new(),
             stt_providers: HashMap::new(),
             fallback_chat_provider: None,
+            credential_pools: HashMap::new(),
         }
     }
 
@@ -388,6 +393,17 @@ impl Registry {
         self.stt_providers.insert(model_id, provider.into());
     }
 
+    /// Attach a credential pool and shared API key to a model for key rotation.
+    pub fn attach_credential_pool(
+        &mut self,
+        model_id: &str,
+        pool: SharedCredentialPool,
+        key: SharedApiKey,
+    ) {
+        self.credential_pools
+            .insert(model_id.to_string(), (pool, key));
+    }
+
     pub fn maybe_wrap_chat_fallback(&mut self, routing: &crate::config::routing::RoutingConfig) {
         use crate::providers::FallbackChatProvider;
         use crate::providers::fallback::FallbackEntry;
@@ -407,10 +423,16 @@ impl Registry {
         let mut chain: Vec<FallbackEntry> = Vec::new();
         for model_id in &entry.models {
             if let Some(provider) = self.chat_providers.get(model_id) {
+                let (pool, shared_key) = self
+                    .credential_pools
+                    .get(model_id)
+                    .map(|(p, k)| (Some(p.clone()), Some(k.clone())))
+                    .unwrap_or((None, None));
                 chain.push(FallbackEntry {
                     provider: Arc::clone(provider),
                     model_id: model_id.clone(),
-                    credential_pool: None,
+                    credential_pool: pool,
+                    shared_api_key: shared_key,
                 });
             } else {
                 tracing::warn!(model = %model_id, "model in fallback routing not registered, skipping");

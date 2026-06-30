@@ -9,23 +9,23 @@ use futures_util::StreamExt;
 
 use crate::providers::http::build_reqwest_client;
 use crate::providers::protocols::google::message_rendering::build_google_body;
-use crate::providers::{BoxStream, ChatProvider, ChatRequest, ChatUsage, StopReason, StreamEvent};
+use crate::providers::{BoxStream, ChatProvider, ChatRequest, ChatUsage, SharedApiKey, StopReason, StreamEvent};
 use reqwest::Client;
 
 /// Google Generate Content protocol client.
 #[derive(Clone)]
 pub struct GoogleGenerateContentClient {
     base_url: String,
-    api_key: String,
+    api_key: SharedApiKey,
     client: Client,
     user_agent: Option<String>,
 }
 
 impl GoogleGenerateContentClient {
-    pub fn new(api_key: String, base_url: String) -> Self {
+    pub fn new(api_key: impl Into<SharedApiKey>, base_url: String) -> Self {
         Self {
             base_url,
-            api_key,
+            api_key: api_key.into(),
             client: build_reqwest_client(),
             user_agent: None,
         }
@@ -48,7 +48,7 @@ impl GoogleGenerateContentClient {
         };
         format!(
             "{}/v1beta/{}:streamGenerateContent?alt=sse&key={}",
-            base, model_path, self.api_key
+            base, model_path, self.api_key.get()
         )
     }
 }
