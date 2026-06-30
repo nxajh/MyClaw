@@ -163,7 +163,7 @@ impl ChatProvider for FallbackChatProvider {
                                 && entry.credential_pool.is_some()
                                 && entry.shared_api_key.is_some()
                             {
-                                if let (Some(ref pool), Some(ref key)) = (&entry.credential_pool, &entry.shared_api_key) {
+                                if let (Some(pool), Some(key)) = (&entry.credential_pool, &entry.shared_api_key) {
                                     let old_key = key.get();
                                     pool.mark_exhausted(&old_key, &classified.reason);
                                     match pool.next_credential() {
@@ -289,7 +289,7 @@ impl ChatProvider for FallbackChatProvider {
                     }
 
                     if should_rotate {
-                        if let (Some(ref pool), Some(ref key), Some(ref classified)) =
+                        if let (Some(pool), Some(key), Some(classified)) =
                             (&entry.credential_pool, &entry.shared_api_key, &last_classified)
                         {
                             let old_key = key.get();
