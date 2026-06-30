@@ -149,6 +149,7 @@ impl ProviderConfig {
             .filter(|k| !k.is_empty())
             .map(String::from)
             .or_else(|| self.api_key.clone())
+            .or_else(|| self.api_keys.iter().find(|k| !k.is_empty()).cloned())
     }
 
     /// Get all effective API keys for a capability section.
@@ -269,6 +270,26 @@ output = ["text"]
         assert_eq!(
             config.effective_api_key(chat.api_key.as_deref()),
             Some("chat-specific-key".to_string())
+        );
+    }
+
+    #[test]
+    fn effective_api_key_fallback_to_api_keys() {
+        let toml_str = r#"
+api_keys = ["key-a", "key-b"]
+
+[chat]
+base_url = "https://api.openai.com/v1"
+
+[chat.models.gpt-4o]
+input = ["text"]
+output = ["text"]
+"#;
+        let config: ProviderConfig = toml::from_str(toml_str).unwrap();
+        let chat = config.chat.as_ref().unwrap();
+        assert_eq!(
+            config.effective_api_key(chat.api_key.as_deref()),
+            Some("key-a".to_string())
         );
     }
 }
