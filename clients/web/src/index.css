@@ -84,3 +84,21 @@ pre {
     }
   }
 }
+
+/* Breathing border for the actively-generating assistant bubble */
+@keyframes generating-breath {
+  0%, 100% {
+    border-color: rgb(63 63 70 / 0.7);
+    box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  }
+  50% {
+    border-color: rgb(96 165 250 / 0.55);
+    box-shadow: 0 0 10px -2px rgb(59 130 246 / 0.18);
+  }
+}
+.generating-border {
+  animation: generating-breath 2.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .generating-border { animation: none; }
+}

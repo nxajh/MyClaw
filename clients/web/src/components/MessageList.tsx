@@ -686,7 +686,7 @@ const AssistantBubble = memo(function AssistantBubble({ blocks, done, isLast, is
   return (
     <div className="flex gap-2.5 sm:gap-3.5 group/msg">
       <div className="mt-0.5 h-6 w-6 sm:h-7 sm:w-7 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-sm sm:text-base shrink-0 select-none shadow-md">🦀</div>
-      <div className="flex-1 min-w-0 rounded-2xl border border-zinc-800/80 bg-zinc-900/25 px-3 sm:px-4 lg:px-5 py-3 sm:py-4 space-y-3 shadow-sm hover:border-zinc-800 transition-colors">
+      <div className={`flex-1 min-w-0 rounded-2xl border bg-zinc-900/25 px-3 sm:px-4 lg:px-5 py-3 sm:py-4 space-y-3 shadow-sm transition-colors ${isGenerating ? 'generating-border' : 'border-zinc-800/80 hover:border-zinc-800'}`}>
         {blocks.map((block, i) => renderBlock(block, i, isGenerating))}
         {isGenerating && blocks.length === 0 && <GeneratingDots />}
         {done && <MessageActions blocks={blocks} isLast={isLast} isGenerating={isGenerating} onRetry={onRetry} />}
