@@ -706,7 +706,7 @@ interface Props {
 }
 
 export default function MessageList({ messages, containerRef, onRetry }: Props) {
-  const { sendMessage, setMessages } = useWebSocketContext()
+  const { sendMessage, setMessages, isGenerating: globalGenerating } = useWebSocketContext()
   const [isNearBottom, setIsNearBottom] = useState(true)
   const scrollElementRef = useRef<HTMLDivElement>(null)
   const lastAssistantIdx = messages.reduce((acc, m, i) => (m.role === 'assistant' ? i : acc), -1)
@@ -864,7 +864,7 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
                                 blocks={msg.blocks}
                                 done={msg.done}
                                 isLast={isLast}
-                                isGenerating={!msg.done}
+                                isGenerating={!msg.done && globalGenerating}
                                 onRetry={onRetry && prevUser ? () => onRetry((prevUser as { content: string }).content) : undefined}
                               />
                               {/* Delete button for assistant messages */}

@@ -190,6 +190,15 @@ export function useWebSocket() {
 
       ws.onclose = () => {
         setStatus('disconnected')
+        // Mark any in-progress assistant message as done so the UI doesn't
+        // show a stale "generating" animation after reconnect.
+        setMessages((prev) => {
+          const last = prev[prev.length - 1]
+          if (last && last.role === 'assistant' && !last.done) {
+            return [...prev.slice(0, -1), { ...last, done: true }]
+          }
+          return prev
+        })
         setIsGenerating(false)
         currentAssistantId.current = null
         authPending.current = false
