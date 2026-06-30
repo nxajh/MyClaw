@@ -615,7 +615,7 @@ function EditableUserBubble({ content, images, files, onResend, onDelete }: {
 
   return (
     <div className="flex justify-end gap-2.5 sm:gap-3.5 group/msg">
-      <div className="max-w-[85%] sm:max-w-[78%] lg:max-w-[72%] rounded-2xl rounded-tr-lg bg-zinc-800 px-3 sm:px-4 lg:px-5 py-2.5 sm:py-3 lg:py-3.5 text-sm text-zinc-100 leading-relaxed">
+      <div className="max-w-[85%] sm:max-w-[78%] lg:max-w-[72%] relative rounded-2xl rounded-tr-lg bg-zinc-800 px-3 sm:px-4 lg:px-5 py-2.5 sm:py-3 lg:py-3.5 text-sm text-zinc-100 leading-relaxed">
         {images && images.length > 0 && (
           <div className="flex flex-wrap gap-2 mb-2">
             {images.map((img, i) => <LazyImage key={i} path={img.path} mime={img.mime} name={img.name} />)}
@@ -642,10 +642,12 @@ function EditableUserBubble({ content, images, files, onResend, onDelete }: {
             </div>
           </div>
         ) : (
+          <>
           <div className="whitespace-pre-wrap">
             <SearchContext.Consumer>{(q) => highlightText(content, q)}</SearchContext.Consumer>
-            {/* Edit/Delete actions */}
-            <div className="flex items-center gap-1 mt-1 opacity-0 group-hover/msg:opacity-100 transition-opacity">
+          </div>
+          {/* Edit/Delete actions */}
+          <div className="flex items-center gap-1 absolute -bottom-3 right-2 opacity-0 group-hover/msg:opacity-100 transition-opacity bg-zinc-800 rounded-md px-1 py-0.5 shadow-md">
               {onResend && (
                 <button onClick={() => setEditing(true)} className="flex items-center gap-1 px-1.5 py-1 rounded-md text-[11px] text-zinc-600 hover:text-zinc-300 hover:bg-zinc-700 transition-colors" title="Edit & resend">
                   <Pencil size={11} /><span>Edit</span>
@@ -656,8 +658,8 @@ function EditableUserBubble({ content, images, files, onResend, onDelete }: {
                   <Trash2 size={11} />
                 </button>
               )}
-            </div>
           </div>
+          </>
         )}
       </div>
       <div className="mt-0.5 h-6 w-6 sm:h-7 sm:w-7 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-sm sm:text-base shrink-0 select-none shadow-md">👤</div>
