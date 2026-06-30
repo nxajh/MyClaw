@@ -1,5 +1,6 @@
 import { useState, useEffect, type FormEvent } from 'react'
 import { KeyRound, Loader2 } from 'lucide-react'
+import { CLIENT_ID_KEY } from '../hooks/useWebSocket'
 
 interface Props {
   onSubmit: (token: string, clientId: string) => void
@@ -10,7 +11,9 @@ interface Props {
 
 export default function LoginOverlay({ onSubmit, isRetry = false, isConnecting = false }: Props) {
   const [token, setToken] = useState('')
-  const [clientId, setClientId] = useState('')
+  const [clientId, setClientId] = useState(() => {
+    try { return localStorage.getItem(CLIENT_ID_KEY) ?? '' } catch { return '' }
+  })
 
   // When a retry occurs (auth failed), clear the input so the user can re-enter.
   useEffect(() => {

@@ -39,7 +39,7 @@ export type ChatMessage = UserMessage | AssistantMessage
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected'
 
 export const AUTH_TOKEN_KEY = 'myclaw_auth_token'
-const CLIENT_ID_KEY = 'myclaw_client_id'
+export const CLIENT_ID_KEY = 'myclaw_client_id'
 
 export interface Attachment { name: string; content: string }
 export interface FileAttachment { data: string; mime_type: string; file_name: string }
