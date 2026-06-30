@@ -502,11 +502,14 @@ export function useWebSocket() {
     }
   }, [sendRaw])
 
-  const submitToken = useCallback((token: string) => {
+  const submitToken = useCallback((token: string, clientId?: string) => {
     if (token) {
       localStorage.setItem(AUTH_TOKEN_KEY, token)
     } else {
       localStorage.removeItem(AUTH_TOKEN_KEY)
+    }
+    if (clientId) {
+      try { localStorage.setItem(CLIENT_ID_KEY, clientId) } catch { /* ignore */ }
     }
     suppressReconnect.current = false
     setAuthFailed(false)

@@ -11,7 +11,7 @@ interface WebSocketContextValue {
   authValidating: boolean
   activeSessionId: string | null
   setActiveSessionId: (id: string | null) => void
-  submitToken: (token: string) => void
+  submitToken: (token: string, clientId?: string) => void
   sendMessage: (content: string, opts?: SendOptions) => void
   cancel: () => void
   sendRaw: (obj: Record<string, unknown>) => void
