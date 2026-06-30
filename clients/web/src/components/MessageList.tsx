@@ -620,7 +620,7 @@ function EditableUserBubble({ content, images, files, onResend, onDelete }: {
 
   return (
     <div className="flex justify-end gap-2.5 sm:gap-3.5 group/msg">
-      <div className="max-w-[85%] sm:max-w-[78%] lg:max-w-[72%] rounded-2xl border border-blue-800/25 bg-blue-900/15 px-3 sm:px-4 lg:px-5 py-3 sm:py-4 text-sm text-zinc-100 leading-relaxed shadow-sm space-y-3 transition-colors hover:border-blue-700/40">
+      <div className="max-w-[85%] sm:max-w-[78%] lg:max-w-[72%] rounded-2xl border border-zinc-700/40 bg-zinc-800/60 px-3 sm:px-4 lg:px-5 py-3 sm:py-4 text-sm text-zinc-100 leading-relaxed shadow-sm space-y-3 transition-colors hover:border-zinc-600/50">
         {images && images.length > 0 && (
           <div className="flex flex-wrap gap-2 mb-2">
             {images.map((img, i) => <LazyImage key={i} path={img.path} mime={img.mime} name={img.name} />)}
