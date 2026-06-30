@@ -532,11 +532,29 @@ fn strip_images(msg: &ChatMessage) -> ChatMessage {
 }
 
 fn build_memory_prompt(knowledge_dir: &str) -> String {
+    // Build a concise listing of existing memory files so the summarizer
+    // can avoid creating duplicates or contradictions.
+    let existing_index = if !knowledge_dir.is_empty() {
+        let memory_dir = std::path::Path::new(knowledge_dir);
+        let files = crate::memory::scan_memory_files(memory_dir);
+        if files.is_empty() {
+            String::from("(empty — no memories yet)")
+        } else {
+            let entries: Vec<crate::memory::IndexEntry> =
+                files.iter().map(crate::memory::IndexEntry::from).collect();
+            crate::memory::format_memory_index(&entries)
+        }
+    } else {
+        String::from("(memory directory not configured)")
+    };
+
     format!(
         "\n\
          \n\
-         You also have a persistent memory system. The memory directory is `{knowledge_dir}/` and\n\
-         its current index is in your system prompt above.\n\
+         You also have a persistent memory system. The memory directory is `{knowledge_dir}/`.\n\
+         \n\
+         ### Existing memory index\n\
+         {existing_index}\n\
          \n\
          Based on this conversation, decide if any memories should be saved, updated, or\n\
          deleted. Use file_write to create/update memory files and file_edit to modify them.\n\
@@ -561,7 +579,7 @@ fn build_memory_prompt(knowledge_dir: &str) -> String {
          \n\
          Other rules:\n\
          - ONLY save things NOT derivable from code/git (user preferences, decisions, corrections)\n\
-         - Check the existing memory index to avoid duplicates — update existing files instead of creating duplicates\n\
+         - Check the existing memory index above to avoid duplicates — update existing files instead of creating duplicates\n\
          - If existing memories are outdated or contradicted, update or delete them\n\
          - Keep name short, lowercase, underscores (becomes the filename: {knowledge_dir}/{{name}}.md)\n\
          - If no memory changes needed, skip this entirely and just output the summary\n\

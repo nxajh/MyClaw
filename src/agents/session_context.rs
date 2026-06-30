@@ -231,6 +231,15 @@ impl SessionContext {
             // (sourced from the shared ResourceProvider via ContextEngine).
             attachments.diff_date(runtime.context_engine.timezone_offset(), &session.history);
             attachments.diff_autonomy(&prompt_config.permission_mode, &session.history);
+            // Inject user/feedback memory index as system-reminder.
+            let knowledge_dir = &runtime.defaults.prompt.knowledge_dir;
+            if !knowledge_dir.is_empty() {
+                let memory_dir = std::path::Path::new(knowledge_dir);
+                let files = crate::memory::scan_memory_files(memory_dir);
+                let entries: Vec<crate::memory::IndexEntry> =
+                    files.iter().map(crate::memory::IndexEntry::from).collect();
+                attachments.diff_memory(&entries, &session.history);
+            }
             let text = attachments.build_text(&skills_snap);
             attachments.clear_pending();
             text

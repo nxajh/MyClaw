@@ -297,37 +297,9 @@ pub fn truncate_index(content: &str, max_lines: usize, max_bytes: usize) -> Stri
     truncated
 }
 
-// ── Memory section for system prompt ───────────────────────────────────────
-
-/// Build the complete Memory section for the system prompt.
-/// Includes static instructions + dynamic index from memory/*.md.
-pub fn build_memory_section(knowledge_dir: &str) -> String {
-    if knowledge_dir.is_empty() {
-        return String::new();
-    }
-
-    let memory_dir = Path::new(knowledge_dir);
-    let files = scan_memory_files(memory_dir);
-    let entries: Vec<IndexEntry> = files.iter().map(IndexEntry::from).collect();
-    let index_text = format_memory_index(&entries);
-
-    format!(
-        r#"## Memory
-
-你有文件级持久记忆系统，文件存放在 `memory/` 目录。
-记忆按 type 分类：user（用户偏好）、feedback（行为纠正）、project（项目背景）、reference（外部引用）。
-当记忆内容与当前任务相关时，用 file_read 读取详细文件。
-
-如果用户明确要求记住某事，或你发现偏好/行为模式变化，用 file_write 写入 memory/ 目录。
-文件必须包含 YAML frontmatter（name / summary / type / created_at），可选 tags。
-不要存可以从代码/文件推导的信息（代码路径、架构、git history）。
-
-### 记忆索引
-
-{}"#,
-        index_text
-    )
-}
+// NOTE: `build_memory_section` was removed — memory index injection is now
+// handled by `AttachmentManager::diff_memory` via system-reminder messages,
+// not the system prompt. See `session_context.rs::process_turn`.
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 

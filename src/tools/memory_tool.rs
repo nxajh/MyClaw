@@ -41,34 +41,24 @@ fn validate_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Scan memory directory and return parsed entries.
-fn scan_entries(memory_dir: &Path) -> Vec<crate::memory::IndexEntry> {
-    let files = crate::memory::scan_memory_files(memory_dir);
-    files.iter().map(crate::memory::IndexEntry::from).collect()
-}
+/// Scan memory files from both global and per-user directories, deduplicated by name.
+fn scan_merged(workspace_dir: &Path, user_id: &str) -> Vec<crate::memory::MemoryFile> {
+    let global_dir = workspace_dir.join(crate::memory::MEMORY_DIR_NAME);
+    let user_dir = workspace_dir
+        .join("users")
+        .join(user_id)
+        .join(crate::memory::MEMORY_DIR_NAME);
 
-/// Resolve memory directory for a specific user.
-///
-/// G43: memories are scoped per-user at `workspace/users/{user_id}/memory/`.
-/// The `user_id` is derived from `session.owner` via `UserResolver`.
-struct MemoryPaths {
-    memory_dir: PathBuf,
-}
+    let mut files = crate::memory::scan_memory_files(&global_dir);
+    let global_names: std::collections::HashSet<String> =
+        files.iter().map(|f| f.name.clone()).collect();
 
-impl MemoryPaths {
-    /// Build the per-user memory path:
-    ///   `{workspace_dir}/users/{user_id}/{MEMORY_DIR_NAME}/`
-    fn for_user(workspace_dir: &Path, user_id: &str) -> Result<Self, String> {
-        let dir = workspace_dir
-            .join("users")
-            .join(user_id)
-            .join(crate::memory::MEMORY_DIR_NAME);
-        if !dir.exists() {
-            std::fs::create_dir_all(&dir)
-                .map_err(|e| format!("Failed to create memory dir: {}", e))?;
+    for f in crate::memory::scan_memory_files(&user_dir) {
+        if !global_names.contains(&f.name) {
+            files.push(f);
         }
-        Ok(Self { memory_dir: dir })
     }
+    files
 }
 
 /// Common helper: resolve the user_id from a session via the resolver.
@@ -179,18 +169,9 @@ impl Tool for MemoryListTool {
         session: &Session,
     ) -> anyhow::Result<ToolResult> {
         let user_id = user_id_for(session, &self.resolver);
-        let paths = match MemoryPaths::for_user(&self.workspace_dir, &user_id) {
-            Ok(p) => p,
-            Err(e) => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: json!({"success": false, "error": e}).to_string(),
-                    error: None,
-                });
-            }
-        };
-
-        let entries = scan_entries(&paths.memory_dir);
+        let files = scan_merged(&self.workspace_dir, &user_id);
+        let entries: Vec<crate::memory::IndexEntry> =
+            files.iter().map(crate::memory::IndexEntry::from).collect();
 
         if entries.is_empty() {
             return Ok(ToolResult {
@@ -292,18 +273,7 @@ impl Tool for MemoryViewTool {
         };
 
         let user_id = user_id_for(session, &self.resolver);
-        let paths = match MemoryPaths::for_user(&self.workspace_dir, &user_id) {
-            Ok(p) => p,
-            Err(e) => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: json!({"success": false, "error": e}).to_string(),
-                    error: None,
-                });
-            }
-        };
-
-        let files = crate::memory::scan_memory_files(&paths.memory_dir);
+        let files = scan_merged(&self.workspace_dir, &user_id);
         let file = files.iter().find(|f| f.name == name);
 
         match file {
@@ -402,18 +372,7 @@ impl Tool for MemorySearchTool {
         };
 
         let user_id = user_id_for(session, &self.resolver);
-        let paths = match MemoryPaths::for_user(&self.workspace_dir, &user_id) {
-            Ok(p) => p,
-            Err(e) => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: json!({"success": false, "error": e}).to_string(),
-                    error: None,
-                });
-            }
-        };
-
-        let files = crate::memory::scan_memory_files(&paths.memory_dir);
+        let files = scan_merged(&self.workspace_dir, &user_id);
 
         // Scoring: name=3, tags=2, summary=2, content=1
         let mut results: Vec<(i32, &crate::memory::MemoryFile)> = Vec::new();
@@ -644,9 +603,7 @@ impl MemoryManageTool {
 
         scan_memory_content_opt(content)?;
 
-        let paths = MemoryPaths::for_user(&self.workspace_dir, user_id)?;
-
-        let files = crate::memory::scan_memory_files(&paths.memory_dir);
+        let files = scan_merged(&self.workspace_dir, user_id);
         if files.iter().any(|f| f.name == name) {
             return Err(format!(
                 "Memory '{}' already exists. Use 'replace' to update it.",
@@ -663,7 +620,9 @@ impl MemoryManageTool {
         let frontmatter = build_frontmatter(name, &summary, &tags, &mem_type, &now);
         let file_content = format!("{}{}", frontmatter, content);
 
-        let target = paths.memory_dir.join(&filename);
+        let target = self.workspace_dir.join(crate::memory::MEMORY_DIR_NAME).join(&filename);
+        // Ensure the global memory dir exists
+        let _ = std::fs::create_dir_all(target.parent().unwrap_or(&target));
         atomic_write(&target, &file_content)
             .map_err(|e| format!("Failed to write memory file: {}", e))?;
 
@@ -685,8 +644,7 @@ impl MemoryManageTool {
     ) -> Result<serde_json::Value, String> {
         validate_name(name)?;
 
-        let paths = MemoryPaths::for_user(&self.workspace_dir, user_id)?;
-        let files = crate::memory::scan_memory_files(&paths.memory_dir);
+        let files = scan_merged(&self.workspace_dir, user_id);
         let existing = files
             .iter()
             .find(|f| f.name == name)
@@ -739,7 +697,14 @@ impl MemoryManageTool {
         let frontmatter = build_frontmatter(name, &summary, &tags, &mem_type, &now);
         let file_content = format!("{}{}", frontmatter, content);
 
-        let target = paths.memory_dir.join(filename);
+        // Write to the same location as the existing file, or global dir if new
+        let target = if existing.path.exists() {
+            existing.path.clone()
+        } else {
+            let dir = self.workspace_dir.join(crate::memory::MEMORY_DIR_NAME);
+            let _ = std::fs::create_dir_all(&dir);
+            dir.join(filename)
+        };
         atomic_write(&target, &file_content)
             .map_err(|e| format!("Failed to write memory file: {}", e))?;
 
@@ -753,8 +718,7 @@ impl MemoryManageTool {
     fn action_remove(&self, name: &str, user_id: &str) -> Result<serde_json::Value, String> {
         validate_name(name)?;
 
-        let paths = MemoryPaths::for_user(&self.workspace_dir, user_id)?;
-        let files = crate::memory::scan_memory_files(&paths.memory_dir);
+        let files = scan_merged(&self.workspace_dir, user_id);
         let existing = files
             .iter()
             .find(|f| f.name == name)
