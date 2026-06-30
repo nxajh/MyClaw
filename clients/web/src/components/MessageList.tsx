@@ -67,10 +67,10 @@ function PreCodeBlock({ children, className }: { children: ReactNode; className?
 
 function GeneratingDots() {
   return (
-    <div className="flex items-center gap-1.5 py-1">
-      <span className="h-2 w-2 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.3s]" />
-      <span className="h-2 w-2 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.15s]" />
-      <span className="h-2 w-2 rounded-full bg-zinc-400 animate-bounce" />
+    <div className="space-y-2 py-1">
+      <div className="skeleton-line w-full" />
+      <div className="skeleton-line w-full" />
+      <div className="skeleton-line w-3/5" />
     </div>
   )
 }
