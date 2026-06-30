@@ -187,13 +187,13 @@ function MessageActions({ blocks, isLast, isGenerating, onRetry }: { blocks: Mes
     try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 2000) } catch { /* ignore */ }
   }
   return (
-    <div className="flex items-center gap-1 mt-1 opacity-0 group-hover/msg:opacity-100 transition-opacity">
-      <button onClick={handleCopy} className="flex items-center gap-1 px-1.5 py-1 rounded-md text-[11px] text-zinc-600 hover:text-zinc-300 hover:bg-zinc-800 transition-colors" title="Copy message">
-        {copied ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}<span>{copied ? 'Copied' : 'Copy'}</span>
+    <div className="flex items-center gap-0.5 mt-1">
+      <button onClick={handleCopy} className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-colors" title={copied ? 'Copied' : 'Copy message'}>
+        {copied ? <Check size={14} className="text-emerald-400" /> : <Copy size={14} />}
       </button>
       {isLast && !isGenerating && onRetry && (
-        <button onClick={onRetry} className="flex items-center gap-1 px-1.5 py-1 rounded-md text-[11px] text-zinc-600 hover:text-zinc-300 hover:bg-zinc-800 transition-colors" title="Regenerate response">
-          <RotateCcw size={12} /><span>Retry</span>
+        <button onClick={onRetry} className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-colors" title="Regenerate response">
+          <RotateCcw size={14} />
         </button>
       )}
     </div>
@@ -615,7 +615,7 @@ function EditableUserBubble({ content, images, files, onResend, onDelete }: {
 
   return (
     <div className="flex justify-end gap-2.5 sm:gap-3.5 group/msg">
-      <div className="max-w-[85%] sm:max-w-[78%] lg:max-w-[72%] relative rounded-2xl rounded-tr-lg bg-zinc-800 px-3 sm:px-4 lg:px-5 py-2.5 sm:py-3 lg:py-3.5 text-sm text-zinc-100 leading-relaxed">
+      <div className="max-w-[85%] sm:max-w-[78%] lg:max-w-[72%] rounded-2xl rounded-tr-lg bg-zinc-800 px-3 sm:px-4 lg:px-5 py-2.5 sm:py-3 lg:py-3.5 text-sm text-zinc-100 leading-relaxed">
         {images && images.length > 0 && (
           <div className="flex flex-wrap gap-2 mb-2">
             {images.map((img, i) => <LazyImage key={i} path={img.path} mime={img.mime} name={img.name} />)}
@@ -647,15 +647,15 @@ function EditableUserBubble({ content, images, files, onResend, onDelete }: {
             <SearchContext.Consumer>{(q) => highlightText(content, q)}</SearchContext.Consumer>
           </div>
           {/* Edit/Delete actions */}
-          <div className="flex items-center gap-1 absolute -bottom-3 right-2 opacity-0 group-hover/msg:opacity-100 transition-opacity bg-zinc-800 rounded-md px-1 py-0.5 shadow-md">
+          <div className="flex items-center gap-0.5 justify-end mt-1">
               {onResend && (
-                <button onClick={() => setEditing(true)} className="flex items-center gap-1 px-1.5 py-1 rounded-md text-[11px] text-zinc-600 hover:text-zinc-300 hover:bg-zinc-700 transition-colors" title="Edit & resend">
-                  <Pencil size={11} /><span>Edit</span>
+                <button onClick={() => setEditing(true)} className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700 transition-colors" title="Edit & resend">
+                  <Pencil size={14} />
                 </button>
               )}
               {onDelete && (
-                <button onClick={onDelete} className="flex items-center gap-1 px-1.5 py-1 rounded-md text-[11px] text-zinc-600 hover:text-red-400 hover:bg-zinc-700 transition-colors" title="Delete message">
-                  <Trash2 size={11} />
+                <button onClick={onDelete} className="p-1.5 rounded-md text-zinc-500 hover:text-red-400 hover:bg-zinc-700 transition-colors" title="Delete message">
+                  <Trash2 size={14} />
                 </button>
               )}
           </div>
@@ -891,9 +891,9 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
                                 onRetry={onRetry && prevUser ? () => onRetry((prevUser as { content: string }).content) : undefined}
                               />
                               {/* Delete button for assistant messages */}
-                              <div className="flex items-center gap-1 mt-1 opacity-0 group-hover/msg:opacity-100 transition-opacity ml-8 sm:ml-10 lg:ml-12">
-                                <button onClick={() => handleDelete(msg.id)} className="flex items-center gap-1 px-1.5 py-1 rounded-md text-[11px] text-zinc-600 hover:text-red-400 hover:bg-zinc-800/60 transition-colors" title="Delete message">
-                                  <Trash2 size={11} />
+                              <div className="flex items-center gap-0.5 mt-1 ml-1">
+                                <button onClick={() => handleDelete(msg.id)} className="p-1.5 rounded-md text-zinc-500 hover:text-red-400 hover:bg-zinc-800 transition-colors" title="Delete message">
+                                  <Trash2 size={14} />
                                 </button>
                               </div>
                             </div>
