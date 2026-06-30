@@ -144,12 +144,7 @@ pub fn marker_for_file(path: &str, mime: Option<&str>) -> String {
 pub fn age_media_in_message(msg: &mut ChatMessage) -> bool {
     let mut changed = false;
     for part in &mut msg.parts {
-        if let ContentPart::File {
-            ref path,
-            ref mime_type,
-            ..
-        } = part
-        {
+        if let ContentPart::File { path, mime_type, .. } = part {
             let marker = marker_for_file(path, mime_type.as_deref());
             *part = ContentPart::Text { text: marker };
             changed = true;
