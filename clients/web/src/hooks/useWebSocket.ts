@@ -502,7 +502,7 @@ export function useWebSocket() {
     }
   }, [sendRaw])
 
-  const submitToken = useCallback((token: string, clientId?: string) => {
+  const submitToken = useCallback((token: string, clientId: string) => {
     if (token) {
       localStorage.setItem(AUTH_TOKEN_KEY, token)
     } else {
