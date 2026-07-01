@@ -345,7 +345,7 @@ fn recovery_hints_for(category: &ErrorCategory, retry_after: Option<Duration>) -
         },
         ErrorCategory::Overloaded => RecoveryHints {
             retry: true,
-            cooldown: retry_after.or(Some(Duration::from_secs(300))),
+            cooldown: retry_after.or(Some(Duration::from_secs(30))),
             report: false,
         },
         ErrorCategory::ServerError => RecoveryHints {

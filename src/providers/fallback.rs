@@ -22,7 +22,27 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// Maximum retries for transient server errors (Overloaded, ServerError) before
+/// falling over to the next provider in the chain.
+const TRANSIENT_MAX_RETRIES: u32 = 2;
+
+/// Base delay for exponential backoff on transient server errors.
+/// Actual delays: attempt 1 = 2 s, attempt 2 = 4 s.
+const TRANSIENT_BACKOFF_BASE: Duration = Duration::from_secs(2);
+
+/// Whether the error category represents a transient server-side condition that
+/// may clear quickly (server overload, internal error) and is worth retrying the
+/// same provider with a short backoff before failing over.
+fn is_transient_server_error(cat: &ErrorCategory) -> bool {
+    matches!(cat, ErrorCategory::Overloaded | ErrorCategory::ServerError)
+}
+
+/// Exponential backoff delay for transient retry attempt `n` (1-based).
+fn transient_backoff(attempt: u32) -> Duration {
+    TRANSIENT_BACKOFF_BASE * 2u32.pow(attempt.saturating_sub(1))
+}
 
 /// An entry in the fallback chain: a provider + its model ID + optional credential pool.
 #[derive(Clone)]
@@ -137,6 +157,12 @@ impl ChatProvider for FallbackChatProvider {
                 let mut broke_for_failover = false;
 
                 'credential_retry: for _rotation in 0..max_rotations {
+                    let mut transient_attempt = 0u32;
+                    let mut should_failover = false;
+                    let mut should_rotate = false;
+                    let mut last_classified: Option<ClassifiedError> = None;
+
+                    'transient_retry: loop {
                     let req = ChatRequest {
                         model: &entry.model_id,
                         messages: &messages,
@@ -189,6 +215,24 @@ impl ChatProvider for FallbackChatProvider {
                                 }
                             }
 
+                            // Transient server error (Overloaded/ServerError): retry same
+                            // provider with backoff before falling over to the next entry.
+                            if is_transient_server_error(&classified.category)
+                                && transient_attempt < TRANSIENT_MAX_RETRIES
+                            {
+                                transient_attempt += 1;
+                                let delay = transient_backoff(transient_attempt);
+                                tracing::info!(
+                                    model = %entry.model_id,
+                                    category = %classified.category,
+                                    attempt = transient_attempt,
+                                    delay_secs = delay.as_secs(),
+                                    "transient setup error, retrying same provider"
+                                );
+                                tokio::time::sleep(delay).await;
+                                continue 'transient_retry;
+                            }
+
                             if is_provider_error(&classified.category)
                                 || classified.recovery_hints().retry
                             {
@@ -203,10 +247,8 @@ impl ChatProvider for FallbackChatProvider {
                     };
 
                     // Drain the stream. Classify errors to decide whether to failover or rotate.
-                    let mut should_failover = false;
-                    let mut should_rotate = false;
-                    let mut last_classified: Option<ClassifiedError> = None;
-                    let mut inner_stream = stream;
+                        let mut saw_content = false;
+                        let mut inner_stream = stream;
 
                     while let Some(event) = inner_stream.next().await {
                         match &event {
@@ -234,6 +276,24 @@ impl ChatProvider for FallbackChatProvider {
                                     break;
                                 }
 
+                                // Transient server error: retry same provider with backoff.
+                                if is_transient_server_error(&classified.category)
+                                    && !saw_content
+                                    && transient_attempt < TRANSIENT_MAX_RETRIES
+                                {
+                                    transient_attempt += 1;
+                                    let delay = transient_backoff(transient_attempt);
+                                    tracing::info!(
+                                        model = %entry.model_id,
+                                        category = %classified.category,
+                                        attempt = transient_attempt,
+                                        delay_secs = delay.as_secs(),
+                                        "transient HTTP error, retrying same provider"
+                                    );
+                                    tokio::time::sleep(delay).await;
+                                    continue 'transient_retry;
+                                }
+
                                 if is_provider_error(&classified.category)
                                     || classified.recovery_hints().retry
                                 {
@@ -258,6 +318,24 @@ impl ChatProvider for FallbackChatProvider {
                                     break;
                                 }
 
+                                // Transient server error: retry same provider with backoff.
+                                if is_transient_server_error(&classified.category)
+                                    && !saw_content
+                                    && transient_attempt < TRANSIENT_MAX_RETRIES
+                                {
+                                    transient_attempt += 1;
+                                    let delay = transient_backoff(transient_attempt);
+                                    tracing::info!(
+                                        model = %entry.model_id,
+                                        category = %classified.category,
+                                        attempt = transient_attempt,
+                                        delay_secs = delay.as_secs(),
+                                        "transient stream error, retrying same provider"
+                                    );
+                                    tokio::time::sleep(delay).await;
+                                    continue 'transient_retry;
+                                }
+
                                 if is_provider_error(&classified.category)
                                     || classified.recovery_hints().retry
                                 {
@@ -277,9 +355,14 @@ impl ChatProvider for FallbackChatProvider {
                                 return;
                             }
                             _ => {
+                                saw_content = true;
                                 let _ = tx.send(event).await;
                             }
                         }
+                    }
+
+                        // Stream ended (success or non-transient error after retries).
+                        break 'transient_retry;
                     }
 
                     if !should_rotate && !should_failover {
