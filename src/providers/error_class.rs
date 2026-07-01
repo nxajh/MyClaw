@@ -405,7 +405,7 @@ fn classify_provider(provider: &str, status: u16, body: &str) -> Option<ErrorCat
         429 => {
             // GLM / Zhipu
             if lp.contains("glm") || lp.contains("zhipu") {
-                if body_contains_code(body, 1312) {
+                if body_contains_code(body, 1305) || body_contains_code(body, 1312) {
                     return Some(ErrorCategory::Overloaded);
                 }
                 if body_contains_code(body, 1308) || body_contains_code(body, 1309) {
@@ -447,7 +447,12 @@ fn body_contains_code(body: &str, code: u64) -> bool {
     }
     // With spaces
     let spaced = format!("\"code\": {code}");
-    body.contains(&spaced)
+    if body.contains(&spaced) {
+        return true;
+    }
+    // Quoted string form (e.g. "code":"1305")
+    let quoted = format!("\"code\":\"{code}\"");
+    body.contains(&quoted)
 }
 
 // ── Retry-after extraction ───────────────────────────────────────────────
@@ -537,6 +542,14 @@ mod tests {
     #[test]
     fn layer2_glm_429_1312_overloaded() {
         let body = r#"{"error":{"code":1312,"message":"该模型当前访问量过大"}}"#;
+        let err = ClassifiedError::classify("glm", 429, body);
+        assert_eq!(err.category, ErrorCategory::Overloaded);
+        assert!(err.retryable);
+    }
+
+    #[test]
+    fn layer2_glm_429_1305_overloaded() {
+        let body = r#"{"error":{"code":"1305","message":"该模型当前访问量过大，请您稍后再试"}}"#;
         let err = ClassifiedError::classify("glm", 429, body);
         assert_eq!(err.category, ErrorCategory::Overloaded);
         assert!(err.retryable);
