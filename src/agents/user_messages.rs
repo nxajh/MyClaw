@@ -40,10 +40,17 @@ pub fn user_facing_error_message(err: &anyhow::Error) -> String {
         let too_long = http.message.contains("too long")
             || http.message.contains("maximum context")
             || http.message.contains("过长");
+        let invalid_key = http.message.contains("Invalid API Key")
+            || http.message.contains("invalid_key")
+            || http.message.contains("invalid_api_key")
+            || http.message.contains("Unauthorized");
         return match http.status {
             500 | 502 | 503 | 504 => "⚠️ 模型服务暂时不可用，请稍后重试。",
             429 => "⚠️ 请求过于频繁，请稍候再试。",
             413 => "⚠️ 消息内容过长，请精简后重试。",
+            401 if invalid_key => "⚠️ 模型 API 密钥已失效，请联系管理员更新。",
+            401 => "⚠️ 模型认证失败，请联系管理员。",
+            402 | 403 => "⚠️ 模型额度不足或无权访问，请联系管理员。",
             400 if too_long => "⚠️ 消息内容过长，请精简后重试。",
             400 => "⚠️ 请求无法处理（格式错误）。",
             _ => "⚠️ 模型调用失败，请稍后重试。",
@@ -106,6 +113,28 @@ mod tests {
         }
         .into();
         assert!(user_facing_error_message(&e).contains("过长"));
+    }
+
+    #[test]
+    fn http_401_invalid_key_maps_to_auth_failure() {
+        let e: anyhow::Error = crate::providers::ProviderHttpError {
+            status: 401,
+            message: "Invalid API Key".into(),
+        }
+        .into();
+        let msg = user_facing_error_message(&e);
+        assert!(msg.contains("密钥"), "got: {msg}");
+    }
+
+    #[test]
+    fn http_403_maps_to_billing() {
+        let e: anyhow::Error = crate::providers::ProviderHttpError {
+            status: 403,
+            message: "Forbidden".into(),
+        }
+        .into();
+        let msg = user_facing_error_message(&e);
+        assert!(msg.contains("额度") || msg.contains("无权"), "got: {msg}");
     }
 
     #[test]
