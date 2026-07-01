@@ -1232,9 +1232,9 @@ fn handle_api_request(
                             "name": f.path.file_name().and_then(|n| n.to_str()).unwrap_or(&f.name).to_string(),
                             "size": std::fs::metadata(&f.path).map(|m| m.len()).unwrap_or(0),
                             "mem_name": f.name,
-                            "summary": f.summary,
+                            "summary": f.description,
                             "tags": f.tags,
-                            "mem_type": f.mem_type.as_str(),
+                            "mem_type": f.mem_type,
                             "created_at": f.created_at,
                         })
                     }).collect();

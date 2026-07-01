@@ -1,17 +1,21 @@
-//! Memory system — file-based persistent memory with frontmatter index.
+//! Memory wiki — file-based knowledge graph with frontmatter index.
 //!
 //! Memory files live in `workspace/memory/`, each with YAML frontmatter:
 //!
 //! ```markdown
 //! ---
 //! name: user_language
-//! summary: 用户偏好使用中文进行所有交流
+//! description: 用户偏好使用中文进行所有交流
 //! tags: [user, language]
 //! type: user
 //! created_at: 2026-05-07
+//! updated_at: 2026-07-01
 //! ---
 //!
 //! Memory content...
+//!
+//! ## See Also
+//! - [User timezone preference](user_timezone.md)
 //! ```
 //!
 //! No separate index file. The index is generated dynamically by scanning
@@ -19,10 +23,11 @@
 //!
 //! ## System-reminder injection policy
 //!
-//! Only `user` (preferences) and `feedback` (behavior corrections) types are
-//! injected into system-reminders — these are facts the agent must always obey.
-//! `project` and `reference` types are available via memory_list / memory_search.
+//! Only `user`, `feedback`, and `rule` types are injected into
+//! system-reminders — these are facts the agent must always obey.
+//! All other types are available via memory_list / memory_search.
 
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
@@ -35,81 +40,54 @@ pub const MEMORY_DIR_NAME: &str = "memory";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum MemoryType {
-    User,
-    Feedback,
-    Project,
-    Reference,
-}
-
-impl MemoryType {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::User => "user",
-            Self::Feedback => "feedback",
-            Self::Project => "project",
-            Self::Reference => "reference",
-        }
-    }
-
-    pub fn from_str_lossy(s: &str) -> Option<Self> {
-        match s {
-            "user" => Some(Self::User),
-            "feedback" => Some(Self::Feedback),
-            "project" => Some(Self::Project),
-            "reference" => Some(Self::Reference),
-            _ => None,
-        }
-    }
-
-    /// Types injected into system-reminders (agent must always obey).
-    pub fn injected_types() -> &'static [MemoryType] {
-        &[Self::User, Self::Feedback]
-    }
-
-    /// All types in canonical order (used for listing/grouping).
-    pub fn all() -> &'static [MemoryType] {
-        &[Self::User, Self::Feedback, Self::Project, Self::Reference]
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct MemoryFile {
     pub name: String,
-    pub summary: String,
+    pub mem_type: String,
+    pub description: String,
     pub tags: Vec<String>,
-    pub mem_type: MemoryType,
     pub created_at: String,
+    pub updated_at: Option<String>,
+    pub links: Vec<LinkRef>,
     pub content: String,
     pub path: std::path::PathBuf,
 }
 
 #[derive(Debug, Clone)]
+pub struct LinkRef {
+    /// Target entity name (no path prefix, no `.md` suffix).
+    pub target: String,
+    /// Link label / relationship description.
+    pub label: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct IndexEntry {
-    pub mem_type: MemoryType,
     pub name: String,
-    pub filename: String,
-    pub summary: String,
+    pub mem_type: String,
+    pub description: String,
     pub tags: Vec<String>,
+    pub link_count: usize,
 }
 
 impl From<&MemoryFile> for IndexEntry {
     fn from(f: &MemoryFile) -> Self {
         Self {
-            mem_type: f.mem_type,
             name: f.name.clone(),
-            filename: f
-                .path
-                .file_name()
-                .unwrap_or_default()
-                .to_str()
-                .unwrap_or("")
-                .to_string(),
-            summary: f.summary.clone(),
+            mem_type: f.mem_type.clone(),
+            description: f.description.clone(),
             tags: f.tags.clone(),
+            link_count: f.links.len(),
         }
     }
+}
+
+// ── Injection helpers ──────────────────────────────────────────────────────
+
+/// Types injected into every conversation's system-reminder.
+/// Open string matching — not limited to a fixed enum.
+pub fn should_inject(mem_type: &str) -> bool {
+    matches!(mem_type, "user" | "feedback" | "rule")
 }
 
 // ── Directory management ───────────────────────────────────────────────────
@@ -150,7 +128,6 @@ pub fn scan_memory_files(memory_dir: &Path) -> Vec<MemoryFile> {
 
 /// Parse a single `.md` file's YAML frontmatter + content.
 /// Returns `None` if frontmatter is missing or malformed.
-///
 fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
     let raw = fs::read_to_string(path).ok()?;
     let trimmed = raw.trim();
@@ -170,10 +147,13 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
 
     // Parse YAML frontmatter (simple key: value parsing)
     let mut name = None;
+    let mut description: Option<String> = None;
     let mut summary: Option<String> = None;
+    let mut abstract_val: Option<String> = None;
     let mut tags: Vec<String> = Vec::new();
-    let mut mem_type = None;
+    let mut mem_type: Option<String> = None;
     let mut created_at = None;
+    let mut updated_at: Option<String> = None;
 
     for line in frontmatter_text.lines() {
         let line = line.trim();
@@ -182,21 +162,35 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
             let value = value.trim();
             match key {
                 "name" => name = Some(value.to_string()),
-                "summary" | "description" => summary = Some(value.to_string()),
+                "description" => description = Some(value.to_string()),
+                "summary" => summary = Some(value.to_string()),
+                "abstract" => abstract_val = Some(value.to_string()),
                 "tags" => tags = parse_tags(value),
-                "type" => mem_type = MemoryType::from_str_lossy(value),
+                "type" => mem_type = Some(value.to_string()),
                 "created_at" => created_at = Some(value.to_string()),
+                "updated_at" => updated_at = Some(value.to_string()),
                 _ => {}
             }
         }
     }
 
+    // Unify description: priority description > summary > abstract
+    let description = description
+        .or(summary)
+        .or(abstract_val)
+        .unwrap_or_default();
+
+    // Parse See Also links from body
+    let links = extract_links(&content);
+
     Some(MemoryFile {
         name: name?,
-        summary: summary.unwrap_or_default(),
-        tags,
         mem_type: mem_type?,
+        description,
+        tags,
         created_at: created_at.unwrap_or_default(),
+        updated_at,
+        links,
         content,
         path: path.to_path_buf(),
     })
@@ -220,41 +214,126 @@ fn parse_tags(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// Extract markdown links from the `## See Also` section.
+/// Returns `Vec<LinkRef>` with target names (no path, no `.md`).
+fn extract_links(content: &str) -> Vec<LinkRef> {
+    let mut in_see_also = false;
+    let mut links = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Detect any `## ` heading — toggle whether we're in See Also
+        if trimmed.starts_with("## ") {
+            in_see_also = trimmed.eq_ignore_ascii_case("## see also");
+            continue;
+        }
+
+        if !in_see_also {
+            continue;
+        }
+
+        // Parse markdown link: [label](target)
+        if let Some(link) = parse_md_link(trimmed) {
+            links.push(link);
+        }
+    }
+
+    links
+}
+
+/// Parse a single markdown link `[label](target)` from a line.
+fn parse_md_link(line: &str) -> Option<LinkRef> {
+    let bracket_start = line.find('[')?;
+    let rest_after_bracket = &line[bracket_start + 1..];
+    let bracket_end_rel = rest_after_bracket.find(']')?;
+    let label = &rest_after_bracket[..bracket_end_rel];
+
+    let rest = &rest_after_bracket[bracket_end_rel + 1..];
+    let paren_start = rest.find('(')?;
+    let rest_after_paren = &rest[paren_start + 1..];
+    let paren_end_rel = rest_after_paren.find(')')?;
+    let target_raw = &rest_after_paren[..paren_end_rel];
+
+    // Strip path prefix (take last component) and .md suffix
+    let target = target_raw
+        .rsplit('/')
+        .next()
+        .unwrap_or(target_raw)
+        .trim_end_matches(".md")
+        .to_string();
+
+    if target.is_empty() {
+        return None;
+    }
+
+    Some(LinkRef {
+        target,
+        label: label.to_string(),
+    })
+}
+
+/// Build a reverse-link (backlink) index: for each entity name, which
+/// other entities link to it.
+pub fn build_backlinks(files: &[MemoryFile]) -> HashMap<String, Vec<String>> {
+    let mut backlinks: HashMap<String, Vec<String>> = HashMap::new();
+    for f in files {
+        for link in &f.links {
+            backlinks
+                .entry(link.target.clone())
+                .or_default()
+                .push(f.name.clone());
+        }
+    }
+    // Deduplicate and sort each entry
+    for refs in backlinks.values_mut() {
+        refs.sort();
+        refs.dedup();
+    }
+    backlinks
+}
+
 // ── Index formatting (for system-reminder injection) ──────────────────────
 
 /// Generate a formatted index string for system-reminder injection.
-/// Only includes `user` and `feedback` types.
-pub fn format_memory_index(entries: &[IndexEntry]) -> String {
+/// Only includes types matching `should_inject` (user, feedback, rule).
+/// Groups entries by type, types sorted alphabetically.
+pub fn format_wiki_index(entries: &[IndexEntry]) -> String {
     // Filter to injected types only
     let injectable: Vec<&IndexEntry> = entries
         .iter()
-        .filter(|e| MemoryType::injected_types().contains(&e.mem_type))
+        .filter(|e| should_inject(&e.mem_type))
         .collect();
 
     if injectable.is_empty() {
         return "暂无需要遵守的记忆。".to_string();
     }
 
+    // Collect distinct type strings, sorted
+    let mut types: Vec<&str> = injectable.iter().map(|e| e.mem_type.as_str()).collect();
+    types.sort();
+    types.dedup();
+
     let mut lines = Vec::new();
 
-    for &mem_type in MemoryType::injected_types() {
+    for mem_type in &types {
         let group: Vec<&&IndexEntry> = injectable
             .iter()
-            .filter(|e| e.mem_type == mem_type)
+            .filter(|e| e.mem_type == *mem_type)
             .collect();
         if group.is_empty() {
             continue;
         }
 
-        lines.push(format!("### {}", mem_type.as_str()));
+        lines.push(format!("### {}", mem_type));
         for entry in &group {
             let mut line = format!("- **{}**", entry.name);
             if !entry.tags.is_empty() {
                 line.push_str(&format!(" [{}]", entry.tags.join(", ")));
             }
             lines.push(line);
-            if !entry.summary.is_empty() {
-                lines.push(format!("  {}", entry.summary));
+            if !entry.description.is_empty() {
+                lines.push(format!("  {}", entry.description));
             }
         }
         lines.push(String::new());
@@ -297,10 +376,6 @@ pub fn truncate_index(content: &str, max_lines: usize, max_bytes: usize) -> Stri
     truncated
 }
 
-// NOTE: `build_memory_section` was removed — memory index injection is now
-// handled by `AttachmentManager::diff_memory` via system-reminder messages,
-// not the system prompt. See `session_context.rs::process_turn`.
-
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -308,37 +383,94 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_frontmatter_with_summary() {
-        // New format uses "summary:", key is "summary:".
-        let content = "---\nname: user_lang\nsummary: 用户偏好使用中文进行所有交流\ntags: [user, language, preference]\ntype: user\ncreated_at: 2026-05-07\n---\n\n中文交流。";
-        let dir = std::env::temp_dir().join("myclaw_test_memory_parse");
+    fn test_parse_frontmatter_with_description() {
+        let content = "---\nname: user_lang\ndescription: 用户偏好使用中文进行所有交流\ntags: [user, language, preference]\ntype: user\ncreated_at: 2026-05-07\n---\n\n中文交流。";
+        let dir = std::env::temp_dir().join("myclaw_test_memory_parse_desc");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("user_lang.md");
         fs::write(&path, content).unwrap();
 
         let mf = parse_memory_file(&path).unwrap();
         assert_eq!(mf.name, "user_lang");
-        assert_eq!(mf.summary, "用户偏好使用中文进行所有交流");
+        assert_eq!(mf.description, "用户偏好使用中文进行所有交流");
         assert_eq!(mf.tags, vec!["user", "language", "preference"]);
-        assert_eq!(mf.mem_type, MemoryType::User);
+        assert_eq!(mf.mem_type, "user");
         assert_eq!(mf.created_at, "2026-05-07");
+        assert!(mf.updated_at.is_none());
         assert_eq!(mf.content, "中文交流。");
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn test_parse_frontmatter_no_summary() {
-        // Files without summary should parse fine (empty summary)
-        let content = "---\nname: test\ntype: project\ncreated_at: 2026-05-07\n---\n\nContent.";
-        let dir = std::env::temp_dir().join("myclaw_test_memory_no_summary");
+    fn test_parse_frontmatter_summary_fallback() {
+        // Old-format files with "summary:" still parse — stored as description.
+        let content = "---\nname: test\nsummary: A short summary\ntype: entity\ncreated_at: 2026-05-07\n---\n\nContent.";
+        let dir = std::env::temp_dir().join("myclaw_test_memory_summary_fb");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.md");
         fs::write(&path, content).unwrap();
 
         let mf = parse_memory_file(&path).unwrap();
         assert_eq!(mf.name, "test");
-        assert_eq!(mf.summary, "");
+        assert_eq!(mf.description, "A short summary");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_parse_frontmatter_abstract_fallback() {
+        let content = "---\nname: test2\nabstract: An abstract\ntype: entity\ncreated_at: 2026-05-07\n---\n\nContent.";
+        let dir = std::env::temp_dir().join("myclaw_test_memory_abstract_fb");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test2.md");
+        fs::write(&path, content).unwrap();
+
+        let mf = parse_memory_file(&path).unwrap();
+        assert_eq!(mf.description, "An abstract");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_parse_description_overrides_summary() {
+        let content = "---\nname: test3\ndescription: The real desc\nsummary: Ignored\ntype: entity\ncreated_at: 2026-05-07\n---\n\nContent.";
+        let dir = std::env::temp_dir().join("myclaw_test_memory_desc_over");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test3.md");
+        fs::write(&path, content).unwrap();
+
+        let mf = parse_memory_file(&path).unwrap();
+        assert_eq!(mf.description, "The real desc");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_parse_updated_at() {
+        let content = "---\nname: test4\ndescription: desc\ntype: entity\ncreated_at: 2026-05-07\nupdated_at: 2026-07-01\n---\n\nContent.";
+        let dir = std::env::temp_dir().join("myclaw_test_memory_updated");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test4.md");
+        fs::write(&path, content).unwrap();
+
+        let mf = parse_memory_file(&path).unwrap();
+        assert_eq!(mf.updated_at.as_deref(), Some("2026-07-01"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_parse_frontmatter_no_description() {
+        let content = "---\nname: test\ntype: entity\ncreated_at: 2026-05-07\n---\n\nContent.";
+        let dir = std::env::temp_dir().join("myclaw_test_memory_no_desc");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.md");
+        fs::write(&path, content).unwrap();
+
+        let mf = parse_memory_file(&path).unwrap();
+        assert_eq!(mf.name, "test");
+        assert_eq!(mf.description, "");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -356,50 +488,119 @@ mod tests {
     }
 
     #[test]
-    fn test_format_index_only_user_and_feedback() {
-        let entries = vec![
-            IndexEntry {
-                mem_type: MemoryType::Project,
-                name: "project1".into(),
-                filename: "project1.md".into(),
-                summary: "Project context".into(),
+    fn test_extract_links() {
+        let content = "Some content.\n\n## See Also\n- [Used by foo](foo.md)\n- [Related to bar](bar)\n- [Nested path](subdir/baz.md)\n\n## Other\n- Not a link section";
+        let links = extract_links(content);
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0].label, "Used by foo");
+        assert_eq!(links[0].target, "foo");
+        assert_eq!(links[1].label, "Related to bar");
+        assert_eq!(links[1].target, "bar");
+        assert_eq!(links[2].label, "Nested path");
+        assert_eq!(links[2].target, "baz");
+    }
+
+    #[test]
+    fn test_extract_links_no_section() {
+        let content = "No See Also section here.";
+        let links = extract_links(content);
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn test_build_backlinks() {
+        let files = vec![
+            MemoryFile {
+                name: "alpha".into(),
+                mem_type: "entity".into(),
+                description: String::new(),
                 tags: vec![],
+                created_at: String::new(),
+                updated_at: None,
+                links: vec![
+                    LinkRef { target: "beta".into(), label: "uses".into() },
+                    LinkRef { target: "gamma".into(), label: "fixes".into() },
+                ],
+                content: String::new(),
+                path: std::path::PathBuf::new(),
             },
-            IndexEntry {
-                mem_type: MemoryType::Feedback,
-                name: "no_diff".into(),
-                filename: "feedback_no_diff.md".into(),
-                summary: "不要总结 diff".into(),
-                tags: vec!["workflow".into()],
-            },
-            IndexEntry {
-                mem_type: MemoryType::User,
-                name: "lang".into(),
-                filename: "user_lang.md".into(),
-                summary: "中文回复".into(),
+            MemoryFile {
+                name: "beta".into(),
+                mem_type: "entity".into(),
+                description: String::new(),
                 tags: vec![],
+                created_at: String::new(),
+                updated_at: None,
+                links: vec![
+                    LinkRef { target: "gamma".into(), label: "depends on".into() },
+                ],
+                content: String::new(),
+                path: std::path::PathBuf::new(),
             },
         ];
-        let index = format_memory_index(&entries);
+
+        let backlinks = build_backlinks(&files);
+        assert_eq!(backlinks.get("beta"), Some(&vec!["alpha".to_string()]));
+        assert_eq!(
+            backlinks.get("gamma"),
+            Some(&vec!["alpha".to_string(), "beta".to_string()])
+        );
+        assert!(backlinks.get("alpha").is_none());
+    }
+
+    #[test]
+    fn test_format_wiki_index_injected_only() {
+        let entries = vec![
+            IndexEntry {
+                name: "project1".into(),
+                mem_type: "entity".into(),
+                description: "Project context".into(),
+                tags: vec![],
+                link_count: 0,
+            },
+            IndexEntry {
+                name: "no_diff".into(),
+                mem_type: "feedback".into(),
+                description: "不要总结 diff".into(),
+                tags: vec!["workflow".into()],
+                link_count: 1,
+            },
+            IndexEntry {
+                name: "lang".into(),
+                mem_type: "user".into(),
+                description: "中文回复".into(),
+                tags: vec![],
+                link_count: 0,
+            },
+            IndexEntry {
+                name: "rule1".into(),
+                mem_type: "rule".into(),
+                description: "Always test".into(),
+                tags: vec![],
+                link_count: 0,
+            },
+        ];
+        let index = format_wiki_index(&entries);
         assert!(index.contains("### user"));
         assert!(index.contains("### feedback"));
-        assert!(!index.contains("### project")); // project should NOT be injected
+        assert!(index.contains("### rule"));
+        assert!(!index.contains("### entity")); // entity should NOT be injected
         assert!(index.contains("lang"));
         assert!(index.contains("no_diff"));
+        assert!(index.contains("rule1"));
         assert!(!index.contains("project1"));
     }
 
     #[test]
-    fn test_format_index_empty_injectable() {
-        // Only project/reference entries → empty index
+    fn test_format_wiki_index_empty_injectable() {
         let entries = vec![IndexEntry {
-            mem_type: MemoryType::Project,
             name: "project1".into(),
-            filename: "project1.md".into(),
-            summary: "Project context".into(),
+            mem_type: "entity".into(),
+            description: "Project context".into(),
             tags: vec![],
+            link_count: 0,
         }];
-        let index = format_memory_index(&entries);
+        let index = format_wiki_index(&entries);
         assert!(index.contains("暂无需要遵守的记忆"));
     }
 

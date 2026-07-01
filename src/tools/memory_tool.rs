@@ -18,7 +18,7 @@ use crate::providers::{Tool, ToolResult};
 // ── Shared types ──────────────────────────────────────────────────────────
 
 const MAX_CONTENT_CHARS: usize = 10_000;
-const MAX_SUMMARY_CHARS: usize = 500;
+const MAX_DESCRIPTION_CHARS: usize = 500;
 const MAX_NAME_LENGTH: usize = 64;
 
 /// Validate a memory file name.
@@ -108,18 +108,22 @@ fn atomic_write(target: &Path, content: &str) -> std::io::Result<()> {
 /// Build frontmatter string.
 fn build_frontmatter(
     name: &str,
-    summary: &str,
+    description: &str,
     tags: &[String],
-    mem_type: &crate::memory::MemoryType,
+    mem_type: &str,
     created_at: &str,
+    updated_at: Option<&str>,
 ) -> String {
     let mut fm = format!(
-        "---\nname: {}\nsummary: \"{}\"\ntype: {}\ncreated_at: {}",
+        "---\nname: {}\ndescription: \"{}\"\ntype: {}\ncreated_at: {}",
         name,
-        summary,
-        mem_type.as_str(),
+        description,
+        mem_type,
         created_at
     );
+    if let Some(ua) = updated_at {
+        fm.push_str(&format!("\nupdated_at: {}", ua));
+    }
     if !tags.is_empty() {
         fm.push_str(&format!("\ntags: [{}]", tags.join(", ")));
     }
@@ -191,9 +195,9 @@ impl Tool for MemoryListTool {
             .iter()
             .map(|e| {
                 let mut obj = json!({
-                    "type": e.mem_type.as_str(),
-                    "name": e.name,
-                    "summary": e.summary,
+                    "type": &e.mem_type,
+                    "name": &e.name,
+                    "description": &e.description,
                 });
                 if !e.tags.is_empty() {
                     obj["tags"] = json!(e.tags);
@@ -280,11 +284,11 @@ impl Tool for MemoryViewTool {
             Some(mf) => {
                 let mut output = json!({
                     "success": true,
-                    "name": mf.name,
-                    "type": mf.mem_type.as_str(),
-                    "summary": mf.summary,
-                    "created_at": mf.created_at,
-                    "content": mf.content,
+                    "name": &mf.name,
+                    "type": &mf.mem_type,
+                    "description": &mf.description,
+                    "created_at": &mf.created_at,
+                    "content": &mf.content,
                 });
                 if !mf.tags.is_empty() {
                     output["tags"] = json!(mf.tags);
@@ -384,7 +388,7 @@ impl Tool for MemorySearchTool {
             if mf.tags.iter().any(|t| t.to_lowercase().contains(&query)) {
                 score += 2;
             }
-            if mf.summary.to_lowercase().contains(&query) {
+            if mf.description.to_lowercase().contains(&query) {
                 score += 2;
             }
             if mf.content.to_lowercase().contains(&query) {
@@ -442,16 +446,16 @@ impl Tool for MemorySearchTool {
                         s.push_str("...");
                     }
                     s
-                } else if mf.summary.to_lowercase().contains(&query) {
-                    mf.summary.clone()
+                } else if mf.description.to_lowercase().contains(&query) {
+                    mf.description.clone()
                 } else {
                     mf.content.chars().take(80).collect()
                 };
 
                 let mut result = json!({
-                    "name": mf.name,
-                    "type": mf.mem_type.as_str(),
-                    "summary": mf.summary,
+                    "name": &mf.name,
+                    "type": &mf.mem_type,
+                    "description": &mf.description,
                     "snippet": snippet,
                     "relevance": score,
                 });
@@ -617,7 +621,7 @@ impl MemoryManageTool {
         let filename = format!("{}.md", name);
         let now = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
-        let frontmatter = build_frontmatter(name, &summary, &tags, &mem_type, &now);
+        let frontmatter = build_frontmatter(name, &summary, &tags, &mem_type, &now, None);
         let file_content = format!("{}{}", frontmatter, content);
 
         let target = self.workspace_dir.join(crate::memory::MEMORY_DIR_NAME).join(&filename);
@@ -668,12 +672,12 @@ impl MemoryManageTool {
         // Preserve existing metadata unless overridden
         let mem_type = args["memory_type"]
             .as_str()
-            .and_then(crate::memory::MemoryType::from_str_lossy)
-            .unwrap_or(existing.mem_type);
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| existing.mem_type.clone());
         let summary = if args["summary"].as_str().is_some() {
             self.resolve_summary(args, content)
         } else {
-            existing.summary.clone()
+            existing.description.clone()
         };
         let tags = if args["tags"].is_array() {
             self.resolve_tags(args)
@@ -694,7 +698,7 @@ impl MemoryManageTool {
         };
         let now = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
-        let frontmatter = build_frontmatter(name, &summary, &tags, &mem_type, &now);
+        let frontmatter = build_frontmatter(name, &summary, &tags, &mem_type, &now, Some(&now));
         let file_content = format!("{}{}", frontmatter, content);
 
         // Write to the same location as the existing file, or global dir if new
@@ -733,11 +737,11 @@ impl MemoryManageTool {
         }))
     }
 
-    fn resolve_type(&self, args: &serde_json::Value) -> crate::memory::MemoryType {
+    fn resolve_type(&self, args: &serde_json::Value) -> String {
         args["memory_type"]
             .as_str()
-            .and_then(crate::memory::MemoryType::from_str_lossy)
-            .unwrap_or(crate::memory::MemoryType::Project)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "project".to_string())
     }
 
     /// Resolve summary: explicit parameter, or auto-generate from content.
@@ -745,8 +749,8 @@ impl MemoryManageTool {
         if let Some(abs) = args["summary"].as_str() {
             let trimmed = abs.trim();
             if !trimmed.is_empty() {
-                if trimmed.chars().count() > MAX_SUMMARY_CHARS {
-                    let truncated: String = trimmed.chars().take(MAX_SUMMARY_CHARS).collect();
+                if trimmed.chars().count() > MAX_DESCRIPTION_CHARS {
+                    let truncated: String = trimmed.chars().take(MAX_DESCRIPTION_CHARS).collect();
                     return truncated;
                 }
                 return trimmed.to_string();

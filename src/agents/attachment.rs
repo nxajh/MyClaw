@@ -254,10 +254,10 @@ impl AttachmentManager {
     /// 只注入 user + feedback 类型（agent 必须始终遵守的偏好和纠正）。
     /// project + reference 通过 memory_list / memory_search 按需查找。
     pub fn diff_memory(&mut self, entries: &[crate::memory::IndexEntry], history: &[ChatMessage]) {
-        // Filter to user + feedback only
+        // Filter to injectable types (user, feedback, rule)
         let injectable: Vec<&crate::memory::IndexEntry> = entries
             .iter()
-            .filter(|e| crate::memory::MemoryType::injected_types().contains(&e.mem_type))
+            .filter(|e| crate::memory::should_inject(&e.mem_type))
             .collect();
 
         let new_key: String = injectable
@@ -281,25 +281,29 @@ impl AttachmentManager {
             }
         }
 
-        // Build structured index for user + feedback
+        // Build structured index grouped by mem_type string
+        let mut types: Vec<&str> = injectable.iter().map(|e| e.mem_type.as_str()).collect();
+        types.sort();
+        types.dedup();
+
         let mut added = Vec::new();
-        for &mem_type in crate::memory::MemoryType::injected_types() {
+        for mem_type in &types {
             let group: Vec<&&crate::memory::IndexEntry> = injectable
                 .iter()
-                .filter(|e| e.mem_type == mem_type)
+                .filter(|e| &e.mem_type.as_str() == mem_type)
                 .collect();
             if group.is_empty() {
                 continue;
             }
-            added.push(format!("### {}", mem_type.as_str()));
+            added.push(format!("### {}", mem_type));
             for entry in &group {
                 let mut line = format!("- **{}**", entry.name);
                 if !entry.tags.is_empty() {
                     line.push_str(&format!(" [{}]", entry.tags.join(", ")));
                 }
                 added.push(line);
-                if !entry.summary.is_empty() {
-                    added.push(format!("  {}", entry.summary));
+                if !entry.description.is_empty() {
+                    added.push(format!("  {}", entry.description));
                 }
             }
         }

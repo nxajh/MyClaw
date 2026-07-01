@@ -542,7 +542,7 @@ fn build_memory_prompt(knowledge_dir: &str) -> String {
         } else {
             let entries: Vec<crate::memory::IndexEntry> =
                 files.iter().map(crate::memory::IndexEntry::from).collect();
-            crate::memory::format_memory_index(&entries)
+            crate::memory::format_wiki_index(&entries)
         }
     } else {
         String::from("(memory directory not configured)")
