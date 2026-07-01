@@ -29,6 +29,9 @@ use std::time::Instant;
 pub struct FallbackEntry {
     pub provider: Arc<dyn ChatProvider>,
     pub model_id: String,
+    /// Provider vendor id (e.g. "glm", "openai") — used by error classifier
+    /// to apply vendor-specific rules (GLM code 1305 → Overloaded, etc.).
+    pub provider_id: String,
     /// Optional credential pool for same-provider key rotation.
     pub credential_pool: Option<SharedCredentialPool>,
     /// Shared API key cell — when present, credential rotation updates this
@@ -149,8 +152,8 @@ impl ChatProvider for FallbackChatProvider {
                     let stream = match entry.provider.chat(req) {
                         Ok(s) => s,
                         Err(e) => {
-                            let classified = ClassifiedError::classify("fallback", 0, &e.to_string())
-                                .with_provider("fallback", &entry.model_id);
+                            let classified = ClassifiedError::classify(&entry.provider_id, 0, &e.to_string())
+                                .with_provider(&entry.provider_id, &entry.model_id);
                             tracing::warn!(
                                 model = %entry.model_id,
                                 category = %classified.category,
@@ -209,8 +212,8 @@ impl ChatProvider for FallbackChatProvider {
                         match &event {
                             StreamEvent::HttpError { status, message } => {
                                 let classified =
-                                    ClassifiedError::classify("fallback", *status, message)
-                                        .with_provider("fallback", &entry.model_id);
+                                    ClassifiedError::classify(&entry.provider_id, *status, message)
+                                        .with_provider(&entry.provider_id, &entry.model_id);
                                 tracing::warn!(
                                     model = %entry.model_id,
                                     status = *status,
@@ -243,8 +246,8 @@ impl ChatProvider for FallbackChatProvider {
                                 return;
                             }
                             StreamEvent::Error(msg) => {
-                                let classified = ClassifiedError::classify("fallback", 0, msg)
-                                    .with_provider("fallback", &entry.model_id);
+                                let classified = ClassifiedError::classify(&entry.provider_id, 0, msg)
+                                    .with_provider(&entry.provider_id, &entry.model_id);
 
                                 if classified.should_rotate_credential
                                     && entry.credential_pool.is_some()
@@ -324,7 +327,7 @@ impl ChatProvider for FallbackChatProvider {
                 if !broke_for_failover {
                     // Safety guard: if the inner loop ended without broke_for_failover and didn't return,
                     // it means all rotations were attempted but none succeeded. Record a default cooldown.
-                    let classified = ClassifiedError::classify("fallback", 503, "all credentials exhausted");
+                    let classified = ClassifiedError::classify(&entry.provider_id, 503, "all credentials exhausted");
                     record_cooldown(&cooldowns, &entry.model_id, &classified);
                 }
             }

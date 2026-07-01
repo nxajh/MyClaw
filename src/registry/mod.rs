@@ -66,6 +66,9 @@ pub struct Registry {
     fallback_chat_provider: Option<(Arc<dyn ChatProvider>, String)>,
     /// Per-model credential pools + shared API key cells for key rotation.
     credential_pools: HashMap<String, (SharedCredentialPool, SharedApiKey)>,
+    /// Per-model provider vendor id (e.g. "glm", "openai") used by the
+    /// fallback chain to classify errors with vendor-specific rules.
+    model_provider_ids: HashMap<String, String>,
 }
 
 impl Registry {
@@ -92,6 +95,7 @@ impl Registry {
             stt_providers: HashMap::new(),
             fallback_chat_provider: None,
             credential_pools: HashMap::new(),
+            model_provider_ids: HashMap::new(),
         }
     }
 
@@ -364,6 +368,10 @@ impl Registry {
         let wrapped: Arc<dyn ChatProvider> = Arc::new(
             crate::providers::MediaLoweringProvider::new(provider.into(), policy),
         );
+        if let Some(ref id) = provider_id {
+            self.model_provider_ids
+                .insert(model_id.clone(), id.as_str().to_string());
+        }
         self.chat_model_configs
             .insert(model_id.clone(), model_config);
         self.chat_providers.insert(model_id, wrapped);
@@ -431,6 +439,11 @@ impl Registry {
                 chain.push(FallbackEntry {
                     provider: Arc::clone(provider),
                     model_id: model_id.clone(),
+                    provider_id: self
+                        .model_provider_ids
+                        .get(model_id)
+                        .cloned()
+                        .unwrap_or_else(|| "fallback".to_string()),
                     credential_pool: pool,
                     shared_api_key: shared_key,
                 });
