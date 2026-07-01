@@ -1,6 +1,84 @@
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
 
+/* ── Theme: light mode color overrides ───────────────────────────────────── */
+/* The app is dark-first with hardcoded zinc utility classes everywhere.
+   For light mode we remap the zinc scale via CSS custom properties so
+   components don't need dark: variants. The inversion maps dark shades
+   to light shades symmetrically. */
+html.light {
+  /* Background scale (darker number = darker bg → lighter in light mode) */
+  --tw-zinc-950: #f4f4f5;  /* page bg       (was #09090b) */
+  --tw-zinc-900: #fafafa;  /* surface bg    (was #18181b) */
+  --tw-zinc-850: #e4e4e7;  /* subtle border (was #27272a) */
+  --tw-zinc-800: #e4e4e7;  /* borders       (was #27272a) */
+  --tw-zinc-700: #d4d4d8;  /* hover borders (was #3f3f46) */
+  --tw-zinc-600: #a1a1aa;  /* hover states  (was #52525b) */
+  /* Text scale (lighter number = brighter text → darker in light mode) */
+  --tw-zinc-100: #1f1f23;  /* primary text  (was #f4f4f5) */
+  --tw-zinc-200: #27272a;  /* heading text  (was #e4e4e7) */
+  --tw-zinc-300: #3f3f46;  /* body text     (was #d4d4d8) */
+  --tw-zinc-400: #52525b;  /* secondary     (was #a1a1aa) */
+  --tw-zinc-500: #71717a;  /* muted         (was #71717a) */
+  --tw-zinc-350: #71717a;
+}
+
+/* Apply the overridden values to the actual utility classes.
+   We target by specificity so these win over Tailwind defaults. */
+html.light .bg-zinc-950 { background-color: #f4f4f5; }
+html.light .bg-zinc-900 { background-color: #fafafa; }
+html.light .bg-zinc-900\/25 { background-color: rgb(250 250 250 / 0.25); }
+html.light .bg-zinc-900\/60 { background-color: rgb(250 250 250 / 0.6); }
+html.light .bg-zinc-800 { background-color: #f0f0f1; }
+html.light .bg-zinc-800\/40 { background-color: rgb(240 240 241 / 0.4); }
+html.light .bg-zinc-800\/50 { background-color: rgb(240 240 241 / 0.5); }
+html.light .bg-zinc-800\/60 { background-color: rgb(240 240 241 / 0.6); }
+html.light .bg-zinc-700 { background-color: #e4e4e7; }
+html.light .bg-zinc-600 { background-color: #d4d4d8; }
+
+html.light .text-zinc-100 { color: #1f1f23; }
+html.light .text-zinc-200 { color: #27272a; }
+html.light .text-zinc-300 { color: #3f3f46; }
+html.light .text-zinc-400 { color: #52525b; }
+html.light .text-zinc-500 { color: #71717a; }
+html.light .text-zinc-600 { color: #71717a; }
+html.light .text-zinc-700 { color: #52525b; }
+
+html.light .border-zinc-900 { border-color: #e4e4e7; }
+html.light .border-zinc-800 { border-color: #e4e4e7; }
+html.light .border-zinc-800\/80 { border-color: rgb(228 228 231 / 0.8); }
+html.light .border-zinc-800\/60 { border-color: rgb(228 228 231 / 0.6); }
+html.light .border-zinc-800\/50 { border-color: rgb(228 228 231 / 0.5); }
+html.light .border-zinc-700 { border-color: #d4d4d8; }
+html.light .border-zinc-700\/50 { border-color: rgb(212 212 216 / 0.5); }
+html.light .border-zinc-700\/60 { border-color: rgb(212 212 216 / 0.6); }
+html.light .border-zinc-700\/40 { border-color: rgb(212 212 216 / 0.4); }
+html.light .border-zinc-600 { border-color: #a1a1aa; }
+html.light .border-zinc-600\/50 { border-color: rgb(161 161 170 / 0.5); }
+html.light .border-zinc-500 { border-color: #a1a1aa; }
+
+/* Placeholder text */
+html.light .placeholder-zinc-500 { color: #a1a1aa; }
+
+/* Code blocks should stay dark even in light mode for readability */
+html.light pre code,
+html.light pre {
+  background-color: #18181b !important;
+  color: #e4e4e7;
+}
+html.light .hljs {
+  background: #18181b !important;
+  color: #e4e4e7;
+}
+
+/* Scrollbar in light mode */
+html.light ::-webkit-scrollbar-thumb { background: #d4d4d8; }
+html.light ::-webkit-scrollbar-thumb:hover { background: #a1a1aa; }
+html.light * { scrollbar-color: #d4d4d8 transparent; }
+
+/* Sidebar shadow glows need adjusting */
+html.light .shadow-md { box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1); }
+
 /* ── highlight.js theme (github-dark) ─────────────────────────────────────── */
 @import "highlight.js/styles/github-dark.css";
 

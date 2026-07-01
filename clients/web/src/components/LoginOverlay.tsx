@@ -37,7 +37,7 @@ export default function LoginOverlay({ onSubmit, isRetry = false, isConnecting =
               : <KeyRound size={24} className={isRetry ? 'text-red-400' : 'text-zinc-300'} />}
           </div>
           <h1 className="text-lg font-semibold text-zinc-100">MyClaw</h1>
-          <p className="text-sm text-center" style={{ color: isRetry ? '#f87171' : '#a1a1aa' }}>
+          <p className={`text-sm text-center ${isRetry ? 'text-red-400' : 'text-zinc-400'}`}>
             {isRetry
               ? 'Token validation failed — please re-enter your access token.'
               : isConnecting

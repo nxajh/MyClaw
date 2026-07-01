@@ -2,10 +2,11 @@ import { useState, useEffect } from 'react'
 import { NavLink } from 'react-router-dom'
 import {
   MessageSquare, Layers, Wrench, Sparkles, Brain, Settings,
-  PanelLeftClose, PanelLeftOpen, Menu, X, LogOut,
+  PanelLeftClose, PanelLeftOpen, Menu, X, LogOut, Sun, Moon,
 } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { AUTH_TOKEN_KEY } from '../hooks/useWebSocket'
+import { useTheme } from '../hooks/useTheme'
 
 const links = [
   { to: '/', icon: MessageSquare, label: 'Chat' },
@@ -65,6 +66,21 @@ function NavLinkItem({ to, icon: Icon, label, collapsed, onNavigate }: {
   )
 }
 
+// ── Theme Toggle Button ──────────────────────────────────────────────────
+
+function ThemeToggleButton({ collapsed }: { collapsed: boolean }) {
+  const { theme, toggle } = useTheme()
+  return (
+    <button
+      onClick={toggle}
+      title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+      className={`p-1 rounded-md text-zinc-600 hover:text-zinc-300 hover:bg-zinc-800 transition-colors ${collapsed ? 'mx-auto' : ''}`}
+    >
+      {theme === 'dark' ? <Sun size={13} /> : <Moon size={13} />}
+    </button>
+  )
+}
+
 // ── Desktop Sidebar (collapsible) ────────────────────────────────────────
 
 function DesktopSidebar({ collapsed, setCollapsed }: { collapsed: boolean; setCollapsed: (v: boolean) => void }) {
@@ -111,10 +127,14 @@ function DesktopSidebar({ collapsed, setCollapsed }: { collapsed: boolean; setCo
         <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${statusBgColor} ${statusShadow}`} />
         {!collapsed && <span className={`text-[10px] font-semibold tracking-wide truncate uppercase ${statusColor}`}>{statusText}</span>}
         {!collapsed && (
-          <button onClick={handleLogout} title="Log out" className="ml-auto p-1 rounded-md text-zinc-600 hover:text-red-400 hover:bg-zinc-800 transition-colors">
-            <LogOut size={13} />
-          </button>
+          <div className="ml-auto flex items-center gap-0.5">
+            <ThemeToggleButton collapsed={false} />
+            <button onClick={handleLogout} title="Log out" className="p-1 rounded-md text-zinc-600 hover:text-red-400 hover:bg-zinc-800 transition-colors">
+              <LogOut size={13} />
+            </button>
+          </div>
         )}
+        {collapsed && <ThemeToggleButton collapsed />}
       </div>
     </aside>
   )
@@ -166,6 +186,7 @@ function MobileDrawer({ open, onClose }: { open: boolean; onClose: () => void })
         <div className="flex items-center gap-2.5 px-4 py-3.5 border-t border-zinc-800">
           <span className={`h-2 w-2 rounded-full ${statusBgColor}`} />
           <span className={`text-[11px] font-semibold tracking-wide uppercase ${statusColor}`}>{statusText}</span>
+          <ThemeToggleButton collapsed={false} />
           <button onClick={() => { onClose(); localStorage.removeItem(AUTH_TOKEN_KEY); window.location.reload() }} title="Log out" className="ml-auto p-1.5 rounded-md text-zinc-600 hover:text-red-400 hover:bg-zinc-800 transition-colors">
             <LogOut size={14} />
           </button>

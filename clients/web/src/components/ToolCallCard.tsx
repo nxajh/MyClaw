@@ -1,10 +1,9 @@
-import { useState, useMemo } from 'react'
-import { ChevronDown, ChevronRight, Loader2, Zap } from 'lucide-react'
+import { useState, useEffect, useMemo } from 'react'
+import { ChevronDown, ChevronRight, Zap, Check, AlertCircle, Loader2 } from 'lucide-react'
 import type { ToolCallBlock } from '../hooks/useWebSocket'
 
 function formatOutput(raw: string): string {
   if (!raw) return '(empty)'
-  // Try to pretty-print JSON output.
   try {
     const parsed = JSON.parse(raw)
     return JSON.stringify(parsed, null, 2)
@@ -13,37 +12,126 @@ function formatOutput(raw: string): string {
   }
 }
 
+/** Build a short arg summary like (path=/foo/bar.rs) for collapsed display. */
+function argSummary(name: string, args: Record<string, unknown>): string {
+  if (!args || Object.keys(args).length === 0) return ''
+  // Show the most relevant arg first depending on tool name.
+  const keys = Object.keys(args)
+  const priority = ['path', 'file_path', 'command', 'cmd', 'query', 'url', 'pattern', 'expression', 'name']
+  const sorted = [...keys].sort((a, b) => {
+    const ai = priority.indexOf(a)
+    const bi = priority.indexOf(b)
+    return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi)
+  })
+  const parts = sorted.slice(0, 2).map((k) => {
+    const v = args[k]
+    let s: string
+    if (typeof v === 'string') s = v
+    else if (typeof v === 'number' || typeof v === 'boolean') s = String(v)
+    else s = JSON.stringify(v)
+    if (s.length > 60) s = s.slice(0, 57) + '…'
+    return `${k}=${s}`
+  })
+  return parts.join(', ')
+}
+
+function fmtElapsed(ms: number): string {
+  const sec = Math.max(0, ms) / 1000
+  if (sec < 1) return `${Math.round(ms)}ms`
+  if (sec < 10) return `${sec.toFixed(1)}s`
+  if (sec < 60) return `${Math.round(sec)}s`
+  const m = Math.floor(sec / 60)
+  const s = Math.round(sec % 60)
+  return s ? `${m}m ${s}s` : `${m}m`
+}
+
+type Status = 'running' | 'done' | 'error'
+
+const STATUS_COLOR: Record<Status, string> = {
+  running: 'text-amber-400',
+  done: 'text-emerald-400',
+  error: 'text-red-400',
+}
+
+const BORDER_COLOR: Record<Status, string> = {
+  running: 'border-amber-900/40',
+  done: 'border-zinc-800',
+  error: 'border-red-900/50',
+}
+
 export default function ToolCallCard({ block }: { block: ToolCallBlock }) {
   const [userExpanded, setUserExpanded] = useState<boolean | null>(null)
-  const running = block.output === undefined
-  const expanded = userExpanded !== null ? userExpanded : running
+  const running = block.output === undefined && !block.error
+  const error = !!block.error
+  const status: Status = running ? 'running' : error ? 'error' : 'done'
 
+  // Live elapsed timer while running.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!running) return
+    const id = window.setInterval(() => setNow(() => Date.now()), 500)
+    return () => window.clearInterval(id)
+  }, [running])
+
+  const elapsed = block.startedAt
+    ? fmtElapsed((block.completedAt ?? now) - block.startedAt)
+    : null
+
+  // Auto-expand on error; otherwise default-collapsed when done, expanded when running.
+  const expanded = userExpanded !== null
+    ? userExpanded
+    : error || running
+
+  const summary = useMemo(() => argSummary(block.name, block.args), [block.name, block.args])
   const formattedOutput = useMemo(
     () => (block.output !== undefined ? formatOutput(block.output) : undefined),
     [block.output],
   )
 
+  const hasBody = Object.keys(block.args).length > 0 || formattedOutput !== undefined
+
   return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 text-[11px] sm:text-xs overflow-hidden">
+    <div className={`rounded-xl border ${BORDER_COLOR[status]} bg-zinc-900/60 text-[11px] sm:text-xs overflow-hidden`}>
       <button
-        onClick={() => setUserExpanded(!expanded)}
-        className="w-full flex items-center gap-2 sm:gap-2.5 px-2.5 sm:px-3.5 py-2 sm:py-2.5 hover:bg-zinc-800/50 text-left transition-colors"
+        onClick={() => hasBody && setUserExpanded(!expanded)}
+        className={`w-full flex items-center gap-2 sm:gap-2.5 px-2.5 sm:px-3.5 py-2 sm:py-2.5 text-left transition-colors ${hasBody ? 'hover:bg-zinc-800/50' : 'cursor-default'}`}
       >
-        {running ? (
+        {hasBody ? (
+          expanded
+            ? <ChevronDown size={11} className="text-zinc-600 shrink-0" />
+            : <ChevronRight size={11} className="text-zinc-600 shrink-0" />
+        ) : (
+          <span className="w-[11px] shrink-0" />
+        )}
+
+        {/* Status icon */}
+        {status === 'running' ? (
           <Loader2 size={12} className="text-amber-400 animate-spin shrink-0" />
+        ) : status === 'error' ? (
+          <AlertCircle size={12} className="text-red-400 shrink-0" />
         ) : (
           <Zap size={12} className="text-emerald-400 shrink-0" />
         )}
-        <span className="font-mono text-zinc-300 flex-1 truncate">{block.name}</span>
-        <span className={`shrink-0 ${running ? 'text-amber-400' : 'text-zinc-600'}`}>
-          {running ? 'running…' : 'done'}
-        </span>
-        {expanded
-          ? <ChevronDown size={11} className="text-zinc-600 shrink-0" />
-          : <ChevronRight size={11} className="text-zinc-600 shrink-0" />}
+
+        {/* Tool name */}
+        <span className="font-mono text-zinc-300 shrink-0">{block.name}</span>
+
+        {/* Arg summary */}
+        {summary && (
+          <span className="font-mono text-zinc-500 truncate min-w-0 flex-1">({summary})</span>
+        )}
+
+        {/* Right side: elapsed + status check */}
+        {!summary && <span className="flex-1" />}
+        {status === 'done' && (
+          <Check size={11} className="text-zinc-600 shrink-0" />
+        )}
+        {elapsed && (
+          <span className="font-mono text-zinc-600 tabular-nums shrink-0">{elapsed}</span>
+        )}
       </button>
 
-      {expanded && (
+      {expanded && hasBody && (
         <div className="border-t border-zinc-800">
           {Object.keys(block.args).length > 0 && (
             <div className="px-2.5 sm:px-3.5 py-2 sm:py-2.5 border-b border-zinc-800/60">
@@ -60,7 +148,7 @@ export default function ToolCallCard({ block }: { block: ToolCallBlock }) {
               <div className="text-zinc-600 uppercase tracking-widest mb-1.5 sm:mb-2" style={{ fontSize: 9 }}>
                 Output
               </div>
-              <pre className="text-zinc-400 whitespace-pre-wrap break-all font-mono text-[10px] sm:text-xs max-h-40 sm:max-h-52 lg:max-h-64 overflow-y-auto leading-4 sm:leading-5">
+              <pre className={`whitespace-pre-wrap break-all font-mono text-[10px] sm:text-xs max-h-40 sm:max-h-52 lg:max-h-64 overflow-y-auto leading-4 sm:leading-5 ${error ? 'text-red-400' : 'text-zinc-400'}`}>
                 {formattedOutput}
               </pre>
             </div>

@@ -24,6 +24,9 @@ export interface ToolCallBlock {
   name: string
   args: Record<string, unknown>
   output?: string
+  error?: boolean
+  startedAt?: number
+  completedAt?: number
 }
 export type MessageBlock = ContentBlock | ThinkingBlock | ToolCallBlock
 
@@ -286,12 +289,12 @@ export function useWebSocket() {
         setMessages((prev) => {
           const last = prev[prev.length - 1]
           if (last && last.role === 'assistant' && !last.done) {
-            const blocks: MessageBlock[] = [...last.blocks, { type: 'tool_call', id: callId, name, args }]
+            const blocks: MessageBlock[] = [...last.blocks, { type: 'tool_call', id: callId, name, args, startedAt: Date.now() }]
             return [...prev.slice(0, -1), { ...last, blocks }]
           }
           const id = uid()
           currentAssistantId.current = id
-          return [...prev, { role: 'assistant', blocks: [{ type: 'tool_call', id: callId, name, args }], id, done: false }]
+          return [...prev, { role: 'assistant', blocks: [{ type: 'tool_call', id: callId, name, args, startedAt: Date.now() }], id, done: false }]
         })
         break
       }
@@ -300,13 +303,15 @@ export function useWebSocket() {
         const callId = (data.id as string) || ''
         const name = (data.name as string) || 'unknown'
         const output = (data.output as string) || ''
+        const isError = !!(data.error as boolean) || (output.trim().startsWith('Error') && output.length < 500)
+        const now = Date.now()
         setMessages((prev) => {
           const last = prev[prev.length - 1]
           if (last && last.role === 'assistant' && !last.done) {
             const blocks = last.blocks.map((b): MessageBlock => {
               if (b.type !== 'tool_call') return b
               const matches = callId ? b.id === callId : (b.name === name && b.output === undefined)
-              return matches ? { ...b, output } : b
+              return matches ? { ...b, output, error: isError, completedAt: now } : b
             })
             return [...prev.slice(0, -1), { ...last, blocks }]
           }
