@@ -1,4 +1,4 @@
-import { createContext, useContext, useCallback, useEffect, type ReactNode, type Dispatch, type SetStateAction } from 'react'
+import { createContext, useContext, useCallback, useEffect, useRef, type ReactNode, type Dispatch, type SetStateAction } from 'react'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useApi } from '../lib/api'
 import type { ChatMessage, ConnectionStatus, SendOptions } from '../hooks/useWebSocket'
@@ -26,7 +26,7 @@ const WebSocketContext = createContext<WebSocketContextValue | null>(null)
 export function WebSocketProvider({ children }: { children: ReactNode }) {
   const ws = useWebSocket()
   const { request } = useApi(ws.sendRaw, ws.addMessageListener)
-  const { setMessages } = ws
+  const { setMessages, status } = ws
 
   // Expose request globally for components that can't use context (e.g. LazyImage in memo'd UserBubble)
   useEffect(() => { (window as any).myclawRequest = request }, [request])
@@ -39,6 +39,17 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       /* leave existing messages untouched on failure */
     }
   }, [request, setMessages])
+
+  // Auto-load history right after authentication succeeds.
+  // This runs at the context level so it works regardless of which
+  // page/component is currently mounted (e.g. login overlay hiding Chat).
+  const prevStatusRef = useRef<ConnectionStatus>(status)
+  useEffect(() => {
+    if (prevStatusRef.current !== 'connected' && status === 'connected') {
+      reloadHistory()
+    }
+    prevStatusRef.current = status
+  }, [status, reloadHistory])
 
   return (
     <WebSocketContext.Provider value={{ ...ws, request, reloadHistory }}>
