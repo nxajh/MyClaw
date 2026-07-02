@@ -368,11 +368,8 @@ impl Tool for FileEditTool {
     }
 
     fn description(&self) -> &str {
-        "Edit a file by replacing exact string matches with new content. \
-         Supports two modes: (1) single edit with old_string/new_string, \
-         (2) multi-edit with an `edits` array of {old_string, new_string} objects. \
-         In single mode, old_string must appear exactly once unless replace_all=true. \
-         In multi-edit mode, each edit is applied sequentially to the file."
+        "Edit a file by replacing an exact string match with new content. \
+         old_string must appear exactly once unless replace_all=true."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -385,31 +382,18 @@ impl Tool for FileEditTool {
                 },
                 "old_string": {
                     "type": "string",
-                    "description": "The exact text to find (must appear exactly once, unless replace_all is true). Used in single-edit mode."
+                    "description": "The exact text to find (must appear exactly once, unless replace_all is true)."
                 },
                 "new_string": {
                     "type": "string",
-                    "description": "The replacement text (use empty string to delete). Used in single-edit mode."
+                    "description": "The replacement text (use empty string to delete)."
                 },
                 "replace_all": {
                     "type": "boolean",
-                    "description": "If true, replace all occurrences of old_string (default: false). Single-edit mode only."
-                },
-                "edits": {
-                    "type": "array",
-                    "description": "Multi-edit mode: an array of {old_string, new_string} objects. Applied sequentially. Cannot be used together with old_string/new_string.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "old_string": { "type": "string", "description": "Text to find." },
-                            "new_string": { "type": "string", "description": "Replacement text." },
-                            "replace_all": { "type": "boolean", "description": "Replace all occurrences (default: false)." }
-                        },
-                        "required": ["old_string", "new_string"]
-                    }
+                    "description": "If true, replace all occurrences of old_string (default: false)."
                 }
             },
-            "required": ["path"]
+            "required": ["path", "old_string", "new_string"]
         })
     }
 
@@ -428,84 +412,10 @@ impl Tool for FileEditTool {
             .await
             .map_err(|e| anyhow::anyhow!("failed to read '{}': {}", path, e))?;
 
-        // Multi-edit mode: edits[] array
-        if let Some(edits) = args.get("edits").and_then(|e| e.as_array()) {
-            if args.get("old_string").is_some() || args.get("new_string").is_some() {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some("cannot use both edits[] and old_string/new_string at the same time".to_string()),
-                });
-            }
-
-            let mut current = content.clone();
-            let mut applied = 0;
-            let mut report = Vec::new();
-
-            for (i, edit) in edits.iter().enumerate() {
-                let old = edit["old_string"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("edits[{}].old_string is required", i))?;
-                let new = edit["new_string"].as_str().unwrap_or("");
-                let replace_all = edit["replace_all"].as_bool().unwrap_or(false);
-
-                let count = current.matches(old).count();
-                if count == 0 {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: format!("edits[{}]: old_string not found in file", i),
-                        error: Some(format!("edits[{}].old_string not found", i)),
-                    });
-                }
-                if count > 1 && !replace_all {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: format!("edits[{}]: old_string found {} times (must be unique, or set replace_all=true)", i, count),
-                        error: Some(format!("edits[{}].old_string matched {} times, expected exactly 1 (set replace_all=true to replace all)", i, count)),
-                    });
-                }
-
-                let replaced = if replace_all {
-                    let before = current.clone();
-                    current = current.replace(old, new);
-                    before.matches(old).count()
-                } else {
-                    current = current.replacen(old, new, 1);
-                    1
-                };
-                applied += replaced;
-                report.push(format!(
-                    "  [{}/{}] line {}: \"{}\" → \"{}\" ({} occurrence{})",
-                    i + 1,
-                    edits.len(),
-                    find_line_number(&content, old),
-                    str_utils::truncate_line(old, 60),
-                    str_utils::truncate_line(new, 60),
-                    replaced,
-                    if replaced > 1 { "s" } else { "" },
-                ));
-            }
-
-            tokio::fs::write(path, &current)
-                .await
-                .map_err(|e| anyhow::anyhow!("failed to write '{}': {}", path, e))?;
-
-            return Ok(ToolResult {
-                success: true,
-                output: format!(
-                    "applied {} edit(s) to {}:\n{}",
-                    applied,
-                    path,
-                    report.join("\n")
-                ),
-                error: None,
-            });
-        }
-
         // Single-edit mode: old_string / new_string
         let old_string = args["old_string"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("'old_string' is required (or use edits[] for multi-edit mode)"))?;
+            .ok_or_else(|| anyhow::anyhow!("'old_string' is required"))?;
         let new_string = args["new_string"].as_str().unwrap_or("");
         let replace_all = args["replace_all"].as_bool().unwrap_or(false);
 
