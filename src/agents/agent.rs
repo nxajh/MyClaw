@@ -433,6 +433,12 @@ impl Agent {
 
                 match loop_breaker.record_and_check(&call.name, &call.arguments, &result_content) {
                     LoopBreak::Detected(reason) => {
+                        tracing::warn!(
+                            session = %session.id,
+                            tool = %call.name,
+                            reason = ?reason,
+                            "loop breaker triggered"
+                        );
                         // Record-and-check triggered: append the result for
                         // this call so the pair is complete, then strip any
                         // remaining unexecuted tool_calls and abort.
@@ -482,6 +488,12 @@ impl Agent {
                         session.strip_trailing_tool_calls(remaining);
                         persist_last(session);
                     }
+                    tracing::warn!(
+                        session = %session.id,
+                        total_calls = loop_breaker.total_calls(),
+                        max = loop_breaker.max_tool_calls(),
+                        "loop breaker triggered: max tool calls exceeded"
+                    );
                     return Err(AgentError::LoopBreak {
                         reason: LoopBreakReason::MaxCalls {
                             count: loop_breaker.total_calls(),
