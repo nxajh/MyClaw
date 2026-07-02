@@ -60,14 +60,15 @@ impl XiaomiProvider {
     }
 
     /// Derive the OpenAI-compatible base URL from the Anthropic base URL.
-    /// e.g. `https://api.xiaomimimo.com/anthropic` → `https://api.xiaomimimo.com`
+    /// e.g. `https://api.xiaomimimo.com/anthropic` → `https://api.xiaomimimo.com/v1`
     fn openai_base_url(&self) -> String {
         let base = self.base_url.trim_end_matches('/');
-        if let Some(pos) = base.rfind("/anthropic") {
+        let stripped = if let Some(pos) = base.rfind("/anthropic") {
             base[..pos].to_string()
         } else {
             base.to_string()
-        }
+        };
+        format!("{}/v1", stripped)
     }
 }
 

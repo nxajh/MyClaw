@@ -13,6 +13,7 @@ use crate::providers::search::SearchProvider;
 use crate::providers::stt::SttProvider;
 use crate::providers::tts::TtsProvider;
 use crate::providers::video::VideoGenerationProvider;
+use crate::providers::protocols::openai::chat_completions::OpenAiChatCompletionsClient;
 use crate::providers::{AuthStyle, ProviderId, SharedApiKey};
 
 // ── Build requests ────────────────────────────────────────────────────────────
@@ -144,16 +145,31 @@ impl ProviderFactory {
         );
 
         match (id, protocol) {
-            // ── GLM: dedicated provider with v4 endpoints ──
+            // ── GLM: OpenAI client + GLM body override (preserved thinking) ──
             (well_known::GLM, _) => {
-                let mut p = crate::providers::glm::GlmProvider::with_base_url(
+                let client = OpenAiChatCompletionsClient::new(
                     request.api_key,
                     request.base_url,
-                );
-                if let Some(ua) = request.user_agent {
-                    p = p.with_user_agent(ua);
-                }
-                Ok(Box::new(p))
+                )
+                .with_body_override(crate::providers::glm::glm_body_override);
+                let client = match request.user_agent {
+                    Some(ua) => client.with_user_agent(ua),
+                    None => client,
+                };
+                Ok(Box::new(client))
+            }
+            // ── DeepSeek: OpenAI client + DeepSeek body override (interleaved thinking) ──
+            (well_known::DEEPSEEK, _) => {
+                let client = OpenAiChatCompletionsClient::new(
+                    request.api_key,
+                    request.base_url,
+                )
+                .with_body_override(crate::providers::deepseek::deepseek_body_override);
+                let client = match request.user_agent {
+                    Some(ua) => client.with_user_agent(ua),
+                    None => client,
+                };
+                Ok(Box::new(client))
             }
             // ── Xiaomi: config-driven protocol (Anthropic or OpenAI) ──
             (well_known::XIAOMI, _) => {
@@ -170,8 +186,8 @@ impl ProviderFactory {
                 Ok(Box::new(p))
             }
             // ── OpenAI-compatible providers ──
-            (_, Protocol::OpenAi) if id != well_known::GOOGLE => {
-                let client = crate::providers::protocols::openai::chat_completions::OpenAiChatCompletionsClient::new(
+            (_, Protocol::OpenAi) if id != well_known::GOOGLE && id != well_known::DEEPSEEK => {
+                let client = OpenAiChatCompletionsClient::new(
                     request.api_key, request.base_url,
                 );
                 let client = match request.user_agent {

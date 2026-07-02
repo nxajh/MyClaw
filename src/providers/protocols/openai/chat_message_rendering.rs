@@ -227,6 +227,8 @@ mod tests {
     use super::*;
     use crate::providers::capability_chat::ChatMessage;
 
+    use crate::providers::capability_chat::ChatMessage;
+
     #[test]
     fn audio_format_hint_maps_common_mimes() {
         assert_eq!(audio_format_hint(Some("audio/ogg")), "ogg");

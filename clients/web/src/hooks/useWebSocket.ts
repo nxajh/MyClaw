@@ -180,7 +180,11 @@ export function useWebSocket() {
   // -----------------------------------------------------------------------
 
   const connect = useCallback(() => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return
+    const ws = wsRef.current
+    if (ws && ws.readyState === WebSocket.OPEN) return
+    if (ws && ws.readyState === WebSocket.CONNECTING) {
+      return
+    }
 
     try {
       const ws = new WebSocket(getWsUrl())
@@ -188,6 +192,7 @@ export function useWebSocket() {
       setStatus('connecting')
 
       ws.onopen = () => {
+        if (wsRef.current !== ws) return
         connectedAtRef.current = Date.now()
         lastMessageAtRef.current = null
         lastPingAtRef.current = null
@@ -200,6 +205,7 @@ export function useWebSocket() {
       }
 
       ws.onclose = (event) => {
+        if (wsRef.current !== ws) return
         const now = Date.now()
         console.info('[myclaw-webui] WebSocket closed', {
           code: event.code,
@@ -238,6 +244,7 @@ export function useWebSocket() {
       }
 
       ws.onerror = (event) => {
+        if (wsRef.current !== ws) return
         console.warn('[myclaw-webui] WebSocket error', {
           eventType: event.type,
           readyState: ws.readyState,
@@ -247,6 +254,7 @@ export function useWebSocket() {
       }
 
       ws.onmessage = (event) => {
+        if (wsRef.current !== ws) return
         lastMessageAtRef.current = Date.now()
         if (pongTimeoutTimer.current) {
           clearTimeout(pongTimeoutTimer.current)
@@ -533,8 +541,14 @@ export function useWebSocket() {
       reconnectTimer.current = null
     }
     const ws = wsRef.current
-    if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.close(4000, 'manual reconnect') } catch { /* ignore */ }
+    }
+    if (ws && ws.readyState === WebSocket.CONNECTING) {
+      try { ws.close() } catch { /* ignore */ }
+    }
     wsRef.current = null
+    setStatus('connecting')
     connect()
   }, [connect])
 

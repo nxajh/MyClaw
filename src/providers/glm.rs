@@ -1,33 +1,67 @@
-//! GLM (Zhipu) provider — Chat + Embedding + Search.
+//! GLM (Zhipu) provider — Embedding + Search.
+//!
+//! Chat is handled by the generic `OpenAiChatCompletionsClient` via
+//! `ProviderFactory`.  `glm_body_override` adds GLM-specific thinking
+//! parameters and reasoning_content echo to the rendered body.
 //!
 //! Reference: https://docs.bigmodel.cn/api-reference/模型-api/对话补全.md
 //!
 //! Endpoints (relative to base_url):
-//!   Chat:      {base_url}/v4/chat/completions
 //!   Embedding: {base_url}/v4/embeddings
 //!   Search:    {base_url}/v4/web_search
-//!
-//! GLM-specific behaviours handled here:
-//! - `do_sample` is required for non-greedy decoding
-//! - `tool_stream: true` enables streaming tool-call deltas (otherwise the
-//!   entire tool call is returned in a single chunk with finish_reason="stop")
-//! - finish_reason can be "sensitive" (content filtered by GLM's safety)
-//! - finish_reason may be "stop" even when tool_calls were emitted; we track
-//!   `saw_tool_call` and override to ToolUse in that case
 
-use async_trait::async_trait;
-use futures_util::StreamExt;
-use std::collections::HashMap;
-
-use crate::providers::http::build_reqwest_client;
 use crate::providers::{
-    BoxStream, ChatProvider, ChatRequest, ContentPart, SharedApiKey, StopReason, StreamEvent,
+    EmbedInput, EmbedRequest, EmbedResponse, EmbeddingProvider, SearchProvider, SearchRequest,
+    SearchResult, SearchResults, SharedApiKey, ContentPart,
 };
-use crate::providers::{EmbedInput, EmbedRequest, EmbedResponse, EmbeddingProvider};
-use crate::providers::{SearchProvider, SearchRequest, SearchResult, SearchResults};
 use reqwest::Client;
 
-const DEFAULT_BASE_URL: &str = "https://open.bigmodel.cn/api/paas";
+const DEFAULT_BASE_URL: &str = "https://open.bigmodel.cn/api/paas/v4";
+
+// ── Body override (used by ProviderFactory for GLM chat) ──────────────────────
+
+/// GLM-specific body override.
+///
+/// 1. Echoes `reasoning_content` for **all** assistant messages (Preserved Thinking).
+/// 2. Adds `thinking: {"type":"enabled","clear_thinking":false}` when reasoning is on.
+pub fn glm_body_override(
+    mut body: serde_json::Value,
+    req: &crate::providers::ChatRequest<'_>,
+) -> serde_json::Value {
+    use serde_json::json;
+
+    // Inject reasoning_content into assistant messages from Thinking parts.
+    if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        for (i, msg) in messages.iter_mut().enumerate() {
+            if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+                continue;
+            }
+            let orig = &req.messages[i];
+            let reasoning: Vec<&str> = orig.parts.iter()
+                .filter_map(|p| match p {
+                    ContentPart::Thinking { thinking, .. } => Some(thinking.as_str()),
+                    _ => None,
+                })
+                .collect();
+            if !reasoning.is_empty() {
+                msg["reasoning_content"] = json!(reasoning.join(""));
+            }
+        }
+    }
+
+    // Enable thinking with Preserved Thinking when configured.
+    if let Some(ref tc) = req.thinking {
+        if tc.enabled {
+            body["thinking"] = json!({"type": "enabled", "clear_thinking": false});
+        } else {
+            body["thinking"] = json!({"type": "disabled"});
+        }
+    }
+
+    body
+}
+
+// ── GlmProvider (Embedding + Search) ──────────────────────────────────────────
 
 #[derive(Clone)]
 pub struct GlmProvider {
@@ -46,7 +80,7 @@ impl GlmProvider {
         Self {
             base_url,
             api_key: api_key.into(),
-            client: build_reqwest_client(),
+            client: crate::providers::http::build_reqwest_client(),
             user_agent: None,
         }
     }
@@ -64,484 +98,11 @@ impl GlmProvider {
     }
 
     fn embeddings_url(&self) -> String {
-        format!("{}/v4/embeddings", self.base_url.trim_end_matches('/'))
+        format!("{}/embeddings", self.base_url.trim_end_matches('/'))
     }
 
     fn web_search_url(&self) -> String {
-        format!("{}/v4/web_search", self.base_url.trim_end_matches('/'))
-    }
-}
-
-// ── ChatProvider ───────────────────────────────────────────────────────────────
-
-#[async_trait]
-impl ChatProvider for GlmProvider {
-    fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
-        let url = format!(
-            "{}/v4/chat/completions",
-            self.base_url.trim_end_matches('/')
-        );
-        let body = build_glm_body(&req);
-        let auth = self.auth();
-        let client = self.client.clone();
-        let user_agent = self.user_agent.clone();
-        let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(100);
-
-        tokio::spawn(async move {
-            let mut headers = reqwest::header::HeaderMap::new();
-            headers.insert(reqwest::header::AUTHORIZATION, auth.parse().unwrap());
-            headers.insert(
-                reqwest::header::CONTENT_TYPE,
-                "application/json".parse().unwrap(),
-            );
-            if let Some(ref ua) = user_agent {
-                headers.insert(reqwest::header::USER_AGENT, ua.parse().unwrap());
-            }
-
-            let resp = match client.post(&url).headers(headers).json(&body).send().await {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(url = %url, error = %e, "request failed");
-                    let _ = tx.send(StreamEvent::Error(e.to_string())).await;
-                    return;
-                }
-            };
-
-            if resp.error_for_status_ref().is_err() {
-                let status = resp.status();
-                let text = resp.text().await.unwrap_or_default();
-                let _ = tx
-                    .send(StreamEvent::HttpError {
-                        status: status.as_u16(),
-                        message: format!("HTTP {}: {}", status, text),
-                    })
-                    .await;
-                return;
-            }
-
-            let mut saw_tool_call = false;
-            // Tracks whether the server sent an authoritative end marker — a
-            // `finish_reason` chunk (which `parse_glm_sse` turns into a `Done`)
-            // or the `[DONE]` sentinel. If the byte stream ends with neither,
-            // the connection was closed mid-response and must not be reported
-            // as a clean completion.
-            let mut saw_terminal = false;
-            let mut tool_index_map: HashMap<u32, String> = HashMap::new();
-            let mut buffer = String::new();
-            let mut utf8_buf = Vec::new();
-            let mut stream = resp.bytes_stream();
-
-            while let Some(item) = stream.next().await {
-                let bytes = match item {
-                    Ok(b) => b,
-                    Err(e) => {
-                        tracing::warn!(url = %url, error = %e, "stream read error");
-                        let _ = tx.send(StreamEvent::Error(e.to_string())).await;
-                        return;
-                    }
-                };
-                utf8_buf.extend_from_slice(&bytes);
-                let try_decode = std::str::from_utf8(&utf8_buf);
-                let text = match try_decode {
-                    Ok(s) => {
-                        let owned = s.to_string();
-                        utf8_buf.clear();
-                        owned
-                    }
-                    Err(e) => {
-                        let valid = e.valid_up_to();
-                        if valid == 0 && utf8_buf.len() < 4 {
-                            continue;
-                        }
-                        let t = String::from_utf8_lossy(&utf8_buf[..valid]).into_owned();
-                        utf8_buf.clear();
-                        t
-                    }
-                };
-                if text.is_empty() {
-                    continue;
-                }
-                buffer.push_str(&text);
-
-                while let Some(pos) = buffer.find('\n') {
-                    let line = buffer[..pos].to_string();
-                    buffer.drain(..=pos);
-                    // The `[DONE]` sentinel marks a clean server-side close.
-                    if line.trim().strip_prefix("data:").map(str::trim) == Some("[DONE]") {
-                        saw_terminal = true;
-                    }
-                    let parsed = parse_glm_sse(&line, &mut saw_tool_call, &mut tool_index_map);
-                    if let Some(events) = parsed {
-                        for ev in events {
-                            if matches!(ev, StreamEvent::Done { .. }) {
-                                saw_terminal = true;
-                            }
-                            let _ = tx.send(ev).await;
-                        }
-                    }
-                }
-            }
-            // The byte stream ended. If we never saw a finish_reason or `[DONE]`,
-            // GLM closed the connection mid-response (e.g. server-side request
-            // time budget exhausted during a long prefill). Surface it as an
-            // error instead of a silent, truncated "success".
-            if !saw_terminal {
-                let _ = tx
-                    .send(StreamEvent::Error(
-                        "GLM stream closed before completion (no finish_reason / [DONE]; \
-                         likely server-side truncation)"
-                            .to_string(),
-                    ))
-                    .await;
-            }
-        });
-
-        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
-    }
-}
-
-// ── Body building ─────────────────────────────────────────────────────────────
-
-/// Build a request body tailored to GLM's API.
-///
-/// Differences from the generic OpenAI body:
-/// - `reasoning_content` extracted from Thinking parts into top-level message field
-/// - `thinking` parameter added for GLM-5.1/5/4.7 models
-/// - `do_sample: true` is added when `temperature > 0` so GLM actually
-///   samples (without it, temperature is silently ignored).
-/// - `tool_stream: true` when tools are present so that tool calls arrive
-///   as incremental SSE deltas instead of a single blob at stream end.
-fn build_glm_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
-    use base64::Engine as _;
-    use serde_json::json;
-
-    let messages: Vec<serde_json::Value> = req.messages
-        .iter()
-        .map(|msg| {
-            // Extract reasoning_content from Thinking parts into top-level field.
-            let reasoning: Option<String> = {
-                let parts: Vec<&str> = msg.parts.iter()
-                    .filter_map(|p| match p {
-                        ContentPart::Thinking { thinking, .. } => Some(thinking.as_str()),
-                        _ => None,
-                    })
-                    .collect();
-                if parts.is_empty() { None } else { Some(parts.join("")) }
-            };
-
-            // Build content parts, skipping Thinking.
-            let content_vec: Vec<serde_json::Value> = msg.parts.iter().filter_map(|part| match part {
-                ContentPart::Text { text } => Some(json!({"type": "text", "text": text})),
-                ContentPart::File { path, mime_type, .. } => {
-                    let modality = crate::providers::media::modality_from_mime(mime_type.as_deref(), path);
-                    match modality {
-                        crate::providers::media::FileModality::Image | crate::providers::media::FileModality::Video => {
-                            let abs = crate::providers::media::resolve_path(path);
-                            let bytes = match std::fs::read(&abs) {
-                                Ok(bytes) => bytes,
-                                Err(e) => return Some(json!({ "type": "text", "text": format!("{}（读取失败: {e}）", crate::providers::media::marker_for_file(path, mime_type.as_deref())) })),
-                            };
-                            let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-                            match modality {
-                                crate::providers::media::FileModality::Image => {
-                                    let mime = mime_type.as_deref()
-                                        .or_else(|| crate::providers::media::infer_image_mime(path))
-                                        .unwrap_or("image/jpeg");
-                                    Some(json!({
-                                        "type": "image_url",
-                                        "image_url": { "url": format!("data:{};base64,{}", mime, b64), "detail": "auto" }
-                                    }))
-                                }
-                                crate::providers::media::FileModality::Video => {
-                                    let mime = mime_type.as_deref()
-                                        .or_else(|| crate::providers::media::infer_video_mime(path))
-                                        .unwrap_or("video/mp4");
-                                    Some(json!({
-                                        "type": "video_url",
-                                        "video_url": { "url": format!("data:{};base64,{}", mime, b64) }
-                                    }))
-                                }
-                                _ => unreachable!(),
-                            }
-                        }
-                        _ => Some(json!({ "type": "text", "text": crate::providers::media::marker_for_file(path, mime_type.as_deref()) })),
-                    }
-                }
-                ContentPart::Thinking { .. } => None,
-            }).collect();
-
-            let content = if content_vec.len() == 1 {
-                if let Some(text) = msg.parts.iter().find_map(|p| match p {
-                    ContentPart::Text { text } => Some(text.as_str()),
-                    _ => None,
-                }) {
-                    json!(text)
-                } else {
-                    content_vec.into_iter().next().unwrap()
-                }
-            } else if content_vec.is_empty() {
-                json!("")
-            } else {
-                json!(content_vec)
-            };
-
-            let mut msg_json = json!({ "role": msg.role });
-
-            if msg.role == "tool" {
-                if let Some(tc_id) = &msg.tool_call_id {
-                    msg_json["tool_call_id"] = json!(tc_id);
-                } else if let Some(n) = &msg.name {
-                    msg_json["tool_call_id"] = json!(n);
-                }
-                msg_json["content"] = json!(content);
-            } else if msg.role == "assistant" {
-                let is_empty = match &content {
-                    serde_json::Value::String(s) => s.is_empty(),
-                    serde_json::Value::Array(arr) => arr.is_empty(),
-                    _ => false,
-                };
-                msg_json["content"] = if is_empty {
-                    serde_json::Value::Null
-                } else {
-                    json!(content)
-                };
-                // Attach reasoning_content as top-level field per GLM spec.
-                if let Some(ref rc) = reasoning {
-                    msg_json["reasoning_content"] = json!(rc);
-                }
-                if let Some(tcs) = &msg.tool_calls {
-                    msg_json["tool_calls"] = serde_json::json!(tcs.iter().map(|tc| tc.to_openai()).collect::<Vec<_>>());
-                }
-            } else {
-                msg_json["content"] = json!(content);
-            }
-
-            msg_json
-        })
-        .collect();
-
-    let mut body = json!({
-        "model": req.model,
-        "messages": messages,
-        "stream": true,
-    });
-
-    if let Some(temp) = req.temperature {
-        body["temperature"] = json!(temp);
-        // GLM requires do_sample=true for non-greedy decoding.
-        body["do_sample"] = json!(true);
-    }
-    if let Some(max) = req.max_tokens {
-        body["max_tokens"] = json!(max);
-    }
-    if let Some(stop) = &req.stop {
-        body["stop"] = json!(stop);
-    }
-    if let Some(tools) = req.tools {
-        body["tools"] = json!(tools.iter().map(|t| {
-            json!({
-                "type": "function",
-                "function": { "name": t.name, "description": t.description, "parameters": t.input_schema }
-            })
-        }).collect::<Vec<_>>());
-        // Request incremental tool-call deltas so we can stream them
-        // instead of receiving the entire call in one chunk.
-        body["tool_stream"] = json!(true);
-    }
-
-    // Enable thinking with Preserved Thinking when configured.
-    if let Some(ref tc) = req.thinking {
-        if tc.enabled {
-            body["thinking"] = json!({"type": "enabled", "clear_thinking": false});
-        } else {
-            body["thinking"] = json!({"type": "disabled"});
-        }
-    }
-
-    body
-}
-
-// ── SSE parsing ───────────────────────────────────────────────────────────────
-
-/// Parse a single SSE line from GLM.
-///
-/// GLM-specific handling:
-/// - `finish_reason` can be `"sensitive"` (content filtered by GLM safety)
-/// - `finish_reason` may be `"stop"` even when `tool_calls` were emitted
-///   in previous chunks; `saw_tool_call` tracks this and overrides the reason
-fn parse_glm_sse(
-    line: &str,
-    saw_tool_call: &mut bool,
-    tool_index_map: &mut HashMap<u32, String>,
-) -> Option<Vec<StreamEvent>> {
-    let line = line.trim();
-    if line.is_empty() || line.starts_with(':') {
-        return None;
-    }
-    let data = line.strip_prefix("data:")?.trim();
-    if data == "[DONE]" {
-        return None;
-    }
-
-    #[derive(serde::Deserialize)]
-    struct Chunk {
-        choices: Vec<Choice>,
-        #[serde(default)]
-        usage: Option<Usage>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Choice {
-        delta: Delta,
-        finish_reason: Option<String>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Delta {
-        content: Option<String>,
-        reasoning_content: Option<String>,
-        tool_calls: Option<Vec<TcDelta>>,
-    }
-    #[derive(serde::Deserialize)]
-    #[allow(dead_code)]
-    struct TcDelta {
-        index: u32,
-        id: Option<String>,
-        function: Option<FuncDelta>,
-    }
-    #[derive(serde::Deserialize)]
-    #[allow(dead_code)]
-    struct FuncDelta {
-        name: Option<String>,
-        arguments: Option<String>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Usage {
-        #[serde(default)]
-        prompt_tokens: Option<u64>,
-        #[serde(default)]
-        completion_tokens: Option<u64>,
-        #[serde(default)]
-        prompt_tokens_details: Option<PromptDetails>,
-    }
-    #[derive(serde::Deserialize)]
-    struct PromptDetails {
-        #[serde(default)]
-        cached_tokens: Option<u64>,
-    }
-
-    let chunk: Chunk = serde_json::from_str(data).ok()?;
-
-    // Extract usage whenever present — GLM sends usage in the final chunk
-    // alongside choices (with finish_reason), unlike standard OpenAI which
-    // sends it in a separate choices=[] chunk.  We must return both Usage
-    // and Done/ToolCall events from the same chunk.
-    let mut events: Vec<StreamEvent> = Vec::new();
-    if let Some(usage) = chunk.usage {
-        // GLM sends prompt_tokens_details.cached_tokens in the usage chunk.
-        // Normalize: input_tokens = non-cached portion, cached_input_tokens = cached.
-        let cached = usage
-            .prompt_tokens_details
-            .as_ref()
-            .and_then(|d| d.cached_tokens)
-            .unwrap_or(0);
-        let non_cached = usage.prompt_tokens.map(|t| t.saturating_sub(cached));
-        events.push(StreamEvent::Usage(crate::providers::ChatUsage {
-            input_tokens: non_cached,
-            output_tokens: usage.completion_tokens,
-            cached_input_tokens: if cached > 0 { Some(cached) } else { None },
-            ..Default::default()
-        }));
-    }
-
-    if chunk.choices.is_empty() {
-        return if events.is_empty() {
-            None
-        } else {
-            Some(events)
-        };
-    }
-
-    for choice in &chunk.choices {
-        // Tool calls take priority — GLM occasionally sends both content
-        // and tool_calls in the same chunk.  When that happens the content
-        // is usually a text representation of the tool call and must be
-        // ignored in favour of the structured tool_calls field.
-        if let Some(tcs) = &choice.delta.tool_calls {
-            *saw_tool_call = true;
-            if let Some(tc) = tcs.first() {
-                let id = tc.id.clone().unwrap_or_default();
-                let func = tc.function.as_ref();
-
-                if !id.is_empty() && func.is_some_and(|f| f.name.is_some()) {
-                    let initial_args = func.and_then(|f| f.arguments.clone()).unwrap_or_default();
-                    tool_index_map.insert(tc.index, id.clone());
-                    events.push(StreamEvent::ToolCallStart {
-                        id: id.clone(),
-                        name: func.and_then(|f| f.name.clone()).unwrap_or_default(),
-                        initial_arguments: initial_args,
-                    });
-                    // Return immediately — Usage was already captured above if present.
-                    // The next chunk will continue the tool call stream.
-                    return Some(events);
-                }
-
-                let args = func.and_then(|f| f.arguments.clone()).unwrap_or_default();
-                if !args.is_empty() {
-                    let real_id = if id.is_empty() {
-                        tool_index_map.get(&tc.index).cloned().unwrap_or_default()
-                    } else {
-                        id
-                    };
-                    events.push(StreamEvent::ToolCallDelta {
-                        index: tc.index,
-                        id: real_id,
-                        name: String::new(),
-                        delta: args,
-                    });
-                    return Some(events);
-                }
-            }
-        }
-
-        if let Some(text) = &choice.delta.content {
-            if !text.is_empty() {
-                events.push(StreamEvent::Delta { text: text.clone() });
-                return Some(events);
-            }
-        }
-        if let Some(reasoning) = &choice.delta.reasoning_content {
-            if !reasoning.is_empty() {
-                events.push(StreamEvent::Thinking {
-                    text: reasoning.clone(),
-                });
-                return Some(events);
-            }
-        }
-        if choice.finish_reason.is_some() {
-            let raw = choice.finish_reason.as_ref().unwrap();
-            let reason = match raw.as_str() {
-                "stop" if *saw_tool_call => StopReason::ToolUse,
-                "stop" => StopReason::EndTurn,
-                "tool_calls" => StopReason::ToolUse,
-                "length" => StopReason::MaxTokens,
-                "content_filter" | "sensitive" => StopReason::ContentFilter,
-                // GLM rejects an over-length request with
-                // `model_context_window_exceeded` (empty content + no tool_calls);
-                // surface it so the agent compacts & retries instead of treating
-                // the empty body as a normal EndTurn and blindly retrying.
-                s if crate::providers::capability_chat::is_context_overflow_reason(s) => {
-                    StopReason::ContextOverflow
-                }
-                _ => StopReason::EndTurn,
-            };
-            events.push(StreamEvent::Done { reason });
-            // Don't return yet — continue to process any remaining choices.
-        }
-    }
-
-    if events.is_empty() {
-        None
-    } else {
-        Some(events)
+        format!("{}/web_search", self.base_url.trim_end_matches('/'))
     }
 }
 
@@ -698,36 +259,5 @@ impl SearchProvider for GlmProvider {
             total,
             query: req.query,
         })
-    }
-}
-
-#[cfg(test)]
-mod overflow_tests {
-    use super::*;
-
-    fn done_reason(line: &str) -> Option<StopReason> {
-        let mut saw_tool_call = false;
-        let mut tool_index_map: HashMap<u32, String> = HashMap::new();
-        parse_glm_sse(line, &mut saw_tool_call, &mut tool_index_map)?
-            .into_iter()
-            .find_map(|e| match e {
-                StreamEvent::Done { reason } => Some(reason),
-                _ => None,
-            })
-    }
-
-    #[test]
-    fn maps_context_window_exceeded_to_overflow() {
-        let line = r#"data: {"choices":[{"delta":{"content":""},"finish_reason":"model_context_window_exceeded"}]}"#;
-        assert_eq!(done_reason(line), Some(StopReason::ContextOverflow));
-    }
-
-    #[test]
-    fn plain_stop_and_length_unaffected() {
-        let stop = r#"data: {"choices":[{"delta":{"content":""},"finish_reason":"stop"}]}"#;
-        assert_eq!(done_reason(stop), Some(StopReason::EndTurn));
-        // `length` is the output-token cap, NOT a context overflow.
-        let length = r#"data: {"choices":[{"delta":{"content":""},"finish_reason":"length"}]}"#;
-        assert_eq!(done_reason(length), Some(StopReason::MaxTokens));
     }
 }

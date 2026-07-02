@@ -42,6 +42,7 @@ pub use video::{VideoGenerationProvider, VideoRequest, VideoResponse};
 
 pub mod anthropic;
 pub mod credential_pool;
+pub mod deepseek;
 pub mod fallback;
 pub mod glm;
 pub mod google;

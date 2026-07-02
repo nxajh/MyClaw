@@ -12,6 +12,12 @@ use crate::providers::protocols::openai::chat_message_rendering::render_openai_c
 use crate::providers::{BoxStream, ChatProvider, ChatRequest, SharedApiKey, StopReason, StreamEvent};
 use reqwest::Client;
 
+/// Post-process the rendered OpenAI body with provider-specific fields.
+/// Receives the full body and the original request, returns the modified body.
+/// Used for thinking parameters that differ across providers
+/// (GLM `clear_thinking`, DeepSeek `{"type":"enabled"}`, reasoning_content echo).
+pub type BodyOverrideFn = fn(serde_json::Value, &ChatRequest<'_>) -> serde_json::Value;
+
 /// OpenAI Chat Completions protocol client.
 #[derive(Clone)]
 pub struct OpenAiChatCompletionsClient {
@@ -19,6 +25,7 @@ pub struct OpenAiChatCompletionsClient {
     api_key: SharedApiKey,
     client: Client,
     user_agent: Option<String>,
+    body_override: Option<BodyOverrideFn>,
 }
 
 impl OpenAiChatCompletionsClient {
@@ -28,11 +35,17 @@ impl OpenAiChatCompletionsClient {
             api_key: api_key.into(),
             client: build_reqwest_client(),
             user_agent: None,
+            body_override: None,
         }
     }
 
     pub fn with_user_agent(mut self, user_agent: String) -> Self {
         self.user_agent = Some(user_agent);
+        self
+    }
+
+    pub fn with_body_override(mut self, f: BodyOverrideFn) -> Self {
+        self.body_override = Some(f);
         self
     }
 
@@ -42,7 +55,7 @@ impl OpenAiChatCompletionsClient {
 
     fn chat_url(&self) -> String {
         format!(
-            "{}/v1/chat/completions",
+            "{}/chat/completions",
             self.base_url.trim_end_matches('/')
         )
     }
@@ -66,6 +79,10 @@ impl ChatProvider for OpenAiChatCompletionsClient {
     fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
         let url = self.chat_url();
         let body = render_openai_chat_body(&req);
+        let body = match self.body_override {
+            Some(f) => f(body, &req),
+            None => body,
+        };
         let client = self.client.clone();
         let headers = self.common_headers();
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(100);
@@ -341,7 +358,7 @@ fn parse_openai_sse(line: &str, tool_index_map: &mut HashMap<u32, String>) -> Ve
             let reason = match r.as_str() {
                 "stop" => StopReason::EndTurn,
                 "length" => StopReason::MaxTokens,
-                "content_filter" => StopReason::ContentFilter,
+                "content_filter" | "sensitive" => StopReason::ContentFilter,
                 "tool_calls" => StopReason::ToolUse,
                 s if crate::providers::capability_chat::is_context_overflow_reason(s) => {
                     StopReason::ContextOverflow
