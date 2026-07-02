@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
-import { ChevronDown, ChevronRight, Zap, Check, AlertCircle, Loader2 } from 'lucide-react'
+import { ChevronDown, ChevronRight, Zap, Check, AlertCircle, Loader2, Copy } from 'lucide-react'
 import type { ToolCallBlock } from '../hooks/useWebSocket'
 
 function formatOutput(raw: string): string {
@@ -13,7 +13,7 @@ function formatOutput(raw: string): string {
 }
 
 /** Build a short arg summary like (path=/foo/bar.rs) for collapsed display. */
-function argSummary(name: string, args: Record<string, unknown>): string {
+function argSummary(_name: string, args: Record<string, unknown>): string {
   if (!args || Object.keys(args).length === 0) return ''
   // Show the most relevant arg first depending on tool name.
   const keys = Object.keys(args)
@@ -47,11 +47,22 @@ function fmtElapsed(ms: number): string {
 
 type Status = 'running' | 'done' | 'error'
 
-const STATUS_COLOR: Record<Status, string> = {
-  running: 'text-amber-400',
-  done: 'text-emerald-400',
-  error: 'text-red-400',
+function CopyButton({ text, title }: { text: string; title: string }) {
+  const [copied, setCopied] = useState(false)
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch { /* ignore */ }
+  }
+  return (
+    <button onClick={handleCopy} className="p-1 rounded text-zinc-600 hover:text-zinc-300 hover:bg-zinc-800 transition-colors" title={copied ? 'Copied' : title}>
+      {copied ? <Check size={11} className="text-emerald-400" /> : <Copy size={11} />}
+    </button>
+  )
 }
+
 
 const BORDER_COLOR: Record<Status, string> = {
   running: 'border-amber-900/40',
@@ -61,6 +72,8 @@ const BORDER_COLOR: Record<Status, string> = {
 
 export default function ToolCallCard({ block }: { block: ToolCallBlock }) {
   const [userExpanded, setUserExpanded] = useState<boolean | null>(null)
+  const [inputOpen, setInputOpen] = useState(true)
+  const [outputOpen, setOutputOpen] = useState(false)
   const running = block.output === undefined && !block.error
   const error = !!block.error
   const status: Status = running ? 'running' : error ? 'error' : 'done'
@@ -88,6 +101,9 @@ export default function ToolCallCard({ block }: { block: ToolCallBlock }) {
     [block.output],
   )
 
+  const inputText = useMemo(() => JSON.stringify(block.args, null, 2), [block.args])
+  const outputIsLong = (formattedOutput?.length ?? 0) > 2000 || (formattedOutput?.split('\n').length ?? 0) > 40
+  const outputExpanded = outputOpen || !outputIsLong
   const hasBody = Object.keys(block.args).length > 0 || formattedOutput !== undefined
 
   return (
@@ -135,22 +151,35 @@ export default function ToolCallCard({ block }: { block: ToolCallBlock }) {
         <div className="border-t border-zinc-800">
           {Object.keys(block.args).length > 0 && (
             <div className="px-2.5 sm:px-3.5 py-2 sm:py-2.5 border-b border-zinc-800/60">
-              <div className="text-zinc-600 uppercase tracking-widest mb-1.5 sm:mb-2" style={{ fontSize: 9 }}>
-                Input
+              <div className="flex items-center gap-1 mb-1.5 sm:mb-2">
+                <button onClick={() => setInputOpen(v => !v)} className="flex items-center gap-1 text-zinc-600 uppercase tracking-widest hover:text-zinc-400 transition-colors" style={{ fontSize: 9 }}>
+                  {inputOpen ? <ChevronDown size={10} /> : <ChevronRight size={10} />} Input
+                </button>
+                <div className="flex-1" />
+                <CopyButton text={inputText} title="Copy input" />
               </div>
-              <pre className="tool-call-pre text-zinc-400 whitespace-pre-wrap break-all font-mono text-[10px] sm:text-xs leading-4 sm:leading-5">
-                {JSON.stringify(block.args, null, 2)}
-              </pre>
+              {inputOpen && (
+                <pre className="tool-call-pre text-zinc-400 whitespace-pre-wrap break-all font-mono text-[10px] sm:text-xs leading-4 sm:leading-5">
+                  {inputText}
+                </pre>
+              )}
             </div>
           )}
           {formattedOutput !== undefined && (
             <div className="px-2.5 sm:px-3.5 py-2 sm:py-2.5">
-              <div className="text-zinc-600 uppercase tracking-widest mb-1.5 sm:mb-2" style={{ fontSize: 9 }}>
-                Output
+              <div className="flex items-center gap-1 mb-1.5 sm:mb-2">
+                <button onClick={() => setOutputOpen(v => !v)} className="flex items-center gap-1 text-zinc-600 uppercase tracking-widest hover:text-zinc-400 transition-colors" style={{ fontSize: 9 }}>
+                  {outputOpen ? <ChevronDown size={10} /> : <ChevronRight size={10} />} Output{outputIsLong ? ' · long' : ''}
+                </button>
+                <div className="flex-1" />
+                <CopyButton text={formattedOutput} title="Copy output" />
               </div>
-              <pre className={`tool-call-pre whitespace-pre-wrap break-all font-mono text-[10px] sm:text-xs max-h-40 sm:max-h-52 lg:max-h-64 overflow-y-auto leading-4 sm:leading-5 ${error ? 'text-red-400' : 'text-zinc-400'}`}>
+              <pre className={`tool-call-pre whitespace-pre-wrap break-all font-mono text-[10px] sm:text-xs ${outputExpanded ? 'max-h-40 sm:max-h-52 lg:max-h-64 overflow-y-auto' : 'max-h-28 overflow-hidden'} leading-4 sm:leading-5 ${error ? 'text-red-400' : 'text-zinc-400'}`}>
                 {formattedOutput}
               </pre>
+              {outputIsLong && !outputOpen && (
+                <button onClick={() => setOutputOpen(true)} className="mt-2 text-[10px] text-zinc-500 hover:text-zinc-300">Show full output</button>
+              )}
             </div>
           )}
         </div>

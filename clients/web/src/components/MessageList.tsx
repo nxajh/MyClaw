@@ -1,10 +1,10 @@
-import { useState, useEffect, useRef, useCallback, memo, createContext, useContext, type ReactNode } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo, memo, createContext, useContext, type ReactNode } from 'react'
 import type { RefObject } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeHighlight from 'rehype-highlight'
-import { ChevronDown, ChevronRight, Copy, Check, ArrowDown, RotateCcw, Search, X, Pencil, Trash2 } from 'lucide-react'
+import { ChevronDown, ChevronRight, Copy, Check, ArrowDown, RotateCcw, Search, X, Pencil, Trash2, Pin } from 'lucide-react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import Lightbox from 'yet-another-react-lightbox'
@@ -38,7 +38,8 @@ async function loadRehypeKatex() {
 function PreCodeBlock({ children, className }: { children: ReactNode; className?: string }) {
   const [copied, setCopied] = useState(false)
   const preRef = useRef<HTMLPreElement>(null)
-  const lang = className?.replace('language-', '') || ''
+  const classes = (className || '').split(/\s+/)
+  const lang = classes.find(c => c.startsWith('language-'))?.replace('language-', '') || ''
 
   const handleCopy = async () => {
     if (!preRef.current) return
@@ -51,7 +52,7 @@ function PreCodeBlock({ children, className }: { children: ReactNode; className?
   }
 
   return (
-    <div className="relative group/code my-4 overflow-hidden rounded-xl border border-zinc-850 bg-zinc-950 shadow-md">
+    <div className="code-block relative group/code my-4 overflow-hidden rounded-xl border border-zinc-850 bg-zinc-950 shadow-md">
       <div className="flex items-center justify-between px-4 py-1.5 border-b border-zinc-900 bg-zinc-900/40 text-[10px] text-zinc-500 font-mono select-none">
         <span>{lang || 'code'}</span>
         <button onClick={handleCopy} className="flex items-center gap-1 px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-850 hover:text-zinc-200 border border-zinc-800/60 transition-opacity sm:opacity-60 sm:group-hover/code:opacity-100">
@@ -128,6 +129,63 @@ function ThinkingBlock({ text, isStreaming }: { text: string; isStreaming?: bool
 
 // ── Content renderer ─────────────────────────────────────────────────────
 
+type ContentSegment = { type: 'text'; text: string } | { type: 'system-reminder'; text: string }
+
+function splitSystemReminders(text: string): ContentSegment[] {
+  const segments: ContentSegment[] = []
+  const re = /<system-reminder>\s*([\s\S]*?)\s*<\/system-reminder>/g
+  let last = 0
+  let match: RegExpExecArray | null
+  let found = false
+
+  while ((match = re.exec(text)) !== null) {
+    found = true
+    if (match.index > last) {
+      const before = text.slice(last, match.index).trim()
+      if (before) segments.push({ type: 'text', text: before })
+    }
+    segments.push({ type: 'system-reminder', text: match[1].trim() })
+    last = match.index + match[0].length
+  }
+
+  if (!found) return [{ type: 'text', text }]
+
+  if (last < text.length) {
+    const after = text.slice(last).trim()
+    if (after) segments.push({ type: 'text', text: after })
+  }
+
+  return segments
+}
+
+function SystemReminderCard({ text }: { text: string }) {
+  const [open, setOpen] = useState(false)
+  const lines = text.split('\n').filter(Boolean).length
+  const preview = text.split('\n').find(line => line.trim())?.trim() || 'System reminder'
+
+  return (
+    <div className="system-reminder-card not-prose rounded-xl border border-zinc-700/70 bg-zinc-900/70 overflow-hidden text-xs shadow-md relative before:absolute before:inset-y-0 before:left-0 before:w-1 before:bg-zinc-600">
+      <button
+        onClick={() => setOpen(prev => !prev)}
+        className="w-full flex items-center gap-2 pl-4 pr-3 py-2 text-left hover:bg-zinc-800/60 transition-colors"
+        title={open ? 'Collapse system reminder' : 'Expand system reminder'}
+      >
+        {open ? <ChevronDown size={13} className="text-zinc-500 shrink-0" /> : <ChevronRight size={13} className="text-zinc-500 shrink-0" />}
+        <span className="font-mono text-zinc-300 shrink-0">system-reminder</span>
+        <span className="text-zinc-500 truncate min-w-0 flex-1">{preview}</span>
+        <span className="font-mono text-zinc-600 shrink-0">{lines} lines</span>
+      </button>
+      {open && (
+        <div className="system-reminder-body pl-4 pr-3 py-2 border-t border-zinc-700/60 bg-zinc-950/30 max-h-80 overflow-y-auto">
+          <div className="prose prose-invert prose-sm max-w-none prose-p:my-1 prose-li:my-0.5 prose-ul:my-1 prose-ol:my-1 prose-headings:my-2 prose-headings:text-zinc-200 prose-code:text-zinc-300 prose-code:bg-zinc-800/60 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:before:content-none prose-code:after:content-none prose-pre:my-2 prose-pre:bg-zinc-950 prose-pre:border prose-pre:border-zinc-800 prose-pre:rounded-lg prose-blockquote:border-zinc-700 prose-blockquote:text-zinc-400 prose-a:text-blue-400 prose-strong:text-zinc-200">
+            <Markdown remarkPlugins={[remarkGfm]}>{text}</Markdown>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ContentBlock({ text, done }: { text: string; done: boolean }) {
   const [katexReady, setKatexReady] = useState(!!RehypeKatex)
   const needsMath = hasMath(text)
@@ -139,9 +197,9 @@ function ContentBlock({ text, done }: { text: string; done: boolean }) {
   }, [done, needsMath, katexReady])
 
   const proseClasses = `prose prose-invert prose-sm lg:prose-base max-w-none prose-p:leading-6 sm:prose-p:leading-7 prose-p:my-2 first:prose-p:mt-0 prose-headings:text-zinc-100 prose-headings:font-semibold prose-headings:mt-5 prose-headings:mb-2 prose-code:text-zinc-200 prose-code:bg-zinc-800 prose-code:px-1 sm:prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-md prose-code:text-[0.8em] prose-code:before:content-none prose-code:after:content-none prose-blockquote:border-zinc-700 prose-blockquote:text-zinc-400 prose-a:text-blue-400 prose-a:no-underline hover:prose-a:underline prose-strong:text-zinc-200 prose-strong:font-semibold prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-hr:border-zinc-800`
+  const searchQ = useContext(SearchContext)
 
   if (!done) {
-    const searchQ = useContext(SearchContext)
     return <div className={`${proseClasses} whitespace-pre-wrap`}>{searchQ ? highlightText(text, searchQ) : text}</div>
   }
 
@@ -156,7 +214,9 @@ function ContentBlock({ text, done }: { text: string; done: boolean }) {
         components={{
           table: ({ children }) => <div className="overflow-x-auto my-2"><table className="border-collapse text-xs">{children}</table></div>,
           pre: ({ children }) => {
-            const codeChild = Array.isArray(children) ? children.find((c: any) => c?.props?.className?.includes('language-')) : (children as any)?.props?.className?.includes('language-') ? children : null
+            const codeChild = Array.isArray(children)
+              ? children.find((c: any) => typeof c?.props?.className === 'string' && c.props.className.includes('language-'))
+              : (typeof (children as any)?.props?.className === 'string' && (children as any).props.className.includes('language-') ? children : null)
             return <PreCodeBlock className={codeChild?.props?.className || ''}>{children}</PreCodeBlock>
           },
         }}
@@ -179,7 +239,7 @@ function extractText(blocks: MessageBlock[]): string {
   return blocks.filter((b): b is { type: 'content'; text: string } => b.type === 'content').map((b) => b.text).join('\n\n')
 }
 
-function MessageActions({ blocks, isLast, isGenerating, onRetry, onDelete }: { blocks: MessageBlock[]; isLast: boolean; isGenerating: boolean; onRetry?: () => void; onDelete?: () => void }) {
+function MessageActions({ blocks, isLast, isGenerating, onRetry, onDelete, onPin, pinned }: { blocks: MessageBlock[]; isLast: boolean; isGenerating: boolean; onRetry?: () => void; onDelete?: () => void; onPin?: () => void; pinned?: boolean }) {
   const [copied, setCopied] = useState(false)
   const handleCopy = async () => {
     const text = extractText(blocks)
@@ -194,6 +254,11 @@ function MessageActions({ blocks, isLast, isGenerating, onRetry, onDelete }: { b
       {isLast && !isGenerating && onRetry && (
         <button onClick={onRetry} className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-colors" title="Regenerate response">
           <RotateCcw size={14} />
+        </button>
+      )}
+      {onPin && (
+        <button onClick={onPin} className={`p-1.5 rounded-md ${pinned ? 'text-amber-400 hover:text-amber-300' : 'text-zinc-500 hover:text-zinc-300'} hover:bg-zinc-800 transition-colors`} title={pinned ? 'Unpin message' : 'Pin message'}>
+          <Pin size={14} />
         </button>
       )}
       {onDelete && (
@@ -238,6 +303,7 @@ const PreviewContext = createContext<PreviewCtx>({ open: () => {} })
 
 function FilePreviewModal({ item, onClose }: { item: PreviewItem; onClose: () => void }) {
   const [zoom, setZoom] = useState(1)
+  const [rotation, setRotation] = useState(0)
   const isImage = item.mime.startsWith('image/')
   const isVideo = item.mime.startsWith('video/')
   const isAudio = item.mime.startsWith('audio/')
@@ -251,7 +317,8 @@ function FilePreviewModal({ item, onClose }: { item: PreviewItem; onClose: () =>
 
   const handleZoomIn = () => setZoom((z) => Math.min(z + 0.25, 5))
   const handleZoomOut = () => setZoom((z) => Math.max(z - 0.25, 0.25))
-  const handleResetZoom = () => setZoom(1)
+  const handleResetZoom = () => { setZoom(1); setRotation(0) }
+  const handleRotate = () => setRotation((r) => (r + 90) % 360)
 
   const handleDownload = () => {
     const a = document.createElement('a')
@@ -279,6 +346,11 @@ function FilePreviewModal({ item, onClose }: { item: PreviewItem; onClose: () =>
               <button onClick={(e) => { e.stopPropagation(); handleZoomIn() }} className="p-1.5 rounded hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 transition-colors" title="Zoom in">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
               </button>
+              {isImage && (
+                <button onClick={(e) => { e.stopPropagation(); handleRotate() }} className="p-1.5 rounded hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 transition-colors" title="Rotate">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>
+                </button>
+              )}
             </>
           )}
           <button onClick={(e) => { e.stopPropagation(); handleDownload() }} className="p-1.5 rounded hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 transition-colors" title="Download">
@@ -292,7 +364,7 @@ function FilePreviewModal({ item, onClose }: { item: PreviewItem; onClose: () =>
       {/* Content area */}
       <div className="flex-1 overflow-auto flex items-center justify-center p-4" onClick={(e) => e.stopPropagation()}>
         {isImage && (
-          <img src={item.src} alt={item.name} style={{ transform: `scale(${zoom})` }} className="max-w-full max-h-full object-contain transition-transform" />
+          <img src={item.src} alt={item.name} style={{ transform: `scale(${zoom}) rotate(${rotation}deg)` }} className="max-w-full max-h-full object-contain transition-transform" />
         )}
         {isVideo && (
           <video controls autoPlay src={item.src} className="max-w-full max-h-full rounded-lg" />
@@ -558,6 +630,31 @@ function renderFileRef(file: { path: string; mime?: string; name?: string }, ind
 // ── Search context ─────────────────────────────────────────────────────
 
 const SearchContext = createContext<string>('')
+const PINNED_MESSAGES_KEY = 'myclaw_pinned_messages'
+
+
+function messageTimestamp(id: string): number | null {
+  const m = id.match(/-(\d{13})$/)
+  return m ? Number(m[1]) : null
+}
+
+function timeDividerLabel(ts: number): string {
+  const d = new Date(ts)
+  const now = new Date()
+  const sameDay = d.toDateString() === now.toDateString()
+  const yesterday = new Date(now)
+  yesterday.setDate(now.getDate() - 1)
+  const prefix = sameDay ? 'Today' : d.toDateString() === yesterday.toDateString() ? 'Yesterday' : d.toLocaleDateString()
+  return `${prefix} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+}
+
+function shouldShowTimeDivider(prev: ChatMessage | undefined, msg: ChatMessage): boolean {
+  const ts = messageTimestamp(msg.id)
+  if (!ts) return false
+  const prevTs = prev ? messageTimestamp(prev.id) : null
+  if (!prevTs) return true
+  return ts - prevTs > 30 * 60 * 1000 || new Date(ts).toDateString() !== new Date(prevTs).toDateString()
+}
 
 function highlightText(text: string, query: string): ReactNode {
   if (!query) return text
@@ -602,13 +699,14 @@ function SearchBar({ query, setQuery, matchCount, matchIdx, onPrev, onNext, onCl
 
 // ── Editable user bubble ───────────────────────────────────────────────
 
-function EditableUserBubble({ content, images, files, onResend, onDelete }: {
+function EditableUserBubble({ content, images, files, onResend, onDelete, onPin, pinned }: {
   content: string; images?: { path: string; mime?: string; name?: string }[]; files?: { path: string; mime?: string; name?: string }[]
-  onResend?: (text: string) => void; onDelete?: () => void; msgId?: string
+  onResend?: (text: string) => void; onDelete?: () => void; onPin?: () => void; pinned?: boolean; msgId?: string
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(content)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const segments = useMemo(() => splitSystemReminders(content), [content])
 
   useEffect(() => { if (editing) { setDraft(content); setTimeout(() => textareaRef.current?.focus(), 0) } }, [editing, content])
 
@@ -648,14 +746,24 @@ function EditableUserBubble({ content, images, files, onResend, onDelete }: {
           </div>
         ) : (
           <>
-          <div className="whitespace-pre-wrap">
-            <SearchContext.Consumer>{(q) => highlightText(content, q)}</SearchContext.Consumer>
-          </div>
+          <SearchContext.Consumer>{(q) => (
+            <div className="space-y-1.5">
+              {segments.map((segment, index) => segment.type === 'system-reminder'
+                ? <SystemReminderCard key={`sys-${index}`} text={segment.text} />
+                : segment.text ? <div key={`text-${index}`} className="whitespace-pre-wrap">{highlightText(segment.text, q)}</div> : null
+              )}
+            </div>
+          )}</SearchContext.Consumer>
           {/* Edit/Delete actions */}
           <div className="flex items-center gap-0.5 justify-end mt-1">
               {onResend && (
                 <button onClick={() => setEditing(true)} className="p-1.5 rounded-md text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700 transition-colors" title="Edit & resend">
                   <Pencil size={14} />
+                </button>
+              )}
+              {onPin && (
+                <button onClick={onPin} className={`p-1.5 rounded-md ${pinned ? 'text-amber-400 hover:text-amber-300' : 'text-zinc-500 hover:text-zinc-300'} hover:bg-zinc-700 transition-colors`} title={pinned ? 'Unpin message' : 'Pin message'}>
+                  <Pin size={14} />
                 </button>
               )}
               {onDelete && (
@@ -674,11 +782,11 @@ function EditableUserBubble({ content, images, files, onResend, onDelete }: {
 
 // ── Memoized bubbles ─────────────────────────────────────────────────────
 
-const UserBubble = memo(function UserBubble({ content, images, files, onResend, onDelete, msgId }: {
+const UserBubble = memo(function UserBubble({ content, images, files, onResend, onDelete, onPin, pinned, msgId }: {
   content: string; images?: { path: string; mime?: string; name?: string }[]; files?: { path: string; mime?: string; name?: string }[]
-  onResend?: (text: string) => void; onDelete?: () => void; msgId?: string
+  onResend?: (text: string) => void; onDelete?: () => void; onPin?: () => void; pinned?: boolean; msgId?: string
 }) {
-  return <EditableUserBubble content={content} images={images} files={files} onResend={onResend} onDelete={onDelete} msgId={msgId} />
+  return <EditableUserBubble content={content} images={images} files={files} onResend={onResend} onDelete={onDelete} onPin={onPin} pinned={pinned} msgId={msgId} />
 })
 
 interface AssistantBubbleProps {
@@ -688,21 +796,23 @@ interface AssistantBubbleProps {
   isGenerating: boolean
   onRetry?: () => void
   onDelete?: () => void
+  onPin?: () => void
+  pinned?: boolean
 }
 
-const AssistantBubble = memo(function AssistantBubble({ blocks, done, isLast, isGenerating, onRetry, onDelete }: AssistantBubbleProps) {
+const AssistantBubble = memo(function AssistantBubble({ blocks, done, isLast, isGenerating, onRetry, onDelete, onPin, pinned }: AssistantBubbleProps) {
   return (
     <div className="flex gap-2.5 sm:gap-3.5 group/msg">
       <div className="mt-0.5 h-6 w-6 sm:h-7 sm:w-7 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-sm sm:text-base shrink-0 select-none shadow-md">🦀</div>
       <div className={`flex-1 min-w-0 rounded-2xl border bg-zinc-900/25 px-3 sm:px-4 lg:px-5 py-3 sm:py-4 space-y-3 shadow-sm transition-colors ${isGenerating ? 'generating-border' : 'border-zinc-800/80 hover:border-zinc-800'}`}>
         {blocks.map((block, i) => renderBlock(block, i, isGenerating))}
         {isGenerating && blocks.length === 0 && <GeneratingDots />}
-        {done && <MessageActions blocks={blocks} isLast={isLast} isGenerating={isGenerating} onRetry={onRetry} onDelete={onDelete} />}
+        {done && <MessageActions blocks={blocks} isLast={isLast} isGenerating={isGenerating} onRetry={onRetry} onDelete={onDelete} onPin={onPin} pinned={pinned} />}
       </div>
     </div>
   )
 }, (prev, next) => (
-  prev.blocks === next.blocks && prev.done === next.done && prev.isLast === next.isLast && prev.isGenerating === next.isGenerating && prev.onRetry === next.onRetry && prev.onDelete === next.onDelete
+  prev.blocks === next.blocks && prev.done === next.done && prev.isLast === next.isLast && prev.isGenerating === next.isGenerating && prev.onRetry === next.onRetry && prev.onDelete === next.onDelete && prev.onPin === next.onPin && prev.pinned === next.pinned
 ))
 
 // ── MessageList with virtualization ──────────────────────────────────────
@@ -733,6 +843,9 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [matchIdx, setMatchIdx] = useState(0)
+  const [pinnedIds, setPinnedIds] = useState<string[]>(() => {
+    try { return JSON.parse(localStorage.getItem(PINNED_MESSAGES_KEY) || '[]') } catch { return [] }
+  })
 
   // Compute matching message indices
   const matchIndices = searchQuery
@@ -742,6 +855,17 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
         return acc
       }, [])
     : []
+  const currentMatchIndex = matchIndices.length ? matchIndices[Math.min(matchIdx, matchIndices.length - 1)] : -1
+  const pinnedMessages = pinnedIds.map(id => messages.find(m => m.id === id)).filter(Boolean) as ChatMessage[]
+
+  useEffect(() => { setMatchIdx(0) }, [searchQuery])
+
+
+  useEffect(() => { localStorage.setItem(PINNED_MESSAGES_KEY, JSON.stringify(pinnedIds)) }, [pinnedIds])
+
+  const togglePin = useCallback((id: string) => {
+    setPinnedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
+  }, [])
 
   // Ctrl+F handler
   useEffect(() => {
@@ -791,6 +915,13 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
     overscan: 5,
     measureElement: (el) => el.getBoundingClientRect().height,
   })
+
+  useEffect(() => {
+    if (currentMatchIndex >= 0) {
+      virtualizer.scrollToIndex(currentMatchIndex, { align: 'center', behavior: 'smooth' })
+      stickToBottomRef.current = false
+    }
+  }, [currentMatchIndex, virtualizer])
 
   const checkNearBottom = useCallback(() => {
     const el = scrollElementRef.current
@@ -855,6 +986,19 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
     <LightboxContext.Provider value={lightboxCtx.current}>
     <PreviewContext.Provider value={previewCtx.current}>
       <div className="flex-1 relative">
+        {pinnedMessages.length > 0 && (
+          <div className="absolute top-2 left-2 right-2 sm:left-4 sm:right-4 z-10 flex gap-2 overflow-x-auto pointer-events-auto">
+            {pinnedMessages.map((m) => {
+              const text = m.role === 'user' ? m.content : extractText(m.blocks)
+              return (
+                <button key={m.id} onClick={() => virtualizer.scrollToIndex(messages.findIndex(x => x.id === m.id), { align: 'center', behavior: 'smooth' })} className="flex items-center gap-1.5 max-w-[220px] rounded-full border border-amber-800/40 bg-zinc-900/90 px-3 py-1 text-xs text-zinc-300 shadow-lg hover:bg-zinc-800 transition-colors" title="Jump to pinned message">
+                  <Pin size={11} className="text-amber-400 shrink-0" />
+                  <span className="truncate">{text}</span>
+                </button>
+              )
+            })}
+          </div>
+        )}
         {searchOpen && (
           <SearchBar
             query={searchQuery}
@@ -872,7 +1016,14 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
               {virtualItems.map((vi) => {
                 const msg = messages[vi.index]
                 return (
-                  <div key={vi.key} data-index={vi.index} ref={(el) => { if (el) virtualizer.measureElement(el) }} className="max-w-3xl lg:max-w-4xl 2xl:max-w-5xl mx-auto px-2 sm:px-4 lg:px-6 py-3 sm:py-4">
+                  <div key={vi.key} data-index={vi.index} ref={(el) => { if (el) virtualizer.measureElement(el) }} className={`max-w-3xl lg:max-w-4xl 2xl:max-w-5xl mx-auto px-2 sm:px-4 lg:px-6 py-3 sm:py-4 rounded-2xl transition-colors ${vi.index === currentMatchIndex ? 'bg-amber-500/10 ring-1 ring-amber-500/30' : ''}`}>
+                    {shouldShowTimeDivider(messages[vi.index - 1], msg) && (
+                      <div className="flex items-center gap-3 my-2 text-[11px] text-zinc-600">
+                        <div className="h-px flex-1 bg-zinc-800" />
+                        <span>{timeDividerLabel(messageTimestamp(msg.id)!)}</span>
+                        <div className="h-px flex-1 bg-zinc-800" />
+                      </div>
+                    )}
                     {msg.role === 'user' ? (
                       <UserBubble
                         content={msg.content}
@@ -880,6 +1031,8 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
                         files={'files' in msg ? (msg as any).files : undefined}
                         onResend={(edited) => handleResend(msg.content, edited)}
                         onDelete={() => handleDelete(msg.id)}
+                        onPin={() => togglePin(msg.id)}
+                        pinned={pinnedIds.includes(msg.id)}
                         msgId={msg.id}
                       />
                     ) : (
@@ -894,6 +1047,8 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
                             isGenerating={!msg.done && globalGenerating}
                             onRetry={onRetry && prevUser ? () => onRetry((prevUser as { content: string }).content) : undefined}
                             onDelete={() => handleDelete(msg.id)}
+                            onPin={() => togglePin(msg.id)}
+                            pinned={pinnedIds.includes(msg.id)}
                           />
                         )
                       })()

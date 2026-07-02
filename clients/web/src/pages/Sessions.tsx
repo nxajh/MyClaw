@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Plus, Pencil, Trash2, Check, X, Loader2, Search } from 'lucide-react'
+import { Plus, Pencil, Trash2, Check, X, Loader2, Search, Pin } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useApi } from '../lib/api'
 import { useToast } from '../components/Toast'
@@ -13,17 +13,21 @@ interface Session {
   is_active?: boolean
 }
 
+const PINNED_SESSIONS_KEY = 'myclaw_pinned_sessions'
+
 // ── Session row ───────────────────────────────────────────────────────────────
 
 function SessionRow({
   session, disabled,
-  onSwitch, onRename, onDelete,
+  onSwitch, onRename, onDelete, onTogglePin, pinned,
 }: {
   session: Session
   disabled: boolean
+  pinned: boolean
   onSwitch: (id: string) => Promise<void>
   onRename: (id: string, name: string) => Promise<void>
   onDelete: (id: string) => Promise<void>
+  onTogglePin: (id: string) => void
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(session.name)
@@ -114,6 +118,9 @@ function SessionRow({
           </>
         ) : (
           <>
+            <button onClick={(e) => { e.stopPropagation(); onTogglePin(session.id) }} className={`p-1.5 rounded-lg ${pinned ? 'text-amber-400 hover:text-amber-300' : 'text-zinc-600 hover:text-zinc-300'} hover:bg-zinc-700 transition-all`} title={pinned ? 'Unpin' : 'Pin'}>
+              <Pin size={13} />
+            </button>
             <button onClick={startEdit} disabled={disabled} className="p-1.5 rounded-lg text-zinc-600 hover:text-zinc-300 hover:bg-zinc-700 opacity-0 group-hover:opacity-100 transition-all disabled:pointer-events-none" title="Rename">
               <Pencil size={13} />
             </button>
@@ -140,6 +147,9 @@ export default function Sessions() {
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
+  const [pinnedIds, setPinnedIds] = useState<string[]>(() => {
+    try { return JSON.parse(localStorage.getItem(PINNED_SESSIONS_KEY) || '[]') } catch { return [] }
+  })
 
   const fetchSessions = useCallback(async () => {
     if (status !== 'connected') return
@@ -207,12 +217,17 @@ export default function Sessions() {
   }, [request, fetchSessions, toast])
 
   useEffect(() => { if (status === 'connected') fetchSessions() }, [status, fetchSessions])
+  useEffect(() => { localStorage.setItem(PINNED_SESSIONS_KEY, JSON.stringify(pinnedIds)) }, [pinnedIds])
+
+  const togglePin = useCallback((id: string) => {
+    setPinnedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
+  }, [])
 
   const filteredSessions = useMemo(() => {
-    if (!searchQuery.trim()) return sessions
-    const q = searchQuery.toLowerCase()
-    return sessions.filter(s => s.name.toLowerCase().includes(q))
-  }, [sessions, searchQuery])
+    const q = searchQuery.toLowerCase().trim()
+    const filtered = q ? sessions.filter(s => s.name.toLowerCase().includes(q)) : sessions
+    return [...filtered].sort((a, b) => Number(pinnedIds.includes(b.id)) - Number(pinnedIds.includes(a.id)))
+  }, [sessions, searchQuery, pinnedIds])
 
   return (
     <div className="flex flex-col h-full">
@@ -268,6 +283,8 @@ export default function Sessions() {
                 onSwitch={handleSwitch}
                 onRename={handleRename}
                 onDelete={handleDelete}
+                onTogglePin={togglePin}
+                pinned={pinnedIds.includes(s.id)}
               />
             ))}
           </div>

@@ -88,6 +88,10 @@ export function useWebSocket() {
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const reconnectAttempts = useRef<number>(0)
   const pongTimeoutTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const connectedAtRef = useRef<number | null>(null)
+  const lastPingAtRef = useRef<number | null>(null)
+  const lastMessageAtRef = useRef<number | null>(null)
+  const lastPongAtRef = useRef<number | null>(null)
   const [status, setStatus] = useState<ConnectionStatus>('disconnected')
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [isGenerating, setIsGenerating] = useState(false)
@@ -184,6 +188,10 @@ export function useWebSocket() {
       setStatus('connecting')
 
       ws.onopen = () => {
+        connectedAtRef.current = Date.now()
+        lastMessageAtRef.current = null
+        lastPingAtRef.current = null
+        lastPongAtRef.current = null
         // Send auth immediately; status stays 'connecting' until auth_ok.
         // If the server has no auth configured it responds auth_ok right away.
         authPending.current = true
@@ -191,7 +199,20 @@ export function useWebSocket() {
         ws.send(JSON.stringify({ type: 'auth', token, client_id: getClientId() }))
       }
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
+        const now = Date.now()
+        console.info('[myclaw-webui] WebSocket closed', {
+          code: event.code,
+          reason: event.reason || '',
+          wasClean: event.wasClean,
+          readyState: ws.readyState,
+          visibilityState: document.visibilityState,
+          uptimeMs: connectedAtRef.current ? now - connectedAtRef.current : null,
+          lastPingAgoMs: lastPingAtRef.current ? now - lastPingAtRef.current : null,
+          lastPongAgoMs: lastPongAtRef.current ? now - lastPongAtRef.current : null,
+          lastMessageAgoMs: lastMessageAtRef.current ? now - lastMessageAtRef.current : null,
+        })
+        connectedAtRef.current = null
         setStatus('disconnected')
         // Mark any in-progress assistant message as done so the UI doesn't
         // show a stale "generating" animation after reconnect.
@@ -216,11 +237,17 @@ export function useWebSocket() {
         }
       }
 
-      ws.onerror = () => {
+      ws.onerror = (event) => {
+        console.warn('[myclaw-webui] WebSocket error', {
+          eventType: event.type,
+          readyState: ws.readyState,
+          visibilityState: document.visibilityState,
+        })
         // onclose will fire after this
       }
 
       ws.onmessage = (event) => {
+        lastMessageAtRef.current = Date.now()
         if (pongTimeoutTimer.current) {
           clearTimeout(pongTimeoutTimer.current)
           pongTimeoutTimer.current = null
@@ -269,6 +296,11 @@ export function useWebSocket() {
         setAuthValidating(false)
         setStatus('connected')
         reconnectAttempts.current = 0
+        break
+      }
+
+      case 'pong': {
+        lastPongAtRef.current = Date.now()
         break
       }
 
@@ -493,13 +525,34 @@ export function useWebSocket() {
     currentAssistantId.current = null
   }, [sendRaw])
 
+  const reconnectNow = useCallback(() => {
+    suppressReconnect.current = false
+    reconnectAttempts.current = 0
+    if (reconnectTimer.current) {
+      clearTimeout(reconnectTimer.current)
+      reconnectTimer.current = null
+    }
+    const ws = wsRef.current
+    if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return
+    wsRef.current = null
+    connect()
+  }, [connect])
+
   const ping = useCallback(() => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       if (pongTimeoutTimer.current) {
         clearTimeout(pongTimeoutTimer.current)
       }
+      lastPingAtRef.current = Date.now()
       pongTimeoutTimer.current = setTimeout(() => {
         if (wsRef.current) {
+          console.warn('[myclaw-webui] WebSocket pong timeout, closing socket', {
+            readyState: wsRef.current.readyState,
+            visibilityState: document.visibilityState,
+            lastPingAgoMs: lastPingAtRef.current ? Date.now() - lastPingAtRef.current : null,
+            lastPongAgoMs: lastPongAtRef.current ? Date.now() - lastPongAtRef.current : null,
+            lastMessageAgoMs: lastMessageAtRef.current ? Date.now() - lastMessageAtRef.current : null,
+          })
           wsRef.current.close()
         }
       }, 10000)
@@ -587,6 +640,7 @@ export function useWebSocket() {
     submitToken,
     sendMessage,
     cancel,
+    reconnectNow,
     sendRaw,
     setMessages,
     addMessageListener,

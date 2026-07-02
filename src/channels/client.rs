@@ -20,6 +20,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
@@ -378,8 +379,13 @@ impl ClientChannel {
                             "WebSocket client connected"
                         );
 
+                        let connected_at = Instant::now();
+
                         // Spawn per-connection handler.
                         tokio::spawn(async move {
+                            let close_reason = Arc::new(SyncMutex::new("task ended".to_string()));
+                            let incoming_close_reason = close_reason.clone();
+
                             // Outgoing message forwarder: ws_receiver → WebSocket sink.
                             let outgoing = async {
                                 while let Some(text) = ws_receiver.recv().await {
@@ -407,9 +413,41 @@ impl ClientChannel {
                                 {
                                     let msg = match msg_result {
                                         Ok(Message::Text(text)) => text.to_string(),
-                                        Ok(Message::Close(_)) => break,
-                                        Ok(_) => continue, // Ignore binary, ping, pong
+                                        Ok(Message::Close(frame)) => {
+                                            let reason = match frame {
+                                                Some(frame) => format!("close frame: code={} reason={}", frame.code, frame.reason),
+                                                None => "close frame without details".to_string(),
+                                            };
+                                            *incoming_close_reason.lock() = reason;
+                                            break;
+                                        }
+                                        Ok(Message::Ping(payload)) => {
+                                            tracing::debug!(
+                                                conn_id = %conn_id_clone,
+                                                payload_len = payload.len(),
+                                                "WebSocket protocol ping received"
+                                            );
+                                            continue;
+                                        }
+                                        Ok(Message::Pong(payload)) => {
+                                            tracing::debug!(
+                                                conn_id = %conn_id_clone,
+                                                payload_len = payload.len(),
+                                                "WebSocket protocol pong received"
+                                            );
+                                            continue;
+                                        }
+                                        Ok(Message::Binary(payload)) => {
+                                            tracing::debug!(
+                                                conn_id = %conn_id_clone,
+                                                bytes = payload.len(),
+                                                "WebSocket binary message ignored"
+                                            );
+                                            continue;
+                                        }
+                                        Ok(Message::Frame(_)) => continue,
                                         Err(e) => {
+                                            *incoming_close_reason.lock() = format!("read error: {}", e);
                                             tracing::warn!(conn_id = %conn_id_clone, err = %e, "WebSocket read error");
                                             break;
                                         }
@@ -524,6 +562,7 @@ impl ClientChannel {
                                             });
                                             let _ = ws_sender.send(err.to_string()).await;
                                             tracing::warn!(conn_id = %conn_id_clone, "WebSocket auth failed, closing connection");
+                                            *incoming_close_reason.lock() = "auth failed".to_string();
                                             break; // Close connection on invalid token
                                         }
                                         continue;
@@ -537,6 +576,7 @@ impl ClientChannel {
                                         });
                                         let _ = ws_sender.send(err.to_string()).await;
                                         tracing::warn!(conn_id = %conn_id_clone, msg_type, "rejected unauthenticated message");
+                                        *incoming_close_reason.lock() = format!("unauthenticated message: {}", msg_type);
                                         break;
                                     }
 
@@ -711,6 +751,7 @@ impl ClientChannel {
                                             };
 
                                             if message_tx_clone.send(channel_msg).await.is_err() {
+                                                *incoming_close_reason.lock() = "orchestrator message channel closed".to_string();
                                                 tracing::warn!(
                                                     "orchestrator message channel closed"
                                                 );
@@ -780,7 +821,9 @@ impl ClientChannel {
 
                             // Run both directions concurrently.
                             tokio::select! {
-                                _ = outgoing => {},
+                                _ = outgoing => {
+                                    *close_reason.lock() = "outgoing task ended".to_string();
+                                },
                                 _ = incoming => {},
                             }
 
@@ -820,7 +863,13 @@ impl ClientChannel {
                                 conns.remove(&conn_id_clone);
                             }
 
-                            tracing::debug!(conn_id = %conn_id_clone, "WebSocket client disconnected");
+                            let close_reason = close_reason.lock().clone();
+                            tracing::debug!(
+                                conn_id = %conn_id_clone,
+                                uptime_ms = connected_at.elapsed().as_millis(),
+                                reason = %close_reason,
+                                "WebSocket client disconnected"
+                            );
                         });
                     }
                     Err(e) => {

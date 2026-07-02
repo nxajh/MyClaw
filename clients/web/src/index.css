@@ -79,8 +79,8 @@ html.light .prose {
   --tw-prose-quote-borders:  #d4d4d8;  /* blockquote left border */
   --tw-prose-captions:       #71717a;
   --tw-prose-code:           #27272a;  /* inline code text */
-  --tw-prose-pre-code:       #e4e4e7;  /* code block text */
-  --tw-prose-pre-bg:         #18181b;  /* code block background */
+  --tw-prose-pre-code:       #27272a;  /* code block text */
+  --tw-prose-pre-bg:         #f4f4f5;  /* code block background */
   --tw-prose-th-borders:     #d4d4d8;
   --tw-prose-td-borders:     #e4e4e7;
 }
@@ -100,24 +100,86 @@ html.light .prose :where(code):not(:where(pre code)) {
 }
 html.light .prose :where(hr)                     { border-color: #e4e4e7; }
 
-/* ── Code blocks: always dark for readability ───────────────────────────── */
-html.light pre:not(.tool-call-pre) {
-  background-color: #18181b !important;
-  color: #e4e4e7;
+/* ── Markdown code blocks: light mode uses a soft paper-like surface ───── */
+html.light .code-block {
+  background-color: #f4f4f5 !important;
+  border-color: #d4d4d8 !important;
 }
-html.light pre:not(.tool-call-pre) code {
+html.light .code-block > div:first-child {
+  background-color: #ececef !important;
+  border-color: #d4d4d8 !important;
+  color: #71717a !important;
+}
+html.light .code-block pre:not(.tool-call-pre) {
   background-color: transparent !important;
-  color: #e4e4e7;
+  color: #27272a !important;
 }
-html.light .hljs {
-  background: #18181b !important;
-  color: #e4e4e7;
+html.light .code-block pre:not(.tool-call-pre) code {
+  background-color: transparent !important;
+  color: #27272a !important;
+}
+html.light .code-block .hljs {
+  background: transparent !important;
+  color: #27272a !important;
+}
+html.light .code-block .hljs-comment,
+html.light .code-block .hljs-quote {
+  color: #71717a !important;
+}
+html.light .code-block .hljs-keyword,
+html.light .code-block .hljs-selector-tag,
+html.light .code-block .hljs-subst {
+  color: #7c3aed !important;
+}
+html.light .code-block .hljs-string,
+html.light .code-block .hljs-doctag,
+html.light .code-block .hljs-regexp {
+  color: #047857 !important;
+}
+html.light .code-block .hljs-number,
+html.light .code-block .hljs-literal,
+html.light .code-block .hljs-variable,
+html.light .code-block .hljs-template-variable,
+html.light .code-block .hljs-tag .hljs-attr {
+  color: #b45309 !important;
+}
+html.light .code-block .hljs-title,
+html.light .code-block .hljs-section,
+html.light .code-block .hljs-selector-id {
+  color: #2563eb !important;
+}
+html.light .code-block .hljs-type,
+html.light .code-block .hljs-class .hljs-title {
+  color: #0e7490 !important;
+}
+html.light .code-block .hljs-attr,
+html.light .code-block .hljs-attribute,
+html.light .code-block .hljs-name,
+html.light .code-block .hljs-selector-class {
+  color: #dc2626 !important;
 }
 
 /* Tool call input/output panels are UI data blocks, not markdown code blocks. */
 html.light .tool-call-pre {
   background-color: transparent !important;
   color: #52525b;
+}
+
+
+/* ── System reminder card adjustments for light mode ───────────────────── */
+html.light .system-reminder-card {
+  background-color: #f4f4f5 !important;
+  border-color: #c4c4cc !important;
+}
+html.light .system-reminder-card::before {
+  background-color: #8b8b96 !important;
+}
+html.light .system-reminder-card > button:hover {
+  background-color: #e7e7ea !important;
+}
+html.light .system-reminder-body {
+  background-color: #ffffff80 !important;
+  border-color: #d4d4d8 !important;
 }
 
 /* ── Scrollbar in light mode ────────────────────────────────────────────── */

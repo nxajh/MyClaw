@@ -86,13 +86,21 @@ export default function ChatHeader() {
     for (const msg of messages) {
       if (msg.role === 'user') {
         lines.push('## 👤 User', '')
-        lines.push(msg.content, '')
+        const content = msg.content.replace(/<system-reminder>\s*([\s\S]*?)\s*<\/system-reminder>/g, (_m, body) => `<details><summary>system-reminder</summary>\n\n${String(body).trim()}\n\n</details>`)
+        lines.push(content, '')
+        if (msg.images?.length) lines.push(...msg.images.map((f) => `- Image: ${f.name ?? f.path} (${f.mime ?? 'image'})`), '')
+        if (msg.files?.length) lines.push(...msg.files.map((f) => `- File: ${f.name ?? f.path} (${f.mime ?? 'file'})`), '')
       } else {
         lines.push('## 🦀 Assistant', '')
         for (const block of msg.blocks) {
           if (block.type === 'content') lines.push(block.text, '')
           else if (block.type === 'thinking') lines.push('<details><summary>Thinking</summary>', '', block.text, '', '</details>', '')
-          else if (block.type === 'tool_call') lines.push(`> 🔧 Tool: \`${block.name}\``, '')
+          else if (block.type === 'tool_call') {
+            lines.push('<details><summary>🔧 Tool: `' + block.name + '`' + (block.error ? ' (error)' : '') + '</summary>', '')
+            lines.push('**Input**', '', '```json', JSON.stringify(block.args, null, 2), '```', '')
+            if (block.output !== undefined) lines.push('**Output**', '', '```text', block.output, '```', '')
+            lines.push('</details>', '')
+          }
         }
       }
       lines.push('---', '')

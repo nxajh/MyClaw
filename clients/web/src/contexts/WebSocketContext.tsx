@@ -14,6 +14,7 @@ interface WebSocketContextValue {
   submitToken: (token: string, clientId: string) => void
   sendMessage: (content: string, opts?: SendOptions) => void
   cancel: () => void
+  reconnectNow: () => void
   sendRaw: (obj: Record<string, unknown>) => void
   setMessages: Dispatch<SetStateAction<ChatMessage[]>>
   addMessageListener: (fn: (data: Record<string, unknown>) => void) => () => void

@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { NavLink } from 'react-router-dom'
 import {
-  MessageSquare, Layers, Wrench, Sparkles, Brain, Settings,
+  MessageSquare, LayoutDashboard, Layers, Wrench, Sparkles, Brain, Settings,
   PanelLeftClose, PanelLeftOpen, Menu, X, LogOut, Sun, Moon,
 } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
@@ -10,6 +10,7 @@ import { useTheme } from '../hooks/useTheme'
 
 const links = [
   { to: '/', icon: MessageSquare, label: 'Chat' },
+  { to: '/overview', icon: LayoutDashboard, label: 'Overview' },
   { to: '/sessions', icon: Layers, label: 'Sessions' },
   { to: '/tools', icon: Wrench, label: 'Tools' },
   { to: '/skills', icon: Sparkles, label: 'Skills' },
@@ -87,16 +88,16 @@ function DesktopSidebar({ collapsed, setCollapsed }: { collapsed: boolean; setCo
   const { status } = useWebSocketContext()
 
   const statusColor =
-    status === 'connected' ? 'text-emerald-400' :
+    status === 'connected' ? 'text-emerald-700' :
     status === 'connecting' ? 'text-amber-400 animate-pulse' : 'text-red-400'
   const statusText =
     status === 'connected' ? 'Connected' :
     status === 'connecting' ? 'Connecting…' : 'Disconnected'
   const statusBgColor =
-    status === 'connected' ? 'bg-emerald-400' :
+    status === 'connected' ? 'bg-emerald-700' :
     status === 'connecting' ? 'bg-amber-400' : 'bg-red-400'
   const statusShadow =
-    status === 'connected' ? 'shadow-[0_0_8px_rgba(52,211,153,0.6)]' :
+    status === 'connected' ? 'shadow-[0_0_8px_rgba(4,120,87,0.45)]' :
     status === 'connecting' ? 'shadow-[0_0_8px_rgba(251,191,36,0.6)] animate-pulse' :
     'shadow-[0_0_8px_rgba(248,113,113,0.6)]'
 
@@ -146,13 +147,13 @@ function MobileDrawer({ open, onClose }: { open: boolean; onClose: () => void })
   const { status } = useWebSocketContext()
 
   const statusColor =
-    status === 'connected' ? 'text-emerald-400' :
+    status === 'connected' ? 'text-emerald-700' :
     status === 'connecting' ? 'text-amber-400' : 'text-red-400'
   const statusText =
     status === 'connected' ? 'Connected' :
     status === 'connecting' ? 'Connecting…' : 'Disconnected'
   const statusBgColor =
-    status === 'connected' ? 'bg-emerald-400' :
+    status === 'connected' ? 'bg-emerald-700' :
     status === 'connecting' ? 'bg-amber-400' : 'bg-red-400'
 
   // Prevent body scroll when open

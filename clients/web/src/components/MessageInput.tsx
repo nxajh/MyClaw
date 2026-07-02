@@ -24,6 +24,7 @@ const BINARY_MAX = 150 * 1024 * 1024
 // Keep raw file under 140MiB so base64 payload stays under ~186MiB.
 const BINARY_SEND_MAX = 140 * 1024 * 1024
 const ACCEPT = '*/*'
+const INPUT_HISTORY_KEY = 'myclaw_input_history'
 
 export default function MessageInput({ onSend, onCancel, disabled, isGenerating }: Props) {
   const { status, request } = useWebSocketContext()
@@ -33,6 +34,11 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
   const [binaries, setBinaries] = useState<PickedBinary[]>([])
   const [note, setNote] = useState<string | null>(null)
   const [previewMode, setPreviewMode] = useState(false)
+  const [history, setHistory] = useState<string[]>(() => {
+    try { return JSON.parse(localStorage.getItem(INPUT_HISTORY_KEY) || '[]') } catch { return [] }
+  })
+  const [historyIdx, setHistoryIdx] = useState<number | null>(null)
+  const draftBeforeHistory = useRef('')
   const noteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -139,6 +145,13 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
       const b64 = b.dataUrl.split(',')[1] || b.dataUrl
       return { data: b64, mime_type: b.mime, file_name: b.name }
     })
+    setHistory((prev) => {
+      const next = [trimmed, ...prev.filter(item => item !== trimmed)].slice(0, 50)
+      localStorage.setItem(INPUT_HISTORY_KEY, JSON.stringify(next))
+      return next
+    })
+    setHistoryIdx(null)
+    draftBeforeHistory.current = ''
     onSend(trimmed, {
       images: images.map((i) => i.dataUrl),
       attachments: texts.map((t) => ({ name: t.name, content: t.content })),
@@ -160,6 +173,33 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
         e.preventDefault(); acceptCommand(matches[cmdSel]); return
       }
       if (e.key === 'Escape') { e.preventDefault(); setText(''); return }
+    }
+    if (e.key === 'ArrowUp' && !e.shiftKey && !showCmds && textareaRef.current?.selectionStart === 0 && textareaRef.current.selectionEnd === 0 && history.length > 0) {
+      e.preventDefault()
+      const nextIdx = historyIdx === null ? 0 : Math.min(historyIdx + 1, history.length - 1)
+      if (historyIdx === null) draftBeforeHistory.current = text
+      setHistoryIdx(nextIdx)
+      setText(history[nextIdx])
+      requestAnimationFrame(() => { const el = textareaRef.current; if (el) { el.selectionStart = el.selectionEnd = el.value.length; handleInput() } })
+      return
+    }
+    if (e.key === 'ArrowDown' && !e.shiftKey && historyIdx !== null) {
+      e.preventDefault()
+      const nextIdx = historyIdx - 1
+      if (nextIdx < 0) {
+        setHistoryIdx(null)
+        setText(draftBeforeHistory.current)
+      } else {
+        setHistoryIdx(nextIdx)
+        setText(history[nextIdx])
+      }
+      requestAnimationFrame(() => { const el = textareaRef.current; if (el) { el.selectionStart = el.selectionEnd = el.value.length; handleInput() } })
+      return
+    }
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault()
+      handleSend()
+      return
     }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -316,7 +356,7 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
               <span className="text-xs text-zinc-600 select-none">
                 {note ? <span className="text-amber-500">{note}</span>
                   : isGenerating ? 'Generating…'
-                  : <span className="hidden sm:flex items-center gap-1"><ImageIcon size={11} /> Shift+Enter for newline</span>}
+                  : <span className="hidden sm:flex items-center gap-1"><ImageIcon size={11} /> ↑ history · Shift+Enter newline · Ctrl+Enter send</span>}
               </span>
             </div>
             {isGenerating ? (
@@ -332,7 +372,7 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
                 onClick={handleSend}
                 disabled={!canSend}
                 className="flex items-center justify-center h-8 w-8 rounded-lg bg-zinc-100 hover:bg-white disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
-                title="Send (Enter)"
+                title="Send (Enter / Ctrl+Enter)"
               >
                 <ArrowUp size={15} className="text-zinc-900" />
               </button>
