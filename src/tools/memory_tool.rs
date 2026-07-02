@@ -342,7 +342,7 @@ impl Tool for MemorySearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search memory entries by keyword. Searches across name, summary, tags, and content. \
+        "Search memory entries by keyword. Searches across name, description, tags, and content. \
          Returns matching entries with relevance info."
     }
 
@@ -352,7 +352,7 @@ impl Tool for MemorySearchTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search query. Matches against name, summary, tags, and content."
+                    "description": "Search query. Matches against name, description, tags, and content."
                 }
             },
             "required": ["query"]
@@ -378,7 +378,7 @@ impl Tool for MemorySearchTool {
         let user_id = user_id_for(session, &self.resolver);
         let files = scan_merged(&self.workspace_dir, &user_id);
 
-        // Scoring: name=3, tags=2, summary=2, content=1
+        // Scoring: name=3, tags=2, description=2, content=1
         let mut results: Vec<(i32, &crate::memory::MemoryFile)> = Vec::new();
         for mf in &files {
             let mut score = 0i32;
@@ -533,11 +533,11 @@ impl Tool for MemoryManageTool {
                     "description": "Category. user=preferences (always injected), feedback=behavior corrections (always injected), \
                      project=project context (on-demand), reference=external references (on-demand). Default: project."
                 },
-                "summary": {
+                "description": {
                     "type": "string",
-                    "description": "Brief summary of the key content (1-2 sentences). \
+                    "description": "Brief description of the key content (1-2 sentences). \
                      Required for user/feedback types (injected into system prompt). \
-                     Auto-generated from content if omitted."
+                     Auto-generated from content if omitted. Formerly known as 'summary'."
                 },
                 "tags": {
                     "type": "array",
@@ -616,12 +616,12 @@ impl MemoryManageTool {
         }
 
         let mem_type = self.resolve_type(args);
-        let summary = self.resolve_summary(args, content);
+        let description = self.resolve_description(args, content);
         let tags = self.resolve_tags(args);
         let filename = format!("{}.md", name);
         let now = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
-        let frontmatter = build_frontmatter(name, &summary, &tags, &mem_type, &now, None);
+        let frontmatter = build_frontmatter(name, &description, &tags, &mem_type, &now, None);
         let file_content = format!("{}{}", frontmatter, content);
 
         let target = self.workspace_dir.join(crate::memory::MEMORY_DIR_NAME).join(&filename);
@@ -634,8 +634,8 @@ impl MemoryManageTool {
             "success": true,
             "message": format!("Memory '{}' added.", name),
             "name": name,
-            "type": mem_type.as_str(),
-            "summary": summary,
+            "type": &mem_type,
+            "description": &description,
             "tags": tags,
         }))
     }
@@ -674,8 +674,8 @@ impl MemoryManageTool {
             .as_str()
             .map(|s| s.to_string())
             .unwrap_or_else(|| existing.mem_type.clone());
-        let summary = if args["summary"].as_str().is_some() {
-            self.resolve_summary(args, content)
+        let description = if args["description"].as_str().is_some() || args["summary"].as_str().is_some() {
+            self.resolve_description(args, content)
         } else {
             existing.description.clone()
         };
@@ -698,7 +698,7 @@ impl MemoryManageTool {
         };
         let now = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
-        let frontmatter = build_frontmatter(name, &summary, &tags, &mem_type, &now, Some(&now));
+        let frontmatter = build_frontmatter(name, &description, &tags, &mem_type, &existing.created_at, Some(&now));
         let file_content = format!("{}{}", frontmatter, content);
 
         // Write to the same location as the existing file, or global dir if new
@@ -744,10 +744,10 @@ impl MemoryManageTool {
             .unwrap_or_else(|| "project".to_string())
     }
 
-    /// Resolve summary: explicit parameter, or auto-generate from content.
-    fn resolve_summary(&self, args: &serde_json::Value, content: &str) -> String {
-        if let Some(abs) = args["summary"].as_str() {
-            let trimmed = abs.trim();
+    /// Resolve description: explicit parameter, or auto-generate from content.
+    fn resolve_description(&self, args: &serde_json::Value, content: &str) -> String {
+        if let Some(desc) = args["description"].as_str().or_else(|| args["summary"].as_str()) {
+            let trimmed = desc.trim();
             if !trimmed.is_empty() {
                 if trimmed.chars().count() > MAX_DESCRIPTION_CHARS {
                     let truncated: String = trimmed.chars().take(MAX_DESCRIPTION_CHARS).collect();

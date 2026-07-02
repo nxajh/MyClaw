@@ -3,67 +3,110 @@
 
 /* ── Theme: light mode color overrides ───────────────────────────────────── */
 /* The app is dark-first with hardcoded zinc utility classes everywhere.
-   For light mode we remap the zinc scale via CSS custom properties so
-   components don't need dark: variants. The inversion maps dark shades
-   to light shades symmetrically. */
-html.light {
-  /* Background scale (darker number = darker bg → lighter in light mode) */
-  --tw-zinc-950: #f4f4f5;  /* page bg       (was #09090b) */
-  --tw-zinc-900: #fafafa;  /* surface bg    (was #18181b) */
-  --tw-zinc-850: #e4e4e7;  /* subtle border (was #27272a) */
-  --tw-zinc-800: #e4e4e7;  /* borders       (was #27272a) */
-  --tw-zinc-700: #d4d4d8;  /* hover borders (was #3f3f46) */
-  --tw-zinc-600: #a1a1aa;  /* hover states  (was #52525b) */
-  /* Text scale (lighter number = brighter text → darker in light mode) */
-  --tw-zinc-100: #1f1f23;  /* primary text  (was #f4f4f5) */
-  --tw-zinc-200: #27272a;  /* heading text  (was #e4e4e7) */
-  --tw-zinc-300: #3f3f46;  /* body text     (was #d4d4d8) */
-  --tw-zinc-400: #52525b;  /* secondary     (was #a1a1aa) */
-  --tw-zinc-500: #71717a;  /* muted         (was #71717a) */
-  --tw-zinc-350: #71717a;
-}
+   For light mode we remap each zinc utility class individually.
+   NOTE: Tailwind v4 generates class names with literal slashes (e.g. "bg-zinc-800\/60"),
+   so we must escape and target each used opacity variant explicitly. */
 
-/* Apply the overridden values to the actual utility classes.
-   We target by specificity so these win over Tailwind defaults. */
-html.light .bg-zinc-950 { background-color: #f4f4f5; }
-html.light .bg-zinc-900 { background-color: #fafafa; }
-html.light .bg-zinc-900\/25 { background-color: rgb(250 250 250 / 0.25); }
-html.light .bg-zinc-900\/60 { background-color: rgb(250 250 250 / 0.6); }
-html.light .bg-zinc-800 { background-color: #f0f0f1; }
-html.light .bg-zinc-800\/40 { background-color: rgb(240 240 241 / 0.4); }
-html.light .bg-zinc-800\/50 { background-color: rgb(240 240 241 / 0.5); }
-html.light .bg-zinc-800\/60 { background-color: rgb(240 240 241 / 0.6); }
-html.light .bg-zinc-700 { background-color: #e4e4e7; }
-html.light .bg-zinc-600 { background-color: #d4d4d8; }
+/* ── Backgrounds: solid ─────────────────────────────────────────────────── */
+html.light .bg-zinc-950       { background-color: #f4f4f5; }
+html.light .bg-zinc-900       { background-color: #fafafa; }
+html.light .bg-zinc-800       { background-color: #f0f0f1; }
+html.light .bg-zinc-700       { background-color: #e4e4e7; }
+html.light .bg-zinc-600       { background-color: #d4d4d8; }
 
-html.light .text-zinc-100 { color: #1f1f23; }
+/* ── Backgrounds: with opacity ──────────────────────────────────────────── */
+html.light .bg-zinc-950\/95   { background-color: rgb(244 244 245 / 0.95); }
+html.light .bg-zinc-950\/80   { background-color: rgb(244 244 245 / 0.8); }
+html.light .bg-zinc-950\/75   { background-color: rgb(244 244 245 / 0.75); }
+html.light .bg-zinc-900\/90   { background-color: rgb(250 250 250 / 0.9); }
+html.light .bg-zinc-900\/80   { background-color: rgb(250 250 250 / 0.8); }
+html.light .bg-zinc-900\/60   { background-color: rgb(245 245 246 / 0.6); }
+html.light .bg-zinc-900\/50   { background-color: rgb(245 245 246 / 0.5); }
+html.light .bg-zinc-900\/40   { background-color: rgb(245 245 246 / 0.4); }
+html.light .bg-zinc-900\/30   { background-color: rgb(245 245 246 / 0.3); }
+html.light .bg-zinc-900\/25   { background-color: rgb(245 245 246 / 0.25); }
+html.light .bg-zinc-900\/20   { background-color: rgb(245 245 246 / 0.2); }
+html.light .bg-zinc-900\/10   { background-color: rgb(245 245 246 / 0.1); }
+html.light .bg-zinc-800\/80   { background-color: rgb(229 229 232 / 0.8); }
+html.light .bg-zinc-800\/60   { background-color: rgb(229 229 232 / 0.6); }
+html.light .bg-zinc-800\/50   { background-color: rgb(240 240 241 / 0.5); }
+html.light .bg-zinc-800\/40   { background-color: rgb(229 229 232 / 0.4); }
+html.light .bg-zinc-800\/30   { background-color: rgb(229 229 232 / 0.3); }
+
+/* ── Text ───────────────────────────────────────────────────────────────── */
+html.light .text-zinc-100 { color: #1a1a1e; }
 html.light .text-zinc-200 { color: #27272a; }
 html.light .text-zinc-300 { color: #3f3f46; }
 html.light .text-zinc-400 { color: #52525b; }
 html.light .text-zinc-500 { color: #71717a; }
-html.light .text-zinc-600 { color: #71717a; }
-html.light .text-zinc-700 { color: #52525b; }
+html.light .text-zinc-600 { color: #8a8a93; }
+html.light .text-zinc-700 { color: #a1a1aa; }
 
-html.light .border-zinc-900 { border-color: #e4e4e7; }
-html.light .border-zinc-800 { border-color: #e4e4e7; }
-html.light .border-zinc-800\/80 { border-color: rgb(228 228 231 / 0.8); }
-html.light .border-zinc-800\/60 { border-color: rgb(228 228 231 / 0.6); }
-html.light .border-zinc-800\/50 { border-color: rgb(228 228 231 / 0.5); }
-html.light .border-zinc-700 { border-color: #d4d4d8; }
-html.light .border-zinc-700\/50 { border-color: rgb(212 212 216 / 0.5); }
-html.light .border-zinc-700\/60 { border-color: rgb(212 212 216 / 0.6); }
-html.light .border-zinc-700\/40 { border-color: rgb(212 212 216 / 0.4); }
-html.light .border-zinc-600 { border-color: #a1a1aa; }
-html.light .border-zinc-600\/50 { border-color: rgb(161 161 170 / 0.5); }
-html.light .border-zinc-500 { border-color: #a1a1aa; }
+/* ── Borders: solid ─────────────────────────────────────────────────────── */
+html.light .border-zinc-900       { border-color: #e4e4e7; }
+html.light .border-zinc-800       { border-color: #e4e4e7; }
+html.light .border-zinc-700       { border-color: #d4d4d8; }
+html.light .border-zinc-600       { border-color: #a1a1aa; }
+html.light .border-zinc-500       { border-color: #a1a1aa; }
+
+/* ── Borders: with opacity ──────────────────────────────────────────────── */
+html.light .border-zinc-900\/60   { border-color: rgb(228 228 231 / 0.6); }
+html.light .border-zinc-800\/80   { border-color: rgb(228 228 231 / 0.8); }
+html.light .border-zinc-800\/60   { border-color: rgb(228 228 231 / 0.6); }
+html.light .border-zinc-800\/50   { border-color: rgb(228 228 231 / 0.5); }
+html.light .border-zinc-700\/60   { border-color: rgb(212 212 216 / 0.6); }
+html.light .border-zinc-700\/50   { border-color: rgb(212 212 216 / 0.5); }
+html.light .border-zinc-700\/40   { border-color: rgb(212 212 216 / 0.4); }
+html.light .border-zinc-700\/20   { border-color: rgb(212 212 216 / 0.2); }
+html.light .border-zinc-600\/50   { border-color: rgb(161 161 170 / 0.5); }
 
 /* Placeholder text */
 html.light .placeholder-zinc-500 { color: #a1a1aa; }
 
-/* Code blocks should stay dark even in light mode for readability */
-html.light pre code,
-html.light pre {
+/* ── Prose / Markdown overrides for light mode ─────────────────────────── */
+/* prose-invert forces light text (designed for dark bg).
+   Override the CSS custom properties that @tailwindcss/typography reads. */
+html.light .prose {
+  --tw-prose-body:           #3f3f46;  /* normal text */
+  --tw-prose-headings:       #18181b;  /* h1-h6 */
+  --tw-prose-lead:           #3f3f46;
+  --tw-prose-links:          #2563eb;
+  --tw-prose-bold:           #18181b;  /* strong */
+  --tw-prose-counters:       #71717a;
+  --tw-prose-bullets:        #d4d4d8;
+  --tw-prose-hr:             #e4e4e7;
+  --tw-prose-quotes:         #52525b;  /* blockquote text */
+  --tw-prose-quote-borders:  #d4d4d8;  /* blockquote left border */
+  --tw-prose-captions:       #71717a;
+  --tw-prose-code:           #27272a;  /* inline code text */
+  --tw-prose-pre-code:       #e4e4e7;  /* code block text */
+  --tw-prose-pre-bg:         #18181b;  /* code block background */
+  --tw-prose-th-borders:     #d4d4d8;
+  --tw-prose-td-borders:     #e4e4e7;
+}
+
+/* Also override the explicit prose utility classes used in JSX.
+   These classes generate child-element selectors (e.g. .prose-headings\:text-zinc-100 :is(:where(h1,h2,...))),
+   so we must target the child elements too, not the container class.
+   Our specificity (0,2,1) beats the generated rules (0,1,0). */
+html.light .prose :where(h1, h2, h3, h4, h5, h6) { color: #18181b; }
+html.light .prose :where(strong, b)              { color: #18181b; }
+html.light .prose :where(blockquote)             { border-color: #d4d4d8 !important; color: #52525b; }
+html.light .prose :where(blockquote p)           { color: #52525b; }
+html.light .prose :where(a)                      { color: #2563eb; }
+html.light .prose :where(code):not(:where(pre code)) {
+  background-color: #e4e4e7;
+  color: #27272a;
+}
+html.light .prose :where(hr)                     { border-color: #e4e4e7; }
+
+/* ── Code blocks: always dark for readability ───────────────────────────── */
+html.light pre:not(.tool-call-pre) {
   background-color: #18181b !important;
+  color: #e4e4e7;
+}
+html.light pre:not(.tool-call-pre) code {
+  background-color: transparent !important;
   color: #e4e4e7;
 }
 html.light .hljs {
@@ -71,13 +114,33 @@ html.light .hljs {
   color: #e4e4e7;
 }
 
-/* Scrollbar in light mode */
-html.light ::-webkit-scrollbar-thumb { background: #d4d4d8; }
-html.light ::-webkit-scrollbar-thumb:hover { background: #a1a1aa; }
+/* Tool call input/output panels are UI data blocks, not markdown code blocks. */
+html.light .tool-call-pre {
+  background-color: transparent !important;
+  color: #52525b;
+}
+
+/* ── Scrollbar in light mode ────────────────────────────────────────────── */
+html.light ::-webkit-scrollbar-thumb        { background: #d4d4d8; }
+html.light ::-webkit-scrollbar-thumb:hover  { background: #a1a1aa; }
 html.light * { scrollbar-color: #d4d4d8 transparent; }
 
-/* Sidebar shadow glows need adjusting */
-html.light .shadow-md { box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1); }
+/* ── Shadows: softer in light mode ──────────────────────────────────────── */
+html.light .shadow-md  { box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1); }
+html.light .shadow-sm  { box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05); }
+html.light .shadow-lg  { box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1); }
+html.light .shadow-2xl { box-shadow: 0 25px 50px -12px rgb(0 0 0 / 0.25); }
+
+/* ── Skeleton loader adjustments for light mode ────────────────────────── */
+html.light .skeleton-line {
+  background: linear-gradient(
+    90deg,
+    rgb(228 228 231 / 0.5) 25%,
+    rgb(212 212 216 / 0.8) 50%,
+    rgb(228 228 231 / 0.5) 75%
+  );
+  background-size: 200% 100%;
+}
 
 /* ── highlight.js theme (github-dark) ─────────────────────────────────────── */
 @import "highlight.js/styles/github-dark.css";

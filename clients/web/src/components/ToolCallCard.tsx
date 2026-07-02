@@ -138,7 +138,7 @@ export default function ToolCallCard({ block }: { block: ToolCallBlock }) {
               <div className="text-zinc-600 uppercase tracking-widest mb-1.5 sm:mb-2" style={{ fontSize: 9 }}>
                 Input
               </div>
-              <pre className="text-zinc-400 whitespace-pre-wrap break-all font-mono text-[10px] sm:text-xs leading-4 sm:leading-5">
+              <pre className="tool-call-pre text-zinc-400 whitespace-pre-wrap break-all font-mono text-[10px] sm:text-xs leading-4 sm:leading-5">
                 {JSON.stringify(block.args, null, 2)}
               </pre>
             </div>
@@ -148,7 +148,7 @@ export default function ToolCallCard({ block }: { block: ToolCallBlock }) {
               <div className="text-zinc-600 uppercase tracking-widest mb-1.5 sm:mb-2" style={{ fontSize: 9 }}>
                 Output
               </div>
-              <pre className={`whitespace-pre-wrap break-all font-mono text-[10px] sm:text-xs max-h-40 sm:max-h-52 lg:max-h-64 overflow-y-auto leading-4 sm:leading-5 ${error ? 'text-red-400' : 'text-zinc-400'}`}>
+              <pre className={`tool-call-pre whitespace-pre-wrap break-all font-mono text-[10px] sm:text-xs max-h-40 sm:max-h-52 lg:max-h-64 overflow-y-auto leading-4 sm:leading-5 ${error ? 'text-red-400' : 'text-zinc-400'}`}>
                 {formattedOutput}
               </pre>
             </div>
