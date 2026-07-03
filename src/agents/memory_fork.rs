@@ -13,8 +13,10 @@ use futures_util::StreamExt;
 use crate::agents::session::Session;
 use crate::agents::tool_registry::ToolRegistry;
 use crate::providers::capability_chat::{ChatMessage, ChatProvider, ChatRequest, ToolSpec};
-use crate::providers::{BoxStream, ChatUsage, ProviderRegistry, StreamEvent, ThinkingConfig, ToolCall};
 use crate::providers::capability_tool::ToolResult;
+use crate::providers::{
+    BoxStream, ChatUsage, ProviderRegistry, StreamEvent, ThinkingConfig, ToolCall,
+};
 
 /// Input bundle for a memory extraction fork.
 ///
@@ -154,7 +156,10 @@ async fn run_memory_fork_inner(input: ForkInput) -> Result<usize> {
                 tracing::warn!(tool = %call.name, "memory_fork: tool not allowed, blocking");
                 let mut tool_msg = ChatMessage::text(
                     "tool",
-                    format!("tool '{}' not available during memory extraction", call.name),
+                    format!(
+                        "tool '{}' not available during memory extraction",
+                        call.name
+                    ),
                 );
                 tool_msg.tool_call_id = Some(call.id.clone());
                 tool_msg.is_error = Some(true);
@@ -389,9 +394,17 @@ fn build_extraction_prompt(knowledge_dir: &str) -> String {
          - MUST include key terms that help decide when to read this file\n\
          - If updating an existing file, update its description to reflect the latest content\n\
          \n\
+         See Also (cross-links):\n\
+         At the END of the content, add a `## See Also` section with markdown links to related memories:\n\
+         ## See Also\n\
+         - [Related: other_memory_name](other_memory_name.md)\n\
+         \n\
+         Use the memory name (without .md) as both the link text suffix and the target. Link to 1-3\n\
+         closely related memories from the existing index. This keeps the knowledge graph connected.\n\
+         \n\
          Other rules:\n\
          - Write memories as declarative facts, not instructions\n\
-         - Only `user` and `feedback` types are injected into every conversation — use `project`/`reference` for on-demand context\n\
+         - Types `user`, `feedback`, and `rule` are injected into every conversation — use `project`/`reference` for on-demand context\n\
          - If no memory changes are needed, respond with exactly: no memory changes needed\n\
          \n\
          You have a limited turn budget. Be efficient: decide what to write, then write it.\n\

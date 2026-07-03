@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use crate::agents::session::Session;
 use crate::agents::user_profile::UserResolver;
+use crate::memory::build_backlinks;
 use crate::providers::{Tool, ToolResult};
 
 // ── Shared types ──────────────────────────────────────────────────────────
@@ -116,10 +117,7 @@ fn build_frontmatter(
 ) -> String {
     let mut fm = format!(
         "---\nname: {}\ndescription: \"{}\"\ntype: {}\ncreated_at: {}",
-        name,
-        description,
-        mem_type,
-        created_at
+        name, description, mem_type, created_at
     );
     if let Some(ua) = updated_at {
         fm.push_str(&format!("\nupdated_at: {}", ua));
@@ -191,13 +189,17 @@ impl Tool for MemoryListTool {
             });
         }
 
+        let backlinks = build_backlinks(&files);
         let json_entries: Vec<serde_json::Value> = entries
             .iter()
             .map(|e| {
+                let backlinks_count = backlinks.get(&e.name).map(|b| b.len()).unwrap_or(0);
                 let mut obj = json!({
                     "type": &e.mem_type,
                     "name": &e.name,
                     "description": &e.description,
+                    "link_count": e.link_count,
+                    "backlink_count": backlinks_count,
                 });
                 if !e.tags.is_empty() {
                     obj["tags"] = json!(e.tags);
@@ -282,6 +284,10 @@ impl Tool for MemoryViewTool {
 
         match file {
             Some(mf) => {
+                let backlinks = build_backlinks(&files);
+                let file_backlinks = backlinks.get(&mf.name).cloned().unwrap_or_default();
+                let outgoing: Vec<&str> = mf.links.iter().map(|l| l.target.as_str()).collect();
+
                 let mut output = json!({
                     "success": true,
                     "name": &mf.name,
@@ -289,6 +295,8 @@ impl Tool for MemoryViewTool {
                     "description": &mf.description,
                     "created_at": &mf.created_at,
                     "content": &mf.content,
+                    "links": outgoing,
+                    "backlinks": file_backlinks,
                 });
                 if !mf.tags.is_empty() {
                     output["tags"] = json!(mf.tags);
@@ -414,6 +422,7 @@ impl Tool for MemorySearchTool {
 
         results.sort_by(|a, b| b.0.cmp(&a.0));
 
+        let backlinks = build_backlinks(&files);
         let json_results: Vec<serde_json::Value> = results
             .iter()
             .map(|(score, mf)| {
@@ -452,12 +461,17 @@ impl Tool for MemorySearchTool {
                     mf.content.chars().take(80).collect()
                 };
 
+                let outgoing: Vec<&str> = mf.links.iter().map(|l| l.target.as_str()).collect();
+                let file_backlinks = backlinks.get(&mf.name).cloned().unwrap_or_default();
+
                 let mut result = json!({
                     "name": &mf.name,
                     "type": &mf.mem_type,
                     "description": &mf.description,
                     "snippet": snippet,
                     "relevance": score,
+                    "links": outgoing,
+                    "backlinks": file_backlinks,
                 });
                 if !mf.tags.is_empty() {
                     result["tags"] = json!(mf.tags);
@@ -525,13 +539,13 @@ impl Tool for MemoryManageTool {
                 },
                 "content": {
                     "type": "string",
-                    "description": "Memory content. Required for add and replace."
+                    "description": "Memory content. Required for add and replace. BODY ONLY: plain markdown content, no YAML frontmatter and no `---` blocks. Add a `## See Also` section with markdown links to 1-3 related memories when applicable."
                 },
                 "memory_type": {
                     "type": "string",
-                    "enum": ["user", "feedback", "project", "reference"],
-                    "description": "Category. user=preferences (always injected), feedback=behavior corrections (always injected), \
-                     project=project context (on-demand), reference=external references (on-demand). Default: project."
+                    "description": "Category. Types 'user', 'feedback', and 'rule' are auto-injected into every conversation. \
+                     Use 'project' for project context or 'reference' for external docs (on-demand). You may also invent \
+                     custom types if none of these fit. Default: project."
                 },
                 "description": {
                     "type": "string",
@@ -624,7 +638,10 @@ impl MemoryManageTool {
         let frontmatter = build_frontmatter(name, &description, &tags, &mem_type, &now, None);
         let file_content = format!("{}{}", frontmatter, content);
 
-        let target = self.workspace_dir.join(crate::memory::MEMORY_DIR_NAME).join(&filename);
+        let target = self
+            .workspace_dir
+            .join(crate::memory::MEMORY_DIR_NAME)
+            .join(&filename);
         // Ensure the global memory dir exists
         let _ = std::fs::create_dir_all(target.parent().unwrap_or(&target));
         atomic_write(&target, &file_content)
@@ -674,11 +691,12 @@ impl MemoryManageTool {
             .as_str()
             .map(|s| s.to_string())
             .unwrap_or_else(|| existing.mem_type.clone());
-        let description = if args["description"].as_str().is_some() || args["summary"].as_str().is_some() {
-            self.resolve_description(args, content)
-        } else {
-            existing.description.clone()
-        };
+        let description =
+            if args["description"].as_str().is_some() || args["summary"].as_str().is_some() {
+                self.resolve_description(args, content)
+            } else {
+                existing.description.clone()
+            };
         let tags = if args["tags"].is_array() {
             self.resolve_tags(args)
         } else {
@@ -698,7 +716,14 @@ impl MemoryManageTool {
         };
         let now = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
-        let frontmatter = build_frontmatter(name, &description, &tags, &mem_type, &existing.created_at, Some(&now));
+        let frontmatter = build_frontmatter(
+            name,
+            &description,
+            &tags,
+            &mem_type,
+            &existing.created_at,
+            Some(&now),
+        );
         let file_content = format!("{}{}", frontmatter, content);
 
         // Write to the same location as the existing file, or global dir if new
@@ -746,7 +771,10 @@ impl MemoryManageTool {
 
     /// Resolve description: explicit parameter, or auto-generate from content.
     fn resolve_description(&self, args: &serde_json::Value, content: &str) -> String {
-        if let Some(desc) = args["description"].as_str().or_else(|| args["summary"].as_str()) {
+        if let Some(desc) = args["description"]
+            .as_str()
+            .or_else(|| args["summary"].as_str())
+        {
             let trimmed = desc.trim();
             if !trimmed.is_empty() {
                 if trimmed.chars().count() > MAX_DESCRIPTION_CHARS {
