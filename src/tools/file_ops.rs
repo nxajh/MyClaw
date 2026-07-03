@@ -555,7 +555,7 @@ fn replacement_context_diff(content: &str, old_string: &str, new_string: &str, l
     out.push_str(&format!("@@ line {} @@\n", line_number));
 
     for line in &all_lines[context_before_start..start] {
-        out.push_str(" ");
+        out.push(' ');
         out.push_str(&str_utils::truncate_line(line, 200));
         out.push('\n');
     }
@@ -563,7 +563,7 @@ fn replacement_context_diff(content: &str, old_string: &str, new_string: &str, l
         out.push_str("-\n");
     } else {
         for line in old_lines {
-            out.push_str("-");
+            out.push('-');
             out.push_str(&str_utils::truncate_line(line, 200));
             out.push('\n');
         }
@@ -572,13 +572,13 @@ fn replacement_context_diff(content: &str, old_string: &str, new_string: &str, l
         out.push_str("+\n");
     } else {
         for line in new_lines {
-            out.push_str("+");
+            out.push('+');
             out.push_str(&str_utils::truncate_line(line, 200));
             out.push('\n');
         }
     }
     for line in &all_lines[after_start..after_end] {
-        out.push_str(" ");
+        out.push(' ');
         out.push_str(&str_utils::truncate_line(line, 200));
         out.push('\n');
     }
