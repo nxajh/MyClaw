@@ -159,7 +159,7 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
         let line = line.trim();
         if let Some((key, value)) = line.split_once(':') {
             let key = key.trim();
-            let value = value.trim();
+            let value = strip_yaml_quotes(value.trim());
             match key {
                 "name" => name = Some(value.to_string()),
                 "description" => description = Some(value.to_string()),
@@ -193,8 +193,18 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
     })
 }
 
+/// Strip surrounding YAML double quotes from a value: `"foo"` → `foo`.
+/// Leaves unquoted values unchanged.
+fn strip_yaml_quotes(s: &str) -> &str {
+    if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
+}
+
 /// Parse a tags value. Supports:
-/// - YAML array: `[foo, bar, baz]`
+/// - YAML array: `[foo, bar, baz]` (values may be quoted)
 /// - Comma-separated: `foo, bar, baz`
 fn parse_tags(value: &str) -> Vec<String> {
     let value = value.trim();
@@ -206,7 +216,7 @@ fn parse_tags(value: &str) -> Vec<String> {
     };
     inner
         .split(',')
-        .map(|t| t.trim().to_string())
+        .map(|t| strip_yaml_quotes(t.trim()).to_string())
         .filter(|t| !t.is_empty())
         .collect()
 }
