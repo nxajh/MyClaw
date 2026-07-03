@@ -65,6 +65,15 @@ html.light .border-zinc-600\/50   { border-color: rgb(161 161 170 / 0.5); }
 /* Placeholder text */
 html.light .placeholder-zinc-500 { color: #a1a1aa; }
 
+/* ── Accent colors: toast & status badges ───────────────────────────────── */
+html.light .bg-emerald-950\/40     { background-color: rgb(240 253 244 / 0.85); }
+html.light .bg-red-950\/40         { background-color: rgb(254 242 242 / 0.85); }
+html.light .border-emerald-800\/50 { border-color: rgb(134 239 172 / 0.6); }
+html.light .border-red-800\/50     { border-color: rgb(252 165 165 / 0.6); }
+html.light .text-emerald-400       { color: #059669; }
+html.light .text-red-400           { color: #dc2626; }
+html.light .text-blue-400          { color: #2563eb; }
+
 /* ── Prose / Markdown overrides for light mode ─────────────────────────── */
 /* prose-invert forces light text (designed for dark bg).
    Override the CSS custom properties that @tailwindcss/typography reads. */
