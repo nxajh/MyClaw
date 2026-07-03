@@ -1,10 +1,11 @@
 import { createContext, useContext, useCallback, useEffect, useRef, type ReactNode, type Dispatch, type SetStateAction } from 'react'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useApi } from '../lib/api'
-import type { ChatMessage, ConnectionStatus, SendOptions } from '../hooks/useWebSocket'
+import type { ChatMessage, ConnectionStatus, SendOptions, LastCloseInfo } from '../hooks/useWebSocket'
 
 interface WebSocketContextValue {
   status: ConnectionStatus
+  lastCloseInfo: LastCloseInfo | null
   messages: ChatMessage[]
   isGenerating: boolean
   authFailed: boolean
@@ -15,7 +16,7 @@ interface WebSocketContextValue {
   sendMessage: (content: string, opts?: SendOptions) => void
   cancel: () => void
   reconnectNow: () => void
-  sendRaw: (obj: Record<string, unknown>) => void
+  sendRaw: (obj: Record<string, unknown>) => boolean
   setMessages: Dispatch<SetStateAction<ChatMessage[]>>
   addMessageListener: (fn: (data: Record<string, unknown>) => void) => () => void
   request: (method: string, params?: Record<string, unknown>, timeoutMs?: number) => Promise<unknown>
@@ -28,9 +29,6 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const ws = useWebSocket()
   const { request } = useApi(ws.sendRaw, ws.addMessageListener)
   const { setMessages, status } = ws
-
-  // Expose request globally for components that can't use context (e.g. LazyImage in memo'd UserBubble)
-  useEffect(() => { (window as any).myclawRequest = request }, [request])
 
   const reloadHistory = useCallback(async () => {
     try {

@@ -7,6 +7,7 @@ import rehypeHighlight from 'rehype-highlight'
 import { ChevronDown, ChevronRight, Copy, Check, ArrowDown, RotateCcw, Search, X, Pencil, Trash2, Pin } from 'lucide-react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
+import { useToast } from './Toast'
 import Lightbox from 'yet-another-react-lightbox'
 import Zoom from 'yet-another-react-lightbox/plugins/zoom'
 import Download from 'yet-another-react-lightbox/plugins/download'
@@ -257,7 +258,7 @@ function MessageActions({ blocks, isLast, isGenerating, onRetry, onDelete, onPin
         </button>
       )}
       {onPin && (
-        <button onClick={onPin} className={`p-1.5 rounded-md ${pinned ? 'text-amber-400 hover:text-amber-300' : 'text-zinc-500 hover:text-zinc-300'} hover:bg-zinc-800 transition-colors`} title={pinned ? 'Unpin message' : 'Pin message'}>
+        <button onClick={onPin} className={`p-1.5 rounded-md ${pinned ? 'text-zinc-200 hover:text-zinc-100 bg-zinc-800/70' : 'text-zinc-500 hover:text-zinc-300'} hover:bg-zinc-800 transition-colors`} title={pinned ? 'Unpin message' : 'Pin message'}>
           <Pin size={14} />
         </button>
       )}
@@ -273,20 +274,43 @@ function MessageActions({ blocks, isLast, isGenerating, onRetry, onDelete, onPin
 // ── Image lightbox context ───────────────────────────────────────────────
 // Module-level registry: tracks all loaded image blob URLs for the lightbox.
 
+const BLOB_CACHE_LIMIT = 80
 const imageCache = new Map<string, string>() // path -> blob URL
 
-/** Ordered list of all registered slides (blob URLs). */
-const slideRegistry: string[] = []
-/** Map from blob URL to its position in slideRegistry. */
-const slideIndex = new Map<string, number>()
+function cacheBlobUrl(key: string, url: string) {
+  const old = imageCache.get(key)
+  if (old && old !== url) URL.revokeObjectURL(old)
+  if (old) imageCache.delete(key)
+  imageCache.set(key, url)
+  while (imageCache.size > BLOB_CACHE_LIMIT) {
+    const oldest = imageCache.entries().next().value as [string, string] | undefined
+    if (!oldest) break
+    imageCache.delete(oldest[0])
+    URL.revokeObjectURL(oldest[1])
+  }
+}
 
-function registerSlide(blobUrl: string): number {
-  let idx = slideIndex.get(blobUrl)
-  if (idx !== undefined) return idx
-  idx = slideRegistry.length
-  slideRegistry.push(blobUrl)
-  slideIndex.set(blobUrl, idx)
-  return idx
+function releaseUnusedBlobUrls(messages: ChatMessage[], activeUrls: string[]) {
+  const keepKeys = new Set<string>()
+  messages.forEach((msg) => {
+    if (msg.role !== 'user') return
+    msg.images?.forEach((file) => keepKeys.add(file.path))
+    msg.files?.forEach((file) => keepKeys.add(file.path))
+  })
+  const keepUrls = new Set(activeUrls)
+  imageCache.forEach((url, key) => {
+    if (!keepKeys.has(key) && !keepUrls.has(url)) {
+      imageCache.delete(key)
+      URL.revokeObjectURL(url)
+    }
+  })
+}
+
+function base64ToBlobUrl(data: string, mime: string): string {
+  const bin = atob(data)
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  return URL.createObjectURL(new Blob([bytes], { type: mime }))
 }
 
 interface LightboxCtx {
@@ -372,7 +396,7 @@ function FilePreviewModal({ item, onClose }: { item: PreviewItem; onClose: () =>
         {isAudio && (
           <div className="flex flex-col items-center gap-4">
             <span className="text-6xl">🎵</span>
-            <audio controls autoPlay src={item.src} className="w-80" style={{ filter: 'invert(0.85) hue-rotate(180deg)' }} />
+            <audio controls autoPlay src={item.src} className="w-80" />
           </div>
         )}
         {isPdf && (
@@ -397,35 +421,32 @@ function FilePreviewModal({ item, onClose }: { item: PreviewItem; onClose: () =>
 function dataUrlToBlobUrl(dataUrl: string): string {
   const [header, b64] = dataUrl.split(',')
   const mime = header.match(/data:(.*?);/)?.[1] || 'application/octet-stream'
-  const bin = atob(b64)
-  const bytes = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-  const blob = new Blob([bytes], { type: mime })
-  return URL.createObjectURL(blob)
+  return base64ToBlobUrl(b64, mime)
 }
+
+interface FileRequestCtx { request: (method: string, params?: Record<string, unknown>, timeoutMs?: number) => Promise<unknown> }
+const FileRequestContext = createContext<FileRequestCtx>({ request: async () => { throw new Error('File request context is unavailable') } })
 
 function LazyImage({ path, mime, name }: { path: string; mime?: string; name?: string }) {
   const [src, setSrc] = useState<string | null>(() => imageCache.get(path) ?? null)
   const [error, setError] = useState(false)
   const ctx = useContext(LightboxContext)
+  const { request } = useContext(FileRequestContext)
 
   useEffect(() => {
     if (imageCache.has(path)) {
       const cached = imageCache.get(path)!
       setSrc(cached)
-      registerSlide(cached)
       return
     }
-    // Use global request function exposed by useApi via window
     const fetchImage = async () => {
       try {
-        const res = await (window as any).myclawRequest?.('file.read', { path }) as { data?: string; mime?: string } | undefined
+        const res = await request('file.read', { path }) as { data?: string; mime?: string } | undefined
         if (res?.data) {
           const mimeStr = res.mime || mime || 'image/png'
           const dataUrl = `data:${mimeStr};base64,${res.data}`
           const blobUrl = dataUrlToBlobUrl(dataUrl)
-          imageCache.set(path, blobUrl)
-          registerSlide(blobUrl)
+          cacheBlobUrl(path, blobUrl)
           setSrc(blobUrl)
         } else {
           setError(true)
@@ -435,7 +456,7 @@ function LazyImage({ path, mime, name }: { path: string; mime?: string; name?: s
       }
     }
     fetchImage()
-  }, [path, mime])
+  }, [path, mime, request])
 
   if (error) {
     return <div className="text-xs text-zinc-600 italic">🖼️ {name || 'Image unavailable'}</div>
@@ -464,26 +485,23 @@ function LazyImage({ path, mime, name }: { path: string; mime?: string; name?: s
 function AudioFileCard({ path, name }: { path: string; name?: string }) {
   const [src, setSrc] = useState<string | null>(() => imageCache.get(path) ?? null)
   const [error, setError] = useState(false)
+  const { request } = useContext(FileRequestContext)
 
   useEffect(() => {
     if (imageCache.has(path)) { setSrc(imageCache.get(path)!); return }
     const fetchFile = async () => {
       try {
-        const res = await (window as any).myclawRequest?.('file.read', { path }) as { data?: string; mime?: string } | undefined
+        const res = await request('file.read', { path }) as { data?: string; mime?: string } | undefined
         if (res?.data) {
           const mimeStr = res.mime || 'audio/mpeg'
-          const bin = atob(res.data)
-          const bytes = new Uint8Array(bin.length)
-          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-          const blob = new Blob([bytes], { type: mimeStr })
-          const blobUrl = URL.createObjectURL(blob)
-          imageCache.set(path, blobUrl)
+          const blobUrl = base64ToBlobUrl(res.data, mimeStr)
+          cacheBlobUrl(path, blobUrl)
           setSrc(blobUrl)
         } else { setError(true) }
       } catch { setError(true) }
     }
     fetchFile()
-  }, [path])
+  }, [path, request])
 
   if (error) return <div className="text-xs text-zinc-600 italic">🎵 {name || 'Audio unavailable'}</div>
   if (!src) return <div className="w-48 h-10 rounded-lg bg-zinc-800 border border-zinc-700 animate-pulse" />
@@ -491,7 +509,7 @@ function AudioFileCard({ path, name }: { path: string; name?: string }) {
   return (
     <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-zinc-800/60 border border-zinc-700">
       <span className="text-xs text-zinc-400 truncate max-w-[120px]">{name || 'Audio'}</span>
-      <audio controls src={src} className="h-8 flex-1 min-w-0" style={{ filter: 'invert(0.85) hue-rotate(180deg)' }} />
+      <audio controls src={src} className="h-8 flex-1 min-w-0" />
     </div>
   )
 }
@@ -502,27 +520,24 @@ function VideoFileCard({ path, name }: { path: string; name?: string }) {
   const [playError, setPlayError] = useState(false)
   const [fileSize, setFileSize] = useState<number | null>(null)
   const [downloading, setDownloading] = useState(false)
+  const { request } = useContext(FileRequestContext)
 
   useEffect(() => {
     if (imageCache.has(path)) { setSrc(imageCache.get(path)!); return }
     const fetchFile = async () => {
       try {
-        const res = await (window as any).myclawRequest?.('file.read', { path }) as { data?: string; mime?: string; size?: number } | undefined
+        const res = await request('file.read', { path }) as { data?: string; mime?: string; size?: number } | undefined
         if (res?.data) {
           const mimeStr = res.mime || 'video/mp4'
-          const bin = atob(res.data)
-          const bytes = new Uint8Array(bin.length)
-          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-          const blob = new Blob([bytes], { type: mimeStr })
-          const blobUrl = URL.createObjectURL(blob)
-          imageCache.set(path, blobUrl)
+          const blobUrl = base64ToBlobUrl(res.data, mimeStr)
+          cacheBlobUrl(path, blobUrl)
           setSrc(blobUrl)
           setFileSize(res.size ?? null)
         } else { setError(true) }
       } catch { setError(true) }
     }
     fetchFile()
-  }, [path])
+  }, [path, request])
 
   const handleDownload = async () => {
     if (!src) return
@@ -583,6 +598,7 @@ function VideoFileCard({ path, name }: { path: string; name?: string }) {
 function FileCard({ path, mime, name }: { path: string; mime?: string; name?: string }) {
   const [loading, setLoading] = useState(false)
   const previewCtx = useContext(PreviewContext)
+  const { request } = useContext(FileRequestContext)
 
   const handleClick = async () => {
     setLoading(true)
@@ -590,15 +606,11 @@ function FileCard({ path, mime, name }: { path: string; mime?: string; name?: st
       let blobUrl = imageCache.get(path)
       let resolvedMime = mime || 'application/octet-stream'
       if (!blobUrl) {
-        const res = await (window as any).myclawRequest?.('file.read', { path }) as { data?: string; mime?: string } | undefined
+        const res = await request('file.read', { path }) as { data?: string; mime?: string } | undefined
         if (!res?.data) return
         resolvedMime = res.mime || mime || 'application/octet-stream'
-        const bin = atob(res.data)
-        const bytes = new Uint8Array(bin.length)
-        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-        const blob = new Blob([bytes], { type: resolvedMime })
-        blobUrl = URL.createObjectURL(blob)
-        imageCache.set(path, blobUrl)
+        blobUrl = base64ToBlobUrl(res.data, resolvedMime)
+        cacheBlobUrl(path, blobUrl)
       }
       previewCtx.open({ src: blobUrl, mime: resolvedMime, name: name || 'file' })
     } finally { setLoading(false) }
@@ -632,6 +644,14 @@ function renderFileRef(file: { path: string; mime?: string; name?: string }, ind
 const SearchContext = createContext<string>('')
 const PINNED_MESSAGES_KEY = 'myclaw_pinned_messages'
 
+
+function searchableMessageText(msg: ChatMessage): string {
+  if (msg.role === 'user') return msg.content
+  return msg.blocks.map((b) => {
+    if (b.type === 'content' || b.type === 'thinking') return b.text
+    return [b.name, JSON.stringify(b.args), b.output || ''].join(' ')
+  }).join(' ')
+}
 
 function messageTimestamp(id: string): number | null {
   const m = id.match(/-(\d{13})$/)
@@ -707,6 +727,7 @@ function EditableUserBubble({ content, images, files, onResend, onDelete, onPin,
   const [draft, setDraft] = useState(content)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const segments = useMemo(() => splitSystemReminders(content), [content])
+  const hasAttachments = !!((images && images.length > 0) || (files && files.length > 0))
 
   useEffect(() => { if (editing) { setDraft(content); setTimeout(() => textareaRef.current?.focus(), 0) } }, [editing, content])
 
@@ -740,8 +761,9 @@ function EditableUserBubble({ content, images, files, onResend, onDelete, onPin,
               rows={3}
             />
             <div className="flex items-center gap-2 justify-end">
+              {hasAttachments && <span className="mr-auto text-[10px] text-zinc-500">Attachments won't be resent</span>}
               <button onClick={() => setEditing(false)} className="px-2 py-1 text-xs text-zinc-400 hover:text-zinc-200 rounded-lg hover:bg-zinc-700 transition-colors">Cancel</button>
-              <button onClick={handleSave} className="px-3 py-1 text-xs text-blue-400 hover:text-blue-300 rounded-lg hover:bg-zinc-700 transition-colors font-medium">Send</button>
+              <button onClick={handleSave} className="px-3 py-1 text-xs text-zinc-200 hover:text-zinc-50 rounded-lg hover:bg-zinc-700 transition-colors font-medium">Send</button>
             </div>
           </div>
         ) : (
@@ -762,7 +784,7 @@ function EditableUserBubble({ content, images, files, onResend, onDelete, onPin,
                 </button>
               )}
               {onPin && (
-                <button onClick={onPin} className={`p-1.5 rounded-md ${pinned ? 'text-amber-400 hover:text-amber-300' : 'text-zinc-500 hover:text-zinc-300'} hover:bg-zinc-700 transition-colors`} title={pinned ? 'Unpin message' : 'Pin message'}>
+                <button onClick={onPin} className={`p-1.5 rounded-md ${pinned ? 'text-zinc-200 hover:text-zinc-100 bg-zinc-700/70' : 'text-zinc-500 hover:text-zinc-300'} hover:bg-zinc-700 transition-colors`} title={pinned ? 'Unpin message' : 'Pin message'}>
                   <Pin size={14} />
                 </button>
               )}
@@ -824,7 +846,8 @@ interface Props {
 }
 
 export default function MessageList({ messages, containerRef, onRetry }: Props) {
-  const { sendMessage, setMessages, isGenerating: globalGenerating } = useWebSocketContext()
+  const { sendMessage, setMessages, isGenerating: globalGenerating, request } = useWebSocketContext()
+  const { toast } = useToast()
   const [isNearBottom, setIsNearBottom] = useState(true)
   const scrollElementRef = useRef<HTMLDivElement>(null)
   // Track stick-to-bottom intent via ref to avoid race conditions during streaming
@@ -850,13 +873,28 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
   // Compute matching message indices
   const matchIndices = searchQuery
     ? messages.reduce<number[]>((acc, msg, i) => {
-        const content = msg.role === 'user' ? msg.content : msg.blocks.filter((b) => b.type === 'content').map((b) => b.text).join(' ')
+        const content = searchableMessageText(msg)
         if (content.toLowerCase().includes(searchQuery.toLowerCase())) acc.push(i)
         return acc
       }, [])
     : []
   const currentMatchIndex = matchIndices.length ? matchIndices[Math.min(matchIdx, matchIndices.length - 1)] : -1
   const pinnedMessages = pinnedIds.map(id => messages.find(m => m.id === id)).filter(Boolean) as ChatMessage[]
+  const slides = useMemo(() => {
+    const seen = new Set<string>()
+    return messages.flatMap((msg) => {
+      if (msg.role !== 'user') return []
+      return (msg.images ?? []).map((img) => imageCache.get(img.path)).filter((url): url is string => !!url)
+    }).filter((url) => {
+      if (seen.has(url)) return false
+      seen.add(url)
+      return true
+    }).map((url) => ({ src: url }))
+  }, [messages])
+
+  useEffect(() => {
+    if (!previewItem && !lightboxOpen) releaseUnusedBlobUrls(messages, slides.map((slide) => slide.src))
+  }, [messages, previewItem, lightboxOpen, slides])
 
   useEffect(() => { setMatchIdx(0) }, [searchQuery])
 
@@ -864,13 +902,19 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
   useEffect(() => { localStorage.setItem(PINNED_MESSAGES_KEY, JSON.stringify(pinnedIds)) }, [pinnedIds])
 
   const togglePin = useCallback((id: string) => {
-    setPinnedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
-  }, [])
+    setPinnedIds(prev => {
+      const pinned = prev.includes(id)
+      toast(pinned ? 'Message unpinned' : 'Message pinned', 'info')
+      return pinned ? prev.filter(x => x !== id) : [...prev, id]
+    })
+  }, [toast])
 
   // Ctrl+F handler
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        const target = e.target as HTMLElement | null
+        if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return
         e.preventDefault()
         setSearchOpen(true)
       }
@@ -884,10 +928,12 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
     return () => window.removeEventListener('keydown', handler)
   }, [searchOpen])
 
-  // Delete message handler (removes from local view; persists on next session save)
+  // Delete message handler (removes from local view; history reload may restore it)
   const handleDelete = useCallback((msgId: string) => {
     setMessages((prev) => prev.filter((m) => m.id !== msgId))
-  }, [setMessages])
+    setPinnedIds((prev) => prev.filter((id) => id !== msgId))
+    toast('Message hidden locally. Reloaded history may restore it.', 'info')
+  }, [setMessages, toast])
 
   // Resend edited message handler
   const handleResend = useCallback((_original: string, edited: string) => {
@@ -895,12 +941,12 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
   }, [sendMessage])
 
   const openLightbox = useCallback((blobUrl: string) => {
-    const idx = slideIndex.get(blobUrl)
-    if (idx !== undefined) {
+    const idx = slides.findIndex((slide) => slide.src === blobUrl)
+    if (idx >= 0) {
       setLightboxIndex(idx)
       setLightboxOpen(true)
     }
-  }, [])
+  }, [slides])
 
   const lightboxCtx = useRef<LightboxCtx>({ open: openLightbox })
   lightboxCtx.current = { open: openLightbox }
@@ -978,11 +1024,9 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
 
   const virtualItems = virtualizer.getVirtualItems()
 
-  // Build slides array from the ordered registry for the lightbox
-  const slides = slideRegistry.map((url) => ({ src: url }))
-
   return (
     <SearchContext.Provider value={searchQuery}>
+    <FileRequestContext.Provider value={{ request }}>
     <LightboxContext.Provider value={lightboxCtx.current}>
     <PreviewContext.Provider value={previewCtx.current}>
       <div className="flex-1 relative">
@@ -991,8 +1035,8 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
             {pinnedMessages.map((m) => {
               const text = m.role === 'user' ? m.content : extractText(m.blocks)
               return (
-                <button key={m.id} onClick={() => virtualizer.scrollToIndex(messages.findIndex(x => x.id === m.id), { align: 'center', behavior: 'smooth' })} className="flex items-center gap-1.5 max-w-[220px] rounded-full border border-amber-800/40 bg-zinc-900/90 px-3 py-1 text-xs text-zinc-300 shadow-lg hover:bg-zinc-800 transition-colors" title="Jump to pinned message">
-                  <Pin size={11} className="text-amber-400 shrink-0" />
+                <button key={m.id} onClick={() => virtualizer.scrollToIndex(messages.findIndex(x => x.id === m.id), { align: 'center', behavior: 'smooth' })} className="flex items-center gap-1.5 max-w-[220px] rounded-full border border-zinc-700/70 bg-zinc-900/90 px-3 py-1 text-xs text-zinc-300 shadow-lg hover:bg-zinc-800 transition-colors" title="Jump to pinned message">
+                  <Pin size={11} className="text-zinc-400 shrink-0" />
                   <span className="truncate">{text}</span>
                 </button>
               )
@@ -1076,7 +1120,7 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
             maxZoomPixelRatio: 5,
             zoomInMultiplier: 2,
           }}
-          carousel={{ finite: slideRegistry.length <= 1 }}
+          carousel={{ finite: slides.length <= 1 }}
           animation={{ fade: 300 }}
           controller={{ closeOnBackdropClick: true }}
           styles={{
@@ -1087,6 +1131,7 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
       </div>
     </PreviewContext.Provider>
     </LightboxContext.Provider>
+    </FileRequestContext.Provider>
     </SearchContext.Provider>
   )
 }

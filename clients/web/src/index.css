@@ -11,6 +11,8 @@
 html.light .bg-zinc-950       { background-color: #f4f4f5; }
 html.light .bg-zinc-900       { background-color: #fafafa; }
 html.light .bg-zinc-800       { background-color: #f0f0f1; }
+html.light .hover\:bg-zinc-900:hover { background-color: #f4f4f5; }
+html.light .hover\:bg-zinc-800:hover { background-color: #e4e4e7; }
 html.light .bg-zinc-700       { background-color: #e4e4e7; }
 html.light .bg-zinc-600       { background-color: #d4d4d8; }
 
@@ -22,7 +24,7 @@ html.light .bg-zinc-900\/90   { background-color: rgb(250 250 250 / 0.9); }
 html.light .bg-zinc-900\/80   { background-color: rgb(250 250 250 / 0.8); }
 html.light .bg-zinc-900\/60   { background-color: rgb(245 245 246 / 0.6); }
 html.light .bg-zinc-900\/50   { background-color: rgb(245 245 246 / 0.5); }
-html.light .bg-zinc-900\/40   { background-color: rgb(245 245 246 / 0.4); }
+html.light .bg-zinc-900\/40   { background-color: #f0f0f1; }
 html.light .bg-zinc-900\/30   { background-color: rgb(245 245 246 / 0.3); }
 html.light .bg-zinc-900\/25   { background-color: rgb(245 245 246 / 0.25); }
 html.light .bg-zinc-900\/20   { background-color: rgb(245 245 246 / 0.2); }
@@ -80,7 +82,7 @@ html.light .prose {
   --tw-prose-captions:       #71717a;
   --tw-prose-code:           #27272a;  /* inline code text */
   --tw-prose-pre-code:       #27272a;  /* code block text */
-  --tw-prose-pre-bg:         #f4f4f5;  /* code block background */
+  --tw-prose-pre-bg:         #e4e4e7;  /* code block background */
   --tw-prose-th-borders:     #d4d4d8;
   --tw-prose-td-borders:     #e4e4e7;
 }
@@ -94,9 +96,21 @@ html.light .prose :where(strong, b)              { color: #18181b; }
 html.light .prose :where(blockquote)             { border-color: #d4d4d8 !important; color: #52525b; }
 html.light .prose :where(blockquote p)           { color: #52525b; }
 html.light .prose :where(a)                      { color: #2563eb; }
+/* Inline code: light gray chip */
 html.light .prose :where(code):not(:where(pre code)) {
   background-color: #e4e4e7;
-  color: #27272a;
+  color: #18181b;
+  font-weight: 600;
+}
+/* Code blocks inside thinking/system-reminder prose: same light-gray surface,
+   bold, near-black text — matching the emphasized content style. */
+html.light .prose :where(pre) {
+  background-color: #e4e4e7 !important;
+}
+html.light .prose :where(pre code) {
+  background-color: transparent !important;
+  color: #18181b !important;
+  font-weight: 600 !important;
 }
 html.light .prose :where(hr)                     { border-color: #e4e4e7; }
 

@@ -34,8 +34,17 @@ function useIsMobile() {
   return isMobile
 }
 
+function formatCloseInfo(info: ReturnType<typeof useWebSocketContext>['lastCloseInfo']) {
+  if (!info) return null
+  const parts = [`code ${info.code ?? 'unknown'}`]
+  if (info.reason) parts.push(info.reason)
+  if (info.lastPongAgoMs != null) parts.push(`last pong ${Math.round(info.lastPongAgoMs / 1000)}s ago`)
+  if (info.visibilityState && info.visibilityState !== 'visible') parts.push(info.visibilityState)
+  return parts.join(' · ')
+}
+
 function DisconnectBanner() {
-  const { status, reconnectNow } = useWebSocketContext()
+  const { status, reconnectNow, lastCloseInfo } = useWebSocketContext()
   const { toast } = useToast()
   const prev = useRef(status)
 
@@ -45,10 +54,12 @@ function DisconnectBanner() {
   }, [status, toast])
 
   if (status === 'connected') return null
+  const closeDetails = formatCloseInfo(lastCloseInfo)
   return (
     <div className="shrink-0 border-b border-zinc-800 bg-zinc-900/80 px-3 sm:px-4 py-1.5 text-xs text-zinc-400 flex items-center justify-center gap-2 shadow-sm">
       <span className={`h-1.5 w-1.5 rounded-full ${status === 'connecting' ? 'bg-zinc-400 animate-pulse' : 'bg-zinc-500'}`} />
       <span>{status === 'connecting' ? 'Reconnecting…' : 'Disconnected — messages may not be delivered'}</span>
+      {closeDetails && <span className="hidden md:inline text-zinc-600">({closeDetails})</span>}
       <button onClick={reconnectNow} className="ml-1 px-2 py-0.5 rounded-md border border-zinc-700/60 hover:bg-zinc-800 text-zinc-300 hover:text-zinc-100 transition-colors">
         Reconnect now
       </button>

@@ -32,7 +32,7 @@ export const sessionApi = {
 // ---------------------------------------------------------------------------
 
 export function useApi(
-  sendRaw: (obj: Record<string, unknown>) => void,
+  sendRaw: (obj: Record<string, unknown>) => boolean,
   addMessageListener: (fn: (data: Record<string, unknown>) => void) => () => void,
 ) {
   const pending = useRef<Map<string, {
@@ -67,7 +67,12 @@ export function useApi(
       return new Promise((resolve, reject) => {
         const req = buildApiRequest(method, params)
         pending.current.set(req.id as string, { resolve, reject })
-        sendRaw(req)
+        const sent = sendRaw(req)
+        if (!sent) {
+          pending.current.delete(req.id as string)
+          reject(new Error('WebSocket is not connected'))
+          return
+        }
         // Timeout: default 15s, override for slow operations
         const timeout = timeoutMs ?? 15_000
         setTimeout(() => {

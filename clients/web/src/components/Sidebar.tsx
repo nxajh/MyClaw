@@ -57,7 +57,7 @@ function NavLinkItem({ to, icon: Icon, label, collapsed, onNavigate }: {
       {({ isActive }) => (
         <>
           {isActive && !collapsed && (
-            <span className="absolute left-0 top-2 bottom-2 w-1 rounded-r-md bg-blue-500" />
+            <span className="absolute left-0 top-2 bottom-2 w-1 rounded-r-md bg-zinc-500" />
           )}
           <Icon size={17} className="shrink-0" />
           {!collapsed && <span className="truncate">{label}</span>}

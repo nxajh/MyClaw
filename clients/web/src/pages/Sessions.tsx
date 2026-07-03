@@ -67,11 +67,11 @@ function SessionRow({
       onClick={handleSwitch}
       className={`group flex items-center gap-3 rounded-xl border px-4 py-3 transition-colors ${
         session.is_active
-          ? 'border-blue-500/40 bg-blue-950/30 cursor-default'
+          ? 'border-zinc-700/70 bg-zinc-800/60 cursor-default'
           : 'border-zinc-800 bg-zinc-900/50 hover:bg-zinc-800/60 hover:border-zinc-700 cursor-pointer'
       }`}
     >
-      <div className={`h-2 w-2 rounded-full shrink-0 transition-colors ${session.is_active ? 'bg-blue-400' : 'bg-zinc-700'}`} />
+      <div className={`h-2 w-2 rounded-full shrink-0 transition-colors ${session.is_active ? 'bg-emerald-700' : 'bg-zinc-700'}`} />
 
       <div className="flex-1 min-w-0">
         {editing ? (
@@ -118,7 +118,7 @@ function SessionRow({
           </>
         ) : (
           <>
-            <button onClick={(e) => { e.stopPropagation(); onTogglePin(session.id) }} className={`p-1.5 rounded-lg ${pinned ? 'text-amber-400 hover:text-amber-300' : 'text-zinc-600 hover:text-zinc-300'} hover:bg-zinc-700 transition-all`} title={pinned ? 'Unpin' : 'Pin'}>
+            <button onClick={(e) => { e.stopPropagation(); onTogglePin(session.id) }} className={`p-1.5 rounded-lg ${pinned ? 'text-zinc-200 hover:text-zinc-100 bg-zinc-800/70' : 'text-zinc-600 hover:text-zinc-300'} hover:bg-zinc-700 transition-all`} title={pinned ? 'Unpin' : 'Pin'}>
               <Pin size={13} />
             </button>
             <button onClick={startEdit} disabled={disabled} className="p-1.5 rounded-lg text-zinc-600 hover:text-zinc-300 hover:bg-zinc-700 opacity-0 group-hover:opacity-100 transition-all disabled:pointer-events-none" title="Rename">

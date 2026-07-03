@@ -149,7 +149,7 @@ export default function Tools() {
           <div className="p-3 sm:p-4 border-b border-zinc-900 space-y-2.5">
             <div>
               <h1 className="text-sm font-bold text-zinc-100 flex items-center gap-1.5">
-                <Cpu size={14} className="text-amber-400" />
+                <Cpu size={14} className="text-zinc-500" />
                 Active MCP Tools
               </h1>
               <p className="text-[10px] text-zinc-500">Inspect registered schemas and Swagger endpoints</p>
@@ -178,7 +178,7 @@ export default function Tools() {
               <div className="text-center py-8 space-y-1">
                 <p className="text-xs text-zinc-600">{searchQuery ? `No tools match “${searchQuery}”` : 'No tools registered'}</p>
                 {searchQuery && (
-                  <button onClick={() => setSearchQuery('')} className="text-xs text-blue-400 hover:text-blue-300">Clear filter</button>
+                  <button onClick={() => setSearchQuery('')} className="text-xs text-zinc-400 hover:text-zinc-200">Clear filter</button>
                 )}
               </div>
             )}
@@ -195,9 +195,9 @@ export default function Tools() {
                     }`}
                   >
                     {isSelected && (
-                      <div className="absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-r bg-amber-400" />
+                      <div className="absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-r bg-zinc-500" />
                     )}
-                    <Wrench size={12} className={`shrink-0 ${isSelected ? 'text-amber-400' : 'text-zinc-600'}`} />
+                    <Wrench size={12} className={`shrink-0 ${isSelected ? 'text-zinc-300' : 'text-zinc-600'}`} />
                     <span className="font-mono text-[11px] truncate">{tool.name}</span>
                   </button>
                 )
@@ -222,7 +222,7 @@ export default function Tools() {
               
               {/* Header Showcase */}
               <div className="border-b border-zinc-900 pb-4 space-y-1">
-                <div className="flex items-center gap-1.5 text-[10px] text-amber-400 font-bold uppercase tracking-wider bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-md max-w-fit">
+                <div className="flex items-center gap-1.5 text-[10px] text-zinc-400 font-bold uppercase tracking-wider bg-zinc-900/60 border border-zinc-800 px-2 py-0.5 rounded-md max-w-fit">
                   <Wrench size={10} /> Active Tool Schema
                 </div>
                 <h1 className="text-base font-bold text-zinc-100 font-mono tracking-tight pt-1">
@@ -236,7 +236,7 @@ export default function Tools() {
               {/* Parameters Table Grid */}
               <div className="space-y-3">
                 <h2 className="text-xs font-semibold text-zinc-300 flex items-center gap-1.5">
-                  <BookOpen size={13} className="text-blue-400" />
+                  <BookOpen size={13} className="text-zinc-500" />
                   Parameters Definition
                 </h2>
                 

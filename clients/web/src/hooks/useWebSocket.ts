@@ -83,6 +83,17 @@ function getWsUrl(): string {
 // Hook
 // ---------------------------------------------------------------------------
 
+export interface LastCloseInfo {
+  code?: number
+  reason?: string
+  wasClean?: boolean
+  visibilityState?: string
+  uptimeMs?: number | null
+  lastPingAgoMs?: number | null
+  lastPongAgoMs?: number | null
+  lastMessageAgoMs?: number | null
+}
+
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -93,6 +104,7 @@ export function useWebSocket() {
   const lastMessageAtRef = useRef<number | null>(null)
   const lastPongAtRef = useRef<number | null>(null)
   const [status, setStatus] = useState<ConnectionStatus>('disconnected')
+  const [lastCloseInfo, setLastCloseInfo] = useState<LastCloseInfo | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [isGenerating, setIsGenerating] = useState(false)
   // true = auth was attempted and rejected by the server
@@ -207,17 +219,18 @@ export function useWebSocket() {
       ws.onclose = (event) => {
         if (wsRef.current !== ws) return
         const now = Date.now()
-        console.info('[myclaw-webui] WebSocket closed', {
+        const closeInfo: LastCloseInfo = {
           code: event.code,
           reason: event.reason || '',
           wasClean: event.wasClean,
-          readyState: ws.readyState,
           visibilityState: document.visibilityState,
           uptimeMs: connectedAtRef.current ? now - connectedAtRef.current : null,
           lastPingAgoMs: lastPingAtRef.current ? now - lastPingAtRef.current : null,
           lastPongAgoMs: lastPongAtRef.current ? now - lastPongAtRef.current : null,
           lastMessageAgoMs: lastMessageAtRef.current ? now - lastMessageAtRef.current : null,
-        })
+        }
+        console.info('[myclaw-webui] WebSocket closed', closeInfo)
+        setLastCloseInfo(closeInfo)
         connectedAtRef.current = null
         setStatus('disconnected')
         // Mark any in-progress assistant message as done so the UI doesn't
@@ -303,6 +316,7 @@ export function useWebSocket() {
         setAuthFailed(false)
         setAuthValidating(false)
         setStatus('connected')
+        setLastCloseInfo(null)
         reconnectAttempts.current = 0
         break
       }
@@ -482,11 +496,13 @@ export function useWebSocket() {
   // Send helpers
   // -----------------------------------------------------------------------
 
-  const sendRaw = useCallback((obj: Record<string, unknown>) => {
+  const sendRaw = useCallback((obj: Record<string, unknown>): boolean => {
     const ws = wsRef.current
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(obj))
+      return true
     }
+    return false
   }, [])
 
   const sendMessage = useCallback(
@@ -515,7 +531,18 @@ export function useWebSocket() {
       if (images.length) payload.image_base64 = images
       if (attachments.length) payload.attachments = attachments
       if (files.length) payload.files_base64 = files
-      sendRaw(payload)
+      if (!sendRaw(payload)) {
+        setMessages((prev) => {
+          const last = prev[prev.length - 1]
+          const errorMsg: AssistantMessage = { role: 'assistant', blocks: [{ type: 'content', text: '⚠️ Message not sent — disconnected. Reconnect and try again.' }], id: assistantId, done: true }
+          if (last && last.role === 'assistant' && last.id === assistantId) {
+            return [...prev.slice(0, -1), errorMsg]
+          }
+          return [...prev, errorMsg]
+        })
+        setIsGenerating(false)
+        currentAssistantId.current = null
+      }
     },
     [sendRaw],
   )
@@ -539,6 +566,10 @@ export function useWebSocket() {
     if (reconnectTimer.current) {
       clearTimeout(reconnectTimer.current)
       reconnectTimer.current = null
+    }
+    if (pongTimeoutTimer.current) {
+      clearTimeout(pongTimeoutTimer.current)
+      pongTimeoutTimer.current = null
     }
     const ws = wsRef.current
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -623,6 +654,10 @@ export function useWebSocket() {
             clearTimeout(reconnectTimer.current)
             reconnectTimer.current = null
           }
+          if (pongTimeoutTimer.current) {
+            clearTimeout(pongTimeoutTimer.current)
+            pongTimeoutTimer.current = null
+          }
           connect()
         }
       }
@@ -645,6 +680,7 @@ export function useWebSocket() {
 
   return {
     status,
+    lastCloseInfo,
     messages,
     isGenerating,
     authFailed,
