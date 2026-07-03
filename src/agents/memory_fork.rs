@@ -154,7 +154,7 @@ async fn run_memory_fork_inner(input: ForkInput) -> Result<usize> {
                 tracing::warn!(tool = %call.name, "memory_fork: tool not allowed, blocking");
                 let mut tool_msg = ChatMessage::text(
                     "tool",
-                    &format!("tool '{}' not available during memory extraction", call.name),
+                    format!("tool '{}' not available during memory extraction", call.name),
                 );
                 tool_msg.tool_call_id = Some(call.id.clone());
                 tool_msg.is_error = Some(true);
@@ -167,7 +167,7 @@ async fn run_memory_fork_inner(input: ForkInput) -> Result<usize> {
                 None => {
                     let mut tool_msg = ChatMessage::text(
                         "tool",
-                        &format!("tool '{}' not found in registry", call.name),
+                        format!("tool '{}' not found in registry", call.name),
                     );
                     tool_msg.tool_call_id = Some(call.id.clone());
                     tool_msg.is_error = Some(true);
