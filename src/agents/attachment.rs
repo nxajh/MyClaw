@@ -251,7 +251,7 @@ impl AttachmentManager {
     }
 
     /// 与 memory 索引做 diff，变更时生成通知式 system-reminder。
-    /// 只注入 user + feedback 类型（agent 必须始终遵守的偏好和纠正）。
+    /// 只注入 user + feedback + rule 类型（agent 必须始终遵守的偏好和纠正）。
     /// project + reference 通过 memory_list / memory_search 按需查找。
     pub fn diff_memory(&mut self, entries: &[crate::memory::IndexEntry], history: &[ChatMessage]) {
         // Filter to injectable types (user, feedback, rule)
@@ -262,7 +262,16 @@ impl AttachmentManager {
 
         let new_key: String = injectable
             .iter()
-            .map(|e| e.name.clone())
+            .map(|e| {
+                format!(
+                    "{}|{}|{}|{}|{}",
+                    e.name,
+                    e.mem_type,
+                    e.description,
+                    e.tags.join(";"),
+                    e.link_count
+                )
+            })
             .collect::<Vec<_>>()
             .join(",");
 
@@ -422,7 +431,11 @@ impl AttachmentManager {
     /// Only generates a delta when the level differs from what is already
     /// announced in the session history — prevents injecting redundant
     /// `## Autonomy Level Changed` notices on every turn.
-    pub fn diff_autonomy(&mut self, new_level: &crate::config::agent::PermissionMode, history: &[ChatMessage]) {
+    pub fn diff_autonomy(
+        &mut self,
+        new_level: &crate::config::agent::PermissionMode,
+        history: &[ChatMessage],
+    ) {
         let label = match new_level {
             crate::config::agent::PermissionMode::Full => "full",
             crate::config::agent::PermissionMode::Default => "default",
@@ -843,10 +856,7 @@ mod tests {
         let history = vec![msg];
 
         // Second diff with same level — should NOT generate a delta
-        am.diff_autonomy(
-            &crate::config::agent::PermissionMode::Default,
-            &history,
-        );
+        am.diff_autonomy(&crate::config::agent::PermissionMode::Default, &history);
         assert!(am.build_message(&SkillManager::new()).is_none());
     }
 
@@ -864,10 +874,7 @@ mod tests {
         let history = vec![msg];
 
         // Change to "full" — should generate a delta
-        am.diff_autonomy(
-            &crate::config::agent::PermissionMode::Full,
-            &history,
-        );
+        am.diff_autonomy(&crate::config::agent::PermissionMode::Full, &history);
         let msg2 = am.build_message(&SkillManager::new()).unwrap();
         let text = msg2.text_content();
         assert!(text.contains("full"));
@@ -888,10 +895,7 @@ mod tests {
 
         // Simulate compaction: history is empty
         let compacted: Vec<ChatMessage> = vec![];
-        am.diff_autonomy(
-            &crate::config::agent::PermissionMode::Default,
-            &compacted,
-        );
+        am.diff_autonomy(&crate::config::agent::PermissionMode::Default, &compacted);
         let msg2 = am.build_message(&SkillManager::new()).unwrap();
         assert!(msg2.text_content().contains("## Autonomy Level Changed"));
     }

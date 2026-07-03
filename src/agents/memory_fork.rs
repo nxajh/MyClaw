@@ -44,10 +44,9 @@ pub struct ForkInput {
 
 /// Tools the fork is permitted to call. Mirrors `MemoryToolExecutor::ALLOWED`.
 const ALLOWED: &[&str] = &[
-    "file_read",
-    "file_write",
-    "file_edit",
-    "shell",
+    "memory_list",
+    "memory_view",
+    "memory_search",
     "memory_manage",
 ];
 
@@ -350,7 +349,7 @@ fn build_extraction_prompt(knowledge_dir: &str) -> String {
         } else {
             let entries: Vec<crate::memory::IndexEntry> =
                 files.iter().map(crate::memory::IndexEntry::from).collect();
-            crate::memory::format_wiki_index(&entries)
+            crate::memory::format_full_memory_index(&entries)
         }
     } else {
         String::from("(memory directory not configured)")
@@ -408,7 +407,7 @@ fn build_extraction_prompt(knowledge_dir: &str) -> String {
          - If no memory changes are needed, respond with exactly: no memory changes needed\n\
          \n\
          You have a limited turn budget. Be efficient: decide what to write, then write it.\n\
-         Available tools: file_read, file_write, file_edit, shell (read-only recommended), memory_manage.",
+         Available tools: memory_list, memory_view, memory_search, memory_manage.",
         existing_index = existing_index,
     )
 }

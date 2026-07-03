@@ -24,8 +24,12 @@ use crate::agents::tokens::{estimate_history_tokens, estimate_tokens};
 use crate::agents::turn::{TurnContext, TurnResult};
 use crate::agents::turn_event::TurnEvent;
 use crate::config::sub_agent::SubAgentConfig;
-use crate::providers::capability_chat::{ChatMessage, ChatProvider, ChatRequest, StopReason, ToolSpec};
-use crate::providers::{BoxStream, Capability, ContentPart, ProviderRegistry, StreamEvent, ToolCall};
+use crate::providers::capability_chat::{
+    ChatMessage, ChatProvider, ChatRequest, StopReason, ToolSpec,
+};
+use crate::providers::{
+    BoxStream, Capability, ContentPart, ProviderRegistry, StreamEvent, ToolCall,
+};
 use crate::storage::SummaryRecord;
 
 /// "An agent" — just its config (name, system prompt fragment, three
@@ -64,11 +68,7 @@ impl Agent {
         // When the model natively supports a media modality (image, audio,
         // video), drop the corresponding retrieval tool so the model uses its
         // own understanding instead of routing through a tool call.
-        filter_modality_redundant_tools(
-            &mut allowed_tools,
-            turn_ctx.model_id,
-            runtime,
-        );
+        filter_modality_redundant_tools(&mut allowed_tools, turn_ctx.model_id, runtime);
         // Convert capability_tool::ToolSpec → capability_chat::ToolSpec
         // (the LLM request type). Same fields, different module homes —
         // a unification candidate for a separate cleanup.
@@ -363,7 +363,7 @@ impl Agent {
                 }
                 let mut msg = ChatMessage::assistant_text(response.text.clone());
                 msg.model = Some(model_id.clone());
-                session.history.push(msg);
+                session.history.push(msg.clone());
                 session.message_ids.push(0);
                 persist_last(session);
 
@@ -371,8 +371,10 @@ impl Agent {
                 // Skipped when the main agent already called memory_manage this
                 // turn (mutual exclusion) or when this is a sub-agent session.
                 if !turn_called_memory && session.parent_session_id.is_none() {
+                    let mut fork_messages = messages.clone();
+                    fork_messages.push(msg);
                     let fork_input = crate::agents::memory_fork::ForkInput {
-                        messages: messages.clone(),
+                        messages: fork_messages,
                         model_id: model_id.clone(),
                         provider: Arc::clone(&provider),
                         tool_specs: tool_specs.clone(),
@@ -473,7 +475,12 @@ impl Agent {
                         tool_msg.tool_call_id = Some(call.id.clone());
                         tool_msg.is_error = Some(is_error);
                         messages.push(tool_msg);
-                        session.add_tool_result(call.id.clone(), &call.name, result_content.clone(), is_error);
+                        session.add_tool_result(
+                            call.id.clone(),
+                            &call.name,
+                            result_content.clone(),
+                            is_error,
+                        );
 
                         let remaining = response.tool_calls.len() - i - 1;
                         if remaining > 0 {

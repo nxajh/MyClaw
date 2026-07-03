@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use crate::agents::session::Session;
 use crate::agents::user_profile::UserResolver;
-use crate::memory::build_backlinks;
+use crate::memory::{LinkRef, MemoryFile, build_backlinks};
 use crate::providers::{Tool, ToolResult};
 
 // ── Shared types ──────────────────────────────────────────────────────────
@@ -106,6 +106,51 @@ fn atomic_write(target: &Path, content: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+fn yaml_scalar(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| String::from("\"\""))
+}
+
+fn validate_body_only(content: &str) -> Result<(), String> {
+    let trimmed = content.trim_start();
+    if trimmed.starts_with("---") {
+        return Err(
+            "Content must be BODY ONLY: do not include YAML frontmatter or `---` blocks."
+                .to_string(),
+        );
+    }
+    if content.lines().any(|line| line.trim() == "---") {
+        return Err("Content must not contain standalone `---` blocks; memory_manage generates frontmatter automatically.".to_string());
+    }
+    Ok(())
+}
+
+fn link_values(links: &[LinkRef]) -> Vec<serde_json::Value> {
+    links
+        .iter()
+        .map(|l| serde_json::json!({ "target": l.target, "label": l.label }))
+        .collect()
+}
+
+fn lint_memory_content(name: &str, content: &str, files: &[MemoryFile]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let links = crate::memory::extract_links_from_content(content);
+    let names: std::collections::HashSet<&str> = files.iter().map(|f| f.name.as_str()).collect();
+    for link in &links {
+        if link.target != name && !names.contains(link.target.as_str()) {
+            warnings.push(format!(
+                "See Also link '{}' points to a missing memory.",
+                link.target
+            ));
+        }
+    }
+    if files.len() > 1 && links.is_empty() && !content.to_lowercase().contains("## see also") {
+        warnings.push(
+            "No See Also links found; add 1-3 related memory links when applicable.".to_string(),
+        );
+    }
+    warnings
+}
+
 /// Build frontmatter string.
 fn build_frontmatter(
     name: &str,
@@ -116,16 +161,37 @@ fn build_frontmatter(
     updated_at: Option<&str>,
 ) -> String {
     let mut fm = format!(
-        "---\nname: {}\ndescription: \"{}\"\ntype: {}\ncreated_at: {}",
-        name, description, mem_type, created_at
+        "---
+name: {}
+description: {}
+type: {}
+created_at: {}",
+        yaml_scalar(name),
+        yaml_scalar(description),
+        yaml_scalar(mem_type),
+        yaml_scalar(created_at)
     );
     if let Some(ua) = updated_at {
-        fm.push_str(&format!("\nupdated_at: {}", ua));
+        fm.push_str(&format!(
+            "
+updated_at: {}",
+            yaml_scalar(ua)
+        ));
     }
     if !tags.is_empty() {
-        fm.push_str(&format!("\ntags: [{}]", tags.join(", ")));
+        let tag_values: Vec<String> = tags.iter().map(|t| yaml_scalar(t)).collect();
+        fm.push_str(&format!(
+            "
+tags: [{}]",
+            tag_values.join(", ")
+        ));
     }
-    fm.push_str("\n---\n\n");
+    fm.push_str(
+        "
+---
+
+",
+    );
     fm
 }
 
@@ -286,7 +352,7 @@ impl Tool for MemoryViewTool {
             Some(mf) => {
                 let backlinks = build_backlinks(&files);
                 let file_backlinks = backlinks.get(&mf.name).cloned().unwrap_or_default();
-                let outgoing: Vec<&str> = mf.links.iter().map(|l| l.target.as_str()).collect();
+                let outgoing = link_values(&mf.links);
 
                 let mut output = json!({
                     "success": true,
@@ -350,8 +416,7 @@ impl Tool for MemorySearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search memory entries by keyword. Searches across name, description, tags, and content. \
-         Returns matching entries with relevance info."
+        "Search memory entries by keyword. Searches across name, description, tags, content, link labels, and link targets. Returns matching entries with relevance info."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -360,7 +425,19 @@ impl Tool for MemorySearchTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search query. Matches against name, description, tags, and content."
+                    "description": "Search query. Matches against name, description, tags, content, link labels, and link targets."
+                },
+                "memory_type": {
+                    "type": "string",
+                    "description": "Optional type filter."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum results to return (default 20, max 100)."
+                },
+                "include_related": {
+                    "type": "boolean",
+                    "description": "If true, include outgoing links and backlinks for each direct result."
                 }
             },
             "required": ["query"]
@@ -382,13 +459,20 @@ impl Tool for MemorySearchTool {
                 });
             }
         };
+        let type_filter = args["memory_type"].as_str().map(|s| s.to_lowercase());
+        let limit = args["limit"].as_u64().unwrap_or(20).clamp(1, 100) as usize;
+        let include_related = args["include_related"].as_bool().unwrap_or(false);
 
         let user_id = user_id_for(session, &self.resolver);
         let files = scan_merged(&self.workspace_dir, &user_id);
 
-        // Scoring: name=3, tags=2, description=2, content=1
         let mut results: Vec<(i32, &crate::memory::MemoryFile)> = Vec::new();
         for mf in &files {
+            if let Some(ref wanted) = type_filter {
+                if mf.mem_type.to_lowercase() != *wanted {
+                    continue;
+                }
+            }
             let mut score = 0i32;
             if mf.name.to_lowercase().contains(&query) {
                 score += 3;
@@ -397,6 +481,11 @@ impl Tool for MemorySearchTool {
                 score += 2;
             }
             if mf.description.to_lowercase().contains(&query) {
+                score += 2;
+            }
+            if mf.links.iter().any(|l| {
+                l.target.to_lowercase().contains(&query) || l.label.to_lowercase().contains(&query)
+            }) {
                 score += 2;
             }
             if mf.content.to_lowercase().contains(&query) {
@@ -421,6 +510,7 @@ impl Tool for MemorySearchTool {
         }
 
         results.sort_by(|a, b| b.0.cmp(&a.0));
+        results.truncate(limit);
 
         let backlinks = build_backlinks(&files);
         let json_results: Vec<serde_json::Value> = results
@@ -428,10 +518,6 @@ impl Tool for MemorySearchTool {
             .map(|(score, mf)| {
                 let content_lower = mf.content.to_lowercase();
                 let snippet = if let Some(byte_pos) = content_lower.find(&query) {
-                    // Map byte position in content_lower → char index, then
-                    // apply char-based offsets → map back to byte offsets in
-                    // the original string.  This avoids panicking when fixed
-                    // byte offsets land inside a multi-byte UTF-8 character.
                     let char_pos = content_lower[..byte_pos].chars().count();
                     let query_chars = query.chars().count();
                     let start = mf
@@ -457,12 +543,28 @@ impl Tool for MemorySearchTool {
                     s
                 } else if mf.description.to_lowercase().contains(&query) {
                     mf.description.clone()
+                } else if let Some(link) = mf.links.iter().find(|l| {
+                    l.target.to_lowercase().contains(&query)
+                        || l.label.to_lowercase().contains(&query)
+                }) {
+                    format!("See Also: {} -> {}", link.label, link.target)
                 } else {
                     mf.content.chars().take(80).collect()
                 };
 
-                let outgoing: Vec<&str> = mf.links.iter().map(|l| l.target.as_str()).collect();
+                let outgoing = link_values(&mf.links);
                 let file_backlinks = backlinks.get(&mf.name).cloned().unwrap_or_default();
+                let mut related = Vec::new();
+                if include_related {
+                    for link in &mf.links {
+                        related.push(
+                            json!({ "direction": "out", "name": link.target, "label": link.label }),
+                        );
+                    }
+                    for backlink in &file_backlinks {
+                        related.push(json!({ "direction": "in", "name": backlink }));
+                    }
+                }
 
                 let mut result = json!({
                     "name": &mf.name,
@@ -473,6 +575,9 @@ impl Tool for MemorySearchTool {
                     "links": outgoing,
                     "backlinks": file_backlinks,
                 });
+                if include_related {
+                    result["related"] = json!(related);
+                }
                 if !mf.tags.is_empty() {
                     result["tags"] = json!(mf.tags);
                 }
@@ -557,6 +662,10 @@ impl Tool for MemoryManageTool {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Tags for filtering and categorization, e.g. [\"rust\", \"qqbot\", \"bug\"]."
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": "Required and must be true for action='remove'. Only remove after explicit user confirmation."
                 }
             },
             "required": ["action", "name"]
@@ -575,7 +684,7 @@ impl Tool for MemoryManageTool {
         let result = match action {
             "add" => self.action_add(name, &args, &user_id),
             "replace" => self.action_replace(name, &args, &user_id),
-            "remove" => self.action_remove(name, &user_id),
+            "remove" => self.action_remove(name, &args, &user_id),
             _ => Err(format!(
                 "Unknown action '{}'. Use: add, replace, remove",
                 action
@@ -619,6 +728,7 @@ impl MemoryManageTool {
             ));
         }
 
+        validate_body_only(content)?;
         scan_memory_content_opt(content)?;
 
         let files = scan_merged(&self.workspace_dir, user_id);
@@ -635,6 +745,7 @@ impl MemoryManageTool {
         let filename = format!("{}.md", name);
         let now = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
+        let warnings = lint_memory_content(name, content, &files);
         let frontmatter = build_frontmatter(name, &description, &tags, &mem_type, &now, None);
         let file_content = format!("{}{}", frontmatter, content);
 
@@ -654,6 +765,7 @@ impl MemoryManageTool {
             "type": &mem_type,
             "description": &description,
             "tags": tags,
+            "warnings": warnings,
         }))
     }
 
@@ -684,6 +796,7 @@ impl MemoryManageTool {
             ));
         }
 
+        validate_body_only(content)?;
         scan_memory_content_opt(content)?;
 
         // Preserve existing metadata unless overridden
@@ -716,6 +829,7 @@ impl MemoryManageTool {
         };
         let now = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
+        let warnings = lint_memory_content(name, content, &files);
         let frontmatter = build_frontmatter(
             name,
             &description,
@@ -741,11 +855,23 @@ impl MemoryManageTool {
             "success": true,
             "message": format!("Memory '{}' updated.", name),
             "name": name,
+            "warnings": warnings,
         }))
     }
 
-    fn action_remove(&self, name: &str, user_id: &str) -> Result<serde_json::Value, String> {
+    fn action_remove(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        user_id: &str,
+    ) -> Result<serde_json::Value, String> {
         validate_name(name)?;
+        if args["confirm"].as_bool() != Some(true) {
+            return Err(
+                "Removing memory requires confirm=true after explicit user confirmation."
+                    .to_string(),
+            );
+        }
 
         let files = scan_merged(&self.workspace_dir, user_id);
         let existing = files

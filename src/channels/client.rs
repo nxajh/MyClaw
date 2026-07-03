@@ -313,15 +313,16 @@ impl ClientChannel {
                         // the first message being an auth message, or accept
                         // connections from localhost only (bind defaults to 127.0.0.1).
                         let ws_config = {
-                            let mut cfg = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
+                            let mut cfg =
+                                tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default(
+                                );
                             cfg.max_message_size = Some(200 << 20); // 200 MiB
-                            cfg.max_frame_size = Some(64 << 20);    // 64 MiB
+                            cfg.max_frame_size = Some(64 << 20); // 64 MiB
                             cfg
                         };
-                        let ws_result = tokio_tungstenite::accept_async_with_config(
-                            stream,
-                            Some(ws_config),
-                        ).await;
+                        let ws_result =
+                            tokio_tungstenite::accept_async_with_config(stream, Some(ws_config))
+                                .await;
                         let ws_stream = match ws_result {
                             Ok(ws) => ws,
                             Err(e) => {
@@ -415,7 +416,10 @@ impl ClientChannel {
                                         Ok(Message::Text(text)) => text.to_string(),
                                         Ok(Message::Close(frame)) => {
                                             let reason = match frame {
-                                                Some(frame) => format!("close frame: code={} reason={}", frame.code, frame.reason),
+                                                Some(frame) => format!(
+                                                    "close frame: code={} reason={}",
+                                                    frame.code, frame.reason
+                                                ),
                                                 None => "close frame without details".to_string(),
                                             };
                                             *incoming_close_reason.lock() = reason;
@@ -447,7 +451,8 @@ impl ClientChannel {
                                         }
                                         Ok(Message::Frame(_)) => continue,
                                         Err(e) => {
-                                            *incoming_close_reason.lock() = format!("read error: {}", e);
+                                            *incoming_close_reason.lock() =
+                                                format!("read error: {}", e);
                                             tracing::warn!(conn_id = %conn_id_clone, err = %e, "WebSocket read error");
                                             break;
                                         }
@@ -484,61 +489,103 @@ impl ClientChannel {
                                                     // Phase 6: migrate bus to stable session_key
                                                     // so reconnects route to the same bus.
                                                     let old_sk = session_key_clone.clone();
-                                                    let new_sk = format!("client:default:{}", new_client_id);
+                                                    let new_sk =
+                                                        format!("client:default:{}", new_client_id);
                                                     if new_sk != old_sk {
                                                         // Migrate bus
                                                         {
-                                                            let mut buses = session_buses_clone.write();
-                                                            if let Some(bus) = buses.remove(&old_sk) {
+                                                            let mut buses =
+                                                                session_buses_clone.write();
+                                                            if let Some(bus) = buses.remove(&old_sk)
+                                                            {
                                                                 buses.insert(new_sk.clone(), bus);
                                                             } else {
-                                                                buses.entry(new_sk.clone())
-                                                                    .or_insert_with(|| Arc::new(SyncMutex::new(SessionOutputBus::new())));
+                                                                buses
+                                                                    .entry(new_sk.clone())
+                                                                    .or_insert_with(|| {
+                                                                        Arc::new(SyncMutex::new(
+                                                                            SessionOutputBus::new(),
+                                                                        ))
+                                                                    });
                                                             }
                                                         }
                                                         // Migrate session_owners
                                                         {
-                                                            let mut owners = session_owners_clone.write();
+                                                            let mut owners =
+                                                                session_owners_clone.write();
                                                             owners.remove(&old_sk);
-                                                            owners.insert(new_sk.clone(), conn_id_clone.clone());
+                                                            owners.insert(
+                                                                new_sk.clone(),
+                                                                conn_id_clone.clone(),
+                                                            );
                                                         }
                                                         // Update connection sessions set
                                                         {
-                                                            let mut conns = connections_clone.write();
-                                                            if let Some(conn) = conns.get_mut(&conn_id_clone) {
+                                                            let mut conns =
+                                                                connections_clone.write();
+                                                            if let Some(conn) =
+                                                                conns.get_mut(&conn_id_clone)
+                                                            {
                                                                 conn.sessions.remove(&old_sk);
-                                                                conn.sessions.insert(new_sk.clone());
-                                                                conn.active_session = new_sk.clone();
+                                                                conn.sessions
+                                                                    .insert(new_sk.clone());
+                                                                conn.active_session =
+                                                                    new_sk.clone();
                                                             }
                                                         }
                                                         session_key_clone = new_sk;
                                                         client_id = new_client_id;
 
                                                         // Subscribe + replay buffered content
-                                                        let api_user = format!("client:default:{}", client_id);
-                                                        let session_id = session_manager_clone.get()
-                                                            .and_then(|sm| sm.active_session_id(&api_user))
+                                                        let api_user =
+                                                            format!("client:default:{}", client_id);
+                                                        let session_id = session_manager_clone
+                                                            .get()
+                                                            .and_then(|sm| {
+                                                                sm.active_session_id(&api_user)
+                                                            })
                                                             .unwrap_or_default();
                                                         let bus = {
-                                                            let mut buses = session_buses_clone.write();
-                                                            buses.entry(session_key_clone.clone())
-                                                                .or_insert_with(|| Arc::new(SyncMutex::new(SessionOutputBus::new())))
+                                                            let mut buses =
+                                                                session_buses_clone.write();
+                                                            buses
+                                                                .entry(session_key_clone.clone())
+                                                                .or_insert_with(|| {
+                                                                    Arc::new(SyncMutex::new(
+                                                                        SessionOutputBus::new(),
+                                                                    ))
+                                                                })
                                                                 .clone()
                                                         };
                                                         let (queued_msgs, replay_events) = {
                                                             let mut bg = bus.lock();
-                                                            bg.subscribe(ws_sender.clone(), session_id.clone());
+                                                            bg.subscribe(
+                                                                ws_sender.clone(),
+                                                                session_id.clone(),
+                                                            );
                                                             (bg.drain_messages(), bg.drain_events())
                                                         };
                                                         for msg_json in queued_msgs {
                                                             let _ = ws_sender.send(msg_json).await;
                                                         }
                                                         for event in replay_events {
-                                                            let mut jv = serde_json::to_value(&event).unwrap_or_default();
-                                                            if let serde_json::Value::Object(ref mut map) = jv {
-                                                                map.insert("session_id".to_string(), serde_json::Value::String(session_id.clone()));
+                                                            let mut jv =
+                                                                serde_json::to_value(&event)
+                                                                    .unwrap_or_default();
+                                                            if let serde_json::Value::Object(
+                                                                ref mut map,
+                                                            ) = jv
+                                                            {
+                                                                map.insert(
+                                                                    "session_id".to_string(),
+                                                                    serde_json::Value::String(
+                                                                        session_id.clone(),
+                                                                    ),
+                                                                );
                                                             }
-                                                            let _ = ws_sender.send(jv.to_string()).await;
+                                                            let _ = ws_sender
+                                                                .send(jv.to_string())
+                                                                .await;
                                                         }
                                                         tracing::info!(
                                                             conn_id = %conn_id_clone,
@@ -562,7 +609,8 @@ impl ClientChannel {
                                             });
                                             let _ = ws_sender.send(err.to_string()).await;
                                             tracing::warn!(conn_id = %conn_id_clone, "WebSocket auth failed, closing connection");
-                                            *incoming_close_reason.lock() = "auth failed".to_string();
+                                            *incoming_close_reason.lock() =
+                                                "auth failed".to_string();
                                             break; // Close connection on invalid token
                                         }
                                         continue;
@@ -576,7 +624,8 @@ impl ClientChannel {
                                         });
                                         let _ = ws_sender.send(err.to_string()).await;
                                         tracing::warn!(conn_id = %conn_id_clone, msg_type, "rejected unauthenticated message");
-                                        *incoming_close_reason.lock() = format!("unauthenticated message: {}", msg_type);
+                                        *incoming_close_reason.lock() =
+                                            format!("unauthenticated message: {}", msg_type);
                                         break;
                                     }
 
@@ -608,7 +657,10 @@ impl ClientChannel {
                                             if let Some(arr) = parsed["files_base64"].as_array() {
                                                 use base64::Engine;
                                                 for (idx, entry) in arr.iter().enumerate() {
-                                                    let raw = match entry.get("data").and_then(|v| v.as_str()) {
+                                                    let raw = match entry
+                                                        .get("data")
+                                                        .and_then(|v| v.as_str())
+                                                    {
                                                         Some(s) => s,
                                                         None => continue,
                                                     };
@@ -630,21 +682,26 @@ impl ClientChannel {
                                                         .and_then(|v| v.as_str())
                                                         .unwrap_or(&format!("file-{}", idx + 1))
                                                         .to_string();
-                                                    let ext = crate::providers::media::modality_from_mime(
-                                                        Some(&mime),
-                                                        &file_name,
-                                                    );
+                                                    let ext =
+                                                        crate::providers::media::modality_from_mime(
+                                                            Some(&mime),
+                                                            &file_name,
+                                                        );
                                                     let suffix = match ext {
                                                         crate::providers::media::FileModality::Image => "img",
                                                         crate::providers::media::FileModality::Audio => "audio",
                                                         crate::providers::media::FileModality::Video => "video",
                                                         crate::providers::media::FileModality::Other => "file",
                                                     };
-                                                    let temp_path = std::env::temp_dir().join(format!(
-                                                        "myclaw-client-{suffix}-{}",
-                                                        uuid::Uuid::new_v4()
-                                                    ));
-                                                    if tokio::fs::write(&temp_path, &bytes).await.is_ok() {
+                                                    let temp_path =
+                                                        std::env::temp_dir().join(format!(
+                                                            "myclaw-client-{suffix}-{}",
+                                                            uuid::Uuid::new_v4()
+                                                        ));
+                                                    if tokio::fs::write(&temp_path, &bytes)
+                                                        .await
+                                                        .is_ok()
+                                                    {
                                                         image_files.push(ChannelFile {
                                                             meta: ChannelFileMeta {
                                                                 file_name,
@@ -696,7 +753,8 @@ impl ClientChannel {
                                             // Ensure session bus exists + subscribe (in case
                                             // auth wasn't called, e.g. TUI). For WebUI the
                                             // bus was already subscribed during auth migration.
-                                            let fwd_api_user = format!("client:default:{}", client_id);
+                                            let fwd_api_user =
+                                                format!("client:default:{}", client_id);
                                             let fwd_session_id = session_manager_clone
                                                 .get()
                                                 .and_then(|sm| sm.active_session_id(&fwd_api_user))
@@ -704,13 +762,21 @@ impl ClientChannel {
                                             let replay_data = {
                                                 let bus = {
                                                     let mut buses = session_buses_clone.write();
-                                                    buses.entry(session_key_clone.clone())
-                                                        .or_insert_with(|| Arc::new(SyncMutex::new(SessionOutputBus::new())))
+                                                    buses
+                                                        .entry(session_key_clone.clone())
+                                                        .or_insert_with(|| {
+                                                            Arc::new(SyncMutex::new(
+                                                                SessionOutputBus::new(),
+                                                            ))
+                                                        })
                                                         .clone()
                                                 };
                                                 let mut bg = bus.lock();
                                                 if bg.ws_sender.is_none() {
-                                                    bg.subscribe(ws_sender.clone(), fwd_session_id.clone());
+                                                    bg.subscribe(
+                                                        ws_sender.clone(),
+                                                        fwd_session_id.clone(),
+                                                    );
                                                     Some((bg.drain_messages(), bg.drain_events()))
                                                 } else {
                                                     None
@@ -722,9 +788,17 @@ impl ClientChannel {
                                                     let _ = ws_sender.send(msg_json).await;
                                                 }
                                                 for event in events {
-                                                    let mut jv = serde_json::to_value(&event).unwrap_or_default();
-                                                    if let serde_json::Value::Object(ref mut map) = jv {
-                                                        map.insert("session_id".to_string(), serde_json::Value::String(fwd_session_id.clone()));
+                                                    let mut jv = serde_json::to_value(&event)
+                                                        .unwrap_or_default();
+                                                    if let serde_json::Value::Object(ref mut map) =
+                                                        jv
+                                                    {
+                                                        map.insert(
+                                                            "session_id".to_string(),
+                                                            serde_json::Value::String(
+                                                                fwd_session_id.clone(),
+                                                            ),
+                                                        );
                                                     }
                                                     let _ = ws_sender.send(jv.to_string()).await;
                                                 }
@@ -751,7 +825,9 @@ impl ClientChannel {
                                             };
 
                                             if message_tx_clone.send(channel_msg).await.is_err() {
-                                                *incoming_close_reason.lock() = "orchestrator message channel closed".to_string();
+                                                *incoming_close_reason.lock() =
+                                                    "orchestrator message channel closed"
+                                                        .to_string();
                                                 tracing::warn!(
                                                     "orchestrator message channel closed"
                                                 );
@@ -924,7 +1000,8 @@ impl Channel for ClientChannel {
                 "type": "message",
                 "session": recipient,
                 "content": msg.content.text,
-            }).to_string();
+            })
+            .to_string();
             bus.lock().push_message(json);
         } else {
             // File messages: encode as base64 and push each as a separate
@@ -955,7 +1032,8 @@ impl Channel for ClientChannel {
                     "size": file.meta.size_bytes,
                     "data": b64,
                     "caption": caption,
-                }).to_string();
+                })
+                .to_string();
                 bus.lock().push_message(json);
             }
         }
@@ -1276,14 +1354,18 @@ fn handle_api_request(
                 Some(dir) => {
                     let memory_dir = dir.join("memory");
                     let files = crate::memory::scan_memory_files(&memory_dir);
+                    let backlinks = crate::memory::build_backlinks(&files);
                     let result: Vec<serde_json::Value> = files.iter().map(|f| {
+                        let bl_count = backlinks.get(&f.name).map(|b| b.len()).unwrap_or(0);
                         serde_json::json!({
                             "name": f.path.file_name().and_then(|n| n.to_str()).unwrap_or(&f.name).to_string(),
                             "size": std::fs::metadata(&f.path).map(|m| m.len()).unwrap_or(0),
                             "mem_name": f.name,
-                            "summary": f.description,
+                            "description": f.description,
                             "tags": f.tags,
-                            "mem_type": f.mem_type,
+                            "type": f.mem_type,
+                            "link_count": f.links.len(),
+                            "backlink_count": bl_count,
                             "created_at": f.created_at,
                         })
                     }).collect();
@@ -1637,7 +1719,10 @@ fn reconstruct_history(
         }
         match m.role.as_str() {
             "user" => {
-                let has_files = m.parts.iter().any(|p| matches!(p, ContentPart::File { .. }));
+                let has_files = m
+                    .parts
+                    .iter()
+                    .any(|p| matches!(p, ContentPart::File { .. }));
                 let content = if !text.is_empty() {
                     text
                 } else if has_image {
@@ -1651,15 +1736,21 @@ fn reconstruct_history(
                 let mut images: Vec<serde_json::Value> = Vec::new();
                 let mut files: Vec<serde_json::Value> = Vec::new();
                 for p in &m.parts {
-                    if let ContentPart::File { path, mime_type, name, .. } = p {
+                    if let ContentPart::File {
+                        path,
+                        mime_type,
+                        name,
+                        ..
+                    } = p
+                    {
                         let entry = serde_json::json!({
                             "path": path,
                             "mime": mime_type,
                             "name": name,
                         });
-                        let is_image = crate::providers::media::modality_from_mime(
-                            mime_type.as_deref(), path
-                        ) == crate::providers::media::FileModality::Image;
+                        let is_image =
+                            crate::providers::media::modality_from_mime(mime_type.as_deref(), path)
+                                == crate::providers::media::FileModality::Image;
                         if is_image {
                             images.push(entry);
                         } else {

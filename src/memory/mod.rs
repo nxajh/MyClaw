@@ -175,10 +175,7 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
     }
 
     // Unify description: priority description > summary > abstract
-    let description = description
-        .or(summary)
-        .or(abstract_val)
-        .unwrap_or_default();
+    let description = description.or(summary).or(abstract_val).unwrap_or_default();
 
     // Parse See Also links from body
     let links = extract_links(&content);
@@ -216,6 +213,10 @@ fn parse_tags(value: &str) -> Vec<String> {
 
 /// Extract markdown links from the `## See Also` section.
 /// Returns `Vec<LinkRef>` with target names (no path, no `.md`).
+pub fn extract_links_from_content(content: &str) -> Vec<LinkRef> {
+    extract_links(content)
+}
+
 fn extract_links(content: &str) -> Vec<LinkRef> {
     let mut in_see_also = false;
     let mut links = Vec::new();
@@ -330,6 +331,44 @@ pub fn format_wiki_index(entries: &[IndexEntry]) -> String {
             let mut line = format!("- **{}**", entry.name);
             if !entry.tags.is_empty() {
                 line.push_str(&format!(" [{}]", entry.tags.join(", ")));
+            }
+            lines.push(line);
+            if !entry.description.is_empty() {
+                lines.push(format!("  {}", entry.description));
+            }
+        }
+        lines.push(String::new());
+    }
+
+    let text = lines.join("\n");
+    truncate_index(&text, MAX_INDEX_LINES, MAX_INDEX_BYTES)
+}
+
+/// Generate a formatted full index string for tools/forks.
+/// Includes all memory types (not only injected types).
+pub fn format_full_memory_index(entries: &[IndexEntry]) -> String {
+    if entries.is_empty() {
+        return "(empty — no memories yet)".to_string();
+    }
+
+    let mut types: Vec<&str> = entries.iter().map(|e| e.mem_type.as_str()).collect();
+    types.sort();
+    types.dedup();
+
+    let mut lines = Vec::new();
+    for mem_type in &types {
+        let group: Vec<&IndexEntry> = entries.iter().filter(|e| e.mem_type == *mem_type).collect();
+        if group.is_empty() {
+            continue;
+        }
+        lines.push(format!("### {}", mem_type));
+        for entry in group {
+            let mut line = format!("- **{}**", entry.name);
+            if !entry.tags.is_empty() {
+                line.push_str(&format!(" [{}]", entry.tags.join(", ")));
+            }
+            if entry.link_count > 0 {
+                line.push_str(&format!(" ({} links)", entry.link_count));
             }
             lines.push(line);
             if !entry.description.is_empty() {
@@ -518,8 +557,14 @@ mod tests {
                 created_at: String::new(),
                 updated_at: None,
                 links: vec![
-                    LinkRef { target: "beta".into(), label: "uses".into() },
-                    LinkRef { target: "gamma".into(), label: "fixes".into() },
+                    LinkRef {
+                        target: "beta".into(),
+                        label: "uses".into(),
+                    },
+                    LinkRef {
+                        target: "gamma".into(),
+                        label: "fixes".into(),
+                    },
                 ],
                 content: String::new(),
                 path: std::path::PathBuf::new(),
@@ -531,9 +576,10 @@ mod tests {
                 tags: vec![],
                 created_at: String::new(),
                 updated_at: None,
-                links: vec![
-                    LinkRef { target: "gamma".into(), label: "depends on".into() },
-                ],
+                links: vec![LinkRef {
+                    target: "gamma".into(),
+                    label: "depends on".into(),
+                }],
                 content: String::new(),
                 path: std::path::PathBuf::new(),
             },

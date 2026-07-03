@@ -258,9 +258,11 @@ Write memories as declarative facts, not instructions.
 - "Project uses pytest with xdist" ✓ — "Run tests with pytest -n 4" ✗
 Do not save task progress, completed-work logs, or temporary TODO state. If a fact will be stale in a week, it does not belong in memory.
 Use the memory_manage tool to add/replace/remove memories. Use memory_search to find existing entries.
-Each memory must have: name, abstract (1-2 sentence summary), and type (user/feedback/project/reference).
+Each memory must have: name, description (1-2 sentence summary), and memory_type.
+The memory_manage content parameter is BODY ONLY: plain markdown without YAML frontmatter and without `---` blocks.
+Types `user`, `feedback`, and `rule` are injected into every conversation. Use `project` or `reference` for on-demand context, or a custom type if neither fits.
 Tags are optional but recommended for searchability (e.g. ["rust","qqbot","bug"]).
-Only user and feedback types are injected into every conversation — use project/reference for on-demand context."#;
+When applicable, add a `## See Also` section with markdown links to 1-3 related memories."#;
 
 const SECTION_READ_BEFORE_EDIT: &str = "## Read Before Edit\n\nDo not propose changes to code you haven't read. If asked about or modifying a file, read it first.";
 
