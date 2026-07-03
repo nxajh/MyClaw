@@ -236,43 +236,100 @@ fn search_in_file(
     re: &regex::Regex,
     max_lines: usize,
     context_lines: usize,
+    max_line_chars: usize,
+    match_window_chars: usize,
 ) -> Option<Vec<String>> {
     let content = std::fs::read_to_string(path).ok()?;
     if !re.is_match(&content) {
         return None;
     }
+
     let lines: Vec<&str> = content.lines().collect();
+    let line_byte_offsets = line_byte_offsets(&content);
     let mut results = Vec::new();
-    let mut prev_match_end: Option<usize> = None; // for merging overlapping context
+    let mut prev_match_end: Option<usize> = None;
+    let mut match_count = 0;
 
     for (i, line) in lines.iter().enumerate() {
-        if re.is_match(line) {
-            // Determine context range, merging with previous if overlapping.
-            let ctx_start = i.saturating_sub(context_lines);
-            let ctx_end = (i + context_lines + 1).min(lines.len());
+        if !re.is_match(line) {
+            continue;
+        }
 
-            // If this overlaps with the previous match's context, continue seamlessly.
-            let start_from = match prev_match_end {
-                Some(prev_end) if prev_end >= ctx_start => prev_end,
-                _ => {
-                    if context_lines > 0 && ctx_start > 0 {
-                        results.push(format!("{}-{}-\t...", path.display(), ctx_start));
-                    }
-                    ctx_start
+        let ctx_start = i.saturating_sub(context_lines);
+        let ctx_end = (i + context_lines + 1).min(lines.len());
+        let start_from = match prev_match_end {
+            Some(prev_end) if prev_end >= ctx_start => prev_end,
+            _ => {
+                if context_lines > 0 && ctx_start > 0 {
+                    results.push(format!("{}-{}-\t...", path.display(), ctx_start));
                 }
-            };
-
-            for (j, line) in lines.iter().enumerate().take(ctx_end).skip(start_from) {
-                let prefix = if j == i { "" } else { "-" };
-                results.push(format!("{}:{}{}\t{}", path.display(), j + 1, prefix, line));
+                ctx_start
             }
-            prev_match_end = Some(ctx_end);
+        };
 
-            // Check if we've hit max results (count only actual matches, not context).
-            let match_count = results.iter().filter(|r| !r.contains(":\t-")).count();
+        for (j, context_line) in lines.iter().enumerate().take(ctx_end).skip(start_from) {
+            if j == i {
+                if display_char_count(context_line) > max_line_chars {
+                    let mut line_matches = 0;
+                    for mat in re.find_iter(context_line) {
+                        let col = context_line[..mat.start()].chars().count() + 1;
+                        let byte_offset = line_byte_offsets.get(j).copied().unwrap_or(0) + mat.start();
+                        results.push(format!(
+                            "{}:{}:{} [byte {}]\t{}",
+                            path.display(),
+                            j + 1,
+                            col,
+                            byte_offset,
+                            match_window(context_line, mat.start(), mat.end(), match_window_chars)
+                        ));
+                        match_count += 1;
+                        line_matches += 1;
+                        if match_count >= max_lines || line_matches >= 3 {
+                            break;
+                        }
+                    }
+                    if re.find_iter(context_line).count() > 3 {
+                        results.push(format!(
+                            "{}:{}\t... (line has more matches; showing first 3 windows)",
+                            path.display(),
+                            j + 1
+                        ));
+                    }
+                } else {
+                    let first_match = re.find(context_line);
+                    let suffix = first_match
+                        .map(|mat| {
+                            let col = context_line[..mat.start()].chars().count() + 1;
+                            let byte_offset = line_byte_offsets.get(j).copied().unwrap_or(0) + mat.start();
+                            format!(":{} [byte {}]", col, byte_offset)
+                        })
+                        .unwrap_or_default();
+                    results.push(format!(
+                        "{}:{}{}\t{}",
+                        path.display(),
+                        j + 1,
+                        suffix,
+                        context_line
+                    ));
+                    match_count += 1;
+                }
+            } else {
+                results.push(format!(
+                    "{}:{}-\t{}",
+                    path.display(),
+                    j + 1,
+                    truncate_chars(context_line, max_line_chars)
+                ));
+            }
+
             if match_count >= max_lines {
                 break;
             }
+        }
+
+        prev_match_end = Some(ctx_end);
+        if match_count >= max_lines {
+            break;
         }
     }
 
@@ -283,6 +340,69 @@ fn search_in_file(
     }
 }
 
+fn line_byte_offsets(content: &str) -> Vec<usize> {
+    let mut offsets = Vec::new();
+    let mut offset = 0;
+    for line in content.split_inclusive('\n') {
+        offsets.push(offset);
+        offset += line.len();
+    }
+    if content.is_empty() || !content.ends_with('\n') {
+        offsets.push(offset);
+    }
+    offsets
+}
+
+fn display_char_count(s: &str) -> usize {
+    s.chars().count()
+}
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+fn match_window(line: &str, match_start: usize, match_end: usize, window_chars: usize) -> String {
+    let start = byte_index_chars_before(line, match_start, window_chars);
+    let end = byte_index_chars_after(line, match_end, window_chars);
+    let mut out = String::new();
+    if start > 0 {
+        out.push_str("...");
+    }
+    out.push_str(&line[start..end]);
+    if end < line.len() {
+        out.push_str("...");
+    }
+    out
+}
+
+fn byte_index_chars_before(s: &str, byte_idx: usize, chars_before: usize) -> usize {
+    if chars_before == 0 {
+        return byte_idx;
+    }
+    s[..byte_idx]
+        .char_indices()
+        .rev()
+        .nth(chars_before.saturating_sub(1))
+        .map(|(idx, _)| idx)
+        .unwrap_or(0)
+}
+
+fn byte_index_chars_after(s: &str, byte_idx: usize, chars_after: usize) -> usize {
+    if chars_after == 0 {
+        return byte_idx;
+    }
+    s[byte_idx..]
+        .char_indices()
+        .nth(chars_after)
+        .map(|(idx, _)| byte_idx + idx)
+        .unwrap_or(s.len())
+}
+
 #[async_trait]
 impl Tool for ContentSearchTool {
     fn name(&self) -> &str {
@@ -290,7 +410,7 @@ impl Tool for ContentSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search file contents by regex pattern. Returns matching lines with file path and line numbers. Supports context_lines to show surrounding lines (like grep -A/-B)."
+        "Search file contents by regex pattern. Returns matching lines with file path, line numbers, columns, and byte offsets. Supports context_lines and match-window snippets for very long lines."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -316,6 +436,14 @@ impl Tool for ContentSearchTool {
                 "context_lines": {
                     "type": "integer",
                     "description": "Number of context lines to show before and after each match (like grep -C). Default: 0 (no context)."
+                },
+                "max_line_chars": {
+                    "type": "integer",
+                    "description": "Maximum characters to output for any single line before switching to a match-window snippet (default 1000)."
+                },
+                "match_window_chars": {
+                    "type": "integer",
+                    "description": "For lines longer than max_line_chars, show this many characters before and after each regex match (default 200)."
                 }
             },
             "required": ["regex"]
@@ -337,6 +465,8 @@ impl Tool for ContentSearchTool {
         let include = args["include"].as_str();
         let max_results = args["max_results"].as_u64().unwrap_or(200) as usize;
         let context_lines = args["context_lines"].as_u64().unwrap_or(0) as usize;
+        let max_line_chars = args["max_line_chars"].as_u64().unwrap_or(1000).max(80) as usize;
+        let match_window_chars = args["match_window_chars"].as_u64().unwrap_or(200).max(20) as usize;
 
         let re = regex::Regex::new(pattern)
             .map_err(|e| anyhow::anyhow!("invalid regex '{}': {}", pattern, e))?;
@@ -380,7 +510,10 @@ impl Tool for ContentSearchTool {
             }
 
             // Count actual matches so far to enforce max_results.
-            let current_match_count = results.iter().filter(|r| !r.contains(":-\t") && !r.contains(":\t...")).count();
+            let current_match_count = results
+                .iter()
+                .filter(|r| !r.contains(":-\t") && !r.contains(":\t...") && !r.contains("-\t"))
+                .count();
             if current_match_count >= max_results {
                 break;
             }
@@ -390,6 +523,8 @@ impl Tool for ContentSearchTool {
                 &re,
                 max_results - current_match_count,
                 context_lines,
+                max_line_chars,
+                match_window_chars,
             ) {
                 results.extend(matches);
             }

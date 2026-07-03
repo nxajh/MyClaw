@@ -63,7 +63,7 @@ impl Tool for FileReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read file contents. Supports partial reading via offset and limit. \
+        "Read file contents. Supports partial reading via line offset/limit or byte_offset/byte_limit. \
          Set outline=true to extract an overview (function/class names for code, \
          headings for markdown)."
     }
@@ -87,6 +87,14 @@ impl Tool for FileReadTool {
                 "outline": {
                     "type": "boolean",
                     "description": "If true, extract only structural overview: function/struct/impl names for Rust, def/class for Python, function/class/const for JS/TS, headings for Markdown. (default: false)."
+                },
+                "byte_offset": {
+                    "type": "integer",
+                    "description": "Starting byte offset, 0-based. If set, reads by byte range instead of line range. Adjusts to valid UTF-8 boundaries."
+                },
+                "byte_limit": {
+                    "type": "integer",
+                    "description": "Maximum number of bytes to read in byte range mode. Default: 4096."
                 }
             },
             "required": ["path"]
@@ -114,6 +122,45 @@ impl Tool for FileReadTool {
         let content = tokio::fs::read_to_string(path)
             .await
             .map_err(|e| anyhow::anyhow!("failed to read '{}': {}", path, e))?;
+
+        if args.get("byte_offset").and_then(|v| v.as_u64()).is_some()
+            || args.get("byte_limit").and_then(|v| v.as_u64()).is_some()
+        {
+            let byte_offset = args["byte_offset"].as_u64().unwrap_or(0) as usize;
+            let byte_limit = args["byte_limit"].as_u64().unwrap_or(4096).max(1) as usize;
+            let total_bytes = content.len();
+            let requested_start = byte_offset.min(total_bytes);
+            let requested_end = requested_start.saturating_add(byte_limit).min(total_bytes);
+            let start = next_char_boundary(&content, requested_start);
+            let end = prev_char_boundary(&content, requested_end);
+            let snippet = if start <= end { &content[start..end] } else { "" };
+            let prefix = if start > 0 { "..." } else { "" };
+            let suffix = if end < total_bytes { "..." } else { "" };
+
+            return Ok(ToolResult {
+                success: true,
+                output: if snippet.is_empty() {
+                    format!(
+                        "{} ({} bytes) — byte range {}..{} is empty or beyond end",
+                        path, total_bytes, requested_start, requested_end
+                    )
+                } else {
+                    format!(
+                        "{} ({} bytes) — bytes {}..{} requested, {}..{} shown\n{}{}{}",
+                        path,
+                        total_bytes,
+                        requested_start,
+                        requested_end,
+                        start,
+                        end,
+                        prefix,
+                        snippet,
+                        suffix
+                    )
+                },
+                error: None,
+            });
+        }
 
         if outline {
             let outline_text = extract_outline(path, &content);
@@ -165,6 +212,22 @@ impl Tool for FileReadTool {
             error: None,
         })
     }
+}
+
+fn next_char_boundary(s: &str, mut idx: usize) -> usize {
+    idx = idx.min(s.len());
+    while idx < s.len() && !s.is_char_boundary(idx) {
+        idx += 1;
+    }
+    idx
+}
+
+fn prev_char_boundary(s: &str, mut idx: usize) -> usize {
+    idx = idx.min(s.len());
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
 }
 
 /// Extract a structural outline from a file based on its extension.
@@ -449,15 +512,16 @@ impl Tool for FileEditTool {
             .map_err(|e| anyhow::anyhow!("failed to write '{}': {}", path, e))?;
 
         let replaced_count = if replace_all { count } else { 1 };
+        let line_number = find_line_number(&content, old_string);
+        let diff = replacement_context_diff(&content, old_string, new_string, line_number);
         Ok(ToolResult {
             success: true,
             output: format!(
-                "replaced {} occurrence(s) in {} (line {}):\n  - {}\n  + {}",
+                "replaced {} occurrence(s) in {} (first match line {})\n{}",
                 replaced_count,
                 path,
-                find_line_number(&content, old_string),
-                str_utils::truncate_line(old_string, 80),
-                str_utils::truncate_line(new_string, 80),
+                line_number,
+                diff,
             ),
             error: None,
         })
@@ -473,4 +537,51 @@ fn find_line_number(haystack: &str, needle: &str) -> usize {
     } else {
         0
     }
+}
+
+fn replacement_context_diff(content: &str, old_string: &str, new_string: &str, line_number: usize) -> String {
+    let old_lines: Vec<&str> = old_string.lines().collect();
+    let new_lines: Vec<&str> = new_string.lines().collect();
+    let all_lines: Vec<&str> = content.lines().collect();
+
+    let old_len = old_lines.len().max(1);
+    let start = line_number.saturating_sub(1);
+    let context_before_start = start.saturating_sub(3);
+    let after_start = (start + old_len).min(all_lines.len());
+    let after_end = (after_start + 3).min(all_lines.len());
+
+    let mut out = String::new();
+    out.push_str("--- before\n+++ after\n");
+    out.push_str(&format!("@@ line {} @@\n", line_number));
+
+    for line in &all_lines[context_before_start..start] {
+        out.push_str(" ");
+        out.push_str(&str_utils::truncate_line(line, 200));
+        out.push('\n');
+    }
+    if old_lines.is_empty() {
+        out.push_str("-\n");
+    } else {
+        for line in old_lines {
+            out.push_str("-");
+            out.push_str(&str_utils::truncate_line(line, 200));
+            out.push('\n');
+        }
+    }
+    if new_lines.is_empty() {
+        out.push_str("+\n");
+    } else {
+        for line in new_lines {
+            out.push_str("+");
+            out.push_str(&str_utils::truncate_line(line, 200));
+            out.push('\n');
+        }
+    }
+    for line in &all_lines[after_start..after_end] {
+        out.push_str(" ");
+        out.push_str(&str_utils::truncate_line(line, 200));
+        out.push('\n');
+    }
+
+    out
 }

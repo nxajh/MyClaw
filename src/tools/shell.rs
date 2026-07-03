@@ -440,7 +440,7 @@ impl Tool for ShellPollTool {
     }
 
     fn description(&self) -> &str {
-        "Poll a background shell process started with `background: true`. Returns accumulated stdout/stderr and process status. Set `remove: true` to clean up the process entry after reading. Large output (>30K chars) is truncated: the first 30K is returned inline and the full output is saved to a temp file that you can read with file_read."
+        "Poll a background shell process started with `background: true`. Returns accumulated stdout/stderr and process status. Set `wait_secs` to wait for completion before returning. Set `remove: true` to clean up the process entry after reading; running processes are never removed. Large output (>30K chars) is truncated: the first 30K is returned inline and the full output is saved to a temp file that you can read with file_read."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -453,7 +453,11 @@ impl Tool for ShellPollTool {
                 },
                 "remove": {
                     "type": "boolean",
-                    "description": "If true, remove the process entry after reading output (default: false)."
+                    "description": "If true, remove the process entry after reading output (default: false). Ignored while the process is still running."
+                },
+                "wait_secs": {
+                    "type": "integer",
+                    "description": "Optional seconds to wait for the process to finish before returning (default 0, max 300)."
                 }
             },
             "required": ["process_id"]
@@ -473,6 +477,30 @@ impl Tool for ShellPollTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'process_id' is required"))?;
         let remove = args["remove"].as_bool().unwrap_or(false);
+        let wait_secs = args["wait_secs"].as_u64().unwrap_or(0).min(300);
+
+        let start_wait = std::time::Instant::now();
+        loop {
+            let finished = {
+                let procs = self.bg_procs.read().await;
+                let entry = match procs.get(proc_id) {
+                    Some(e) => e,
+                    None => {
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!("process_id '{}' not found", proc_id)),
+                        });
+                    }
+                };
+                entry.finished
+            };
+
+            if finished || wait_secs == 0 || start_wait.elapsed() >= Duration::from_secs(wait_secs) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
 
         let procs = self.bg_procs.read().await;
         let entry = match procs.get(proc_id) {
@@ -494,7 +522,8 @@ impl Tool for ShellPollTool {
         let command = entry.command.clone();
         drop(procs);
 
-        if remove {
+        let removed = remove && finished;
+        if removed {
             self.bg_procs.write().await.remove(proc_id);
         }
 
@@ -508,6 +537,11 @@ impl Tool for ShellPollTool {
             "process_id: {}\ncommand: {}\nstatus: {}\n",
             proc_id, command, status_str
         );
+        if remove && !finished {
+            output.push_str("note: remove=true ignored because process is still running\n");
+        } else if removed {
+            output.push_str("note: process entry removed\n");
+        }
         if !stdout.is_empty() {
             output.push_str(&format!("\nstdout:\n{}", stdout));
         }
