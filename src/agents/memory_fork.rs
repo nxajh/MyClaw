@@ -375,16 +375,14 @@ fn build_extraction_prompt(knowledge_dir: &str) -> String {
          ## How to save\n\
          Use the `memory_manage` tool with action `add` (new), `replace` (update), or `remove` (delete).\n\
          \n\
-         Each memory MUST have YAML frontmatter:\n\
-         ---\n\
-         name: short_snake_case_name\n\
-         description: one-line description (under 150 chars)\n\
-         type: user|feedback|project|reference\n\
-         tags: [optional, for, searchability]\n\
-         created_at: {today}\n\
-         ---\n\
+         The tool auto-generates YAML frontmatter for you. Pass metadata as tool parameters:\n\
+         - name: short_snake_case_name\n\
+         - description: one-line description (under 150 chars)\n\
+         - type: user|feedback|project|reference\n\
+         - tags: [optional, for, searchability]\n\
          \n\
-         Then the memory content in markdown.\n\
+         The `content` parameter is the memory BODY ONLY — plain markdown text, NO frontmatter, NO `---` blocks.\n\
+         The tool will prepend the frontmatter automatically.\n\
          \n\
          description quality rules:\n\
          - DO NOT repeat the filename — description must add information beyond what the name says\n\
@@ -399,6 +397,5 @@ fn build_extraction_prompt(knowledge_dir: &str) -> String {
          You have a limited turn budget. Be efficient: decide what to write, then write it.\n\
          Available tools: file_read, file_write, file_edit, shell (read-only recommended), memory_manage.",
         existing_index = existing_index,
-        today = chrono::Utc::now().format("%Y-%m-%d"),
     )
 }
