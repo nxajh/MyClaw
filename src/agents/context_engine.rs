@@ -263,8 +263,7 @@ impl ContextEngine {
             messages.push(strip_images(msg));
         }
 
-        let memory_prompt = build_memory_prompt(&self.resources.knowledge_dir);
-        let prompt = build_summarizer_prompt(to_compact.len(), existing_summary, &memory_prompt);
+        let prompt = build_summarizer_prompt(to_compact.len(), existing_summary);
         messages.push(ChatMessage::user_text(prompt));
 
         let thinking = self
@@ -531,68 +530,9 @@ fn strip_images(msg: &ChatMessage) -> ChatMessage {
     cleaned
 }
 
-fn build_memory_prompt(knowledge_dir: &str) -> String {
-    // Build a concise listing of existing memory files so the summarizer
-    // can avoid creating duplicates or contradictions.
-    let existing_index = if !knowledge_dir.is_empty() {
-        let memory_dir = std::path::Path::new(knowledge_dir);
-        let files = crate::memory::scan_memory_files(memory_dir);
-        if files.is_empty() {
-            String::from("(empty — no memories yet)")
-        } else {
-            let entries: Vec<crate::memory::IndexEntry> =
-                files.iter().map(crate::memory::IndexEntry::from).collect();
-            crate::memory::format_wiki_index(&entries)
-        }
-    } else {
-        String::from("(memory directory not configured)")
-    };
-
-    format!(
-        "\n\
-         \n\
-         You also have a persistent memory system. The memory directory is `{knowledge_dir}/`.\n\
-         \n\
-         ### Existing memory index\n\
-         {existing_index}\n\
-         \n\
-         Based on this conversation, decide if any memories should be saved, updated, or\n\
-         deleted. Use file_write to create/update memory files and file_edit to modify them.\n\
-         Use shell (rm) to delete memory files.\n\
-         \n\
-         Each memory file MUST have YAML frontmatter:\n\
-         ---\n\
-         name: short_snake_case_name\n\
-         description: one-line description (under 150 chars)\n\
-         type: user|feedback|project|reference\n\
-         created_at: YYYY-MM-DD\n\
-         ---\n\
-         \n\
-         Then the memory content in markdown.\n\
-         \n\
-         description quality rules:\n\
-         - DO NOT repeat the filename — description must add information beyond what the name already says\n\
-         - MUST include key terms that help decide when to read this file (tool names, feature names, bug symptoms, decision outcomes)\n\
-         - BAD: \"MyClaw memory system design decisions\" (name already says this)\n\
-         - GOOD: \"记忆索引从system prompt迁到system-reminder注入；diff_memory始终检查history不依赖内存旧文本\"\n\
-         - If updating an existing file, update its description to reflect the latest content\n\
-         \n\
-         Other rules:\n\
-         - ONLY save things NOT derivable from code/git (user preferences, decisions, corrections)\n\
-         - Check the existing memory index above to avoid duplicates — update existing files instead of creating duplicates\n\
-         - If existing memories are outdated or contradicted, update or delete them\n\
-         - Keep name short, lowercase, underscores (becomes the filename: {knowledge_dir}/{{name}}.md)\n\
-         - If no memory changes needed, skip this entirely and just output the summary\n\
-         \n\
-         You may use file_write, file_edit, and file_read tools for memory operations ONLY.\n\
-         Do not use other tools."
-    )
-}
-
 fn build_summarizer_prompt(
     msg_count: usize,
     existing_summary: Option<&str>,
-    memory_prompt: &str,
 ) -> String {
     match existing_summary {
         Some(base) => format!(
@@ -630,16 +570,14 @@ fn build_summarizer_prompt(
              - Mark pending items clearly (prefix with [Pending])\n\
              - Omit raw tool output (large code blocks, logs, file contents)\n\
              - Use the same language as the conversation\n\
-             - Be thorough but concise: every important detail should be preserved{memory_prompt}"
+             - Be thorough but concise: every important detail should be preserved"
         ),
         None => format!(
             "Summarize the conversation history above. This summary will replace \
              the full history, so it MUST preserve all information needed to continue \
              the conversation seamlessly.\n\
              \n\
-             Output the summary as plain text. If you also need to update memory files, \
-             use the file_write/file_edit tools first, then output the summary as your \
-             final response.\n\
+             Output the summary as plain text.\n\
              \n\
              Required sections:\n\
              1. **User Goals**: What is the user trying to accomplish? Current status of each goal.\n\
@@ -652,7 +590,7 @@ fn build_summarizer_prompt(
              - Omit raw tool output (large code blocks, logs, file dumps) — keep only key facts\n\
              - Use the same language as the conversation\n\
              - Be thorough: losing context means the user has to repeat themselves\n\
-             - This conversation has {msg_count} messages to summarize{memory_prompt}"
+             - This conversation has {msg_count} messages to summarize"
         ),
     }
 }

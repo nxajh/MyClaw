@@ -25,7 +25,7 @@ use crate::agents::turn::{TurnContext, TurnResult};
 use crate::agents::turn_event::TurnEvent;
 use crate::config::sub_agent::SubAgentConfig;
 use crate::providers::capability_chat::{ChatMessage, ChatProvider, ChatRequest, StopReason, ToolSpec};
-use crate::providers::{BoxStream, Capability, ContentPart, StreamEvent, ToolCall};
+use crate::providers::{BoxStream, Capability, ContentPart, ProviderRegistry, StreamEvent, ToolCall};
 use crate::storage::SummaryRecord;
 
 /// "An agent" — just its config (name, system prompt fragment, three
@@ -158,6 +158,9 @@ impl Agent {
         const MAX_EMPTY_RETRIES: usize = 3;
         let mut overflow_retries: usize = 0;
         const MAX_OVERFLOW_RETRIES: usize = 3;
+        // Track whether the main agent called memory_manage this turn —
+        // if so, the forked extraction is redundant (mutual exclusion).
+        let mut turn_called_memory = false;
         // Send tools are not always declared (loaded on demand), so fold any
         // prior references that would become orphan tool calls.
         fold_absent_tool(&mut messages, &tool_specs, "send_message", "消息发送结果");
@@ -363,6 +366,26 @@ impl Agent {
                 session.history.push(msg);
                 session.message_ids.push(0);
                 persist_last(session);
+
+                // Fire-and-forget memory extraction fork (claude-code pattern).
+                // Skipped when the main agent already called memory_manage this
+                // turn (mutual exclusion) or when this is a sub-agent session.
+                if !turn_called_memory && session.parent_session_id.is_none() {
+                    let fork_input = crate::agents::memory_fork::ForkInput {
+                        messages: messages.clone(),
+                        model_id: model_id.clone(),
+                        provider: Arc::clone(&provider),
+                        tool_specs: tool_specs.clone(),
+                        tool_registry: Arc::clone(&runtime.tools),
+                        session_owner: session.owner.clone(),
+                        knowledge_dir: runtime.defaults.prompt.knowledge_dir.clone(),
+                        registry: Arc::clone(&runtime.providers) as Arc<dyn ProviderRegistry>,
+                    };
+                    tokio::spawn(async move {
+                        crate::agents::memory_fork::run_memory_fork(fork_input).await;
+                    });
+                }
+
                 return Ok(TurnResult {
                     text: response.text,
                     stop_reason: response.stop_reason,
@@ -395,6 +418,10 @@ impl Agent {
             persist_last(session);
 
             for (i, call) in response.tool_calls.iter().enumerate() {
+                // Track memory_manage calls for fork mutual exclusion.
+                if call.name == "memory_manage" {
+                    turn_called_memory = true;
+                }
                 // Execute the tool call first, then check the limit.
                 // Checking before execution would leave orphan tool_calls
                 // (assistant declares a call but no result is appended).

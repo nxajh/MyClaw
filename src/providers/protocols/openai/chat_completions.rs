@@ -271,9 +271,16 @@ fn parse_openai_sse(line: &str, tool_index_map: &mut HashMap<u32, String>) -> Ve
         arguments: Option<String>,
     }
     #[derive(serde::Deserialize)]
+    struct PromptTokensDetails {
+        #[serde(default)]
+        cached_tokens: Option<u64>,
+    }
+    #[derive(serde::Deserialize)]
     struct ChunkUsage {
         prompt_tokens: Option<u64>,
         completion_tokens: Option<u64>,
+        #[serde(default)]
+        prompt_tokens_details: Option<PromptTokensDetails>,
     }
 
     let chunk: Chunk = match serde_json::from_str(data) {
@@ -286,7 +293,9 @@ fn parse_openai_sse(line: &str, tool_index_map: &mut HashMap<u32, String>) -> Ve
             return vec![StreamEvent::Usage(ChatUsage {
                 input_tokens: u.prompt_tokens,
                 output_tokens: u.completion_tokens,
-                cached_input_tokens: None,
+                cached_input_tokens: u
+                    .prompt_tokens_details
+                    .and_then(|d| d.cached_tokens),
                 reasoning_tokens: None,
                 cache_write_tokens: None,
             })];
