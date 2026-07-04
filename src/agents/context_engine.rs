@@ -570,7 +570,8 @@ fn build_summarizer_prompt(
              - Mark pending items clearly (prefix with [Pending])\n\
              - Omit raw tool output (large code blocks, logs, file contents)\n\
              - Use the same language as the conversation\n\
-             - Be thorough but concise: every important detail should be preserved"
+             - Be thorough but concise: every important detail should be preserved\n\
+             - Each fact appears in exactly ONE section only — the most appropriate one. Never repeat the same information across Active Task / Key Decisions / Resolved / Pending. If something was completed, it belongs in Resolved, not also in Active Task."
         ),
         None => format!(
             "Summarize the conversation history above. This summary will replace \
