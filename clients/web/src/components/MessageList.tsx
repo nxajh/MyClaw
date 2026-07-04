@@ -187,6 +187,28 @@ function SystemReminderCard({ text }: { text: string }) {
   )
 }
 
+/// Auto-close unclosed fenced code blocks so the rest of the document
+/// isn't swallowed into a code block per CommonMark spec.
+function closeUnclosedFences(text: string): string {
+  let inFence = false
+  let fenceMarker = ''
+  let fenceLen = 0
+  for (const line of text.split('\n')) {
+    const m = line.match(/^\s{0,3}(`{3,}|~{3,})/)
+    if (!m) continue
+    const marker = m[1][0]
+    const len = m[1].length
+    if (!inFence) {
+      inFence = true
+      fenceMarker = marker
+      fenceLen = len
+    } else if (marker === fenceMarker && len >= fenceLen && line.slice(m[0].length).trim() === '') {
+      inFence = false
+    }
+  }
+  return inFence ? text + '\n' + fenceMarker.repeat(Math.max(fenceLen, 3)) + '\n' : text
+}
+
 function ContentBlock({ text, done }: { text: string; done: boolean }) {
   const [katexReady, setKatexReady] = useState(!!RehypeKatex)
   const needsMath = hasMath(text)
@@ -221,7 +243,7 @@ function ContentBlock({ text, done }: { text: string; done: boolean }) {
             return <PreCodeBlock className={codeChild?.props?.className || ''}>{children}</PreCodeBlock>
           },
         }}
-      >{text}</Markdown>
+      >{closeUnclosedFences(text)}</Markdown>
     </div>
   )
 }
