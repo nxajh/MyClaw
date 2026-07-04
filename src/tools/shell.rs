@@ -149,6 +149,10 @@ impl Tool for ShellTool {
         3_000
     }
 
+    fn preferred_timeout_secs(&self) -> Option<u64> {
+        Some(300)
+    }
+
     async fn execute(
         &self,
         args: serde_json::Value,
