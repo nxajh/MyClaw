@@ -1,7 +1,15 @@
 import { useState, useMemo } from 'react'
 import { Edit3, Loader2, Check, X } from 'lucide-react'
 import { inputCls, btnPrimary, btnGhost } from './PageLayout'
-import { parseFrontmatter, typeStyles } from '../lib/memoryUtils'
+import { parseFrontmatter, getStyle, type MemType } from '../lib/memoryUtils'
+
+const TYPE_OPTIONS: { value: MemType; label: string }[] = [
+  { value: 'user', label: '👤 User Preference (Always Injected)' },
+  { value: 'feedback', label: '🎯 Feedback & Alignment (Always Injected)' },
+  { value: 'rule', label: '⚙️ Rule (Always Injected)' },
+  { value: 'project', label: '📂 Project Context (On-Demand)' },
+  { value: 'reference', label: '📄 External Reference (On-Demand)' },
+]
 
 interface Props {
   initial: { name: string; content: string }
@@ -14,17 +22,34 @@ export default function MemoryEditor({ initial, onSave, onCancel, saving }: Prop
   const isNew = !initial.name
 
   const parsed = useMemo(() => {
-    if (isNew) return { body: '', meta: { name: '', type: 'project' as const, summary: '', tags: [] as string[], created_at: '' } }
+    if (isNew) return { body: '', meta: { name: '', type: 'project' as MemType, description: '', tags: [] as string[], created_at: '', updated_at: '' } }
     return parseFrontmatter(initial.content)
   }, [initial, isNew])
 
   const [name, setName] = useState(isNew ? '' : (parsed.meta.name || initial.name.replace('.md', '')))
-  const [memType, setMemType] = useState<'user' | 'feedback' | 'project' | 'reference'>(parsed.meta.type || 'project')
-  const [summary, setSummary] = useState(parsed.meta.summary || '')
+  const [memType, setMemType] = useState<MemType>(parsed.meta.type)
+  const [description, setDescription] = useState(parsed.meta.description || '')
   const [tagsInput, setTagsInput] = useState(parsed.meta.tags ? parsed.meta.tags.join(', ') : '')
   const [body, setBody] = useState(parsed.body || '')
   const [editorMode, setEditorMode] = useState<'visual' | 'raw'>('visual')
   const [rawText, setRawText] = useState(initial.content)
+
+  const buildMarkdown = () => {
+    const cleanName = name.trim().toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_-]/g, '')
+    const tagsArray = tagsInput.split(',').map(t => t.trim()).filter(Boolean)
+    const tagsStr = tagsArray.length > 0 ? `[${tagsArray.map(t => `"${t}"`).join(', ')}]` : '[]'
+    const today = parsed.meta.created_at || new Date().toISOString().split('T')[0]
+    const desc = description.trim()
+    return `---
+name: "${cleanName}"
+description: "${desc}"
+type: "${memType}"
+created_at: "${today}"
+tags: ${tagsStr}
+---
+
+${body.trim()}`
+  }
 
   const handleSave = () => {
     if (editorMode === 'raw') {
@@ -33,41 +58,17 @@ export default function MemoryEditor({ initial, onSave, onCancel, saving }: Prop
       return
     }
     const cleanName = name.trim().toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_-]/g, '')
-    const tagsArray = tagsInput.split(',').map(t => t.trim()).filter(Boolean)
-    const tagsStr = tagsArray.length > 0 ? `[${tagsArray.join(', ')}]` : '[]'
-    const today = parsed.meta.created_at || new Date().toISOString().split('T')[0]
-    const fullMarkdown = `---
-name: ${cleanName}
-type: ${memType}
-summary: ${summary.trim()}
-tags: ${tagsStr}
-created_at: ${today}
----
-
-${body.trim()}`
-    onSave(`${cleanName}.md`, fullMarkdown)
+    onSave(`${cleanName}.md`, buildMarkdown())
   }
 
   const handleToggleMode = (mode: 'visual' | 'raw') => {
     if (mode === 'raw') {
-      const cleanName = name.trim().toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_-]/g, '')
-      const tagsArray = tagsInput.split(',').map(t => t.trim()).filter(Boolean)
-      const tagsStr = tagsArray.length > 0 ? `[${tagsArray.join(', ')}]` : '[]'
-      const today = parsed.meta.created_at || new Date().toISOString().split('T')[0]
-      setRawText(`---
-name: ${cleanName}
-type: ${memType}
-summary: ${summary.trim()}
-tags: ${tagsStr}
-created_at: ${today}
----
-
-${body.trim()}`)
+      setRawText(buildMarkdown())
     } else {
       const p = parseFrontmatter(rawText)
       setName(p.meta.name || name)
       setMemType(p.meta.type || memType)
-      setSummary(p.meta.summary || summary)
+      setDescription(p.meta.description || description)
       setTagsInput(p.meta.tags ? p.meta.tags.join(', ') : tagsInput)
       setBody(p.body)
     }
@@ -84,14 +85,14 @@ ${body.trim()}`)
       <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
         <h2 className="text-sm font-semibold text-zinc-300 flex items-center gap-1.5">
           <Edit3 size={14} className="text-blue-400" />
-          {isNew ? 'Create New Semantic Fact' : `Edit Fact: ${parsed.meta.name || initial.name}`}
+          {isNew ? 'Create New Memory' : `Edit: ${parsed.meta.name || initial.name}`}
         </h2>
         <div className="flex items-center bg-zinc-950 border border-zinc-800 rounded-lg p-0.5 text-xs">
           <button onClick={() => handleToggleMode('visual')} className={`px-2.5 py-1 rounded-md transition-colors ${editorMode === 'visual' ? 'bg-zinc-800 text-zinc-100 font-medium' : 'text-zinc-400 hover:text-zinc-200'}`}>
-            Structured UI
+            Structured
           </button>
           <button onClick={() => handleToggleMode('raw')} className={`px-2.5 py-1 rounded-md transition-colors ${editorMode === 'raw' ? 'bg-zinc-800 text-zinc-100 font-medium' : 'text-zinc-400 hover:text-zinc-200'}`}>
-            Raw Markdown
+            Raw
           </button>
         </div>
       </div>
@@ -100,23 +101,20 @@ ${body.trim()}`)
         <div className="space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-zinc-900/40 p-4 rounded-2xl border border-zinc-800/80">
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-zinc-400">Fact ID / Key Name</label>
+              <label className="text-xs font-semibold text-zinc-400">Name</label>
               <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. delegate_patience" className={inputCls} disabled={!isNew} autoFocus={isNew} />
-              <p className="text-[10px] text-zinc-500">Unique alphanumeric key using only a-z, 0-9, _, -</p>
+              <p className="text-[10px] text-zinc-500">Unique key using only a-z, 0-9, _, -</p>
             </div>
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-zinc-400">Memory Scope / Type</label>
-              <select value={memType} onChange={(e) => setMemType(e.target.value as any)} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-sm text-zinc-300 focus:border-zinc-700 outline-none transition-colors duration-150">
-                <option value="user">👤 User Preference (Always Injected)</option>
-                <option value="feedback">🎯 Feedback & Alignment (Always Injected)</option>
-                <option value="project">📂 Project Context (On-Demand)</option>
-                <option value="reference">📄 External Reference (On-Demand)</option>
+              <label className="text-xs font-semibold text-zinc-400">Type</label>
+              <select value={memType} onChange={(e) => setMemType(e.target.value as MemType)} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-sm text-zinc-300 focus:border-zinc-700 outline-none transition-colors duration-150">
+                {TYPE_OPTIONS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
               </select>
-              <p className="text-[10px] text-zinc-500">{typeStyles[memType].desc}</p>
+              <p className="text-[10px] text-zinc-500">{getStyle(memType).desc}</p>
             </div>
             <div className="space-y-1.5 md:col-span-2">
-              <label className="text-xs font-semibold text-zinc-400">Brief Summary</label>
-              <input value={summary} onChange={(e) => setSummary(e.target.value)} placeholder="1-2 sentences summarizing this memory..." className={inputCls} />
+              <label className="text-xs font-semibold text-zinc-400">Description</label>
+              <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="1-2 sentences summarizing this memory..." className={inputCls} />
             </div>
             <div className="space-y-1.5 md:col-span-2">
               <label className="text-xs font-semibold text-zinc-400">Tags (Comma-separated)</label>
@@ -124,8 +122,8 @@ ${body.trim()}`)
             </div>
           </div>
           <div className="space-y-1.5">
-            <label className="text-xs font-semibold text-zinc-400">Memory Body (Markdown)</label>
-            <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={14} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-sm font-mono text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-700 resize-y transition-colors" placeholder="Write detailed rules, facts, or instructions here..." />
+            <label className="text-xs font-semibold text-zinc-400">Body (Markdown)</label>
+            <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={14} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-sm font-mono text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-700 resize-y transition-colors" placeholder="Write content here..." />
           </div>
         </div>
       ) : (
@@ -138,8 +136,8 @@ ${body.trim()}`)
             </div>
           )}
           <div className="space-y-1.5">
-            <label className="text-xs font-semibold text-zinc-400 font-mono">Full File Text (Includes Frontmatter)</label>
-            <textarea value={rawText} onChange={(e) => setRawText(e.target.value)} rows={18} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-sm font-mono text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-700 resize-y transition-colors" placeholder={'---\nname: my_fact\ntype: project\n---\n\nContent...'} />
+            <label className="text-xs font-semibold text-zinc-400 font-mono">Full File (includes frontmatter)</label>
+            <textarea value={rawText} onChange={(e) => setRawText(e.target.value)} rows={18} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-sm font-mono text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-700 resize-y transition-colors" placeholder={'---\nname: "my_fact"\ndescription: "..."\ntype: "project"\n---\n\nContent...'} />
           </div>
         </div>
       )}
@@ -147,12 +145,12 @@ ${body.trim()}`)
       <div className="flex gap-2 justify-end border-t border-zinc-850 pt-3">
         <button onClick={onCancel} className={btnGhost}><X size={13} /> Cancel</button>
         <button onClick={handleSave} disabled={saving || !isValid()} className={btnPrimary}>
-          {saving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />} Save Fact
+          {saving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />} Save
         </button>
       </div>
 
       {isNew && name && editorMode === 'raw' && !name.endsWith('.md') && (
-        <p className="text-xs text-amber-400">Filename must end with .md when in raw editing mode</p>
+        <p className="text-xs text-amber-400">Filename must end with .md in raw mode</p>
       )}
     </div>
   )

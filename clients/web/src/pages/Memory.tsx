@@ -1,11 +1,23 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
-import { Plus, Loader2, Search, Tag, AlertTriangle } from 'lucide-react'
+import { Plus, Loader2, Search, Tag, AlertTriangle, Link2 } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useToast } from '../components/Toast'
 import { ErrorBanner, LoadingRow, EmptyState, btnPrimary } from '../components/PageLayout'
 import MemoryEditor from '../components/MemoryEditor'
 import MemoryViewer from '../components/MemoryViewer'
-import { typeStyles, type MemoryFile } from '../lib/memoryUtils'
+import { getStyle, type MemoryFile } from '../lib/memoryUtils'
+
+const TABS = ['all', 'user', 'feedback', 'rule', 'project', 'reference'] as const
+type Tab = typeof TABS[number]
+
+const TAB_LABELS: Record<Tab, string> = {
+  all: 'All Memories',
+  user: '👤 Preferences',
+  feedback: '🎯 Alignments',
+  rule: '⚙️ Rules',
+  project: '📂 Projects',
+  reference: '📄 References',
+}
 
 export default function Memory() {
   const { status, request } = useWebSocketContext()
@@ -24,7 +36,7 @@ export default function Memory() {
   const [view, setView] = useState<View>({ mode: 'list' })
   const [saving, setSaving] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
-  const [activeTab, setActiveTab] = useState<'all' | 'user' | 'feedback' | 'project' | 'reference'>('all')
+  const [activeTab, setActiveTab] = useState<Tab>('all')
 
   const isEditing = view.mode === 'edit' || view.mode === 'new'
 
@@ -108,13 +120,14 @@ export default function Memory() {
 
   const filteredFiles = useMemo(() => {
     return files.filter(f => {
-      const matchesTab = activeTab === 'all' || f.mem_type === activeTab
+      const matchesTab = activeTab === 'all' || f.type === activeTab
+      const q = searchQuery.toLowerCase()
       const matchesSearch =
-        !searchQuery ||
-        f.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (f.mem_name && f.mem_name.toLowerCase().includes(searchQuery.toLowerCase())) ||
-        (f.summary && f.summary.toLowerCase().includes(searchQuery.toLowerCase())) ||
-        (f.tags && f.tags.some(t => t.toLowerCase().includes(searchQuery.toLowerCase())))
+        !q ||
+        (f.mem_name || '').toLowerCase().includes(q) ||
+        f.name.toLowerCase().includes(q) ||
+        (f.description || '').toLowerCase().includes(q) ||
+        (f.tags && f.tags.some(t => t.toLowerCase().includes(q)))
       return matchesTab && matchesSearch
     })
   }, [files, activeTab, searchQuery])
@@ -145,7 +158,7 @@ export default function Memory() {
         <div className="flex-1 overflow-y-auto">
           <div className="max-w-3xl mx-auto px-3 sm:px-6 py-4 sm:py-6 space-y-4">
             <button onClick={backToList} className="flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-300 transition-colors mb-2">
-              ← Back to Semantic Facts
+              ← Back to Memories
             </button>
             {error && <ErrorBanner message={error} />}
             <MemoryEditor
@@ -168,28 +181,26 @@ export default function Memory() {
           {/* Header */}
           <div className="flex flex-col sm:flex-row sm:items-center gap-3 justify-between pb-2 border-b border-zinc-900">
             <div>
-              <h1 className="text-base font-bold text-zinc-100">Semantic Memory System</h1>
-              <p className="text-xs text-zinc-500">Manage structure-first facts and core rules guiding MyClaw</p>
+              <h1 className="text-base font-bold text-zinc-100">Memory</h1>
+              <p className="text-xs text-zinc-500">{files.length} entries · Manage facts and rules guiding MyClaw</p>
             </div>
             <button onClick={() => setView({ mode: 'new' })} disabled={status !== 'connected'} className={btnPrimary}>
-              <Plus size={13} /> New Fact
+              <Plus size={13} /> New
             </button>
           </div>
 
           {/* Tabs */}
           <div className="flex flex-wrap gap-1 border-b border-zinc-900/60 pb-1">
-            {(['all', 'user', 'feedback', 'project', 'reference'] as const).map(tab => {
+            {TABS.map(tab => {
               const isActive = activeTab === tab
-              let tabLabel = 'All Memories'
-              let tabColor = 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/30'
-              if (tab === 'user') { tabLabel = '👤 Preferences'; tabColor = isActive ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20' : 'text-zinc-500 hover:text-blue-400 hover:bg-blue-500/5' }
-              else if (tab === 'feedback') { tabLabel = '🎯 Alignments'; tabColor = isActive ? 'bg-red-500/10 text-red-400 border border-red-500/20' : 'text-zinc-500 hover:text-red-400 hover:bg-red-500/5' }
-              else if (tab === 'project') { tabLabel = '📂 Projects'; tabColor = isActive ? 'bg-purple-500/10 text-purple-400 border border-purple-500/20' : 'text-zinc-500 hover:text-purple-400 hover:bg-purple-500/5' }
-              else if (tab === 'reference') { tabLabel = '📄 References'; tabColor = isActive ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'text-zinc-500 hover:text-amber-400 hover:bg-amber-500/5' }
-              else if (isActive) { tabColor = 'bg-zinc-800 text-zinc-100 border border-zinc-700/60' }
+              const count = tab === 'all' ? files.length : files.filter(f => f.type === tab).length
+              const s = tab === 'all' ? null : getStyle(tab)
+              const tabColor = isActive
+                ? (s ? `${s.badgeBg}` : 'bg-zinc-800 text-zinc-100 border border-zinc-700/60')
+                : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/30 border border-transparent'
               return (
-                <button key={tab} onClick={() => setActiveTab(tab)} className={`px-3 py-1.5 rounded-xl text-xs font-medium border border-transparent transition-all ${tabColor}`}>
-                  {tabLabel}
+                <button key={tab} onClick={() => setActiveTab(tab)} className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-all ${tabColor}`}>
+                  {TAB_LABELS[tab]} <span className="opacity-60">{count}</span>
                 </button>
               )
             })}
@@ -198,18 +209,18 @@ export default function Memory() {
           {/* Search */}
           <div className="relative">
             <span className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none"><Search size={14} className="text-zinc-500" /></span>
-            <input type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Search semantic facts by ID, summary, or tags..." className="w-full rounded-2xl border border-zinc-900 bg-zinc-900/30 pl-10 pr-4 py-2.5 text-xs text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-800 transition-colors" />
+            <input type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Search by name, description, or tags..." className="w-full rounded-2xl border border-zinc-900 bg-zinc-900/30 pl-10 pr-4 py-2.5 text-xs text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-800 transition-colors" />
           </div>
 
           {error && <ErrorBanner message={error} />}
           {loadingList && <LoadingRow />}
-          {!loadingList && status !== 'connected' && <EmptyState>Waiting for connection to sync memory facts…</EmptyState>}
+          {!loadingList && status !== 'connected' && <EmptyState>Waiting for connection to sync memory…</EmptyState>}
           {!loadingList && status === 'connected' && filteredFiles.length === 0 && (
             <div className="rounded-2xl border border-dashed border-zinc-900 p-8 text-center space-y-2">
               <AlertTriangle size={24} className="mx-auto text-zinc-600" />
-              <p className="text-xs text-zinc-500 font-medium">No matching semantic facts found</p>
+              <p className="text-xs text-zinc-500 font-medium">No matching memories</p>
               {files.length > 0 && (
-                <button onClick={() => { setSearchQuery(''); setActiveTab('all') }} className="text-xs text-blue-400 hover:text-blue-300">Reset all filters</button>
+                <button onClick={() => { setSearchQuery(''); setActiveTab('all') }} className="text-xs text-blue-400 hover:text-blue-300">Reset filters</button>
               )}
             </div>
           )}
@@ -218,7 +229,8 @@ export default function Memory() {
           {!loadingList && filteredFiles.length > 0 && (
             <div className="grid grid-cols-1 gap-3">
               {filteredFiles.map((file) => {
-                const style = typeStyles[file.mem_type || 'project']
+                const style = getStyle(file.type)
+                const links = (file.link_count || 0) + (file.backlink_count || 0)
                 return (
                   <button key={file.name} onClick={() => openFile(file.name)} className={`w-full text-left rounded-2xl border ${style.border} ${style.bg} px-4 py-4 transition-all duration-200 group flex flex-col gap-2.5`}>
                     <div className="flex flex-wrap items-center justify-between gap-2 w-full">
@@ -230,12 +242,15 @@ export default function Memory() {
                           {file.mem_name || file.name.replace('.md', '')}
                         </span>
                       </div>
-                      <span className="text-[10px] text-zinc-600 font-mono">{(file.size / 1024).toFixed(1)} KB</span>
+                      <div className="flex items-center gap-2 text-[10px] text-zinc-600 font-mono">
+                        {links > 0 && <span className="flex items-center gap-0.5"><Link2 size={9} />{links}</span>}
+                        <span>{(file.size / 1024).toFixed(1)} KB</span>
+                      </div>
                     </div>
-                    {file.summary ? (
-                      <p className="text-xs text-zinc-400 leading-relaxed font-normal">{file.summary}</p>
+                    {file.description ? (
+                      <p className="text-xs text-zinc-400 leading-relaxed font-normal">{file.description}</p>
                     ) : (
-                      <p className="text-xs text-zinc-600 italic">No summary provided</p>
+                      <p className="text-xs text-zinc-600 italic">No description</p>
                     )}
                     {file.tags && file.tags.length > 0 && (
                       <div className="flex flex-wrap gap-1">

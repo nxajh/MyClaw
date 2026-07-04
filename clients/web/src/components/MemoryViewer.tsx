@@ -1,9 +1,9 @@
 import { useState } from 'react'
-import { ChevronLeft, Pencil, Trash2, Calendar, Tag } from 'lucide-react'
+import { ChevronLeft, Pencil, Trash2, Calendar, Tag, Link2 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { ErrorBanner } from './PageLayout'
-import { parseFrontmatter, typeStyles, formatBytes } from '../lib/memoryUtils'
+import { parseFrontmatter, getStyle, formatBytes } from '../lib/memoryUtils'
 
 interface Props {
   name: string
@@ -17,7 +17,7 @@ interface Props {
 export default function MemoryViewer({ name, content, error, onEdit, onBack, onDelete }: Props) {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const parsed = parseFrontmatter(content)
-  const style = typeStyles[parsed.meta.type || 'project']
+  const style = getStyle(parsed.meta.type)
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -25,7 +25,7 @@ export default function MemoryViewer({ name, content, error, onEdit, onBack, onD
         {/* Nav row */}
         <div className="flex items-center justify-between mb-4 border-b border-zinc-800 pb-2">
           <button onClick={onBack} className="flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-300 transition-colors">
-            <ChevronLeft size={14} /> Back to Semantic Facts
+            <ChevronLeft size={14} /> Back to Memories
           </button>
           <div className="flex items-center gap-2">
             {confirmDelete ? (
@@ -56,17 +56,17 @@ export default function MemoryViewer({ name, content, error, onEdit, onBack, onD
               {style.label}
             </span>
             <div className="flex items-center gap-3 text-[11px] text-zinc-500 font-mono">
-              {parsed.meta.created_at && (
-                <span className="flex items-center gap-1"><Calendar size={11} />{parsed.meta.created_at}</span>
-              )}
+              {parsed.meta.updated_at || parsed.meta.created_at ? (
+                <span className="flex items-center gap-1"><Calendar size={11} />{parsed.meta.updated_at || parsed.meta.created_at}</span>
+              ) : null}
               <span>{formatBytes(content.length)}</span>
             </div>
           </div>
           <h1 className="text-lg font-bold text-zinc-100 font-mono tracking-tight leading-snug">
             {parsed.meta.name || name.replace('.md', '')}
           </h1>
-          {parsed.meta.summary && (
-            <p className="text-sm text-zinc-400 leading-relaxed border-l-2 border-zinc-800 pl-3">{parsed.meta.summary}</p>
+          {parsed.meta.description && (
+            <p className="text-sm text-zinc-400 leading-relaxed border-l-2 border-zinc-800 pl-3">{parsed.meta.description}</p>
           )}
           {parsed.meta.tags && parsed.meta.tags.length > 0 && (
             <div className="flex flex-wrap gap-1.5 pt-1.5">
@@ -77,6 +77,20 @@ export default function MemoryViewer({ name, content, error, onEdit, onBack, onD
               ))}
             </div>
           )}
+          {/* See Also links rendered from body */}
+          {(() => {
+            const seeAlso = extractSeeAlso(parsed.body)
+            if (seeAlso.length === 0) return null
+            return (
+              <div className="flex flex-wrap gap-1.5 pt-1.5">
+                {seeAlso.map(link => (
+                  <span key={link} className="flex items-center gap-1 text-[10px] text-zinc-500 bg-zinc-900/40 px-2 py-0.5 rounded-md border border-zinc-800/60">
+                    <Link2 size={9} />{link}
+                  </span>
+                ))}
+              </div>
+            )
+          })()}
         </div>
 
         {/* Body */}
@@ -91,4 +105,13 @@ export default function MemoryViewer({ name, content, error, onEdit, onBack, onD
       </div>
     </div>
   )
+}
+
+function extractSeeAlso(body: string): string[] {
+  const section = body.match(/^##\s+See\s+Also\s*$/im)
+  if (!section) return []
+  const afterSection = body.slice(section.index! + section[0].length)
+  // Match markdown links: [label](memory-name) or [label](memory-name.md)
+  const links = [...afterSection.matchAll(/\[([^\]]+)\]\(memory-?([^)]+)\)/gi)]
+  return links.map(m => m[2].replace(/\.md$/, ''))
 }

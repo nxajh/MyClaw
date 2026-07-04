@@ -1,19 +1,25 @@
+export type MemType = 'user' | 'feedback' | 'rule' | 'project' | 'reference'
+
 export interface MemoryFile {
   name: string
   size: number
   mem_name?: string
-  summary?: string
+  description?: string
   tags?: string[]
-  mem_type?: 'user' | 'feedback' | 'project' | 'reference'
+  type?: string
+  link_count?: number
+  backlink_count?: number
   created_at?: string
+  updated_at?: string
 }
 
 export interface ParsedMeta {
   name: string
-  type: 'user' | 'feedback' | 'project' | 'reference'
-  summary: string
+  type: MemType
+  description: string
   tags: string[]
   created_at: string
+  updated_at: string
 }
 
 export interface ParsedFrontmatter {
@@ -21,7 +27,15 @@ export interface ParsedFrontmatter {
   meta: ParsedMeta
 }
 
-export const typeStyles = {
+export const typeStyles: Record<string, {
+  bg: string
+  border: string
+  borderActive: string
+  text: string
+  badgeBg: string
+  label: string
+  desc: string
+}> = {
   user: {
     bg: 'bg-blue-500/5',
     border: 'border-blue-500/20 hover:border-blue-500/30',
@@ -39,6 +53,15 @@ export const typeStyles = {
     badgeBg: 'bg-red-500/10 text-red-400 border border-red-500/20',
     label: '🎯 Feedback Correction',
     desc: 'Always-injected behavior corrections (strict constraints)',
+  },
+  rule: {
+    bg: 'bg-emerald-500/5',
+    border: 'border-emerald-500/20 hover:border-emerald-500/30',
+    borderActive: 'border-emerald-500/50 ring-1 ring-emerald-500/20',
+    text: 'text-emerald-400',
+    badgeBg: 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20',
+    label: '⚙️ Rule',
+    desc: 'Always-injected operational rules and constraints',
   },
   project: {
     bg: 'bg-purple-500/5',
@@ -60,14 +83,24 @@ export const typeStyles = {
   },
 }
 
+export function getStyle(type?: string) {
+  return typeStyles[type || ''] || typeStyles.project
+}
+
 export function formatBytes(b: number) {
   if (b < 1024) return `${b} B`
   if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`
   return `${(b / (1024 * 1024)).toFixed(1)} MB`
 }
 
+const KNOWN_TYPES: MemType[] = ['user', 'feedback', 'rule', 'project', 'reference']
+
+function asMemType(v: string): MemType {
+  return (KNOWN_TYPES as string[]).includes(v) ? v as MemType : 'project'
+}
+
 export function parseFrontmatter(raw: string): ParsedFrontmatter {
-  const emptyMeta: ParsedMeta = { name: '', type: 'project', summary: '', tags: [], created_at: '' }
+  const emptyMeta: ParsedMeta = { name: '', type: 'project', description: '', tags: [], created_at: '', updated_at: '' }
   const trimmed = raw.trim()
   if (!trimmed.startsWith('---')) return { body: raw, meta: emptyMeta }
   const nextDash = trimmed.indexOf('\n---', 3)
@@ -77,22 +110,34 @@ export function parseFrontmatter(raw: string): ParsedFrontmatter {
   const body = trimmed.slice(nextDash + 4).trim()
   const meta: ParsedMeta = { ...emptyMeta }
 
+  let descriptionVal = ''
+  let summaryVal = ''
+  let abstractVal = ''
+
   yaml.split('\n').forEach((line) => {
     const colon = line.indexOf(':')
     if (colon !== -1) {
       const k = line.slice(0, colon).trim()
-      const v = line.slice(colon + 1).trim()
+      let v = line.slice(colon + 1).trim()
+      // strip surrounding quotes
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+        v = v.slice(1, -1)
+      }
       if (k === 'name') meta.name = v
-      else if (k === 'type' && ['user', 'feedback', 'project', 'reference'].includes(v))
-        meta.type = v as ParsedMeta['type']
-      else if (k === 'summary' || k === 'description') meta.summary = v
+      else if (k === 'type') meta.type = asMemType(v)
+      else if (k === 'description') descriptionVal = v
+      else if (k === 'summary') summaryVal = v
+      else if (k === 'abstract') abstractVal = v
       else if (k === 'created_at') meta.created_at = v
+      else if (k === 'updated_at') meta.updated_at = v
       else if (k === 'tags') {
         const inner = v.startsWith('[') && v.endsWith(']') ? v.slice(1, -1) : v
-        meta.tags = inner.split(',').map((x) => x.trim()).filter(Boolean)
+        meta.tags = inner.split(',').map((x) => x.trim().replace(/^["']|["']$/g, '')).filter(Boolean)
       }
     }
   })
+
+  meta.description = descriptionVal || summaryVal || abstractVal
 
   return { body, meta }
 }
