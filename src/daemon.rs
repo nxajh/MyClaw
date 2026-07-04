@@ -928,8 +928,6 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         &registry_arc,
     ))));
 
-    warn_missing_agent_tool_references(&sub_agent_configs, &tools);
-
     // WorkspaceWatcher for hot-reload.
     let _watcher =
         crate::agents::WorkspaceWatcher::new(&config.workspace_dir, &config.knowledge_dir)?;
@@ -1005,6 +1003,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
         (Arc::new(parent_tools), Some(delegator_arc))
     };
+
+    warn_missing_agent_tool_references(&sub_agent_configs, &tools_arc);
 
     // ── Delegation channel (conditional — only when sub-agents configured) ─────
     // The DelegationCoordinator is the single owner of the sender and
