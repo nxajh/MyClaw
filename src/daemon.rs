@@ -573,6 +573,59 @@ fn build_sub_agents(
     agents
 }
 
+fn missing_agent_tool_references(
+    agents: &[crate::config::sub_agent::SubAgentConfig],
+    registry: &ToolRegistry,
+) -> Vec<(String, Vec<String>)> {
+    use crate::config::filters::{AllKeyword, NameFilter};
+    use std::collections::HashSet;
+
+    let available: HashSet<String> = registry.tool_names_sorted().into_iter().collect();
+    let mut missing = Vec::new();
+
+    for agent in agents {
+        let referenced: Vec<String> = match &agent.tools {
+            NameFilter::AllKeyword(AllKeyword(list)) => list
+                .iter()
+                .filter(|name| name.as_str() != "all")
+                .cloned()
+                .collect(),
+            NameFilter::Allow(list) => list.clone(),
+            NameFilter::Deny(deny) => deny.except.clone(),
+        };
+
+        let agent_missing: Vec<String> = referenced
+            .into_iter()
+            .filter(|name| !available.contains(name))
+            .collect();
+        if !agent_missing.is_empty() {
+            missing.push((agent.name.clone(), agent_missing));
+        }
+    }
+
+    missing
+}
+
+fn warn_missing_agent_tool_references(
+    agents: &[crate::config::sub_agent::SubAgentConfig],
+    registry: &ToolRegistry,
+) {
+    for (agent, missing_tools) in missing_agent_tool_references(agents, registry) {
+        for tool in &missing_tools {
+            tracing::warn!(
+                agent = %agent,
+                tool = %tool,
+                "AGENT.md references unregistered tool; will fail at runtime as Unknown tool"
+            );
+        }
+        tracing::warn!(
+            agent = %agent,
+            missing_tool_count = missing_tools.len(),
+            "AGENT.md tool references missing from registry"
+        );
+    }
+}
+
 /// Build the session backend (shared with SessionManager and persist hooks).
 fn build_session_backend(
     config: &crate::config::AppConfig,
@@ -850,7 +903,9 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     let sub_agent_configs = build_sub_agents(&config.workspace_dir);
     let sub_agent_count = sub_agent_configs.len();
     let sub_agent_names: Vec<String> = sub_agent_configs.iter().map(|a| a.name.clone()).collect();
-    let sub_agent_registry = Arc::new(crate::agents::AgentRegistry::from_vec(sub_agent_configs));
+    let sub_agent_registry = Arc::new(crate::agents::AgentRegistry::from_vec(
+        sub_agent_configs.clone(),
+    ));
 
     let registry_arc: Arc<dyn crate::providers::ProviderRegistry> = Arc::new(registry);
 
@@ -872,6 +927,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     tools.register(Arc::new(crate::tools::ViewVideoTool::new(Arc::clone(
         &registry_arc,
     ))));
+
+    warn_missing_agent_tool_references(&sub_agent_configs, &tools);
 
     // WorkspaceWatcher for hot-reload.
     let _watcher =
@@ -1350,6 +1407,71 @@ async fn wait_for_signal() -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::filters::ToolFilter;
+    use crate::config::sub_agent::{AgentIsolation, SubAgentConfig};
+    use crate::providers::{Tool, ToolResult};
+    use async_trait::async_trait;
+    use std::sync::Arc;
+
+    struct NamedTool(&'static str);
+
+    #[async_trait]
+    impl Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        fn description(&self) -> &str {
+            "test tool"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+            _session: &crate::agents::session::Session,
+        ) -> anyhow::Result<ToolResult> {
+            Ok(ToolResult {
+                success: true,
+                output: String::new(),
+                error: None,
+            })
+        }
+    }
+
+    #[test]
+    fn detects_missing_agent_tool_references() {
+        let agent = SubAgentConfig {
+            name: "coder".to_string(),
+            system_prompt: String::new(),
+            tools: ToolFilter::Allow(vec!["shell".to_string(), "ghost_tool".to_string()]),
+            skills: Default::default(),
+            mcp: Default::default(),
+            max_tool_calls: None,
+            description: None,
+            model: None,
+            isolation: AgentIsolation::default(),
+        };
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(NamedTool("shell")));
+
+        let missing = missing_agent_tool_references(&[agent], &registry);
+
+        assert_eq!(
+            missing,
+            vec![("coder".to_string(), vec!["ghost_tool".to_string()])]
+        );
+    }
 }
 
 // ── Hot-switch helpers ──────────────────────────────────────────────────────
