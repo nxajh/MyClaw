@@ -25,6 +25,11 @@ pub struct TokenManager {
     pub http_client: reqwest::Client,
     /// Background refresh task handle.
     pub bg_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Serializes token refreshes (singleflight). Concurrent refreshers share
+    /// one network fetch instead of each issuing a new token — important
+    /// because QQ's API may invalidate the previously-issued token, and racing
+    /// fetches can leave the cache holding an already-invalidated token.
+    refresh_lock: tokio::sync::Mutex<()>,
 }
 
 impl TokenManager {
@@ -38,6 +43,7 @@ impl TokenManager {
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             bg_handle: tokio::sync::Mutex::new(None),
+            refresh_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -117,12 +123,41 @@ impl TokenManager {
     }
 
     /// Force refresh the access token.
+    ///
+    /// Always fetches a new token, ignoring any cached value. Used when the QQ
+    /// API signals the current token is invalid (HTTP 401 / code 11244) even if
+    /// our local clock says it hasn't expired. The refresh lock serializes
+    /// concurrent force-refreshes so only one network fetch happens at a time.
     pub async fn refresh(&self) -> anyhow::Result<String> {
-        self.do_refresh().await
+        let _guard = self.refresh_lock.lock().await;
+        let token_state = self.fetch_new_token().await?;
+        let token = token_state.access_token.clone();
+        *self.state.write().await = Some(token_state);
+        Ok(token)
     }
 
-    /// Internal: fetch a new token and update the cache.
+    /// Internal: get a valid token, refreshing if needed.
+    ///
+    /// Singleflight: the refresh lock serializes refreshes. After acquiring the
+    /// lock we re-check the cache — another caller may have just refreshed — so
+    /// concurrent callers share one fetch instead of each hitting the API.
+    /// Fetching a new QQ token can invalidate the previous one, so deduplication
+    /// also avoids the "second fetch invalidates the first, cache holds stale
+    /// token" race.
     pub async fn do_refresh(&self) -> anyhow::Result<String> {
+        let _guard = self.refresh_lock.lock().await;
+        // Re-check after acquiring the lock: a concurrent refresh may have just
+        // populated the cache with a still-fresh token.
+        {
+            let state = self.state.read().await;
+            if let Some(ref s) = *state {
+                if let Ok(remaining) = s.expires_at.duration_since(std::time::SystemTime::now()) {
+                    if remaining > Duration::from_secs(5) {
+                        return Ok(s.access_token.clone());
+                    }
+                }
+            }
+        }
         let token_state = self.fetch_new_token().await?;
         let token = token_state.access_token.clone();
         *self.state.write().await = Some(token_state);
