@@ -150,7 +150,7 @@ impl ContextEngine {
         provider: Arc<dyn ChatProvider>,
         session: &crate::agents::session::Session,
     ) -> anyhow::Result<CompactionResult> {
-        let (compact_start, compact_end, existing_summary) =
+        let (replace_start, compact_start, compact_end, existing_summary) =
             find_incremental_range(history, boundary);
 
         let to_compact: Vec<ChatMessage> = history[compact_start..compact_end].to_vec();
@@ -159,9 +159,13 @@ impl ContextEngine {
         }
 
         let compacted_count = to_compact.len();
-        let removed_tokens: u64 = to_compact.iter().map(estimate_message_tokens).sum();
+        let removed_tokens: u64 = history[replace_start..compact_end]
+            .iter()
+            .map(estimate_message_tokens)
+            .sum();
 
         tracing::info!(
+            replace_start,
             compact_start,
             compact_end,
             boundary,
@@ -189,7 +193,7 @@ impl ContextEngine {
         let summary_tokens = estimate_message_tokens(&ChatMessage::user_text(summary.clone()));
 
         Ok(CompactionResult {
-            compact_start,
+            compact_start: replace_start,
             compact_end,
             summary,
             summary_tokens,
@@ -498,7 +502,7 @@ struct SummaryResponse {
 fn find_incremental_range(
     history: &[ChatMessage],
     boundary: usize,
-) -> (usize, usize, Option<String>) {
+) -> (usize, usize, usize, Option<String>) {
     let last_summary = history[..boundary].iter().rposition(|m| {
         m.role == "user"
             && m.text_content()
@@ -507,9 +511,68 @@ fn find_incremental_range(
     match last_summary {
         Some(idx) => {
             let existing = history[idx].text_content();
-            (idx, boundary, Some(existing))
+            (idx, idx + 1, boundary, Some(existing))
         }
-        None => (0, boundary, None),
+        None => (0, 0, boundary, None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incremental_range_without_existing_summary_compacts_prefix() {
+        let history = vec![
+            ChatMessage::user_text("u1"),
+            ChatMessage::assistant_text("a1"),
+            ChatMessage::user_text("u2"),
+        ];
+
+        let (replace_start, compact_start, compact_end, existing) =
+            find_incremental_range(&history, 2);
+
+        assert_eq!(replace_start, 0);
+        assert_eq!(compact_start, 0);
+        assert_eq!(compact_end, 2);
+        assert!(existing.is_none());
+    }
+
+    #[test]
+    fn incremental_range_excludes_existing_summary_from_new_content() {
+        let history = vec![
+            ChatMessage::user_text("[CONTEXT COMPACTION — REFERENCE ONLY] previous"),
+            ChatMessage::user_text("new user"),
+            ChatMessage::assistant_text("new assistant"),
+            ChatMessage::user_text("retained"),
+        ];
+
+        let (replace_start, compact_start, compact_end, existing) =
+            find_incremental_range(&history, 3);
+
+        assert_eq!(replace_start, 0);
+        assert_eq!(compact_start, 1);
+        assert_eq!(compact_end, 3);
+        assert_eq!(
+            existing.as_deref(),
+            Some("[CONTEXT COMPACTION — REFERENCE ONLY] previous")
+        );
+    }
+
+    #[test]
+    fn incremental_range_detects_no_new_content_after_existing_summary() {
+        let history = vec![
+            ChatMessage::user_text("[CONTEXT COMPACTION — REFERENCE ONLY] previous"),
+            ChatMessage::user_text("retained"),
+        ];
+
+        let (replace_start, compact_start, compact_end, existing) =
+            find_incremental_range(&history, 1);
+
+        assert_eq!(replace_start, 0);
+        assert_eq!(compact_start, 1);
+        assert_eq!(compact_end, 1);
+        assert!(existing.is_some());
     }
 }
 
