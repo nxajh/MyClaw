@@ -5,10 +5,12 @@
 //! conversation's prompt cache prefix and uses a restricted tool set to
 //! persist durable memories. Fire-and-forget — the main turn does not wait.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use anyhow::Result;
 use futures_util::StreamExt;
+use tokio::sync::{Mutex, Semaphore};
 
 use crate::agents::session::Session;
 use crate::agents::tool_registry::ToolRegistry;
@@ -50,28 +52,98 @@ const ALLOWED: &[&str] = &[
     "memory_manage",
 ];
 
-const MAX_ROUNDS: usize = 5;
+const MAX_ROUNDS: usize = 3;
+const OVERALL_TIMEOUT: Duration = Duration::from_secs(90);
+const SESSION_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+const MAX_FORK_CONTEXT_MESSAGES: usize = 24;
+const CONTEXT_TAIL_MESSAGES: usize = 12;
+
+static MEMORY_FORK_SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
+static SESSION_COOLDOWNS: OnceLock<Mutex<std::collections::HashMap<String, std::time::Instant>>> =
+    OnceLock::new();
 
 /// Run the memory extraction fork. Best-effort — logs errors, never panics.
 pub async fn run_memory_fork(input: ForkInput) {
+    let session_key = input.session_owner.clone();
+    if should_skip_for_cooldown(&session_key).await {
+        tracing::debug!(session_owner = %session_key, "memory_fork: skipped by session cooldown");
+        return;
+    }
+
+    let semaphore = MEMORY_FORK_SEMAPHORE.get_or_init(|| Semaphore::new(1));
+    let permit = match semaphore.try_acquire() {
+        Ok(permit) => permit,
+        Err(_) => {
+            tracing::debug!(session_owner = %session_key, "memory_fork: skipped because another fork is running");
+            return;
+        }
+    };
+
     tracing::info!(
         model = %input.model_id,
         msg_count = input.messages.len(),
         "memory_fork: starting"
     );
 
-    match run_memory_fork_inner(input).await {
-        Ok(written) => {
+    let result = tokio::time::timeout(OVERALL_TIMEOUT, run_memory_fork_inner(input)).await;
+    drop(permit);
+
+    match result {
+        Ok(Ok(written)) => {
+            mark_session_cooldown(&session_key).await;
             if written > 0 {
                 tracing::info!(files_written = written, "memory_fork: memories saved");
             } else {
                 tracing::debug!("memory_fork: no memories saved");
             }
         }
-        Err(e) => {
+        Ok(Err(e)) => {
+            mark_session_cooldown(&session_key).await;
             tracing::warn!(err = %e, "memory_fork: failed");
         }
+        Err(_) => {
+            mark_session_cooldown(&session_key).await;
+            tracing::warn!(timeout_secs = OVERALL_TIMEOUT.as_secs(), "memory_fork: timed out");
+        }
     }
+}
+
+async fn should_skip_for_cooldown(session_key: &str) -> bool {
+    let cooldowns = SESSION_COOLDOWNS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let cooldowns = cooldowns.lock().await;
+    cooldowns
+        .get(session_key)
+        .is_some_and(|last| last.elapsed() < SESSION_COOLDOWN)
+}
+
+async fn mark_session_cooldown(session_key: &str) {
+    let cooldowns = SESSION_COOLDOWNS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut cooldowns = cooldowns.lock().await;
+    cooldowns.insert(session_key.to_string(), std::time::Instant::now());
+    cooldowns.retain(|_, last| last.elapsed() < SESSION_COOLDOWN * 2);
+}
+
+fn compact_fork_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    if messages.len() <= MAX_FORK_CONTEXT_MESSAGES {
+        return messages;
+    }
+
+    let head = messages
+        .iter()
+        .take(2)
+        .filter(|msg| msg.role == "system")
+        .cloned()
+        .collect::<Vec<_>>();
+    let tail_start = messages.len().saturating_sub(CONTEXT_TAIL_MESSAGES);
+    let omitted = messages.len().saturating_sub(head.len() + CONTEXT_TAIL_MESSAGES);
+    let summary = ChatMessage::system_text(format!(
+        "Memory fork context was trimmed: {omitted} older messages omitted. Extract only durable memories evidenced by the recent messages below; do not infer task progress from omitted history."
+    ));
+
+    let mut compacted = head;
+    compacted.push(summary);
+    compacted.extend(messages.into_iter().skip(tail_start));
+    compacted
 }
 
 async fn run_memory_fork_inner(input: ForkInput) -> Result<usize> {
@@ -95,8 +167,8 @@ async fn run_memory_fork_inner(input: ForkInput) -> Result<usize> {
             }
         });
 
-    // Assemble messages: original context + extraction prompt.
-    let mut messages = input.messages;
+    // Assemble messages: compacted recent context + extraction prompt.
+    let mut messages = compact_fork_messages(input.messages);
     let extraction_prompt = build_extraction_prompt(&input.knowledge_dir);
     messages.push(ChatMessage::user_text(extraction_prompt));
 
@@ -186,6 +258,17 @@ async fn run_memory_fork_inner(input: ForkInput) -> Result<usize> {
                 serde_json::from_str(&call.arguments)
                     .unwrap_or_else(|_| serde_json::json!({ "raw": &call.arguments }))
             };
+            if call.name == "memory_manage" && args["action"].as_str() == Some("remove") {
+                tracing::warn!("memory_fork: remove action blocked");
+                let mut tool_msg = ChatMessage::text(
+                    "tool",
+                    "memory_manage(action='remove') is not available during background memory extraction",
+                );
+                tool_msg.tool_call_id = Some(call.id.clone());
+                tool_msg.is_error = Some(true);
+                messages.push(tool_msg);
+                continue;
+            }
 
             let raw = tool.execute(args, &session_shell).await;
             let result: anyhow::Result<ToolResult> = raw;
@@ -363,7 +446,22 @@ fn build_extraction_prompt(knowledge_dir: &str) -> String {
          ## Existing memory index\n\
          {existing_index}\n\
          \n\
-         Check this list before writing — update an existing file rather than creating a duplicate.\n\
+         Check this list before writing — use memory_search for likely duplicates and update an existing file rather than creating a duplicate.\n\
+         \n\
+         ## Durability gate (must pass before writing)\n\
+         Write only if the fact is likely to remain useful after 7 days and across future sessions.\n\
+         Before any add/replace, internally classify the candidate:\n\
+         - durability: high|medium|low\n\
+         - staleness_risk: low|medium|high\n\
+         - action: add|replace|skip\n\
+         Only call memory_manage when durability is high or medium AND staleness_risk is low or medium.\n\
+         Skip task progress, transient runtime status, temporary TODOs, current commit/PID/log state, and one-off observations.\n\
+         \n\
+         ## Replace-first rule\n\
+         Before creating a new memory, call memory_search with the key terms.\n\
+         If an existing memory covers the same topic, use `memory_manage` action `replace` to merge the new durable fact.\n\
+         Use `add` only when no existing memory covers the subject.\n\
+         Never call `remove` unless the user explicitly confirmed deletion in the main conversation.\n\
          \n\
          ## What to save\n\
          - User preferences, habits, and communication style\n\
@@ -377,7 +475,7 @@ fn build_extraction_prompt(knowledge_dir: &str) -> String {
          - Code snippets, file contents, git diffs\n\
          \n\
          ## How to save\n\
-         Use the `memory_manage` tool with action `add` (new), `replace` (update), or `remove` (delete).\n\
+         Use the `memory_manage` tool with action `add` (new) or `replace` (update). Do not use `remove` from this background fork.\n\
          \n\
          The tool auto-generates YAML frontmatter for you. Pass metadata as tool parameters:\n\
          - name: short_snake_case_name\n\
