@@ -20,6 +20,7 @@ pub struct TokenState {
 
 pub struct TokenManager {
     pub state: tokio::sync::RwLock<Option<TokenState>>,
+    pub account_id: String,
     pub app_id: String,
     pub client_secret: String,
     pub http_client: reqwest::Client,
@@ -33,9 +34,10 @@ pub struct TokenManager {
 }
 
 impl TokenManager {
-    pub fn new(app_id: String, client_secret: String) -> Self {
+    pub fn new(account_id: String, app_id: String, client_secret: String) -> Self {
         Self {
             state: tokio::sync::RwLock::new(None),
+            account_id,
             app_id,
             client_secret,
             http_client: reqwest::Client::builder()
@@ -58,7 +60,7 @@ impl TokenManager {
         // so that listen() returns with a populated cache and get_token() won't
         // race with a fallback do_refresh().
         if let Err(e) = self.do_refresh().await {
-            error!(err = %e, "QQ Bot initial token fetch failed");
+            error!(account = %self.account_id, err = %e, "QQ Bot initial token fetch failed");
         }
         let this = Arc::clone(self);
         *handle = Some(tokio::spawn(async move {
@@ -99,7 +101,7 @@ impl TokenManager {
             }
 
             if let Err(e) = self.do_refresh().await {
-                error!(err = %e, "QQ Bot background token refresh failed, retrying in 5s");
+                error!(account = %self.account_id, err = %e, "QQ Bot background token refresh failed, retrying in 5s");
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
@@ -209,6 +211,7 @@ impl TokenManager {
         };
 
         info!(
+            account = %self.account_id,
             expires_in_secs = expires_in,
             "QQ Bot access token refreshed"
         );

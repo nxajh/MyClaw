@@ -91,6 +91,7 @@ pub fn user_agent() -> String {
 #[derive(Clone)]
 pub struct QQBotChannel {
     pub(super) config: QQBotAccountConfig,
+    pub(super) account_id: String,
     pub(super) token_manager: Arc<TokenManager>,
     pub(super) dedup: DedupState,
     /// Last sequence number for heartbeat.
@@ -106,13 +107,14 @@ pub struct QQBotChannel {
 }
 
 impl QQBotChannel {
-    pub fn new(config: QQBotAccountConfig) -> Self {
+    pub fn new(account_id: String, config: QQBotAccountConfig) -> Self {
         let app_id = config.app_id.clone();
         let client_secret = config.client_secret.clone();
 
         let ch = Self {
             config,
-            token_manager: Arc::new(TokenManager::new(app_id, client_secret)),
+            account_id: account_id.clone(),
+            token_manager: Arc::new(TokenManager::new(account_id, app_id, client_secret)),
             dedup: DedupState::new(),
             last_seq: Arc::new(Mutex::new(None)),
             http_client: reqwest::Client::builder()
@@ -177,7 +179,7 @@ impl QQBotChannel {
 
         // Token expired? Force-refresh and retry once.
         if status.as_u16() == 401 || text.contains("11244") {
-            warn!(status = %status, "gateway got token-expired error, refreshing and retrying");
+            warn!(account = %self.account_id, status = %status, "gateway got token-expired error, refreshing and retrying");
             let new_token = self.token_manager.refresh().await?;
             let ua = user_agent();
             let resp = self
@@ -814,7 +816,7 @@ impl QQBotChannel {
 
         // Token-expired? Force-refresh and retry once.
         if status.as_u16() == 401 || text.contains("11244") {
-            warn!(status = %status, "QQ Bot REST got token-expired error, refreshing and retrying");
+            warn!(account = %self.account_id, status = %status, "QQ Bot REST got token-expired error, refreshing and retrying");
             let new_token = self.token_manager.refresh().await?;
             let ua = user_agent();
             let resp = self
@@ -844,6 +846,7 @@ impl QQBotChannel {
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(5);
             warn!(
+                account = %self.account_id,
                 retry_after_secs = retry_after,
                 "QQ Bot REST rate limited, retrying after delay"
             );
@@ -1023,7 +1026,7 @@ impl QQBotChannel {
 
             // Token expired? Force-refresh and retry once.
             if status.as_u16() == 401 || text.contains("11244") {
-                warn!(status = %status, "C2C keyboard got token-expired error, refreshing and retrying");
+                warn!(account = %self.account_id, status = %status, "C2C keyboard got token-expired error, refreshing and retrying");
                 let new_token = self.token_manager.refresh().await?;
                 let resp = self
                     .http_client
@@ -1108,7 +1111,7 @@ impl QQBotChannel {
 
             // Token expired? Force-refresh and retry once.
             if status.as_u16() == 401 || text.contains("11244") {
-                warn!(status = %status, "group keyboard got token-expired error, refreshing and retrying");
+                warn!(account = %self.account_id, status = %status, "group keyboard got token-expired error, refreshing and retrying");
                 let new_token = self.token_manager.refresh().await?;
                 let resp = self
                     .http_client
@@ -1489,7 +1492,7 @@ impl Channel for QQBotChannel {
 
                 // Token expired? Force-refresh and retry once.
                 if status.as_u16() == 401 || text.contains("11244") {
-                    warn!(status = %status, "file upload got token-expired error, refreshing and retrying");
+                    warn!(account = %self.account_id, status = %status, "file upload got token-expired error, refreshing and retrying");
                     let new_token = self.token_manager.refresh().await?;
                     let retry_resp = self
                         .http_client
@@ -1591,12 +1594,12 @@ impl QQBotChannel {
             match result {
                 Ok(WsDisconnect::TryResume) => {
                     // Resume-capable disconnect — try immediately with short delay
-                    info!("QQ Bot WebSocket disconnected (resumable), reconnecting");
+                    info!(account = %self.account_id, "QQ Bot WebSocket disconnected (resumable), reconnecting");
                     attempt = 0;
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
                 Ok(WsDisconnect::Clean) => {
-                    warn!("QQ Bot WebSocket disconnected, reconnecting");
+                    warn!(account = %self.account_id, "QQ Bot WebSocket disconnected, reconnecting");
                     if rapid {
                         attempt += 1;
                     } else {
@@ -1611,23 +1614,23 @@ impl QQBotChannel {
                     };
                     // Clean disconnect clears session
                     *self.session.lock() = None;
-                    info!(delay_secs = delay.as_secs(), attempt, "reconnecting");
+                    info!(account = %self.account_id, delay_secs = delay.as_secs(), attempt, "reconnecting");
                     tokio::time::sleep(delay).await;
                 }
                 Ok(WsDisconnect::TokenExpired) => {
-                    warn!("QQ Bot token expired, forcing refresh before reconnect");
+                    warn!(account = %self.account_id, "QQ Bot token expired, forcing refresh before reconnect");
                     if let Err(e) = self.token_manager.refresh().await {
-                        error!(err = %e, "token refresh failed");
+                        error!(account = %self.account_id, err = %e, "token refresh failed");
                     }
                     *self.session.lock() = None;
                     tokio::time::sleep(Duration::from_secs(3)).await;
                 }
                 Ok(WsDisconnect::Fatal) => {
-                    error!("QQ Bot WebSocket fatal disconnect, stopping reconnect");
+                    error!(account = %self.account_id, "QQ Bot WebSocket fatal disconnect, stopping reconnect");
                     return;
                 }
                 Err(e) => {
-                    error!(err = %e, "QQ Bot WebSocket error, reconnecting");
+                    error!(account = %self.account_id, err = %e, "QQ Bot WebSocket error, reconnecting");
                     if rapid {
                         attempt += 1;
                     } else {
@@ -1656,14 +1659,14 @@ impl QQBotChannel {
     ) -> anyhow::Result<WsDisconnect> {
         // 1. Get gateway URL.
         let ws_url = self.fetch_gateway_url().await?;
-        info!(url = %ws_url, "connecting to QQ Bot WebSocket gateway");
+        info!(account = %self.account_id, url = %ws_url, "connecting to QQ Bot WebSocket gateway");
 
         // 2. Connect.
         let (ws_stream, _response) = connect_async(&ws_url)
             .await
             .map_err(|e| anyhow::anyhow!("WebSocket connect failed: {}", e))?;
 
-        info!("QQ Bot WebSocket connected");
+        info!(account = %self.account_id, "QQ Bot WebSocket connected");
         let (mut write, mut read) = ws_stream.split();
 
         // 3. Wait for Hello (OpCode 10).
@@ -1690,14 +1693,14 @@ impl QQBotChannel {
 
         let heartbeat_interval: u64 = hello.d["heartbeat_interval"].as_u64().unwrap_or(41250);
 
-        info!(heartbeat_interval_ms = heartbeat_interval, "received Hello");
+        info!(account = %self.account_id, heartbeat_interval_ms = heartbeat_interval, "received Hello");
 
         // 4. Send Identify or Resume.
         let token = self.token_manager.get_token().await?;
         let session = self.session.lock().clone();
         let init_payload = match session {
             Some(ref s) => {
-                info!(session_id = %s.session_id, seq = s.last_seq, "sending Resume");
+                info!(account = %self.account_id, session_id = %s.session_id, seq = s.last_seq, "sending Resume");
                 serde_json::json!({
                     "op": OP_RESUME,
                     "d": {
@@ -1715,7 +1718,7 @@ impl QQBotChannel {
             .await
             .map_err(|e| anyhow::anyhow!("Identify/Resume send failed: {}", e))?;
 
-        info!("QQ Bot Identify/Resume sent");
+        info!(account = %self.account_id, "QQ Bot Identify/Resume sent");
 
         // 5. Main loop: select between heartbeat tick and incoming messages.
         let mut heartbeat_ticker = tokio::time::interval(Duration::from_millis(heartbeat_interval));
@@ -1733,10 +1736,10 @@ impl QQBotChannel {
                     });
                     let text = serde_json::to_string(&payload).unwrap_or_default();
                     if let Err(e) = write.send(Message::Text(text.into())).await {
-                        warn!(err = %e, "heartbeat send failed, connection likely closed");
+                        warn!(account = %self.account_id, err = %e, "heartbeat send failed, connection likely closed");
                         return Ok(WsDisconnect::TryResume);
                     }
-                    debug!("heartbeat sent");
+                    debug!(account = %self.account_id, "heartbeat sent");
                 }
                 // Incoming WebSocket message.
                 msg = read.next() => {
@@ -1747,7 +1750,7 @@ impl QQBotChannel {
                             }
                         }
                         Some(Err(e)) => {
-                            warn!(err = %e, "WebSocket read error");
+                            warn!(account = %self.account_id, err = %e, "WebSocket read error");
                             return Ok(WsDisconnect::Clean);
                         }
                         None => {
@@ -1771,28 +1774,28 @@ impl QQBotChannel {
             Message::Text(t) => t,
             Message::Close(frame) => {
                 let code = frame.as_ref().map(|f| f.code.into()).unwrap_or(0u16);
-                info!(close_code = code, "WebSocket closed by server");
+                info!(account = %self.account_id, close_code = code, "WebSocket closed by server");
                 return Some(match code {
                     // Token expired — refresh and reconnect
                     4004 => {
-                        warn!("close 4004: token expired");
+                        warn!(account = %self.account_id, "close 4004: token expired");
                         WsDisconnect::TokenExpired
                     }
                     // Session invalid — clear session, reconnect with Identify
                     4006 | 4007 | 4009 => {
-                        warn!(code, "close: session invalidated, clearing session");
+                        warn!(account = %self.account_id, code, "close: session invalidated, clearing session");
                         *self.session.lock() = None;
                         *self.last_seq.lock() = None;
                         WsDisconnect::Clean
                     }
                     // Rate limited — reconnect normally (ws_loop handles delay via attempt counter)
                     4008 => {
-                        warn!("close 4008: rate limited");
+                        warn!(account = %self.account_id, "close 4008: rate limited");
                         WsDisconnect::Clean
                     }
                     // Fatal — stop reconnecting
                     4914 | 4915 => {
-                        error!(code, "fatal close code");
+                        error!(account = %self.account_id, code, "fatal close code");
                         WsDisconnect::Fatal
                     }
                     _ => WsDisconnect::Clean,
@@ -1805,7 +1808,7 @@ impl QQBotChannel {
         let payload: GatewayPayload = match serde_json::from_str(&text) {
             Ok(p) => p,
             Err(e) => {
-                warn!(err = %e, "failed to parse WebSocket payload");
+                warn!(account = %self.account_id, err = %e, "failed to parse WebSocket payload");
                 return None;
             }
         };
@@ -1825,6 +1828,7 @@ impl QQBotChannel {
                                 payload.d.get("session_id").and_then(|v| v.as_str())
                             {
                                 info!(
+                                    account = %self.account_id,
                                     session_id = session_id,
                                     "READY received, session established"
                                 );
@@ -1835,7 +1839,7 @@ impl QQBotChannel {
                             }
                         }
                         "RESUMED" => {
-                            info!("RESUMED received, session restored");
+                            info!(account = %self.account_id, "RESUMED received, session restored");
                         }
                         _ => {}
                     }
@@ -1870,7 +1874,7 @@ impl QQBotChannel {
                             .await;
 
                         if tx.send(channel_msg.clone()).await.is_err() {
-                            warn!("channel receiver dropped, stopping listen");
+                            warn!(account = %self.account_id, "channel receiver dropped, stopping listen");
                             return Some(WsDisconnect::Clean);
                         }
                         // Start typing keep-alive for C2C messages.
@@ -1879,14 +1883,14 @@ impl QQBotChannel {
                 }
             }
             OP_HEARTBEAT_ACK => {
-                debug!("heartbeat ACK received");
+                debug!(account = %self.account_id, "heartbeat ACK received");
             }
             OP_RECONNECT => {
-                warn!("server requested reconnect");
+                warn!(account = %self.account_id, "server requested reconnect");
                 return Some(WsDisconnect::TryResume);
             }
             OP_INVALID_SESSION => {
-                warn!("invalid session (OpCode 9), clearing session for fresh identify");
+                warn!(account = %self.account_id, "invalid session (OpCode 9), clearing session for fresh identify");
                 *self.last_seq.lock() = None;
                 *self.session.lock() = None;
                 return Some(WsDisconnect::Clean);

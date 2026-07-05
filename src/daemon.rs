@@ -691,6 +691,7 @@ fn build_channel_accounts(
                         "qqbot".to_string(),
                         account_id.clone(),
                         Arc::new(crate::channels::qqbot::QQBotChannel::new(
+                            account_id.clone(),
                             account_cfg.clone(),
                         )),
                     ));
@@ -1318,11 +1319,12 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
                 &[
                     sd_notify::NotifyState::MainPid(new_pid),
                     sd_notify::NotifyState::Ready,
+                    sd_notify::NotifyState::Errno(0),
                 ],
             ) {
                 tracing::warn!(err = %e, "sd_notify MAINPID+READY failed");
             } else {
-                tracing::debug!(new_pid, "sd_notify MAINPID+READY sent");
+                tracing::debug!(new_pid, "sd_notify MAINPID+READY+ERRNO=0 sent");
             }
             if let Some(old_pid) = crate::hot_switch::old_pid() {
                 tracing::debug!(
@@ -1335,7 +1337,13 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             }
         } else {
             // Normal startup: tell systemd we are ready to accept connections.
-            if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]) {
+            if let Err(e) = sd_notify::notify(
+                false,
+                &[
+                    sd_notify::NotifyState::Ready,
+                    sd_notify::NotifyState::Errno(0),
+                ],
+            ) {
                 tracing::debug!(err = %e, "sd_notify READY failed (not running under systemd)");
             }
         }
