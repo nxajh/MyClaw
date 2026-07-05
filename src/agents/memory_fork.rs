@@ -278,6 +278,13 @@ async fn run_memory_fork_inner(input: ForkInput) -> Result<usize> {
                 serde_json::from_str(&call.arguments)
                     .unwrap_or_else(|_| serde_json::json!({ "raw": &call.arguments }))
             };
+            let mut args = args;
+            if call.name == "memory_manage" {
+                if let Some(obj) = args.as_object_mut() {
+                    obj.entry("model".to_string())
+                        .or_insert_with(|| serde_json::Value::String(input.model_id.clone()));
+                }
+            }
             if call.name == "memory_manage" && args["action"].as_str() == Some("remove") {
                 tracing::warn!("memory_fork: remove action blocked");
                 let mut tool_msg = ChatMessage::text(
@@ -480,7 +487,7 @@ fn build_extraction_prompt(knowledge_dir: &str) -> String {
          ## Replace-first rule\n\
          Before creating a new memory, call memory_search with the key terms.\n\
          If an existing memory covers the same topic, use `memory_manage` action `replace` to merge the new durable fact.\n\
-         Use `add` only when no existing memory covers the subject.\n\
+         Use `add` only when no existing memory covers the subject. Include a concise `reason` in memory_manage calls so audit logs explain why the memory changed.\n\
          Never call `remove` unless the user explicitly confirmed deletion in the main conversation.\n\
          \n\
          ## What to save\n\

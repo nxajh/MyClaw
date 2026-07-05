@@ -9,6 +9,8 @@
 use async_trait::async_trait;
 use serde_json::json;
 use std::collections::HashSet;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -22,6 +24,60 @@ use crate::providers::{Tool, ToolResult};
 const MAX_CONTENT_CHARS: usize = 10_000;
 const MAX_DESCRIPTION_CHARS: usize = 500;
 const MAX_NAME_LENGTH: usize = 64;
+const MEMORY_AUDIT_LOG: &str = "memory_audit.jsonl";
+
+fn short_sha256(content: &str) -> String {
+    let hash = crate::providers::capability_chat::sha256_hex(content.as_bytes());
+    hash.chars().take(16).collect()
+}
+
+fn redact_audit_reason(reason: Option<&str>) -> Option<String> {
+    reason
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(500).collect())
+}
+
+fn append_memory_audit(
+    workspace_dir: &Path,
+    session: &Session,
+    user_id: &str,
+    action: &str,
+    name: &str,
+    old_hash: Option<String>,
+    new_hash: Option<String>,
+    args: &serde_json::Value,
+) {
+    let audit_dir = workspace_dir.join(crate::memory::MEMORY_DIR_NAME).join(".audit");
+    if let Err(e) = std::fs::create_dir_all(&audit_dir) {
+        tracing::warn!(err = %e, "memory audit: failed to create audit dir");
+        return;
+    }
+
+    let entry = json!({
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "session_id": session.id,
+        "session_owner": session.owner,
+        "user_id": user_id,
+        "action": action,
+        "memory_name": name,
+        "old_hash": old_hash,
+        "new_hash": new_hash,
+        "reason": redact_audit_reason(args["reason"].as_str()),
+        "model": args["model"].as_str(),
+        "source": "memory_manage",
+    });
+
+    let path = audit_dir.join(MEMORY_AUDIT_LOG);
+    match OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(mut file) => {
+            if let Err(e) = writeln!(file, "{}", entry) {
+                tracing::warn!(err = %e, path = %path.display(), "memory audit: failed to write entry");
+            }
+        }
+        Err(e) => tracing::warn!(err = %e, path = %path.display(), "memory audit: failed to open log"),
+    }
+}
 
 /// Validate a memory file name.
 fn validate_name(name: &str) -> Result<(), String> {
@@ -796,6 +852,14 @@ impl Tool for MemoryManageTool {
                 "confirm": {
                     "type": "boolean",
                     "description": "Required and must be true for action='remove'. Only remove after explicit user confirmation."
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Optional short reason for audit logging."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional model identifier for audit logging when a background agent writes memory."
                 }
             },
             "required": ["action", "name"]
@@ -812,9 +876,9 @@ impl Tool for MemoryManageTool {
         let user_id = user_id_for(session, &self.resolver);
 
         let result = match action {
-            "add" => self.action_add(name, &args, &user_id),
-            "replace" => self.action_replace(name, &args, &user_id),
-            "remove" => self.action_remove(name, &args, &user_id),
+            "add" => self.action_add(name, &args, &user_id, session),
+            "replace" => self.action_replace(name, &args, &user_id, session),
+            "remove" => self.action_remove(name, &args, &user_id, session),
             _ => Err(format!(
                 "Unknown action '{}'. Use: add, replace, remove",
                 action
@@ -842,6 +906,7 @@ impl MemoryManageTool {
         name: &str,
         args: &serde_json::Value,
         user_id: &str,
+        session: &Session,
     ) -> Result<serde_json::Value, String> {
         validate_name(name)?;
 
@@ -887,6 +952,16 @@ impl MemoryManageTool {
         let _ = std::fs::create_dir_all(target.parent().unwrap_or(&target));
         atomic_write(&target, &file_content)
             .map_err(|e| format!("Failed to write memory file: {}", e))?;
+        append_memory_audit(
+            &self.workspace_dir,
+            session,
+            user_id,
+            "add",
+            name,
+            None,
+            Some(short_sha256(&file_content)),
+            args,
+        );
 
         Ok(json!({
             "success": true,
@@ -904,6 +979,7 @@ impl MemoryManageTool {
         name: &str,
         args: &serde_json::Value,
         user_id: &str,
+        session: &Session,
     ) -> Result<serde_json::Value, String> {
         validate_name(name)?;
 
@@ -912,6 +988,9 @@ impl MemoryManageTool {
             .iter()
             .find(|f| f.name == name)
             .ok_or_else(|| format!("Memory '{}' not found.", name))?;
+        let old_hash = std::fs::read_to_string(&existing.path)
+            .ok()
+            .map(|content| short_sha256(&content));
 
         let content = args["content"]
             .as_str()
@@ -978,6 +1057,16 @@ impl MemoryManageTool {
         };
         atomic_write(&target, &file_content)
             .map_err(|e| format!("Failed to write memory file: {}", e))?;
+        append_memory_audit(
+            &self.workspace_dir,
+            session,
+            user_id,
+            "replace",
+            name,
+            old_hash,
+            Some(short_sha256(&file_content)),
+            args,
+        );
 
         Ok(json!({
             "success": true,
@@ -992,6 +1081,7 @@ impl MemoryManageTool {
         name: &str,
         args: &serde_json::Value,
         user_id: &str,
+        session: &Session,
     ) -> Result<serde_json::Value, String> {
         validate_name(name)?;
         if args["confirm"].as_bool() != Some(true) {
@@ -1006,9 +1096,22 @@ impl MemoryManageTool {
             .iter()
             .find(|f| f.name == name)
             .ok_or_else(|| format!("Memory '{}' not found.", name))?;
+        let old_hash = std::fs::read_to_string(&existing.path)
+            .ok()
+            .map(|content| short_sha256(&content));
 
         std::fs::remove_file(&existing.path)
             .map_err(|e| format!("Failed to remove memory file: {}", e))?;
+        append_memory_audit(
+            &self.workspace_dir,
+            session,
+            user_id,
+            "remove",
+            name,
+            old_hash,
+            None,
+            args,
+        );
 
         Ok(json!({
             "success": true,
