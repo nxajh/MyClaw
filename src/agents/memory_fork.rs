@@ -124,26 +124,46 @@ async fn mark_session_cooldown(session_key: &str) {
 }
 
 fn compact_fork_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
-    if messages.len() <= MAX_FORK_CONTEXT_MESSAGES {
-        return messages;
-    }
+    let selected = if messages.len() <= MAX_FORK_CONTEXT_MESSAGES {
+        messages
+    } else {
+        let head = messages
+            .iter()
+            .take(2)
+            .filter(|msg| msg.role == "system")
+            .cloned()
+            .collect::<Vec<_>>();
+        let tail_start = messages.len().saturating_sub(CONTEXT_TAIL_MESSAGES);
+        let omitted = messages.len().saturating_sub(head.len() + CONTEXT_TAIL_MESSAGES);
+        let summary = ChatMessage::system_text(format!(
+            "Memory fork context was trimmed: {omitted} older messages omitted. Extract only durable memories evidenced by the recent messages below; do not infer task progress from omitted history."
+        ));
 
-    let head = messages
-        .iter()
-        .take(2)
-        .filter(|msg| msg.role == "system")
-        .cloned()
-        .collect::<Vec<_>>();
-    let tail_start = messages.len().saturating_sub(CONTEXT_TAIL_MESSAGES);
-    let omitted = messages.len().saturating_sub(head.len() + CONTEXT_TAIL_MESSAGES);
-    let summary = ChatMessage::system_text(format!(
-        "Memory fork context was trimmed: {omitted} older messages omitted. Extract only durable memories evidenced by the recent messages below; do not infer task progress from omitted history."
-    ));
+        let mut compacted = head;
+        compacted.push(summary);
+        compacted.extend(messages.into_iter().skip(tail_start));
+        compacted
+    };
 
-    let mut compacted = head;
-    compacted.push(summary);
-    compacted.extend(messages.into_iter().skip(tail_start));
-    compacted
+    sanitize_fork_context(selected)
+}
+
+fn sanitize_fork_context(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    messages
+        .into_iter()
+        .filter_map(|mut msg| {
+            if msg.role == "tool" {
+                return None;
+            }
+            msg.tool_calls = None;
+            msg.tool_call_id = None;
+            msg.is_error = None;
+            if msg.role == "assistant" && msg.text_content().trim().is_empty() {
+                return None;
+            }
+            Some(msg)
+        })
+        .collect()
 }
 
 async fn run_memory_fork_inner(input: ForkInput) -> Result<usize> {
