@@ -21,6 +21,8 @@ mod http;
 mod list_dir;
 mod media_download;
 mod memory_tool;
+#[cfg(test)]
+mod memory_tool_tests;
 mod search;
 mod search_cooldown;
 mod send_message;

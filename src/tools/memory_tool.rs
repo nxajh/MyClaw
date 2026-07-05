@@ -8,6 +8,7 @@
 
 use async_trait::async_trait;
 use serde_json::json;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -60,6 +61,111 @@ fn scan_merged(workspace_dir: &Path, user_id: &str) -> Vec<crate::memory::Memory
         }
     }
     files
+}
+
+fn normalize_optional_filter(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_lowercase())
+}
+
+fn query_tokens(query: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    query
+        .split(|c: char| c.is_whitespace() || c == ',' || c == ';' || c == '，' || c == '；')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_lowercase())
+        .filter(|s| seen.insert(s.clone()))
+        .collect()
+}
+
+fn field_match_score(field: &str, query: &str, tokens: &[String], weight: i32) -> i32 {
+    let lower = field.to_lowercase();
+    let mut score = 0;
+    if !query.is_empty() && lower.contains(query) {
+        score += weight * 3;
+    }
+    for token in tokens {
+        if lower.contains(token) {
+            score += weight;
+        }
+    }
+    score
+}
+
+fn memory_search_score(mf: &crate::memory::MemoryFile, query: &str, tokens: &[String]) -> i32 {
+    let mut score = 0;
+    score += field_match_score(&mf.name, query, tokens, 10);
+    score += mf
+        .tags
+        .iter()
+        .map(|tag| field_match_score(tag, query, tokens, 8))
+        .sum::<i32>();
+    score += field_match_score(&mf.description, query, tokens, 6);
+    score += mf
+        .links
+        .iter()
+        .map(|link| {
+            field_match_score(&link.label, query, tokens, 2)
+                + field_match_score(&link.target, query, tokens, 2)
+        })
+        .sum::<i32>();
+    score += field_match_score(&mf.content, query, tokens, 3);
+    score
+}
+
+fn best_snippet(mf: &crate::memory::MemoryFile, query: &str, tokens: &[String]) -> String {
+    let content_lower = mf.content.to_lowercase();
+    let needle = if !query.is_empty() && content_lower.contains(query) {
+        Some(query.to_string())
+    } else {
+        tokens
+            .iter()
+            .find(|token| content_lower.contains(token.as_str()))
+            .cloned()
+    };
+
+    if let Some(needle) = needle {
+        if let Some(byte_pos) = content_lower.find(&needle) {
+            let char_pos = content_lower[..byte_pos].chars().count();
+            let needle_chars = needle.chars().count();
+            let start = mf
+                .content
+                .char_indices()
+                .nth(char_pos.saturating_sub(40))
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            let end = mf
+                .content
+                .char_indices()
+                .nth(char_pos + needle_chars + 60)
+                .map(|(i, _)| i)
+                .unwrap_or(mf.content.len());
+            let mut s = String::new();
+            if start > 0 {
+                s.push_str("...");
+            }
+            s.push_str(&mf.content[start..end]);
+            if end < mf.content.len() {
+                s.push_str("...");
+            }
+            return s;
+        }
+    }
+
+    if field_match_score(&mf.description, query, tokens, 1) > 0 {
+        return mf.description.clone();
+    }
+    if let Some(link) = mf.links.iter().find(|link| {
+        field_match_score(&link.label, query, tokens, 1)
+            + field_match_score(&link.target, query, tokens, 1)
+            > 0
+    }) {
+        return format!("See Also: {} -> {}", link.label, link.target);
+    }
+    mf.content.chars().take(120).collect()
 }
 
 /// Common helper: resolve the user_id from a session via the resolver.
@@ -227,19 +333,32 @@ impl Tool for MemoryListTool {
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
-            "properties": {}
+            "properties": {
+                "memory_type": {
+                    "type": "string",
+                    "description": "Optional type filter. Omit, pass empty string, or whitespace to list all types."
+                }
+            }
         })
     }
 
     async fn execute(
         &self,
-        _args: serde_json::Value,
+        args: serde_json::Value,
         session: &Session,
     ) -> anyhow::Result<ToolResult> {
+        let type_filter = normalize_optional_filter(args["memory_type"].as_str());
         let user_id = user_id_for(session, &self.resolver);
         let files = scan_merged(&self.workspace_dir, &user_id);
-        let entries: Vec<crate::memory::IndexEntry> =
-            files.iter().map(crate::memory::IndexEntry::from).collect();
+        let entries: Vec<crate::memory::IndexEntry> = files
+            .iter()
+            .filter(|mf| {
+                type_filter
+                    .as_ref()
+                    .is_none_or(|wanted| mf.mem_type.to_lowercase() == *wanted)
+            })
+            .map(crate::memory::IndexEntry::from)
+            .collect();
 
         if entries.is_empty() {
             return Ok(ToolResult {
@@ -429,7 +548,7 @@ impl Tool for MemorySearchTool {
                 },
                 "memory_type": {
                     "type": "string",
-                    "description": "Optional type filter."
+                    "description": "Optional type filter. Omit, pass empty string, or whitespace to search all types."
                 },
                 "limit": {
                     "type": "integer",
@@ -450,7 +569,7 @@ impl Tool for MemorySearchTool {
         session: &Session,
     ) -> anyhow::Result<ToolResult> {
         let query = match args["query"].as_str() {
-            Some(q) => q.to_lowercase(),
+            Some(q) => q.trim().to_lowercase(),
             None => {
                 return Ok(ToolResult {
                     success: false,
@@ -459,7 +578,15 @@ impl Tool for MemorySearchTool {
                 });
             }
         };
-        let type_filter = args["memory_type"].as_str().map(|s| s.to_lowercase());
+        if query.is_empty() {
+            return Ok(ToolResult {
+                success: false,
+                output: json!({"success": false, "error": "'query' cannot be empty."}).to_string(),
+                error: None,
+            });
+        }
+        let tokens = query_tokens(&query);
+        let type_filter = normalize_optional_filter(args["memory_type"].as_str());
         let limit = args["limit"].as_u64().unwrap_or(20).clamp(1, 100) as usize;
         let include_related = args["include_related"].as_bool().unwrap_or(false);
 
@@ -473,24 +600,7 @@ impl Tool for MemorySearchTool {
                     continue;
                 }
             }
-            let mut score = 0i32;
-            if mf.name.to_lowercase().contains(&query) {
-                score += 3;
-            }
-            if mf.tags.iter().any(|t| t.to_lowercase().contains(&query)) {
-                score += 2;
-            }
-            if mf.description.to_lowercase().contains(&query) {
-                score += 2;
-            }
-            if mf.links.iter().any(|l| {
-                l.target.to_lowercase().contains(&query) || l.label.to_lowercase().contains(&query)
-            }) {
-                score += 2;
-            }
-            if mf.content.to_lowercase().contains(&query) {
-                score += 1;
-            }
+            let score = memory_search_score(mf, &query, &tokens);
             if score > 0 {
                 results.push((score, mf));
             }
@@ -509,48 +619,14 @@ impl Tool for MemorySearchTool {
             });
         }
 
-        results.sort_by(|a, b| b.0.cmp(&a.0));
+        results.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
         results.truncate(limit);
 
         let backlinks = build_backlinks(&files);
         let json_results: Vec<serde_json::Value> = results
             .iter()
             .map(|(score, mf)| {
-                let content_lower = mf.content.to_lowercase();
-                let snippet = if let Some(byte_pos) = content_lower.find(&query) {
-                    let char_pos = content_lower[..byte_pos].chars().count();
-                    let query_chars = query.chars().count();
-                    let start = mf
-                        .content
-                        .char_indices()
-                        .nth(char_pos.saturating_sub(40))
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
-                    let end = mf
-                        .content
-                        .char_indices()
-                        .nth(char_pos + query_chars + 60)
-                        .map(|(i, _)| i)
-                        .unwrap_or(mf.content.len());
-                    let mut s = String::new();
-                    if start > 0 {
-                        s.push_str("...");
-                    }
-                    s.push_str(&mf.content[start..end]);
-                    if end < mf.content.len() {
-                        s.push_str("...");
-                    }
-                    s
-                } else if mf.description.to_lowercase().contains(&query) {
-                    mf.description.clone()
-                } else if let Some(link) = mf.links.iter().find(|l| {
-                    l.target.to_lowercase().contains(&query)
-                        || l.label.to_lowercase().contains(&query)
-                }) {
-                    format!("See Also: {} -> {}", link.label, link.target)
-                } else {
-                    mf.content.chars().take(80).collect()
-                };
+                let snippet = best_snippet(mf, &query, &tokens);
 
                 let outgoing = link_values(&mf.links);
                 let file_backlinks = backlinks.get(&mf.name).cloned().unwrap_or_default();
@@ -800,9 +876,7 @@ impl MemoryManageTool {
         scan_memory_content_opt(content)?;
 
         // Preserve existing metadata unless overridden
-        let mem_type = args["memory_type"]
-            .as_str()
-            .map(|s| s.to_string())
+        let mem_type = normalize_optional_filter(args["memory_type"].as_str())
             .unwrap_or_else(|| existing.mem_type.clone());
         let description =
             if args["description"].as_str().is_some() || args["summary"].as_str().is_some() {
@@ -889,9 +963,7 @@ impl MemoryManageTool {
     }
 
     fn resolve_type(&self, args: &serde_json::Value) -> String {
-        args["memory_type"]
-            .as_str()
-            .map(|s| s.to_string())
+        normalize_optional_filter(args["memory_type"].as_str())
             .unwrap_or_else(|| "project".to_string())
     }
 
