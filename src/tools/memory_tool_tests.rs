@@ -106,6 +106,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_search_ascii_tokens_do_not_match_inside_words() {
+        let dir = tempfile::tempdir().unwrap();
+        write_memory(
+            dir.path(),
+            "client-channel",
+            "project",
+            "WebSocket client transport",
+            "websocket",
+            "WebSocket-based unified client transport for Web UI.",
+        );
+        write_memory(
+            dir.path(),
+            "ssh-host",
+            "project",
+            "SSH port 31822",
+            "ssh",
+            "SSH port 31822 is exposed on the ARM host.",
+        );
+        let tool = MemorySearchTool::new(dir.path().to_path_buf(), Arc::new(UserResolver::new()));
+
+        let output = search(&tool, json!({"query": "ssh port"})).await;
+        assert_eq!(output["count"], 1);
+        assert_eq!(output["results"][0]["name"], "ssh-host");
+    }
+
+    #[tokio::test]
+    async fn memory_search_ascii_boundary_allows_hyphenated_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        write_memory(
+            dir.path(),
+            "arm-host",
+            "project",
+            "ARM host",
+            "ssh-port-31822",
+            "ARM host connection details.",
+        );
+        let tool = MemorySearchTool::new(dir.path().to_path_buf(), Arc::new(UserResolver::new()));
+
+        let output = search(&tool, json!({"query": "port"})).await;
+        assert_eq!(output["count"], 1);
+        assert_eq!(output["results"][0]["name"], "arm-host");
+    }
+
+    #[tokio::test]
+    async fn memory_search_non_ascii_tokens_still_use_substring_match() {
+        let dir = tempfile::tempdir().unwrap();
+        write_memory(
+            dir.path(),
+            "openlist",
+            "project",
+            "OpenList 百度网盘服务",
+            "openlist",
+            "百度网盘管理服务部署在 ARM 主机。",
+        );
+        let tool = MemorySearchTool::new(dir.path().to_path_buf(), Arc::new(UserResolver::new()));
+
+        let output = search(&tool, json!({"query": "网盘"})).await;
+        assert_eq!(output["count"], 1);
+        assert_eq!(output["results"][0]["name"], "openlist");
+    }
+
+    #[tokio::test]
     async fn memory_list_empty_type_lists_all_types() {
         let dir = tempfile::tempdir().unwrap();
         write_memory(

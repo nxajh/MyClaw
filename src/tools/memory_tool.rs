@@ -81,6 +81,60 @@ fn query_tokens(query: &str) -> Vec<String> {
         .collect()
 }
 
+fn ascii_boundary_contains(haystack: &str, needle: &str) -> bool {
+    let mut search_start = 0;
+    while let Some(relative_pos) = haystack[search_start..].find(needle) {
+        let start = search_start + relative_pos;
+        let end = start + needle.len();
+        let before = haystack[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric());
+        let after = haystack[end..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric());
+        if !before && !after {
+            return true;
+        }
+        search_start = end;
+    }
+    false
+}
+
+fn token_matches(haystack: &str, token: &str) -> bool {
+    if token.chars().all(|c| c.is_ascii_alphanumeric()) {
+        ascii_boundary_contains(haystack, token)
+    } else {
+        haystack.contains(token)
+    }
+}
+
+fn find_token_match(haystack: &str, token: &str) -> Option<usize> {
+    if !token.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return haystack.find(token);
+    }
+
+    let mut search_start = 0;
+    while let Some(relative_pos) = haystack[search_start..].find(token) {
+        let start = search_start + relative_pos;
+        let end = start + token.len();
+        let before = haystack[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric());
+        let after = haystack[end..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric());
+        if !before && !after {
+            return Some(start);
+        }
+        search_start = end;
+    }
+    None
+}
+
 fn field_match_score(field: &str, query: &str, tokens: &[String], weight: i32) -> i32 {
     let lower = field.to_lowercase();
     let mut score = 0;
@@ -88,7 +142,7 @@ fn field_match_score(field: &str, query: &str, tokens: &[String], weight: i32) -
         score += weight * 3;
     }
     for token in tokens {
-        if lower.contains(token) {
+        if token_matches(&lower, token) {
             score += weight;
         }
     }
@@ -123,12 +177,12 @@ fn best_snippet(mf: &crate::memory::MemoryFile, query: &str, tokens: &[String]) 
     } else {
         tokens
             .iter()
-            .find(|token| content_lower.contains(token.as_str()))
+            .find(|token| find_token_match(&content_lower, token.as_str()).is_some())
             .cloned()
     };
 
     if let Some(needle) = needle {
-        if let Some(byte_pos) = content_lower.find(&needle) {
+        if let Some(byte_pos) = find_token_match(&content_lower, &needle) {
             let char_pos = content_lower[..byte_pos].chars().count();
             let needle_chars = needle.chars().count();
             let start = mf
