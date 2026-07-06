@@ -38,16 +38,16 @@ fn redact_audit_reason(reason: Option<&str>) -> Option<String> {
         .map(|s| s.chars().take(500).collect())
 }
 
-fn append_memory_audit(
-    workspace_dir: &Path,
-    session: &Session,
-    user_id: &str,
-    action: &str,
-    name: &str,
+struct MemoryAudit<'a> {
+    user_id: &'a str,
+    action: &'a str,
+    name: &'a str,
     old_hash: Option<String>,
     new_hash: Option<String>,
-    args: &serde_json::Value,
-) {
+    args: &'a serde_json::Value,
+}
+
+fn append_memory_audit(workspace_dir: &Path, session: &Session, audit: MemoryAudit<'_>) {
     let audit_dir = workspace_dir.join(crate::memory::MEMORY_DIR_NAME).join(".audit");
     if let Err(e) = std::fs::create_dir_all(&audit_dir) {
         tracing::warn!(err = %e, "memory audit: failed to create audit dir");
@@ -58,13 +58,13 @@ fn append_memory_audit(
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "session_id": session.id,
         "session_owner": session.owner,
-        "user_id": user_id,
-        "action": action,
-        "memory_name": name,
-        "old_hash": old_hash,
-        "new_hash": new_hash,
-        "reason": redact_audit_reason(args["reason"].as_str()),
-        "model": args["model"].as_str(),
+        "user_id": audit.user_id,
+        "action": audit.action,
+        "memory_name": audit.name,
+        "old_hash": audit.old_hash,
+        "new_hash": audit.new_hash,
+        "reason": redact_audit_reason(audit.args["reason"].as_str()),
+        "model": audit.args["model"].as_str(),
         "source": "memory_manage",
     });
 
@@ -72,10 +72,18 @@ fn append_memory_audit(
     match OpenOptions::new().create(true).append(true).open(&path) {
         Ok(mut file) => {
             if let Err(e) = writeln!(file, "{}", entry) {
-                tracing::warn!(err = %e, path = %path.display(), "memory audit: failed to write entry");
+                tracing::warn!(
+                    err = %e,
+                    path = %path.display(),
+                    "memory audit: failed to write entry"
+                );
             }
         }
-        Err(e) => tracing::warn!(err = %e, path = %path.display(), "memory audit: failed to open log"),
+        Err(e) => tracing::warn!(
+            err = %e,
+            path = %path.display(),
+            "memory audit: failed to open log"
+        ),
     }
 }
 
@@ -955,12 +963,14 @@ impl MemoryManageTool {
         append_memory_audit(
             &self.workspace_dir,
             session,
-            user_id,
-            "add",
-            name,
-            None,
-            Some(short_sha256(&file_content)),
-            args,
+            MemoryAudit {
+                user_id,
+                action: "add",
+                name,
+                old_hash: None,
+                new_hash: Some(short_sha256(&file_content)),
+                args,
+            },
         );
 
         Ok(json!({
@@ -1060,12 +1070,14 @@ impl MemoryManageTool {
         append_memory_audit(
             &self.workspace_dir,
             session,
-            user_id,
-            "replace",
-            name,
-            old_hash,
-            Some(short_sha256(&file_content)),
-            args,
+            MemoryAudit {
+                user_id,
+                action: "replace",
+                name,
+                old_hash,
+                new_hash: Some(short_sha256(&file_content)),
+                args,
+            },
         );
 
         Ok(json!({
@@ -1105,12 +1117,14 @@ impl MemoryManageTool {
         append_memory_audit(
             &self.workspace_dir,
             session,
-            user_id,
-            "remove",
-            name,
-            old_hash,
-            None,
-            args,
+            MemoryAudit {
+                user_id,
+                action: "remove",
+                name,
+                old_hash,
+                new_hash: None,
+                args,
+            },
         );
 
         Ok(json!({
