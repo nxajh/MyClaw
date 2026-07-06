@@ -288,6 +288,7 @@ impl Tool for ViewImageTool {
             tool_calls: None,
             is_error: None,
             model: None,
+            usage: None,
         };
         let messages = [user_msg];
 

@@ -221,6 +221,7 @@ impl Session {
             tool_calls: None,
             is_error: None,
             model: None,
+            usage: None,
         });
         self.message_ids.push(0);
     }
@@ -259,6 +260,7 @@ impl Session {
         thinking: Option<String>,
         thinking_signature: Option<String>,
         model: Option<String>,
+        usage: Option<crate::providers::ChatMessageUsage>,
     ) {
         if text.trim().is_empty() && tool_calls.is_empty() {
             return;
@@ -266,6 +268,7 @@ impl Session {
         let mut msg = ChatMessage::assistant_text(&text);
         msg.tool_calls = Some(tool_calls);
         msg.model = model;
+        msg.usage = usage;
         // Persist reasoning and/or signature. Even when there's no thinking
         // text, a signature may be present (e.g. Google functionCall
         // thoughtSignature). In that case we store an empty-thinking block to

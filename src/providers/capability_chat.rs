@@ -79,6 +79,9 @@ pub struct ChatMessage {
     /// dropped or replaced with dummy values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// LLM usage for assistant messages, persisted for observability and cost/cache analysis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ChatMessageUsage>,
 }
 
 impl ChatMessage {
@@ -91,6 +94,7 @@ impl ChatMessage {
             tool_calls: None,
             is_error: None,
             model: None,
+            usage: None,
         }
     }
     pub fn user_text(text: impl Into<String>) -> Self {
@@ -225,6 +229,27 @@ pub struct ChatUsage {
     pub reasoning_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_tokens: Option<u64>,
+}
+
+/// Per-assistant-message LLM usage persisted with history.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChatMessageUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
 }
 
 // ── Tool calling ──────────────────────────────────────────────────────────────

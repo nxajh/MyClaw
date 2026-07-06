@@ -55,6 +55,9 @@ pub trait ProviderRegistry: Send + Sync {
     fn get_chat_provider_by_model(&self, model_id: &str)
     -> Option<(Arc<dyn ChatProvider>, String)>;
 
+    /// Get the provider key/vendor id for a registered chat model.
+    fn get_chat_provider_id_by_model(&self, model_id: &str) -> Option<String>;
+
     /// Get the list of model IDs in the chat routing config (in fallback order).
     fn get_chat_routing_models(&self) -> Vec<String>;
 

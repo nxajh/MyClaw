@@ -21,8 +21,8 @@ pub use capability::{
     EmbeddingPricing, Modality,
 };
 pub use capability_chat::{
-    BoxStream, ChatMessage, ChatProvider, ChatRequest, ChatResponse, ChatUsage, ContentPart,
-    StopReason, StreamEvent, ThinkingConfig, ToolCall, ToolSpec as ChatToolSpec,
+    BoxStream, ChatMessage, ChatMessageUsage, ChatProvider, ChatRequest, ChatResponse, ChatUsage,
+    ContentPart, StopReason, StreamEvent, ThinkingConfig, ToolCall, ToolSpec as ChatToolSpec,
 };
 pub use capability_embedding::{
     EmbedInput, EmbedRequest, EmbedResponse, EmbeddingProvider, EmbeddingUsage,

@@ -620,6 +620,10 @@ impl ProviderRegistry for Registry {
             .map(|p| (Arc::clone(p), model_id.to_string()))
     }
 
+    fn get_chat_provider_id_by_model(&self, model_id: &str) -> Option<String> {
+        self.model_provider_ids.get(model_id).cloned()
+    }
+
     fn get_chat_routing_models(&self) -> Vec<String> {
         self.routing
             .get(Capability::Chat)

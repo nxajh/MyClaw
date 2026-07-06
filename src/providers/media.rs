@@ -556,6 +556,7 @@ mod tests {
             tool_calls: None,
             is_error: None,
             model: None,
+            usage: None,
         }
     }
 

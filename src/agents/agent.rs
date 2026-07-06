@@ -25,7 +25,7 @@ use crate::agents::turn::{TurnContext, TurnResult};
 use crate::agents::turn_event::TurnEvent;
 use crate::config::sub_agent::SubAgentConfig;
 use crate::providers::capability_chat::{
-    ChatMessage, ChatProvider, ChatRequest, StopReason, ToolSpec,
+    ChatMessage, ChatMessageUsage, ChatProvider, ChatRequest, StopReason, ToolSpec,
 };
 use crate::providers::{
     BoxStream, Capability, ContentPart, ProviderRegistry, StreamEvent, ToolCall,
@@ -384,6 +384,13 @@ impl Agent {
                 }
                 let mut msg = ChatMessage::assistant_text(response.text.clone());
                 msg.model = Some(model_id.clone());
+                msg.usage = llm_usage(
+                    &response,
+                    runtime
+                        .providers
+                        .get_chat_provider_id_by_model(&model_id),
+                    &model_id,
+                );
                 session.history.push(msg.clone());
                 session.message_ids.push(0);
                 persist_last(session);
@@ -430,6 +437,13 @@ impl Agent {
                     },
                 );
             }
+            let usage = llm_usage(
+                &response,
+                runtime
+                    .providers
+                    .get_chat_provider_id_by_model(&model_id),
+                &model_id,
+            );
             messages.push(assistant_msg);
             session.add_assistant_with_tools(
                 response.text.clone(),
@@ -437,6 +451,7 @@ impl Agent {
                 response.reasoning_content.clone(),
                 response.thinking_signature.clone(),
                 Some(model_id.clone()),
+                usage,
             );
             persist_last(session);
 
@@ -1113,6 +1128,28 @@ fn last_user_text(session: &Session) -> String {
         .find(|m| m.role == "user")
         .map(|m| m.text_content())
         .unwrap_or_default()
+}
+
+fn llm_usage(
+    response: &CollectedResponse,
+    provider: Option<String>,
+    model: &str,
+) -> Option<ChatMessageUsage> {
+    let has_usage = response.usage.is_some();
+    let usage = response.usage.as_ref();
+    if !has_usage && provider.is_none() && model.is_empty() {
+        return None;
+    }
+    Some(ChatMessageUsage {
+        provider,
+        model: Some(model.to_string()),
+        input_tokens: usage.and_then(|u| u.input_tokens),
+        cached_input_tokens: usage.and_then(|u| u.cached_input_tokens),
+        output_tokens: usage.and_then(|u| u.output_tokens),
+        reasoning_tokens: usage.and_then(|u| u.reasoning_tokens),
+        cache_write_tokens: usage.and_then(|u| u.cache_write_tokens),
+        stop_reason: Some(format!("{:?}", response.stop_reason)),
+    })
 }
 
 /// Bundle of fields extracted from one streaming LLM response. Mirrors
