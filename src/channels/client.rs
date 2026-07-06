@@ -403,11 +403,9 @@ impl ClientChannel {
                                 // before sending any other message type.
                                 // If auth_token is None, all connections are pre-authenticated.
                                 let mut is_authenticated = auth_token_clone.is_none();
-                                // Stable identity for session scoping. Defaults to the
-                                // ephemeral conn_id (TUI); a WebUI client supplies a
-                                // persistent client_id in its auth message so its
-                                // sessions survive reconnects.
-                                let mut client_id = conn_id_clone.clone();
+                                // Permission/session owner identity. For WebUI this is a stable
+                                // logical user; client_id remains only a per-browser device id.
+                                let mut client_user_id = conn_id_clone.clone();
 
                                 while let Some(msg_result) =
                                     futures_util::StreamExt::next(&mut ws_stream).await
@@ -481,6 +479,13 @@ impl ClientChannel {
                                         };
                                         if ok {
                                             is_authenticated = true;
+                                            let client_user = parsed["user_id"]
+                                                .as_str()
+                                                .or_else(|| parsed["user"].as_str())
+                                                .map(str::trim)
+                                                .filter(|id| !id.is_empty())
+                                                .unwrap_or("default");
+                                            client_user_id = format!("web-user:{}", client_user);
                                             if let Some(cid) = parsed["client_id"].as_str() {
                                                 let cid = cid.trim();
                                                 if !cid.is_empty() {
@@ -534,11 +539,11 @@ impl ClientChannel {
                                                             }
                                                         }
                                                         session_key_clone = new_sk;
-                                                        client_id = new_client_id;
-
                                                         // Subscribe + replay buffered content
-                                                        let api_user =
-                                                            format!("client:default:{}", client_id);
+                                                        let api_user = format!(
+                                                            "client:default:{}",
+                                                            client_user_id
+                                                        );
                                                         let session_id = session_manager_clone
                                                             .get()
                                                             .and_then(|sm| {
@@ -593,8 +598,6 @@ impl ClientChannel {
                                                             new_session = %session_key_clone,
                                                             "session migrated to stable key on auth"
                                                         );
-                                                    } else {
-                                                        client_id = new_client_id;
                                                     }
                                                 }
                                             }
@@ -754,7 +757,7 @@ impl ClientChannel {
                                             // auth wasn't called, e.g. TUI). For WebUI the
                                             // bus was already subscribed during auth migration.
                                             let fwd_api_user =
-                                                format!("client:default:{}", client_id);
+                                                format!("client:default:{}", client_user_id);
                                             let fwd_session_id = session_manager_clone
                                                 .get()
                                                 .and_then(|sm| sm.active_session_id(&fwd_api_user))
@@ -811,7 +814,9 @@ impl ClientChannel {
                                                     conn_id_clone,
                                                     chrono::Utc::now().timestamp_millis()
                                                 ),
-                                                sender: MessageSender::new(client_id.clone()),
+                                                sender: MessageSender::new(
+                                                    client_user_id.clone(),
+                                                ),
                                                 receiver: MessageReceiver::new(
                                                     session_key_clone.clone(),
                                                 ),
@@ -860,7 +865,7 @@ impl ClientChannel {
                                             // (channel:account:sender) so the WebUI
                                             // sees the same sessions chat actually uses.
                                             let api_user_id =
-                                                format!("client:default:{}", client_id);
+                                                format!("client:default:{}", client_user_id);
                                             let resp = handle_api_request(
                                                 &id,
                                                 &method,
@@ -1170,6 +1175,7 @@ fn handle_api_request(
                     "id": s.id,
                     "name": s.display_name,
                     "created_at": s.created_at.to_rfc3339(),
+                    "owner": s.owner,
                     "is_active": active.as_ref() == Some(&s.id),
                 })
             }).collect();
@@ -1249,6 +1255,7 @@ fn handle_api_request(
                     }).to_string();
                 }
             };
+            let existing_owner = sm.backend().get_session(session_id).map(|s| s.owner);
             match sm.delete_session(user_id, session_id) {
                 Ok(()) => {
                     serde_json::json!({
@@ -1257,11 +1264,21 @@ fn handle_api_request(
                         "result": null
                     }).to_string()
                 }
-                Err(e) => serde_json::json!({
-                    "type": "api_error",
-                    "id": id,
-                    "error": format!("failed to delete session: {}", e)
-                }).to_string(),
+                Err(e) => {
+                    tracing::warn!(
+                        attempted_user = %user_id,
+                        session = %session_id,
+                        actual_owner = existing_owner.as_deref().unwrap_or("<missing>"),
+                        error_kind = ?e.kind(),
+                        err = %e,
+                        "failed to delete WebUI session"
+                    );
+                    serde_json::json!({
+                        "type": "api_error",
+                        "id": id,
+                        "error": format!("failed to delete session: {}", e)
+                    }).to_string()
+                }
             }
         }
 
