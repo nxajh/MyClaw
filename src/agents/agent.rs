@@ -343,22 +343,43 @@ impl Agent {
                     // or MaxTokens (output budget exhausted). We don't yet
                     // do the boosted-max_tokens retry; we just re-call.
                     empty_response_retries += 1;
+                    let tool_use_without_calls = response.stop_reason == StopReason::ToolUse;
                     if empty_response_retries > MAX_EMPTY_RETRIES {
-                        tracing::warn!(
-                            "empty response after {} retries, giving up",
-                            MAX_EMPTY_RETRIES
-                        );
+                        if tool_use_without_calls {
+                            tracing::warn!(
+                                model = %model_id,
+                                session = %session.id,
+                                tool_call_events = response.tool_call_events,
+                                "tool_use stop without tool calls after retries, giving up"
+                            );
+                        } else {
+                            tracing::warn!(
+                                stop = ?response.stop_reason,
+                                "empty response after {} retries, giving up",
+                                MAX_EMPTY_RETRIES
+                            );
+                        }
                         return Ok(TurnResult {
                             text: String::new(),
                             stop_reason: response.stop_reason,
                             pending_retry: Some(last_user_text(session)),
                         });
                     }
-                    tracing::warn!(
-                        attempt = empty_response_retries,
-                        stop = ?response.stop_reason,
-                        "empty response, retrying"
-                    );
+                    if tool_use_without_calls {
+                        tracing::warn!(
+                            model = %model_id,
+                            session = %session.id,
+                            attempt = empty_response_retries,
+                            tool_call_events = response.tool_call_events,
+                            "tool_use stop without tool calls, retrying"
+                        );
+                    } else {
+                        tracing::warn!(
+                            attempt = empty_response_retries,
+                            stop = ?response.stop_reason,
+                            "empty response, retrying"
+                        );
+                    }
                     continue;
                 }
                 let mut msg = ChatMessage::assistant_text(response.text.clone());
@@ -1102,6 +1123,7 @@ struct CollectedResponse {
     reasoning_content: Option<String>,
     thinking_signature: Option<String>,
     tool_calls: Vec<ToolCall>,
+    tool_call_events: usize,
     stop_reason: StopReason,
     usage: Option<crate::providers::ChatUsage>,
 }
@@ -1144,6 +1166,7 @@ async fn collect_stream(
     let mut reasoning_content: Option<String> = None;
     let mut thinking_signature: Option<String> = None;
     let mut tool_calls: Vec<ToolCall> = Vec::new();
+    let mut tool_call_events: usize = 0;
     let mut usage: Option<crate::providers::ChatUsage> = None;
     let mut received_first_chunk = false;
 
@@ -1228,6 +1251,7 @@ async fn collect_stream(
                 name,
                 initial_arguments,
             } => {
+                tool_call_events += 1;
                 tool_calls.push(ToolCall {
                     id,
                     name,
@@ -1240,6 +1264,7 @@ async fn collect_stream(
                 delta,
                 name,
             } => {
+                tool_call_events += 1;
                 let idx = index as usize;
                 while tool_calls.len() <= idx {
                     tool_calls.push(ToolCall {
@@ -1262,6 +1287,7 @@ async fn collect_stream(
                 name,
                 arguments,
             } => {
+                tool_call_events += 1;
                 if let Some(call) = tool_calls.iter_mut().find(|c| c.id == id) {
                     call.name = name;
                     call.arguments = arguments;
@@ -1307,6 +1333,7 @@ async fn collect_stream(
         reasoning_content,
         thinking_signature,
         tool_calls,
+        tool_call_events,
         stop_reason,
         usage,
     })
