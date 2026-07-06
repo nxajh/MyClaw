@@ -127,7 +127,8 @@ export default function Memory() {
         (f.mem_name || '').toLowerCase().includes(q) ||
         f.name.toLowerCase().includes(q) ||
         (f.description || '').toLowerCase().includes(q) ||
-        (f.tags && f.tags.some(t => t.toLowerCase().includes(q)))
+        (f.tags && f.tags.some(t => t.toLowerCase().includes(q))) ||
+        (f.content || '').toLowerCase().includes(q)
       return matchesTab && matchesSearch
     })
   }, [files, activeTab, searchQuery])

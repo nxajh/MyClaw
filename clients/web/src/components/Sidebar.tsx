@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { NavLink } from 'react-router-dom'
 import {
   MessageSquare, LayoutDashboard, Layers, Wrench, Sparkles, Brain, Settings,
@@ -145,6 +145,9 @@ function DesktopSidebar({ collapsed, setCollapsed }: { collapsed: boolean; setCo
 
 function MobileDrawer({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { status } = useWebSocketContext()
+  const [visible, setVisible] = useState(false)
+  const [exiting, setExiting] = useState(false)
+  const closingRef = useRef(false)
 
   const statusColor =
     status === 'connected' ? 'text-emerald-700' :
@@ -156,23 +159,36 @@ function MobileDrawer({ open, onClose }: { open: boolean; onClose: () => void })
     status === 'connected' ? 'bg-emerald-700' :
     status === 'connecting' ? 'bg-amber-400' : 'bg-red-400'
 
-  // Prevent body scroll when open
   useEffect(() => {
     if (open) {
+      setVisible(true)
+      setExiting(false)
       document.body.style.overflow = 'hidden'
-      return () => { document.body.style.overflow = '' }
+    } else if (visible && !closingRef.current) {
+      closingRef.current = true
+      setExiting(true)
+      // Wait for exit animation then unmount
+      setTimeout(() => {
+        setVisible(false)
+        setExiting(false)
+        closingRef.current = false
+        document.body.style.overflow = ''
+      }, 180)
     }
-  }, [open])
+    return () => {
+      if (!open) document.body.style.overflow = ''
+    }
+  }, [open, visible])
 
-  if (!open) return null
+  if (!visible) return null
 
   return (
-    <div className="fixed inset-0 z-40 md:hidden">
+    <div className={`fixed inset-0 z-40 md:hidden ${exiting ? 'animate-[fadeOut_0.15s_ease-in_forwards]' : ''}`}>
       {/* Backdrop */}
       <div className="absolute inset-0 bg-black/50 backdrop-blur-[2px]" onClick={onClose} />
       {/* Panel */}
-      <div className="absolute inset-y-0 left-0 w-64 bg-zinc-900 border-r border-zinc-800 flex flex-col animate-[slideIn_0.15s_ease-out]">
-        <style>{`@keyframes slideIn { from { transform: translateX(-100%); } to { transform: translateX(0); } }`}</style>
+      <div className={`absolute inset-y-0 left-0 w-64 bg-zinc-900 border-r border-zinc-800 flex flex-col ${exiting ? 'animate-[slideOut_0.15s_ease-in_forwards]' : 'animate-[slideIn_0.15s_ease-out]'}`}>
+        <style>{`@keyframes slideIn { from { transform: translateX(-100%); } to { transform: translateX(0); } } @keyframes slideOut { from { transform: translateX(0); } to { transform: translateX(-100%); } } @keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }`}</style>
         <div className="flex items-center h-14 px-4 border-b border-zinc-800 shrink-0">
           <span className="flex-1 text-sm font-semibold text-zinc-100">🦀 MyClaw</span>
           <button onClick={onClose} className="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition">

@@ -27,7 +27,7 @@ const ACCEPT = '*/*'
 const INPUT_HISTORY_KEY = 'myclaw_input_history'
 
 export default function MessageInput({ onSend, onCancel, disabled, isGenerating }: Props) {
-  const { status, request } = useWebSocketContext()
+  const { status, request, clearInputToken } = useWebSocketContext()
   const [text, setText] = useState('')
   const [images, setImages] = useState<PickedImage[]>([])
   const [texts, setTexts] = useState<PickedText[]>([])
@@ -52,6 +52,36 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
 
   // Cleanup timer on unmount
   useEffect(() => () => { if (noteTimerRef.current) clearTimeout(noteTimerRef.current) }, [])
+
+  // Clear input when session switches
+  const prevClearTokenRef = useRef(clearInputToken)
+  useEffect(() => {
+    if (clearInputToken !== prevClearTokenRef.current) {
+      prevClearTokenRef.current = clearInputToken
+      setText('')
+      setImages([])
+      setTexts([])
+      setBinaries([])
+      setNote(null)
+      setPreviewMode(false)
+      if (textareaRef.current) textareaRef.current.style.height = 'auto'
+    }
+  }, [clearInputToken])
+
+  // Focus input on '/' when not in an input field
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (disabled) return
+      const tag = (e.target as HTMLElement)?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement)?.isContentEditable) return
+      if (e.key === '/' && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault()
+        textareaRef.current?.focus()
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [disabled])
 
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault()
@@ -313,6 +343,7 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
             onKeyDown={handleKeyDown}
             onInput={handleInput}
             onPaste={(e) => {
+              if (disabled) return
               if (e.clipboardData.files && e.clipboardData.files.length > 0) {
                 e.preventDefault()
                 handleFiles(e.clipboardData.files)

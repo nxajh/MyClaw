@@ -20,7 +20,7 @@ export default function CommandPalette() {
   const [selectedIndex, setSelectedIndex] = useState(0)
   
   const navigate = useNavigate()
-  const { status, sendRaw, addMessageListener, reloadHistory } = useWebSocketContext()
+  const { status, sendRaw, addMessageListener, reloadHistory, triggerClearInput, setMessages } = useWebSocketContext()
   const { request } = useApi(sendRaw, addMessageListener)
   
   const inputRef = useRef<HTMLInputElement>(null)
@@ -74,6 +74,8 @@ export default function CommandPalette() {
     if (status !== 'connected') return
     try {
       await request('sessions.create', { name: `Chat ${new Date().toLocaleString()}` })
+      triggerClearInput()
+      setMessages([])
       await reloadHistory()
       navigate('/')
     } catch (err) {

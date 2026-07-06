@@ -4,7 +4,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeHighlight from 'rehype-highlight'
-import { ChevronDown, ChevronRight, Copy, Check, ArrowDown, RotateCcw, Search, X, Pencil, Trash2, Pin } from 'lucide-react'
+import { ChevronDown, ChevronRight, Copy, Check, ArrowDown, ArrowUp, RotateCcw, Search, X, Pencil, Trash2, Pin } from 'lucide-react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useToast } from './Toast'
@@ -855,9 +855,7 @@ const AssistantBubble = memo(function AssistantBubble({ blocks, done, isLast, is
       </div>
     </div>
   )
-}, (prev, next) => (
-  prev.blocks === next.blocks && prev.done === next.done && prev.isLast === next.isLast && prev.isGenerating === next.isGenerating && prev.onRetry === next.onRetry && prev.onDelete === next.onDelete && prev.onPin === next.onPin && prev.pinned === next.pinned
-))
+})
 
 // ── MessageList with virtualization ──────────────────────────────────────
 
@@ -871,6 +869,7 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
   const { sendMessage, setMessages, isGenerating: globalGenerating, request } = useWebSocketContext()
   const { toast } = useToast()
   const [isNearBottom, setIsNearBottom] = useState(true)
+  const [isNearTop, setIsNearTop] = useState(true)
   const scrollElementRef = useRef<HTMLDivElement>(null)
   // Track stick-to-bottom intent via ref to avoid race conditions during streaming
   const stickToBottomRef = useRef(true)
@@ -1007,6 +1006,7 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
     }
     lastScrollTopRef.current = scrollTop
     setIsNearBottom(stickToBottomRef.current)
+    setIsNearTop(scrollTop < 200)
   }, [])
 
   useEffect(() => {
@@ -1038,6 +1038,11 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
     stickToBottomRef.current = true
     setIsNearBottom(true)
     virtualizer.scrollToIndex(messages.length - 1, { align: 'end', behavior: 'smooth' })
+  }
+
+  const scrollToTop = () => {
+    stickToBottomRef.current = false
+    virtualizer.scrollToIndex(0, { align: 'start', behavior: 'smooth' })
   }
 
   if (messages.length === 0) {
@@ -1129,6 +1134,11 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
         {!isNearBottom && (
           <button onClick={scrollToBottom} className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-zinc-800 border border-zinc-700 text-xs text-zinc-300 hover:bg-zinc-700 shadow-lg transition-colors z-10">
             <ArrowDown size={12} /><span>Scroll to bottom</span>
+          </button>
+        )}
+        {!isNearTop && messages.length > 20 && (
+          <button onClick={scrollToTop} className="absolute top-4 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-zinc-800 border border-zinc-700 text-xs text-zinc-300 hover:bg-zinc-700 shadow-lg transition-colors z-10">
+            <ArrowUp size={12} /><span>Scroll to top</span>
           </button>
         )}
 

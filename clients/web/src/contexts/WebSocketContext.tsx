@@ -21,6 +21,8 @@ interface WebSocketContextValue {
   addMessageListener: (fn: (data: Record<string, unknown>) => void) => () => void
   request: (method: string, params?: Record<string, unknown>, timeoutMs?: number) => Promise<unknown>
   reloadHistory: () => Promise<void>
+  clearInputToken: number
+  triggerClearInput: () => void
 }
 
 const WebSocketContext = createContext<WebSocketContextValue | null>(null)

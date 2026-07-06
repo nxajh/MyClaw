@@ -137,7 +137,7 @@ function SessionRow({
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function Sessions() {
-  const { status, sendRaw, addMessageListener, reloadHistory } = useWebSocketContext()
+  const { status, sendRaw, addMessageListener, reloadHistory, setMessages, triggerClearInput } = useWebSocketContext()
   const { request } = useApi(sendRaw, addMessageListener)
   const { toast } = useToast()
   const navigate = useNavigate()
@@ -186,13 +186,15 @@ export default function Sessions() {
     try {
       await request('sessions.switch', { id })
       toast('Session switched', 'success')
+      triggerClearInput()
+      setMessages([])
       await reloadHistory()
       await fetchSessions()
       navigate('/')
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       toast('Failed to switch session', 'error') }
-  }, [request, reloadHistory, fetchSessions, navigate, toast])
+  }, [request, reloadHistory, fetchSessions, navigate, toast, triggerClearInput, setMessages])
 
   const handleRename = useCallback(async (id: string, name: string) => {
     setError(null)

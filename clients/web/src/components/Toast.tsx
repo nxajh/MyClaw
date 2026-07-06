@@ -53,7 +53,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         {toasts.map((t) => (
           <div
             key={t.id}
-            className={`flex items-center gap-2.5 rounded-xl border px-4 py-3 text-sm text-zinc-200 shadow-2xl backdrop-blur-sm pointer-events-auto animate-[toastIn_0.2s_ease-out] ${bg[t.kind]}`}
+            className={`flex items-center gap-2.5 rounded-xl border px-4 py-3 text-sm text-zinc-200 shadow-2xl backdrop-blur-sm pointer-events-auto animate-[toastIn_0.2s_ease-out,toastOut_0.25s_ease-in_3.8s_forwards] ${bg[t.kind]}`}
           >
             {icons[t.kind]}
             <span className="flex-1">{t.message}</span>
@@ -62,7 +62,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             </button>
           </div>
         ))}
-        <style>{`@keyframes toastIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }`}</style>
+        <style>{`@keyframes toastIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } } @keyframes toastOut { from { opacity: 1; transform: translateX(0); } to { opacity: 0; transform: translateX(20px); } }`}</style>
       </div>
     </Ctx.Provider>
   )

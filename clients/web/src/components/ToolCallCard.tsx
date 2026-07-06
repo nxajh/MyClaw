@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
-import { ChevronDown, ChevronRight, Zap, Check, AlertCircle, Loader2, Copy } from 'lucide-react'
+import { ChevronDown, ChevronRight, Zap, Check, AlertCircle, Loader2, Copy, Square } from 'lucide-react'
 import type { ToolCallBlock } from '../hooks/useWebSocket'
+import { useWebSocketContext } from '../contexts/WebSocketContext'
 
 function formatOutput(raw: string): string {
   if (!raw) return '(empty)'
@@ -74,6 +75,7 @@ export default function ToolCallCard({ block }: { block: ToolCallBlock }) {
   const [userExpanded, setUserExpanded] = useState<boolean | null>(null)
   const [inputOpen, setInputOpen] = useState(true)
   const [outputOpen, setOutputOpen] = useState(false)
+  const { cancel, isGenerating } = useWebSocketContext()
   const running = block.output === undefined && !block.error
   const error = !!block.error
   const status: Status = running ? 'running' : error ? 'error' : 'done'
@@ -144,6 +146,15 @@ export default function ToolCallCard({ block }: { block: ToolCallBlock }) {
         )}
         {elapsed && (
           <span className="font-mono text-zinc-600 tabular-nums shrink-0">{elapsed}</span>
+        )}
+        {running && isGenerating && (
+          <button
+            onClick={(e) => { e.stopPropagation(); cancel() }}
+            title="Stop generation"
+            className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] text-amber-400 hover:text-red-400 hover:bg-red-950/40 border border-transparent hover:border-red-800/40 transition-colors shrink-0"
+          >
+            <Square size={9} /> Stop
+          </button>
         )}
       </button>
 

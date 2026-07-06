@@ -1,4 +1,4 @@
-import { useRef, useCallback } from 'react'
+import { useRef, useCallback, useMemo } from 'react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useToast } from '../components/Toast'
 import MessageList from '../components/MessageList'
@@ -7,24 +7,38 @@ import ChatHeader from '../components/ChatHeader'
 
 import type { SendOptions } from '../hooks/useWebSocket'
 
-const EXAMPLES = [
+const ALL_EXAMPLES = [
   { icon: '💡', text: 'Explain async/await in Rust' },
   { icon: '🔧', text: 'Write a Python script to rename files' },
   { icon: '📚', text: 'Summarize the concept of closures' },
   { icon: '🏗️', text: 'Design a REST API for a todo app' },
+  { icon: '🐛', text: 'Debug this error: connection refused on port 8080' },
+  { icon: '📊', text: 'Analyze this CSV and find trends' },
+  { icon: '🧪', text: 'Write unit tests for this function' },
+  { icon: '🔍', text: 'Find performance bottlenecks in this code' },
+  { icon: '🌐', text: 'Explain how DNS resolution works' },
+  { icon: '📝', text: 'Refactor this code to be more readable' },
+  { icon: '🛡️', text: 'Review this code for security issues' },
+  { icon: '📦', text: 'Create a Dockerfile for a Node.js app' },
 ]
 
 export default function Chat() {
-  const { status, messages, isGenerating, sendMessage, cancel } = useWebSocketContext()
+  const { status, messages, isGenerating, sendMessage, cancel, setMessages } = useWebSocketContext()
   const { toast } = useToast()
   const containerRef = useRef<HTMLDivElement>(null)
 
   const handleRetry = useCallback(
     (userContent: string) => {
       if (isGenerating || status !== 'connected') return
+      // Remove the last assistant message so the new response replaces it
+      setMessages((prev) => {
+        const last = prev[prev.length - 1]
+        if (last && last.role === 'assistant') return prev.slice(0, -1)
+        return prev
+      })
       sendMessage(userContent)
     },
-    [isGenerating, status, sendMessage],
+    [isGenerating, status, sendMessage, setMessages],
   )
 
   const handleSend = useCallback(
@@ -40,6 +54,12 @@ export default function Chat() {
 
   const showEmpty = messages.length === 0 && status === 'connected' && !isGenerating
 
+  const suggestions = useMemo(() => {
+    const shuffled = [...ALL_EXAMPLES].sort(() => Math.random() - 0.5)
+    return shuffled.slice(0, 4)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showEmpty])
+
   return (
     <div className="flex flex-col h-full">
       <ChatHeader />
@@ -52,7 +72,7 @@ export default function Chat() {
               <p className="text-sm text-zinc-500">Ask anything — coding, writing, analysis, and more.</p>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 w-full max-w-lg">
-              {EXAMPLES.map((ex) => (
+              {suggestions.map((ex) => (
                 <button
                   key={ex.text}
                   onClick={() => handleSend(ex.text)}

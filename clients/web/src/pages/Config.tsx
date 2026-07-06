@@ -86,6 +86,11 @@ export default function Config() {
 
   const handleRestart = useCallback(async () => {
     if (!confirmRestart) { setConfirmRestart(true); return }
+    if (isDirty) {
+      toast('Save your changes before restarting', 'error')
+      setConfirmRestart(false)
+      return
+    }
     setConfirmRestart(false)
     setRestarting(true)
     setError(null)

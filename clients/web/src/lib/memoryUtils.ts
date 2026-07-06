@@ -11,6 +11,7 @@ export interface MemoryFile {
   backlink_count?: number
   created_at?: string
   updated_at?: string
+  content?: string
 }
 
 export interface ParsedMeta {

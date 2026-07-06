@@ -114,6 +114,12 @@ export function useWebSocket() {
   // Track active session so we can filter stale stream events after session switch
   const activeSessionIdRef = useRef<string | null>(null)
   const [activeSessionId, setActiveSessionIdState] = useState<string | null>(null)
+  const clearInputTokenRef = useRef(0)
+  const [clearInputToken, _setClearInputToken] = useState(0)
+  const triggerClearInput = useCallback(() => {
+    clearInputTokenRef.current += 1
+    _setClearInputToken(clearInputTokenRef.current)
+  }, [])
   const setActiveSessionId = useCallback((id: string | null) => {
     activeSessionIdRef.current = id
     setActiveSessionIdState(id)
@@ -357,7 +363,7 @@ export function useWebSocket() {
         const callId = (data.id as string) || ''
         const name = (data.name as string) || 'unknown'
         const output = (data.output as string) || ''
-        const isError = !!(data.error as boolean) || (output.trim().startsWith('Error') && output.length < 500)
+        const isError = !!(data.error as boolean)
         const now = Date.now()
         setMessages((prev) => {
           const last = prev[prev.length - 1]
@@ -549,6 +555,7 @@ export function useWebSocket() {
 
   const cancel = useCallback(() => {
     sendRaw({ type: 'cancel' })
+    flushPendingDelta()
     setIsGenerating(false)
     setMessages((prev) => {
       const last = prev[prev.length - 1]
@@ -558,7 +565,7 @@ export function useWebSocket() {
       return prev
     })
     currentAssistantId.current = null
-  }, [sendRaw])
+  }, [sendRaw, flushPendingDelta])
 
   const reconnectNow = useCallback(() => {
     suppressReconnect.current = false
@@ -694,5 +701,7 @@ export function useWebSocket() {
     sendRaw,
     setMessages,
     addMessageListener,
+    clearInputToken,
+    triggerClearInput,
   }
 }

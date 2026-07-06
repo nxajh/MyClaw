@@ -1367,6 +1367,7 @@ fn handle_api_request(
                             "link_count": f.links.len(),
                             "backlink_count": bl_count,
                             "created_at": f.created_at,
+                            "content": f.content,
                         })
                     }).collect();
                     serde_json::json!({

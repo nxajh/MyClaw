@@ -1,8 +1,9 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { ChevronDown, Plus, Check, Cpu, Layers, Loader2, Download } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
+import { useToast } from '../components/Toast'
 
-interface Session { id: string; name: string; is_active?: boolean }
+interface Session { id: string; name: string; is_active?: boolean; created_at?: string; message_count?: number }
 interface ModelInfo { id: string; active: boolean; supports_image: boolean }
 
 function useOutsideClose(onClose: () => void) {
@@ -18,7 +19,8 @@ function useOutsideClose(onClose: () => void) {
 }
 
 export default function ChatHeader() {
-  const { status, messages, request, reloadHistory, setActiveSessionId } = useWebSocketContext()
+  const { status, messages, request, reloadHistory, setActiveSessionId, triggerClearInput, setMessages } = useWebSocketContext()
+  const { toast } = useToast()
   const [sessions, setSessions] = useState<Session[]>([])
   const [models, setModels] = useState<ModelInfo[]>([])
   const [activeModel, setActiveModel] = useState<string | null>(null)
@@ -56,6 +58,8 @@ export default function ChatHeader() {
     try {
       await request('sessions.switch', { id })
       setActiveSessionId(id)
+      triggerClearInput()
+      setMessages([])
       await reloadHistory()
       await refresh()
     } finally { setBusy(false) }
@@ -67,6 +71,8 @@ export default function ChatHeader() {
     try {
       const res = await request('sessions.create', { name: `Chat ${new Date().toLocaleString()}` }) as { id: string } | undefined
       if (res?.id) setActiveSessionId(res.id)
+      triggerClearInput()
+      setMessages([])
       await reloadHistory()
       await refresh()
     } finally { setBusy(false) }
@@ -112,6 +118,7 @@ export default function ChatHeader() {
     a.download = `${(activeSession?.name ?? 'chat').replace(/[^a-zA-Z0-9_-]/g, '_')}.md`
     document.body.appendChild(a); a.click(); document.body.removeChild(a)
     URL.revokeObjectURL(url)
+    toast('Chat exported as Markdown', 'success')
   }
 
   const btn = 'flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-xs text-zinc-300 hover:bg-zinc-800 border border-zinc-800 transition-colors disabled:opacity-50 min-w-0'
@@ -120,6 +127,15 @@ export default function ChatHeader() {
 
   return (
     <header className="border-b border-zinc-800 px-2 sm:px-4 h-10 sm:h-12 flex items-center gap-1.5 sm:gap-2 shrink-0">
+      {/* Connection status dot */}
+      <span
+        title={status === 'connected' ? 'Connected' : status === 'connecting' ? 'Connecting…' : 'Disconnected'}
+        className={`shrink-0 h-1.5 w-1.5 rounded-full ${
+          status === 'connected' ? 'bg-emerald-700 shadow-[0_0_6px_rgba(4,120,87,0.5)]' :
+          status === 'connecting' ? 'bg-amber-400 animate-pulse shadow-[0_0_6px_rgba(251,191,36,0.5)]' :
+          'bg-red-400 shadow-[0_0_6px_rgba(248,113,113,0.5)]'
+        }`}
+      />
       {/* Session selector */}
       <div className="relative min-w-0 flex-1 sm:flex-none" ref={sessRef}>
         <button
@@ -140,12 +156,20 @@ export default function ChatHeader() {
             {sessions.length === 0 && (
               <div className="px-3 py-2 text-xs text-zinc-600">No sessions</div>
             )}
-            {sessions.map((s) => (
-              <button key={s.id} className={item} onClick={() => switchSession(s.id)}>
-                {s.is_active ? <Check size={13} className="text-emerald-400 shrink-0" /> : <span className="w-[13px] shrink-0" />}
-                <span className="truncate">{s.name}</span>
-              </button>
-            ))}
+            {sessions.map((s) => {
+              const date = s.created_at ? new Date(s.created_at).toLocaleDateString() : ''
+              return (
+                <button key={s.id} className={item} onClick={() => switchSession(s.id)}>
+                  {s.is_active ? <Check size={13} className="text-emerald-400 shrink-0" /> : <span className="w-[13px] shrink-0" />}
+                  <span className="truncate flex-1">{s.name}</span>
+                  <span className="text-[10px] text-zinc-600 shrink-0 ml-1">
+                    {s.message_count !== undefined ? `${s.message_count} msgs` : ''}
+                    {(s.message_count !== undefined && date) ? ' · ' : ''}
+                    {date}
+                  </span>
+                </button>
+              )
+            })}
           </div>
         )}
       </div>
