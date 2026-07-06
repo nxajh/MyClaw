@@ -124,8 +124,9 @@ fn estimate_msg_tokens(msg: &ChatMessage) -> u64 {
 
 /// Find the latest compaction boundary whose compressible prefix fits within `compress_budget`.
 ///
-/// `compress_budget` = max input tokens the summarizer (target model) can accept in one call,
-/// computed as `target_window − system_prompt_tokens − summary_output_reserve`.
+/// `compress_budget` = max input tokens the summarizer can accept in one call,
+/// computed as `context_window − summary_output_reserve − system_prompt_tokens
+/// − tool_spec_tokens − compression_safety_margin`.
 ///
 /// Walks work unit boundaries **front to back**, accumulating compressed-prefix tokens.
 /// Returns the **latest** boundary where `prefix_tokens ≤ compress_budget` — the maximum

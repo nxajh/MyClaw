@@ -1028,11 +1028,10 @@ async fn maybe_compact(
 /// threshold, or no further progress is possible.
 ///
 /// A single `maybe_compact` pass folds only a bounded prefix (≤ the compaction
-/// budget, ~window×threshold) into the rolling summary, so a history far over
-/// the window — e.g. 934K against a 262K window — used to shrink by one chunk
-/// per *user turn*, taking 6+ turns (and 6+ stalls) to converge. Looping the
-/// passes within one turn drives it under threshold before we send, while
-/// keeping each summary's input bounded (so per-summary fidelity is unchanged).
+/// input budget) into the rolling summary, so a history far over the window
+/// used to shrink by one chunk per *user turn*, taking multiple turns (and
+/// multiple stalls) to converge. Looping the passes within one turn drives it
+/// under threshold before we send, while keeping each summary's input bounded.
 ///
 /// `force` applies only to the first pass (the provider-overflow backstop knows
 /// the request overflowed even when our estimate sits under threshold); later

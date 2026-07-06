@@ -37,6 +37,9 @@ pub(crate) struct CompactionResult {
     pub compacted_count: usize,
 }
 
+const SUMMARY_OUTPUT_RESERVE: u64 = 20_000;
+const COMPRESSION_SAFETY_MARGIN: u64 = 4_000;
+
 /// Unified context-management facade. Holds the compaction threshold
 /// / retain-units policy plus the summarizer plumbing (provider
 /// registry, memory-tool executor) in one struct.
@@ -122,12 +125,23 @@ impl ContextEngine {
         tool_spec_tokens: u64,
         override_retain: Option<usize>,
     ) -> Option<usize> {
-        let budget = ((context_window as f64 * self.compact_threshold) as u64)
+        let budget = context_window
+            .saturating_sub(SUMMARY_OUTPUT_RESERVE)
             .saturating_sub(system_prompt_tokens)
-            .saturating_sub(tool_spec_tokens);
+            .saturating_sub(tool_spec_tokens)
+            .saturating_sub(COMPRESSION_SAFETY_MARGIN);
         if budget == 0 {
             return None;
         }
+        tracing::debug!(
+            context_window,
+            summary_output_reserve = SUMMARY_OUTPUT_RESERVE,
+            system_prompt_tokens,
+            tool_spec_tokens,
+            compression_safety_margin = COMPRESSION_SAFETY_MARGIN,
+            compress_budget = budget,
+            "computed compaction input budget"
+        );
         let retain = override_retain.unwrap_or(self.retain_work_units).max(1);
         work_unit::find_compaction_boundary_for_budget(history, budget, retain)
     }
@@ -296,7 +310,7 @@ impl ContextEngine {
                 model: model_id,
                 messages: &messages,
                 temperature: None,
-                max_tokens: Some(20_000),
+                max_tokens: Some(SUMMARY_OUTPUT_RESERVE as u32),
                 thinking: thinking.clone(),
                 stop: None,
                 seed: None,
