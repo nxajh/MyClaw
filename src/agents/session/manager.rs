@@ -121,7 +121,10 @@ impl SessionManager {
     /// the backend for callers that want a one-shot value.
     pub fn get_or_create(&self, user_id: &str) -> Session {
         let session_id = self.resolve_active(user_id);
+        self.load_session(session_id, user_id.to_string())
+    }
 
+    fn load_session(&self, session_id: String, owner: String) -> Session {
         // Load from backend.
         let stored_total_tokens = self.backend.load_token_count(&session_id);
         let session_override = self
@@ -215,7 +218,7 @@ impl SessionManager {
 
         let mut session = Session {
             id: session_id.clone(),
-            owner: user_id.to_string(),
+            owner,
             agent_name: self
                 .backend
                 .load_agent_name(&session_id)
@@ -430,7 +433,7 @@ impl SessionManager {
     /// Used by delegation recovery and PR-review tools.
     pub fn get_by_id(&self, session_id: &str) -> Option<Session> {
         let info = self.backend.get_session(session_id)?;
-        Some(self.get_or_create(&info.owner))
+        Some(self.load_session(info.id, info.owner))
     }
 
     /// Per RFC §三.A line 412: build a sub-session SessionContext that
