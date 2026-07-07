@@ -87,11 +87,7 @@ impl Tool for SendMessageTool {
                         "required": ["path"]
                     }
                 }
-            },
-            "anyOf": [
-                { "required": ["text"] },
-                { "required": ["files"] }
-            ]
+            }
         })
     }
 
