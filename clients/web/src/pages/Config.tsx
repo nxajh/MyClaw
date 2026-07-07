@@ -209,7 +209,7 @@ export default function Config() {
           </div>
 
           {/* Diagnostics banner */}
-          <div className="flex items-center justify-between bg-zinc-900/10 border border-zinc-900 px-4 py-3 rounded-2xl">
+          <div className={`flex items-center justify-between px-4 py-3 rounded-2xl border transition-colors ${isDirty ? 'bg-amber-950/15 border-amber-800/50' : 'bg-zinc-900/10 border-zinc-900'}`}>
             <div className="flex items-center gap-2">
               {isDirty ? (
                 <span className="flex items-center gap-1.5 text-xs text-amber-400 font-medium">

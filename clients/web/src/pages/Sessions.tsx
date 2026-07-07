@@ -236,7 +236,7 @@ export default function Sessions() {
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-2xl mx-auto px-3 sm:px-6 py-4 sm:py-6 space-y-4">
       {/* Create */}
-      <div className="flex gap-2">
+      <div className="flex gap-2 pb-4 border-b border-zinc-900">
         <input
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
@@ -259,7 +259,7 @@ export default function Sessions() {
       {loading && <LoadingRow />}
       {!loading && status !== 'connected' && <EmptyState>Waiting for connection…</EmptyState>}
       {!loading && status === 'connected' && sessions.length === 0 && (
-        <EmptyState>No sessions yet. Create one above.</EmptyState>
+        <EmptyState>📝 No sessions yet. Create one above.</EmptyState>
       )}
       {!loading && sessions.length > 0 && (
         <>

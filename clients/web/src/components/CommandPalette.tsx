@@ -189,7 +189,7 @@ export default function CommandPalette() {
             placeholder="Type a command or jump to page..."
             className="w-full bg-transparent pl-11 pr-4 py-3.5 text-xs text-zinc-100 placeholder-zinc-600 outline-none"
           />
-          <div className="absolute right-4 text-[10px] text-zinc-600 bg-zinc-900/60 border border-zinc-800/80 px-1.5 py-0.5 rounded-md font-mono">
+          <div className="absolute right-4 text-[10px] text-zinc-500 bg-zinc-800/80 border border-zinc-700/60 px-1.5 py-0.5 rounded-md font-mono">
             ESC
           </div>
         </div>

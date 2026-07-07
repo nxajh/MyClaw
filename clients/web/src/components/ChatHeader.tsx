@@ -131,7 +131,7 @@ export default function ChatHeader() {
       <span
         title={status === 'connected' ? 'Connected' : status === 'connecting' ? 'Connecting…' : 'Disconnected'}
         className={`shrink-0 h-1.5 w-1.5 rounded-full ${
-          status === 'connected' ? 'bg-emerald-700 shadow-[0_0_6px_rgba(4,120,87,0.5)]' :
+          status === 'connected' ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.5)]' :
           status === 'connecting' ? 'bg-amber-400 animate-pulse shadow-[0_0_6px_rgba(251,191,36,0.5)]' :
           'bg-red-400 shadow-[0_0_6px_rgba(248,113,113,0.5)]'
         }`}

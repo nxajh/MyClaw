@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
-import { Plus, Loader2, Search, Tag, AlertTriangle, Link2 } from 'lucide-react'
+import { Plus, Loader2, Search, Tag, Link2 } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useToast } from '../components/Toast'
 import { ErrorBanner, LoadingRow, EmptyState, btnPrimary } from '../components/PageLayout'
@@ -201,7 +201,7 @@ export default function Memory() {
                 : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/30 border border-transparent'
               return (
                 <button key={tab} onClick={() => setActiveTab(tab)} className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-all ${tabColor}`}>
-                  {TAB_LABELS[tab]} <span className="opacity-60">{count}</span>
+                  {TAB_LABELS[tab]} <span className="opacity-50">{count}</span>
                 </button>
               )
             })}
@@ -218,7 +218,7 @@ export default function Memory() {
           {!loadingList && status !== 'connected' && <EmptyState>Waiting for connection to sync memory…</EmptyState>}
           {!loadingList && status === 'connected' && filteredFiles.length === 0 && (
             <div className="rounded-2xl border border-dashed border-zinc-900 p-8 text-center space-y-2">
-              <AlertTriangle size={24} className="mx-auto text-zinc-600" />
+              <span className="text-2xl">📭</span>
               <p className="text-xs text-zinc-500 font-medium">No matching memories</p>
               {files.length > 0 && (
                 <button onClick={() => { setSearchQuery(''); setActiveTab('all') }} className="text-xs text-blue-400 hover:text-blue-300">Reset filters</button>

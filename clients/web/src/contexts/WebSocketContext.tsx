@@ -1,4 +1,4 @@
-import { createContext, useContext, useCallback, useEffect, useRef, type ReactNode, type Dispatch, type SetStateAction } from 'react'
+import { createContext, useContext, useCallback, useEffect, useRef, useState, type ReactNode, type Dispatch, type SetStateAction } from 'react'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useApi } from '../lib/api'
 import type { ChatMessage, ConnectionStatus, SendOptions, LastCloseInfo } from '../hooks/useWebSocket'
@@ -23,6 +23,7 @@ interface WebSocketContextValue {
   reloadHistory: () => Promise<void>
   clearInputToken: number
   triggerClearInput: () => void
+  historyLoading: boolean
 }
 
 const WebSocketContext = createContext<WebSocketContextValue | null>(null)
@@ -31,13 +32,17 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const ws = useWebSocket()
   const { request } = useApi(ws.sendRaw, ws.addMessageListener)
   const { setMessages, status } = ws
+  const [historyLoading, setHistoryLoading] = useState(false)
 
   const reloadHistory = useCallback(async () => {
+    setHistoryLoading(true)
     try {
       const result = await request('sessions.history')
       setMessages((result as ChatMessage[] | null) ?? [])
     } catch {
       /* leave existing messages untouched on failure */
+    } finally {
+      setHistoryLoading(false)
     }
   }, [request, setMessages])
 
@@ -53,7 +58,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   }, [status, reloadHistory])
 
   return (
-    <WebSocketContext.Provider value={{ ...ws, request, reloadHistory }}>
+    <WebSocketContext.Provider value={{ ...ws, request, reloadHistory, historyLoading }}>
       {children}
     </WebSocketContext.Provider>
   )

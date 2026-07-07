@@ -23,7 +23,7 @@ const ALL_EXAMPLES = [
 ]
 
 export default function Chat() {
-  const { status, messages, isGenerating, sendMessage, cancel, setMessages } = useWebSocketContext()
+  const { status, messages, isGenerating, sendMessage, cancel, setMessages, historyLoading } = useWebSocketContext()
   const { toast } = useToast()
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -52,7 +52,7 @@ export default function Chat() {
     [status, sendMessage, toast],
   )
 
-  const showEmpty = messages.length === 0 && status === 'connected' && !isGenerating
+  const showEmpty = messages.length === 0 && status === 'connected' && !isGenerating && !historyLoading
 
   const suggestions = useMemo(() => {
     const shuffled = [...ALL_EXAMPLES].sort(() => Math.random() - 0.5)
@@ -63,7 +63,20 @@ export default function Chat() {
   return (
     <div className="flex flex-col h-full">
       <ChatHeader />
-      {showEmpty ? (
+      {historyLoading && messages.length === 0 ? (
+        <div className="flex-1 overflow-y-auto">
+          <div className="max-w-2xl mx-auto px-3 sm:px-6 py-8 space-y-6">
+            {[...Array(3)].map((_, i) => (
+              <div key={i} className="space-y-3">
+                <div className="skeleton-line w-3/4" />
+                <div className="skeleton-line w-full" />
+                <div className="skeleton-line w-5/6" />
+                <div className="skeleton-line w-1/2" />
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : showEmpty ? (
         <div className="flex-1 overflow-y-auto">
           <div className="max-w-2xl mx-auto px-3 sm:px-6 py-8 flex flex-col items-center justify-center min-h-full">
             <div className="text-center mb-8">
@@ -76,7 +89,7 @@ export default function Chat() {
                 <button
                   key={ex.text}
                   onClick={() => handleSend(ex.text)}
-                  className="flex items-center gap-3 text-left rounded-xl border border-zinc-800 px-4 py-3 hover:bg-zinc-900 hover:border-zinc-700 transition-colors text-sm text-zinc-300"
+                  className="flex items-center gap-3 text-left rounded-xl border border-zinc-800 px-4 py-3 hover:bg-zinc-900 hover:border-zinc-700 hover:scale-[1.01] active:scale-[0.99] transition-all text-sm text-zinc-300"
                 >
                   <span className="text-lg shrink-0">{ex.icon}</span>
                   <span>{ex.text}</span>

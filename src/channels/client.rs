@@ -31,7 +31,8 @@ use tokio::sync::{Mutex, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
-use crate::agents::TurnEvent;
+use crate::agents::{Skill, TurnEvent};
+use crate::agents::workspace::skill_loader;
 use crate::channels::message::{
     Channel, ChannelFile, ChannelFileMeta, ChannelInboundMessage, ChannelMessageContent,
     ChannelOutboundMessage, LocalFileBody, MessageReceiver, MessageSender, OutboundSendResult,
@@ -814,9 +815,7 @@ impl ClientChannel {
                                                     conn_id_clone,
                                                     chrono::Utc::now().timestamp_millis()
                                                 ),
-                                                sender: MessageSender::new(
-                                                    client_user_id.clone(),
-                                                ),
+                                                sender: MessageSender::new(client_user_id.clone()),
                                                 receiver: MessageReceiver::new(
                                                     session_key_clone.clone(),
                                                 ),
@@ -1644,6 +1643,92 @@ fn handle_api_request(
                 "id": id,
                 "result": result,
             }).to_string()
+        }
+
+        "skills.read" => {
+            let name = match params["name"].as_str() {
+                Some(s) if !s.is_empty() => s,
+                _ => return serde_json::json!({ "type": "api_error", "id": id, "error": "missing name parameter" }).to_string(),
+            };
+            if name.contains('/') || name.contains('\\') || name.starts_with('.') {
+                return serde_json::json!({ "type": "api_error", "id": id, "error": "invalid skill name" }).to_string();
+            }
+            match ctx.workspace_dir.get() {
+                Some(dir) => {
+                    let path = dir.join("skills").join(name).join("SKILL.md");
+                    match std::fs::read_to_string(&path) {
+                        Ok(content) => serde_json::json!({
+                            "type": "api_response",
+                            "id": id,
+                            "result": { "name": name, "content": content }
+                        }).to_string(),
+                        Err(e) => serde_json::json!({
+                            "type": "api_error",
+                            "id": id,
+                            "error": format!("failed to read skill file: {}", e)
+                        }).to_string(),
+                    }
+                }
+                None => serde_json::json!({ "type": "api_error", "id": id, "error": "workspace directory not configured" }).to_string(),
+            }
+        }
+
+        "skills.write" => {
+            let name = match params["name"].as_str() {
+                Some(s) if !s.is_empty() => s,
+                _ => return serde_json::json!({ "type": "api_error", "id": id, "error": "missing name parameter" }).to_string(),
+            };
+            if name.contains('/') || name.contains('\\') || name.starts_with('.') {
+                return serde_json::json!({ "type": "api_error", "id": id, "error": "invalid skill name" }).to_string();
+            }
+            let content = params["content"].as_str().unwrap_or("");
+            match ctx.workspace_dir.get() {
+                Some(dir) => {
+                    let skill_dir = dir.join("skills").join(name);
+                    let path = skill_dir.join("SKILL.md");
+                    match std::fs::write(&path, content) {
+                        Ok(()) => {
+                            // Reload skills from disk so the manager reflects changes.
+                            if let Some(mgr_arc) = ctx.skill_manager.get() {
+                                let defs = skill_loader::load_skills_from_dir(&dir.join("skills"));
+                                let new_skills: Vec<Skill> = defs.iter().map(Skill::from_definition).collect();
+                                mgr_arc.write().reload(new_skills);
+                            }
+                            serde_json::json!({ "type": "api_response", "id": id, "result": null }).to_string()
+                        }
+                        Err(e) => serde_json::json!({ "type": "api_error", "id": id, "error": format!("failed to write skill file: {}", e) }).to_string(),
+                    }
+                }
+                None => serde_json::json!({ "type": "api_error", "id": id, "error": "workspace directory not configured" }).to_string(),
+            }
+        }
+
+        "skills.delete" => {
+            let name = match params["name"].as_str() {
+                Some(s) if !s.is_empty() => s,
+                _ => return serde_json::json!({ "type": "api_error", "id": id, "error": "missing name parameter" }).to_string(),
+            };
+            if name.contains('/') || name.contains('\\') || name.starts_with('.') {
+                return serde_json::json!({ "type": "api_error", "id": id, "error": "invalid skill name" }).to_string();
+            }
+            match ctx.workspace_dir.get() {
+                Some(dir) => {
+                    let skill_dir = dir.join("skills").join(name);
+                    match std::fs::remove_dir_all(&skill_dir) {
+                        Ok(()) => {
+                            // Reload skills from disk so the manager reflects changes.
+                            if let Some(mgr_arc) = ctx.skill_manager.get() {
+                                let defs = skill_loader::load_skills_from_dir(&dir.join("skills"));
+                                let new_skills: Vec<Skill> = defs.iter().map(Skill::from_definition).collect();
+                                mgr_arc.write().reload(new_skills);
+                            }
+                            serde_json::json!({ "type": "api_response", "id": id, "result": null }).to_string()
+                        }
+                        Err(e) => serde_json::json!({ "type": "api_error", "id": id, "error": format!("failed to delete skill: {}", e) }).to_string(),
+                    }
+                }
+                None => serde_json::json!({ "type": "api_error", "id": id, "error": "workspace directory not configured" }).to_string(),
+            }
         }
 
         "commands.list" => {

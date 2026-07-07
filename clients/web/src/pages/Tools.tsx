@@ -315,7 +315,7 @@ export default function Tools() {
             </div>
           ) : (
             <div className="h-full flex items-center justify-center text-xs text-zinc-600">
-              Select a tool on the left to inspect its parameters and JSON definitions.
+              🛠️ Select a tool on the left to inspect its parameters and JSON definitions.
             </div>
           )}
         </div>

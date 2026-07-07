@@ -283,7 +283,7 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
           className={`relative rounded-2xl border shadow-xl transition-all ${
             isDragging
               ? 'border-blue-500 bg-zinc-900/90 scale-[1.01] ring-1 ring-blue-500/30'
-              : 'border-zinc-700/60 bg-zinc-900 focus-within:border-zinc-600'
+              : 'border-zinc-700/60 bg-zinc-900 focus-within:border-zinc-500 focus-within:ring-1 focus-within:ring-zinc-500/30'
           }`}
         >
           {isDragging && (

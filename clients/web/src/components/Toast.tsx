@@ -57,7 +57,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           >
             {icons[t.kind]}
             <span className="flex-1">{t.message}</span>
-            <button onClick={() => remove(t.id)} className="text-zinc-500 hover:text-zinc-300 shrink-0">
+            <button onClick={() => remove(t.id)} className="text-zinc-400 hover:text-zinc-100 shrink-0">
               <X size={14} />
             </button>
           </div>
