@@ -122,6 +122,11 @@ html.light .prose :where(pre code) {
   font-weight: 600 !important;
 }
 html.light .prose :where(hr)                     { border-color: #e4e4e7; }
+/* Tables: prose-invert gives th light text on dark bg; override in light mode */
+html.light .prose :where(thead)                  { border-bottom-color: #d4d4d8; }
+html.light .prose :where(th)                     { color: #18181b; background-color: #f4f4f5; }
+html.light .prose :where(td)                     { color: #27272a; border-bottom-color: #e4e4e7; }
+html.light .prose :where(tr)                     { border-bottom-color: #e4e4e7; }
 
 /* ── Markdown code blocks: light mode uses a soft paper-like surface ───── */
 html.light .code-block {
