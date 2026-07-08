@@ -28,7 +28,8 @@ use crate::providers::capability_chat::{
     ChatMessage, ChatMessageUsage, ChatProvider, ChatRequest, StopReason, ToolSpec,
 };
 use crate::providers::{
-    BoxStream, Capability, ContentPart, ProviderRegistry, StreamEvent, ToolCall,
+    BoxStream, Capability, ContentPart, FileModality, MediaInlineDecision, MediaPolicy,
+    ProviderRegistry, StreamEvent, ToolCall, modality_from_mime,
 };
 use crate::storage::SummaryRecord;
 
@@ -65,24 +66,6 @@ impl Agent {
         // Resolve filtered tool view from runtime + per-agent config.
         let mut allowed_tools = self.allowed_tools(runtime);
         filter_turn_scoped_tools(&mut allowed_tools, session);
-        // When the model natively supports a media modality (image, audio,
-        // video), drop the corresponding retrieval tool so the model uses its
-        // own understanding instead of routing through a tool call.
-        filter_modality_redundant_tools(&mut allowed_tools, turn_ctx.model_id, runtime);
-        // Convert capability_tool::ToolSpec → capability_chat::ToolSpec
-        // (the LLM request type). Same fields, different module homes —
-        // a unification candidate for a separate cleanup.
-        let tool_specs: Vec<ToolSpec> = allowed_tools
-            .iter()
-            .map(|t| {
-                let s = t.spec();
-                ToolSpec {
-                    name: s.name,
-                    description: Some(s.description),
-                    input_schema: s.parameters,
-                }
-            })
-            .collect();
 
         // Resolve provider + model.
         //
@@ -152,6 +135,24 @@ impl Agent {
             .chain(session.history.iter().cloned())
             .collect();
         crate::agents::session::sanitize_history(&mut messages);
+
+        if let Some(policy) = runtime.providers.get_chat_media_policy(&model_id) {
+            filter_modality_redundant_tools(&mut allowed_tools, &messages, policy, &model_id);
+        }
+        // Convert capability_tool::ToolSpec → capability_chat::ToolSpec
+        // (the LLM request type). Same fields, different module homes —
+        // a unification candidate for a separate cleanup.
+        let tool_specs: Vec<ToolSpec> = allowed_tools
+            .iter()
+            .map(|t| {
+                let s = t.spec();
+                ToolSpec {
+                    name: s.name,
+                    description: Some(s.description),
+                    input_schema: s.parameters,
+                }
+            })
+            .collect();
 
         let permission_mode = turn_ctx.permission_mode;
         let mut empty_response_retries: usize = 0;
@@ -386,9 +387,7 @@ impl Agent {
                 msg.model = Some(model_id.clone());
                 msg.usage = llm_usage(
                     &response,
-                    runtime
-                        .providers
-                        .get_chat_provider_id_by_model(&model_id),
+                    runtime.providers.get_chat_provider_id_by_model(&model_id),
                     &model_id,
                 );
                 session.history.push(msg.clone());
@@ -439,9 +438,7 @@ impl Agent {
             }
             let usage = llm_usage(
                 &response,
-                runtime
-                    .providers
-                    .get_chat_provider_id_by_model(&model_id),
+                runtime.providers.get_chat_provider_id_by_model(&model_id),
                 &model_id,
             );
             messages.push(assistant_msg);
@@ -747,42 +744,59 @@ fn filter_turn_scoped_tools(
 /// - Without override: the primary model in the routing chain is used. On
 ///   transient failure the FallbackChatProvider may retry with a different
 ///   model — acceptable trade-off vs. always keeping redundant tools.
+fn native_media_availability(messages: &[ChatMessage], policy: MediaPolicy) -> (bool, bool, bool) {
+    let mut image = false;
+    let mut audio = false;
+    let mut video = false;
+    for msg in messages {
+        for part in &msg.parts {
+            let ContentPart::File {
+                path,
+                mime_type,
+                size_bytes,
+                ..
+            } = part
+            else {
+                continue;
+            };
+            let modality = modality_from_mime(mime_type.as_deref(), path);
+            if policy.decision_for(modality, *size_bytes) != MediaInlineDecision::Inline {
+                continue;
+            }
+            match modality {
+                FileModality::Image => image = true,
+                FileModality::Audio => audio = true,
+                FileModality::Video => video = true,
+                FileModality::Other => {}
+            }
+        }
+    }
+    (image, audio, video)
+}
+
 fn filter_modality_redundant_tools(
     allowed_tools: &mut Vec<Arc<dyn crate::providers::Tool>>,
-    model_override: Option<&str>,
-    runtime: &AgentRuntime,
+    messages: &[ChatMessage],
+    policy: MediaPolicy,
+    model_id: &str,
 ) {
-    use crate::providers::capability::Modality;
-
-    // When no explicit model override is provided, skip modality-based filtering.
-    // We cannot know which model the default router will ultimately select,
-    // so dropping tools based on the first routing model risks removing
-    // capabilities that a later-chosen vision model would need.
-    //
-    // Only apply the optimization when the user has explicitly selected
-    // a model via /model or session override.
-    let model_id = match model_override {
-        Some(m) => m.to_string(),
-        None => return,
-    };
-
-    let cfg = match runtime.providers.get_chat_model_config(&model_id) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
+    let (native_image, native_audio, native_video) = native_media_availability(messages, policy);
 
     allowed_tools.retain(|tool| {
         let drop = match tool.name() {
-            "view_video" => cfg.supports_input(Modality::Video),
-            "view_image" => cfg.supports_input(Modality::Image),
-            "hear_audio" => cfg.supports_input(Modality::Audio),
+            "view_video" => native_video,
+            "view_image" => native_image,
+            "hear_audio" => native_audio,
             _ => false,
         };
         if drop {
             tracing::info!(
                 model = %model_id,
                 tool = tool.name(),
-                "filter_modality_redundant_tools: dropping tool, model supports modality natively"
+                native_image,
+                native_audio,
+                native_video,
+                "filter_modality_redundant_tools: dropping tool, current request has inline native media"
             );
         }
         !drop

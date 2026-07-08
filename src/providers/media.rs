@@ -247,6 +247,19 @@ pub enum MediaTransport {
     InlineBase64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaMarkerReason {
+    ModelUnsupported,
+    ProtocolUnsupported,
+    SizeExceeded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaInlineDecision {
+    Inline,
+    Marker(MediaMarkerReason),
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct MediaInputPolicy {
     pub model_supports: bool,
@@ -271,22 +284,27 @@ impl MediaInputPolicy {
         }
     }
 
-    fn can_inline(&self, size_bytes: Option<u64>) -> bool {
-        if !self.model_supports || self.transport != MediaTransport::InlineBase64 {
-            return false;
+    fn decision(&self, size_bytes: Option<u64>) -> MediaInlineDecision {
+        if !self.model_supports {
+            return MediaInlineDecision::Marker(MediaMarkerReason::ModelUnsupported);
         }
-        match (self.max_inline_bytes, size_bytes) {
-            (Some(max), Some(size)) => size <= max,
-            _ => true,
+        if self.transport != MediaTransport::InlineBase64 {
+            return MediaInlineDecision::Marker(MediaMarkerReason::ProtocolUnsupported);
         }
+        if let (Some(max), Some(size)) = (self.max_inline_bytes, size_bytes) {
+            if size > max {
+                return MediaInlineDecision::Marker(MediaMarkerReason::SizeExceeded);
+            }
+        }
+        MediaInlineDecision::Inline
     }
 }
 
 /// Provider/protocol media policy for file lowering.
 ///
 /// `model_config.input` only says the model understands a modality; this policy
-/// says the current provider/protocol renderer can safely carry it. Unsupported
-/// or over-limit media becomes a path marker.
+/// says the current protocol renderer can safely carry it. Unsupported or
+/// over-limit media becomes a path marker.
 #[derive(Debug, Clone, Copy)]
 pub struct MediaPolicy {
     pub image: MediaInputPolicy,
@@ -305,8 +323,7 @@ impl MediaPolicy {
         }
     }
 
-    pub fn for_provider_protocol_model(
-        provider_id: &ProviderId,
+    pub fn for_protocol_model(
         protocol: crate::config::provider::Protocol,
         model_config: &crate::providers::capability::ChatModelConfig,
     ) -> Self {
@@ -316,53 +333,35 @@ impl MediaPolicy {
         let audio = model_config.supports_input(Modality::Audio);
         let video = model_config.supports_input(Modality::Video);
 
-        let image_policy = match provider_id.as_str() {
-            well_known::OPENAI
-            | well_known::ANTHROPIC
-            | well_known::GLM
-            | well_known::GENERIC
-            | well_known::GOOGLE => MediaInputPolicy::inline_base64(image, Some(25 * 1024 * 1024)),
-            well_known::XIAOMI | well_known::MINIMAX => {
-                // Both Anthropic and OpenAI renderers handle inline images.
-                MediaInputPolicy::inline_base64(image, Some(25 * 1024 * 1024))
-            }
-            _ => MediaInputPolicy::marker(image),
-        };
-
-        let audio_policy = match provider_id.as_str() {
-            well_known::OPENAI | well_known::GOOGLE => {
-                MediaInputPolicy::inline_base64(audio, Some(25 * 1024 * 1024))
-            }
-            // Xiaomi OpenAI protocol supports input_audio natively when the
-            // model declares audio support. Models without audio support get
-            // a marker so the agent can delegate via hear_audio tool.
-            well_known::XIAOMI if protocol == crate::config::provider::Protocol::OpenAi => {
-                MediaInputPolicy::inline_base64(audio, Some(25 * 1024 * 1024))
-            }
-            // Xiaomi Anthropic protocol: audio/video not supported by the
-            // Anthropic Messages wire format; fall back to text markers.
-            _ => MediaInputPolicy::marker(audio),
-        };
-
-        let video_policy = match provider_id.as_str() {
-            well_known::GLM | well_known::GENERIC | well_known::GOOGLE => {
-                MediaInputPolicy::inline_base64(video, Some(50 * 1024 * 1024))
-            }
-            // Xiaomi OpenAI protocol supports video_url natively when the
-            // model declares video support. Models without video support get
-            // a marker so the agent can delegate via view_video tool.
-            well_known::XIAOMI if protocol == crate::config::provider::Protocol::OpenAi => {
-                MediaInputPolicy::inline_base64(video, Some(50 * 1024 * 1024))
-            }
-            _ => MediaInputPolicy::marker(video),
-        };
-
-        Self {
-            image: image_policy,
-            audio: audio_policy,
-            video: video_policy,
-            other: MediaInputPolicy::marker(false),
+        match protocol {
+            crate::config::provider::Protocol::OpenAi => Self {
+                image: MediaInputPolicy::inline_base64(image, Some(25 * 1024 * 1024)),
+                audio: MediaInputPolicy::inline_base64(audio, Some(25 * 1024 * 1024)),
+                video: MediaInputPolicy::inline_base64(video, Some(50 * 1024 * 1024)),
+                other: MediaInputPolicy::marker(false),
+            },
+            crate::config::provider::Protocol::Anthropic => Self {
+                image: MediaInputPolicy::inline_base64(image, Some(25 * 1024 * 1024)),
+                audio: MediaInputPolicy::marker(audio),
+                video: MediaInputPolicy::marker(video),
+                other: MediaInputPolicy::marker(false),
+            },
+            crate::config::provider::Protocol::Google => Self {
+                image: MediaInputPolicy::inline_base64(image, Some(25 * 1024 * 1024)),
+                audio: MediaInputPolicy::inline_base64(audio, Some(25 * 1024 * 1024)),
+                video: MediaInputPolicy::inline_base64(video, Some(50 * 1024 * 1024)),
+                other: MediaInputPolicy::marker(false),
+            },
         }
+    }
+
+    pub fn for_provider_protocol_model(
+        provider_id: &ProviderId,
+        protocol: crate::config::provider::Protocol,
+        model_config: &crate::providers::capability::ChatModelConfig,
+    ) -> Self {
+        let policy = Self::for_protocol_model(protocol, model_config);
+        Self::apply_provider_overrides(provider_id, policy)
     }
 
     pub fn for_provider_model(
@@ -374,6 +373,37 @@ impl MediaPolicy {
             crate::config::provider::Protocol::OpenAi,
             model_config,
         )
+    }
+
+    pub fn decision_for(
+        &self,
+        modality: FileModality,
+        size_bytes: Option<u64>,
+    ) -> MediaInlineDecision {
+        match modality {
+            FileModality::Image => self.image.decision(size_bytes),
+            FileModality::Audio => self.audio.decision(size_bytes),
+            FileModality::Video => self.video.decision(size_bytes),
+            FileModality::Other => self.other.decision(size_bytes),
+        }
+    }
+
+    fn apply_provider_overrides(provider_id: &ProviderId, policy: Self) -> Self {
+        match provider_id.as_str() {
+            // Keep this hook for provider-specific transport quirks. Media transport
+            // is protocol/renderer-driven by default; known providers currently need
+            // no downgrade overrides.
+            well_known::OPENAI
+            | well_known::ANTHROPIC
+            | well_known::GLM
+            | well_known::GENERIC
+            | well_known::GOOGLE
+            | well_known::XIAOMI
+            | well_known::KIMI
+            | well_known::MINIMAX
+            | well_known::DEEPSEEK => policy,
+            _ => policy,
+        }
     }
 }
 
@@ -403,35 +433,33 @@ fn lower_file_part(
     policy: MediaPolicy,
 ) -> ContentPart {
     let modality = modality_from_mime(mime_type.as_deref(), &path);
-    let supported = match modality {
-        FileModality::Image => policy.image.can_inline(size_bytes),
-        FileModality::Audio => policy.audio.can_inline(size_bytes),
-        FileModality::Video => policy.video.can_inline(size_bytes),
-        FileModality::Other => policy.other.can_inline(size_bytes),
-    };
-    if supported {
-        tracing::debug!(
-            path = %path,
-            modality = ?modality,
-            size_bytes,
-            "lower_file_part: keeping inline"
-        );
-        ContentPart::File {
-            path,
-            mime_type,
-            name,
-            size_bytes,
+    match policy.decision_for(modality, size_bytes) {
+        MediaInlineDecision::Inline => {
+            tracing::debug!(
+                path = %path,
+                modality = ?modality,
+                size_bytes,
+                "lower_file_part: keeping inline"
+            );
+            ContentPart::File {
+                path,
+                mime_type,
+                name,
+                size_bytes,
+            }
         }
-    } else {
-        let marker = marker_for_file(&path, mime_type.as_deref());
-        tracing::info!(
-            path = %path,
-            modality = ?modality,
-            size_bytes,
-            marker = %marker,
-            "lower_file_part: converting to text marker (exceeds policy or unsupported)"
-        );
-        ContentPart::Text { text: marker }
+        MediaInlineDecision::Marker(reason) => {
+            let marker = marker_for_file(&path, mime_type.as_deref());
+            tracing::info!(
+                path = %path,
+                modality = ?modality,
+                size_bytes,
+                reason = ?reason,
+                marker = %marker,
+                "lower_file_part: converting to text marker"
+            );
+            ContentPart::Text { text: marker }
+        }
     }
 }
 
@@ -561,6 +589,19 @@ mod tests {
         }
     }
 
+    fn model_config(
+        input: Vec<crate::providers::capability::Modality>,
+    ) -> crate::providers::capability::ChatModelConfig {
+        crate::providers::capability::ChatModelConfig {
+            input,
+            output: vec![crate::providers::capability::Modality::Text],
+            context_window: None,
+            max_output_tokens: None,
+            reasoning: false,
+            pricing: None,
+        }
+    }
+
     #[test]
     fn file_markers_use_path_and_modality() {
         assert_eq!(
@@ -578,6 +619,51 @@ mod tests {
         assert_eq!(
             marker_for_file("sessions/s/files/report.pdf", Some("application/pdf")),
             "[文件: sessions/s/files/report.pdf]"
+        );
+    }
+
+    #[test]
+    fn openai_protocol_inlines_supported_image_regardless_provider_id() {
+        let cfg = model_config(vec![
+            crate::providers::capability::Modality::Text,
+            crate::providers::capability::Modality::Image,
+        ]);
+        let policy = MediaPolicy::for_provider_protocol_model(
+            &ProviderId::new("open_ai"),
+            crate::config::provider::Protocol::OpenAi,
+            &cfg,
+        );
+
+        assert_eq!(
+            policy.decision_for(FileModality::Image, Some(119_085)),
+            MediaInlineDecision::Inline
+        );
+    }
+
+    #[test]
+    fn model_without_image_support_marks_image_even_if_protocol_supports() {
+        let cfg = model_config(vec![crate::providers::capability::Modality::Text]);
+        let policy =
+            MediaPolicy::for_protocol_model(crate::config::provider::Protocol::OpenAi, &cfg);
+
+        assert_eq!(
+            policy.decision_for(FileModality::Image, Some(1000)),
+            MediaInlineDecision::Marker(MediaMarkerReason::ModelUnsupported)
+        );
+    }
+
+    #[test]
+    fn oversized_image_is_marked() {
+        let policy = MediaPolicy {
+            image: MediaInputPolicy::inline_base64(true, Some(25 * 1024 * 1024)),
+            audio: MediaInputPolicy::marker(false),
+            video: MediaInputPolicy::marker(false),
+            other: MediaInputPolicy::marker(false),
+        };
+
+        assert_eq!(
+            policy.decision_for(FileModality::Image, Some(26 * 1024 * 1024)),
+            MediaInlineDecision::Marker(MediaMarkerReason::SizeExceeded)
         );
     }
 

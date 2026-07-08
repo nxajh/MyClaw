@@ -4,6 +4,7 @@ use super::capability::{Capability, ChatModelConfig, Modality};
 use super::capability_chat::ChatProvider;
 use super::capability_embedding::EmbeddingProvider;
 use super::image::ImageGenerationProvider;
+use super::media::MediaPolicy;
 use super::search::SearchProvider;
 use super::stt::SttProvider;
 use super::tts::TtsProvider;
@@ -57,6 +58,9 @@ pub trait ProviderRegistry: Send + Sync {
 
     /// Get the provider key/vendor id for a registered chat model.
     fn get_chat_provider_id_by_model(&self, model_id: &str) -> Option<String>;
+
+    /// Get the media transport policy for a registered chat model.
+    fn get_chat_media_policy(&self, model_id: &str) -> Option<MediaPolicy>;
 
     /// Get the list of model IDs in the chat routing config (in fallback order).
     fn get_chat_routing_models(&self) -> Vec<String>;

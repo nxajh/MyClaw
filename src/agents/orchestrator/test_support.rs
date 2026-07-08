@@ -87,6 +87,7 @@ impl ProviderRegistry for NullRegistry {
     fn get_chat_model_config(&self, _m: &str) -> anyhow::Result<&ChatModelConfig> { anyhow::bail!("test stub") }
     fn get_chat_provider_by_model(&self, _m: &str) -> Option<(Arc<dyn ChatProvider>, String)> { None }
     fn get_chat_provider_id_by_model(&self, _m: &str) -> Option<String> { None }
+    fn get_chat_media_policy(&self, _m: &str) -> Option<crate::providers::MediaPolicy> { None }
     fn get_chat_routing_models(&self) -> Vec<String> { Vec::new() }
     fn get_all_provider_summaries(&self) -> Vec<ProviderSummary> { Vec::new() }
 }

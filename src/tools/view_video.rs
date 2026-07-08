@@ -187,7 +187,7 @@ impl Tool for ViewVideoTool {
     }
 
     fn description(&self) -> &str {
-        "View video file content. When the conversation contains a `[video: sessions/.../files/xxx]` marker, call this tool with the path and a specific question. Path can be workspace-relative, absolute, or a URL (http/https)."
+        "View video file content. When the conversation contains a `[视频: sessions/.../files/xxx]` or `[video: sessions/.../files/xxx]` marker, call this tool with the path and a specific question. Only use it for video files; do not use it for image or audio. Path can be workspace-relative, absolute, or a URL (http/https)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -253,6 +253,15 @@ impl Tool for ViewVideoTool {
                 success: false,
                 output: String::new(),
                 error: Some("video file too large, view_video limit is 200MB".to_string()),
+            });
+        }
+        if crate::providers::modality_from_mime(infer_video_mime(path), path)
+            != crate::providers::FileModality::Video
+        {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!("view_video only accepts video files: {path}")),
             });
         }
 

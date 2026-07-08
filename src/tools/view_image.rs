@@ -184,7 +184,7 @@ impl Tool for ViewImageTool {
     }
 
     fn description(&self) -> &str {
-        "View image file content. When the conversation contains an `[image: sessions/.../files/xxx]` marker, call this tool with the path and a specific question. Path can be workspace-relative, absolute, or a URL (http/https)."
+        "View image file content. When the conversation contains a `[图片: sessions/.../files/xxx]` or `[image: sessions/.../files/xxx]` marker, call this tool with the path and a specific question. Only use it for image files; do not use it for video or audio. Path can be workspace-relative, absolute, or a URL (http/https)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -246,6 +246,15 @@ impl Tool for ViewImageTool {
                 success: false,
                 output: String::new(),
                 error: Some("image file too large, view_image limit is 25MB".to_string()),
+            });
+        }
+        if crate::providers::modality_from_mime(infer_image_mime(path), path)
+            != crate::providers::FileModality::Image
+        {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!("view_image only accepts image files: {path}")),
             });
         }
 

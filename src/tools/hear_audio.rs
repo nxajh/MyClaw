@@ -181,7 +181,7 @@ impl Tool for HearAudioTool {
     }
 
     fn description(&self) -> &str {
-        "Listen to voice/audio file content. When the conversation contains a `[voice: sessions/.../files/xxx]` marker, call this tool with the path. Path can be workspace-relative, absolute, or a URL (http/https)."
+        "Listen to voice/audio file content. When the conversation contains a `[语音: sessions/.../files/xxx]`, `[音频: sessions/.../files/xxx]`, or `[voice: sessions/.../files/xxx]` marker, call this tool with the path. Only use it for audio files; do not use it for image or video. Path can be workspace-relative, absolute, or a URL (http/https)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -243,6 +243,15 @@ impl Tool for HearAudioTool {
                 success: false,
                 output: String::new(),
                 error: Some("audio file too large, hear_audio limit is 50MB".to_string()),
+            });
+        }
+        if crate::providers::modality_from_mime(infer_audio_mime(path), path)
+            != crate::providers::FileModality::Audio
+        {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!("hear_audio only accepts audio files: {path}")),
             });
         }
 

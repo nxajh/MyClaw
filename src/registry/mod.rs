@@ -69,6 +69,9 @@ pub struct Registry {
     /// Per-model provider vendor id (e.g. "glm", "openai") used by the
     /// fallback chain to classify errors with vendor-specific rules.
     model_provider_ids: HashMap<String, String>,
+    /// Per-model media transport policies used both by request lowering and
+    /// modality tool filtering.
+    chat_media_policies: HashMap<String, crate::providers::MediaPolicy>,
 }
 
 impl Registry {
@@ -96,6 +99,7 @@ impl Registry {
             fallback_chat_provider: None,
             credential_pools: HashMap::new(),
             model_provider_ids: HashMap::new(),
+            chat_media_policies: HashMap::new(),
         }
     }
 
@@ -374,6 +378,7 @@ impl Registry {
         }
         self.chat_model_configs
             .insert(model_id.clone(), model_config);
+        self.chat_media_policies.insert(model_id.clone(), policy);
         self.chat_providers.insert(model_id, wrapped);
     }
 
@@ -622,6 +627,10 @@ impl ProviderRegistry for Registry {
 
     fn get_chat_provider_id_by_model(&self, model_id: &str) -> Option<String> {
         self.model_provider_ids.get(model_id).cloned()
+    }
+
+    fn get_chat_media_policy(&self, model_id: &str) -> Option<crate::providers::MediaPolicy> {
+        self.chat_media_policies.get(model_id).copied()
     }
 
     fn get_chat_routing_models(&self) -> Vec<String> {

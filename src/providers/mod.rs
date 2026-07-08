@@ -66,8 +66,9 @@ pub use glm::GlmProvider;
 pub use google::GoogleProvider;
 pub use kimi::KimiProvider;
 pub use media::{
-    MediaCaps, MediaInputPolicy, MediaLoweringProvider, MediaPolicy, MediaTransport,
-    age_media_in_message, audio_marker, image_marker, lower_media_for,
+    FileModality, MediaCaps, MediaInlineDecision, MediaInputPolicy, MediaLoweringProvider,
+    MediaMarkerReason, MediaPolicy, MediaTransport, age_media_in_message, audio_marker,
+    image_marker, lower_media_for, modality_from_mime,
 };
 pub use minimax::MiniMaxProvider;
 pub use openai::OpenAiProvider;
