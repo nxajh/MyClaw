@@ -754,16 +754,16 @@ fn filter_modality_redundant_tools(
 ) {
     use crate::providers::capability::Modality;
 
-    // Resolve the model that will handle this request.
+    // When no explicit model override is provided, skip modality-based filtering.
+    // We cannot know which model the default router will ultimately select,
+    // so dropping tools based on the first routing model risks removing
+    // capabilities that a later-chosen vision model would need.
+    //
+    // Only apply the optimization when the user has explicitly selected
+    // a model via /model or session override.
     let model_id = match model_override {
         Some(m) => m.to_string(),
-        None => {
-            let models = runtime.providers.get_chat_routing_models();
-            match models.into_iter().next() {
-                Some(m) => m,
-                None => return,
-            }
-        }
+        None => return,
     };
 
     let cfg = match runtime.providers.get_chat_model_config(&model_id) {
