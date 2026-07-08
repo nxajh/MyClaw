@@ -108,7 +108,7 @@ function DesktopSidebar({ collapsed, setCollapsed }: { collapsed: boolean; setCo
   }
 
   return (
-    <aside className={`${collapsed ? 'w-14' : 'w-56'} hidden md:flex flex-col shrink-0 bg-zinc-900 border-r border-zinc-800 transition-[width] duration-200 overflow-hidden`}>
+    <aside className={`${collapsed ? 'w-14' : 'w-60'} hidden md:flex flex-col shrink-0 bg-zinc-900 border-r border-zinc-800 transition-[width] duration-200 overflow-hidden`}>
       <div className="flex items-center h-14 px-3 border-b border-zinc-800 shrink-0">
         {!collapsed && <span className="flex-1 text-sm font-semibold text-zinc-100 truncate">🦀 MyClaw</span>}
         <button

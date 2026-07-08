@@ -137,7 +137,7 @@ export default function Skills() {
     return (
       <div className="flex flex-col h-full bg-zinc-950">
         <div className="flex-1 overflow-y-auto">
-          <div className="px-3 sm:px-6 py-4 sm:py-6 space-y-4">
+          <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4">
             <button onClick={backToList} className="flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-300 transition-colors mb-2">
               ← Back to Skills
             </button>
@@ -158,7 +158,7 @@ export default function Skills() {
   return (
     <div className="flex flex-col h-full bg-zinc-950">
       <div className="flex-1 overflow-y-auto">
-        <div className="px-3 sm:px-6 py-4 sm:py-6 space-y-4">
+        <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4">
           {/* Header */}
           <div className="flex flex-col sm:flex-row sm:items-center gap-3 justify-between pb-2 border-b border-zinc-900">
             <div>

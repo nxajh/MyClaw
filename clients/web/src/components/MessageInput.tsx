@@ -254,7 +254,7 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
   }
 
   return (
-    <div className="px-2 sm:px-4 pb-3 sm:pb-5 pt-2 sm:pt-3 shrink-0 safe-area-bottom">
+    <div className="px-3 sm:px-8 py-4 sm:py-5 shrink-0 safe-area-bottom">
       <div className="relative">
         {/* Slash command dropdown */}
         {showCmds && (

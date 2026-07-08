@@ -1087,7 +1087,7 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
               {virtualItems.map((vi) => {
                 const msg = messages[vi.index]
                 return (
-                  <div key={vi.key} data-index={vi.index} ref={(el) => { if (el) virtualizer.measureElement(el) }} className={`px-2 sm:px-4 lg:px-6 py-3 sm:py-4 rounded-2xl transition-colors ${vi.index === currentMatchIndex ? 'bg-amber-500/10 ring-1 ring-amber-500/30' : ''}`}>
+                  <div key={vi.key} data-index={vi.index} ref={(el) => { if (el) virtualizer.measureElement(el) }} className={`px-2 sm:px-6 lg:px-8 py-3 sm:py-4 rounded-2xl transition-colors ${vi.index === currentMatchIndex ? 'bg-amber-500/10 ring-1 ring-amber-500/30' : ''}`}>
                     {shouldShowTimeDivider(messages[vi.index - 1], msg) && (
                       <div className="flex items-center gap-3 my-2 text-[11px] text-zinc-600">
                         <div className="h-px flex-1 bg-zinc-800" />

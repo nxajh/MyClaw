@@ -234,7 +234,7 @@ export default function Sessions() {
   return (
     <div className="flex flex-col h-full">
       <div className="flex-1 overflow-y-auto">
-        <div className="px-3 sm:px-6 py-4 sm:py-6 space-y-4">
+        <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4">
       {/* Create */}
       <div className="flex gap-2 pb-4 border-b border-zinc-900">
         <input
