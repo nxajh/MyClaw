@@ -53,14 +53,14 @@ function PreCodeBlock({ children, className }: { children: ReactNode; className?
   }
 
   return (
-    <div className="code-block relative group/code my-4 overflow-hidden rounded-xl border border-zinc-850 bg-zinc-950 shadow-md">
+    <div className="code-block relative group/code my-4 overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 shadow-md">
       <div className="flex items-center justify-between px-4 py-1.5 border-b border-zinc-900 bg-zinc-900/40 text-[10px] text-zinc-500 font-mono select-none">
         <span>{lang || 'code'}</span>
-        <button onClick={handleCopy} className="flex items-center gap-1 px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-850 hover:text-zinc-200 border border-zinc-800/60 transition-opacity sm:opacity-60 sm:group-hover/code:opacity-100">
+        <button onClick={handleCopy} className="flex items-center gap-1 px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 hover:text-zinc-200 border border-zinc-800/60 transition-opacity sm:opacity-60 sm:group-hover/code:opacity-100">
           {copied ? <><Check size={10} className="text-emerald-400" /><span className="text-emerald-400">Copied</span></> : <><Copy size={10} /><span>Copy</span></>}
         </button>
       </div>
-      <pre ref={preRef} className="p-2 sm:p-3 lg:p-4 overflow-x-auto text-[11px] sm:text-xs leading-5 sm:leading-6 text-zinc-350 focus:outline-none !my-0 !bg-transparent !border-none">{children}</pre>
+      <pre ref={preRef} className="p-2 sm:p-3 lg:p-4 overflow-x-auto text-[11px] sm:text-xs leading-5 sm:leading-6 text-zinc-400 focus:outline-none !my-0 !bg-transparent !border-none">{children}</pre>
     </div>
   )
 }

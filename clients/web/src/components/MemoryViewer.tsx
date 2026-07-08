@@ -94,7 +94,7 @@ export default function MemoryViewer({ name, content, error, onEdit, onBack, onD
         </div>
 
         {/* Body */}
-        <div className="prose prose-invert prose-sm max-w-none bg-zinc-900/10 p-6 rounded-2xl border border-zinc-900
+        <div className="prose prose-invert prose-sm max-w-none bg-zinc-900/30 p-6 rounded-2xl border border-zinc-800
           prose-p:leading-7 prose-headings:text-zinc-100 prose-headings:font-semibold
           prose-code:text-zinc-200 prose-code:bg-zinc-800 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:text-[0.8em] prose-code:before:content-none prose-code:after:content-none
           prose-pre:bg-zinc-950 prose-pre:border prose-pre:border-zinc-800 prose-pre:rounded-xl prose-pre:text-xs

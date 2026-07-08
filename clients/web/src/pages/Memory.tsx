@@ -157,7 +157,7 @@ export default function Memory() {
     return (
       <div className="flex flex-col h-full bg-zinc-950">
         <div className="flex-1 overflow-y-auto">
-          <div className="max-w-3xl mx-auto px-3 sm:px-6 py-4 sm:py-6 space-y-4">
+          <div className="px-3 sm:px-6 py-4 sm:py-6 space-y-4">
             <button onClick={backToList} className="flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-300 transition-colors mb-2">
               ← Back to Memories
             </button>
@@ -178,7 +178,7 @@ export default function Memory() {
   return (
     <div className="flex flex-col h-full bg-zinc-950">
       <div className="flex-1 overflow-y-auto">
-        <div className="max-w-3xl mx-auto px-3 sm:px-6 py-4 sm:py-6 space-y-4">
+        <div className="px-3 sm:px-6 py-4 sm:py-6 space-y-4">
           {/* Header */}
           <div className="flex flex-col sm:flex-row sm:items-center gap-3 justify-between pb-2 border-b border-zinc-900">
             <div>
@@ -210,7 +210,7 @@ export default function Memory() {
           {/* Search */}
           <div className="relative">
             <span className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none"><Search size={14} className="text-zinc-500" /></span>
-            <input type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Search by name, description, or tags..." className="w-full rounded-2xl border border-zinc-900 bg-zinc-900/30 pl-10 pr-4 py-2.5 text-xs text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-800 transition-colors" />
+            <input type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Search by name, description, or tags..." className="w-full rounded-2xl border border-zinc-800 bg-zinc-900/40 pl-10 pr-4 py-2.5 text-xs text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-700 transition-colors" />
           </div>
 
           {error && <ErrorBanner message={error} />}

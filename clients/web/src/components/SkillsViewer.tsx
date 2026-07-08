@@ -22,7 +22,7 @@ export default function SkillsViewer({ name, content, error, onEdit, onBack, onD
     <div className="flex-1 overflow-y-auto">
       <div className="max-w-3xl mx-auto px-6 py-6 space-y-5">
         {/* Nav row */}
-        <div className="flex items-center justify-between mb-4 border-b border-zinc-900 pb-2">
+        <div className="flex items-center justify-between mb-4 border-b border-zinc-800 pb-2">
           <button onClick={onBack} className="flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-300 transition-colors">
             <ChevronLeft size={14} /> Back to Skills
           </button>
@@ -80,7 +80,7 @@ export default function SkillsViewer({ name, content, error, onEdit, onBack, onD
         </div>
 
         {/* Body */}
-        <div className="prose prose-invert prose-sm max-w-none bg-zinc-900/10 p-6 rounded-2xl border border-zinc-900
+        <div className="prose prose-invert prose-sm max-w-none bg-zinc-900/30 p-6 rounded-2xl border border-zinc-800
           prose-p:leading-7 prose-headings:text-zinc-100 prose-headings:font-semibold
           prose-code:text-zinc-200 prose-code:bg-zinc-800 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:text-[0.8em] prose-code:before:content-none prose-code:after:content-none
           prose-pre:bg-zinc-950 prose-pre:border prose-pre:border-zinc-800 prose-pre:rounded-xl prose-pre:text-xs

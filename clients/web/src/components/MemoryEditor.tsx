@@ -142,7 +142,7 @@ ${body.trim()}`
         </div>
       )}
 
-      <div className="flex gap-2 justify-end border-t border-zinc-850 pt-3">
+      <div className="flex gap-2 justify-end border-t border-zinc-800 pt-3">
         <button onClick={onCancel} className={btnGhost}><X size={13} /> Cancel</button>
         <button onClick={handleSave} disabled={saving || !isValid()} className={btnPrimary}>
           {saving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />} Save

@@ -67,7 +67,7 @@ export default function LoginOverlay({ onSubmit, isRetry = false, isConnecting =
           <button
             type="submit"
             disabled={!token.trim() || !clientId.trim() || isConnecting}
-            className="w-full rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed px-4 py-3 text-sm font-medium transition flex items-center justify-center gap-2"
+            className="w-full rounded-xl bg-zinc-100 hover:bg-white text-zinc-900 disabled:opacity-40 disabled:cursor-not-allowed px-4 py-3 text-sm font-medium transition flex items-center justify-center gap-2"
           >
             {isConnecting && <Loader2 size={14} className="animate-spin" />}
             {isConnecting ? 'Connecting…' : 'Connect'}

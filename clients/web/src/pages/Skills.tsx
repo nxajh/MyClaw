@@ -137,7 +137,7 @@ export default function Skills() {
     return (
       <div className="flex flex-col h-full bg-zinc-950">
         <div className="flex-1 overflow-y-auto">
-          <div className="max-w-3xl mx-auto px-3 sm:px-6 py-4 sm:py-6 space-y-4">
+          <div className="px-3 sm:px-6 py-4 sm:py-6 space-y-4">
             <button onClick={backToList} className="flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-300 transition-colors mb-2">
               ← Back to Skills
             </button>
@@ -158,7 +158,7 @@ export default function Skills() {
   return (
     <div className="flex flex-col h-full bg-zinc-950">
       <div className="flex-1 overflow-y-auto">
-        <div className="max-w-2xl mx-auto px-3 sm:px-6 py-4 sm:py-6 space-y-4">
+        <div className="px-3 sm:px-6 py-4 sm:py-6 space-y-4">
           {/* Header */}
           <div className="flex flex-col sm:flex-row sm:items-center gap-3 justify-between pb-2 border-b border-zinc-900">
             <div>
@@ -184,7 +184,7 @@ export default function Skills() {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Search skills by name, description, or keyword…"
-                className="w-full rounded-2xl border border-zinc-900 bg-zinc-900/30 pl-10 pr-4 py-2.5 text-xs text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-800 transition-colors"
+                className="w-full rounded-2xl border border-zinc-800 bg-zinc-900/40 pl-10 pr-4 py-2.5 text-xs text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-700 transition-colors"
               />
             </div>
           )}

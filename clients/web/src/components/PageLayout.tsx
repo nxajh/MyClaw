@@ -30,7 +30,7 @@ export const inputCls =
   'rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-2.5 text-sm text-zinc-100 placeholder-zinc-600 outline-none focus:border-zinc-700 transition-colors disabled:opacity-50 w-full'
 
 export const btnPrimary =
-  'flex items-center gap-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed px-4 py-2.5 text-sm font-medium transition-colors shrink-0'
+  'flex items-center gap-1.5 rounded-xl bg-zinc-100 hover:bg-white text-zinc-900 disabled:opacity-40 disabled:cursor-not-allowed px-4 py-2.5 text-sm font-medium transition-colors shrink-0'
 
 export const btnGhost =
   'flex items-center gap-1.5 rounded-xl border border-zinc-800 hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed px-3 py-2 text-sm text-zinc-400 hover:text-zinc-200 transition-colors shrink-0'

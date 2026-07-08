@@ -71,7 +71,7 @@ function SessionRow({
           : 'border-zinc-800 bg-zinc-900/50 hover:bg-zinc-800/60 hover:border-zinc-700 cursor-pointer'
       }`}
     >
-      <div className={`h-2 w-2 rounded-full shrink-0 transition-colors ${session.is_active ? 'bg-emerald-700' : 'bg-zinc-700'}`} />
+      <div className={`h-2 w-2 rounded-full shrink-0 transition-colors ${session.is_active ? 'bg-emerald-400' : 'bg-zinc-700'}`} />
 
       <div className="flex-1 min-w-0">
         {editing ? (
@@ -234,7 +234,7 @@ export default function Sessions() {
   return (
     <div className="flex flex-col h-full">
       <div className="flex-1 overflow-y-auto">
-        <div className="max-w-2xl mx-auto px-3 sm:px-6 py-4 sm:py-6 space-y-4">
+        <div className="px-3 sm:px-6 py-4 sm:py-6 space-y-4">
       {/* Create */}
       <div className="flex gap-2 pb-4 border-b border-zinc-900">
         <input

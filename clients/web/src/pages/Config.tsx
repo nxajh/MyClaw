@@ -175,7 +175,7 @@ export default function Config() {
   return (
     <div className="flex flex-col h-full bg-zinc-950">
       <div className="flex-1 overflow-y-auto">
-        <div className="max-w-2xl mx-auto px-3 sm:px-6 py-4 sm:py-6 space-y-5 animate-fadeIn">
+        <div className="px-3 sm:px-6 py-4 sm:py-6 space-y-5 animate-fadeIn">
 
           {/* Action Row & Diagnostics */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-zinc-900">
@@ -209,7 +209,7 @@ export default function Config() {
           </div>
 
           {/* Diagnostics banner */}
-          <div className={`flex items-center justify-between px-4 py-3 rounded-2xl border transition-colors ${isDirty ? 'bg-amber-950/15 border-amber-800/50' : 'bg-zinc-900/10 border-zinc-900'}`}>
+          <div className={`flex items-center justify-between px-4 py-3 rounded-2xl border transition-colors ${isDirty ? 'bg-amber-950/15 border-amber-800/50' : 'bg-zinc-900/30 border-zinc-800'}`}>
             <div className="flex items-center gap-2">
               {isDirty ? (
                 <span className="flex items-center gap-1.5 text-xs text-amber-400 font-medium">
@@ -231,13 +231,13 @@ export default function Config() {
           {/* Configuration Metadata Blocks */}
           {!loading && meta && (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-              <div className="rounded-2xl border border-zinc-900 bg-zinc-900/10 px-4 py-3.5 space-y-1">
+              <div className="rounded-2xl border border-zinc-800 bg-zinc-900/30 px-4 py-3.5 space-y-1">
                 <div className="text-zinc-600 font-medium flex items-center gap-1">
                   <Globe size={11} /> Loaded Tools
                 </div>
                 <div className="text-zinc-300 font-semibold font-mono text-sm">{meta.tool_count} builtins</div>
               </div>
-              <div className="rounded-2xl border border-zinc-900 bg-zinc-900/10 px-4 py-3.5 space-y-1 min-w-0">
+              <div className="rounded-2xl border border-zinc-800 bg-zinc-900/30 px-4 py-3.5 space-y-1 min-w-0">
                 <div className="text-zinc-600 font-medium flex items-center gap-1">
                   <FileText size={11} /> Config File Path
                 </div>
@@ -250,7 +250,7 @@ export default function Config() {
 
           {/* View Switcher Tabs */}
           {!loading && raw && (
-            <div className="flex bg-zinc-950 border border-zinc-900 rounded-xl p-0.5 self-start text-xs max-w-fit">
+            <div className="flex bg-zinc-950 border border-zinc-800 rounded-xl p-0.5 self-start text-xs max-w-fit">
               <button
                 onClick={() => setViewMode('form')}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${viewMode === 'form' ? 'bg-zinc-900 text-zinc-100 font-semibold' : 'text-zinc-500 hover:text-zinc-300'}`}
@@ -272,7 +272,7 @@ export default function Config() {
           {!loading && raw && (
             <div className="space-y-4">
               {viewMode === 'form' ? (
-                <div className="space-y-4 bg-zinc-900/20 border border-zinc-900 p-5 rounded-2xl">
+                <div className="space-y-4 bg-zinc-900/30 border border-zinc-800 p-5 rounded-2xl">
                   <div className="space-y-1.5">
                     <label className="text-xs font-semibold text-zinc-400">Knowledge Workspace Directory</label>
                     <input
@@ -313,7 +313,7 @@ export default function Config() {
                     onKeyDown={handleKeyDown}
                     rows={22}
                     spellCheck={false}
-                    className="w-full rounded-2xl border border-zinc-900 bg-zinc-950 px-4 py-3.5 text-xs font-mono text-zinc-300 outline-none focus:border-zinc-800 resize-y transition-colors leading-relaxed"
+                    className="w-full rounded-2xl border border-zinc-800 bg-zinc-950 px-4 py-3.5 text-xs font-mono text-zinc-300 outline-none focus:border-zinc-700 resize-y transition-colors leading-relaxed"
                   />
                 </div>
               )}
