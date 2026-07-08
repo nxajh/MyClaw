@@ -156,10 +156,7 @@ impl ChatProvider for XiaomiProvider {
                 "XiaomiProvider: using OpenAI protocol"
             );
 
-            let client = OpenAiChatCompletionsClient::new(
-                self.api_key.get(),
-                openai_base,
-            );
+            let client = OpenAiChatCompletionsClient::new(self.api_key.get(), openai_base);
             let client = if let Some(ref ua) = self.user_agent {
                 client.with_user_agent(ua.clone())
             } else {
@@ -171,14 +168,16 @@ impl ChatProvider for XiaomiProvider {
             use crate::providers::protocols::anthropic::messages::AnthropicMessagesClient;
 
             let thinking_enabled = media_req.thinking.as_ref().is_some_and(|t| t.enabled);
-            let mut body = crate::providers::protocols::anthropic::message_rendering::build_anthropic_body(&media_req);
+            let mut body =
+                crate::providers::protocols::anthropic::message_rendering::build_anthropic_body(
+                    &media_req,
+                );
 
             // MiMo-specific: MiMo ALWAYS requires a thinking block in every
             // assistant message that contains tool_use.
             patch_mimo_thinking(&mut body);
 
-            let client =
-                AnthropicMessagesClient::new(self.api_key.get(), self.base_url.clone());
+            let client = AnthropicMessagesClient::new(self.api_key.get(), self.base_url.clone());
             let client = if let Some(ref ua) = self.user_agent {
                 client.with_user_agent(ua.clone())
             } else {

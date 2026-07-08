@@ -59,14 +59,22 @@ impl TaskState {
     /// Render the task tree as a text block suitable for injection after
     /// context compaction, so the model retains its planning state.
     pub fn format_for_injection(&self) -> Option<String> {
-        let goals: Vec<&Task> = self.tasks.iter().filter(|t| t.parent_id.is_none()).collect();
+        let goals: Vec<&Task> = self
+            .tasks
+            .iter()
+            .filter(|t| t.parent_id.is_none())
+            .collect();
         if goals.is_empty() {
             return None;
         }
 
-        let mut lines = vec!["[Your active task list was preserved across context compaction]".to_string()];
+        let mut lines =
+            vec!["[Your active task list was preserved across context compaction]".to_string()];
         for goal in &goals {
-            lines.push(format!("- [{}] {} ({})", goal.status, goal.id, goal.subject));
+            lines.push(format!(
+                "- [{}] {} ({})",
+                goal.status, goal.id, goal.subject
+            ));
 
             // Show direct children.
             let children: Vec<&Task> = self
@@ -75,7 +83,10 @@ impl TaskState {
                 .filter(|t| t.parent_id.as_deref() == Some(&goal.id))
                 .collect();
             for child in &children {
-                lines.push(format!("    - [{}] {} ({})", child.status, child.id, child.subject));
+                lines.push(format!(
+                    "    - [{}] {} ({})",
+                    child.status, child.id, child.subject
+                ));
             }
         }
         Some(lines.join("\n"))

@@ -11,8 +11,8 @@
 //!   Search:    {base_url}/v4/web_search
 
 use crate::providers::{
-    EmbedInput, EmbedRequest, EmbedResponse, EmbeddingProvider, SearchProvider, SearchRequest,
-    SearchResult, SearchResults, SharedApiKey, ContentPart,
+    ContentPart, EmbedInput, EmbedRequest, EmbedResponse, EmbeddingProvider, SearchProvider,
+    SearchRequest, SearchResult, SearchResults, SharedApiKey,
 };
 use reqwest::Client;
 
@@ -37,7 +37,9 @@ pub fn glm_body_override(
                 continue;
             }
             let orig = &req.messages[i];
-            let reasoning: Vec<&str> = orig.parts.iter()
+            let reasoning: Vec<&str> = orig
+                .parts
+                .iter()
                 .filter_map(|p| match p {
                     ContentPart::Thinking { thinking, .. } => Some(thinking.as_str()),
                     _ => None,

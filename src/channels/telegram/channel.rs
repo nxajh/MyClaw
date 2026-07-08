@@ -1303,7 +1303,10 @@ impl TelegramChannel {
                             }
                         }
                         Err(e) => {
-                            warn!("Telegram download failed for video_note {}: {e}", vn.file_id)
+                            warn!(
+                                "Telegram download failed for video_note {}: {e}",
+                                vn.file_id
+                            )
                         }
                     }
                     if content.is_empty() {
@@ -1435,7 +1438,7 @@ impl TelegramChannel {
     /// UTF-8 characters. We leave a margin for the `(continues...)` suffix
     /// and for Telegram's own overhead.
     fn chunk_for_telegram(content: &str) -> Vec<String> {
-        use crate::channels::message::{split_message_chunk, LenUnit};
+        use crate::channels::message::{LenUnit, split_message_chunk};
 
         let rich_limit = RICH_MESSAGE_LENGTH.saturating_sub(CONTINUATION_OVERHEAD * 2);
         split_message_chunk(content, rich_limit, LenUnit::Codepoints)
@@ -2101,6 +2104,9 @@ mod tests {
         let input4 = "Text1\n| A |\n| - |\n| x |\n\nText2\n| B |\n| - |\n| y |";
         let out4 = TelegramChannel::normalize_markdown_tables(input4);
         assert!(out4.contains("Text1\n\n| A |"), "first table missing blank");
-        assert!(out4.contains("Text2\n\n| B |"), "second table missing blank");
+        assert!(
+            out4.contains("Text2\n\n| B |"),
+            "second table missing blank"
+        );
     }
 }

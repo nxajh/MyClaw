@@ -67,11 +67,7 @@ async fn download_to_temp(url: &str) -> anyhow::Result<PathBuf> {
     let tmp_dir = std::env::temp_dir().join("myclaw_downloads");
     std::fs::create_dir_all(&tmp_dir)?;
 
-    let filename = format!(
-        "url_{}.{ext}",
-        md5_hash(url),
-        ext = ext
-    );
+    let filename = format!("url_{}.{ext}", md5_hash(url), ext = ext);
     let tmp_path = tmp_dir.join(&filename);
     std::fs::write(&tmp_path, &body)?;
 

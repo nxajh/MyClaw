@@ -103,7 +103,10 @@ pub async fn run_memory_fork(input: ForkInput) {
         }
         Err(_) => {
             mark_session_cooldown(&session_key).await;
-            tracing::warn!(timeout_secs = OVERALL_TIMEOUT.as_secs(), "memory_fork: timed out");
+            tracing::warn!(
+                timeout_secs = OVERALL_TIMEOUT.as_secs(),
+                "memory_fork: timed out"
+            );
         }
     }
 }
@@ -134,7 +137,9 @@ fn compact_fork_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
             .cloned()
             .collect::<Vec<_>>();
         let tail_start = messages.len().saturating_sub(CONTEXT_TAIL_MESSAGES);
-        let omitted = messages.len().saturating_sub(head.len() + CONTEXT_TAIL_MESSAGES);
+        let omitted = messages
+            .len()
+            .saturating_sub(head.len() + CONTEXT_TAIL_MESSAGES);
         let summary = ChatMessage::system_text(format!(
             "Memory fork context was trimmed: {omitted} older messages omitted. Extract only durable memories evidenced by the recent messages below; do not infer task progress from omitted history."
         ));

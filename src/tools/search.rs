@@ -191,7 +191,8 @@ impl Tool for GlobSearchTool {
                         .ok()
                         .map(|m| {
                             let size = m.len();
-                            let mtime = m.modified()
+                            let mtime = m
+                                .modified()
                                 .ok()
                                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                                 .map(|d| d.as_secs())
@@ -273,7 +274,8 @@ fn search_in_file(
                     let mut line_matches = 0;
                     for mat in re.find_iter(context_line) {
                         let col = context_line[..mat.start()].chars().count() + 1;
-                        let byte_offset = line_byte_offsets.get(j).copied().unwrap_or(0) + mat.start();
+                        let byte_offset =
+                            line_byte_offsets.get(j).copied().unwrap_or(0) + mat.start();
                         results.push(format!(
                             "{}:{}:{} [byte {}]\t{}",
                             path.display(),
@@ -300,7 +302,8 @@ fn search_in_file(
                     let suffix = first_match
                         .map(|mat| {
                             let col = context_line[..mat.start()].chars().count() + 1;
-                            let byte_offset = line_byte_offsets.get(j).copied().unwrap_or(0) + mat.start();
+                            let byte_offset =
+                                line_byte_offsets.get(j).copied().unwrap_or(0) + mat.start();
                             format!(":{} [byte {}]", col, byte_offset)
                         })
                         .unwrap_or_default();
@@ -466,7 +469,8 @@ impl Tool for ContentSearchTool {
         let max_results = args["max_results"].as_u64().unwrap_or(200) as usize;
         let context_lines = args["context_lines"].as_u64().unwrap_or(0) as usize;
         let max_line_chars = args["max_line_chars"].as_u64().unwrap_or(1000).max(80) as usize;
-        let match_window_chars = args["match_window_chars"].as_u64().unwrap_or(200).max(20) as usize;
+        let match_window_chars =
+            args["match_window_chars"].as_u64().unwrap_or(200).max(20) as usize;
 
         let re = regex::Regex::new(pattern)
             .map_err(|e| anyhow::anyhow!("invalid regex '{}': {}", pattern, e))?;

@@ -163,203 +163,213 @@ impl ChatProvider for FallbackChatProvider {
                     let mut last_classified: Option<ClassifiedError> = None;
 
                     'transient_retry: loop {
-                    let req = ChatRequest {
-                        model: &entry.model_id,
-                        messages: &messages,
-                        temperature,
-                        max_tokens,
-                        thinking: thinking.clone(),
-                        stop: stop.clone(),
-                        seed,
-                        tools: tools.as_deref(),
-                        stream: stream_flag,
-                    };
+                        let req = ChatRequest {
+                            model: &entry.model_id,
+                            messages: &messages,
+                            temperature,
+                            max_tokens,
+                            thinking: thinking.clone(),
+                            stop: stop.clone(),
+                            seed,
+                            tools: tools.as_deref(),
+                            stream: stream_flag,
+                        };
 
-                    let stream = match entry.provider.chat(req) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            let classified = ClassifiedError::classify(&entry.provider_id, 0, &e.to_string())
+                        let stream = match entry.provider.chat(req) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                let classified = ClassifiedError::classify(
+                                    &entry.provider_id,
+                                    0,
+                                    &e.to_string(),
+                                )
                                 .with_provider(&entry.provider_id, &entry.model_id);
-                            tracing::warn!(
-                                model = %entry.model_id,
-                                category = %classified.category,
-                                reason = ?classified.reason,
-                                retryable = classified.recovery_hints().retry,
-                                "chat() failed: {}", classified.message
-                            );
+                                tracing::warn!(
+                                    model = %entry.model_id,
+                                    category = %classified.category,
+                                    reason = ?classified.reason,
+                                    retryable = classified.recovery_hints().retry,
+                                    "chat() failed: {}", classified.message
+                                );
 
-                            if classified.should_rotate_credential
-                                && entry.credential_pool.is_some()
-                                && entry.shared_api_key.is_some()
-                            {
-                                if let (Some(pool), Some(key)) = (&entry.credential_pool, &entry.shared_api_key) {
-                                    let old_key = key.get();
-                                    pool.mark_exhausted(&old_key, &classified.reason);
-                                    match pool.next_credential() {
-                                        Some(new_key) => {
-                                            key.set(&new_key);
-                                            tracing::info!(
-                                                model = %entry.model_id,
-                                                key_prefix = %new_key.chars().take(4).collect::<String>(),
-                                                "credential rotated (setup error), retrying same provider"
-                                            );
-                                            continue 'credential_retry;
-                                        }
-                                        None => {
-                                            tracing::warn!(
-                                                model = %entry.model_id,
-                                                "all credentials exhausted (setup error), failing over"
-                                            );
+                                if classified.should_rotate_credential
+                                    && entry.credential_pool.is_some()
+                                    && entry.shared_api_key.is_some()
+                                {
+                                    if let (Some(pool), Some(key)) =
+                                        (&entry.credential_pool, &entry.shared_api_key)
+                                    {
+                                        let old_key = key.get();
+                                        pool.mark_exhausted(&old_key, &classified.reason);
+                                        match pool.next_credential() {
+                                            Some(new_key) => {
+                                                key.set(&new_key);
+                                                tracing::info!(
+                                                    model = %entry.model_id,
+                                                    key_prefix = %new_key.chars().take(4).collect::<String>(),
+                                                    "credential rotated (setup error), retrying same provider"
+                                                );
+                                                continue 'credential_retry;
+                                            }
+                                            None => {
+                                                tracing::warn!(
+                                                    model = %entry.model_id,
+                                                    "all credentials exhausted (setup error), failing over"
+                                                );
+                                            }
                                         }
                                     }
                                 }
-                            }
 
-                            // Transient server error (Overloaded/ServerError): retry same
-                            // provider with backoff before falling over to the next entry.
-                            if is_transient_server_error(&classified.category)
-                                && transient_attempt < TRANSIENT_MAX_RETRIES
-                            {
-                                transient_attempt += 1;
-                                let delay = transient_backoff(transient_attempt);
-                                tracing::info!(
-                                    model = %entry.model_id,
-                                    category = %classified.category,
-                                    attempt = transient_attempt,
-                                    delay_secs = delay.as_secs(),
-                                    "transient setup error, retrying same provider"
-                                );
-                                tokio::time::sleep(delay).await;
-                                continue 'transient_retry;
-                            }
+                                // Transient server error (Overloaded/ServerError): retry same
+                                // provider with backoff before falling over to the next entry.
+                                if is_transient_server_error(&classified.category)
+                                    && transient_attempt < TRANSIENT_MAX_RETRIES
+                                {
+                                    transient_attempt += 1;
+                                    let delay = transient_backoff(transient_attempt);
+                                    tracing::info!(
+                                        model = %entry.model_id,
+                                        category = %classified.category,
+                                        attempt = transient_attempt,
+                                        delay_secs = delay.as_secs(),
+                                        "transient setup error, retrying same provider"
+                                    );
+                                    tokio::time::sleep(delay).await;
+                                    continue 'transient_retry;
+                                }
 
-                            if is_provider_error(&classified.category)
-                                || classified.recovery_hints().retry
-                            {
-                                record_cooldown(&cooldowns, &entry.model_id, &classified);
-                                broke_for_failover = true;
-                                break 'credential_retry;
+                                if is_provider_error(&classified.category)
+                                    || classified.recovery_hints().retry
+                                {
+                                    record_cooldown(&cooldowns, &entry.model_id, &classified);
+                                    broke_for_failover = true;
+                                    break 'credential_retry;
+                                }
+                                // Non-retryable setup error — propagate immediately.
+                                let _ = tx.send(StreamEvent::Error(e.to_string())).await;
+                                return;
                             }
-                            // Non-retryable setup error — propagate immediately.
-                            let _ = tx.send(StreamEvent::Error(e.to_string())).await;
-                            return;
-                        }
-                    };
+                        };
 
-                    // Drain the stream. Classify errors to decide whether to failover or rotate.
+                        // Drain the stream. Classify errors to decide whether to failover or rotate.
                         let mut saw_content = false;
                         let mut inner_stream = stream;
 
-                    while let Some(event) = inner_stream.next().await {
-                        match &event {
-                            StreamEvent::HttpError { status, message } => {
-                                let classified =
-                                    ClassifiedError::classify(&entry.provider_id, *status, message)
-                                        .with_provider(&entry.provider_id, &entry.model_id);
-                                tracing::warn!(
-                                    model = %entry.model_id,
-                                    status = *status,
-                                    category = %classified.category,
-                                    reason = ?classified.reason,
-                                    cooldown = ?classified.cooldown_duration(),
-                                    retry_after = ?classified.retry_after,
-                                    body = %classified.message,
-                                    "classified HTTP error"
-                                );
-
-                                if classified.should_rotate_credential
-                                    && entry.credential_pool.is_some()
-                                    && entry.shared_api_key.is_some()
-                                {
-                                    should_rotate = true;
-                                    last_classified = Some(classified);
-                                    break;
-                                }
-
-                                // Transient server error: retry same provider with backoff.
-                                if is_transient_server_error(&classified.category)
-                                    && !saw_content
-                                    && transient_attempt < TRANSIENT_MAX_RETRIES
-                                {
-                                    transient_attempt += 1;
-                                    let delay = transient_backoff(transient_attempt);
-                                    tracing::info!(
-                                        model = %entry.model_id,
-                                        category = %classified.category,
-                                        attempt = transient_attempt,
-                                        delay_secs = delay.as_secs(),
-                                        "transient HTTP error, retrying same provider"
-                                    );
-                                    tokio::time::sleep(delay).await;
-                                    continue 'transient_retry;
-                                }
-
-                                if is_provider_error(&classified.category)
-                                    || classified.recovery_hints().retry
-                                {
-                                    record_cooldown(&cooldowns, &entry.model_id, &classified);
-                                    should_failover = true;
-                                    break;
-                                }
-                                // Non-retryable HTTP error — propagate and stop.
-                                let _ = tx.send(event).await;
-                                return;
-                            }
-                            StreamEvent::Error(msg) => {
-                                let classified = ClassifiedError::classify(&entry.provider_id, 0, msg)
+                        while let Some(event) = inner_stream.next().await {
+                            match &event {
+                                StreamEvent::HttpError { status, message } => {
+                                    let classified = ClassifiedError::classify(
+                                        &entry.provider_id,
+                                        *status,
+                                        message,
+                                    )
                                     .with_provider(&entry.provider_id, &entry.model_id);
-
-                                if classified.should_rotate_credential
-                                    && entry.credential_pool.is_some()
-                                    && entry.shared_api_key.is_some()
-                                {
-                                    should_rotate = true;
-                                    last_classified = Some(classified);
-                                    break;
-                                }
-
-                                // Transient server error: retry same provider with backoff.
-                                if is_transient_server_error(&classified.category)
-                                    && !saw_content
-                                    && transient_attempt < TRANSIENT_MAX_RETRIES
-                                {
-                                    transient_attempt += 1;
-                                    let delay = transient_backoff(transient_attempt);
-                                    tracing::info!(
-                                        model = %entry.model_id,
-                                        category = %classified.category,
-                                        attempt = transient_attempt,
-                                        delay_secs = delay.as_secs(),
-                                        "transient stream error, retrying same provider"
-                                    );
-                                    tokio::time::sleep(delay).await;
-                                    continue 'transient_retry;
-                                }
-
-                                if is_provider_error(&classified.category)
-                                    || classified.recovery_hints().retry
-                                {
-                                    record_cooldown(&cooldowns, &entry.model_id, &classified);
                                     tracing::warn!(
                                         model = %entry.model_id,
+                                        status = *status,
                                         category = %classified.category,
                                         reason = ?classified.reason,
-                                        message = %classified.message,
-                                        "classified stream error, failing over"
+                                        cooldown = ?classified.cooldown_duration(),
+                                        retry_after = ?classified.retry_after,
+                                        body = %classified.message,
+                                        "classified HTTP error"
                                     );
-                                    should_failover = true;
-                                    break;
+
+                                    if classified.should_rotate_credential
+                                        && entry.credential_pool.is_some()
+                                        && entry.shared_api_key.is_some()
+                                    {
+                                        should_rotate = true;
+                                        last_classified = Some(classified);
+                                        break;
+                                    }
+
+                                    // Transient server error: retry same provider with backoff.
+                                    if is_transient_server_error(&classified.category)
+                                        && !saw_content
+                                        && transient_attempt < TRANSIENT_MAX_RETRIES
+                                    {
+                                        transient_attempt += 1;
+                                        let delay = transient_backoff(transient_attempt);
+                                        tracing::info!(
+                                            model = %entry.model_id,
+                                            category = %classified.category,
+                                            attempt = transient_attempt,
+                                            delay_secs = delay.as_secs(),
+                                            "transient HTTP error, retrying same provider"
+                                        );
+                                        tokio::time::sleep(delay).await;
+                                        continue 'transient_retry;
+                                    }
+
+                                    if is_provider_error(&classified.category)
+                                        || classified.recovery_hints().retry
+                                    {
+                                        record_cooldown(&cooldowns, &entry.model_id, &classified);
+                                        should_failover = true;
+                                        break;
+                                    }
+                                    // Non-retryable HTTP error — propagate and stop.
+                                    let _ = tx.send(event).await;
+                                    return;
                                 }
-                                // Non-retryable stream error — propagate.
-                                let _ = tx.send(event).await;
-                                return;
-                            }
-                            _ => {
-                                saw_content = true;
-                                let _ = tx.send(event).await;
+                                StreamEvent::Error(msg) => {
+                                    let classified =
+                                        ClassifiedError::classify(&entry.provider_id, 0, msg)
+                                            .with_provider(&entry.provider_id, &entry.model_id);
+
+                                    if classified.should_rotate_credential
+                                        && entry.credential_pool.is_some()
+                                        && entry.shared_api_key.is_some()
+                                    {
+                                        should_rotate = true;
+                                        last_classified = Some(classified);
+                                        break;
+                                    }
+
+                                    // Transient server error: retry same provider with backoff.
+                                    if is_transient_server_error(&classified.category)
+                                        && !saw_content
+                                        && transient_attempt < TRANSIENT_MAX_RETRIES
+                                    {
+                                        transient_attempt += 1;
+                                        let delay = transient_backoff(transient_attempt);
+                                        tracing::info!(
+                                            model = %entry.model_id,
+                                            category = %classified.category,
+                                            attempt = transient_attempt,
+                                            delay_secs = delay.as_secs(),
+                                            "transient stream error, retrying same provider"
+                                        );
+                                        tokio::time::sleep(delay).await;
+                                        continue 'transient_retry;
+                                    }
+
+                                    if is_provider_error(&classified.category)
+                                        || classified.recovery_hints().retry
+                                    {
+                                        record_cooldown(&cooldowns, &entry.model_id, &classified);
+                                        tracing::warn!(
+                                            model = %entry.model_id,
+                                            category = %classified.category,
+                                            reason = ?classified.reason,
+                                            message = %classified.message,
+                                            "classified stream error, failing over"
+                                        );
+                                        should_failover = true;
+                                        break;
+                                    }
+                                    // Non-retryable stream error — propagate.
+                                    let _ = tx.send(event).await;
+                                    return;
+                                }
+                                _ => {
+                                    saw_content = true;
+                                    let _ = tx.send(event).await;
+                                }
                             }
                         }
-                    }
 
                         // Stream ended (success or non-transient error after retries).
                         break 'transient_retry;
@@ -375,9 +385,11 @@ impl ChatProvider for FallbackChatProvider {
                     }
 
                     if should_rotate {
-                        if let (Some(pool), Some(key), Some(classified)) =
-                            (&entry.credential_pool, &entry.shared_api_key, &last_classified)
-                        {
+                        if let (Some(pool), Some(key), Some(classified)) = (
+                            &entry.credential_pool,
+                            &entry.shared_api_key,
+                            &last_classified,
+                        ) {
                             let old_key = key.get();
                             pool.mark_exhausted(&old_key, &classified.reason);
                             match pool.next_credential() {
@@ -410,7 +422,11 @@ impl ChatProvider for FallbackChatProvider {
                 if !broke_for_failover {
                     // Safety guard: if the inner loop ended without broke_for_failover and didn't return,
                     // it means all rotations were attempted but none succeeded. Record a default cooldown.
-                    let classified = ClassifiedError::classify(&entry.provider_id, 503, "all credentials exhausted");
+                    let classified = ClassifiedError::classify(
+                        &entry.provider_id,
+                        503,
+                        "all credentials exhausted",
+                    );
                     record_cooldown(&cooldowns, &entry.model_id, &classified);
                 }
             }

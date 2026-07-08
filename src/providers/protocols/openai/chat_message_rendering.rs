@@ -161,15 +161,23 @@ pub fn render_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                         let preview: String = text.chars().take(40).collect();
                         kinds.push(format!("text({})", preview));
                     }
-                    ContentPart::File { mime_type, size_bytes, path, .. } => {
-                        let modality = crate::providers::media::modality_from_mime(mime_type.as_deref(), path);
+                    ContentPart::File {
+                        mime_type,
+                        size_bytes,
+                        path,
+                        ..
+                    } => {
+                        let modality =
+                            crate::providers::media::modality_from_mime(mime_type.as_deref(), path);
                         let label = match modality {
                             crate::providers::media::FileModality::Image => "image",
                             crate::providers::media::FileModality::Audio => "audio",
                             crate::providers::media::FileModality::Video => "video",
                             crate::providers::media::FileModality::Other => "file",
                         };
-                        let mb = size_bytes.map(|b| format!("{:.1}MB", b as f64 / 1048576.0)).unwrap_or_default();
+                        let mb = size_bytes
+                            .map(|b| format!("{:.1}MB", b as f64 / 1048576.0))
+                            .unwrap_or_default();
                         kinds.push(format!("{}({})", label, mb));
                     }
                     ContentPart::Thinking { .. } => kinds.push("thinking".to_string()),

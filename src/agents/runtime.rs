@@ -128,7 +128,10 @@ impl AgentRuntime {
         self
     }
 
-    pub fn with_task_state(mut self, state: Arc<tokio::sync::RwLock<crate::tools::TaskState>>) -> Self {
+    pub fn with_task_state(
+        mut self,
+        state: Arc<tokio::sync::RwLock<crate::tools::TaskState>>,
+    ) -> Self {
         self.task_state = Some(state);
         self
     }

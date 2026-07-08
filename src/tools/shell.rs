@@ -263,7 +263,10 @@ impl ShellTool {
 
         match timeout(Duration::from_secs(timeout_secs), collect_task).await {
             Ok(Ok((status, stdout_text, stderr_text))) => {
-                let exit_code = status.as_ref().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+                let exit_code = status
+                    .as_ref()
+                    .map(|s| s.code().unwrap_or(-1))
+                    .unwrap_or(-1);
                 let success = status.as_ref().map(|s| s.success()).unwrap_or(false);
 
                 let mut output_text = format!("exit code: {}\n{}", exit_code, stdout_text);
@@ -386,10 +389,16 @@ impl ShellTool {
 
             // Copy collected output to shared buffers.
             if !stdout_buf_local.is_empty() {
-                stdout_buf_clone.lock().await.push_str(&String::from_utf8_lossy(&stdout_buf_local));
+                stdout_buf_clone
+                    .lock()
+                    .await
+                    .push_str(&String::from_utf8_lossy(&stdout_buf_local));
             }
             if !stderr_buf_local.is_empty() {
-                stderr_buf_clone.lock().await.push_str(&String::from_utf8_lossy(&stderr_buf_local));
+                stderr_buf_clone
+                    .lock()
+                    .await
+                    .push_str(&String::from_utf8_lossy(&stderr_buf_local));
             }
 
             let status = child.wait().await.ok();
@@ -500,7 +509,8 @@ impl Tool for ShellPollTool {
                 entry.finished
             };
 
-            if finished || wait_secs == 0 || start_wait.elapsed() >= Duration::from_secs(wait_secs) {
+            if finished || wait_secs == 0 || start_wait.elapsed() >= Duration::from_secs(wait_secs)
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(250)).await;

@@ -29,7 +29,9 @@ pub fn deepseek_body_override(
                 continue;
             }
             let orig = &req.messages[i];
-            let reasoning: Vec<&str> = orig.parts.iter()
+            let reasoning: Vec<&str> = orig
+                .parts
+                .iter()
                 .filter_map(|p| match p {
                     ContentPart::Thinking { thinking, .. } => Some(thinking.as_str()),
                     _ => None,

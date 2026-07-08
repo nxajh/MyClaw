@@ -24,10 +24,12 @@ pub fn build_google_body(req: &ChatRequest<'_>) -> serde_json::Value {
         .messages
         .iter()
         .filter(|m| m.role == "system")
-        .flat_map(|m| m.parts.iter().filter_map(|p| match p {
-            crate::providers::ContentPart::Text { text } => Some(text.as_str()),
-            _ => None,
-        }))
+        .flat_map(|m| {
+            m.parts.iter().filter_map(|p| match p {
+                crate::providers::ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -208,14 +210,19 @@ fn render_content(msg: &crate::providers::ChatMessage) -> Option<serde_json::Val
                             parts.push(json!({ "text": text }));
                         }
                     }
-                    crate::providers::ContentPart::Thinking { thinking, signature } => {
+                    crate::providers::ContentPart::Thinking {
+                        thinking,
+                        signature,
+                    } => {
                         if !thinking.is_empty() {
                             let mut part = json!({ "text": thinking, "thought": true });
                             // Only include signature if this message originated
                             // from a Gemini model; cross-provider signatures
                             // are incompatible (though non-FC signatures are
                             // not strictly validated by Google).
-                            let is_gemini = msg.model.as_deref()
+                            let is_gemini = msg
+                                .model
+                                .as_deref()
                                 .map(|m| m.starts_with("gemini"))
                                 .unwrap_or(true);
                             if let Some(sig) = signature {
@@ -231,7 +238,9 @@ fn render_content(msg: &crate::providers::ChatMessage) -> Option<serde_json::Val
                             pending_fc_sig = Some(sig.clone());
                         }
                     }
-                    crate::providers::ContentPart::File { path, mime_type, .. } => {
+                    crate::providers::ContentPart::File {
+                        path, mime_type, ..
+                    } => {
                         // Inline images as base64; other files as text markers.
                         let modality =
                             crate::providers::media::modality_from_mime(mime_type.as_deref(), path);
@@ -248,8 +257,8 @@ fn render_content(msg: &crate::providers::ChatMessage) -> Option<serde_json::Val
             // Tool calls → functionCall parts
             if let Some(ref tcs) = msg.tool_calls {
                 for (i, tc) in tcs.iter().enumerate() {
-                    let args: serde_json::Value =
-                        serde_json::from_str(&tc.arguments).unwrap_or_else(|e| {
+                    let args: serde_json::Value = serde_json::from_str(&tc.arguments)
+                        .unwrap_or_else(|e| {
                             tracing::warn!(
                                 tool_id = %tc.id,
                                 name = %tc.name,
@@ -270,7 +279,11 @@ fn render_content(msg: &crate::providers::ChatMessage) -> Option<serde_json::Val
                     if i == 0 {
                         if let Some(sig) = pending_fc_sig.take() {
                             part["thoughtSignature"] = json!(sig);
-                        } else if msg.model.as_deref().is_none_or(|m| !m.starts_with("gemini")) {
+                        } else if msg
+                            .model
+                            .as_deref()
+                            .is_none_or(|m| !m.starts_with("gemini"))
+                        {
                             // functionCall from a non-Google model has no
                             // real signature. Use the dummy bypass value
                             // documented by Google to avoid 400.
@@ -299,7 +312,9 @@ fn render_content(msg: &crate::providers::ChatMessage) -> Option<serde_json::Val
                             parts.push(json!({ "text": text }));
                         }
                     }
-                    crate::providers::ContentPart::File { path, mime_type, .. } => {
+                    crate::providers::ContentPart::File {
+                        path, mime_type, ..
+                    } => {
                         if let Some(part) = inline_file_as_part(path, mime_type.as_deref()) {
                             parts.push(part);
                         } else {
@@ -327,18 +342,13 @@ fn render_content(msg: &crate::providers::ChatMessage) -> Option<serde_json::Val
 
 /// Inline a file as a Google `inlineData` part (base64-encoded).
 /// Returns `None` if the file cannot be read.
-fn inline_file_as_part(
-    path: &str,
-    mime_type: Option<&str>,
-) -> Option<serde_json::Value> {
+fn inline_file_as_part(path: &str, mime_type: Option<&str>) -> Option<serde_json::Value> {
     let abs = crate::providers::media::resolve_path(path);
     let bytes = std::fs::read(&abs).ok()?;
     let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
     let mime = mime_type
         .map(|s| s.to_string())
-        .or_else(|| {
-            crate::providers::media::infer_image_mime(path).map(|s| s.to_string())
-        })
+        .or_else(|| crate::providers::media::infer_image_mime(path).map(|s| s.to_string()))
         .unwrap_or_else(|| "application/octet-stream".to_string());
     Some(json!({
         "inlineData": {

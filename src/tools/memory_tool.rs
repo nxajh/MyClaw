@@ -48,7 +48,9 @@ struct MemoryAudit<'a> {
 }
 
 fn append_memory_audit(workspace_dir: &Path, session: &Session, audit: MemoryAudit<'_>) {
-    let audit_dir = workspace_dir.join(crate::memory::MEMORY_DIR_NAME).join(".audit");
+    let audit_dir = workspace_dir
+        .join(crate::memory::MEMORY_DIR_NAME)
+        .join(".audit");
     if let Err(e) = std::fs::create_dir_all(&audit_dir) {
         tracing::warn!(err = %e, "memory audit: failed to create audit dir");
         return;

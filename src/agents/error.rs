@@ -9,7 +9,9 @@
 pub enum AgentError {
     /// The loop-breaker aborted the turn (repetitive pattern or hard limit).
     #[error("loop breaker triggered: {reason:?}")]
-    LoopBreak { reason: crate::agents::LoopBreakReason },
+    LoopBreak {
+        reason: crate::agents::LoopBreakReason,
+    },
 
     /// The LLM stream produced no data within the configured timeout.
     #[error("stream chunk timeout after {secs}s")]

@@ -47,7 +47,10 @@ fn list_tools(format: &str) -> Result<()> {
         ("glob_search", "Search files by glob pattern"),
         ("content_search", "Search file contents by regex"),
         ("web_search", "Search the web"),
-        ("http_request", "Make HTTP requests (supports strip_html for web pages)"),
+        (
+            "http_request",
+            "Make HTTP requests (supports strip_html for web pages)",
+        ),
         ("shell_poll", "Poll background shell processes"),
         ("calculator", "Evaluate math expressions"),
         ("ask_user", "Ask user a question"),

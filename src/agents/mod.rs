@@ -12,10 +12,10 @@ pub mod delegator;
 pub mod error;
 pub mod llm_stream;
 pub mod loop_breaker;
-pub mod memory_fork;
 mod mcp_manager;
 #[cfg(test)]
 mod media_e2e_test;
+pub mod memory_fork;
 mod orchestrator;
 mod prompt;
 pub mod recovery;

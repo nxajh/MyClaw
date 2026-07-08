@@ -292,9 +292,7 @@ impl SessionContext {
                 // Skip when the turn ended with ContextOverflow — the model
                 // never successfully processed the request, so we want the
                 // media to remain inline for the retry / compaction path.
-                if turn_result.stop_reason
-                    != crate::providers::StopReason::ContextOverflow
-                {
+                if turn_result.stop_reason != crate::providers::StopReason::ContextOverflow {
                     age_session_media(&mut session, persist_hook.as_deref());
                 }
 
@@ -356,7 +354,10 @@ impl SessionContext {
                 if let Some(s) = stream {
                     s.abort().await;
                 }
-                let channel_name = channel_for_send.as_ref().map(|ch| ch.name()).unwrap_or("none");
+                let channel_name = channel_for_send
+                    .as_ref()
+                    .map(|ch| ch.name())
+                    .unwrap_or("none");
                 tracing::error!(
                     session = %session.id,
                     channel = %channel_name,

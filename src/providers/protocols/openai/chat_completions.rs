@@ -9,7 +9,9 @@ use std::collections::HashMap;
 
 use crate::providers::http::build_reqwest_client;
 use crate::providers::protocols::openai::chat_message_rendering::render_openai_chat_body;
-use crate::providers::{BoxStream, ChatProvider, ChatRequest, SharedApiKey, StopReason, StreamEvent};
+use crate::providers::{
+    BoxStream, ChatProvider, ChatRequest, SharedApiKey, StopReason, StreamEvent,
+};
 use reqwest::Client;
 
 /// Post-process the rendered OpenAI body with provider-specific fields.
@@ -54,10 +56,7 @@ impl OpenAiChatCompletionsClient {
     }
 
     fn chat_url(&self) -> String {
-        format!(
-            "{}/chat/completions",
-            self.base_url.trim_end_matches('/')
-        )
+        format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
     }
 
     fn common_headers(&self) -> reqwest::header::HeaderMap {
@@ -293,9 +292,7 @@ fn parse_openai_sse(line: &str, tool_index_map: &mut HashMap<u32, String>) -> Ve
             return vec![StreamEvent::Usage(ChatUsage {
                 input_tokens: u.prompt_tokens,
                 output_tokens: u.completion_tokens,
-                cached_input_tokens: u
-                    .prompt_tokens_details
-                    .and_then(|d| d.cached_tokens),
+                cached_input_tokens: u.prompt_tokens_details.and_then(|d| d.cached_tokens),
                 reasoning_tokens: None,
                 cache_write_tokens: None,
             })];

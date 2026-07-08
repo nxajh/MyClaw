@@ -877,7 +877,8 @@ mod tests {
         }
 
         // Third call now — the streak spans > 60s, should NOT trigger.
-        let result = lb.record_and_check("shell", r#"{"c":"sleep 120 && tail log"}"#, "still running");
+        let result =
+            lb.record_and_check("shell", r#"{"c":"sleep 120 && tail log"}"#, "still running");
         assert_eq!(
             result,
             LoopBreak::None,

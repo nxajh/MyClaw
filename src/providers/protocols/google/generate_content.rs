@@ -9,7 +9,9 @@ use futures_util::StreamExt;
 
 use crate::providers::http::build_reqwest_client;
 use crate::providers::protocols::google::message_rendering::build_google_body;
-use crate::providers::{BoxStream, ChatProvider, ChatRequest, ChatUsage, SharedApiKey, StopReason, StreamEvent};
+use crate::providers::{
+    BoxStream, ChatProvider, ChatRequest, ChatUsage, SharedApiKey, StopReason, StreamEvent,
+};
 use reqwest::Client;
 
 /// Google Generate Content protocol client.
@@ -48,7 +50,9 @@ impl GoogleGenerateContentClient {
         };
         format!(
             "{}/v1beta/{}:streamGenerateContent?alt=sse&key={}",
-            base, model_path, self.api_key.get()
+            base,
+            model_path,
+            self.api_key.get()
         )
     }
 }
@@ -84,8 +88,8 @@ impl ChatProvider for GoogleGenerateContentClient {
             if resp.error_for_status_ref().is_err() {
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_default();
-                let message =
-                    parse_google_error_body(&text).unwrap_or_else(|| format!("HTTP {}: {}", status, text));
+                let message = parse_google_error_body(&text)
+                    .unwrap_or_else(|| format!("HTTP {}: {}", status, text));
                 if status.as_u16() == 400 {
                     tracing::warn!(
                         url = %url,
@@ -175,7 +179,10 @@ fn parse_google_error_body(body: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(body).ok()?;
     let err = v.get("error")?;
     let code = err.get("code").and_then(|v| v.as_u64()).unwrap_or(0);
-    let status = err.get("status").and_then(|v| v.as_str()).unwrap_or("ERROR");
+    let status = err
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("ERROR");
     let msg = err.get("message").and_then(|v| v.as_str())?;
     Some(format!("{} ({}): {}", status, code, msg))
 }
@@ -212,15 +219,11 @@ fn parse_google_sse(line: &str) -> Vec<StreamEvent> {
     if let Some(usage) = evt.get("usageMetadata") {
         events.push(StreamEvent::Usage(ChatUsage {
             input_tokens: usage.get("promptTokenCount").and_then(|v| v.as_u64()),
-            output_tokens: usage
-                .get("candidatesTokenCount")
-                .and_then(|v| v.as_u64()),
+            output_tokens: usage.get("candidatesTokenCount").and_then(|v| v.as_u64()),
             cached_input_tokens: usage
                 .get("cachedContentTokenCount")
                 .and_then(|v| v.as_u64()),
-            reasoning_tokens: usage
-                .get("thoughtsTokenCount")
-                .and_then(|v| v.as_u64()),
+            reasoning_tokens: usage.get("thoughtsTokenCount").and_then(|v| v.as_u64()),
             cache_write_tokens: None,
         }));
     }
@@ -251,9 +254,7 @@ fn parse_google_sse(line: &str) -> Vec<StreamEvent> {
                             });
                             // Google thinking blocks carry a thoughtSignature that
                             // must be echoed back in subsequent turns.
-                            if let Some(sig) = part
-                                .get("thoughtSignature")
-                                .and_then(|v| v.as_str())
+                            if let Some(sig) = part.get("thoughtSignature").and_then(|v| v.as_str())
                             {
                                 events.push(StreamEvent::ThinkingSignature {
                                     signature: sig.to_string(),
@@ -293,10 +294,7 @@ fn parse_google_sse(line: &str) -> Vec<StreamEvent> {
                     // functionCall parts may carry a thoughtSignature at the
                     // same level (Gemini 3+ thinking models). Emit it so the
                     // caller can store and replay it in subsequent turns.
-                    if let Some(sig) = part
-                        .get("thoughtSignature")
-                        .and_then(|v| v.as_str())
-                    {
+                    if let Some(sig) = part.get("thoughtSignature").and_then(|v| v.as_str()) {
                         events.push(StreamEvent::ThinkingSignature {
                             signature: sig.to_string(),
                         });
@@ -329,7 +327,8 @@ mod tests {
 
     #[test]
     fn parse_text_delta() {
-        let line = r#"data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Hello"}]}}]}"#;
+        let line =
+            r#"data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Hello"}]}}]}"#;
         let events = parse_google_sse(line);
         assert_eq!(events.len(), 1);
         match &events[0] {
@@ -355,7 +354,11 @@ mod tests {
         let events = parse_google_sse(line);
         assert_eq!(events.len(), 1);
         match &events[0] {
-            StreamEvent::ToolCallStart { name, initial_arguments, .. } => {
+            StreamEvent::ToolCallStart {
+                name,
+                initial_arguments,
+                ..
+            } => {
                 assert_eq!(name, "search");
                 assert!(initial_arguments.contains("rust"));
             }
@@ -369,7 +372,12 @@ mod tests {
         let events = parse_google_sse(line);
         assert_eq!(events.len(), 2);
         assert!(matches!(events[0], StreamEvent::Delta { .. }));
-        assert!(matches!(events[1], StreamEvent::Done { reason: StopReason::EndTurn }));
+        assert!(matches!(
+            events[1],
+            StreamEvent::Done {
+                reason: StopReason::EndTurn
+            }
+        ));
     }
 
     #[test]
@@ -388,7 +396,8 @@ mod tests {
 
     #[test]
     fn parse_error_body() {
-        let body = r#"{"error":{"code":400,"message":"Invalid request","status":"INVALID_ARGUMENT"}}"#;
+        let body =
+            r#"{"error":{"code":400,"message":"Invalid request","status":"INVALID_ARGUMENT"}}"#;
         let msg = parse_google_error_body(body).unwrap();
         assert!(msg.contains("INVALID_ARGUMENT"));
         assert!(msg.contains("Invalid request"));

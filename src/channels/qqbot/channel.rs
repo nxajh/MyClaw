@@ -583,8 +583,11 @@ impl QQBotChannel {
             } else {
                 "silk"
             };
-            let temp_path = std::env::temp_dir()
-                .join(format!("myclaw-qq-voice-{}.{}", uuid::Uuid::new_v4(), voice_ext));
+            let temp_path = std::env::temp_dir().join(format!(
+                "myclaw-qq-voice-{}.{}",
+                uuid::Uuid::new_v4(),
+                voice_ext
+            ));
             if tokio::fs::write(&temp_path, &bytes).await.is_err() {
                 warn!("qqbot: failed to save voice to temp file");
                 continue;
@@ -636,8 +639,11 @@ impl QQBotChannel {
                 Ok(resp) => match resp.bytes().await {
                     Ok(bytes) => {
                         let ext = mime_ext_from_content_type(ct);
-                        let temp_path = std::env::temp_dir()
-                            .join(format!("myclaw-qq-img-{}.{}", uuid::Uuid::new_v4(), ext));
+                        let temp_path = std::env::temp_dir().join(format!(
+                            "myclaw-qq-img-{}.{}",
+                            uuid::Uuid::new_v4(),
+                            ext
+                        ));
                         if tokio::fs::write(&temp_path, &bytes).await.is_ok() {
                             tracing::debug!(url = %full_url, size = bytes.len(), "qqbot: image downloaded and saved to temp file");
                             msg.content.files.push(ChannelFile {
@@ -723,9 +729,14 @@ impl QQBotChannel {
                             .get("filename")
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string())
-                            .unwrap_or_else(|| format!("attachment-{}.{}", uuid::Uuid::new_v4(), ext));
-                        let temp_path =
-                            std::env::temp_dir().join(format!("myclaw-qq-file-{}.{}", uuid::Uuid::new_v4(), ext));
+                            .unwrap_or_else(|| {
+                                format!("attachment-{}.{}", uuid::Uuid::new_v4(), ext)
+                            });
+                        let temp_path = std::env::temp_dir().join(format!(
+                            "myclaw-qq-file-{}.{}",
+                            uuid::Uuid::new_v4(),
+                            ext
+                        ));
                         if tokio::fs::write(&temp_path, &bytes).await.is_ok() {
                             tracing::debug!(url = %full_url, size = bytes.len(), %mime, "qqbot: attachment downloaded and saved to temp file");
                             msg.content.files.push(ChannelFile {
@@ -739,7 +750,9 @@ impl QQBotChannel {
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("qqbot: reading attachment bytes failed for {full_url}: {e}");
+                        tracing::warn!(
+                            "qqbot: reading attachment bytes failed for {full_url}: {e}"
+                        );
                     }
                 },
                 Err(e) => {

@@ -133,7 +133,11 @@ impl Tool for FileReadTool {
             let requested_end = requested_start.saturating_add(byte_limit).min(total_bytes);
             let start = next_char_boundary(&content, requested_start);
             let end = prev_char_boundary(&content, requested_end);
-            let snippet = if start <= end { &content[start..end] } else { "" };
+            let snippet = if start <= end {
+                &content[start..end]
+            } else {
+                ""
+            };
             let prefix = if start > 0 { "..." } else { "" };
             let suffix = if end < total_bytes { "..." } else { "" };
 
@@ -167,9 +171,18 @@ impl Tool for FileReadTool {
             return Ok(ToolResult {
                 success: true,
                 output: if outline_text.is_empty() {
-                    format!("{} ({} lines) — no structural elements found", path, content.lines().count())
+                    format!(
+                        "{} ({} lines) — no structural elements found",
+                        path,
+                        content.lines().count()
+                    )
                 } else {
-                    format!("{} ({} lines) — outline:\n{}", path, content.lines().count(), outline_text)
+                    format!(
+                        "{} ({} lines) — outline:\n{}",
+                        path,
+                        content.lines().count(),
+                        outline_text
+                    )
                 },
                 error: None,
             });
@@ -257,18 +270,15 @@ fn extract_outline(path: &str, content: &str) -> String {
             (r"^\s*(export\s+)?(async\s+)?function\s+(\w+)", "function"),
             (r"^\s*(export\s+)?class\s+(\w+)", "class"),
             (r"^\s*(export\s+)?const\s+(\w+)\s*=", "const"),
-            (r"^\s*(export\s+)?(default\s+)?interface\s+(\w+)", "interface"),
+            (
+                r"^\s*(export\s+)?(default\s+)?interface\s+(\w+)",
+                "interface",
+            ),
             (r"^\s*(export\s+)?type\s+(\w+)", "type"),
         ],
-        "md" | "markdown" => vec![
-            (r"^#{1,6}\s+.*", "heading"),
-        ],
-        "toml" => vec![
-            (r"^\[[\w.-]+\]", "section"),
-        ],
-        "yaml" | "yml" => vec![
-            (r"^[\w-]+\s*:", "key"),
-        ],
+        "md" | "markdown" => vec![(r"^#{1,6}\s+.*", "heading")],
+        "toml" => vec![(r"^\[[\w.-]+\]", "section")],
+        "yaml" | "yml" => vec![(r"^[\w-]+\s*:", "key")],
         "json" => {
             // For JSON, just show top-level keys
             return extract_json_outline(content);
@@ -276,8 +286,14 @@ fn extract_outline(path: &str, content: &str) -> String {
         _ => {
             // Generic: look for function-like patterns
             vec![
-                (r"(?i)^\s*(pub|public|private|protected)?\s*(static\s+)?(async\s+)?function\s+(\w+)", "function"),
-                (r"(?i)^\s*(pub|public|private|protected)?\s*class\s+(\w+)", "class"),
+                (
+                    r"(?i)^\s*(pub|public|private|protected)?\s*(static\s+)?(async\s+)?function\s+(\w+)",
+                    "function",
+                ),
+                (
+                    r"(?i)^\s*(pub|public|private|protected)?\s*class\s+(\w+)",
+                    "class",
+                ),
             ]
         }
     };
@@ -301,7 +317,12 @@ fn extract_outline(path: &str, content: &str) -> String {
     if result.is_empty() {
         String::new()
     } else {
-        format!("total {} lines, {} structural elements\n{}", total_lines, result.len(), result.join("\n"))
+        format!(
+            "total {} lines, {} structural elements\n{}",
+            total_lines,
+            result.len(),
+            result.join("\n")
+        )
     }
 }
 
@@ -312,7 +333,11 @@ fn extract_json_outline(content: &str) -> String {
     match val {
         serde_json::Value::Object(map) => {
             let keys: Vec<String> = map.keys().map(|k| format!("  {}", k)).collect();
-            format!("JSON object with {} top-level keys:\n{}", keys.len(), keys.join("\n"))
+            format!(
+                "JSON object with {} top-level keys:\n{}",
+                keys.len(),
+                keys.join("\n")
+            )
         }
         serde_json::Value::Array(arr) => {
             format!("JSON array with {} elements", arr.len())
@@ -493,7 +518,10 @@ impl Tool for FileEditTool {
         if count > 1 && !replace_all {
             return Ok(ToolResult {
                 success: false,
-                output: format!("old_string found {} times, must be unique (or set replace_all=true)", count),
+                output: format!(
+                    "old_string found {} times, must be unique (or set replace_all=true)",
+                    count
+                ),
                 error: Some(format!(
                     "old_string matched {} times, expected exactly 1 (set replace_all=true to replace all)",
                     count
@@ -518,10 +546,7 @@ impl Tool for FileEditTool {
             success: true,
             output: format!(
                 "replaced {} occurrence(s) in {} (first match line {})\n{}",
-                replaced_count,
-                path,
-                line_number,
-                diff,
+                replaced_count, path, line_number, diff,
             ),
             error: None,
         })
@@ -539,7 +564,12 @@ fn find_line_number(haystack: &str, needle: &str) -> usize {
     }
 }
 
-fn replacement_context_diff(content: &str, old_string: &str, new_string: &str, line_number: usize) -> String {
+fn replacement_context_diff(
+    content: &str,
+    old_string: &str,
+    new_string: &str,
+    line_number: usize,
+) -> String {
     let old_lines: Vec<&str> = old_string.lines().collect();
     let new_lines: Vec<&str> = new_string.lines().collect();
     let all_lines: Vec<&str> = content.lines().collect();

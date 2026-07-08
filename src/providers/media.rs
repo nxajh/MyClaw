@@ -102,7 +102,9 @@ fn sniff_modality_from_bytes(bytes: &[u8]) -> FileModality {
         return FileModality::Image; // BMP
     }
     // Audio magic bytes
-    if bytes.starts_with(b"ID3") || (bytes.len() >= 2 && bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0) {
+    if bytes.starts_with(b"ID3")
+        || (bytes.len() >= 2 && bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0)
+    {
         return FileModality::Audio; // MP3
     }
     if bytes.starts_with(b"OggS") {
@@ -144,7 +146,10 @@ pub fn marker_for_file(path: &str, mime: Option<&str>) -> String {
 pub fn age_media_in_message(msg: &mut ChatMessage) -> bool {
     let mut changed = false;
     for part in &mut msg.parts {
-        if let ContentPart::File { path, mime_type, .. } = part {
+        if let ContentPart::File {
+            path, mime_type, ..
+        } = part
+        {
             let marker = marker_for_file(path, mime_type.as_deref());
             *part = ContentPart::Text { text: marker };
             changed = true;
@@ -312,9 +317,11 @@ impl MediaPolicy {
         let video = model_config.supports_input(Modality::Video);
 
         let image_policy = match provider_id.as_str() {
-            well_known::OPENAI | well_known::ANTHROPIC | well_known::GLM | well_known::GENERIC | well_known::GOOGLE => {
-                MediaInputPolicy::inline_base64(image, Some(25 * 1024 * 1024))
-            }
+            well_known::OPENAI
+            | well_known::ANTHROPIC
+            | well_known::GLM
+            | well_known::GENERIC
+            | well_known::GOOGLE => MediaInputPolicy::inline_base64(image, Some(25 * 1024 * 1024)),
             well_known::XIAOMI | well_known::MINIMAX => {
                 // Both Anthropic and OpenAI renderers handle inline images.
                 MediaInputPolicy::inline_base64(image, Some(25 * 1024 * 1024))
@@ -329,9 +336,7 @@ impl MediaPolicy {
             // Xiaomi OpenAI protocol supports input_audio natively when the
             // model declares audio support. Models without audio support get
             // a marker so the agent can delegate via hear_audio tool.
-            well_known::XIAOMI
-                if protocol == crate::config::provider::Protocol::OpenAi =>
-            {
+            well_known::XIAOMI if protocol == crate::config::provider::Protocol::OpenAi => {
                 MediaInputPolicy::inline_base64(audio, Some(25 * 1024 * 1024))
             }
             // Xiaomi Anthropic protocol: audio/video not supported by the
@@ -346,9 +351,7 @@ impl MediaPolicy {
             // Xiaomi OpenAI protocol supports video_url natively when the
             // model declares video support. Models without video support get
             // a marker so the agent can delegate via view_video tool.
-            well_known::XIAOMI
-                if protocol == crate::config::provider::Protocol::OpenAi =>
-            {
+            well_known::XIAOMI if protocol == crate::config::provider::Protocol::OpenAi => {
                 MediaInputPolicy::inline_base64(video, Some(50 * 1024 * 1024))
             }
             _ => MediaInputPolicy::marker(video),
@@ -428,9 +431,7 @@ fn lower_file_part(
             marker = %marker,
             "lower_file_part: converting to text marker (exceeds policy or unsupported)"
         );
-        ContentPart::Text {
-            text: marker,
-        }
+        ContentPart::Text { text: marker }
     }
 }
 
@@ -666,9 +667,12 @@ mod tests {
 
     #[test]
     fn sniff_detects_image_magic_bytes() {
-        assert_eq!(sniff_modality_from_bytes(&[0xFF, 0xD8, 0xFF, 0xE0]), FileModality::Image); // JPEG
         assert_eq!(
-            sniff_modality_from_bytes(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A]), 
+            sniff_modality_from_bytes(&[0xFF, 0xD8, 0xFF, 0xE0]),
+            FileModality::Image
+        ); // JPEG
+        assert_eq!(
+            sniff_modality_from_bytes(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A]),
             FileModality::Image // PNG
         );
     }
@@ -676,7 +680,9 @@ mod tests {
     #[test]
     fn sniff_detects_video_magic_bytes() {
         // MP4 ftyp box
-        let mp4_header = [0x00, 0x00, 0x00, 0x20, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm'];
+        let mp4_header = [
+            0x00, 0x00, 0x00, 0x20, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm',
+        ];
         assert_eq!(sniff_modality_from_bytes(&mp4_header), FileModality::Video);
         // WebM/MKV EBML
         assert_eq!(
@@ -687,13 +693,19 @@ mod tests {
 
     #[test]
     fn sniff_detects_audio_magic_bytes() {
-        assert_eq!(sniff_modality_from_bytes(b"ID3\x03\x00"), FileModality::Audio); // MP3
+        assert_eq!(
+            sniff_modality_from_bytes(b"ID3\x03\x00"),
+            FileModality::Audio
+        ); // MP3
         assert_eq!(sniff_modality_from_bytes(b"OggS\x00"), FileModality::Audio); // OGG
     }
 
     #[test]
     fn sniff_returns_other_for_unknown() {
         assert_eq!(sniff_modality_from_bytes(b"XXXX"), FileModality::Other);
-        assert_eq!(sniff_modality_from_bytes(&[0x01, 0x02]), FileModality::Other);
+        assert_eq!(
+            sniff_modality_from_bytes(&[0x01, 0x02]),
+            FileModality::Other
+        );
     }
 }

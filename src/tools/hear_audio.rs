@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use crate::agents::session::Session;
 use crate::providers::capability::Modality;
-use crate::providers::capability_chat::{ChatMessage, ChatProvider, ChatRequest, ChatResponse, ContentPart};
+use crate::providers::capability_chat::{
+    ChatMessage, ChatProvider, ChatRequest, ChatResponse, ContentPart,
+};
 use crate::providers::provider_registry::ProviderRegistry;
 use crate::providers::{Tool, ToolResult};
 use serde_json::json;
@@ -21,7 +23,6 @@ impl HearAudioTool {
         Self { providers }
     }
 }
-
 
 fn infer_audio_mime(path: &str) -> Option<&'static str> {
     match Path::new(path)
@@ -289,7 +290,13 @@ impl Tool for HearAudioTool {
         };
         let messages = [user_msg];
 
-        try_with_fallback(&candidates, &messages, &abs.display().to_string(), file_size_mb).await
+        try_with_fallback(
+            &candidates,
+            &messages,
+            &abs.display().to_string(),
+            file_size_mb,
+        )
+        .await
     }
 }
 
@@ -300,9 +307,10 @@ mod tests {
     #[tokio::test]
     async fn resolves_relative_path_against_current_dir() {
         let cwd = std::env::current_dir().unwrap();
-        let result = crate::tools::media_download::resolve_path_or_url("sessions/s/files/voice.ogg")
-            .await
-            .unwrap();
+        let result =
+            crate::tools::media_download::resolve_path_or_url("sessions/s/files/voice.ogg")
+                .await
+                .unwrap();
         assert_eq!(result, cwd.join("sessions/s/files/voice.ogg"));
     }
 

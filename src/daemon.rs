@@ -228,11 +228,7 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
         // ── Chat ──────────────────────────────────────────────────────
         if let Some(ref chat) = provider_cfg.chat {
             let api_keys = provider_cfg.effective_api_keys(chat.api_key.as_deref());
-            anyhow::ensure!(
-                !api_keys.is_empty(),
-                "no API key for '{}'",
-                provider_key
-            );
+            anyhow::ensure!(!api_keys.is_empty(), "no API key for '{}'", provider_key);
 
             // Shared API key cell — all models under this provider share one cell.
             let shared_key = SharedApiKey::new(api_keys[0].clone());
@@ -294,11 +290,7 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
 
                 // Attach credential pool so the fallback chain can rotate keys.
                 if let Some(ref pool) = pool {
-                    registry.attach_credential_pool(
-                        model_id,
-                        pool.clone(),
-                        shared_key.clone(),
-                    );
+                    registry.attach_credential_pool(model_id, pool.clone(), shared_key.clone());
                 }
             }
         }
@@ -470,7 +462,10 @@ async fn build_tools(
     _knowledge_dir: &str,
     user_resolver: &Arc<crate::agents::UserResolver>,
     ask_router: Arc<crate::agents::AskRouter>,
-) -> (ToolRegistry, Arc<tokio::sync::RwLock<crate::tools::TaskState>>) {
+) -> (
+    ToolRegistry,
+    Arc<tokio::sync::RwLock<crate::tools::TaskState>>,
+) {
     let mut tools = ToolRegistry::new();
     let builtin = crate::tools::builtin_tools();
     for tool in builtin {
@@ -486,9 +481,9 @@ async fn build_tools(
     tools.register(Arc::new(crate::tools::SendMessageTool::new()));
     tools.register(Arc::new(crate::tools::ListDirTool::new()));
     let task_state = crate::tools::TaskManagerTool::shared_state();
-    tools.register(Arc::new(crate::tools::TaskManagerTool::new(
-        Arc::clone(&task_state),
-    )));
+    tools.register(Arc::new(crate::tools::TaskManagerTool::new(Arc::clone(
+        &task_state,
+    ))));
 
     // SkillTool — loads skill body on demand.
     tools.register(Arc::new(crate::tools::SkillTool::new(Arc::clone(skills))));
