@@ -67,7 +67,6 @@ html.light .hover\:bg-zinc-900\/40:hover { background-color: rgb(244 244 245 / 0
 html.light .hover\:bg-zinc-900\/30:hover { background-color: rgb(244 244 245 / 0.4); }
 html.light .hover\:bg-zinc-800\/40:hover { background-color: rgb(228 228 231 / 0.5); }
 html.light .hover\:bg-zinc-800\/50:hover { background-color: rgb(228 228 231 / 0.6); }
-html.light .from-zinc-950         { --tw-gradient-from: #f4f4f5; --tw-gradient-to: rgb(244 244 245 / 0); --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to); }
 html.light .text-sky-400          { color: #0284c7; }
 html.light .text-violet-400       { color: #7c3aed; }
 html.light .text-amber-400        { color: #d97706; }
@@ -328,6 +327,14 @@ pre {
       padding-bottom: calc(1.25rem + env(safe-area-inset-bottom));
     }
   }
+}
+
+/* Composer top fade — theme-aware (utility from-zinc-950 remap is unreliable for gradients) */
+.composer-fade {
+  background: linear-gradient(to top, rgb(9 9 11) 0%, rgb(9 9 11 / 0) 100%);
+}
+html.light .composer-fade {
+  background: linear-gradient(to top, #f4f4f5 0%, rgb(244 244 245 / 0) 100%);
 }
 
 /* Breathing border for the actively-generating assistant bubble */

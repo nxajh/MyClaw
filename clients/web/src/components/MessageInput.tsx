@@ -256,7 +256,7 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
   return (
     <div className="relative px-3 sm:px-8 pt-3 pb-4 sm:pb-5 shrink-0 safe-area-bottom">
       {/* Scroll fade / elevation above composer */}
-      <div className="pointer-events-none absolute inset-x-0 -top-8 h-8 bg-gradient-to-t from-zinc-950 to-transparent" />
+      <div className="composer-fade pointer-events-none absolute inset-x-0 -top-8 h-8" />
       <div className="relative max-w-5xl mx-auto">
         {/* Slash command dropdown */}
         {showCmds && (
