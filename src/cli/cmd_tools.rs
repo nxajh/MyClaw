@@ -46,6 +46,7 @@ fn list_tools(format: &str) -> Result<()> {
         ("list_dir", "List directory contents"),
         ("glob_search", "Search files by glob pattern"),
         ("content_search", "Search file contents by regex"),
+        ("symbol_check", "Check documented identifiers against code"),
         ("web_search", "Search the web"),
         (
             "http_request",
