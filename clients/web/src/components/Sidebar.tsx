@@ -9,13 +9,13 @@ import { AUTH_TOKEN_KEY } from '../hooks/useWebSocket'
 import { useTheme } from '../hooks/useTheme'
 
 const links = [
-  { to: '/', icon: MessageSquare, label: 'Chat' },
-  { to: '/overview', icon: LayoutDashboard, label: 'Overview' },
-  { to: '/sessions', icon: Layers, label: 'Sessions' },
-  { to: '/tools', icon: Wrench, label: 'Tools' },
-  { to: '/skills', icon: Sparkles, label: 'Skills' },
-  { to: '/memory', icon: Brain, label: 'Memory' },
-  { to: '/config', icon: Settings, label: 'Config' },
+  { to: '/', icon: MessageSquare, label: 'Chat', accent: 'text-sky-400' },
+  { to: '/overview', icon: LayoutDashboard, label: 'Overview', accent: 'text-emerald-400' },
+  { to: '/sessions', icon: Layers, label: 'Sessions', accent: 'text-zinc-300' },
+  { to: '/tools', icon: Wrench, label: 'Tools', accent: 'text-orange-400' },
+  { to: '/skills', icon: Sparkles, label: 'Skills', accent: 'text-amber-400' },
+  { to: '/memory', icon: Brain, label: 'Memory', accent: 'text-violet-400' },
+  { to: '/config', icon: Settings, label: 'Config', accent: 'text-blue-400' },
 ]
 
 function useIsMobile() {
@@ -28,8 +28,8 @@ function useIsMobile() {
   return isMobile
 }
 
-function NavLinkItem({ to, icon: Icon, label, collapsed, onNavigate }: {
-  to: string; icon: React.ComponentType<any>; label: string; collapsed: boolean; onNavigate?: () => void
+function NavLinkItem({ to, icon: Icon, label, accent, collapsed, onNavigate }: {
+  to: string; icon: React.ComponentType<any>; label: string; accent: string; collapsed: boolean; onNavigate?: () => void
 }) {
   return (
     <NavLink
@@ -49,18 +49,18 @@ function NavLinkItem({ to, icon: Icon, label, collapsed, onNavigate }: {
           collapsed ? 'justify-center' : ''
         } ${
           isActive
-            ? 'bg-zinc-800/80 text-zinc-100 shadow-sm border border-zinc-700/20'
-            : 'text-zinc-400 hover:bg-zinc-800/40 hover:text-zinc-200'
+            ? 'bg-zinc-800/80 text-zinc-100 shadow-sm border border-zinc-700/30'
+            : 'text-zinc-400 hover:bg-zinc-800/40 hover:text-zinc-200 border border-transparent'
         }`
       }
     >
       {({ isActive }) => (
         <>
-          {isActive && !collapsed && (
-            <span className="absolute left-0 top-2 bottom-2 w-1 rounded-r-md bg-zinc-500" />
+          {isActive && (
+            <span className={`absolute left-0 top-1.5 bottom-1.5 w-1 rounded-r-md ${isActive ? 'bg-zinc-300' : 'bg-zinc-500'}`} />
           )}
-          <Icon size={17} className="shrink-0" />
-          {!collapsed && <span className="truncate">{label}</span>}
+          <Icon size={17} className={`shrink-0 ${isActive ? accent : ''}`} />
+          {!collapsed && <span className="truncate font-medium">{label}</span>}
         </>
       )}
     </NavLink>
@@ -120,8 +120,8 @@ function DesktopSidebar({ collapsed, setCollapsed }: { collapsed: boolean; setCo
         </button>
       </div>
       <nav className="flex-1 px-2 py-2 space-y-0.5 overflow-y-auto">
-        {links.map(({ to, icon, label }) => (
-          <NavLinkItem key={to} to={to} icon={icon} label={label} collapsed={collapsed} />
+        {links.map(({ to, icon, label, accent }) => (
+          <NavLinkItem key={to} to={to} icon={icon} label={label} accent={accent} collapsed={collapsed} />
         ))}
       </nav>
       <div className={`flex items-center gap-2.5 px-4 py-3.5 border-t border-zinc-800 shrink-0 ${collapsed ? 'justify-center' : ''}`}>
@@ -196,8 +196,8 @@ function MobileDrawer({ open, onClose }: { open: boolean; onClose: () => void })
           </button>
         </div>
         <nav className="flex-1 px-2 py-3 space-y-1 overflow-y-auto">
-          {links.map(({ to, icon, label }) => (
-            <NavLinkItem key={to} to={to} icon={icon} label={label} collapsed={false} onNavigate={onClose} />
+          {links.map(({ to, icon, label, accent }) => (
+            <NavLinkItem key={to} to={to} icon={icon} label={label} accent={accent} collapsed={false} onNavigate={onClose} />
           ))}
         </nav>
         <div className="flex items-center gap-2.5 px-4 py-3.5 border-t border-zinc-800">

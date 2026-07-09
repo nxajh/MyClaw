@@ -1,10 +1,13 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Plus, Pencil, Trash2, Check, X, Loader2, Search, Pin } from 'lucide-react'
+import { Plus, Pencil, Trash2, Check, X, Loader2, Search, Pin, Layers } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useApi } from '../lib/api'
 import { useToast } from '../components/Toast'
-import { ErrorBanner, LoadingRow, EmptyState, inputCls, btnPrimary, searchInputCls } from '../components/PageLayout'
+import {
+  ErrorBanner, EmptyState, SkeletonCards, PageHeader,
+  inputCls, btnPrimary, searchInputCls, panelCls, cardHoverCls,
+} from '../components/PageLayout'
 
 interface Session {
   id: string
@@ -65,10 +68,10 @@ function SessionRow({
   return (
     <div
       onClick={handleSwitch}
-      className={`group flex items-center gap-3 rounded-xl border px-4 py-3 transition-colors ${
+      className={`group flex items-center gap-3 rounded-xl border px-4 py-3 ${
         session.is_active
-          ? 'border-zinc-700/70 bg-zinc-800/60 cursor-default'
-          : 'border-zinc-800 bg-zinc-900/50 hover:bg-zinc-800/60 hover:border-zinc-700 cursor-pointer'
+          ? 'border-zinc-700/70 bg-zinc-800/60 cursor-default shadow-sm'
+          : `${panelCls} ${cardHoverCls} cursor-pointer`
       }`}
     >
       <div className={`h-2 w-2 rounded-full shrink-0 transition-colors ${session.is_active ? 'bg-emerald-400' : 'bg-zinc-700'}`} />
@@ -90,7 +93,7 @@ function SessionRow({
               {session.name}
             </span>
             {session.created_at && (
-              <span className="text-xs text-zinc-600">{new Date(session.created_at).toLocaleString()}</span>
+              <span className="text-[11px] text-zinc-500 font-mono">{new Date(session.created_at).toLocaleString()}</span>
             )}
           </div>
         )}
@@ -234,42 +237,73 @@ export default function Sessions() {
   return (
     <div className="flex flex-col h-full">
       <div className="flex-1 overflow-y-auto">
-        <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4">
-          {/* Header — title + create */}
-          <div className="flex flex-col sm:flex-row sm:items-center gap-3 justify-between pb-2 border-b border-zinc-800">
-            <div>
-              <h1 className="text-base font-bold text-zinc-100">Sessions</h1>
-              <p className="text-xs text-zinc-500 mt-0.5">{sessions.length} sessions · Switch, pin, rename, or create conversations</p>
-            </div>
-            <div className="flex gap-2 w-full sm:w-auto">
-              <input
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
-                placeholder="New session name…"
-                disabled={status !== 'connected'}
-                className={inputCls}
-              />
-              <button
-                onClick={handleCreate}
-                disabled={status !== 'connected' || !newName.trim() || creating}
-                className={btnPrimary}
-              >
-                {creating ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
-                New
-              </button>
-            </div>
-          </div>
+        <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4 page-enter">
+          <PageHeader
+            title="Sessions"
+            subtitle={`${sessions.length} sessions · Switch, pin, rename, or create conversations`}
+            icon={<Layers size={18} className="text-zinc-500" />}
+            actions={
+              <>
+                <input
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
+                  placeholder="New session name…"
+                  disabled={status !== 'connected'}
+                  className={inputCls}
+                />
+                <button
+                  onClick={handleCreate}
+                  disabled={status !== 'connected' || !newName.trim() || creating}
+                  className={btnPrimary}
+                >
+                  {creating ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
+                  New
+                </button>
+              </>
+            }
+          />
 
           {error && <ErrorBanner message={error} />}
-          {loading && <LoadingRow />}
-          {!loading && status !== 'connected' && <EmptyState>Waiting for connection…</EmptyState>}
+          {loading && <SkeletonCards count={5} />}
+          {!loading && status !== 'connected' && (
+            <EmptyState icon={<Layers size={28} />}>Waiting for connection…</EmptyState>
+          )}
           {!loading && status === 'connected' && sessions.length === 0 && (
-            <EmptyState>📝 No sessions yet. Create one above.</EmptyState>
+            <EmptyState
+              icon={<Layers size={28} />}
+              action={
+                <button
+                  onClick={async () => {
+                    if (status !== 'connected' || creating) return
+                    setCreating(true)
+                    setError(null)
+                    try {
+                      await request('sessions.create', { name: newName.trim() || 'New chat' })
+                      toast('Session created', 'success')
+                      setNewName('')
+                      await fetchSessions()
+                      navigate('/')
+                    } catch (err) {
+                      setError(err instanceof Error ? err.message : String(err))
+                      toast('Failed to create session', 'error')
+                    } finally {
+                      setCreating(false)
+                    }
+                  }}
+                  className={btnPrimary}
+                  disabled={status !== 'connected' || creating}
+                >
+                  {creating ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
+                  Create first session
+                </button>
+              }
+            >
+              No sessions yet. Create one to start chatting.
+            </EmptyState>
           )}
           {!loading && sessions.length > 0 && (
             <>
-              {/* Search filter */}
               <div className="relative">
                 <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none" />
                 <input
@@ -282,7 +316,15 @@ export default function Sessions() {
               </div>
               <div className="space-y-1.5">
                 {filteredSessions.length === 0 ? (
-                  <EmptyState>No sessions match “{searchQuery}”</EmptyState>
+                  <EmptyState
+                    action={
+                      <button onClick={() => setSearchQuery('')} className={btnPrimary}>
+                        Clear filter
+                      </button>
+                    }
+                  >
+                    No sessions match “{searchQuery}”
+                  </EmptyState>
                 ) : filteredSessions.map((s) => (
                   <SessionRow
                     key={s.id}

@@ -70,7 +70,7 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
 
   // Focus input on '/' when not in an input field
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
+    const handler = (e: globalThis.KeyboardEvent) => {
       if (disabled) return
       const tag = (e.target as HTMLElement)?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement)?.isContentEditable) return
@@ -254,8 +254,10 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
   }
 
   return (
-    <div className="px-3 sm:px-8 py-4 sm:py-5 shrink-0 safe-area-bottom">
-      <div className="relative max-w-5xl mx-auto">
+    <div className="relative px-3 sm:px-8 pt-3 pb-4 sm:pb-5 shrink-0 safe-area-bottom">
+      {/* Scroll fade / elevation above composer */}
+      <div className="pointer-events-none absolute inset-x-0 -top-8 h-8 bg-gradient-to-t from-zinc-950 to-transparent" />
+      <div className="relative max-w-3xl mx-auto">
         {/* Slash command dropdown */}
         {showCmds && (
           <div className="absolute bottom-full mb-2 left-0 right-0 max-h-64 overflow-y-auto rounded-xl border border-zinc-800 bg-zinc-900 shadow-2xl py-1 z-20">
@@ -280,7 +282,7 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
-          className={`relative rounded-2xl border shadow-xl transition-all ${
+          className={`relative rounded-2xl border shadow-2xl transition-all ${
             isDragging
               ? 'border-blue-500 bg-zinc-900/90 scale-[1.01] ring-1 ring-blue-500/30'
               : 'border-zinc-700/60 bg-zinc-900 focus-within:border-zinc-500 focus-within:ring-1 focus-within:ring-zinc-500/30'

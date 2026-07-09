@@ -59,7 +59,20 @@ html.light .border-zinc-800\/50   { border-color: rgb(228 228 231 / 0.5); }
 html.light .border-zinc-700\/60   { border-color: rgb(212 212 216 / 0.6); }
 html.light .border-zinc-700\/50   { border-color: rgb(212 212 216 / 0.5); }
 html.light .border-zinc-700\/40   { border-color: rgb(212 212 216 / 0.4); }
+html.light .border-zinc-700\/30   { border-color: rgb(212 212 216 / 0.3); }
 html.light .border-zinc-700\/20   { border-color: rgb(212 212 216 / 0.2); }
+html.light .bg-zinc-950\/85       { background-color: rgb(244 244 245 / 0.85); }
+html.light .bg-zinc-950\/90       { background-color: rgb(244 244 245 / 0.9); }
+html.light .hover\:bg-zinc-900\/40:hover { background-color: rgb(244 244 245 / 0.5); }
+html.light .hover\:bg-zinc-900\/30:hover { background-color: rgb(244 244 245 / 0.4); }
+html.light .hover\:bg-zinc-800\/40:hover { background-color: rgb(228 228 231 / 0.5); }
+html.light .hover\:bg-zinc-800\/50:hover { background-color: rgb(228 228 231 / 0.6); }
+html.light .from-zinc-950         { --tw-gradient-from: #f4f4f5; --tw-gradient-to: rgb(244 244 245 / 0); --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to); }
+html.light .text-sky-400          { color: #0284c7; }
+html.light .text-violet-400       { color: #7c3aed; }
+html.light .text-amber-400        { color: #d97706; }
+html.light .text-orange-400       { color: #ea580c; }
+html.light .shadow-2xl            { box-shadow: 0 25px 50px -12px rgb(0 0 0 / 0.15); }
 html.light .border-zinc-600\/50   { border-color: rgb(161 161 170 / 0.5); }
 
 /* Placeholder text */
@@ -332,6 +345,24 @@ pre {
 }
 @media (prefers-reduced-motion: reduce) {
   .generating-border { animation: none; }
+}
+
+/* Page enter micro-animation (route content) */
+@keyframes page-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.page-enter {
+  animation: page-enter 160ms ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .page-enter { animation: none; }
 }
 
 /* Skeleton text lines for pre-content loading state */

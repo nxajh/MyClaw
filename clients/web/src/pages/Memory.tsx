@@ -1,8 +1,11 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
-import { Plus, Loader2, Search, Tag, Link2 } from 'lucide-react'
+import { Plus, Loader2, Search, Tag, Link2, Brain } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useToast } from '../components/Toast'
-import { ErrorBanner, LoadingRow, EmptyState, btnPrimary, searchInputCls } from '../components/PageLayout'
+import {
+  ErrorBanner, EmptyState, SkeletonCards, PageHeader,
+  btnPrimary, searchInputCls,
+} from '../components/PageLayout'
 import MemoryEditor from '../components/MemoryEditor'
 import MemoryViewer from '../components/MemoryViewer'
 import { getStyle, type MemoryFile } from '../lib/memoryUtils'
@@ -157,7 +160,7 @@ export default function Memory() {
     return (
       <div className="flex flex-col h-full bg-zinc-950">
         <div className="flex-1 overflow-y-auto">
-          <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4">
+          <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4 page-enter">
             <button onClick={backToList} className="flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-300 transition-colors mb-2">
               ← Back to Memories
             </button>
@@ -178,17 +181,17 @@ export default function Memory() {
   return (
     <div className="flex flex-col h-full bg-zinc-950">
       <div className="flex-1 overflow-y-auto">
-        <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4">
-          {/* Header */}
-          <div className="flex flex-col sm:flex-row sm:items-center gap-3 justify-between pb-2 border-b border-zinc-800">
-            <div>
-              <h1 className="text-base font-bold text-zinc-100">Memory</h1>
-              <p className="text-xs text-zinc-500">{files.length} entries · Manage facts and rules guiding MyClaw</p>
-            </div>
-            <button onClick={() => setView({ mode: 'new' })} disabled={status !== 'connected'} className={btnPrimary}>
-              <Plus size={13} /> New
-            </button>
-          </div>
+        <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4 page-enter">
+          <PageHeader
+            title="Memory"
+            subtitle={`${files.length} entries · Manage facts and rules guiding MyClaw`}
+            icon={<Brain size={18} className="text-violet-400" />}
+            actions={
+              <button onClick={() => setView({ mode: 'new' })} disabled={status !== 'connected'} className={btnPrimary}>
+                <Plus size={13} /> New
+              </button>
+            }
+          />
 
           {/* Tabs */}
           <div className="flex flex-wrap gap-1 border-b border-zinc-800/60 pb-1">
@@ -214,50 +217,65 @@ export default function Memory() {
           </div>
 
           {error && <ErrorBanner message={error} />}
-          {loadingList && <LoadingRow />}
-          {!loadingList && status !== 'connected' && <EmptyState>Waiting for connection to sync memory…</EmptyState>}
+          {loadingList && <SkeletonCards count={6} cols />}
+          {!loadingList && status !== 'connected' && (
+            <EmptyState icon={<Brain size={28} />}>Waiting for connection to sync memory…</EmptyState>
+          )}
           {!loadingList && status === 'connected' && filteredFiles.length === 0 && (
-            <EmptyState>
-              <span className="block text-2xl mb-1">📭</span>
-              No matching memories
-              {files.length > 0 && (
-                <button onClick={() => { setSearchQuery(''); setActiveTab('all') }} className="block mx-auto mt-2 text-xs text-blue-400 hover:text-blue-300">Reset filters</button>
-              )}
+            <EmptyState
+              icon={<Brain size={28} />}
+              action={
+                files.length > 0 ? (
+                  <button onClick={() => { setSearchQuery(''); setActiveTab('all') }} className={btnPrimary}>
+                    Reset filters
+                  </button>
+                ) : (
+                  <button onClick={() => setView({ mode: 'new' })} disabled={status !== 'connected'} className={btnPrimary}>
+                    <Plus size={13} /> New memory
+                  </button>
+                )
+              }
+            >
+              {files.length === 0 ? 'No memories yet. Add a fact to guide MyClaw.' : 'No matching memories'}
             </EmptyState>
           )}
 
-          {/* List */}
+          {/* List — multi-column on wide screens */}
           {!loadingList && filteredFiles.length > 0 && (
-            <div className="grid grid-cols-1 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
               {filteredFiles.map((file) => {
                 const style = getStyle(file.type)
                 const links = (file.link_count || 0) + (file.backlink_count || 0)
                 return (
-                  <button key={file.name} onClick={() => openFile(file.name)} className={`w-full text-left rounded-2xl border ${style.border} ${style.bg} px-4 py-4 transition-all duration-200 group flex flex-col gap-2.5`}>
+                  <button
+                    key={file.name}
+                    onClick={() => openFile(file.name)}
+                    className={`w-full text-left rounded-2xl border ${style.border} ${style.bg} px-4 py-4 transition-all duration-200 group flex flex-col gap-2.5 h-full hover:-translate-y-0.5 hover:shadow-md`}
+                  >
                     <div className="flex flex-wrap items-center justify-between gap-2 w-full">
-                      <div className="flex items-center gap-2">
-                        <span className={`text-[9px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-md ${style.badgeBg}`}>
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className={`text-[11px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-md shrink-0 ${style.badgeBg}`}>
                           {style.label.split(' ').slice(1).join(' ')}
                         </span>
-                        <span className="text-sm font-bold text-zinc-300 font-mono truncate group-hover:text-zinc-100 transition-colors">
+                        <span className="text-sm font-medium text-zinc-300 font-mono truncate group-hover:text-zinc-100 transition-colors">
                           {file.mem_name || file.name.replace('.md', '')}
                         </span>
                       </div>
-                      <div className="flex items-center gap-2 text-[10px] text-zinc-600 font-mono">
-                        {links > 0 && <span className="flex items-center gap-0.5"><Link2 size={9} />{links}</span>}
+                      <div className="flex items-center gap-2 text-[11px] text-zinc-500 font-mono shrink-0">
+                        {links > 0 && <span className="flex items-center gap-0.5"><Link2 size={10} />{links}</span>}
                         <span>{(file.size / 1024).toFixed(1)} KB</span>
                       </div>
                     </div>
                     {file.description ? (
-                      <p className="text-xs text-zinc-400 leading-relaxed font-normal">{file.description}</p>
+                      <p className="text-sm text-zinc-400 leading-relaxed font-normal line-clamp-3">{file.description}</p>
                     ) : (
-                      <p className="text-xs text-zinc-600 italic">No description</p>
+                      <p className="text-sm text-zinc-600 italic">No description</p>
                     )}
                     {file.tags && file.tags.length > 0 && (
-                      <div className="flex flex-wrap gap-1">
+                      <div className="flex flex-wrap gap-1 mt-auto">
                         {file.tags.map(t => (
-                          <span key={t} className="flex items-center gap-1 text-[9px] text-zinc-500 bg-zinc-950 px-2 py-0.5 rounded-md border border-zinc-800">
-                            <Tag size={8} />{t}
+                          <span key={t} className="flex items-center gap-1 text-[11px] text-zinc-500 bg-zinc-950 px-2 py-0.5 rounded-md border border-zinc-800">
+                            <Tag size={9} />{t}
                           </span>
                         ))}
                       </div>

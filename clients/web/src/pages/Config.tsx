@@ -175,54 +175,56 @@ export default function Config() {
   return (
     <div className="flex flex-col h-full bg-zinc-950">
       <div className="flex-1 overflow-y-auto">
-        <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-5 animate-fadeIn">
+        <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-5 page-enter">
 
           {/* Action Row & Diagnostics */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-zinc-800">
-            <div>
-              <h1 className="text-base font-bold text-zinc-100 flex items-center gap-1.5">
-                <Settings size={15} className="text-blue-400" />
-                Configuration Center
-              </h1>
-              <p className="text-xs text-zinc-500">Fine-tune MyClaw system parameters and runtime daemons</p>
-            </div>
-            
-            <div className="flex items-center gap-2">
-              <button
-                onClick={handleSave}
-                disabled={saving || !isDirty || status !== 'connected'}
-                className={btnPrimary}
-              >
-                {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
-                Save
-              </button>
-              <button
-                onClick={handleRestart}
-                disabled={restarting || status !== 'connected'}
-                className={confirmRestart ? btnDanger : btnGhost}
-                title="Save first, then restart to apply changes"
-              >
-                {restarting ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />}
-                {confirmRestart ? 'Confirm Restart?' : 'Restart'}
-              </button>
+          <div className="sticky top-0 z-10 -mx-3 sm:-mx-8 px-3 sm:px-8 py-3 sm:py-4 mb-1 border-b border-zinc-800/80 bg-zinc-950/85 backdrop-blur-md">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h1 className="text-lg font-semibold tracking-tight text-zinc-100 flex items-center gap-2">
+                  <Settings size={18} className="text-blue-400" />
+                  Configuration Center
+                </h1>
+                <p className="text-sm text-zinc-500 mt-0.5">Fine-tune MyClaw system parameters and runtime daemons</p>
+              </div>
+              
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleSave}
+                  disabled={saving || !isDirty || status !== 'connected'}
+                  className={btnPrimary}
+                >
+                  {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
+                  Save
+                </button>
+                <button
+                  onClick={handleRestart}
+                  disabled={restarting || status !== 'connected'}
+                  className={confirmRestart ? btnDanger : btnGhost}
+                  title="Save first, then restart to apply changes"
+                >
+                  {restarting ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />}
+                  {confirmRestart ? 'Confirm Restart?' : 'Restart'}
+                </button>
+              </div>
             </div>
           </div>
 
           {/* Diagnostics banner */}
-          <div className={`flex items-center justify-between px-4 py-3 rounded-2xl border transition-colors ${isDirty ? 'bg-amber-950/15 border-amber-800/50' : 'bg-zinc-900/30 border-zinc-800'}`}>
+          <div className={`flex items-center justify-between px-4 py-3 rounded-2xl border shadow-sm transition-colors ${isDirty ? 'bg-amber-950/15 border-amber-800/50' : 'bg-zinc-900/50 border-zinc-800'}`}>
             <div className="flex items-center gap-2">
               {isDirty ? (
-                <span className="flex items-center gap-1.5 text-xs text-amber-400 font-medium">
+                <span className="flex items-center gap-1.5 text-sm text-amber-400 font-medium">
                   <AlertTriangle size={12} className="animate-pulse" />
                   Unsaved Changes · Click "Save" and "Restart" to apply
                 </span>
               ) : (
-                <span className="text-xs text-zinc-500 font-medium">
+                <span className="text-sm text-zinc-500 font-medium">
                   All changes applied
                 </span>
               )}
             </div>
-            {saved && <span className="text-xs text-emerald-400 font-medium animate-pulse">✓ Saved Successfully</span>}
+            {saved && <span className="text-sm text-emerald-400 font-medium animate-pulse">✓ Saved Successfully</span>}
           </div>
 
           {error && <ErrorBanner message={error} />}
@@ -230,18 +232,18 @@ export default function Config() {
 
           {/* Configuration Metadata Blocks */}
           {!loading && meta && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-              <div className="rounded-2xl border border-zinc-800 bg-zinc-900/30 px-4 py-3.5 space-y-1">
-                <div className="text-zinc-600 font-medium flex items-center gap-1">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+              <div className="rounded-2xl border border-zinc-800 bg-zinc-900/50 px-4 py-3.5 space-y-1 shadow-sm">
+                <div className="text-zinc-500 font-medium flex items-center gap-1 text-xs">
                   <Globe size={11} /> Loaded Tools
                 </div>
-                <div className="text-zinc-300 font-semibold font-mono text-sm">{meta.tool_count} builtins</div>
+                <div className="text-zinc-200 font-semibold font-mono">{meta.tool_count} builtins</div>
               </div>
-              <div className="rounded-2xl border border-zinc-800 bg-zinc-900/30 px-4 py-3.5 space-y-1 min-w-0">
-                <div className="text-zinc-600 font-medium flex items-center gap-1">
+              <div className="rounded-2xl border border-zinc-800 bg-zinc-900/50 px-4 py-3.5 space-y-1 min-w-0 shadow-sm">
+                <div className="text-zinc-500 font-medium flex items-center gap-1 text-xs">
                   <FileText size={11} /> Config File Path
                 </div>
-                <div className="text-zinc-300 font-mono text-[11px] truncate" title={meta.config_path ?? ''}>
+                <div className="text-zinc-300 font-mono text-xs truncate" title={meta.config_path ?? ''}>
                   {meta.config_path ?? '—'}
                 </div>
               </div>
@@ -250,17 +252,17 @@ export default function Config() {
 
           {/* View Switcher Tabs */}
           {!loading && raw && (
-            <div className="flex bg-zinc-950 border border-zinc-800 rounded-xl p-0.5 self-start text-xs max-w-fit">
+            <div className="flex bg-zinc-950 border border-zinc-800 rounded-xl p-0.5 self-start text-sm max-w-fit">
               <button
                 onClick={() => setViewMode('form')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${viewMode === 'form' ? 'bg-zinc-900 text-zinc-100 font-semibold' : 'text-zinc-500 hover:text-zinc-300'}`}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${viewMode === 'form' ? 'bg-zinc-900 text-zinc-100 font-medium' : 'text-zinc-500 hover:text-zinc-300'}`}
               >
                 <Settings size={12} />
                 Parameters UI
               </button>
               <button
                 onClick={() => setViewMode('code')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${viewMode === 'code' ? 'bg-zinc-900 text-zinc-100 font-semibold' : 'text-zinc-500 hover:text-zinc-300'}`}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${viewMode === 'code' ? 'bg-zinc-900 text-zinc-100 font-medium' : 'text-zinc-500 hover:text-zinc-300'}`}
               >
                 <Code size={12} />
                 TOML Source Code
@@ -272,9 +274,9 @@ export default function Config() {
           {!loading && raw && (
             <div className="space-y-4">
               {viewMode === 'form' ? (
-                <div className="space-y-4 bg-zinc-900/30 border border-zinc-800 p-5 rounded-2xl">
+                <div className="space-y-4 bg-zinc-900/50 border border-zinc-800 p-5 rounded-2xl shadow-sm">
                   <div className="space-y-1.5">
-                    <label className="text-xs font-semibold text-zinc-400">Knowledge Workspace Directory</label>
+                    <label className="text-sm font-medium text-zinc-400">Knowledge Workspace Directory</label>
                     <input
                       type="text"
                       value={formParams.knowledgeDir}
@@ -282,11 +284,11 @@ export default function Config() {
                       placeholder="e.g. /home/ubuntu/.myclaw/workspace"
                       className={inputCls}
                     />
-                    <p className="text-[10px] text-zinc-500">The absolute path where memory and logs are located</p>
+                    <p className="text-[11px] text-zinc-500">The absolute path where memory and logs are located</p>
                   </div>
 
                   <div className="space-y-1.5">
-                    <label className="text-xs font-semibold text-zinc-400">Daemon Listen Port</label>
+                    <label className="text-sm font-medium text-zinc-400">Daemon Listen Port</label>
                     <input
                       type="number"
                       value={formParams.port}
@@ -294,10 +296,10 @@ export default function Config() {
                       placeholder="e.g. 8080"
                       className={inputCls}
                     />
-                    <p className="text-[10px] text-zinc-500">Port number the backend daemon service runs on</p>
+                    <p className="text-[11px] text-zinc-500">Port number the backend daemon service runs on</p>
                   </div>
 
-                  <div className="pt-2 border-t border-zinc-800 text-[10px] text-zinc-500 leading-normal flex items-center gap-1.5">
+                  <div className="pt-2 border-t border-zinc-800 text-[11px] text-zinc-500 leading-normal flex items-center gap-1.5">
                     <AlertTriangle size={11} className="text-amber-500 shrink-0" />
                     Additional advanced parameters can be adjusted via the "TOML Source Code" mode.
                   </div>
@@ -313,7 +315,7 @@ export default function Config() {
                     onKeyDown={handleKeyDown}
                     rows={22}
                     spellCheck={false}
-                    className="w-full rounded-2xl border border-zinc-800 bg-zinc-950 px-4 py-3.5 text-xs font-mono text-zinc-300 outline-none focus:border-zinc-700 focus:ring-1 focus:ring-zinc-700/30 resize-y transition-colors leading-relaxed"
+                    className="w-full rounded-2xl border border-zinc-800 bg-zinc-950 px-4 py-3.5 text-sm font-mono text-zinc-300 outline-none focus:border-zinc-700 focus:ring-1 focus:ring-zinc-700/30 resize-y transition-colors leading-relaxed"
                   />
                 </div>
               )}

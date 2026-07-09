@@ -126,7 +126,7 @@ export default function ChatHeader() {
   const item = 'w-full flex items-center gap-2 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 text-left transition-colors'
 
   return (
-    <header className="border-b border-zinc-800 px-3 sm:px-8 h-10 sm:h-12 flex items-center gap-1.5 sm:gap-2 shrink-0">
+    <header className="sticky top-0 z-20 border-b border-zinc-800/80 px-3 sm:px-8 h-10 sm:h-12 flex items-center gap-1.5 sm:gap-2 shrink-0 bg-zinc-950/85 backdrop-blur-md">
       {/* Connection status dot */}
       <span
         title={status === 'connected' ? 'Connected' : status === 'connecting' ? 'Connecting…' : 'Disconnected'}

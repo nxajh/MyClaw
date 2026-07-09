@@ -2,7 +2,10 @@ import { useEffect, useState, useCallback, useMemo } from 'react'
 import { Sparkles, Search, Loader2, Plus } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useToast } from '../components/Toast'
-import { ErrorBanner, LoadingRow, EmptyState, btnPrimary, searchInputCls } from '../components/PageLayout'
+import {
+  ErrorBanner, EmptyState, SkeletonCards, PageHeader,
+  btnPrimary, searchInputCls, panelCls, cardHoverCls,
+} from '../components/PageLayout'
 import SkillsViewer from '../components/SkillsViewer'
 import SkillsEditor from '../components/SkillsEditor'
 
@@ -137,7 +140,7 @@ export default function Skills() {
     return (
       <div className="flex flex-col h-full bg-zinc-950">
         <div className="flex-1 overflow-y-auto">
-          <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4">
+          <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4 page-enter">
             <button onClick={backToList} className="flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-300 transition-colors mb-2">
               ← Back to Skills
             </button>
@@ -158,22 +161,18 @@ export default function Skills() {
   return (
     <div className="flex flex-col h-full bg-zinc-950">
       <div className="flex-1 overflow-y-auto">
-        <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4">
-          {/* Header */}
-          <div className="flex flex-col sm:flex-row sm:items-center gap-3 justify-between pb-2 border-b border-zinc-800">
-            <div>
-              <h1 className="text-base font-bold text-zinc-100 flex items-center gap-1.5">
-                <Sparkles size={14} className="text-amber-400" />
-                Skills Library
-              </h1>
-              <p className="text-xs text-zinc-500 mt-0.5">{skills.length} loaded · Behavior templates guiding MyClaw's capabilities</p>
-            </div>
-            <button onClick={() => setView({ mode: 'new' })} disabled={status !== 'connected'} className={btnPrimary}>
-              <Plus size={13} /> New
-            </button>
-          </div>
+        <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4 page-enter">
+          <PageHeader
+            title="Skills Library"
+            subtitle={`${skills.length} loaded · Behavior templates guiding MyClaw's capabilities`}
+            icon={<Sparkles size={18} className="text-amber-400" />}
+            actions={
+              <button onClick={() => setView({ mode: 'new' })} disabled={status !== 'connected'} className={btnPrimary}>
+                <Plus size={13} /> New
+              </button>
+            }
+          />
 
-          {/* Search */}
           {skills.length > 0 && (
             <div className="relative">
               <span className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
@@ -190,37 +189,53 @@ export default function Skills() {
           )}
 
           {error && <ErrorBanner message={error} />}
-          {loading && <LoadingRow />}
-          {!loading && status !== 'connected' && <EmptyState>Waiting for connection…</EmptyState>}
+          {loading && <SkeletonCards count={6} cols />}
+          {!loading && status !== 'connected' && (
+            <EmptyState icon={<Sparkles size={28} />}>Waiting for connection…</EmptyState>
+          )}
           {!loading && status === 'connected' && skills.length === 0 && (
-            <EmptyState>📭 No skills loaded. Add SKILL.md files under workspace/skills/.</EmptyState>
+            <EmptyState
+              icon={<Sparkles size={28} />}
+              action={
+                <button onClick={() => setView({ mode: 'new' })} disabled={status !== 'connected'} className={btnPrimary}>
+                  <Plus size={13} /> New skill
+                </button>
+              }
+            >
+              No skills loaded. Add SKILL.md files under workspace/skills/.
+            </EmptyState>
           )}
           {!loading && status === 'connected' && skills.length > 0 && filteredSkills.length === 0 && (
-            <EmptyState>
-              <span className="block text-2xl mb-1">📭</span>
-              No skills match "{searchQuery}"
-              <button onClick={() => setSearchQuery('')} className="block mx-auto mt-2 text-xs text-blue-400 hover:text-blue-300">Clear filter</button>
+            <EmptyState
+              icon={<Sparkles size={28} />}
+              action={
+                <button onClick={() => setSearchQuery('')} className={btnPrimary}>
+                  Clear filter
+                </button>
+              }
+            >
+              No skills match “{searchQuery}”
             </EmptyState>
           )}
           {!loading && filteredSkills.length > 0 && (
-            <div className="space-y-1.5">
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
               {filteredSkills.map((s) => (
                 <button
                   key={s.name}
                   onClick={() => openFile(s.name)}
-                  className="w-full text-left rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-3 hover:bg-zinc-800/50 hover:border-zinc-700 transition-colors"
+                  className={`w-full text-left ${panelCls} ${cardHoverCls} px-4 py-3.5 h-full flex flex-col gap-2 hover:-translate-y-0.5 hover:shadow-md transition-all`}
                 >
                   <div className="flex items-center gap-2">
-                    <Sparkles size={13} className="text-amber-400 shrink-0" />
-                    <span className="font-mono text-sm text-zinc-200">{s.name}</span>
+                    <Sparkles size={14} className="text-amber-400 shrink-0" />
+                    <span className="font-mono text-sm font-medium text-zinc-200 truncate">{s.name}</span>
                   </div>
                   {s.description && (
-                    <p className="mt-1.5 text-sm text-zinc-400 leading-relaxed">{s.description}</p>
+                    <p className="text-sm text-zinc-400 leading-relaxed line-clamp-3">{s.description}</p>
                   )}
                   {s.keywords?.length > 0 && (
-                    <div className="mt-2 flex flex-wrap gap-1.5">
+                    <div className="mt-auto flex flex-wrap gap-1.5">
                       {s.keywords.map((k) => (
-                        <span key={k} className="px-2 py-0.5 rounded-md bg-zinc-800 text-[11px] text-zinc-500">
+                        <span key={k} className="px-2 py-0.5 rounded-md bg-zinc-800 text-[11px] text-zinc-500 border border-zinc-800">
                           {k}
                         </span>
                       ))}
