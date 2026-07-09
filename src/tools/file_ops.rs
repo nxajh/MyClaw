@@ -4,6 +4,7 @@ use crate::providers::{Tool, ToolResult};
 use crate::str_utils;
 use async_trait::async_trait;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 /// Resolve `path` to an absolute path and check it stays within the user's
@@ -65,7 +66,8 @@ impl Tool for FileReadTool {
     fn description(&self) -> &str {
         "Read file contents. Supports partial reading via line offset/limit or byte_offset/byte_limit. \
          Set outline=true to extract an overview (function/class names for code, \
-         headings for markdown)."
+         headings for markdown). Supports symbol lookup with symbol/include_body for common code files. \
+         Returns range and truncation metadata."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -95,6 +97,14 @@ impl Tool for FileReadTool {
                 "byte_limit": {
                     "type": "integer",
                     "description": "Maximum number of bytes to read in byte range mode. Default: 4096."
+                },
+                "symbol": {
+                    "type": "string",
+                    "description": "Symbol name to locate in code files (function/struct/enum/trait/type/mod/class/const)."
+                },
+                "include_body": {
+                    "type": "boolean",
+                    "description": "With symbol, include the symbol body/block when possible instead of only the declaration context."
                 }
             },
             "required": ["path"]
@@ -123,6 +133,11 @@ impl Tool for FileReadTool {
             .await
             .map_err(|e| anyhow::anyhow!("failed to read '{}': {}", path, e))?;
 
+        if let Some(symbol) = args["symbol"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            let include_body = args["include_body"].as_bool().unwrap_or(false);
+            return Ok(read_symbol(path, &content, symbol, include_body));
+        }
+
         if args.get("byte_offset").and_then(|v| v.as_u64()).is_some()
             || args.get("byte_limit").and_then(|v| v.as_u64()).is_some()
         {
@@ -145,18 +160,27 @@ impl Tool for FileReadTool {
                 success: true,
                 output: if snippet.is_empty() {
                     format!(
-                        "{} ({} bytes) — byte range {}..{} is empty or beyond end",
-                        path, total_bytes, requested_start, requested_end
+                        "{} ({} bytes) — byte range {}..{} is empty or beyond end; total_bytes={}; shown_start={}; shown_end={}; truncated={}",
+                        path,
+                        total_bytes,
+                        requested_start,
+                        requested_end,
+                        total_bytes,
+                        start,
+                        end,
+                        requested_start >= total_bytes || start != 0 || end < total_bytes
                     )
                 } else {
                     format!(
-                        "{} ({} bytes) — bytes {}..{} requested, {}..{} shown\n{}{}{}",
+                        "{} ({} bytes) — bytes {}..{} requested, {}..{} shown; total_bytes={}; truncated={}\n{}{}{}",
                         path,
                         total_bytes,
                         requested_start,
                         requested_end,
                         start,
                         end,
+                        total_bytes,
+                        start > 0 || end < total_bytes,
                         prefix,
                         snippet,
                         suffix
@@ -213,14 +237,35 @@ impl Tool for FileReadTool {
                 .collect()
         };
 
+        let shown_end = start + selected.len();
+        let truncated = shown_end < lines.len() || start > 0;
         let output = selected.join("\n");
 
         Ok(ToolResult {
             success: true,
             output: if output.is_empty() {
-                "(empty file or offset beyond end)".to_string()
+                format!(
+                    "{} ({} lines, {} bytes) — empty range; total_lines={}; shown_start={}; shown_end={}; truncated={}",
+                    path,
+                    lines.len(),
+                    content.len(),
+                    lines.len(),
+                    start + 1,
+                    shown_end,
+                    start >= lines.len()
+                )
             } else {
-                format!("{} ({} lines)\n{}", path, lines.len(), output)
+                format!(
+                    "{} ({} lines, {} bytes) — lines {}..{} shown; total_lines={}; truncated={}\n{}",
+                    path,
+                    lines.len(),
+                    content.len(),
+                    start + 1,
+                    shown_end,
+                    lines.len(),
+                    truncated,
+                    output
+                )
             },
             error: None,
         })
@@ -241,6 +286,91 @@ fn prev_char_boundary(s: &str, mut idx: usize) -> usize {
         idx -= 1;
     }
     idx
+}
+
+fn read_symbol(path: &str, content: &str, symbol: &str, include_body: bool) -> ToolResult {
+    let Some((line_idx, _line)) = find_symbol_line(content, symbol) else {
+        return ToolResult {
+            success: false,
+            output: format!(
+                "symbol '{}' not found in {}; total_lines={}; total_bytes={}",
+                symbol,
+                path,
+                content.lines().count(),
+                content.len()
+            ),
+            error: Some(format!("symbol '{}' not found", symbol)),
+        };
+    };
+
+    let lines: Vec<&str> = content.lines().collect();
+    let (start, end) = if include_body {
+        symbol_body_range(&lines, line_idx)
+    } else {
+        (line_idx.saturating_sub(3), (line_idx + 4).min(lines.len()))
+    };
+    let selected = lines[start..end]
+        .iter()
+        .enumerate()
+        .map(|(i, line)| format!("{:>6}\t{}", start + i + 1, line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    ToolResult {
+        success: true,
+        output: format!(
+            "{} — symbol='{}' declaration_line={}; shown_lines={}..{}; total_lines={}; include_body={}; truncated={}\n{}",
+            path,
+            symbol,
+            line_idx + 1,
+            start + 1,
+            end,
+            lines.len(),
+            include_body,
+            start > 0 || end < lines.len(),
+            selected
+        ),
+        error: None,
+    }
+}
+
+fn find_symbol_line(content: &str, symbol: &str) -> Option<(usize, String)> {
+    let escaped = regex::escape(symbol);
+    let re = regex::Regex::new(&format!(
+        r"^\s*(?:pub\s+)?(?:(?:async\s+)?fn|struct|enum|trait|type|mod|const|static)\s+{}\b|^\s*impl(?:<[^>]+>)?\s+{}\b|^\s*(?:export\s+)?(?:(?:async\s+)?function|class|interface|type|const)\s+{}\b|^\s*(?:def|class)\s+{}\b",
+        escaped, escaped, escaped, escaped
+    ))
+    .ok()?;
+    content
+        .lines()
+        .enumerate()
+        .find(|(_, line)| re.is_match(line))
+        .map(|(idx, line)| (idx, line.to_string()))
+}
+
+fn symbol_body_range(lines: &[&str], line_idx: usize) -> (usize, usize) {
+    let start = line_idx;
+    let Some(open_rel) = lines[start..].iter().position(|line| line.contains('{')) else {
+        return (line_idx.saturating_sub(3), (line_idx + 8).min(lines.len()));
+    };
+    let mut depth = 0isize;
+    let mut seen_open = false;
+    for (idx, line) in lines.iter().enumerate().skip(start + open_rel) {
+        for ch in line.chars() {
+            match ch {
+                '{' => {
+                    depth += 1;
+                    seen_open = true;
+                }
+                '}' if seen_open => depth -= 1,
+                _ => {}
+            }
+        }
+        if seen_open && depth <= 0 {
+            return (start, (idx + 1).min(lines.len()));
+        }
+    }
+    (start, lines.len())
 }
 
 /// Extract a structural outline from a file based on its extension.
@@ -499,8 +629,8 @@ impl Tool for FileEditTool {
         let content = tokio::fs::read_to_string(path)
             .await
             .map_err(|e| anyhow::anyhow!("failed to read '{}': {}", path, e))?;
-
-        // Single-edit mode: old_string / new_string
+        let old_hash = sha256_hex(content.as_bytes());
+        let old_bytes = content.len();
         let old_string = args["old_string"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'old_string' is required"))?;
@@ -539,14 +669,34 @@ impl Tool for FileEditTool {
             .await
             .map_err(|e| anyhow::anyhow!("failed to write '{}': {}", path, e))?;
 
+        let written = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to verify '{}': readback failed: {}", path, e))?;
+        if written != new_content {
+            return Ok(ToolResult {
+                success: false,
+                output: format!(
+                    "write verification failed for {}; expected_hash={}; actual_hash={}; expected_bytes={}; actual_bytes={}",
+                    path,
+                    sha256_hex(new_content.as_bytes()),
+                    sha256_hex(written.as_bytes()),
+                    new_content.len(),
+                    written.len()
+                ),
+                error: Some("write verification failed: readback differs from intended content".to_string()),
+            });
+        }
+        let new_hash = sha256_hex(written.as_bytes());
+        let new_bytes = written.len();
+
         let replaced_count = if replace_all { count } else { 1 };
         let line_number = find_line_number(&content, old_string);
         let diff = replacement_context_diff(&content, old_string, new_string, line_number);
         Ok(ToolResult {
             success: true,
             output: format!(
-                "replaced {} occurrence(s) in {} (first match line {})\n{}",
-                replaced_count, path, line_number, diff,
+                "replaced {} occurrence(s) in {} (first match line {}); bytes {} -> {}; sha256 {} -> {}; verified_readback=true\n{}",
+                replaced_count, path, line_number, old_bytes, new_bytes, old_hash, new_hash, diff,
             ),
             error: None,
         })
@@ -554,6 +704,12 @@ impl Tool for FileEditTool {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
 
 /// Find the 1-based line number where `needle` first occurs in `haystack`.
 fn find_line_number(haystack: &str, needle: &str) -> usize {

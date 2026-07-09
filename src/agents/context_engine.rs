@@ -204,6 +204,14 @@ impl ContextEngine {
             tracing::warn!(reasons = ?reasons, "summary quality audit failed (non-blocking)");
         }
 
+        let summary = append_evidence_index(
+            summary,
+            &to_compact,
+            compact_start,
+            compact_end,
+            boundary,
+            model_id,
+        );
         let summary_tokens = estimate_message_tokens(&ChatMessage::user_text(summary.clone()));
 
         Ok(CompactionResult {
@@ -642,6 +650,9 @@ fn build_summarizer_prompt(
              ## Errors & Fixes\n\
              Problems encountered and their solutions.\n\
              \n\
+             ## Evidence Index\n\
+             Compact evidence needed for later verification: file paths with line numbers where available, commands run, commit hashes, CI/run IDs, artifact paths, log paths, versions, PIDs, and deployment targets.\n\\
+             \n\
              Rules:\n\
              - Mark resolved items clearly (prefix with [Resolved])\n\
              - Mark pending items clearly (prefix with [Pending])\n\
@@ -663,6 +674,7 @@ fn build_summarizer_prompt(
              3. **Technical Context**: Files modified, code locations, APIs used, configurations changed.\n\
              4. **Errors & Fixes**: Problems encountered and their solutions.\n\
              5. **Pending Work**: What still needs to be done.\n\
+             6. **Evidence Index**: Compact verification evidence such as file paths with line numbers where available, commands run, commit hashes, CI/run IDs, artifact paths, log paths, versions, PIDs, and deployment targets.\n\\
              \n\
              Rules:\n\
              - Omit raw tool output (large code blocks, logs, file dumps) — keep only key facts\n\
@@ -671,6 +683,102 @@ fn build_summarizer_prompt(
              - This conversation has {msg_count} messages to summarize"
         ),
     }
+}
+
+fn append_evidence_index(
+    mut summary: String,
+    messages: &[ChatMessage],
+    compact_start: usize,
+    compact_end: usize,
+    boundary: usize,
+    model_id: &str,
+) -> String {
+    let paths = extract_file_paths(messages);
+    let commands = extract_shell_commands(messages);
+    let commits = extract_commit_hashes(messages);
+    let runs = extract_ci_runs(messages);
+
+    let has_section = summary.contains("## Evidence Index") || summary.contains("Evidence Index");
+    if !has_section {
+        summary.push_str("\n\n## Evidence Index\n");
+    } else {
+        summary.push_str("\n\nAdditional evidence captured by compaction:\n");
+    }
+    summary.push_str(&format!(
+        "- Compaction range: compact_start={}, compact_end={}, boundary={}, messages_compacted={}, model={}\n",
+        compact_start,
+        compact_end,
+        boundary,
+        messages.len(),
+        model_id
+    ));
+    if !paths.is_empty() {
+        summary.push_str(&format!("- File paths: {}\n", paths.iter().take(20).cloned().collect::<Vec<_>>().join(", ")));
+    }
+    if !commands.is_empty() {
+        summary.push_str(&format!("- Commands: {}\n", commands.iter().take(10).cloned().collect::<Vec<_>>().join(" | ")));
+    }
+    if !commits.is_empty() {
+        summary.push_str(&format!("- Commit hashes: {}\n", commits.iter().take(20).cloned().collect::<Vec<_>>().join(", ")));
+    }
+    if !runs.is_empty() {
+        summary.push_str(&format!("- CI/run IDs: {}\n", runs.iter().take(20).cloned().collect::<Vec<_>>().join(", ")));
+    }
+    summary
+}
+
+fn extract_shell_commands(messages: &[ChatMessage]) -> Vec<String> {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r#"(?s)"command"\s*:\s*"([^"]{1,240})""#).unwrap());
+    let mut seen = std::collections::HashSet::new();
+    let mut commands = Vec::new();
+    for msg in messages {
+        for cap in re.captures_iter(&msg.text_content()) {
+            if let Some(m) = cap.get(1) {
+                let value = m.as_str().replace("\\n", " ");
+                if seen.insert(value.clone()) {
+                    commands.push(value);
+                }
+            }
+        }
+    }
+    commands
+}
+
+fn extract_commit_hashes(messages: &[ChatMessage]) -> Vec<String> {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r"\b[0-9a-f]{7,40}\b").unwrap());
+    let mut seen = std::collections::HashSet::new();
+    let mut hashes = Vec::new();
+    for msg in messages {
+        for cap in re.captures_iter(&msg.text_content()) {
+            if let Some(m) = cap.get(0) {
+                let value = m.as_str().to_string();
+                if seen.insert(value.clone()) {
+                    hashes.push(value);
+                }
+            }
+        }
+    }
+    hashes
+}
+
+fn extract_ci_runs(messages: &[ChatMessage]) -> Vec<String> {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r"(?i)\b(?:run id|run_id|workflow run|CI run)[:= ]+([0-9]{5,})\b").unwrap());
+    let mut seen = std::collections::HashSet::new();
+    let mut runs = Vec::new();
+    for msg in messages {
+        for cap in re.captures_iter(&msg.text_content()) {
+            if let Some(m) = cap.get(1) {
+                let value = m.as_str().to_string();
+                if seen.insert(value.clone()) {
+                    runs.push(value);
+                }
+            }
+        }
+    }
+    runs
 }
 
 fn audit_summary_quality(to_compact: &[ChatMessage], summary: &str) -> (bool, Vec<String>) {

@@ -5,8 +5,6 @@ use async_trait::async_trait;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
-// ── GlobSearchTool ───────────────────────────────────────────────────────────
-
 #[derive(Default)]
 pub struct GlobSearchTool;
 
@@ -16,8 +14,6 @@ impl GlobSearchTool {
     }
 }
 
-/// Convert a simple glob pattern to a regex.
-/// Supports: `*` (any non-slash), `**` (any path), `?` (single char).
 fn glob_to_regex(pattern: &str) -> String {
     let mut regex = String::with_capacity(pattern.len() * 2);
     regex.push('^');
@@ -26,10 +22,8 @@ fn glob_to_regex(pattern: &str) -> String {
     while i < chars.len() {
         match chars[i] {
             '*' if i + 1 < chars.len() && chars[i + 1] == '*' => {
-                // ** = match any path prefix (including none)
                 regex.push_str("(.*/)?");
                 i += 2;
-                // Skip trailing / after **
                 if i < chars.len() && chars[i] == '/' {
                     i += 1;
                 }
@@ -57,22 +51,37 @@ fn glob_to_regex(pattern: &str) -> String {
     regex
 }
 
-/// Resolve the search base directory.
-/// If `path` is None or "." or empty, falls back to the workspace root
-/// (the MyClaw working directory), NOT the process cwd which may differ.
 fn resolve_search_base(path: Option<&str>) -> PathBuf {
     let raw = path.unwrap_or(".").trim();
     if raw.is_empty() || raw == "." {
-        // Use the MyClaw workspace directory, not the OS process cwd.
-        // The workspace dir is set as the daemon's working directory at startup.
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     } else {
         PathBuf::from(raw)
     }
 }
 
-fn walk_dir(dir: &Path, results: &mut Vec<String>, max: usize) -> std::io::Result<()> {
+#[derive(Default)]
+struct WalkStats {
+    scanned_files: usize,
+    skipped_dirs: Vec<String>,
+    skipped_large_files: usize,
+    unreadable_files: usize,
+    truncated: bool,
+}
+
+fn should_skip_dir(path: &Path) -> bool {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    name.starts_with('.') || name == "target" || name == "node_modules" || name == "__pycache__"
+}
+
+fn walk_dir(
+    dir: &Path,
+    results: &mut Vec<PathBuf>,
+    max: usize,
+    stats: &mut WalkStats,
+) -> std::io::Result<()> {
     if results.len() >= max {
+        stats.truncated = true;
         return Ok(());
     }
     let entries = std::fs::read_dir(dir)?;
@@ -80,20 +89,19 @@ fn walk_dir(dir: &Path, results: &mut Vec<String>, max: usize) -> std::io::Resul
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            // Skip hidden and common non-project dirs.
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            if name.starts_with('.')
-                || name == "target"
-                || name == "node_modules"
-                || name == "__pycache__"
-            {
+            if should_skip_dir(&path) {
+                if stats.skipped_dirs.len() < 20 {
+                    stats.skipped_dirs.push(path.display().to_string());
+                }
                 continue;
             }
-            walk_dir(&path, results, max)?;
+            walk_dir(&path, results, max, stats)?;
         } else {
-            results.push(path.to_string_lossy().into_owned());
+            results.push(path);
+            stats.scanned_files += 1;
         }
         if results.len() >= max {
+            stats.truncated = true;
             return Ok(());
         }
     }
@@ -107,25 +115,16 @@ impl Tool for GlobSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search for files matching a glob pattern. Supports *, **, and ? wildcards. Optionally returns file metadata (size, mtime)."
+        "Search for files matching a glob pattern. Supports *, **, and ? wildcards. Returns diagnostics for empty results, skipped directories, and traversal truncation."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "pattern": {
-                    "type": "string",
-                    "description": "Glob pattern, e.g. '**/*.rs', 'src/**/*.toml'."
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Base directory to search in (default: current directory)."
-                },
-                "include_metadata": {
-                    "type": "boolean",
-                    "description": "If true, include file size and last-modified time for each match (default: false)."
-                }
+                "pattern": { "type": "string", "description": "Glob pattern, e.g. '**/*.rs', 'src/**/*.toml'." },
+                "path": { "type": "string", "description": "Base directory to search in (default: current directory)." },
+                "include_metadata": { "type": "boolean", "description": "If true, include file size and last-modified time for each match (default: false)." }
             },
             "required": ["pattern"]
         })
@@ -144,7 +143,6 @@ impl Tool for GlobSearchTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'pattern' is required"))?;
         let include_metadata = args["include_metadata"].as_bool().unwrap_or(false);
-
         let base = resolve_search_base(args["path"].as_str());
 
         if !base.exists() {
@@ -159,14 +157,19 @@ impl Tool for GlobSearchTool {
         let re = regex::Regex::new(&regex_str)
             .map_err(|e| anyhow::anyhow!("invalid glob pattern '{}': {}", pattern, e))?;
 
+        let mut stats = WalkStats::default();
         let mut files = Vec::new();
-        walk_dir(&base, &mut files, 1000)?;
+        if base.is_file() {
+            stats.scanned_files = 1;
+            files.push(base.clone());
+        } else {
+            walk_dir(&base, &mut files, 1000, &mut stats)?;
+        }
 
-        // Match against relative paths from base.
-        let matches: Vec<String> = files
+        let matches: Vec<PathBuf> = files
             .iter()
             .filter_map(|f| {
-                let rel = Path::new(f).strip_prefix(&base).ok()?;
+                let rel = f.strip_prefix(&base).unwrap_or(f);
                 let rel_str = rel.to_string_lossy();
                 if re.is_match(&rel_str) {
                     Some(f.clone())
@@ -176,17 +179,27 @@ impl Tool for GlobSearchTool {
             })
             .collect();
 
-        let truncated = matches.len() > 500;
-        let output = if matches.is_empty() {
-            format!(
-                "no files matching '{}' found in {}",
-                pattern,
-                base.display()
-            )
+        let mut output = format!(
+            "glob_search diagnostics: base={} base_exists=true pattern={} regex={} scanned_files={} skipped_dirs={} traversal_truncated={} include_metadata={}\n",
+            base.display(),
+            pattern,
+            regex_str,
+            stats.scanned_files,
+            stats.skipped_dirs.len(),
+            stats.truncated,
+            include_metadata
+        );
+        if !stats.skipped_dirs.is_empty() {
+            output.push_str(&format!("skipped_dirs_sample={}\n", stats.skipped_dirs.join(", ")));
+        }
+
+        if matches.is_empty() {
+            output.push_str("matches=0\nNo results found.");
         } else {
-            let mut out = format!("{} files found:\n", matches.len());
-            if include_metadata {
-                for f in matches.iter().take(500) {
+            let display_limit = 500;
+            output.push_str(&format!("matches={}\n", matches.len()));
+            for f in matches.iter().take(display_limit) {
+                if include_metadata {
                     let meta_info = std::fs::metadata(f)
                         .ok()
                         .map(|m| {
@@ -200,17 +213,15 @@ impl Tool for GlobSearchTool {
                             format!("  [{} bytes, mtime={}]", size, mtime)
                         })
                         .unwrap_or_default();
-                    out.push_str(&format!("{}{}\n", f, meta_info));
+                    output.push_str(&format!("{}{}\n", f.display(), meta_info));
+                } else {
+                    output.push_str(&format!("{}\n", f.display()));
                 }
-            } else {
-                let display: Vec<&str> = matches.iter().take(500).map(|s| s.as_str()).collect();
-                out.push_str(&display.join("\n"));
             }
-            if truncated {
-                out.push_str("\n... (truncated at 500 results)");
+            if matches.len() > display_limit {
+                output.push_str(&format!("... (display_truncated at {} results)", display_limit));
             }
-            out
-        };
+        }
 
         Ok(ToolResult {
             success: true,
@@ -219,8 +230,6 @@ impl Tool for GlobSearchTool {
         })
     }
 }
-
-// ── ContentSearchTool ────────────────────────────────────────────────────────
 
 #[derive(Default)]
 pub struct ContentSearchTool;
@@ -231,7 +240,6 @@ impl ContentSearchTool {
     }
 }
 
-/// Search a single file for regex matches, optionally including context lines.
 fn search_in_file(
     path: &Path,
     re: &regex::Regex,
@@ -272,10 +280,10 @@ fn search_in_file(
             if j == i {
                 if display_char_count(context_line) > max_line_chars {
                     let mut line_matches = 0;
+                    let matches_on_line = re.find_iter(context_line).count();
                     for mat in re.find_iter(context_line) {
                         let col = context_line[..mat.start()].chars().count() + 1;
-                        let byte_offset =
-                            line_byte_offsets.get(j).copied().unwrap_or(0) + mat.start();
+                        let byte_offset = line_byte_offsets.get(j).copied().unwrap_or(0) + mat.start();
                         results.push(format!(
                             "{}:{}:{} [byte {}]\t{}",
                             path.display(),
@@ -290,7 +298,7 @@ fn search_in_file(
                             break;
                         }
                     }
-                    if re.find_iter(context_line).count() > 3 {
+                    if matches_on_line > 3 {
                         results.push(format!(
                             "{}:{}\t... (line has more matches; showing first 3 windows)",
                             path.display(),
@@ -302,18 +310,11 @@ fn search_in_file(
                     let suffix = first_match
                         .map(|mat| {
                             let col = context_line[..mat.start()].chars().count() + 1;
-                            let byte_offset =
-                                line_byte_offsets.get(j).copied().unwrap_or(0) + mat.start();
+                            let byte_offset = line_byte_offsets.get(j).copied().unwrap_or(0) + mat.start();
                             format!(":{} [byte {}]", col, byte_offset)
                         })
                         .unwrap_or_default();
-                    results.push(format!(
-                        "{}:{}{}\t{}",
-                        path.display(),
-                        j + 1,
-                        suffix,
-                        context_line
-                    ));
+                    results.push(format!("{}:{}{}\t{}", path.display(), j + 1, suffix, context_line));
                     match_count += 1;
                 }
             } else {
@@ -336,11 +337,7 @@ fn search_in_file(
         }
     }
 
-    if results.is_empty() {
-        None
-    } else {
-        Some(results)
-    }
+    if results.is_empty() { None } else { Some(results) }
 }
 
 fn line_byte_offsets(content: &str) -> Vec<usize> {
@@ -413,41 +410,20 @@ impl Tool for ContentSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search file contents by regex pattern. Returns matching lines with file path, line numbers, columns, and byte offsets. Supports context_lines and match-window snippets for very long lines."
+        "Search file contents by regex pattern. Returns matching lines with file path, line numbers, columns, byte offsets, and diagnostics for empty results/skipped files."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "regex": {
-                    "type": "string",
-                    "description": "Regular expression to search for."
-                },
-                "path": {
-                    "type": "string",
-                    "description": "File or directory to search in (default: current directory)."
-                },
-                "include": {
-                    "type": "string",
-                    "description": "File name glob filter, e.g. '*.rs', '*.{rs,toml}'."
-                },
-                "max_results": {
-                    "type": "integer",
-                    "description": "Maximum number of matching lines to return (default 200)."
-                },
-                "context_lines": {
-                    "type": "integer",
-                    "description": "Number of context lines to show before and after each match (like grep -C). Default: 0 (no context)."
-                },
-                "max_line_chars": {
-                    "type": "integer",
-                    "description": "Maximum characters to output for any single line before switching to a match-window snippet (default 1000)."
-                },
-                "match_window_chars": {
-                    "type": "integer",
-                    "description": "For lines longer than max_line_chars, show this many characters before and after each regex match (default 200)."
-                }
+                "regex": { "type": "string", "description": "Regular expression to search for." },
+                "path": { "type": "string", "description": "File or directory to search in (default: current directory)." },
+                "include": { "type": "string", "description": "File name glob filter, e.g. '*.rs', '*.{rs,toml}'." },
+                "max_results": { "type": "integer", "description": "Maximum number of matching lines to return (default 200)." },
+                "context_lines": { "type": "integer", "description": "Number of context lines to show before and after each match (like grep -C). Default: 0." },
+                "max_line_chars": { "type": "integer", "description": "Maximum characters to output for any single line before switching to match-window snippets (default 1000)." },
+                "match_window_chars": { "type": "integer", "description": "For long lines, chars before/after each regex match (default 200)." }
             },
             "required": ["regex"]
         })
@@ -466,54 +442,60 @@ impl Tool for ContentSearchTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'regex' is required"))?;
         let include = args["include"].as_str();
-        let max_results = args["max_results"].as_u64().unwrap_or(200) as usize;
+        let max_results = args["max_results"].as_u64().unwrap_or(200).max(1) as usize;
         let context_lines = args["context_lines"].as_u64().unwrap_or(0) as usize;
         let max_line_chars = args["max_line_chars"].as_u64().unwrap_or(1000).max(80) as usize;
-        let match_window_chars =
-            args["match_window_chars"].as_u64().unwrap_or(200).max(20) as usize;
+        let match_window_chars = args["match_window_chars"].as_u64().unwrap_or(200).max(20) as usize;
 
         let re = regex::Regex::new(pattern)
             .map_err(|e| anyhow::anyhow!("invalid regex '{}': {}", pattern, e))?;
-
-        // Build include filter regex from glob.
-        let include_re = include.map(|inc| {
-            // Convert simple glob like "*.rs" or "*.{rs,toml}" to regex.
-            let regexified = inc
-                .replace('.', r"\.")
+        let include_regex_str = include.map(|inc| {
+            inc.replace('.', r"\.")
                 .replace('*', ".*")
                 .replace('{', "(")
                 .replace('}', ")")
-                .replace(',', "|");
-            regex::Regex::new(&format!("^{}$", regexified))
-                .unwrap_or_else(|_| regex::Regex::new(".*").unwrap())
+                .replace(',', "|")
         });
+        let include_re = include_regex_str
+            .as_ref()
+            .map(|s| regex::Regex::new(&format!("^{}$", s)))
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("invalid include glob: {}", e))?;
 
         let base = resolve_search_base(args["path"].as_str());
+        if !base.exists() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!("path '{}' does not exist", base.display())),
+            });
+        }
+
+        let mut stats = WalkStats::default();
         let mut all_files = Vec::new();
         if base.is_file() {
-            all_files.push(base.to_string_lossy().into_owned());
+            stats.scanned_files = 1;
+            all_files.push(base.clone());
         } else {
-            walk_dir(&base, &mut all_files, 5000)?;
+            walk_dir(&base, &mut all_files, 5000, &mut stats)?;
         }
 
         let mut results: Vec<String> = Vec::new();
-        for file_path_str in &all_files {
-            let file_path = Path::new(file_path_str);
-            // Apply include filter.
+        let mut candidate_files = 0usize;
+        for file_path in &all_files {
             if let Some(ref inc_re) = include_re {
                 let name = file_path.file_name().unwrap_or_default().to_string_lossy();
                 if !inc_re.is_match(&name) {
                     continue;
                 }
             }
-            // Skip binary-ish files and very large files.
             if let Ok(meta) = std::fs::metadata(file_path) {
                 if meta.len() > 5_000_000 {
+                    stats.skipped_large_files += 1;
                     continue;
                 }
             }
-
-            // Count actual matches so far to enforce max_results.
+            candidate_files += 1;
             let current_match_count = results
                 .iter()
                 .filter(|r| !r.contains(":-\t") && !r.contains(":\t...") && !r.contains("-\t"))
@@ -521,7 +503,17 @@ impl Tool for ContentSearchTool {
             if current_match_count >= max_results {
                 break;
             }
-
+            match std::fs::read_to_string(file_path) {
+                Ok(content) => {
+                    if !re.is_match(&content) {
+                        continue;
+                    }
+                }
+                Err(_) => {
+                    stats.unreadable_files += 1;
+                    continue;
+                }
+            }
             if let Some(matches) = search_in_file(
                 file_path,
                 &re,
@@ -534,16 +526,38 @@ impl Tool for ContentSearchTool {
             }
         }
 
-        let truncated = results.len() >= max_results;
-        let output = if results.is_empty() {
-            format!("no matches for '{}' in {}", pattern, base.display())
+        let matched_lines = results
+            .iter()
+            .filter(|r| !r.contains(":-\t") && !r.contains(":\t...") && !r.contains("-\t"))
+            .count();
+        let display_truncated = matched_lines >= max_results;
+        let mut output = format!(
+            "content_search diagnostics: base={} base_exists=true regex={} include={} scanned_files={} candidate_files={} skipped_dirs={} skipped_large_files={} unreadable_files={} traversal_truncated={} result_truncated={} max_results={}\n",
+            base.display(),
+            pattern,
+            include.unwrap_or("<none>"),
+            stats.scanned_files,
+            candidate_files,
+            stats.skipped_dirs.len(),
+            stats.skipped_large_files,
+            stats.unreadable_files,
+            stats.truncated,
+            display_truncated,
+            max_results
+        );
+        if !stats.skipped_dirs.is_empty() {
+            output.push_str(&format!("skipped_dirs_sample={}\n", stats.skipped_dirs.join(", ")));
+        }
+
+        if results.is_empty() {
+            output.push_str("matches=0\nNo results found.");
         } else {
-            let mut out = results.join("\n");
-            if truncated {
-                out.push_str(&format!("\n... (truncated at {} results)", max_results));
+            output.push_str(&format!("matches={}\n", matched_lines));
+            output.push_str(&results.join("\n"));
+            if display_truncated {
+                output.push_str(&format!("\n... (truncated at {} results)", max_results));
             }
-            out
-        };
+        }
 
         Ok(ToolResult {
             success: true,

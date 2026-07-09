@@ -30,6 +30,7 @@ mod shell;
 mod skill_manage_tool;
 mod skill_tool;
 mod skills_list_tool;
+mod symbol_check;
 mod task;
 pub mod tool_search;
 pub mod truncation;
@@ -56,6 +57,7 @@ pub use shell::{ShellPollTool, ShellTool};
 pub use skill_manage_tool::SkillManageTool;
 pub use skill_tool::SkillTool;
 pub use skills_list_tool::SkillsListTool;
+pub use symbol_check::SymbolCheckTool;
 pub use task::{TaskManagerTool, TaskState};
 pub use tool_search::ToolSearchTool;
 pub use truncation::{truncate_output, truncate_tool_result};
@@ -82,6 +84,7 @@ pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(FileEditTool::new()),
         Arc::new(GlobSearchTool::new()),
         Arc::new(ContentSearchTool::new()),
+        Arc::new(SymbolCheckTool::new()),
         // Web tools — http_request subsumes web_fetch (use strip_html=true)
         Arc::new(HttpRequestTool::new()),
         // Utility tools
