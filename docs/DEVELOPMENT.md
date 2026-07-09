@@ -1,8 +1,13 @@
 # MyClaw 开发计划
 
-> 基于代码实际状态更新（2026-04-30）
+> ⚠️ **历史快照（2026-04-30）**，统计与模块表**已过时**，请勿当作当前架构。  
 >
-> 核心系统已完成，LoopBreaker 熔断机制也已实现并集成。以下是当前真实进度和剩余任务。
+> - **当前运行时架构** → [`architecture-current.md`](./architecture-current.md)  
+> - **RFC 重构进度** → [`refactor-progress.md`](./refactor-progress.md)（主项 61/61）  
+> - **源码模块索引** → [`architecture.md`](./architecture.md)  
+>
+> 下文保留作早期进度考古；文中的 `AgentLoop` / `ServiceRegistry` / `agent_impl.rs`  
+> 等路径在 RFC v2 后已删除或更名。
 
 ---
 

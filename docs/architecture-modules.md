@@ -1,7 +1,12 @@
 # MyClaw 模块关联关系总图
 
-> 基于 RFC: Session 架构重构 v2
-> 日期：2026-05-21
+> 基于 RFC: Session 架构重构 v2  
+> 日期：2026-05-21  
+>
+> **状态（2026-07-09）**：本图描述 RFC 目标模块关系，主骨架已与代码一致。  
+> **运行时权威说明**见 [`architecture-current.md`](./architecture-current.md)。  
+> 图中若仍写 `ServiceRegistry` / 旧字段数，以 as-is 与源码为准  
+> （现为 `ProviderRegistry`；`AgentRuntime` 含可选 mcp/search_cooldown/task_state）。
 
 下图覆盖目标架构的**全部模块**和它们之间的关系。三种箭头：
 
@@ -280,7 +285,7 @@
 │ (daemon)    │  │              │  │              │  │            │
 ├─────────────┤  ├──────────────┤  ├──────────────┤  ├────────────┤
 │ GlobalConfig│  │ Agent        │  │ Session      │  │ TurnContext│
-│ Service-    │  │   .config    │  │   .history   │  │ TurnResult │
+│ Provider-   │  │   .config    │  │   .history   │  │ TurnResult │
 │   Registry  │  │ （仅一个字段）│  │   .token_    │  │            │
 │ ToolRegistry│  │              │  │     tracker  │  │            │
 │ SkillManager│  │              │  │ Session-     │  │            │

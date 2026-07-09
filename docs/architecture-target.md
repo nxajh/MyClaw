@@ -1,7 +1,13 @@
 # MyClaw 目标架构图（重构后）
 
-> 基于 RFC: Session 架构重构 v2
-> 日期：2026-05-21
+> 基于 RFC: Session 架构重构 v2  
+> 日期：2026-05-21  
+>
+> **状态（2026-07-09）**：主路径**已落地**。读运行时请以  
+> [`architecture-current.md`](./architecture-current.md)（As-Is）为准。  
+> 本文保留为目标设计原稿；与 as-is 的细差（`OrchestratorCtx`、`AgentRuntime`  
+> 扩展字段、`TurnStream`、消息类型命名等）见 as-is 文末对照表。  
+> 重构清单：[`refactor-progress.md`](./refactor-progress.md)。
 
 ## 组件关系总览
 

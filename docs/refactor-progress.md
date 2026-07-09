@@ -1,7 +1,12 @@
 # 重构进度跟踪
 
-> 基于 RFC §七 实施清单
-> 完整重构，不分阶段发布
+> 基于 RFC §七 实施清单  
+> 完整重构，不分阶段发布  
+>
+> **文档同步（2026-07-09）**：运行时 As-Is 已写入  
+> [`architecture-current.md`](./architecture-current.md)；  
+> `architecture-target` / `architecture-modules` 保留为目标原稿并加状态横幅；  
+> `architecture.md` 模块统计已刷新。主项仍以本清单勾选为准。
 
 ## 进度统计
 

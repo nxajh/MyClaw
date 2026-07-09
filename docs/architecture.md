@@ -1,24 +1,41 @@
 # MyClaw 架构文档
 
-> 自动生成自源码结构提取，覆盖全部 181 个 Rust 源文件。
+> **用途**：源码树 / 符号级索引（自动生成痕迹保留在下文各节）。  
+> **运行时架构（As-Is）**：请先读 [`architecture-current.md`](./architecture-current.md)。  
+> **目标设计原稿**：[`architecture-target.md`](./architecture-target.md) ·  
+> [`architecture-modules.md`](./architecture-modules.md)  
+> **重构进度**：[`refactor-progress.md`](./refactor-progress.md)  
+>
+> 模块统计刷新于 **2026-07-09**（约 **192** 个 `src/**/*.rs`）。  
+> 下文各文件的函数摘录可能落后于 HEAD，以源码为准。
 
 ## 目录
 
 | 模块 | 文件数 | 说明 |
 |---|---|---|
-| `main.rs / lib.rs / daemon.rs` | — | 入口与工具 |
-| `signal / hot_switch / sys_info / str_utils` | — | 入口与工具 |
-| `agents/` | 59 | 智能体系统：Agent 运行循环、Turn 管理、Session 管理、上下文引擎、工具执行、调度器、子代理委派、Orchestrator 事件编排(责任链 inbound) |
-| `channels/` | 15 | 消息通道：多平台适配（Telegram/QQBot/微信/浏览器 Client）、消息分块、流式推送、安全策略 |
-| `cli/` | 14 | 命令行界面：myclaw chat/status/reload/restart/stop/update/config/doctor/tools/tui/completion/exec 子命令 |
-| `config/` | 9 | 配置系统：TOML 配置解析、Agent/Channel/Provider/Routing/Scheduler/MCP/SubAgent 配置结构 |
-| `mcp/` | 11 | MCP 协议客户端：Model Context Protocol 的 HTTP/SSE/STDIO 传输、工具发现与调用 |
-| `memory/` | 1 | 持久化记忆：用户/项目级 key-value 记忆存储 |
-| `providers/` | 32 | LLM Provider 系统：多供应商适配（OpenAI/Anthropic/Google/GLM/Kimi/MiniMax/Xiaomi）、能力协商、流式传输、工具调用 |
-| `registry/` | 2 | 服务注册表：Provider 和 Channel 的注册与路由 |
-| `storage/` | 7 | 存储后端：JSON 文件存储、Session 持久化、共享/私有 KV 存储 |
-| `tools/` | 22 | 内置工具集：文件操作、Shell 执行、Web 搜索/请求、记忆管理、任务管理、代理委派、技能系统 |
-| `tui/` | 2 | 终端 UI：基于 ratatui 的交互式终端界面 |
+| `main.rs` / `lib.rs` / `daemon.rs` | — | 入口与 Composition Root（`daemon.rs` 装配全局单例） |
+| `signal` / `hot_switch` / `sys_info` / `str_utils` | — | 进程信号、热切换、系统信息 |
+| `agents/` | 61 | Agent 身份与 `Agent::run`、SessionContext/Manager、Orchestrator 事件编排（inbound 责任链）、ContextEngine、ToolExecutor、调度、委派、AskRouter |
+| `channels/` | 14 | 通道适配：Telegram / QQBot / WeChat / Client(WebUI WS)、消息类型、TurnStream、安全策略 |
+| `cli/` | 14 | `myclaw` 子命令：chat/status/reload/restart/stop/update/config/doctor/tools/tui/completion/exec |
+| `config/` | 9 | TOML：Agent / Channel / Provider / Routing / Scheduler / MCP / SubAgent / filters |
+| `mcp/` | 11 | MCP 客户端：HTTP / SSE / STDIO、工具发现与调用 |
+| `memory/` | 1 | 记忆存储辅助 |
+| `providers/` | 37 | LLM 供应商与协议、能力协商、媒体策略、流式、工具调用（含 `protocols/`） |
+| `registry/` | 2 | Provider 装配与路由辅助（Channel 运行时注册在 `OrchestratorCtx.ChannelRegistry`） |
+| `storage/` | 7 | Session / KV 持久化后端 |
+| `tools/` | 27 | 内置工具：文件/Shell/搜索/记忆/任务/委派/技能/媒体 view|hear 等 |
+| `tui/` | 2 | 终端 UI（ratatui） |
+
+### 运行时主路径（摘要）
+
+```
+Channel → Orchestrator(inbound) → SessionContext.process_turn
+        → Agent::run(&mut Session, TurnContext, &AgentRuntime)
+        → Provider / Tools / ContextEngine → Channel
+```
+
+**已删除、勿再引用**：`AgentLoop`、`LoopRegistry`、`SessionHandle`、`run_session_actor`、`ServiceRegistry`（现名 `ProviderRegistry`）。
 
 ---
 
