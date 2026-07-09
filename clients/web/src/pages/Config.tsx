@@ -175,7 +175,7 @@ export default function Config() {
   return (
     <div className="flex flex-col h-full bg-zinc-950">
       <div className="flex-1 overflow-y-auto">
-        <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-5 animate-fadeIn max-w-6xl">
+        <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-5 animate-fadeIn">
 
           {/* Action Row & Diagnostics */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-zinc-800">

@@ -60,7 +60,7 @@ export default function Overview() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="px-3 sm:px-8 py-5 sm:py-7 space-y-5 max-w-6xl">
+      <div className="px-3 sm:px-8 py-5 sm:py-7 space-y-5">
         <div>
           <h1 className="text-base font-bold text-zinc-100">Overview</h1>
           <p className="text-sm text-zinc-500 mt-1">Current client status, recent sessions, and conversation activity.</p>

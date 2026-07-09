@@ -234,7 +234,7 @@ export default function Sessions() {
   return (
     <div className="flex flex-col h-full">
       <div className="flex-1 overflow-y-auto">
-        <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4 max-w-6xl">
+        <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4">
           {/* Header — title + create */}
           <div className="flex flex-col sm:flex-row sm:items-center gap-3 justify-between pb-2 border-b border-zinc-800">
             <div>
