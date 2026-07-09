@@ -72,6 +72,7 @@ html.light .text-sky-400          { color: #0284c7; }
 html.light .text-violet-400       { color: #7c3aed; }
 html.light .text-amber-400        { color: #d97706; }
 html.light .text-orange-400       { color: #ea580c; }
+html.light .text-indigo-400       { color: #4f46e5; }
 html.light .shadow-2xl            { box-shadow: 0 25px 50px -12px rgb(0 0 0 / 0.15); }
 html.light .border-zinc-600\/50   { border-color: rgb(161 161 170 / 0.5); }
 

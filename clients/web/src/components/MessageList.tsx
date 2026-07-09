@@ -760,7 +760,7 @@ function EditableUserBubble({ content, images, files, onResend, onDelete, onPin,
   }
 
   return (
-    <div className="flex justify-end gap-2.5 sm:gap-3.5 group/msg max-w-3xl mx-auto w-full">
+    <div className="flex justify-end gap-2.5 sm:gap-3.5 group/msg">
       <div className="max-w-[85%] sm:max-w-[78%] lg:max-w-[72%] rounded-2xl border border-zinc-700/40 bg-zinc-800/60 px-3 sm:px-4 lg:px-5 py-3 sm:py-4 text-sm text-zinc-100 leading-relaxed shadow-sm space-y-3 transition-colors hover:border-zinc-600/50">
         {images && images.length > 0 && (
           <div className="flex flex-wrap gap-2 mb-2">
@@ -846,7 +846,7 @@ interface AssistantBubbleProps {
 
 const AssistantBubble = memo(function AssistantBubble({ blocks, done, isLast, isGenerating, onRetry, onDelete, onPin, pinned }: AssistantBubbleProps) {
   return (
-    <div className="flex gap-2.5 sm:gap-3.5 group/msg max-w-3xl mx-auto w-full">
+    <div className="flex gap-2.5 sm:gap-3.5 group/msg">
       <div className="mt-0.5 h-8 w-8 sm:h-10 sm:w-10 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-lg sm:text-xl shrink-0 select-none shadow-md">🦀</div>
       <div className={`flex-1 min-w-0 rounded-2xl border bg-zinc-900/40 px-3 sm:px-4 lg:px-5 py-3 sm:py-4 space-y-3 shadow-sm transition-colors ${isGenerating ? 'generating-border' : 'border-zinc-800/80 hover:border-zinc-800'}`}>
         {blocks.map((block, i) => renderBlock(block, i, isGenerating))}

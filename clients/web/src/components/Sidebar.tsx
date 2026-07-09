@@ -11,7 +11,7 @@ import { useTheme } from '../hooks/useTheme'
 const links = [
   { to: '/', icon: MessageSquare, label: 'Chat', accent: 'text-sky-400' },
   { to: '/overview', icon: LayoutDashboard, label: 'Overview', accent: 'text-emerald-400' },
-  { to: '/sessions', icon: Layers, label: 'Sessions', accent: 'text-zinc-300' },
+  { to: '/sessions', icon: Layers, label: 'Sessions', accent: 'text-indigo-400' },
   { to: '/tools', icon: Wrench, label: 'Tools', accent: 'text-orange-400' },
   { to: '/skills', icon: Sparkles, label: 'Skills', accent: 'text-amber-400' },
   { to: '/memory', icon: Brain, label: 'Memory', accent: 'text-violet-400' },
@@ -57,10 +57,10 @@ function NavLinkItem({ to, icon: Icon, label, accent, collapsed, onNavigate }: {
       {({ isActive }) => (
         <>
           {isActive && (
-            <span className={`absolute left-0 top-1.5 bottom-1.5 w-1 rounded-r-md ${isActive ? 'bg-zinc-300' : 'bg-zinc-500'}`} />
+            <span className={`absolute left-0 top-1.5 bottom-1.5 w-1 rounded-r-md bg-current ${accent}`} />
           )}
           <Icon size={17} className={`shrink-0 ${isActive ? accent : ''}`} />
-          {!collapsed && <span className="truncate font-medium">{label}</span>}
+          {!collapsed && <span className={`truncate ${isActive ? 'font-semibold' : 'font-medium'}`}>{label}</span>}
         </>
       )}
     </NavLink>

@@ -65,7 +65,7 @@ export default function Chat() {
       <ChatHeader />
       {historyLoading && messages.length === 0 ? (
         <div className="flex-1 overflow-y-auto">
-          <div className="px-3 sm:px-8 py-8 space-y-6 max-w-3xl mx-auto w-full">
+          <div className="px-3 sm:px-8 py-8 space-y-6 max-w-5xl mx-auto w-full">
             {[...Array(3)].map((_, i) => (
               <div key={i} className="space-y-3">
                 <div className="skeleton-line w-3/4" />

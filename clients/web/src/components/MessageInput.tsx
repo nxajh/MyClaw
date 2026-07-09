@@ -257,7 +257,7 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
     <div className="relative px-3 sm:px-8 pt-3 pb-4 sm:pb-5 shrink-0 safe-area-bottom">
       {/* Scroll fade / elevation above composer */}
       <div className="pointer-events-none absolute inset-x-0 -top-8 h-8 bg-gradient-to-t from-zinc-950 to-transparent" />
-      <div className="relative max-w-3xl mx-auto">
+      <div className="relative max-w-5xl mx-auto">
         {/* Slash command dropdown */}
         {showCmds && (
           <div className="absolute bottom-full mb-2 left-0 right-0 max-h-64 overflow-y-auto rounded-xl border border-zinc-800 bg-zinc-900 shadow-2xl py-1 z-20">
