@@ -27,6 +27,9 @@ export default function LoginOverlay({ onSubmit, isRetry = false, isConnecting =
     if (token.trim() && clientId.trim() && !isConnecting) onSubmit(token.trim(), clientId.trim())
   }
 
+  const fieldCls =
+    'w-full rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-3 text-sm text-zinc-100 placeholder-zinc-500 outline-none focus:border-zinc-700 focus:ring-1 focus:ring-zinc-700/40 disabled:opacity-50 transition-colors'
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/80 backdrop-blur-sm">
       <div className="w-full max-w-sm mx-4 rounded-2xl border border-zinc-700/60 bg-zinc-900 p-8 shadow-2xl">
@@ -54,7 +57,7 @@ export default function LoginOverlay({ onSubmit, isRetry = false, isConnecting =
             placeholder="Client ID"
             autoFocus
             disabled={isConnecting}
-            className="w-full rounded-xl border border-zinc-700/50 bg-zinc-800 px-4 py-3 text-sm text-zinc-100 placeholder-zinc-500 outline-none focus:border-zinc-600 focus:ring-1 focus:ring-zinc-600 disabled:opacity-50"
+            className={fieldCls}
           />
           <input
             type="password"
@@ -62,7 +65,7 @@ export default function LoginOverlay({ onSubmit, isRetry = false, isConnecting =
             onChange={(e) => setToken(e.target.value)}
             placeholder="Access token"
             disabled={isConnecting}
-            className="w-full rounded-xl border border-zinc-700/50 bg-zinc-800 px-4 py-3 text-sm text-zinc-100 placeholder-zinc-500 outline-none focus:border-zinc-600 focus:ring-1 focus:ring-zinc-600 disabled:opacity-50"
+            className={fieldCls}
           />
           <button
             type="submit"

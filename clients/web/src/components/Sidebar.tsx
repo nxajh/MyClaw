@@ -187,7 +187,7 @@ function MobileDrawer({ open, onClose }: { open: boolean; onClose: () => void })
       {/* Backdrop */}
       <div className="absolute inset-0 bg-black/50 backdrop-blur-[2px]" onClick={onClose} />
       {/* Panel */}
-      <div className={`absolute inset-y-0 left-0 w-64 bg-zinc-900 border-r border-zinc-800 flex flex-col ${exiting ? 'animate-[slideOut_0.15s_ease-in_forwards]' : 'animate-[slideIn_0.15s_ease-out]'}`}>
+      <div className={`absolute inset-y-0 left-0 w-72 bg-zinc-900 border-r border-zinc-800 flex flex-col ${exiting ? 'animate-[slideOut_0.15s_ease-in_forwards]' : 'animate-[slideIn_0.15s_ease-out]'}`}>
         <style>{`@keyframes slideIn { from { transform: translateX(-100%); } to { transform: translateX(0); } } @keyframes slideOut { from { transform: translateX(0); } to { transform: translateX(-100%); } } @keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }`}</style>
         <div className="flex items-center h-14 px-4 border-b border-zinc-800 shrink-0">
           <span className="flex-1 text-sm font-semibold text-zinc-100">🦀 MyClaw</span>

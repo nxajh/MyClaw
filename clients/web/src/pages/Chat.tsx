@@ -65,7 +65,7 @@ export default function Chat() {
       <ChatHeader />
       {historyLoading && messages.length === 0 ? (
         <div className="flex-1 overflow-y-auto">
-          <div className="px-3 sm:px-8 py-8 space-y-6">
+          <div className="px-3 sm:px-8 py-8 space-y-6 max-w-5xl mx-auto w-full">
             {[...Array(3)].map((_, i) => (
               <div key={i} className="space-y-3">
                 <div className="skeleton-line w-3/4" />
@@ -78,23 +78,25 @@ export default function Chat() {
         </div>
       ) : showEmpty ? (
         <div className="flex-1 overflow-y-auto">
-          <div className="px-3 sm:px-6 py-8 flex flex-col items-center justify-center min-h-full">
-            <div className="text-center mb-8">
-              <div className="text-4xl mb-3">🐾</div>
-              <h2 className="text-lg font-semibold text-zinc-200 mb-1">How can I help you today?</h2>
-              <p className="text-sm text-zinc-500">Ask anything — coding, writing, analysis, and more.</p>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 w-full">
-              {suggestions.map((ex) => (
-                <button
-                  key={ex.text}
-                  onClick={() => handleSend(ex.text)}
-                  className="flex items-center gap-3 text-left rounded-xl border border-zinc-800 px-4 py-3 hover:bg-zinc-900 hover:border-zinc-700 hover:scale-[1.01] active:scale-[0.99] transition-all text-sm text-zinc-300"
-                >
-                  <span className="text-lg shrink-0">{ex.icon}</span>
-                  <span>{ex.text}</span>
-                </button>
-              ))}
+          <div className="px-3 sm:px-8 py-8 flex flex-col items-center justify-center min-h-full">
+            <div className="w-full max-w-3xl">
+              <div className="text-center mb-8">
+                <div className="text-4xl mb-3">🐾</div>
+                <h2 className="text-lg font-semibold text-zinc-200 mb-1">How can I help you today?</h2>
+                <p className="text-sm text-zinc-500">Ask anything — coding, writing, analysis, and more.</p>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 w-full">
+                {suggestions.map((ex) => (
+                  <button
+                    key={ex.text}
+                    onClick={() => handleSend(ex.text)}
+                    className="flex items-center gap-3 text-left rounded-xl border border-zinc-800 px-4 py-3 hover:bg-zinc-900 hover:border-zinc-700 hover:scale-[1.01] active:scale-[0.99] transition-all text-sm text-zinc-300"
+                  >
+                    <span className="text-lg shrink-0">{ex.icon}</span>
+                    <span>{ex.text}</span>
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
         </div>

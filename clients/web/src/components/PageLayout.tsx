@@ -21,13 +21,21 @@ export function LoadingRow({ label = 'Loading…' }: { label?: string }) {
 }
 
 export function EmptyState({ children }: { children: ReactNode }) {
-  return <p className="text-sm text-zinc-500 py-1">{children}</p>
+  return (
+    <div className="rounded-2xl border border-dashed border-zinc-800 p-8 text-center space-y-2">
+      <p className="text-sm text-zinc-500">{children}</p>
+    </div>
+  )
 }
 
 // ── Shared input / button styles (exported as class strings) ─────────────────
 
 export const inputCls =
-  'rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-2.5 text-sm text-zinc-100 placeholder-zinc-600 outline-none focus:border-zinc-700 transition-colors disabled:opacity-50 w-full'
+  'rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-2.5 text-sm text-zinc-100 placeholder-zinc-600 outline-none focus:border-zinc-700 focus:ring-1 focus:ring-zinc-700/40 transition-colors disabled:opacity-50 w-full'
+
+/** Full-width search field used across management pages */
+export const searchInputCls =
+  'w-full rounded-2xl border border-zinc-800 bg-zinc-900/40 pl-10 pr-4 py-2.5 text-xs text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-700 focus:ring-1 focus:ring-zinc-700/30 transition-colors'
 
 export const btnPrimary =
   'flex items-center gap-1.5 rounded-xl bg-zinc-100 hover:bg-white text-zinc-900 disabled:opacity-40 disabled:cursor-not-allowed px-4 py-2.5 text-sm font-medium transition-colors shrink-0'

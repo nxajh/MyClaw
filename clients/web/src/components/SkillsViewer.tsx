@@ -20,9 +20,9 @@ export default function SkillsViewer({ name, content, error, onEdit, onBack, onD
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="max-w-3xl mx-auto px-6 py-6 space-y-5">
+      <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-5">
         {/* Nav row */}
-        <div className="flex items-center justify-between mb-4 border-b border-zinc-800 pb-2">
+        <div className="flex items-center justify-between border-b border-zinc-800 pb-2">
           <button onClick={onBack} className="flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-300 transition-colors">
             <ChevronLeft size={14} /> Back to Skills
           </button>
@@ -49,7 +49,7 @@ export default function SkillsViewer({ name, content, error, onEdit, onBack, onD
         {error && <ErrorBanner message={error} />}
 
         {/* Metadata panel */}
-        <div className="p-5 rounded-2xl border border-zinc-800 bg-zinc-900/10 space-y-3">
+        <div className="p-5 rounded-2xl border border-zinc-800 bg-zinc-900/30 space-y-3">
           <div className="flex items-center gap-2">
             <Sparkles size={14} className="text-amber-400 shrink-0" />
             <h1 className="text-lg font-bold text-zinc-100 font-mono tracking-tight">
@@ -65,7 +65,7 @@ export default function SkillsViewer({ name, content, error, onEdit, onBack, onD
           {parsed.meta.keywords.length > 0 && (
             <div className="flex flex-wrap gap-1.5 pt-1.5">
               {parsed.meta.keywords.map(k => (
-                <span key={k} className="flex items-center gap-1 text-[10px] text-zinc-500 bg-zinc-900/60 px-2 py-0.5 rounded-md border border-zinc-800/80">
+                <span key={k} className="flex items-center gap-1 text-[10px] text-zinc-500 bg-zinc-900/60 px-2 py-0.5 rounded-md border border-zinc-800">
                   <Tag size={9} />{k}
                 </span>
               ))}
@@ -79,14 +79,16 @@ export default function SkillsViewer({ name, content, error, onEdit, onBack, onD
           )}
         </div>
 
-        {/* Body */}
-        <div className="prose prose-invert prose-sm max-w-none bg-zinc-900/30 p-6 rounded-2xl border border-zinc-800
-          prose-p:leading-7 prose-headings:text-zinc-100 prose-headings:font-semibold
-          prose-code:text-zinc-200 prose-code:bg-zinc-800 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:text-[0.8em] prose-code:before:content-none prose-code:after:content-none
-          prose-pre:bg-zinc-950 prose-pre:border prose-pre:border-zinc-800 prose-pre:rounded-xl prose-pre:text-xs
-          prose-blockquote:border-zinc-700 prose-blockquote:text-zinc-400
-          prose-a:text-blue-400 prose-strong:text-zinc-200 prose-hr:border-zinc-800">
-          <Markdown remarkPlugins={[remarkGfm]}>{parsed.body}</Markdown>
+        {/* Body — readable max width on ultra-wide screens */}
+        <div className="max-w-5xl">
+          <div className="prose prose-invert prose-sm max-w-none bg-zinc-900/30 p-6 rounded-2xl border border-zinc-800
+            prose-p:leading-7 prose-headings:text-zinc-100 prose-headings:font-semibold
+            prose-code:text-zinc-200 prose-code:bg-zinc-800 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:text-[0.8em] prose-code:before:content-none prose-code:after:content-none
+            prose-pre:bg-zinc-950 prose-pre:border prose-pre:border-zinc-800 prose-pre:rounded-xl prose-pre:text-xs
+            prose-blockquote:border-zinc-700 prose-blockquote:text-zinc-400
+            prose-a:text-blue-400 prose-strong:text-zinc-200 prose-hr:border-zinc-800">
+            <Markdown remarkPlugins={[remarkGfm]}>{parsed.body}</Markdown>
+          </div>
         </div>
       </div>
     </div>

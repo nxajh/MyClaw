@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useMemo } from 'react'
 import { Plus, Loader2, Search, Tag, Link2 } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useToast } from '../components/Toast'
-import { ErrorBanner, LoadingRow, EmptyState, btnPrimary } from '../components/PageLayout'
+import { ErrorBanner, LoadingRow, EmptyState, btnPrimary, searchInputCls } from '../components/PageLayout'
 import MemoryEditor from '../components/MemoryEditor'
 import MemoryViewer from '../components/MemoryViewer'
 import { getStyle, type MemoryFile } from '../lib/memoryUtils'
@@ -157,7 +157,7 @@ export default function Memory() {
     return (
       <div className="flex flex-col h-full bg-zinc-950">
         <div className="flex-1 overflow-y-auto">
-          <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4">
+          <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4 max-w-6xl">
             <button onClick={backToList} className="flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-300 transition-colors mb-2">
               ← Back to Memories
             </button>
@@ -178,9 +178,9 @@ export default function Memory() {
   return (
     <div className="flex flex-col h-full bg-zinc-950">
       <div className="flex-1 overflow-y-auto">
-        <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4">
+        <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4 max-w-6xl">
           {/* Header */}
-          <div className="flex flex-col sm:flex-row sm:items-center gap-3 justify-between pb-2 border-b border-zinc-900">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3 justify-between pb-2 border-b border-zinc-800">
             <div>
               <h1 className="text-base font-bold text-zinc-100">Memory</h1>
               <p className="text-xs text-zinc-500">{files.length} entries · Manage facts and rules guiding MyClaw</p>
@@ -191,7 +191,7 @@ export default function Memory() {
           </div>
 
           {/* Tabs */}
-          <div className="flex flex-wrap gap-1 border-b border-zinc-900/60 pb-1">
+          <div className="flex flex-wrap gap-1 border-b border-zinc-800/60 pb-1">
             {TABS.map(tab => {
               const isActive = activeTab === tab
               const count = tab === 'all' ? files.length : files.filter(f => f.type === tab).length
@@ -210,20 +210,20 @@ export default function Memory() {
           {/* Search */}
           <div className="relative">
             <span className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none"><Search size={14} className="text-zinc-500" /></span>
-            <input type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Search by name, description, or tags..." className="w-full rounded-2xl border border-zinc-800 bg-zinc-900/40 pl-10 pr-4 py-2.5 text-xs text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-700 transition-colors" />
+            <input type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Search by name, description, or tags..." className={searchInputCls} />
           </div>
 
           {error && <ErrorBanner message={error} />}
           {loadingList && <LoadingRow />}
           {!loadingList && status !== 'connected' && <EmptyState>Waiting for connection to sync memory…</EmptyState>}
           {!loadingList && status === 'connected' && filteredFiles.length === 0 && (
-            <div className="rounded-2xl border border-dashed border-zinc-900 p-8 text-center space-y-2">
-              <span className="text-2xl">📭</span>
-              <p className="text-xs text-zinc-500 font-medium">No matching memories</p>
+            <EmptyState>
+              <span className="block text-2xl mb-1">📭</span>
+              No matching memories
               {files.length > 0 && (
-                <button onClick={() => { setSearchQuery(''); setActiveTab('all') }} className="text-xs text-blue-400 hover:text-blue-300">Reset filters</button>
+                <button onClick={() => { setSearchQuery(''); setActiveTab('all') }} className="block mx-auto mt-2 text-xs text-blue-400 hover:text-blue-300">Reset filters</button>
               )}
-            </div>
+            </EmptyState>
           )}
 
           {/* List */}
@@ -256,7 +256,7 @@ export default function Memory() {
                     {file.tags && file.tags.length > 0 && (
                       <div className="flex flex-wrap gap-1">
                         {file.tags.map(t => (
-                          <span key={t} className="flex items-center gap-1 text-[9px] text-zinc-500 bg-zinc-950 px-2 py-0.5 rounded-md border border-zinc-900">
+                          <span key={t} className="flex items-center gap-1 text-[9px] text-zinc-500 bg-zinc-950 px-2 py-0.5 rounded-md border border-zinc-800">
                             <Tag size={8} />{t}
                           </span>
                         ))}

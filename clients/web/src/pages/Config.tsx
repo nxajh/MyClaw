@@ -3,7 +3,7 @@ import { Save, RotateCcw, Loader2, AlertTriangle, Settings, Code, FileText, Glob
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useApi } from '../lib/api'
 import { useToast } from '../components/Toast'
-import { ErrorBanner, LoadingRow, btnPrimary, btnGhost, btnDanger, inputCls } from '../components/PageLayout'
+import { ErrorBanner, LoadingRow, EmptyState, btnPrimary, btnGhost, btnDanger, inputCls } from '../components/PageLayout'
 
 interface ConfigMeta {
   tool_count: number
@@ -175,10 +175,10 @@ export default function Config() {
   return (
     <div className="flex flex-col h-full bg-zinc-950">
       <div className="flex-1 overflow-y-auto">
-        <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-5 animate-fadeIn">
+        <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-5 animate-fadeIn max-w-6xl">
 
           {/* Action Row & Diagnostics */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-zinc-900">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-zinc-800">
             <div>
               <h1 className="text-base font-bold text-zinc-100 flex items-center gap-1.5">
                 <Settings size={15} className="text-blue-400" />
@@ -297,7 +297,7 @@ export default function Config() {
                     <p className="text-[10px] text-zinc-500">Port number the backend daemon service runs on</p>
                   </div>
 
-                  <div className="pt-2 border-t border-zinc-900 text-[10px] text-zinc-500 leading-normal flex items-center gap-1.5">
+                  <div className="pt-2 border-t border-zinc-800 text-[10px] text-zinc-500 leading-normal flex items-center gap-1.5">
                     <AlertTriangle size={11} className="text-amber-500 shrink-0" />
                     Additional advanced parameters can be adjusted via the "TOML Source Code" mode.
                   </div>
@@ -313,7 +313,7 @@ export default function Config() {
                     onKeyDown={handleKeyDown}
                     rows={22}
                     spellCheck={false}
-                    className="w-full rounded-2xl border border-zinc-800 bg-zinc-950 px-4 py-3.5 text-xs font-mono text-zinc-300 outline-none focus:border-zinc-700 resize-y transition-colors leading-relaxed"
+                    className="w-full rounded-2xl border border-zinc-800 bg-zinc-950 px-4 py-3.5 text-xs font-mono text-zinc-300 outline-none focus:border-zinc-700 focus:ring-1 focus:ring-zinc-700/30 resize-y transition-colors leading-relaxed"
                   />
                 </div>
               )}
@@ -321,10 +321,10 @@ export default function Config() {
           )}
 
           {!loading && status === 'connected' && !raw && !error && (
-            <p className="text-xs text-zinc-500">Config file not accessible.</p>
+            <EmptyState>Config file not accessible.</EmptyState>
           )}
           {!loading && status !== 'connected' && (
-            <p className="text-xs text-zinc-500">Waiting for connection…</p>
+            <EmptyState>Waiting for connection…</EmptyState>
           )}
 
         </div>

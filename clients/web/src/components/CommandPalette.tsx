@@ -179,7 +179,7 @@ export default function CommandPalette() {
         className="w-full max-w-lg bg-zinc-950/95 border border-zinc-800 shadow-2xl rounded-2xl overflow-hidden flex flex-col max-h-[60vh] sm:max-h-[50vh] transition-all duration-200"
       >
         {/* Search header input */}
-        <div className="relative border-b border-zinc-900 flex items-center shrink-0">
+        <div className="relative border-b border-zinc-800 flex items-center shrink-0">
           <Search size={16} className="absolute left-4 text-zinc-500 pointer-events-none" />
           <input
             ref={inputRef}
@@ -240,7 +240,7 @@ export default function CommandPalette() {
         </div>
 
         {/* Shortcut Legend Footer */}
-        <div className="px-4 py-2 border-t border-zinc-900 bg-zinc-950 shrink-0 flex items-center justify-between text-[9px] text-zinc-600 font-medium">
+        <div className="px-4 py-2 border-t border-zinc-800 bg-zinc-950 shrink-0 flex items-center justify-between text-[9px] text-zinc-600 font-medium">
           <div className="flex items-center gap-3">
             <span>↑↓ Navigation</span>
             <span>↵ Select</span>

@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useMemo } from 'react'
 import { Sparkles, Search, Loader2, Plus } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useToast } from '../components/Toast'
-import { ErrorBanner, LoadingRow, EmptyState, btnPrimary } from '../components/PageLayout'
+import { ErrorBanner, LoadingRow, EmptyState, btnPrimary, searchInputCls } from '../components/PageLayout'
 import SkillsViewer from '../components/SkillsViewer'
 import SkillsEditor from '../components/SkillsEditor'
 
@@ -137,7 +137,7 @@ export default function Skills() {
     return (
       <div className="flex flex-col h-full bg-zinc-950">
         <div className="flex-1 overflow-y-auto">
-          <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4">
+          <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4 max-w-6xl">
             <button onClick={backToList} className="flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-300 transition-colors mb-2">
               ← Back to Skills
             </button>
@@ -158,9 +158,9 @@ export default function Skills() {
   return (
     <div className="flex flex-col h-full bg-zinc-950">
       <div className="flex-1 overflow-y-auto">
-        <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4">
+        <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4 max-w-6xl">
           {/* Header */}
-          <div className="flex flex-col sm:flex-row sm:items-center gap-3 justify-between pb-2 border-b border-zinc-900">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3 justify-between pb-2 border-b border-zinc-800">
             <div>
               <h1 className="text-base font-bold text-zinc-100 flex items-center gap-1.5">
                 <Sparkles size={14} className="text-amber-400" />
@@ -184,7 +184,7 @@ export default function Skills() {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Search skills by name, description, or keyword…"
-                className="w-full rounded-2xl border border-zinc-800 bg-zinc-900/40 pl-10 pr-4 py-2.5 text-xs text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-700 transition-colors"
+                className={searchInputCls}
               />
             </div>
           )}
@@ -196,11 +196,11 @@ export default function Skills() {
             <EmptyState>📭 No skills loaded. Add SKILL.md files under workspace/skills/.</EmptyState>
           )}
           {!loading && status === 'connected' && skills.length > 0 && filteredSkills.length === 0 && (
-            <div className="rounded-2xl border border-dashed border-zinc-900 p-8 text-center space-y-2">
-              <span className="text-2xl">📭</span>
-              <p className="text-xs text-zinc-500 font-medium">No skills match "{searchQuery}"</p>
-              <button onClick={() => setSearchQuery('')} className="text-xs text-blue-400 hover:text-blue-300">Clear filter</button>
-            </div>
+            <EmptyState>
+              <span className="block text-2xl mb-1">📭</span>
+              No skills match "{searchQuery}"
+              <button onClick={() => setSearchQuery('')} className="block mx-auto mt-2 text-xs text-blue-400 hover:text-blue-300">Clear filter</button>
+            </EmptyState>
           )}
           {!loading && filteredSkills.length > 0 && (
             <div className="space-y-1.5">
