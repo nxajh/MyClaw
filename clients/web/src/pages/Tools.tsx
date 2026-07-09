@@ -90,15 +90,17 @@ export default function Tools() {
       const res = await request('tools.list')
       const fetched = (res as Tool[]) || []
       setTools(fetched)
-      if (fetched.length > 0 && !selectedToolName) {
-        setSelectedToolName(fetched[0].name)
-      }
+      // Only auto-select first tool when nothing is selected yet
+      setSelectedToolName((prev) => {
+        if (prev && fetched.some((t) => t.name === prev)) return prev
+        return fetched[0]?.name ?? null
+      })
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setLoading(false)
     }
-  }, [status, request, selectedToolName])
+  }, [status, request])
 
   useEffect(() => {
     if (status === 'connected') fetchTools()
@@ -167,7 +169,7 @@ export default function Tools() {
 
           <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
             {error && <div className="px-2"><ErrorBanner message={error} /></div>}
-            {loading && (
+            {loading && tools.length === 0 && (
               <div className="px-1 space-y-1">
                 {Array.from({ length: 8 }).map((_, i) => (
                   <div key={i} className="rounded-xl border border-zinc-800 bg-zinc-900/40 px-3 py-2.5 space-y-1.5">
@@ -191,7 +193,7 @@ export default function Tools() {
               </div>
             )}
 
-            {!loading && filteredTools.length > 0 && (
+            {filteredTools.length > 0 && (
               filteredTools.map((tool) => {
                 const isSelected = tool.name === selectedToolName
                 return (
