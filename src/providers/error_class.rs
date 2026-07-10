@@ -612,13 +612,13 @@ pub fn format_cooldown_zh(d: Duration) -> String {
     if secs < 60 {
         format!("{secs} 秒")
     } else if secs < 3600 {
-        let m = (secs + 59) / 60;
+        let m = secs.div_ceil(60);
         format!("约 {m} 分钟")
     } else if secs < 86400 * 2 {
-        let h = (secs + 3599) / 3600;
+        let h = secs.div_ceil(3600);
         format!("约 {h} 小时")
     } else {
-        let days = (secs + 86399) / 86400;
+        let days = secs.div_ceil(86400);
         format!("约 {days} 天")
     }
 }
