@@ -3,6 +3,11 @@
 //!
 //! This keeps fallback logic entirely within the Infrastructure layer.
 //! The Application layer (Agent) only sees a single `ChatProvider`.
+//!
+//! Session `/model` override never uses this wrapper — only the default
+//! routing path does. Recovery decisions come from [`ClassifiedError`]:
+//! - `should_same_model_retry()` → short sleep on the same entry
+//! - `should_fallback` / `retryable` → record cooldown and try next model
 
 /// Tag embedded in the error message when every provider in the chain has
 /// been tried and all failed.  The outer retry loop in run.rs checks for this
@@ -28,15 +33,46 @@ use std::time::{Duration, Instant};
 /// falling over to the next provider in the chain.
 const TRANSIENT_MAX_RETRIES: u32 = 2;
 
+/// Short rate-limit: at most one same-model sleep before failover.
+const RATE_LIMIT_SAME_MODEL_RETRIES: u32 = 1;
+
+/// Cap same-model sleep for short rate limits so interactive turns stay bounded.
+const RATE_LIMIT_SLEEP_CAP: Duration = Duration::from_secs(60);
+
 /// Base delay for exponential backoff on transient server errors.
 /// Actual delays: attempt 1 = 2 s, attempt 2 = 4 s.
 const TRANSIENT_BACKOFF_BASE: Duration = Duration::from_secs(2);
 
-/// Whether the error category represents a transient server-side condition that
-/// may clear quickly (server overload, internal error) and is worth retrying the
-/// same provider with a short backoff before failing over.
-fn is_transient_server_error(cat: &ErrorCategory) -> bool {
-    matches!(cat, ErrorCategory::Overloaded | ErrorCategory::ServerError)
+/// Whether the classified error is worth retrying on the *same* chain entry
+/// (short RateLimit / Overloaded / ServerError / Timeout).
+fn is_same_model_retryable(classified: &ClassifiedError) -> bool {
+    classified.should_same_model_retry()
+}
+
+/// Whether to leave this entry and try the next model in the chain.
+fn should_failover_to_next(classified: &ClassifiedError) -> bool {
+    // Align with ClassifiedError flags: fallbackable categories + retryable chain
+    // continuation (RateLimit etc. now set should_fallback=true as well).
+    classified.should_fallback || classified.recovery_hints().retry
+}
+
+/// Delay before same-model retry.
+fn same_model_delay(classified: &ClassifiedError, attempt: u32) -> Duration {
+    match classified.category {
+        ErrorCategory::RateLimit => classified
+            .cooldown_duration()
+            .unwrap_or(RATE_LIMIT_SLEEP_CAP)
+            .min(RATE_LIMIT_SLEEP_CAP),
+        _ => transient_backoff(attempt),
+    }
+}
+
+/// Max same-model attempts for this category (0-based attempt counter ceiling).
+fn same_model_max_retries(classified: &ClassifiedError) -> u32 {
+    match classified.category {
+        ErrorCategory::RateLimit => RATE_LIMIT_SAME_MODEL_RETRIES,
+        _ => TRANSIENT_MAX_RETRIES,
+    }
 }
 
 /// Exponential backoff delay for transient retry attempt `n` (1-based).
@@ -77,18 +113,6 @@ impl FallbackChatProvider {
             model_cooldowns: Arc::new(Mutex::new(HashMap::new())),
         }
     }
-}
-
-/// Returns `true` if the error is provider-specific and warrants failover to the
-/// next provider in the chain (rather than a simple retry).
-fn is_provider_error(cat: &ErrorCategory) -> bool {
-    matches!(
-        cat,
-        ErrorCategory::Auth
-            | ErrorCategory::AuthPermanent
-            | ErrorCategory::Billing
-            | ErrorCategory::ModelNotFound
-    )
 }
 
 /// Record a cooldown deadline for `model_id` if the classified error carries one.
@@ -221,13 +245,12 @@ impl ChatProvider for FallbackChatProvider {
                                     }
                                 }
 
-                                // Transient server error (Overloaded/ServerError): retry same
-                                // provider with backoff before falling over to the next entry.
-                                if is_transient_server_error(&classified.category)
-                                    && transient_attempt < TRANSIENT_MAX_RETRIES
+                                // Same-model short retry (Overloaded/ServerError/Timeout/short RL).
+                                if is_same_model_retryable(&classified)
+                                    && transient_attempt < same_model_max_retries(&classified)
                                 {
                                     transient_attempt += 1;
-                                    let delay = transient_backoff(transient_attempt);
+                                    let delay = same_model_delay(&classified, transient_attempt);
                                     tracing::info!(
                                         model = %entry.model_id,
                                         category = %classified.category,
@@ -239,9 +262,7 @@ impl ChatProvider for FallbackChatProvider {
                                     continue 'transient_retry;
                                 }
 
-                                if is_provider_error(&classified.category)
-                                    || classified.recovery_hints().retry
-                                {
+                                if should_failover_to_next(&classified) {
                                     record_cooldown(&cooldowns, &entry.model_id, &classified);
                                     broke_for_failover = true;
                                     break 'credential_retry;
@@ -272,6 +293,7 @@ impl ChatProvider for FallbackChatProvider {
                                         reason = ?classified.reason,
                                         cooldown = ?classified.cooldown_duration(),
                                         retry_after = ?classified.retry_after,
+                                        same_model_retry = classified.should_same_model_retry(),
                                         body = %classified.message,
                                         "classified HTTP error"
                                     );
@@ -285,13 +307,14 @@ impl ChatProvider for FallbackChatProvider {
                                         break;
                                     }
 
-                                    // Transient server error: retry same provider with backoff.
-                                    if is_transient_server_error(&classified.category)
+                                    // Same-model short retry before failing over.
+                                    if is_same_model_retryable(&classified)
                                         && !saw_content
-                                        && transient_attempt < TRANSIENT_MAX_RETRIES
+                                        && transient_attempt < same_model_max_retries(&classified)
                                     {
                                         transient_attempt += 1;
-                                        let delay = transient_backoff(transient_attempt);
+                                        let delay =
+                                            same_model_delay(&classified, transient_attempt);
                                         tracing::info!(
                                             model = %entry.model_id,
                                             category = %classified.category,
@@ -303,9 +326,7 @@ impl ChatProvider for FallbackChatProvider {
                                         continue 'transient_retry;
                                     }
 
-                                    if is_provider_error(&classified.category)
-                                        || classified.recovery_hints().retry
-                                    {
+                                    if should_failover_to_next(&classified) {
                                         record_cooldown(&cooldowns, &entry.model_id, &classified);
                                         should_failover = true;
                                         break;
@@ -328,13 +349,13 @@ impl ChatProvider for FallbackChatProvider {
                                         break;
                                     }
 
-                                    // Transient server error: retry same provider with backoff.
-                                    if is_transient_server_error(&classified.category)
+                                    if is_same_model_retryable(&classified)
                                         && !saw_content
-                                        && transient_attempt < TRANSIENT_MAX_RETRIES
+                                        && transient_attempt < same_model_max_retries(&classified)
                                     {
                                         transient_attempt += 1;
-                                        let delay = transient_backoff(transient_attempt);
+                                        let delay =
+                                            same_model_delay(&classified, transient_attempt);
                                         tracing::info!(
                                             model = %entry.model_id,
                                             category = %classified.category,
@@ -346,9 +367,7 @@ impl ChatProvider for FallbackChatProvider {
                                         continue 'transient_retry;
                                     }
 
-                                    if is_provider_error(&classified.category)
-                                        || classified.recovery_hints().retry
-                                    {
+                                    if should_failover_to_next(&classified) {
                                         record_cooldown(&cooldowns, &entry.model_id, &classified);
                                         tracing::warn!(
                                             model = %entry.model_id,

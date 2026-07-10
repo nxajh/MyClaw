@@ -30,6 +30,7 @@ pub use capability_embedding::{
 pub use capability_tool::{Tool, ToolResult, ToolSource, ToolSpec};
 pub use error_class::{
     ClassifiedError, ErrorCategory, FailoverReason, ProviderHttpError, RecoveryHints,
+    format_cooldown_zh, LONG_COOLDOWN_THRESHOLD,
 };
 pub use image::{ImageFormat, ImageGenerationProvider, ImageOutput, ImageRequest, ImageResponse};
 pub use provider_registry::{ProviderRegistry, ProviderSummary};

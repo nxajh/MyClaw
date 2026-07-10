@@ -3,8 +3,14 @@
 //! Provides a three-layer classification pipeline:
 //! 1. **HTTP status code** → broad category (401→Auth, 503→Overloaded, …)
 //! 2. **Provider-specific business codes** → fine-grained category
-//!    (GLM code 1312→Overloaded, OpenAI insufficient_quota→Billing, …)
+//!    (GLM code 1312→Overloaded, OpenAI/Codex usage limit→Billing, …)
 //! 3. **Fallback** → Timeout when no HTTP status; FormatError/RateLimit default
+//!
+//! Recovery flags are the single source of truth for Fallback and Agent:
+//! - `should_fallback` — may switch model/provider in a routing chain
+//! - `should_same_model_retry()` — worth sleeping and retrying the *same* model
+//! - Session `/model` override intentionally never falls back to another model;
+//!   only `should_same_model_retry` applies on that path.
 
 use std::fmt;
 use std::time::Duration;
@@ -135,6 +141,13 @@ pub struct RecoveryHints {
     pub report: bool,
 }
 
+/// Cooldown longer than this is treated as "long" (model_cooldown / plan limits).
+/// Short rate limits may same-model sleep; long ones only failover or surface.
+pub const LONG_COOLDOWN_THRESHOLD: Duration = Duration::from_secs(60);
+
+/// Default cooldown for bare RateLimit when the body has no retry-after.
+const DEFAULT_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
+
 // ── ClassifiedError ──────────────────────────────────────────────────────
 
 /// Structured classification of an API error with recovery hints.
@@ -161,9 +174,11 @@ pub struct ClassifiedError {
     pub should_compress: bool,
     /// Whether to rotate to the next credential before retry.
     pub should_rotate_credential: bool,
-    /// Whether to failover to the next provider in the chain.
+    /// Whether to failover to the next provider/model in a routing chain.
+    ///
+    /// Session `/model` override does **not** honor this — only routing Fallback does.
     pub should_fallback: bool,
-    /// Cooldown duration before retrying this credential.
+    /// Cooldown duration before retrying this credential/model.
     pub cooldown: Option<Duration>,
 }
 
@@ -250,6 +265,26 @@ impl ClassifiedError {
         )
     }
 
+    /// True when cooldown is longer than [`LONG_COOLDOWN_THRESHOLD`] (60s).
+    /// Long cooldowns (plan limits, model_cooldown) must not same-model-retry.
+    pub fn is_long_cooldown(&self) -> bool {
+        self.cooldown_duration()
+            .map(|d| d > LONG_COOLDOWN_THRESHOLD)
+            .unwrap_or(false)
+    }
+
+    /// Whether sleeping and retrying the *same* model is worth it.
+    ///
+    /// Used by Agent (override + default) and Fallback's same-entry loop.
+    /// Billing / long RateLimit / auth / not-found are never same-model-retried.
+    pub fn should_same_model_retry(&self) -> bool {
+        match self.category {
+            ErrorCategory::Overloaded | ErrorCategory::ServerError | ErrorCategory::Timeout => true,
+            ErrorCategory::RateLimit => !self.is_long_cooldown(),
+            _ => false,
+        }
+    }
+
     // ── Recovery hints ──────────────────────────────────────────────────
 
     /// Compute recovery hints from the error category.
@@ -259,7 +294,7 @@ impl ClassifiedError {
 
     /// Cooldown duration before retrying this credential.
     pub fn cooldown_duration(&self) -> Option<Duration> {
-        self.recovery_hints().cooldown
+        self.cooldown
     }
 
     /// Whether this error should be reported upstream.
@@ -288,12 +323,19 @@ impl ClassifiedError {
             category,
             ErrorCategory::Auth | ErrorCategory::Billing | ErrorCategory::RateLimit
         );
+        // RateLimit is included: routing Fallback should switch models after
+        // same-model short retry / credential rotation. Session override ignores
+        // this flag and never auto-switches models.
         let should_fallback = matches!(
             category,
             ErrorCategory::Auth
                 | ErrorCategory::AuthPermanent
                 | ErrorCategory::Billing
+                | ErrorCategory::RateLimit
                 | ErrorCategory::ModelNotFound
+                | ErrorCategory::Overloaded
+                | ErrorCategory::ServerError
+                | ErrorCategory::Timeout
         );
         let cooldown = hints.cooldown;
 
@@ -339,8 +381,10 @@ fn recovery_hints_for(category: &ErrorCategory, retry_after: Option<Duration>) -
             report: true,
         },
         ErrorCategory::RateLimit => RecoveryHints {
+            // retry=true means the routing chain may continue (failover / short sleep).
+            // Same-model sleep is gated by `should_same_model_retry()` (short only).
             retry: true,
-            cooldown: retry_after.or(Some(Duration::from_secs(3600))),
+            cooldown: retry_after.or(Some(DEFAULT_RATE_LIMIT_COOLDOWN)),
             report: false,
         },
         ErrorCategory::Overloaded => RecoveryHints {
@@ -399,11 +443,18 @@ fn classify_http(status: u16) -> Option<ErrorCategory> {
 
 fn classify_provider(provider: &str, status: u16, body: &str) -> Option<ErrorCategory> {
     let lp = provider.to_lowercase();
+    let bl = body.to_ascii_lowercase();
 
     match status {
         // ── 429 refinement ──
         429 => {
-            // GLM / Zhipu
+            // Provider-agnostic billing / plan quota signals (Codex, OpenAI, …).
+            // Matched before vendor-specific codes so empty provider ids still work.
+            if is_billing_quota_body(&bl) {
+                return Some(ErrorCategory::Billing);
+            }
+
+            // GLM / Zhipu numeric codes
             if lp.contains("glm") || lp.contains("zhipu") {
                 if body_contains_code(body, 1305) || body_contains_code(body, 1312) {
                     return Some(ErrorCategory::Overloaded);
@@ -412,11 +463,12 @@ fn classify_provider(provider: &str, status: u16, body: &str) -> Option<ErrorCat
                     return Some(ErrorCategory::Billing);
                 }
             }
-            // OpenAI
-            if lp.contains("openai") && body.contains("insufficient_quota") {
+            // OpenAI-style (also covered by is_billing_quota_body; keep explicit)
+            if lp.contains("openai") && bl.contains("insufficient_quota") {
                 return Some(ErrorCategory::Billing);
             }
-            // Other 429 → None (caller falls back to RateLimit)
+            // Other 429 → None (caller falls back to RateLimit). model_cooldown
+            // stays RateLimit; long cooldown comes from extract_retry_after.
             None
         }
         // ── 400 refinement ──
@@ -435,6 +487,15 @@ fn classify_provider(provider: &str, status: u16, body: &str) -> Option<ErrorCat
         // Other status → no refinement
         _ => None,
     }
+}
+
+/// Body keywords that mean plan/quota exhaustion rather than burst rate limit.
+fn is_billing_quota_body(body_lower: &str) -> bool {
+    body_lower.contains("usage_limit_reached")
+        || body_lower.contains("insufficient_quota")
+        || body_lower.contains("quota_exceeded")
+        || body_lower.contains("billing_not_active")
+        || body_lower.contains("exceeded_current_quota")
 }
 
 /// Check whether `body` contains a JSON `"code": <n>` field (with or without
@@ -463,19 +524,36 @@ fn extract_retry_after(body: &str) -> Option<Duration> {
     }
     // Try JSON parsing
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
-        // Top-level retry_after / retry-after
-        for key in &["retry_after", "retry-after"] {
-            if let Some(d) = json_get_seconds(&json, key) {
+        if let Some(d) = extract_retry_after_from_value(&json) {
+            return Some(d);
+        }
+        if let Some(error) = json.get("error") {
+            if let Some(d) = extract_retry_after_from_value(error) {
                 return Some(d);
             }
         }
-        // Nested error.retry_after
-        if let Some(error) = json.get("error") {
-            for key in &["retry_after", "retry-after"] {
-                if let Some(d) = json_get_seconds(error, key) {
-                    return Some(d);
-                }
-            }
+    }
+    None
+}
+
+fn extract_retry_after_from_value(json: &serde_json::Value) -> Option<Duration> {
+    // Seconds-until-reset style fields
+    for key in &[
+        "retry_after",
+        "retry-after",
+        "resets_in_seconds",
+        "resets_in",
+        "reset_after",
+        "reset_in_seconds",
+    ] {
+        if let Some(d) = json_get_seconds(json, key) {
+            return Some(d);
+        }
+    }
+    // Absolute reset timestamps
+    for key in &["reset_at", "resets_at", "resetAt", "resetsAt"] {
+        if let Some(d) = json_get_reset_at(json, key) {
+            return Some(d);
         }
     }
     None
@@ -488,6 +566,60 @@ fn json_get_seconds(json: &serde_json::Value, key: &str) -> Option<Duration> {
         Some(Duration::from_secs(secs))
     } else {
         None
+    }
+}
+
+/// Parse absolute reset time: unix seconds/millis or RFC3339 string.
+fn json_get_reset_at(json: &serde_json::Value, key: &str) -> Option<Duration> {
+    let val = json.get(key)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+
+    if let Some(n) = val.as_u64().or_else(|| val.as_f64().map(|f| f as u64)) {
+        // Heuristic: values > 10^12 are milliseconds.
+        let reset = if n > 1_000_000_000_000 {
+            Duration::from_millis(n)
+        } else {
+            Duration::from_secs(n)
+        };
+        return reset.checked_sub(now).filter(|d| !d.is_zero());
+    }
+
+    if let Some(s) = val.as_str() {
+        // Plain integer string
+        if let Ok(n) = s.parse::<u64>() {
+            let reset = if n > 1_000_000_000_000 {
+                Duration::from_millis(n)
+            } else {
+                Duration::from_secs(n)
+            };
+            return reset.checked_sub(now).filter(|d| !d.is_zero());
+        }
+        // RFC3339
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+            let reset_secs = dt.timestamp().max(0) as u64;
+            let reset = Duration::from_secs(reset_secs);
+            return reset.checked_sub(now).filter(|d| !d.is_zero());
+        }
+    }
+    None
+}
+
+/// Format a cooldown for user-facing Chinese messages.
+pub fn format_cooldown_zh(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs} 秒")
+    } else if secs < 3600 {
+        let m = (secs + 59) / 60;
+        format!("约 {m} 分钟")
+    } else if secs < 86400 * 2 {
+        let h = (secs + 3599) / 3600;
+        format!("约 {h} 小时")
+    } else {
+        let days = (secs + 86399) / 86400;
+        format!("约 {days} 天")
     }
 }
 
@@ -513,6 +645,8 @@ mod tests {
         let err = ClassifiedError::from_http(503, Some("Service Unavailable"));
         assert_eq!(err.category, ErrorCategory::Overloaded);
         assert!(err.retryable);
+        assert!(err.should_fallback);
+        assert!(err.should_same_model_retry());
     }
 
     #[test]
@@ -527,6 +661,8 @@ mod tests {
         let err = ClassifiedError::from_http(404, Some("Not Found"));
         assert_eq!(err.category, ErrorCategory::ModelNotFound);
         assert!(!err.retryable);
+        assert!(err.should_fallback);
+        assert!(!err.should_same_model_retry());
     }
 
     #[test]
@@ -535,6 +671,7 @@ mod tests {
         assert_eq!(err.category, ErrorCategory::PayloadTooLarge);
         assert!(!err.retryable);
         assert!(err.should_compress);
+        assert!(!err.should_fallback);
     }
 
     // ── Layer 2 tests ──
@@ -561,6 +698,8 @@ mod tests {
         let err = ClassifiedError::classify("glm", 429, body);
         assert_eq!(err.category, ErrorCategory::Billing);
         assert!(!err.retryable);
+        assert!(err.should_fallback);
+        assert!(!err.should_same_model_retry());
     }
 
     #[test]
@@ -575,6 +714,30 @@ mod tests {
         let body = r#"{"error":{"message":"insufficient_quota","type":"invalid_request_error"}}"#;
         let err = ClassifiedError::classify("openai", 429, body);
         assert_eq!(err.category, ErrorCategory::Billing);
+        assert!(err.should_fallback);
+        assert!(!err.should_same_model_retry());
+    }
+
+    #[test]
+    fn layer2_codex_usage_limit_reached_is_billing_even_without_provider() {
+        let body = r#"{"error":{"type":"usage_limit_reached","message":"usage limit","plan_type":"free"}}"#;
+        let err = ClassifiedError::classify("", 429, body);
+        assert_eq!(err.category, ErrorCategory::Billing);
+        assert!(!err.retryable);
+        assert!(err.should_fallback);
+        assert!(!err.should_same_model_retry());
+    }
+
+    #[test]
+    fn layer2_codex_model_cooldown_is_long_rate_limit() {
+        let body = r#"{"error":{"type":"model_cooldown","message":"model cooling","resets_in_seconds":2534400}}"#;
+        let err = ClassifiedError::classify("codex", 429, body);
+        assert_eq!(err.category, ErrorCategory::RateLimit);
+        assert!(err.retryable);
+        assert!(err.should_fallback);
+        assert_eq!(err.retry_after, Some(Duration::from_secs(2534400)));
+        assert!(err.is_long_cooldown());
+        assert!(!err.should_same_model_retry());
     }
 
     #[test]
@@ -582,6 +745,9 @@ mod tests {
         let err = ClassifiedError::classify("unknown", 429, "rate limit exceeded");
         assert_eq!(err.category, ErrorCategory::RateLimit);
         assert!(err.retryable);
+        assert!(err.should_fallback);
+        assert!(err.should_same_model_retry());
+        assert_eq!(err.cooldown_duration(), Some(DEFAULT_RATE_LIMIT_COOLDOWN));
     }
 
     #[test]
@@ -638,12 +804,35 @@ mod tests {
         assert_eq!(err.category, ErrorCategory::RateLimit);
         assert_eq!(err.retry_after, Some(Duration::from_secs(42)));
         assert_eq!(err.cooldown_duration(), Some(Duration::from_secs(42)));
+        assert!(err.should_same_model_retry());
     }
 
     #[test]
-    fn rate_limit_default_cooldown_1h() {
+    fn rate_limit_default_cooldown_60s() {
         let err = ClassifiedError::from_http(429, Some("too many requests"));
-        assert_eq!(err.cooldown_duration(), Some(Duration::from_secs(3600)));
+        assert_eq!(
+            err.cooldown_duration(),
+            Some(DEFAULT_RATE_LIMIT_COOLDOWN)
+        );
+        assert!(!err.is_long_cooldown());
+        assert!(err.should_same_model_retry());
+    }
+
+    #[test]
+    fn short_rate_limit_boundary_at_60s_is_same_model_retryable() {
+        let body = r#"{"retry_after":60}"#;
+        let err = ClassifiedError::classify("openai", 429, body);
+        // threshold is *strictly greater than* 60s
+        assert!(!err.is_long_cooldown());
+        assert!(err.should_same_model_retry());
+    }
+
+    #[test]
+    fn long_rate_limit_61s_not_same_model_retryable() {
+        let body = r#"{"retry_after":61}"#;
+        let err = ClassifiedError::classify("openai", 429, body);
+        assert!(err.is_long_cooldown());
+        assert!(!err.should_same_model_retry());
     }
 
     #[test]
@@ -719,6 +908,12 @@ mod tests {
     }
 
     #[test]
+    fn resets_in_seconds_from_error() {
+        let body = r#"{"error":{"type":"model_cooldown","resets_in_seconds":90}}"#;
+        assert_eq!(extract_retry_after(body), Some(Duration::from_secs(90)));
+    }
+
+    #[test]
     fn retry_after_empty_body() {
         assert_eq!(extract_retry_after(""), None);
     }
@@ -726,5 +921,13 @@ mod tests {
     #[test]
     fn retry_after_no_field() {
         assert_eq!(extract_retry_after(r#"{"error":"oops"}"#), None);
+    }
+
+    #[test]
+    fn format_cooldown_zh_units() {
+        assert_eq!(format_cooldown_zh(Duration::from_secs(12)), "12 秒");
+        assert!(format_cooldown_zh(Duration::from_secs(120)).contains("分钟"));
+        assert!(format_cooldown_zh(Duration::from_secs(7200)).contains("小时"));
+        assert!(format_cooldown_zh(Duration::from_secs(2534400)).contains("天"));
     }
 }

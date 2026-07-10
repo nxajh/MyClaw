@@ -70,11 +70,13 @@ impl Agent {
         // Resolve provider + model.
         //
         // - No override → the Chat fallback wrapper (fans out across the
-        //   configured chain on transient errors).
-        // - Override (`/model`) → the raw per-model provider. Transient errors
-        //   (502/timeout/SSE interruption) are retried in the LLM call loop
-        //   below on the SAME chosen model. We intentionally do NOT fall back
-        //   to a different model — the user picked this one.
+        //   configured chain on retryable / fallbackable errors).
+        // - Override (`/model`) → the raw per-model provider only. Same-model
+        //   short retries (short RateLimit / 5xx / timeout) may sleep and retry
+        //   here. We intentionally NEVER fall back to a different model or to
+        //   the routing Fallback chain — the user pinned this model. On
+        //   Billing / long model_cooldown / Auth / ModelNotFound the turn fails
+        //   with an actionable message (switch via `/model` or `/model off`).
         let (provider, model_id) = match turn_ctx.model_id {
             Some(m) => {
                 let result = runtime
@@ -84,7 +86,7 @@ impl Agent {
                 tracing::info!(
                     model = %result.1,
                     reason = "session_override",
-                    "model resolved"
+                    "model resolved (no auto-degrade to fallback)"
                 );
                 result
             }
@@ -1389,17 +1391,21 @@ async fn collect_stream(
     })
 }
 
-/// Whether an LLM error is transient and worth retrying on the same model.
-/// Reuses the existing error classification from `error_class.rs`.
+/// Whether an LLM error is worth sleeping and retrying on the *same* model.
+///
+/// Aligns with [`ClassifiedError::should_same_model_retry`]: short RateLimit,
+/// Overloaded, ServerError, Timeout. Billing / long RateLimit / auth / not-found
+/// are never same-model-retried.
+///
+/// Session `/model` override uses this path only — it never degrades to the
+/// routing Fallback chain. Prefer `/model off` or `/model <other>` when the
+/// pinned model is unavailable.
 fn is_transient_llm_error(err: &anyhow::Error) -> bool {
-    use crate::providers::{ClassifiedError, ErrorCategory, ProviderHttpError};
+    use crate::providers::{ClassifiedError, ProviderHttpError};
     // HTTP errors: classify via the existing pipeline
     if let Some(http_err) = err.downcast_ref::<ProviderHttpError>() {
-        let classified = ClassifiedError::classify("agent", http_err.status, &http_err.message);
-        return matches!(
-            classified.category,
-            ErrorCategory::ServerError | ErrorCategory::Overloaded | ErrorCategory::Timeout
-        );
+        let classified = ClassifiedError::classify("", http_err.status, &http_err.message);
+        return classified.should_same_model_retry();
     }
     // Stream errors: SSE interruption, connection drop, etc.
     let msg = err.to_string();
