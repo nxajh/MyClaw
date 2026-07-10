@@ -480,10 +480,10 @@ async fn build_tools(
     // Register additional built-in tools.
     tools.register(Arc::new(crate::tools::SendMessageTool::new()));
     tools.register(Arc::new(crate::tools::ListDirTool::new()));
-    let task_state = crate::tools::TaskManagerTool::shared_state();
-    tools.register(Arc::new(crate::tools::TaskManagerTool::new(Arc::clone(
-        &task_state,
-    ))));
+    let task_state = crate::tools::shared_task_state();
+    for tool in crate::tools::new_task_tools(Arc::clone(&task_state)) {
+        tools.register(tool);
+    }
 
     // SkillTool — loads skill body on demand.
     tools.register(Arc::new(crate::tools::SkillTool::new(Arc::clone(skills))));

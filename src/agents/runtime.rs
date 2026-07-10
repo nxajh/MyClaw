@@ -81,7 +81,7 @@ pub struct AgentRuntime {
     /// (the tool writes timestamps on rate-limit; `/status` reads them
     /// to render ⏱️ markers next to cooled-down providers).
     pub search_cooldown: Option<Arc<SearchProviderCooldown>>,
-    /// Shared task/goal state from `TaskManagerTool`. Injected into the
+    /// Shared task/goal state from task tools. Injected into the
     /// compaction summary so the model retains its plan across context resets.
     pub task_state: Option<Arc<tokio::sync::RwLock<crate::tools::TaskState>>>,
 }

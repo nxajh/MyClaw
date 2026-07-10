@@ -56,7 +56,10 @@ fn list_tools(format: &str) -> Result<()> {
         ("calculator", "Evaluate math expressions"),
         ("ask_user", "Ask user a question"),
         ("agent_delegate", "Delegate task to sub-agent"),
-        ("task_manager", "Manage tasks and goals"),
+        ("task_create", "Create a goal or task"),
+        ("task_list", "List tasks and goals"),
+        ("task_update", "Update task status"),
+        ("task_delete", "Delete task and sub-tasks"),
         ("tool_search", "Search available tools"),
     ];
 

@@ -1,7 +1,8 @@
-//! Task Manager — unified task/goal management.
+//! Task tools — split into four independent tools sharing the same state.
 //!
-//! Merges goal_manager, task_manager, and update_plan into one tool.
-//! Supports tree structure: goal (no parent) → task (with parent) → sub-task (nested).
+//! `task_create`, `task_list`, `task_update`, `task_delete` each have their
+//! own struct so that `required` fields can be expressed per-tool without
+//! relying on `oneOf`/`anyOf` (which Gemini and grok don't support).
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -93,33 +94,32 @@ impl TaskState {
     }
 }
 
-pub struct TaskManagerTool {
-    state: Arc<RwLock<TaskState>>,
+// ---------------------------------------------------------------------------
+// Shared state helper
+// ---------------------------------------------------------------------------
+
+pub type SharedTaskState = Arc<RwLock<TaskState>>;
+
+pub fn shared_state() -> SharedTaskState {
+    Arc::new(RwLock::new(TaskState::default()))
 }
 
-impl TaskManagerTool {
-    pub fn new(state: Arc<RwLock<TaskState>>) -> Self {
-        Self { state }
-    }
+// ---------------------------------------------------------------------------
+// task_create
+// ---------------------------------------------------------------------------
 
-    pub fn shared_state() -> Arc<RwLock<TaskState>> {
-        Arc::new(RwLock::new(TaskState::default()))
-    }
+pub struct TaskCreateTool {
+    state: SharedTaskState,
 }
 
 #[async_trait]
-impl Tool for TaskManagerTool {
+impl Tool for TaskCreateTool {
     fn name(&self) -> &str {
-        "task_manager"
+        "task_create"
     }
 
     fn description(&self) -> &str {
-        "Manage tasks and goals in a tree structure. Supports: create, list, update, delete, progress.\n\n\
-         - **create**: Create a goal (no parent) or a task (with parent). Supports batch creation by passing an array of subjects.\n\
-         - **list**: List tasks. Filter by parent to see sub-tasks of a goal.\n\
-         - **update**: Change task status (pending/in_progress/completed/cancelled).\n\
-         - **delete**: Delete a task and all its sub-tasks.\n\
-         - **progress**: Get completion progress of a goal (x/y completed).\n\n\
+        "Create a goal (no parent) or a task (with parent). Supports batch creation by passing an array of subjects.\n\n\
          Use tasks to track multi-step work and maintain progress across context compactions."
     }
 
@@ -127,15 +127,6 @@ impl Tool for TaskManagerTool {
         json!({
             "type": "object",
             "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["create", "list", "update", "delete", "progress"],
-                    "description": "Operation to perform"
-                },
-                "task_id": {
-                    "type": "string",
-                    "description": "Task ID (required for update/delete/progress)"
-                },
                 "subject": {
                     "oneOf": [
                         { "type": "string", "description": "A single task/goal subject" },
@@ -145,19 +136,14 @@ impl Tool for TaskManagerTool {
                 },
                 "details": {
                     "type": "string",
-                    "description": "Detailed description (optional for create)"
+                    "description": "Detailed description (optional)"
                 },
                 "parent": {
                     "type": "string",
-                    "description": "Parent task ID (optional for create). If omitted, creates a top-level goal."
-                },
-                "status": {
-                    "type": "string",
-                    "enum": ["pending", "in_progress", "completed", "cancelled"],
-                    "description": "New status (required for update)"
+                    "description": "Parent task ID (optional). If omitted, creates a top-level goal."
                 }
             },
-            "required": ["action"]
+            "required": ["subject"]
         })
     }
 
@@ -170,27 +156,6 @@ impl Tool for TaskManagerTool {
         args: Value,
         _session: &crate::agents::session::Session,
     ) -> anyhow::Result<ToolResult> {
-        let action = args["action"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("missing 'action'"))?;
-
-        match action {
-            "create" => self.handle_create(&args).await,
-            "list" => self.handle_list(&args).await,
-            "update" => self.handle_update(&args).await,
-            "delete" => self.handle_delete(&args).await,
-            "progress" => self.handle_progress(&args).await,
-            _ => Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!("unknown action: {}", action)),
-            }),
-        }
-    }
-}
-
-impl TaskManagerTool {
-    async fn handle_create(&self, args: &Value) -> anyhow::Result<ToolResult> {
         let parent = args["parent"].as_str();
         let description = args["details"].as_str().unwrap_or("");
 
@@ -277,8 +242,48 @@ impl TaskManagerTool {
             error: None,
         })
     }
+}
 
-    async fn handle_list(&self, args: &Value) -> anyhow::Result<ToolResult> {
+// ---------------------------------------------------------------------------
+// task_list
+// ---------------------------------------------------------------------------
+
+pub struct TaskListTool {
+    state: SharedTaskState,
+}
+
+#[async_trait]
+impl Tool for TaskListTool {
+    fn name(&self) -> &str {
+        "task_list"
+    }
+
+    fn description(&self) -> &str {
+        "List tasks. Filter by parent to see sub-tasks of a goal. Without a parent filter, lists only top-level goals."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "parent": {
+                    "type": "string",
+                    "description": "Parent task ID. If set, lists sub-tasks of that goal. If omitted, lists top-level goals."
+                }
+            },
+            "required": []
+        })
+    }
+
+    fn max_output_tokens(&self) -> usize {
+        5_000
+    }
+
+    async fn execute(
+        &self,
+        args: Value,
+        _session: &crate::agents::session::Session,
+    ) -> anyhow::Result<ToolResult> {
         let parent = args["parent"].as_str();
         let state = self.state.read().await;
 
@@ -287,7 +292,7 @@ impl TaskManagerTool {
             .iter()
             .filter(|t| match parent {
                 Some(pid) => t.parent_id.as_deref() == Some(pid),
-                None => t.parent_id.is_none(), // no parent = list only goals
+                None => t.parent_id.is_none(),
             })
             .map(|t| {
                 json!({
@@ -309,14 +314,60 @@ impl TaskManagerTool {
             error: None,
         })
     }
+}
 
-    async fn handle_update(&self, args: &Value) -> anyhow::Result<ToolResult> {
+// ---------------------------------------------------------------------------
+// task_update
+// ---------------------------------------------------------------------------
+
+pub struct TaskUpdateTool {
+    state: SharedTaskState,
+}
+
+#[async_trait]
+impl Tool for TaskUpdateTool {
+    fn name(&self) -> &str {
+        "task_update"
+    }
+
+    fn description(&self) -> &str {
+        "Change task status (pending/in_progress/completed/cancelled).\n\n\
+         Use tasks to track multi-step work and maintain progress across context compactions."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "Task ID to update"
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["pending", "in_progress", "completed", "cancelled"],
+                    "description": "New status"
+                }
+            },
+            "required": ["task_id", "status"]
+        })
+    }
+
+    fn max_output_tokens(&self) -> usize {
+        5_000
+    }
+
+    async fn execute(
+        &self,
+        args: Value,
+        _session: &crate::agents::session::Session,
+    ) -> anyhow::Result<ToolResult> {
         let task_id = args["task_id"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("missing 'task_id' for update"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing 'task_id'"))?;
         let status = args["status"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("missing 'status' for update"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing 'status'"))?;
 
         let valid_statuses = ["pending", "in_progress", "completed", "cancelled"];
         if !valid_statuses.contains(&status) {
@@ -352,11 +403,51 @@ impl TaskManagerTool {
             }),
         }
     }
+}
 
-    async fn handle_delete(&self, args: &Value) -> anyhow::Result<ToolResult> {
+// ---------------------------------------------------------------------------
+// task_delete
+// ---------------------------------------------------------------------------
+
+pub struct TaskDeleteTool {
+    state: SharedTaskState,
+}
+
+#[async_trait]
+impl Tool for TaskDeleteTool {
+    fn name(&self) -> &str {
+        "task_delete"
+    }
+
+    fn description(&self) -> &str {
+        "Delete a task and all its sub-tasks."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "Task ID to delete"
+                }
+            },
+            "required": ["task_id"]
+        })
+    }
+
+    fn max_output_tokens(&self) -> usize {
+        5_000
+    }
+
+    async fn execute(
+        &self,
+        args: Value,
+        _session: &crate::agents::session::Session,
+    ) -> anyhow::Result<ToolResult> {
         let task_id = args["task_id"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("missing 'task_id' for delete"))?;
+            .ok_or_else(|| anyhow::anyhow!("missing 'task_id'"))?;
 
         let mut state = self.state.write().await;
 
@@ -384,91 +475,40 @@ impl TaskManagerTool {
             error: None,
         })
     }
+}
 
-    async fn handle_progress(&self, args: &Value) -> anyhow::Result<ToolResult> {
-        let task_id = args["task_id"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("missing 'task_id' for progress"))?;
+// ---------------------------------------------------------------------------
+// Helpers for daemon registration
+// ---------------------------------------------------------------------------
 
-        let state = self.state.read().await;
-
-        let task = state
-            .find_task(task_id)
-            .ok_or_else(|| anyhow::anyhow!("task not found: {}", task_id))?;
-
-        // Collect direct children
-        let children: Vec<&Task> = state
-            .tasks
-            .iter()
-            .filter(|t| t.parent_id.as_deref() == Some(task_id))
-            .collect();
-
-        if children.is_empty() {
-            return Ok(ToolResult {
-                success: true,
-                output: serde_json::to_string(&json!({
-                    "ok": true,
-                    "task_id": task_id,
-                    "subject": task.subject,
-                    "status": task.status,
-                    "children": 0,
-                    "message": "No sub-tasks"
-                }))?,
-                error: None,
-            });
-        }
-
-        let completed = children.iter().filter(|t| t.status == "completed").count();
-        let in_progress = children
-            .iter()
-            .filter(|t| t.status == "in_progress")
-            .count();
-        let pending = children.iter().filter(|t| t.status == "pending").count();
-        let cancelled = children.iter().filter(|t| t.status == "cancelled").count();
-        let total = children.len();
-
-        let current = children
-            .iter()
-            .find(|t| t.status == "in_progress")
-            .map(|t| t.subject.as_str())
-            .unwrap_or("none");
-
-        Ok(ToolResult {
-            success: true,
-            output: serde_json::to_string(&json!({
-                "ok": true,
-                "task_id": task_id,
-                "subject": task.subject,
-                "status": task.status,
-                "progress": format!("{}/{} completed", completed, total),
-                "completed": completed,
-                "in_progress": in_progress,
-                "pending": pending,
-                "cancelled": cancelled,
-                "total": total,
-                "current_step": current
-            }))?,
-            error: None,
-        })
-    }
+pub fn new_tools(state: SharedTaskState) -> Vec<Arc<dyn Tool>> {
+    vec![
+        Arc::new(TaskCreateTool { state: Arc::clone(&state) }),
+        Arc::new(TaskListTool { state: Arc::clone(&state) }),
+        Arc::new(TaskUpdateTool { state: Arc::clone(&state) }),
+        Arc::new(TaskDeleteTool { state: Arc::clone(&state) }),
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn make_session() -> crate::agents::session::Session {
+        crate::agents::session::Session::new("test".to_string())
+    }
+
     #[tokio::test]
     async fn test_batch_create() {
-        let tool = TaskManagerTool::new(TaskManagerTool::shared_state());
+        let state = shared_state();
+        let tool = TaskCreateTool { state: Arc::clone(&state) };
 
-        // 批量创建 goals
         let result = tool
             .execute(
                 json!({
-                    "action": "create",
                     "subject": ["Goal A", "Goal B", "Goal C"]
                 }),
-                &crate::agents::session::Session::new("test".to_string()),
+                &make_session(),
             )
             .await
             .unwrap();
@@ -477,36 +517,29 @@ mod tests {
         let output: Value = serde_json::from_str(&result.output).unwrap();
         assert!(output["ok"].as_bool().unwrap());
         assert_eq!(output["count"].as_u64().unwrap(), 3);
-        assert_eq!(output["tasks"].as_array().unwrap().len(), 3);
     }
 
     #[tokio::test]
     async fn test_batch_create_subtasks() {
-        let tool = TaskManagerTool::new(TaskManagerTool::shared_state());
+        let state = shared_state();
 
-        // 先创建 goal
-        let goal = tool
-            .execute(
-                json!({
-                    "action": "create",
-                    "subject": "My Goal"
-                }),
-                &crate::agents::session::Session::new("test".to_string()),
-            )
+        // Create a goal
+        let create = TaskCreateTool { state: Arc::clone(&state) };
+        let goal = create
+            .execute(json!({"subject": "My Goal"}), &make_session())
             .await
             .unwrap();
         let goal_output: Value = serde_json::from_str(&goal.output).unwrap();
         let goal_id = goal_output["task_id"].as_str().unwrap();
 
-        // 批量创建子任务
-        let result = tool
+        // Batch create sub-tasks
+        let result = create
             .execute(
                 json!({
-                    "action": "create",
                     "subject": ["Task 1", "Task 2"],
                     "parent": goal_id
                 }),
-                &crate::agents::session::Session::new("test".to_string()),
+                &make_session(),
             )
             .await
             .unwrap();
@@ -515,5 +548,26 @@ mod tests {
         let output: Value = serde_json::from_str(&result.output).unwrap();
         assert!(output["ok"].as_bool().unwrap());
         assert_eq!(output["count"].as_u64().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_update_requires_status() {
+        let state = shared_state();
+        let create = TaskCreateTool { state: Arc::clone(&state) };
+        let _goal = create
+            .execute(json!({"subject": "Goal"}), &make_session())
+            .await
+            .unwrap();
+
+        // Update without status should error
+        let update = TaskUpdateTool { state: Arc::clone(&state) };
+        let result = update
+            .execute(
+                json!({"task_id": "task_1"}),
+                &make_session(),
+            )
+            .await;
+
+        assert!(result.is_err());
     }
 }

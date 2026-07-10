@@ -93,7 +93,11 @@ fn default_no_progress_threshold() -> usize {
     5
 }
 fn default_relaxed_tools() -> Vec<String> {
-    vec!["shell".to_string(), "task_manager".to_string()]
+    vec![
+        "shell".to_string(),
+        "task_update".to_string(),
+        "task_delete".to_string(),
+    ]
 }
 fn default_rapid_repeat_window() -> u64 {
     60
