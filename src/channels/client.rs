@@ -1132,6 +1132,38 @@ impl Drop for ClientTurnStream {
 
 // ── Management API Router ───────────────────────────────────────────────────
 
+fn is_safe_skill_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.starts_with('.')
+}
+
+/// Resolve the on-disk skill directory for a skill name.
+///
+/// Prefer the path recorded on `Skill.skill_dir` (from SKILL.md source_path),
+/// so frontmatter `name` may differ from the directory name. Fall back to
+/// `workspace/skills/{name}` only when the manager has no entry.
+fn resolve_skill_dir(ctx: &ApiContext<'_>, name: &str) -> Option<std::path::PathBuf> {
+    if let Some(mgr_arc) = ctx.skill_manager.get() {
+        if let Some(dir) = mgr_arc.read().skill_dir(name) {
+            return Some(dir.to_path_buf());
+        }
+    }
+    ctx.workspace_dir
+        .get()
+        .map(|ws| ws.join("skills").join(name))
+        .filter(|p| p.exists())
+}
+
+fn reload_skills_from_workspace(ctx: &ApiContext<'_>, workspace: &std::path::Path) {
+    if let Some(mgr_arc) = ctx.skill_manager.get() {
+        let defs = skill_loader::load_skills_from_dir(&workspace.join("skills"));
+        let new_skills: Vec<Skill> = defs.iter().map(Skill::from_definition).collect();
+        mgr_arc.write().reload(new_skills);
+    }
+}
+
 /// Shared handles passed to every API request handler.
 struct ApiContext<'a> {
     /// Session-manager scope key (channel:account:sender), stable across reconnects.
@@ -1650,26 +1682,34 @@ fn handle_api_request(
                 Some(s) if !s.is_empty() => s,
                 _ => return serde_json::json!({ "type": "api_error", "id": id, "error": "missing name parameter" }).to_string(),
             };
-            if name.contains('/') || name.contains('\\') || name.starts_with('.') {
+            if !is_safe_skill_name(name) {
                 return serde_json::json!({ "type": "api_error", "id": id, "error": "invalid skill name" }).to_string();
             }
-            match ctx.workspace_dir.get() {
-                Some(dir) => {
-                    let path = dir.join("skills").join(name).join("SKILL.md");
-                    match std::fs::read_to_string(&path) {
-                        Ok(content) => serde_json::json!({
-                            "type": "api_response",
-                            "id": id,
-                            "result": { "name": name, "content": content }
-                        }).to_string(),
-                        Err(e) => serde_json::json!({
-                            "type": "api_error",
-                            "id": id,
-                            "error": format!("failed to read skill file: {}", e)
-                        }).to_string(),
-                    }
+            // Prefer SkillManager.skill_dir so frontmatter name may differ from directory name.
+            let path = match resolve_skill_dir(ctx, name) {
+                Some(dir) => dir.join("SKILL.md"),
+                None => {
+                    return serde_json::json!({
+                        "type": "api_error",
+                        "id": id,
+                        "error": format!("skill '{}' not found", name)
+                    })
+                    .to_string();
                 }
-                None => serde_json::json!({ "type": "api_error", "id": id, "error": "workspace directory not configured" }).to_string(),
+            };
+            match std::fs::read_to_string(&path) {
+                Ok(content) => serde_json::json!({
+                    "type": "api_response",
+                    "id": id,
+                    "result": { "name": name, "content": content }
+                })
+                .to_string(),
+                Err(e) => serde_json::json!({
+                    "type": "api_error",
+                    "id": id,
+                    "error": format!("failed to read skill file: {}", e)
+                })
+                .to_string(),
             }
         }
 
@@ -1678,28 +1718,37 @@ fn handle_api_request(
                 Some(s) if !s.is_empty() => s,
                 _ => return serde_json::json!({ "type": "api_error", "id": id, "error": "missing name parameter" }).to_string(),
             };
-            if name.contains('/') || name.contains('\\') || name.starts_with('.') {
+            if !is_safe_skill_name(name) {
                 return serde_json::json!({ "type": "api_error", "id": id, "error": "invalid skill name" }).to_string();
             }
             let content = params["content"].as_str().unwrap_or("");
-            match ctx.workspace_dir.get() {
-                Some(dir) => {
-                    let skill_dir = dir.join("skills").join(name);
-                    let path = skill_dir.join("SKILL.md");
-                    match std::fs::write(&path, content) {
-                        Ok(()) => {
-                            // Reload skills from disk so the manager reflects changes.
-                            if let Some(mgr_arc) = ctx.skill_manager.get() {
-                                let defs = skill_loader::load_skills_from_dir(&dir.join("skills"));
-                                let new_skills: Vec<Skill> = defs.iter().map(Skill::from_definition).collect();
-                                mgr_arc.write().reload(new_skills);
-                            }
-                            serde_json::json!({ "type": "api_response", "id": id, "result": null }).to_string()
-                        }
-                        Err(e) => serde_json::json!({ "type": "api_error", "id": id, "error": format!("failed to write skill file: {}", e) }).to_string(),
-                    }
+            let Some(workspace) = ctx.workspace_dir.get() else {
+                return serde_json::json!({ "type": "api_error", "id": id, "error": "workspace directory not configured" }).to_string();
+            };
+            // Existing skills keep their real directory (name may != dir name).
+            // New skills fall back to workspace/skills/{name}.
+            let skill_dir = resolve_skill_dir(ctx, name)
+                .unwrap_or_else(|| workspace.join("skills").join(name));
+            let path = skill_dir.join("SKILL.md");
+            if let Err(e) = std::fs::create_dir_all(&skill_dir) {
+                return serde_json::json!({
+                    "type": "api_error",
+                    "id": id,
+                    "error": format!("failed to create skill directory: {}", e)
+                })
+                .to_string();
+            }
+            match std::fs::write(&path, content) {
+                Ok(()) => {
+                    reload_skills_from_workspace(ctx, workspace);
+                    serde_json::json!({ "type": "api_response", "id": id, "result": null }).to_string()
                 }
-                None => serde_json::json!({ "type": "api_error", "id": id, "error": "workspace directory not configured" }).to_string(),
+                Err(e) => serde_json::json!({
+                    "type": "api_error",
+                    "id": id,
+                    "error": format!("failed to write skill file: {}", e)
+                })
+                .to_string(),
             }
         }
 
@@ -1708,26 +1757,31 @@ fn handle_api_request(
                 Some(s) if !s.is_empty() => s,
                 _ => return serde_json::json!({ "type": "api_error", "id": id, "error": "missing name parameter" }).to_string(),
             };
-            if name.contains('/') || name.contains('\\') || name.starts_with('.') {
+            if !is_safe_skill_name(name) {
                 return serde_json::json!({ "type": "api_error", "id": id, "error": "invalid skill name" }).to_string();
             }
-            match ctx.workspace_dir.get() {
-                Some(dir) => {
-                    let skill_dir = dir.join("skills").join(name);
-                    match std::fs::remove_dir_all(&skill_dir) {
-                        Ok(()) => {
-                            // Reload skills from disk so the manager reflects changes.
-                            if let Some(mgr_arc) = ctx.skill_manager.get() {
-                                let defs = skill_loader::load_skills_from_dir(&dir.join("skills"));
-                                let new_skills: Vec<Skill> = defs.iter().map(Skill::from_definition).collect();
-                                mgr_arc.write().reload(new_skills);
-                            }
-                            serde_json::json!({ "type": "api_response", "id": id, "result": null }).to_string()
-                        }
-                        Err(e) => serde_json::json!({ "type": "api_error", "id": id, "error": format!("failed to delete skill: {}", e) }).to_string(),
-                    }
+            let Some(workspace) = ctx.workspace_dir.get() else {
+                return serde_json::json!({ "type": "api_error", "id": id, "error": "workspace directory not configured" }).to_string();
+            };
+            let Some(skill_dir) = resolve_skill_dir(ctx, name) else {
+                return serde_json::json!({
+                    "type": "api_error",
+                    "id": id,
+                    "error": format!("skill '{}' not found", name)
+                })
+                .to_string();
+            };
+            match std::fs::remove_dir_all(&skill_dir) {
+                Ok(()) => {
+                    reload_skills_from_workspace(ctx, workspace);
+                    serde_json::json!({ "type": "api_response", "id": id, "result": null }).to_string()
                 }
-                None => serde_json::json!({ "type": "api_error", "id": id, "error": "workspace directory not configured" }).to_string(),
+                Err(e) => serde_json::json!({
+                    "type": "api_error",
+                    "id": id,
+                    "error": format!("failed to delete skill: {}", e)
+                })
+                .to_string(),
             }
         }
 
