@@ -121,9 +121,9 @@ export default function ChatHeader() {
     toast('Chat exported as Markdown', 'success')
   }
 
-  const btn = 'flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-xs text-zinc-300 hover:bg-zinc-800 border border-zinc-800 transition-colors disabled:opacity-50 min-w-0'
+  const btn = 'flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-sm text-zinc-300 hover:bg-zinc-800 border border-zinc-800 transition-colors disabled:opacity-50 min-w-0'
   const menu = 'absolute z-20 mt-1 w-56 sm:w-64 max-h-80 overflow-y-auto rounded-xl border border-zinc-800 bg-zinc-900 shadow-2xl py-1 right-0 sm:left-0'
-  const item = 'w-full flex items-center gap-2 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 text-left transition-colors'
+  const item = 'w-full flex items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800 text-left transition-colors'
 
   return (
     <header className="sticky top-0 z-20 border-b border-zinc-800/80 px-3 sm:px-8 h-10 sm:h-12 flex items-center gap-1.5 sm:gap-2 shrink-0 bg-zinc-950/85 backdrop-blur-md">
@@ -154,7 +154,7 @@ export default function ChatHeader() {
             </button>
             <div className="my-1 border-t border-zinc-800" />
             {sessions.length === 0 && (
-              <div className="px-3 py-2 text-xs text-zinc-600">No sessions</div>
+              <div className="px-3 py-2 text-sm text-zinc-600">No sessions</div>
             )}
             {sessions.map((s) => {
               const date = s.created_at ? new Date(s.created_at).toLocaleDateString() : ''
@@ -162,7 +162,7 @@ export default function ChatHeader() {
                 <button key={s.id} className={item} onClick={() => switchSession(s.id)}>
                   {s.is_active ? <Check size={13} className="text-emerald-400 shrink-0" /> : <span className="w-[13px] shrink-0" />}
                   <span className="truncate flex-1">{s.name}</span>
-                  <span className="text-[10px] text-zinc-600 shrink-0 ml-1">
+                  <span className="text-xs text-zinc-600 shrink-0 ml-1">
                     {s.message_count !== undefined ? `${s.message_count} msgs` : ''}
                     {(s.message_count !== undefined && date) ? ' · ' : ''}
                     {date}
@@ -188,17 +188,17 @@ export default function ChatHeader() {
         {modelOpen && (
           <div className={menu}>
             {models.length === 0 && (
-              <div className="px-3 py-2 text-xs text-zinc-600">No models available</div>
+              <div className="px-3 py-2 text-sm text-zinc-600">No models available</div>
             )}
             {models.map((m) => (
               <button key={m.id} className={item} onClick={() => pickModel(m.id)}>
                 {m.active ? <Check size={13} className="text-emerald-400 shrink-0" /> : <span className="w-[13px] shrink-0" />}
                 <span className="truncate font-mono">{m.id}</span>
-                {m.supports_image && <span className="ml-auto text-[10px] text-zinc-600 shrink-0">vision</span>}
+                {m.supports_image && <span className="ml-auto text-xs text-zinc-600 shrink-0">vision</span>}
               </button>
             ))}
             {models.length > 0 && !models.some(m => m.id === activeModel) && activeModel && (
-              <div className="px-3 py-1.5 text-[10px] text-zinc-600 border-t border-zinc-800 mt-1">
+              <div className="px-3 py-1.5 text-xs text-zinc-600 border-t border-zinc-800 mt-1">
                 Active: <span className="font-mono text-zinc-500">{activeModel}</span> (not in fallback chain)
               </div>
             )}

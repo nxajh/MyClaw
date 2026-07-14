@@ -115,7 +115,7 @@ export default function Overview() {
               {recentSessions.map(s => (
                 <button key={s.id} onClick={() => navigate('/sessions')} className="w-full flex items-center justify-between gap-2 rounded-xl px-3 py-2 text-left hover:bg-zinc-800/50 transition-colors">
                   <span className="text-sm text-zinc-300 truncate">{s.name}</span>
-                  {s.created_at && <span className="text-[11px] text-zinc-500 font-mono shrink-0">{new Date(s.created_at).toLocaleDateString()}</span>}
+                  {s.created_at && <span className="text-xs text-zinc-500 font-mono shrink-0">{new Date(s.created_at).toLocaleDateString()}</span>}
                 </button>
               ))}
             </div>

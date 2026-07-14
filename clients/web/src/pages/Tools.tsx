@@ -162,7 +162,7 @@ export default function Tools() {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Search tools..."
-                className={searchInputCls + ' !rounded-xl !pl-9 !py-2 !text-xs'}
+                className={searchInputCls + ' !rounded-xl !pl-9 !py-2'}
               />
             </div>
           </div>
@@ -208,11 +208,11 @@ export default function Tools() {
                       <div className="absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-r bg-zinc-400" />
                     )}
                     <div className="flex items-center gap-2 min-w-0">
-                      <Wrench size={12} className={`shrink-0 ${isSelected ? 'text-zinc-300' : 'text-zinc-600'}`} />
-                      <span className="font-mono text-xs truncate font-medium">{tool.name}</span>
+                      <Wrench size={13} className={`shrink-0 ${isSelected ? 'text-zinc-300' : 'text-zinc-600'}`} />
+                      <span className="font-mono text-sm truncate font-medium">{tool.name}</span>
                     </div>
                     {tool.description && (
-                      <p className={`pl-5 text-[11px] leading-snug line-clamp-2 ${isSelected ? 'text-zinc-400' : 'text-zinc-600'}`}>
+                      <p className={`pl-5 text-xs leading-snug line-clamp-2 ${isSelected ? 'text-zinc-400' : 'text-zinc-600'}`}>
                         {tool.description}
                       </p>
                     )}
@@ -237,8 +237,8 @@ export default function Tools() {
             <div className="flex flex-col min-h-full">
               {/* Sticky tool header */}
               <div className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/90 backdrop-blur-md px-3 sm:px-8 py-4 space-y-1.5">
-                <div className="flex items-center gap-1.5 text-[11px] text-zinc-400 font-bold uppercase tracking-wider bg-zinc-900/60 border border-zinc-800 px-2 py-0.5 rounded-md max-w-fit">
-                  <Wrench size={10} /> Active Tool Schema
+                <div className="flex items-center gap-1.5 text-xs text-zinc-400 font-semibold uppercase tracking-wider bg-zinc-900/60 border border-zinc-800 px-2 py-0.5 rounded-md max-w-fit">
+                  <Wrench size={11} /> Active Tool Schema
                 </div>
                 <h1 className="text-lg font-semibold tracking-tight text-zinc-100 font-mono">
                   {selectedToolName}
@@ -266,15 +266,15 @@ export default function Tools() {
                       <div className="divide-y divide-zinc-800">
                         {Object.entries(activeToolSpec.parameters.properties).map(([name, val]) => (
                           <div key={name} className="grid grid-cols-2 sm:grid-cols-4 px-3 sm:px-4 py-3 items-baseline gap-1 sm:gap-0">
-                            <div className="col-span-2 sm:col-span-1 font-mono text-xs text-zinc-200 font-medium flex items-center gap-1.5">
+                            <div className="col-span-2 sm:col-span-1 font-mono text-sm text-zinc-200 font-medium flex items-center gap-1.5">
                               {val.required && (
                                 <span className="h-1.5 w-1.5 rounded-full bg-red-500 shrink-0" title="Required" />
                               )}
                               {name}
-                              {val.required && <span className="text-red-400 text-[10px] font-sans font-semibold">req</span>}
+                              {val.required && <span className="text-red-400 text-xs font-sans font-semibold">req</span>}
                             </div>
                             <div className="col-span-2 sm:col-span-1 text-left sm:text-center">
-                              <span className="text-[11px] bg-zinc-900 border border-zinc-800 text-zinc-400 font-semibold px-2 py-0.5 rounded-md font-mono">
+                              <span className="text-xs bg-zinc-900 border border-zinc-800 text-zinc-400 font-semibold px-2 py-0.5 rounded-md font-mono">
                                 {val.type}
                               </span>
                             </div>
@@ -282,9 +282,9 @@ export default function Tools() {
                               <p className="text-zinc-400 text-sm leading-relaxed">{val.description}</p>
                               {val.enum && (
                                 <div className="flex flex-wrap items-center gap-1">
-                                  <span className="text-[11px] text-zinc-500 font-medium">Enum:</span>
+                                  <span className="text-xs text-zinc-500 font-medium">Enum:</span>
                                   {val.enum.map(e => (
-                                    <span key={e} className="text-[11px] font-mono text-zinc-400 bg-zinc-900 border border-zinc-800 px-1.5 py-0.5 rounded-sm">
+                                    <span key={e} className="text-xs font-mono text-zinc-400 bg-zinc-900 border border-zinc-800 px-1.5 py-0.5 rounded-sm">
                                       "{e}"
                                     </span>
                                   ))}

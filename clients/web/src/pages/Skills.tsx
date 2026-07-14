@@ -235,7 +235,7 @@ export default function Skills() {
                   {s.keywords?.length > 0 && (
                     <div className="mt-auto flex flex-wrap gap-1.5">
                       {s.keywords.map((k) => (
-                        <span key={k} className="px-2 py-0.5 rounded-md bg-zinc-800 text-[11px] text-zinc-500 border border-zinc-800">
+                        <span key={k} className="px-2 py-0.5 rounded-md bg-zinc-800 text-xs text-zinc-500 border border-zinc-800">
                           {k}
                         </span>
                       ))}

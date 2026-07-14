@@ -93,7 +93,7 @@ function SessionRow({
               {session.name}
             </span>
             {session.created_at && (
-              <span className="text-[11px] text-zinc-500 font-mono">{new Date(session.created_at).toLocaleString()}</span>
+              <span className="text-xs text-zinc-500 font-mono">{new Date(session.created_at).toLocaleString()}</span>
             )}
           </div>
         )}

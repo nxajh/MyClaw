@@ -126,7 +126,7 @@ function DesktopSidebar({ collapsed, setCollapsed }: { collapsed: boolean; setCo
       </nav>
       <div className={`flex items-center gap-2.5 px-4 py-3.5 border-t border-zinc-800 shrink-0 ${collapsed ? 'justify-center' : ''}`}>
         <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${statusBgColor} ${statusShadow}`} />
-        {!collapsed && <span className={`text-[10px] font-semibold tracking-wide truncate uppercase ${statusColor}`}>{statusText}</span>}
+        {!collapsed && <span className={`text-xs font-semibold tracking-wide truncate uppercase ${statusColor}`}>{statusText}</span>}
         {!collapsed && (
           <div className="ml-auto flex items-center gap-0.5">
             <ThemeToggleButton collapsed={false} />
@@ -202,7 +202,7 @@ function MobileDrawer({ open, onClose }: { open: boolean; onClose: () => void })
         </nav>
         <div className="flex items-center gap-2.5 px-4 py-3.5 border-t border-zinc-800">
           <span className={`h-2 w-2 rounded-full ${statusBgColor}`} />
-          <span className={`text-[11px] font-semibold tracking-wide uppercase ${statusColor}`}>{statusText}</span>
+          <span className={`text-xs font-semibold tracking-wide uppercase ${statusColor}`}>{statusText}</span>
           <ThemeToggleButton collapsed={false} />
           <button onClick={() => { onClose(); localStorage.removeItem(AUTH_TOKEN_KEY); window.location.reload() }} title="Log out" className="ml-auto p-1.5 rounded-md text-zinc-600 hover:text-red-400 hover:bg-zinc-800 transition-colors">
             <LogOut size={14} />

@@ -284,7 +284,7 @@ export default function Config() {
                       placeholder="e.g. /home/ubuntu/.myclaw/workspace"
                       className={inputCls}
                     />
-                    <p className="text-[11px] text-zinc-500">The absolute path where memory and logs are located</p>
+                    <p className="text-xs text-zinc-500">The absolute path where memory and logs are located</p>
                   </div>
 
                   <div className="space-y-1.5">
@@ -296,11 +296,11 @@ export default function Config() {
                       placeholder="e.g. 8080"
                       className={inputCls}
                     />
-                    <p className="text-[11px] text-zinc-500">Port number the backend daemon service runs on</p>
+                    <p className="text-xs text-zinc-500">Port number the backend daemon service runs on</p>
                   </div>
 
-                  <div className="pt-2 border-t border-zinc-800 text-[11px] text-zinc-500 leading-normal flex items-center gap-1.5">
-                    <AlertTriangle size={11} className="text-amber-500 shrink-0" />
+                  <div className="pt-2 border-t border-zinc-800 text-xs text-zinc-500 leading-normal flex items-center gap-1.5">
+                    <AlertTriangle size={12} className="text-amber-500 shrink-0" />
                     Additional advanced parameters can be adjusted via the "TOML Source Code" mode.
                   </div>
                 </div>

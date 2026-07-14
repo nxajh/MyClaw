@@ -93,7 +93,7 @@ export default function SkillsEditor({ initial, onSave, onCancel, saving }: Prop
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-zinc-400">Name</label>
               <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. weather" className={inputCls} disabled={!isNew} autoFocus={isNew} />
-              <p className="text-[10px] text-zinc-500">Unique key using only a-z, 0-9, _, -, .</p>
+              <p className="text-xs text-zinc-500">Unique key using only a-z, 0-9, _, -, .</p>
             </div>
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-zinc-400">Version (optional)</label>

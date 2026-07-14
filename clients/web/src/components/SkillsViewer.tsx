@@ -29,7 +29,7 @@ export default function SkillsViewer({ name, content, error, onEdit, onBack, onD
           <div className="flex items-center gap-2">
             {confirmDelete ? (
               <div className="flex items-center gap-1.5 bg-red-950/20 border border-red-800/30 px-2 py-1 rounded-xl">
-                <span className="text-[11px] text-red-400 font-medium">Permanently Delete?</span>
+                <span className="text-xs text-red-400 font-medium">Permanently Delete?</span>
                 <button onClick={() => onDelete(name)} className="rounded-lg bg-red-600/80 hover:bg-red-600 px-2.5 py-1 text-xs text-white transition-colors">Yes</button>
                 <button onClick={() => setConfirmDelete(false)} className="rounded-lg border border-zinc-800 hover:bg-zinc-800 px-2.5 py-1 text-xs text-zinc-400 hover:text-zinc-200 transition-colors">No</button>
               </div>
@@ -52,11 +52,11 @@ export default function SkillsViewer({ name, content, error, onEdit, onBack, onD
         <div className="p-5 rounded-2xl border border-zinc-800 bg-zinc-900/30 space-y-3">
           <div className="flex items-center gap-2">
             <Sparkles size={14} className="text-amber-400 shrink-0" />
-            <h1 className="text-lg font-bold text-zinc-100 font-mono tracking-tight">
+            <h1 className="text-lg font-semibold text-zinc-100 font-mono tracking-tight">
               {parsed.meta.name || name}
             </h1>
             {parsed.meta.version && (
-              <span className="text-[10px] text-zinc-500 font-mono ml-1">v{parsed.meta.version}</span>
+              <span className="text-xs text-zinc-500 font-mono ml-1">v{parsed.meta.version}</span>
             )}
           </div>
           {parsed.meta.description && (
@@ -65,8 +65,8 @@ export default function SkillsViewer({ name, content, error, onEdit, onBack, onD
           {parsed.meta.keywords.length > 0 && (
             <div className="flex flex-wrap gap-1.5 pt-1.5">
               {parsed.meta.keywords.map(k => (
-                <span key={k} className="flex items-center gap-1 text-[10px] text-zinc-500 bg-zinc-900/60 px-2 py-0.5 rounded-md border border-zinc-800">
-                  <Tag size={9} />{k}
+                <span key={k} className="flex items-center gap-1 text-xs text-zinc-500 bg-zinc-900/60 px-2 py-0.5 rounded-md border border-zinc-800">
+                  <Tag size={10} />{k}
                 </span>
               ))}
             </div>

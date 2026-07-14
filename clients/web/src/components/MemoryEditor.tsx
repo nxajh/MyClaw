@@ -103,14 +103,14 @@ ${body.trim()}`
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-zinc-400">Name</label>
               <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. delegate_patience" className={inputCls} disabled={!isNew} autoFocus={isNew} />
-              <p className="text-[10px] text-zinc-500">Unique key using only a-z, 0-9, _, -</p>
+              <p className="text-xs text-zinc-500">Unique key using only a-z, 0-9, _, -</p>
             </div>
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-zinc-400">Type</label>
               <select value={memType} onChange={(e) => setMemType(e.target.value as MemType)} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-sm text-zinc-300 focus:border-zinc-700 outline-none transition-colors duration-150">
                 {TYPE_OPTIONS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
               </select>
-              <p className="text-[10px] text-zinc-500">{getStyle(memType).desc}</p>
+              <p className="text-xs text-zinc-500">{getStyle(memType).desc}</p>
             </div>
             <div className="space-y-1.5 md:col-span-2">
               <label className="text-xs font-semibold text-zinc-400">Description</label>
@@ -132,7 +132,7 @@ ${body.trim()}`
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-zinc-400 font-mono">Filename</label>
               <input value={name} onChange={(e) => setName(e.target.value)} placeholder="filename.md" className={inputCls} autoFocus />
-              <p className="text-[10px] text-zinc-500">File must end with .md extension</p>
+              <p className="text-xs text-zinc-500">File must end with .md extension</p>
             </div>
           )}
           <div className="space-y-1.5">

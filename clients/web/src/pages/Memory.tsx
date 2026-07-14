@@ -254,15 +254,15 @@ export default function Memory() {
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2 w-full">
                       <div className="flex items-center gap-2 min-w-0">
-                        <span className={`text-[11px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-md shrink-0 ${style.badgeBg}`}>
+                        <span className={`text-xs uppercase font-semibold tracking-wider px-2 py-0.5 rounded-md shrink-0 ${style.badgeBg}`}>
                           {style.label.split(' ').slice(1).join(' ')}
                         </span>
                         <span className="text-sm font-medium text-zinc-300 font-mono truncate group-hover:text-zinc-100 transition-colors">
                           {file.mem_name || file.name.replace('.md', '')}
                         </span>
                       </div>
-                      <div className="flex items-center gap-2 text-[11px] text-zinc-500 font-mono shrink-0">
-                        {links > 0 && <span className="flex items-center gap-0.5"><Link2 size={10} />{links}</span>}
+                      <div className="flex items-center gap-2 text-xs text-zinc-500 font-mono shrink-0">
+                        {links > 0 && <span className="flex items-center gap-0.5"><Link2 size={11} />{links}</span>}
                         <span>{(file.size / 1024).toFixed(1)} KB</span>
                       </div>
                     </div>
@@ -274,8 +274,8 @@ export default function Memory() {
                     {file.tags && file.tags.length > 0 && (
                       <div className="flex flex-wrap gap-1 mt-auto">
                         {file.tags.map(t => (
-                          <span key={t} className="flex items-center gap-1 text-[11px] text-zinc-500 bg-zinc-950 px-2 py-0.5 rounded-md border border-zinc-800">
-                            <Tag size={9} />{t}
+                          <span key={t} className="flex items-center gap-1 text-xs text-zinc-500 bg-zinc-950 px-2 py-0.5 rounded-md border border-zinc-800">
+                            <Tag size={10} />{t}
                           </span>
                         ))}
                       </div>

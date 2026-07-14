@@ -187,9 +187,9 @@ export default function CommandPalette() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Type a command or jump to page..."
-            className="w-full bg-transparent pl-11 pr-4 py-3.5 text-xs text-zinc-100 placeholder-zinc-600 outline-none"
+            className="w-full bg-transparent pl-11 pr-4 py-3.5 text-sm text-zinc-100 placeholder-zinc-600 outline-none"
           />
-          <div className="absolute right-4 text-[10px] text-zinc-500 bg-zinc-800/80 border border-zinc-700/60 px-1.5 py-0.5 rounded-md font-mono">
+          <div className="absolute right-4 text-xs text-zinc-500 bg-zinc-800/80 border border-zinc-700/60 px-1.5 py-0.5 rounded-md font-mono">
             ESC
           </div>
         </div>
@@ -223,13 +223,13 @@ export default function CommandPalette() {
                     <div className={`text-xs font-semibold ${isSelected ? 'text-zinc-200' : 'text-zinc-400'}`}>
                       {cmd.title}
                     </div>
-                    <div className="text-[10px] text-zinc-500 truncate mt-0.5">
+                    <div className="text-xs text-zinc-500 truncate mt-0.5">
                       {cmd.subtitle}
                     </div>
                   </div>
 
                   {cmd.shortcut && (
-                    <div className="shrink-0 text-[9px] bg-zinc-950 border border-zinc-800 px-1.5 py-0.5 rounded-md font-mono text-zinc-600">
+                    <div className="shrink-0 text-xs bg-zinc-950 border border-zinc-800 px-1.5 py-0.5 rounded-md font-mono text-zinc-600">
                       {cmd.shortcut}
                     </div>
                   )}
@@ -240,7 +240,7 @@ export default function CommandPalette() {
         </div>
 
         {/* Shortcut Legend Footer */}
-        <div className="px-4 py-2 border-t border-zinc-800 bg-zinc-950 shrink-0 flex items-center justify-between text-[9px] text-zinc-600 font-medium">
+        <div className="px-4 py-2 border-t border-zinc-800 bg-zinc-950 shrink-0 flex items-center justify-between text-xs text-zinc-600 font-medium">
           <div className="flex items-center gap-3">
             <span>↑↓ Navigation</span>
             <span>↵ Select</span>
