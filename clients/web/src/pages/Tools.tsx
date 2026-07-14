@@ -141,18 +141,23 @@ export default function Tools() {
 
   return (
     <div className="flex flex-col h-full bg-zinc-950 page-enter">
+      {/* Full-width page header */}
+      <div className="shrink-0 px-3 sm:px-8 py-3 sm:py-4 border-b border-zinc-800/80 bg-zinc-950/85 backdrop-blur-md">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h1 className="text-lg font-semibold tracking-tight text-zinc-100 flex items-center gap-2">
+              <Cpu size={18} className="text-orange-400" />
+              Tools
+            </h1>
+            <p className="text-sm text-zinc-500 mt-0.5">{tools.length} registered</p>
+          </div>
+        </div>
+      </div>
+
       <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
         {/* Left Side: Tool List */}
         <div className={`${mobileShowDetail ? 'hidden md:flex' : 'flex'} w-full md:w-80 border-b md:border-b-0 md:border-r border-zinc-800 flex-col shrink-0`}>
           <div className="sticky top-0 z-10 px-4 py-3 border-b border-zinc-800/80 space-y-2.5 bg-zinc-950/85 backdrop-blur-md">
-            <div className="flex items-center justify-between">
-              <h1 className="text-lg font-semibold tracking-tight text-zinc-100 flex items-center gap-2">
-                <Cpu size={18} className="text-orange-400" />
-                Tools
-              </h1>
-              <span className="text-sm text-zinc-500 font-mono">{tools.length}</span>
-            </div>
-
             <SearchField
               value={searchQuery}
               onChange={setSearchQuery}
