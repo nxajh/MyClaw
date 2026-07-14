@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useMemo } from 'react'
 import { Wrench, BookOpen, Terminal, Copy, Check, Cpu } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useToast } from '../components/Toast'
-import { ErrorBanner, EmptyState, SearchField, panelCls } from '../components/PageLayout'
+import { ErrorBanner, EmptyState, SearchField, EntityListItem, panelCls } from '../components/PageLayout'
 
 interface Tool {
   name: string
@@ -144,13 +144,13 @@ export default function Tools() {
       <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
         {/* Left Side: Tool List */}
         <div className={`${mobileShowDetail ? 'hidden md:flex' : 'flex'} w-full md:w-80 border-b md:border-b-0 md:border-r border-zinc-800 flex-col shrink-0`}>
-          <div className="sticky top-0 z-10 p-3 sm:p-4 border-b border-zinc-800/80 space-y-2.5 bg-zinc-950/85 backdrop-blur-md">
-            <div>
+          <div className="sticky top-0 z-10 px-4 py-3 border-b border-zinc-800/80 space-y-2.5 bg-zinc-950/85 backdrop-blur-md">
+            <div className="flex items-center justify-between">
               <h1 className="text-lg font-semibold tracking-tight text-zinc-100 flex items-center gap-2">
                 <Cpu size={18} className="text-orange-400" />
-                Active MCP Tools
+                Tools
               </h1>
-              <p className="text-sm text-zinc-500 mt-0.5">{tools.length} registered · Inspect schemas</p>
+              <span className="text-sm text-zinc-500 font-mono">{tools.length}</span>
             </div>
 
             <SearchField
@@ -160,19 +160,22 @@ export default function Tools() {
             />
           </div>
 
-          <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
+          <div className="flex-1 overflow-y-auto p-2 space-y-2">
             {error && <div className="px-2"><ErrorBanner message={error} /></div>}
             {loading && tools.length === 0 && (
-              <div className="px-1 space-y-1">
-                {Array.from({ length: 8 }).map((_, i) => (
-                  <div key={i} className="rounded-xl border border-zinc-800 bg-zinc-900/40 px-3 py-2.5 space-y-1.5">
-                    <div className="skeleton-line w-2/3 h-2.5" />
-                    <div className="skeleton-line w-full h-2" />
+              <div className="px-1 space-y-2">
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <div key={i} className="rounded-2xl border border-zinc-800 bg-zinc-900/40 px-4 py-3 space-y-2">
+                    <div className="flex items-center gap-3">
+                      <div className="skeleton-line w-4 h-4 !rounded shrink-0" />
+                      <div className="skeleton-line flex-1 h-3" />
+                    </div>
+                    <div className="skeleton-line w-3/4 h-2.5" />
                   </div>
                 ))}
               </div>
             )}
-            {!loading && status !== 'connected' && <EmptyState>Waiting for sync…</EmptyState>}
+            {!loading && status !== 'connected' && <div className="px-2"><EmptyState>Waiting for sync…</EmptyState></div>}
             {!loading && status === 'connected' && filteredTools.length === 0 && (
               <div className="px-2 py-4">
                 <EmptyState
@@ -190,26 +193,15 @@ export default function Tools() {
               filteredTools.map((tool) => {
                 const isSelected = tool.name === selectedToolName
                 return (
-                  <button
+                  <EntityListItem
                     key={tool.name}
+                    density="comfortable"
+                    active={isSelected}
                     onClick={() => { setSelectedToolName(tool.name); setMobileShowDetail(true) }}
-                    className={`w-full flex flex-col gap-0.5 px-3 py-2.5 text-left rounded-xl transition-all relative ${
-                      isSelected ? 'bg-zinc-900 text-zinc-100 shadow-sm' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/40'
-                    }`}
-                  >
-                    {isSelected && (
-                      <div className="absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-r bg-zinc-400" />
-                    )}
-                    <div className="flex items-center gap-2 min-w-0">
-                      <Wrench size={13} className={`shrink-0 ${isSelected ? 'text-zinc-300' : 'text-zinc-600'}`} />
-                      <span className="font-mono text-sm truncate font-medium">{tool.name}</span>
-                    </div>
-                    {tool.description && (
-                      <p className={`pl-5 text-xs leading-snug line-clamp-2 ${isSelected ? 'text-zinc-400' : 'text-zinc-600'}`}>
-                        {tool.description}
-                      </p>
-                    )}
-                  </button>
+                    leading={<Wrench size={16} className={isSelected ? 'text-zinc-300' : 'text-zinc-600'} />}
+                    title={<span className="font-mono">{tool.name}</span>}
+                    description={tool.description || undefined}
+                  />
                 )
               })
             )}
