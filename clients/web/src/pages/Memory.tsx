@@ -4,7 +4,7 @@ import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useToast } from '../components/Toast'
 import {
   ErrorBanner, EmptyState, SkeletonCards, PageHeader, PageShell, SearchField,
-  btnPrimary, panelCls,
+  EntityListItem, EntityMetaChip, btnPrimary,
 } from '../components/PageLayout'
 import MemoryEditor from '../components/MemoryEditor'
 import MemoryViewer from '../components/MemoryViewer'
@@ -211,7 +211,7 @@ export default function Memory() {
       />
 
       {error && <ErrorBanner message={error} />}
-      {loadingList && <SkeletonCards count={6} cols />}
+      {loadingList && <SkeletonCards count={6} />}
       {!loadingList && status !== 'connected' && (
         <EmptyState icon={<Brain size={28} />}>Waiting for connection to sync memory…</EmptyState>
       )}
@@ -234,47 +234,42 @@ export default function Memory() {
         </EmptyState>
       )}
 
-      {/* List — multi-column on wide screens */}
+      {/* Browse list — same EntityListItem family as Sessions/Skills */}
       {!loadingList && filteredFiles.length > 0 && (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        <div className="space-y-2">
           {filteredFiles.map((file) => {
             const style = getStyle(file.type)
             const links = (file.link_count || 0) + (file.backlink_count || 0)
             return (
-              <button
+              <EntityListItem
                 key={file.name}
+                density="comfortable"
                 onClick={() => openFile(file.name)}
-                className={`w-full text-left ${panelCls} border ${style.border} ${style.bg} px-4 py-4 transition-all duration-200 group flex flex-col gap-2.5 h-full hover:-translate-y-0.5 hover:shadow-md`}
-              >
-                <div className="flex flex-wrap items-center justify-between gap-2 w-full">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className={`text-xs uppercase font-semibold tracking-wider px-2 py-0.5 rounded-md shrink-0 ${style.badgeBg}`}>
-                      {style.label.split(' ').slice(1).join(' ')}
-                    </span>
-                    <span className="text-sm font-medium text-zinc-300 font-mono truncate group-hover:text-zinc-100 transition-colors">
-                      {file.mem_name || file.name.replace('.md', '')}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2 text-xs text-zinc-500 font-mono shrink-0">
+                leading={
+                  <span className={`text-xs uppercase font-semibold tracking-wider px-2 py-1 rounded-md shrink-0 ${style.badgeBg}`}>
+                    {style.label.split(' ').slice(1).join(' ') || style.label}
+                  </span>
+                }
+                title={
+                  <span className="font-mono">{file.mem_name || file.name.replace('.md', '')}</span>
+                }
+                description={file.description || <span className="italic text-zinc-600">No description</span>}
+                tags={
+                  file.tags && file.tags.length > 0 ? (
+                    <>
+                      {file.tags.map(t => (
+                        <EntityMetaChip key={t}><Tag size={10} />{t}</EntityMetaChip>
+                      ))}
+                    </>
+                  ) : undefined
+                }
+                meta={
+                  <span className="flex items-center gap-2">
                     {links > 0 && <span className="flex items-center gap-0.5"><Link2 size={11} />{links}</span>}
                     <span>{(file.size / 1024).toFixed(1)} KB</span>
-                  </div>
-                </div>
-                {file.description ? (
-                  <p className="text-sm text-zinc-400 leading-relaxed font-normal line-clamp-3">{file.description}</p>
-                ) : (
-                  <p className="text-sm text-zinc-600 italic">No description</p>
-                )}
-                {file.tags && file.tags.length > 0 && (
-                  <div className="flex flex-wrap gap-1 mt-auto">
-                    {file.tags.map(t => (
-                      <span key={t} className="flex items-center gap-1 text-xs text-zinc-500 bg-zinc-950 px-2 py-0.5 rounded-md border border-zinc-800">
-                        <Tag size={10} />{t}
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </button>
+                  </span>
+                }
+              />
             )
           })}
         </div>

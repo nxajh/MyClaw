@@ -4,7 +4,7 @@ import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useToast } from '../components/Toast'
 import {
   ErrorBanner, EmptyState, SkeletonCards, PageHeader, PageShell, SearchField,
-  btnPrimary, panelCls, cardHoverCls,
+  EntityListItem, EntityMetaChip, btnPrimary,
 } from '../components/PageLayout'
 import SkillsViewer from '../components/SkillsViewer'
 import SkillsEditor from '../components/SkillsEditor'
@@ -176,7 +176,7 @@ export default function Skills() {
       )}
 
       {error && <ErrorBanner message={error} />}
-      {loading && <SkeletonCards count={6} cols />}
+      {loading && <SkeletonCards count={6} />}
       {!loading && status !== 'connected' && (
         <EmptyState icon={<Sparkles size={28} />}>Waiting for connection…</EmptyState>
       )}
@@ -205,30 +205,25 @@ export default function Skills() {
         </EmptyState>
       )}
       {!loading && filteredSkills.length > 0 && (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        <div className="space-y-2">
           {filteredSkills.map((s) => (
-            <button
+            <EntityListItem
               key={s.name}
+              density="comfortable"
               onClick={() => openFile(s.name)}
-              className={`w-full text-left ${panelCls} ${cardHoverCls} px-4 py-3.5 h-full flex flex-col gap-2 hover:-translate-y-0.5 hover:shadow-md transition-all`}
-            >
-              <div className="flex items-center gap-2">
-                <Sparkles size={14} className="text-amber-400 shrink-0" />
-                <span className="font-mono text-sm font-medium text-zinc-200 truncate">{s.name}</span>
-              </div>
-              {s.description && (
-                <p className="text-sm text-zinc-400 leading-relaxed line-clamp-3">{s.description}</p>
-              )}
-              {s.keywords?.length > 0 && (
-                <div className="mt-auto flex flex-wrap gap-1.5">
-                  {s.keywords.map((k) => (
-                    <span key={k} className="px-2 py-0.5 rounded-md bg-zinc-800 text-xs text-zinc-500 border border-zinc-800">
-                      {k}
-                    </span>
-                  ))}
-                </div>
-              )}
-            </button>
+              leading={<Sparkles size={16} className="text-amber-400" />}
+              title={<span className="font-mono">{s.name}</span>}
+              description={s.description || undefined}
+              tags={
+                s.keywords?.length > 0 ? (
+                  <>
+                    {s.keywords.map((k) => (
+                      <EntityMetaChip key={k}>{k}</EntityMetaChip>
+                    ))}
+                  </>
+                ) : undefined
+              }
+            />
           ))}
         </div>
       )}

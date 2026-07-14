@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import type { ReactNode, MouseEvent } from 'react'
 import { Loader2, Search } from 'lucide-react'
 
 // ── Common UI atoms ──────────────────────────────────────────────────────────
@@ -20,22 +20,23 @@ export function LoadingRow({ label = 'Loading…' }: { label?: string }) {
   )
 }
 
-/** Skeleton placeholders for list loading states */
+/** Skeleton placeholders for browse lists */
 export function SkeletonCards({ count = 4, cols = false }: { count?: number; cols?: boolean }) {
   return (
-    <div className={cols ? 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3' : 'space-y-2'}>
+    <div className={cols ? 'grid grid-cols-1 md:grid-cols-2 gap-2' : 'space-y-2'}>
       {Array.from({ length: count }).map((_, i) => (
         <div
           key={i}
-          className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4 space-y-3"
+          className="rounded-2xl border border-zinc-800 bg-zinc-900/40 px-4 py-3 space-y-2"
         >
-          <div className="flex items-center gap-2">
-            <div className="skeleton-line w-16 h-3" />
-            <div className="skeleton-line w-28 h-3" />
+          <div className="flex items-center gap-3">
+            <div className="skeleton-line w-8 h-8 !rounded-lg shrink-0" />
+            <div className="flex-1 space-y-2 min-w-0">
+              <div className="skeleton-line w-1/3 h-3" />
+              <div className="skeleton-line w-2/3 h-2.5" />
+            </div>
+            <div className="skeleton-line w-12 h-2.5 shrink-0" />
           </div>
-          <div className="skeleton-line w-full h-2.5" />
-          <div className="skeleton-line w-4/5 h-2.5" />
-          <div className="skeleton-line w-1/3 h-2.5" />
         </div>
       ))}
     </div>
@@ -124,6 +125,100 @@ export function SearchField({
         className={searchInputCls}
       />
     </div>
+  )
+}
+
+/**
+ * Unified browse entity row used by Sessions / Memory / Skills.
+ * density:
+ *  - dense: single-line primary + compact meta (Sessions)
+ *  - comfortable: title + description + tags (Memory/Skills)
+ */
+export function EntityListItem({
+  leading,
+  title,
+  subtitle,
+  description,
+  tags,
+  meta,
+  actions,
+  active = false,
+  density = 'comfortable',
+  onClick,
+  className = '',
+}: {
+  leading?: ReactNode
+  title: ReactNode
+  subtitle?: ReactNode
+  description?: ReactNode
+  tags?: ReactNode
+  meta?: ReactNode
+  actions?: ReactNode
+  active?: boolean
+  density?: 'dense' | 'comfortable'
+  onClick?: () => void
+  className?: string
+}) {
+  const interactive = typeof onClick === 'function'
+  const base = active
+    ? 'border-zinc-700/70 bg-zinc-800/60 shadow-sm'
+    : `${panelCls} ${interactive ? cardHoverCls : ''}`
+
+  const handleActionsClick = (e: MouseEvent) => {
+    e.stopPropagation()
+  }
+
+  const body = (
+    <>
+      {leading && <div className="shrink-0 mt-0.5">{leading}</div>}
+      <div className="flex-1 min-w-0 space-y-1">
+        <div className="flex items-start gap-2 min-w-0">
+          <div className="min-w-0 flex-1">
+            <div className={`text-sm font-medium truncate ${active ? 'text-zinc-100' : 'text-zinc-200'}`}>
+              {title}
+            </div>
+            {subtitle && (
+              <div className="text-xs text-zinc-500 mt-0.5 truncate">{subtitle}</div>
+            )}
+          </div>
+          {meta && (
+            <div className="shrink-0 text-xs text-zinc-500 font-mono pt-0.5">{meta}</div>
+          )}
+        </div>
+        {density === 'comfortable' && description && (
+          <p className="text-sm text-zinc-400 leading-relaxed line-clamp-2">{description}</p>
+        )}
+        {density === 'comfortable' && tags && (
+          <div className="flex flex-wrap gap-1.5 pt-0.5">{tags}</div>
+        )}
+      </div>
+      {actions && (
+        <div className="shrink-0 flex items-center gap-1 self-center" onClick={handleActionsClick}>
+          {actions}
+        </div>
+      )}
+    </>
+  )
+
+  const cls = `group flex items-start gap-3 rounded-2xl border px-4 ${density === 'dense' ? 'py-3' : 'py-3.5'} w-full text-left transition-colors ${base} ${interactive ? 'cursor-pointer' : ''} ${className}`
+
+  if (interactive) {
+    return (
+      <button type="button" onClick={onClick} className={cls}>
+        {body}
+      </button>
+    )
+  }
+
+  return <div className={cls}>{body}</div>
+}
+
+/** Small mono/chip meta pill for entity rows */
+export function EntityMetaChip({ children }: { children: ReactNode }) {
+  return (
+    <span className="inline-flex items-center gap-1 text-xs text-zinc-500 bg-zinc-950/60 px-2 py-0.5 rounded-md border border-zinc-800">
+      {children}
+    </span>
   )
 }
 

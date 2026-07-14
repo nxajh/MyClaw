@@ -5,8 +5,8 @@ import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useApi } from '../lib/api'
 import { useToast } from '../components/Toast'
 import {
-  ErrorBanner, EmptyState, SkeletonCards, PageHeader, PageShell, SearchField,
-  inputCls, btnPrimary, panelCls, cardHoverCls,
+  ErrorBanner, EmptyState, SkeletonCards, PageHeader, PageShell, SearchField, EntityListItem,
+  inputCls, btnPrimary,
 } from '../components/PageLayout'
 
 interface Session {
@@ -65,19 +65,49 @@ function SessionRow({
     try { await onDelete(session.id) } finally { setBusy(false) }
   }
 
-  return (
-    <div
-      onClick={handleSwitch}
-      className={`group flex items-center gap-3 rounded-xl border px-4 py-3 ${
-        session.is_active
-          ? 'border-zinc-700/70 bg-zinc-800/60 cursor-default shadow-sm'
-          : `${panelCls} ${cardHoverCls} cursor-pointer`
-      }`}
-    >
-      <div className={`h-2 w-2 rounded-full shrink-0 transition-colors ${session.is_active ? 'bg-emerald-400' : 'bg-zinc-700'}`} />
+const actions = editing ? (
+    <>
+      <button onClick={commitRename} disabled={busy} className="p-1.5 rounded-lg text-emerald-400 hover:bg-zinc-700 transition-colors" title="Save">
+        {busy ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
+      </button>
+      <button onClick={() => setEditing(false)} className="p-1.5 rounded-lg text-zinc-500 hover:bg-zinc-700 transition-colors" title="Cancel">
+        <X size={13} />
+      </button>
+    </>
+  ) : confirmDelete ? (
+    <>
+      <span className="text-xs text-red-400 mr-1">Delete?</span>
+      <button onClick={handleDelete} disabled={busy} className="px-2 py-1 rounded-lg bg-red-600/80 hover:bg-red-600 text-white text-xs transition-colors">
+        {busy ? <Loader2 size={11} className="animate-spin" /> : 'Yes'}
+      </button>
+      <button onClick={(e) => { e.stopPropagation(); setConfirmDelete(false) }} className="px-2 py-1 rounded-lg bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-xs transition-colors">
+        No
+      </button>
+    </>
+  ) : (
+    <>
+      <button onClick={(e) => { e.stopPropagation(); onTogglePin(session.id) }} className={`p-1.5 rounded-lg ${pinned ? 'text-zinc-200 hover:text-zinc-100 bg-zinc-800/70' : 'text-zinc-600 hover:text-zinc-300'} hover:bg-zinc-700 transition-all`} title={pinned ? 'Unpin' : 'Pin'}>
+        <Pin size={13} />
+      </button>
+      <button onClick={startEdit} disabled={disabled} className="p-1.5 rounded-lg text-zinc-600 hover:text-zinc-300 hover:bg-zinc-700 opacity-0 group-hover:opacity-100 transition-all disabled:pointer-events-none" title="Rename">
+        <Pencil size={13} />
+      </button>
+      <button onClick={handleDelete} disabled={disabled} className="p-1.5 rounded-lg text-zinc-600 hover:text-red-400 hover:bg-zinc-700 opacity-0 group-hover:opacity-100 transition-all disabled:pointer-events-none" title="Delete">
+        <Trash2 size={13} />
+      </button>
+    </>
+  )
 
-      <div className="flex-1 min-w-0">
-        {editing ? (
+  return (
+    <EntityListItem
+      density="dense"
+      active={!!session.is_active}
+      onClick={editing ? undefined : handleSwitch}
+      leading={
+        <div className={`h-2 w-2 rounded-full shrink-0 transition-colors ${session.is_active ? 'bg-emerald-400' : 'bg-zinc-700'}`} />
+      }
+      title={
+        editing ? (
           <input
             ref={inputRef}
             value={draft}
@@ -88,52 +118,12 @@ function SessionRow({
             autoFocus
           />
         ) : (
-          <div>
-            <span className={`text-sm font-medium block truncate ${session.is_active ? 'text-zinc-100' : 'text-zinc-300'}`}>
-              {session.name}
-            </span>
-            {session.created_at && (
-              <span className="text-xs text-zinc-500 font-mono">{new Date(session.created_at).toLocaleString()}</span>
-            )}
-          </div>
-        )}
-      </div>
-
-      <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
-        {editing ? (
-          <>
-            <button onClick={commitRename} disabled={busy} className="p-1.5 rounded-lg text-emerald-400 hover:bg-zinc-700 transition-colors" title="Save">
-              {busy ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
-            </button>
-            <button onClick={() => setEditing(false)} className="p-1.5 rounded-lg text-zinc-500 hover:bg-zinc-700 transition-colors" title="Cancel">
-              <X size={13} />
-            </button>
-          </>
-        ) : confirmDelete ? (
-          <>
-            <span className="text-xs text-red-400 mr-1">Delete?</span>
-            <button onClick={handleDelete} disabled={busy} className="px-2 py-1 rounded-lg bg-red-600/80 hover:bg-red-600 text-white text-xs transition-colors">
-              {busy ? <Loader2 size={11} className="animate-spin" /> : 'Yes'}
-            </button>
-            <button onClick={(e) => { e.stopPropagation(); setConfirmDelete(false) }} className="px-2 py-1 rounded-lg bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-xs transition-colors">
-              No
-            </button>
-          </>
-        ) : (
-          <>
-            <button onClick={(e) => { e.stopPropagation(); onTogglePin(session.id) }} className={`p-1.5 rounded-lg ${pinned ? 'text-zinc-200 hover:text-zinc-100 bg-zinc-800/70' : 'text-zinc-600 hover:text-zinc-300'} hover:bg-zinc-700 transition-all`} title={pinned ? 'Unpin' : 'Pin'}>
-              <Pin size={13} />
-            </button>
-            <button onClick={startEdit} disabled={disabled} className="p-1.5 rounded-lg text-zinc-600 hover:text-zinc-300 hover:bg-zinc-700 opacity-0 group-hover:opacity-100 transition-all disabled:pointer-events-none" title="Rename">
-              <Pencil size={13} />
-            </button>
-            <button onClick={handleDelete} disabled={disabled} className="p-1.5 rounded-lg text-zinc-600 hover:text-red-400 hover:bg-zinc-700 opacity-0 group-hover:opacity-100 transition-all disabled:pointer-events-none" title="Delete">
-              <Trash2 size={13} />
-            </button>
-          </>
-        )}
-      </div>
-    </div>
+          session.name
+        )
+      }
+      subtitle={!editing && session.created_at ? new Date(session.created_at).toLocaleString() : undefined}
+      actions={actions}
+    />
   )
 }
 
