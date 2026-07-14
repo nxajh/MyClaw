@@ -3,7 +3,7 @@ import { Save, RotateCcw, Loader2, AlertTriangle, Settings, Code, FileText, Glob
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useApi } from '../lib/api'
 import { useToast } from '../components/Toast'
-import { ErrorBanner, LoadingRow, EmptyState, btnPrimary, btnGhost, btnDanger, inputCls } from '../components/PageLayout'
+import { ErrorBanner, LoadingRow, EmptyState, PageShell, PageHeader, panelCls, btnPrimary, btnGhost, btnDanger, inputCls } from '../components/PageLayout'
 
 interface ConfigMeta {
   tool_count: number
@@ -173,164 +173,152 @@ export default function Config() {
   }
 
   return (
-    <div className="flex flex-col h-full bg-zinc-950">
-      <div className="flex-1 overflow-y-auto">
-        <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-5 page-enter">
+    <PageShell>
+      <PageHeader
+        title="Configuration Center"
+        subtitle="Fine-tune MyClaw system parameters and runtime daemons"
+        icon={<Settings size={18} className="text-blue-400" />}
+        actions={
+          <>
+            <button
+              onClick={handleSave}
+              disabled={saving || !isDirty || status !== 'connected'}
+              className={btnPrimary}
+            >
+              {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
+              Save
+            </button>
+            <button
+              onClick={handleRestart}
+              disabled={restarting || status !== 'connected'}
+              className={confirmRestart ? btnDanger : btnGhost}
+              title="Save first, then restart to apply changes"
+            >
+              {restarting ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />}
+              {confirmRestart ? 'Confirm Restart?' : 'Restart'}
+            </button>
+          </>
+        }
+      />
 
-          {/* Action Row & Diagnostics */}
-          <div className="sticky top-0 z-10 -mx-3 sm:-mx-8 px-3 sm:px-8 py-3 sm:py-4 mb-1 border-b border-zinc-800/80 bg-zinc-950/85 backdrop-blur-md">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div>
-                <h1 className="text-lg font-semibold tracking-tight text-zinc-100 flex items-center gap-2">
-                  <Settings size={18} className="text-blue-400" />
-                  Configuration Center
-                </h1>
-                <p className="text-sm text-zinc-500 mt-0.5">Fine-tune MyClaw system parameters and runtime daemons</p>
-              </div>
-              
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={handleSave}
-                  disabled={saving || !isDirty || status !== 'connected'}
-                  className={btnPrimary}
-                >
-                  {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
-                  Save
-                </button>
-                <button
-                  onClick={handleRestart}
-                  disabled={restarting || status !== 'connected'}
-                  className={confirmRestart ? btnDanger : btnGhost}
-                  title="Save first, then restart to apply changes"
-                >
-                  {restarting ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />}
-                  {confirmRestart ? 'Confirm Restart?' : 'Restart'}
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* Diagnostics banner */}
-          <div className={`flex items-center justify-between px-4 py-3 rounded-2xl border shadow-sm transition-colors ${isDirty ? 'bg-amber-950/15 border-amber-800/50' : 'bg-zinc-900/50 border-zinc-800'}`}>
-            <div className="flex items-center gap-2">
-              {isDirty ? (
-                <span className="flex items-center gap-1.5 text-sm text-amber-400 font-medium">
-                  <AlertTriangle size={12} className="animate-pulse" />
-                  Unsaved Changes · Click "Save" and "Restart" to apply
-                </span>
-              ) : (
-                <span className="text-sm text-zinc-500 font-medium">
-                  All changes applied
-                </span>
-              )}
-            </div>
-            {saved && <span className="text-sm text-emerald-400 font-medium animate-pulse">✓ Saved Successfully</span>}
-          </div>
-
-          {error && <ErrorBanner message={error} />}
-          {loading && <LoadingRow label="Loading configurations…" />}
-
-          {/* Configuration Metadata Blocks */}
-          {!loading && meta && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
-              <div className="rounded-2xl border border-zinc-800 bg-zinc-900/50 px-4 py-3.5 space-y-1 shadow-sm">
-                <div className="text-zinc-500 font-medium flex items-center gap-1 text-xs">
-                  <Globe size={11} /> Loaded Tools
-                </div>
-                <div className="text-zinc-200 font-semibold font-mono">{meta.tool_count} builtins</div>
-              </div>
-              <div className="rounded-2xl border border-zinc-800 bg-zinc-900/50 px-4 py-3.5 space-y-1 min-w-0 shadow-sm">
-                <div className="text-zinc-500 font-medium flex items-center gap-1 text-xs">
-                  <FileText size={11} /> Config File Path
-                </div>
-                <div className="text-zinc-300 font-mono text-xs truncate" title={meta.config_path ?? ''}>
-                  {meta.config_path ?? '—'}
-                </div>
-              </div>
-            </div>
+      {/* Diagnostics banner */}
+      <div className={`flex items-center justify-between px-4 py-3 rounded-2xl border shadow-sm transition-colors ${isDirty ? 'bg-amber-950/15 border-amber-800/50' : `${panelCls}`}`}>
+        <div className="flex items-center gap-2">
+          {isDirty ? (
+            <span className="flex items-center gap-1.5 text-sm text-amber-400 font-medium">
+              <AlertTriangle size={12} className="animate-pulse" />
+              Unsaved Changes · Click "Save" and "Restart" to apply
+            </span>
+          ) : (
+            <span className="text-sm text-zinc-500 font-medium">
+              All changes applied
+            </span>
           )}
-
-          {/* View Switcher Tabs */}
-          {!loading && raw && (
-            <div className="flex bg-zinc-950 border border-zinc-800 rounded-xl p-0.5 self-start text-sm max-w-fit">
-              <button
-                onClick={() => setViewMode('form')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${viewMode === 'form' ? 'bg-zinc-900 text-zinc-100 font-medium' : 'text-zinc-500 hover:text-zinc-300'}`}
-              >
-                <Settings size={12} />
-                Parameters UI
-              </button>
-              <button
-                onClick={() => setViewMode('code')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${viewMode === 'code' ? 'bg-zinc-900 text-zinc-100 font-medium' : 'text-zinc-500 hover:text-zinc-300'}`}
-              >
-                <Code size={12} />
-                TOML Source Code
-              </button>
-            </div>
-          )}
-
-          {/* Editor Body */}
-          {!loading && raw && (
-            <div className="space-y-4">
-              {viewMode === 'form' ? (
-                <div className="space-y-4 bg-zinc-900/50 border border-zinc-800 p-5 rounded-2xl shadow-sm">
-                  <div className="space-y-1.5">
-                    <label className="text-sm font-medium text-zinc-400">Knowledge Workspace Directory</label>
-                    <input
-                      type="text"
-                      value={formParams.knowledgeDir}
-                      onChange={(e) => handleUpdateFormParam('knowledge_dir', e.target.value)}
-                      placeholder="e.g. /home/ubuntu/.myclaw/workspace"
-                      className={inputCls}
-                    />
-                    <p className="text-xs text-zinc-500">The absolute path where memory and logs are located</p>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <label className="text-sm font-medium text-zinc-400">Daemon Listen Port</label>
-                    <input
-                      type="number"
-                      value={formParams.port}
-                      onChange={(e) => handleUpdateFormParam('port', e.target.value)}
-                      placeholder="e.g. 8080"
-                      className={inputCls}
-                    />
-                    <p className="text-xs text-zinc-500">Port number the backend daemon service runs on</p>
-                  </div>
-
-                  <div className="pt-2 border-t border-zinc-800 text-xs text-zinc-500 leading-normal flex items-center gap-1.5">
-                    <AlertTriangle size={12} className="text-amber-500 shrink-0" />
-                    Additional advanced parameters can be adjusted via the "TOML Source Code" mode.
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-1.5">
-                  <div className="flex justify-between items-center">
-                    <span className="text-xs text-zinc-500 font-mono">myclaw.toml</span>
-                  </div>
-                  <textarea
-                    value={draft}
-                    onChange={(e) => setDraft(e.target.value)}
-                    onKeyDown={handleKeyDown}
-                    rows={22}
-                    spellCheck={false}
-                    className="w-full rounded-2xl border border-zinc-800 bg-zinc-950 px-4 py-3.5 text-sm font-mono text-zinc-300 outline-none focus:border-zinc-700 focus:ring-1 focus:ring-zinc-700/30 resize-y transition-colors leading-relaxed"
-                  />
-                </div>
-              )}
-            </div>
-          )}
-
-          {!loading && status === 'connected' && !raw && !error && (
-            <EmptyState>Config file not accessible.</EmptyState>
-          )}
-          {!loading && status !== 'connected' && (
-            <EmptyState>Waiting for connection…</EmptyState>
-          )}
-
         </div>
+        {saved && <span className="text-sm text-emerald-400 font-medium animate-pulse">✓ Saved Successfully</span>}
       </div>
-    </div>
+
+      {error && <ErrorBanner message={error} />}
+      {loading && <LoadingRow label="Loading configurations…" />}
+
+      {/* Configuration Metadata Blocks */}
+      {!loading && meta && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+          <div className={`${panelCls} px-4 py-3.5 space-y-1`}>
+            <div className="text-zinc-500 font-medium flex items-center gap-1 text-xs">
+              <Globe size={12} /> Loaded Tools
+            </div>
+            <div className="text-zinc-200 font-semibold font-mono">{meta.tool_count} builtins</div>
+          </div>
+          <div className={`${panelCls} px-4 py-3.5 space-y-1 min-w-0`}>
+            <div className="text-zinc-500 font-medium flex items-center gap-1 text-xs">
+              <FileText size={12} /> Config File Path
+            </div>
+            <div className="text-zinc-300 font-mono text-xs truncate" title={meta.config_path ?? ''}>
+              {meta.config_path ?? '—'}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* View Switcher Tabs */}
+      {!loading && raw && (
+        <div className="flex bg-zinc-950 border border-zinc-800 rounded-xl p-0.5 self-start text-sm max-w-fit">
+          <button
+            onClick={() => setViewMode('form')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${viewMode === 'form' ? 'bg-zinc-900 text-zinc-100 font-medium' : 'text-zinc-500 hover:text-zinc-300'}`}
+          >
+            <Settings size={12} />
+            Parameters UI
+          </button>
+          <button
+            onClick={() => setViewMode('code')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors ${viewMode === 'code' ? 'bg-zinc-900 text-zinc-100 font-medium' : 'text-zinc-500 hover:text-zinc-300'}`}
+          >
+            <Code size={12} />
+            TOML Source Code
+          </button>
+        </div>
+      )}
+
+      {/* Editor Body */}
+      {!loading && raw && (
+        <div className="space-y-4">
+          {viewMode === 'form' ? (
+            <div className={`space-y-4 ${panelCls} p-5`}>
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium text-zinc-400">Knowledge Workspace Directory</label>
+                <input
+                  type="text"
+                  value={formParams.knowledgeDir}
+                  onChange={(e) => handleUpdateFormParam('knowledge_dir', e.target.value)}
+                  placeholder="e.g. /home/ubuntu/.myclaw/workspace"
+                  className={inputCls}
+                />
+                <p className="text-xs text-zinc-500">The absolute path where memory and logs are located</p>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium text-zinc-400">Daemon Listen Port</label>
+                <input
+                  type="number"
+                  value={formParams.port}
+                  onChange={(e) => handleUpdateFormParam('port', e.target.value)}
+                  placeholder="e.g. 8080"
+                  className={inputCls}
+                />
+                <p className="text-xs text-zinc-500">Port number the backend daemon service runs on</p>
+              </div>
+
+              <div className="pt-2 border-t border-zinc-800 text-xs text-zinc-500 leading-normal flex items-center gap-1.5">
+                <AlertTriangle size={12} className="text-amber-500 shrink-0" />
+                Additional advanced parameters can be adjusted via the "TOML Source Code" mode.
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              <div className="flex justify-between items-center">
+                <span className="text-xs text-zinc-500 font-mono">myclaw.toml</span>
+              </div>
+              <textarea
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={handleKeyDown}
+                rows={22}
+                spellCheck={false}
+                className="w-full rounded-2xl border border-zinc-800 bg-zinc-950 px-4 py-3.5 text-sm font-mono text-zinc-300 outline-none focus:border-zinc-700 focus:ring-1 focus:ring-zinc-700/30 resize-y transition-colors leading-relaxed"
+              />
+            </div>
+          )}
+        </div>
+      )}
+
+      {!loading && status === 'connected' && !raw && !error && (
+        <EmptyState>Config file not accessible.</EmptyState>
+      )}
+      {!loading && status !== 'connected' && (
+        <EmptyState>Waiting for connection…</EmptyState>
+      )}
+    </PageShell>
   )
 }

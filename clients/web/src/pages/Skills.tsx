@@ -1,10 +1,10 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
-import { Sparkles, Search, Loader2, Plus } from 'lucide-react'
+import { Sparkles, Loader2, Plus } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useToast } from '../components/Toast'
 import {
-  ErrorBanner, EmptyState, SkeletonCards, PageHeader,
-  btnPrimary, searchInputCls, panelCls, cardHoverCls,
+  ErrorBanner, EmptyState, SkeletonCards, PageHeader, PageShell, SearchField,
+  btnPrimary, panelCls, cardHoverCls,
 } from '../components/PageLayout'
 import SkillsViewer from '../components/SkillsViewer'
 import SkillsEditor from '../components/SkillsEditor'
@@ -138,115 +138,100 @@ export default function Skills() {
   // ── Edit / New mode ──
   if (view.mode === 'edit' || view.mode === 'new') {
     return (
-      <div className="flex flex-col h-full bg-zinc-950">
-        <div className="flex-1 overflow-y-auto">
-          <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4 page-enter">
-            <button onClick={backToList} className="flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-300 transition-colors mb-2">
-              ← Back to Skills
-            </button>
-            {error && <ErrorBanner message={error} />}
-            <SkillsEditor
-              initial={view.mode === 'new' ? { name: '', content: '' } : { name: view.name, content: view.content }}
-              onSave={handleSave}
-              onCancel={() => view.mode === 'new' ? backToList() : setView({ mode: 'view', name: view.name, content: view.content })}
-              saving={saving}
-            />
-          </div>
-        </div>
-      </div>
+      <PageShell>
+        <button onClick={backToList} className="flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-300 transition-colors">
+          ← Back to Skills
+        </button>
+        {error && <ErrorBanner message={error} />}
+        <SkillsEditor
+          initial={view.mode === 'new' ? { name: '', content: '' } : { name: view.name, content: view.content }}
+          onSave={handleSave}
+          onCancel={() => view.mode === 'new' ? backToList() : setView({ mode: 'view', name: view.name, content: view.content })}
+          saving={saving}
+        />
+      </PageShell>
     )
   }
 
   // ── List mode ──
   return (
-    <div className="flex flex-col h-full bg-zinc-950">
-      <div className="flex-1 overflow-y-auto">
-        <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4 page-enter">
-          <PageHeader
-            title="Skills Library"
-            subtitle={`${skills.length} loaded · Behavior templates guiding MyClaw's capabilities`}
-            icon={<Sparkles size={18} className="text-amber-400" />}
-            actions={
-              <button onClick={() => setView({ mode: 'new' })} disabled={status !== 'connected'} className={btnPrimary}>
-                <Plus size={13} /> New
-              </button>
-            }
-          />
+    <PageShell>
+      <PageHeader
+        title="Skills Library"
+        subtitle={`${skills.length} loaded · Behavior templates guiding MyClaw's capabilities`}
+        icon={<Sparkles size={18} className="text-amber-400" />}
+        actions={
+          <button onClick={() => setView({ mode: 'new' })} disabled={status !== 'connected'} className={btnPrimary}>
+            <Plus size={13} /> New
+          </button>
+        }
+      />
 
-          {skills.length > 0 && (
-            <div className="relative">
-              <span className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
-                <Search size={14} className="text-zinc-500" />
-              </span>
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search skills by name, description, or keyword…"
-                className={searchInputCls}
-              />
-            </div>
-          )}
+      {skills.length > 0 && (
+        <SearchField
+          value={searchQuery}
+          onChange={setSearchQuery}
+          placeholder="Search skills by name, description, or keyword…"
+        />
+      )}
 
-          {error && <ErrorBanner message={error} />}
-          {loading && <SkeletonCards count={6} cols />}
-          {!loading && status !== 'connected' && (
-            <EmptyState icon={<Sparkles size={28} />}>Waiting for connection…</EmptyState>
-          )}
-          {!loading && status === 'connected' && skills.length === 0 && (
-            <EmptyState
-              icon={<Sparkles size={28} />}
-              action={
-                <button onClick={() => setView({ mode: 'new' })} disabled={status !== 'connected'} className={btnPrimary}>
-                  <Plus size={13} /> New skill
-                </button>
-              }
+      {error && <ErrorBanner message={error} />}
+      {loading && <SkeletonCards count={6} cols />}
+      {!loading && status !== 'connected' && (
+        <EmptyState icon={<Sparkles size={28} />}>Waiting for connection…</EmptyState>
+      )}
+      {!loading && status === 'connected' && skills.length === 0 && (
+        <EmptyState
+          icon={<Sparkles size={28} />}
+          action={
+            <button onClick={() => setView({ mode: 'new' })} disabled={status !== 'connected'} className={btnPrimary}>
+              <Plus size={13} /> New skill
+            </button>
+          }
+        >
+          No skills loaded. Add SKILL.md files under workspace/skills/.
+        </EmptyState>
+      )}
+      {!loading && status === 'connected' && skills.length > 0 && filteredSkills.length === 0 && (
+        <EmptyState
+          icon={<Sparkles size={28} />}
+          action={
+            <button onClick={() => setSearchQuery('')} className={btnPrimary}>
+              Clear filter
+            </button>
+          }
+        >
+          No skills match “{searchQuery}”
+        </EmptyState>
+      )}
+      {!loading && filteredSkills.length > 0 && (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+          {filteredSkills.map((s) => (
+            <button
+              key={s.name}
+              onClick={() => openFile(s.name)}
+              className={`w-full text-left ${panelCls} ${cardHoverCls} px-4 py-3.5 h-full flex flex-col gap-2 hover:-translate-y-0.5 hover:shadow-md transition-all`}
             >
-              No skills loaded. Add SKILL.md files under workspace/skills/.
-            </EmptyState>
-          )}
-          {!loading && status === 'connected' && skills.length > 0 && filteredSkills.length === 0 && (
-            <EmptyState
-              icon={<Sparkles size={28} />}
-              action={
-                <button onClick={() => setSearchQuery('')} className={btnPrimary}>
-                  Clear filter
-                </button>
-              }
-            >
-              No skills match “{searchQuery}”
-            </EmptyState>
-          )}
-          {!loading && filteredSkills.length > 0 && (
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-              {filteredSkills.map((s) => (
-                <button
-                  key={s.name}
-                  onClick={() => openFile(s.name)}
-                  className={`w-full text-left ${panelCls} ${cardHoverCls} px-4 py-3.5 h-full flex flex-col gap-2 hover:-translate-y-0.5 hover:shadow-md transition-all`}
-                >
-                  <div className="flex items-center gap-2">
-                    <Sparkles size={14} className="text-amber-400 shrink-0" />
-                    <span className="font-mono text-sm font-medium text-zinc-200 truncate">{s.name}</span>
-                  </div>
-                  {s.description && (
-                    <p className="text-sm text-zinc-400 leading-relaxed line-clamp-3">{s.description}</p>
-                  )}
-                  {s.keywords?.length > 0 && (
-                    <div className="mt-auto flex flex-wrap gap-1.5">
-                      {s.keywords.map((k) => (
-                        <span key={k} className="px-2 py-0.5 rounded-md bg-zinc-800 text-xs text-zinc-500 border border-zinc-800">
-                          {k}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </button>
-              ))}
-            </div>
-          )}
+              <div className="flex items-center gap-2">
+                <Sparkles size={14} className="text-amber-400 shrink-0" />
+                <span className="font-mono text-sm font-medium text-zinc-200 truncate">{s.name}</span>
+              </div>
+              {s.description && (
+                <p className="text-sm text-zinc-400 leading-relaxed line-clamp-3">{s.description}</p>
+              )}
+              {s.keywords?.length > 0 && (
+                <div className="mt-auto flex flex-wrap gap-1.5">
+                  {s.keywords.map((k) => (
+                    <span key={k} className="px-2 py-0.5 rounded-md bg-zinc-800 text-xs text-zinc-500 border border-zinc-800">
+                      {k}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </button>
+          ))}
         </div>
-      </div>
-    </div>
+      )}
+    </PageShell>
   )
 }

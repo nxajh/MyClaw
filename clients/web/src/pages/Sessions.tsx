@@ -1,12 +1,12 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Plus, Pencil, Trash2, Check, X, Loader2, Search, Pin, Layers } from 'lucide-react'
+import { Plus, Pencil, Trash2, Check, X, Loader2, Pin, Layers } from 'lucide-react'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useApi } from '../lib/api'
 import { useToast } from '../components/Toast'
 import {
-  ErrorBanner, EmptyState, SkeletonCards, PageHeader,
-  inputCls, btnPrimary, searchInputCls, panelCls, cardHoverCls,
+  ErrorBanner, EmptyState, SkeletonCards, PageHeader, PageShell, SearchField,
+  inputCls, btnPrimary, panelCls, cardHoverCls,
 } from '../components/PageLayout'
 
 interface Session {
@@ -235,113 +235,104 @@ export default function Sessions() {
   }, [sessions, searchQuery, pinnedIds])
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="flex-1 overflow-y-auto">
-        <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4 page-enter">
-          <PageHeader
-            title="Sessions"
-            subtitle={`${sessions.length} sessions · Switch, pin, rename, or create conversations`}
-            icon={<Layers size={18} className="text-zinc-500" />}
-            actions={
-              <>
-                <input
-                  value={newName}
-                  onChange={(e) => setNewName(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
-                  placeholder="New session name…"
-                  disabled={status !== 'connected'}
-                  className={inputCls}
-                />
-                <button
-                  onClick={handleCreate}
-                  disabled={status !== 'connected' || !newName.trim() || creating}
-                  className={btnPrimary}
-                >
-                  {creating ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
-                  New
-                </button>
-              </>
-            }
-          />
-
-          {error && <ErrorBanner message={error} />}
-          {loading && <SkeletonCards count={5} />}
-          {!loading && status !== 'connected' && (
-            <EmptyState icon={<Layers size={28} />}>Waiting for connection…</EmptyState>
-          )}
-          {!loading && status === 'connected' && sessions.length === 0 && (
-            <EmptyState
-              icon={<Layers size={28} />}
-              action={
-                <button
-                  onClick={async () => {
-                    if (status !== 'connected' || creating) return
-                    setCreating(true)
-                    setError(null)
-                    try {
-                      await request('sessions.create', { name: newName.trim() || 'New chat' })
-                      toast('Session created', 'success')
-                      setNewName('')
-                      await fetchSessions()
-                      navigate('/')
-                    } catch (err) {
-                      setError(err instanceof Error ? err.message : String(err))
-                      toast('Failed to create session', 'error')
-                    } finally {
-                      setCreating(false)
-                    }
-                  }}
-                  className={btnPrimary}
-                  disabled={status !== 'connected' || creating}
-                >
-                  {creating ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
-                  Create first session
-                </button>
-              }
+    <PageShell>
+      <PageHeader
+        title="Sessions"
+        subtitle={`${sessions.length} sessions · Switch, pin, rename, or create conversations`}
+        icon={<Layers size={18} className="text-indigo-400" />}
+        actions={
+          <>
+            <input
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
+              placeholder="New session name…"
+              disabled={status !== 'connected'}
+              className={inputCls}
+            />
+            <button
+              onClick={handleCreate}
+              disabled={status !== 'connected' || !newName.trim() || creating}
+              className={btnPrimary}
             >
-              No sessions yet. Create one to start chatting.
-            </EmptyState>
-          )}
-          {!loading && sessions.length > 0 && (
-            <>
-              <div className="relative">
-                <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none" />
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search sessions…"
-                  className={searchInputCls}
-                />
-              </div>
-              <div className="space-y-1.5">
-                {filteredSessions.length === 0 ? (
-                  <EmptyState
-                    action={
-                      <button onClick={() => setSearchQuery('')} className={btnPrimary}>
-                        Clear filter
-                      </button>
-                    }
-                  >
-                    No sessions match “{searchQuery}”
-                  </EmptyState>
-                ) : filteredSessions.map((s) => (
-                  <SessionRow
-                    key={s.id}
-                    session={s}
-                    disabled={status !== 'connected'}
-                    onSwitch={handleSwitch}
-                    onRename={handleRename}
-                    onDelete={handleDelete}
-                    onTogglePin={togglePin}
-                    pinned={pinnedIds.includes(s.id)}
-                  />
-                ))}
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-    </div>
+              {creating ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
+              New
+            </button>
+          </>
+        }
+      />
+
+      {error && <ErrorBanner message={error} />}
+      {loading && <SkeletonCards count={5} />}
+      {!loading && status !== 'connected' && (
+        <EmptyState icon={<Layers size={28} />}>Waiting for connection…</EmptyState>
+      )}
+      {!loading && status === 'connected' && sessions.length === 0 && (
+        <EmptyState
+          icon={<Layers size={28} />}
+          action={
+            <button
+              onClick={async () => {
+                if (status !== 'connected' || creating) return
+                setCreating(true)
+                setError(null)
+                try {
+                  await request('sessions.create', { name: newName.trim() || 'New chat' })
+                  toast('Session created', 'success')
+                  setNewName('')
+                  await fetchSessions()
+                  navigate('/')
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : String(err))
+                  toast('Failed to create session', 'error')
+                } finally {
+                  setCreating(false)
+                }
+              }}
+              className={btnPrimary}
+              disabled={status !== 'connected' || creating}
+            >
+              {creating ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
+              Create first session
+            </button>
+          }
+        >
+          No sessions yet. Create one to start chatting.
+        </EmptyState>
+      )}
+      {!loading && sessions.length > 0 && (
+        <>
+          <SearchField
+            value={searchQuery}
+            onChange={setSearchQuery}
+            placeholder="Search sessions…"
+          />
+          <div className="space-y-1.5">
+            {filteredSessions.length === 0 ? (
+              <EmptyState
+                action={
+                  <button onClick={() => setSearchQuery('')} className={btnPrimary}>
+                    Clear filter
+                  </button>
+                }
+              >
+                No sessions match “{searchQuery}”
+              </EmptyState>
+            ) : filteredSessions.map((s) => (
+              <SessionRow
+                key={s.id}
+                session={s}
+                disabled={status !== 'connected'}
+                onSwitch={handleSwitch}
+                onRename={handleRename}
+                onDelete={handleDelete}
+                onTogglePin={togglePin}
+                pinned={pinnedIds.includes(s.id)}
+              />
+            ))}
+          </div>
+        </>
+      )}
+    </PageShell>
   )
 }

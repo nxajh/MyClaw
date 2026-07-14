@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { Loader2 } from 'lucide-react'
+import { Loader2, Search } from 'lucide-react'
 
 // ── Common UI atoms ──────────────────────────────────────────────────────────
 
@@ -60,6 +60,19 @@ export function EmptyState({
   )
 }
 
+/** Full-page scroll shell used by management views */
+export function PageShell({ children, className = '' }: { children: ReactNode; className?: string }) {
+  return (
+    <div className={`flex flex-col h-full bg-zinc-950 ${className}`}>
+      <div className="flex-1 overflow-y-auto">
+        <div className="px-3 sm:px-8 py-4 sm:py-6 space-y-4 page-enter">
+          {children}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /** Sticky page header for management views */
 export function PageHeader({
   title,
@@ -88,6 +101,32 @@ export function PageHeader({
   )
 }
 
+/** Shared search field with leading icon */
+export function SearchField({
+  value,
+  onChange,
+  placeholder = 'Search…',
+  className = '',
+}: {
+  value: string
+  onChange: (value: string) => void
+  placeholder?: string
+  className?: string
+}) {
+  return (
+    <div className={`relative ${className}`}>
+      <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none" />
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className={searchInputCls}
+      />
+    </div>
+  )
+}
+
 // ── Shared surface / input / button styles ───────────────────────────────────
 
 /** L1 panel surface */
@@ -97,6 +136,10 @@ export const panelCls =
 /** L1 interactive card hover */
 export const cardHoverCls =
   'hover:bg-zinc-800/40 hover:border-zinc-700 transition-colors'
+
+/** Shared interactive list/card treatment */
+export const listItemCls =
+  `w-full text-left ${panelCls} ${cardHoverCls}`
 
 export const inputCls =
   'rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-2.5 text-sm text-zinc-100 placeholder-zinc-600 outline-none focus:border-zinc-700 focus:ring-1 focus:ring-zinc-700/40 transition-colors disabled:opacity-50 w-full'
