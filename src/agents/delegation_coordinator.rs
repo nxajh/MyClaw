@@ -33,6 +33,11 @@ use crate::agents::delegation::DelegationEvent;
 use crate::agents::session::{BackendPersistHook, PersistHook, SessionManager};
 use crate::config::sub_agent::AgentIsolation;
 
+/// Maximum wall-clock time a sub-agent may run before being killed.
+/// Prevents runaway loops or stuck provider calls from blocking the
+/// parent agent indefinitely.
+const SUB_AGENT_TIMEOUT_SECS: u64 = 300;
+
 /// Holds sub-agent configs and creates temporary `Agent::run` invocations
 /// for delegation.
 ///
@@ -111,6 +116,40 @@ impl DelegationCoordinator {
         self.running.iter().map(|e| e.key().clone()).collect()
     }
 
+    /// Remove orphaned worktree directories left behind by crashed or
+    /// timed-out sub-agent runs. Called once at daemon startup.
+    pub fn cleanup_stale_worktrees(&self) {
+        let entries = match std::fs::read_dir(&self.worktrees_root) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        let mut cleaned = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // Each worktree dir is named like `coder_<8hex>`.
+            // `git worktree remove --force` also removes stale git worktree metadata.
+            let out = std::process::Command::new("git")
+                .args(["worktree", "remove", "--force"])
+                .arg(&path)
+                .current_dir(&self.worktrees_root)
+                .output();
+            let ok = out.as_ref().is_ok_and(|o| o.status.success());
+            if !ok {
+                // Fallback: remove directory directly if git doesn't know about it.
+                let _ = std::fs::remove_dir_all(&path);
+            }
+            cleaned += 1;
+        }
+        // Also prune stale git worktree metadata.
+        let _ = std::process::Command::new("git")
+            .args(["worktree", "prune"])
+            .current_dir(&self.worktrees_root)
+            .output();
+        if cleaned > 0 {
+            tracing::info!(count = cleaned, "cleaned up stale sub-agent worktrees");
+        }
+    }
+
     /// Cancel a running background task by id.
     pub fn cancel(&self, task_id: &str) -> bool {
         if let Some((_, handle)) = self.running.remove(task_id) {
@@ -176,6 +215,16 @@ impl DelegationCoordinator {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'a>>
     {
         Box::pin(async move {
+            // Recursion depth guard: if the parent session is itself a sub-session,
+            // this would be a level-2+ nesting.
+            if let Some(parent_session) = self.session_manager.get_by_id(parent_session_id) {
+                if parent_session.parent_session_id.is_some() {
+                    return Err(anyhow::anyhow!(
+                        "maximum delegation depth exceeded: sub-agents cannot spawn further sub-agents"
+                    ));
+                }
+            }
+
             let agent = self.find_agent(agent_name).ok_or_else(|| {
                 let available = self.configs.names();
                 anyhow::anyhow!(
@@ -279,6 +328,10 @@ impl DelegationCoordinator {
             let sub_ctx = self
                 .session_manager
                 .create_sub_session_context(parent_session_id, &config.name)?;
+            let sub_session_id = {
+                let session = sub_ctx.session.lock().await;
+                session.id.clone()
+            };
 
             {
                 let mut session = sub_ctx.session.lock().await;
@@ -311,10 +364,27 @@ impl DelegationCoordinator {
             };
 
             tracing::debug!(agent = %config.name, "sub-agent started");
-            let result = sub_ctx
-                .process_turn(synthetic, None, runtime)
-                .await
-                .map(|tr| tr.text);
+            let turn_future = sub_ctx.process_turn(synthetic, None, runtime);
+            let result = match tokio::time::timeout(
+                std::time::Duration::from_secs(SUB_AGENT_TIMEOUT_SECS),
+                turn_future,
+            )
+            .await
+            {
+                Ok(r) => r.map(|tr| tr.text),
+                Err(_) => {
+                    tracing::warn!(
+                        agent = %config.name,
+                        timeout_secs = SUB_AGENT_TIMEOUT_SECS,
+                        "sub-agent timed out"
+                    );
+                    Err(anyhow::anyhow!(
+                        "sub-agent '{}' timed out after {}s",
+                        config.name,
+                        SUB_AGENT_TIMEOUT_SECS
+                    ))
+                }
+            };
 
             match &result {
                 Ok(text) => {
@@ -354,18 +424,35 @@ impl DelegationCoordinator {
 
                             match merge {
                                 Ok(m) if !m.status.success() => {
+                                    // Capture conflicted files for diagnostics.
+                                    let conflicts = std::process::Command::new("git")
+                                        .args(["diff", "--name-only", "--diff-filter=U"])
+                                        .output();
+                                    let conflict_files = match conflicts {
+                                        Ok(c) => String::from_utf8_lossy(&c.stdout)
+                                            .trim()
+                                            .to_string(),
+                                        Err(_) => String::new(),
+                                    };
                                     tracing::warn!(
                                         branch = %branch_name,
                                         stderr = %String::from_utf8_lossy(&m.stderr),
+                                        conflict_files = %conflict_files,
                                         "merge conflict — aborting merge, worktree preserved"
                                     );
                                     let _ = std::process::Command::new("git")
                                         .args(["merge", "--abort"])
                                         .output();
+                                    let detail = if conflict_files.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!("\nConflicted files:\n{}", conflict_files)
+                                    };
                                     return Err(anyhow::anyhow!(
-                                        "sub-agent '{}' completed but merge failed (conflict). Worktree preserved at {}",
+                                        "sub-agent '{}' completed but merge failed (conflict). Worktree preserved at {}.{}",
                                         config.name,
-                                        worktree_path.display()
+                                        worktree_path.display(),
+                                        detail
                                     ));
                                 }
                                 Err(e) => {
@@ -388,8 +475,9 @@ impl DelegationCoordinator {
                 }
             }
 
-            // Cleanup worktree + branch (only on success).
-            if cleanup_worktree.is_some() && result.is_ok() {
+            // Cleanup worktree + branch on any exit path.
+            // (Merge conflicts already returned early above, preserving the worktree.)
+            if cleanup_worktree.is_some() {
                 let _ = std::process::Command::new("git")
                     .args([
                         "worktree",
@@ -410,6 +498,15 @@ impl DelegationCoordinator {
             // `incomplete_turn` via the standard turn-end persistence path; the
             // session is then no longer flagged as needing recovery.
 
+            // GC: delete the sub-session for sync delegations. The result is
+            // already captured in `result` and returned to the parent's tool
+            // call, so the sub-session history is no longer needed.
+            if result.is_ok() {
+                if let Err(e) = self.session_manager.backend().delete_session(&sub_session_id) {
+                    tracing::debug!(sub_session = %sub_session_id, err = %e, "failed to GC sub-session");
+                }
+            }
+
             result
         }) // end Box::pin
     }
@@ -417,7 +514,7 @@ impl DelegationCoordinator {
     /// Delegate a task asynchronously — spawns the sub-agent in a
     /// background tokio task whose JoinHandle is stashed in `running`
     /// so `/agent_list` and `/agent_kill` can see it.
-    pub fn delegate_async(
+    pub fn spawn_delegate_async(
         &self,
         agent_name: &str,
         task: &str,
@@ -530,6 +627,19 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
             reply_target.as_deref(),
         )
         .await
+    }
+
+    fn delegate_async(
+        &self,
+        agent_name: &str,
+        task: &str,
+        parent_session: &super::session::Session,
+    ) -> anyhow::Result<String> {
+        let reply_target = parent_session
+            .reply_target()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        self.spawn_delegate_async(agent_name, task, &parent_session.id, &reply_target)
     }
 
     fn list_available(&self) -> Vec<(String, Option<String>)> {

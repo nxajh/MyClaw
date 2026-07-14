@@ -968,6 +968,9 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         );
         let delegator_arc = Arc::new(delegator);
 
+        // Clean up stale worktrees from crashed/timed-out sub-agent runs.
+        delegator_arc.cleanup_stale_worktrees();
+
         // Build agent_delegate tool. H47: now wired through `AgentDelegator`
         // (the legacy `TaskDelegator` trait has been removed).
         let delegate_tool = crate::tools::AgentDelegateTool::new(

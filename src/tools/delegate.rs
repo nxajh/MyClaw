@@ -20,11 +20,14 @@ use crate::providers::{Tool, ToolResult};
 /// The agent_delegate tool — injectable delegator for runtime dispatch.
 pub struct AgentDelegateTool {
     delegator: Arc<dyn AgentDelegator>,
+    /// Cached list of available sub-agents `(name, description)`.
+    agents: Vec<(String, Option<String>)>,
 }
 
 impl AgentDelegateTool {
     pub fn new(delegator: Arc<dyn AgentDelegator>) -> Self {
-        Self { delegator }
+        let agents = delegator.list_available();
+        Self { delegator, agents }
     }
 }
 
@@ -42,12 +45,34 @@ impl Tool for AgentDelegateTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        json!({
+        let agent_names: Vec<&str> = self.agents.iter().map(|(n, _)| n.as_str()).collect();
+        let agent_descs: Vec<String> = self
+            .agents
+            .iter()
+            .map(|(n, d)| {
+                format!(
+                    "- {}: {}",
+                    n,
+                    d.as_deref().unwrap_or("No description")
+                )
+            })
+            .collect();
+
+        let agent_description = if agent_names.is_empty() {
+            "Name of the sub-agent to delegate to.".to_string()
+        } else {
+            format!(
+                "Name of the sub-agent to delegate to. Available agents:\n{}",
+                agent_descs.join("\n")
+            )
+        };
+
+        let mut schema = json!({
             "type": "object",
             "properties": {
                 "agent": {
                     "type": "string",
-                    "description": "Name of the sub-agent to delegate to."
+                    "description": agent_description
                 },
                 "task": {
                     "type": "string",
@@ -60,7 +85,13 @@ impl Tool for AgentDelegateTool {
                 }
             },
             "required": ["agent", "task"]
-        })
+        });
+
+        if !agent_names.is_empty() {
+            schema["properties"]["agent"]["enum"] = json!(agent_names);
+        }
+
+        schema
     }
 
     fn max_output_tokens(&self) -> usize {
@@ -78,20 +109,42 @@ impl Tool for AgentDelegateTool {
         let task = args["task"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'task' is required"))?;
+        let mode = args["mode"].as_str().unwrap_or("sync");
 
-        tracing::info!(agent = %agent_name, task_len = task.len(), "delegating task to sub-agent");
+        tracing::info!(agent = %agent_name, task_len = task.len(), mode = %mode, "delegating task to sub-agent");
 
-        match self.delegator.delegate(agent_name, task, session).await {
-            Ok(result) => Ok(ToolResult {
-                success: true,
-                output: result,
-                error: None,
-            }),
-            Err(e) => Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!("Sub-agent '{}' failed: {}", agent_name, e)),
-            }),
+        if mode == "async" {
+            match self.delegator.delegate_async(agent_name, task, session) {
+                Ok(task_id) => Ok(ToolResult {
+                    success: true,
+                    output: json!({
+                        "ok": true,
+                        "mode": "async",
+                        "task_id": task_id,
+                        "message": "Sub-agent spawned in background. Use agent_list to check status."
+                    })
+                    .to_string(),
+                    error: None,
+                }),
+                Err(e) => Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Failed to spawn sub-agent '{}': {}", agent_name, e)),
+                }),
+            }
+        } else {
+            match self.delegator.delegate(agent_name, task, session).await {
+                Ok(result) => Ok(ToolResult {
+                    success: true,
+                    output: result,
+                    error: None,
+                }),
+                Err(e) => Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Sub-agent '{}' failed: {}", agent_name, e)),
+                }),
+            }
         }
     }
 }

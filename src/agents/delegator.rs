@@ -27,6 +27,19 @@ pub trait AgentDelegator: Send + Sync {
         parent_session: &Session,
     ) -> anyhow::Result<String>;
 
+    /// Spawn the sub-agent in the background and return a `task_id` immediately.
+    ///
+    /// Completion or failure is reported asynchronously via `DelegationEvent`.
+    /// The default implementation returns an error (sync-only delegators).
+    fn delegate_async(
+        &self,
+        _agent_name: &str,
+        _task: &str,
+        _parent_session: &Session,
+    ) -> anyhow::Result<String> {
+        Err(anyhow::anyhow!("async delegation not supported"))
+    }
+
     /// List sub-agents the `DelegateTool` may target. Used to construct the
     /// tool's JSON schema (the `agent` parameter's enum).
     ///
