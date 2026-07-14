@@ -185,11 +185,13 @@ export function EntityListItem({
             <div className="shrink-0 text-xs text-zinc-500 font-mono pt-0.5">{meta}</div>
           )}
         </div>
-        {density === 'comfortable' && description && (
-          <p className="text-sm text-zinc-400 leading-relaxed line-clamp-2">{description}</p>
+        {density === 'comfortable' && (
+          <p className="text-sm text-zinc-400 leading-relaxed line-clamp-2 min-h-[2.875rem]">
+            {description ?? '\u00A0'}
+          </p>
         )}
-        {density === 'comfortable' && tags && (
-          <div className="flex flex-wrap gap-1.5 pt-0.5">{tags}</div>
+        {density === 'comfortable' && (
+          <div className="flex flex-wrap gap-1.5 pt-0.5 min-h-[1.5rem]">{tags}</div>
         )}
       </div>
       {actions && (
@@ -200,7 +202,7 @@ export function EntityListItem({
     </>
   )
 
-  const cls = `group flex items-start gap-3 rounded-2xl border px-4 ${density === 'dense' ? 'py-3' : 'py-3.5 min-h-[72px]'} w-full text-left transition-colors ${base} ${interactive ? 'cursor-pointer' : ''} ${className}`
+  const cls = `group flex items-start gap-3 rounded-2xl border px-4 ${density === 'dense' ? 'py-3' : 'py-3.5'} w-full text-left transition-colors ${base} ${interactive ? 'cursor-pointer' : ''} ${className}`
 
   if (interactive) {
     return (

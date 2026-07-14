@@ -149,7 +149,7 @@ export default function Tools() {
               <Cpu size={18} className="text-orange-400" />
               Tools
             </h1>
-            <p className="text-sm text-zinc-500 mt-0.5">{tools.length} registered</p>
+            <p className="text-sm text-zinc-500 mt-0.5">{tools.length} registered · MCP tools available for agent execution</p>
           </div>
         </div>
       </div>
