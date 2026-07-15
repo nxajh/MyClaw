@@ -400,9 +400,33 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
 
         // ── Search ────────────────────────────────────────────────────
         if let Some(ref sec) = provider_cfg.search {
-            let api_key = provider_cfg.effective_api_key(sec.api_key.as_deref());
-            let api_key =
-                api_key.with_context(|| format!("no API key for '{}' search", provider_key))?;
+            let api_keys = provider_cfg.effective_api_keys(sec.api_key.as_deref());
+            anyhow::ensure!(
+                !api_keys.is_empty(),
+                "no API key for '{}' search",
+                provider_key
+            );
+
+            let shared_key = SharedApiKey::new(api_keys[0].clone());
+
+            let pool = if api_keys.len() > 1 {
+                let p = CredentialPool::new(
+                    provider_key.clone(),
+                    api_keys.clone(),
+                    provider_cfg.rotation_strategy,
+                );
+                let shared = SharedCredentialPool::new(p);
+                tracing::info!(
+                    provider = %provider_key,
+                    key_count = api_keys.len(),
+                    strategy = ?provider_cfg.rotation_strategy,
+                    "multi-key credential pool created for search"
+                );
+                Some(shared)
+            } else {
+                None
+            };
+
             let auth_style = provider_cfg.effective_auth_style(sec.auth_style);
             let user_agent = sec.user_agent.clone();
 
@@ -411,13 +435,17 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
                     provider_key: provider_key.clone(),
                     provider_id: provider_id.clone(),
                     base_url: sec.base_url.clone(),
-                    api_key: api_key.clone(),
+                    api_key: shared_key.clone(),
                     auth_style: auth_style.into(),
                     user_agent: user_agent.clone(),
                 };
 
                 if let Some(srch) = factory.build_search_provider(request) {
                     registry.register_search(srch, model_id.clone());
+
+                    if let Some(ref pool) = pool {
+                        registry.attach_credential_pool(model_id, pool.clone(), shared_key.clone());
+                    }
                 }
             }
         }

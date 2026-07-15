@@ -13,7 +13,7 @@ use crate::providers::SharedCredentialPool;
 use crate::providers::capability_chat::ChatProvider;
 use crate::providers::capability_embedding::EmbeddingProvider;
 use crate::providers::image::ImageGenerationProvider;
-use crate::providers::provider_registry::ProviderRegistry;
+use crate::providers::provider_registry::{ProviderRegistry, SearchFallbackEntry};
 use crate::providers::search::SearchProvider;
 use crate::providers::stt::SttProvider;
 use crate::providers::tts::TtsProvider;
@@ -577,9 +577,7 @@ impl ProviderRegistry for Registry {
         self.route_capability(Capability::Search, &self.search_providers)
     }
 
-    fn get_search_fallback_chain(
-        &self,
-    ) -> anyhow::Result<Vec<(Arc<dyn SearchProvider>, String, String)>> {
+    fn get_search_fallback_chain(&self) -> anyhow::Result<Vec<SearchFallbackEntry>> {
         let entry = self
             .routing
             .get(Capability::Search)
@@ -592,7 +590,20 @@ impl ProviderRegistry for Registry {
                     .find_provider_by_model(model_id)
                     .map(|(name, _)| name.to_string())
                     .unwrap_or_else(|_| "unknown".to_string());
-                chain.push((Arc::clone(provider), model_id.clone(), provider_name));
+
+                let (pool, shared_key) = self
+                    .credential_pools
+                    .get(model_id)
+                    .map(|(p, k)| (Some(p.clone()), Some(k.clone())))
+                    .unwrap_or((None, None));
+
+                chain.push(SearchFallbackEntry {
+                    provider: Arc::clone(provider),
+                    model_id: model_id.clone(),
+                    provider_name,
+                    credential_pool: pool,
+                    shared_api_key: shared_key,
+                });
             }
         }
 

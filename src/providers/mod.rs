@@ -29,11 +29,11 @@ pub use capability_embedding::{
 };
 pub use capability_tool::{Tool, ToolResult, ToolSource, ToolSpec};
 pub use error_class::{
-    ClassifiedError, ErrorCategory, FailoverReason, ProviderHttpError, RecoveryHints,
-    format_cooldown_zh, LONG_COOLDOWN_THRESHOLD,
+    ClassifiedError, ErrorCategory, FailoverReason, LONG_COOLDOWN_THRESHOLD, ProviderHttpError,
+    RecoveryHints, format_cooldown_zh,
 };
 pub use image::{ImageFormat, ImageGenerationProvider, ImageOutput, ImageRequest, ImageResponse};
-pub use provider_registry::{ProviderRegistry, ProviderSummary};
+pub use provider_registry::{ProviderRegistry, ProviderSummary, SearchFallbackEntry};
 pub use search::{SearchProvider, SearchRequest, SearchResult, SearchResults};
 pub use stt::{SttProvider, SttRequest, SttSegment, TranscriptionResponse};
 pub use tts::{TtsFormat, TtsProvider, TtsRequest, TtsVoice};

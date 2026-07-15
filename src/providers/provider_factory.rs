@@ -69,7 +69,7 @@ pub struct BuildSearchProviderRequest {
     pub provider_key: String,
     pub provider_id: ProviderId,
     pub base_url: String,
-    pub api_key: String,
+    pub api_key: SharedApiKey,
     pub auth_style: AuthStyle,
     pub user_agent: Option<String>,
 }

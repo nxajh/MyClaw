@@ -3,6 +3,7 @@
 use super::capability::{Capability, ChatModelConfig, Modality};
 use super::capability_chat::ChatProvider;
 use super::capability_embedding::EmbeddingProvider;
+use super::credential_pool::{SharedApiKey, SharedCredentialPool};
 use super::image::ImageGenerationProvider;
 use super::media::MediaPolicy;
 use super::search::SearchProvider;
@@ -10,6 +11,15 @@ use super::stt::SttProvider;
 use super::tts::TtsProvider;
 use super::video::VideoGenerationProvider;
 use std::sync::Arc;
+
+/// A single entry in the search fallback chain, with optional credential pool.
+pub struct SearchFallbackEntry {
+    pub provider: Arc<dyn SearchProvider>,
+    pub model_id: String,
+    pub provider_name: String,
+    pub credential_pool: Option<SharedCredentialPool>,
+    pub shared_api_key: Option<SharedApiKey>,
+}
 
 /// Summary of a provider's registered models and capabilities.
 #[derive(Debug, Clone)]
@@ -42,10 +52,7 @@ pub trait ProviderRegistry: Send + Sync {
     fn get_tts_provider(&self) -> anyhow::Result<(Arc<dyn TtsProvider>, String)>;
     fn get_video_provider(&self) -> anyhow::Result<(Arc<dyn VideoGenerationProvider>, String)>;
     fn get_search_provider(&self) -> anyhow::Result<(Arc<dyn SearchProvider>, String)>;
-    #[allow(clippy::type_complexity)]
-    fn get_search_fallback_chain(
-        &self,
-    ) -> anyhow::Result<Vec<(Arc<dyn SearchProvider>, String, String)>>;
+    fn get_search_fallback_chain(&self) -> anyhow::Result<Vec<SearchFallbackEntry>>;
     fn get_stt_provider(&self) -> anyhow::Result<(Arc<dyn SttProvider>, String)>;
 
     /// 获取 chat model 配置（含 input/output/pricing 等）

@@ -20,8 +20,8 @@ use crate::agents::{AgentRegistry, AgentRuntime, AskRouter, LoopBreaker, LoopBre
 use crate::channels::{Channel, ChannelInboundMessage, ChannelOutboundMessage, OutboundSendResult};
 use crate::providers::{
     Capability, ChatModelConfig, ChatProvider, EmbeddingProvider, ImageGenerationProvider,
-    ProviderRegistry, ProviderSummary, SearchProvider, SttProvider, TtsProvider,
-    VideoGenerationProvider,
+    ProviderRegistry, ProviderSummary, SearchFallbackEntry, SearchProvider, SttProvider,
+    TtsProvider, VideoGenerationProvider,
 };
 use tokio::sync::mpsc;
 
@@ -82,7 +82,7 @@ impl ProviderRegistry for NullRegistry {
     fn get_tts_provider(&self) -> anyhow::Result<(Arc<dyn TtsProvider>, String)> { anyhow::bail!("test stub") }
     fn get_video_provider(&self) -> anyhow::Result<(Arc<dyn VideoGenerationProvider>, String)> { anyhow::bail!("test stub") }
     fn get_search_provider(&self) -> anyhow::Result<(Arc<dyn SearchProvider>, String)> { anyhow::bail!("test stub") }
-    fn get_search_fallback_chain(&self) -> anyhow::Result<Vec<(Arc<dyn SearchProvider>, String, String)>> { anyhow::bail!("test stub") }
+    fn get_search_fallback_chain(&self) -> anyhow::Result<Vec<SearchFallbackEntry>> { anyhow::bail!("test stub") }
     fn get_stt_provider(&self) -> anyhow::Result<(Arc<dyn SttProvider>, String)> { anyhow::bail!("test stub") }
     fn get_chat_model_config(&self, _m: &str) -> anyhow::Result<&ChatModelConfig> { anyhow::bail!("test stub") }
     fn get_chat_provider_by_model(&self, _m: &str) -> Option<(Arc<dyn ChatProvider>, String)> { None }

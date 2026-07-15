@@ -17,6 +17,7 @@
 //!
 //!   [providers.google.search.models."gemini-2.0-flash"]
 
+use crate::providers::credential_pool::SharedApiKey;
 use crate::providers::http::build_reqwest_client;
 use crate::providers::{SearchProvider, SearchRequest, SearchResult, SearchResults};
 
@@ -26,19 +27,19 @@ const DEFAULT_MODEL: &str = "gemini-2.0-flash";
 #[derive(Clone)]
 pub struct GoogleProvider {
     base_url: String,
-    api_key: String,
+    api_key: SharedApiKey,
     client: reqwest::Client,
 }
 
 impl GoogleProvider {
-    pub fn new(api_key: String) -> Self {
+    pub fn new(api_key: impl Into<SharedApiKey>) -> Self {
         Self::with_base_url(api_key, DEFAULT_BASE_URL.to_string())
     }
 
-    pub fn with_base_url(api_key: String, base_url: String) -> Self {
+    pub fn with_base_url(api_key: impl Into<SharedApiKey>, base_url: String) -> Self {
         Self {
             base_url,
-            api_key,
+            api_key: api_key.into(),
             client: build_reqwest_client(),
         }
     }
@@ -123,7 +124,7 @@ impl SearchProvider for GoogleProvider {
             "{}/v1beta/models/{}:generateContent?key={}",
             self.base_url.trim_end_matches('/'),
             model,
-            self.api_key,
+            self.api_key.get(),
         );
 
         let body = serde_json::json!({

@@ -6,8 +6,10 @@
 //! retryable errors are skipped until their cooldown expires.
 
 use crate::providers::search::SearchRequest;
-use crate::providers::{ProviderRegistry, Tool, ToolResult};
-use crate::tools::search_cooldown::{SearchProviderCooldown, parse_search_cooldown};
+use crate::providers::{ClassifiedError, ProviderRegistry, Tool, ToolResult};
+use crate::tools::search_cooldown::{
+    SearchProviderCooldown, parse_http_error, parse_search_cooldown,
+};
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
@@ -86,11 +88,11 @@ impl Tool for WebSearchTool {
         // Try each provider in the fallback chain.
         let mut last_error = None;
         let mut skipped = 0;
-        for (provider, model_id, provider_name) in &chain {
+        for entry in &chain {
             // Skip providers that are still in cooldown.
-            if self.cooldown.is_cooled_down(provider_name) {
+            if self.cooldown.is_cooled_down(&entry.provider_name) {
                 tracing::debug!(
-                    provider = %provider_name,
+                    provider = %entry.provider_name,
                     "search provider in cooldown, skipping"
                 );
                 skipped += 1;
@@ -100,76 +102,120 @@ impl Tool for WebSearchTool {
             tracing::debug!(
                 query = %query,
                 limit = limit,
-                provider_model = %model_id,
-                provider = %provider_name,
+                provider_model = %entry.model_id,
+                provider = %entry.provider_name,
                 "executing web search"
             );
 
             let request = SearchRequest {
                 query: query.to_string(),
                 limit: Some(limit),
-                search_type: Some(model_id.clone()),
+                search_type: Some(entry.model_id.clone()),
             };
 
-            match provider.search(request) {
-                Ok(results) => {
-                    if results.results.is_empty() {
+            let max_rotations = entry.credential_pool.as_ref().map(|p| p.len()).unwrap_or(1);
+
+            'credential_retry: for _rotation in 0..max_rotations {
+                match entry.provider.search(request.clone()) {
+                    Ok(results) => {
+                        if results.results.is_empty() {
+                            return Ok(ToolResult {
+                                success: true,
+                                output: format!("No results found for \"{}\".", query),
+                                error: None,
+                            });
+                        }
+
+                        // Format results into a readable text response.
+                        let mut output = format!(
+                            "Search results for \"{}\" ({} found):\n\n",
+                            query,
+                            results.results.len()
+                        );
+                        for (i, result) in results.results.iter().enumerate() {
+                            output.push_str(&format!("{}. {}\n", i + 1, result.title));
+                            output.push_str(&format!("   URL: {}\n", result.url));
+                            if !result.snippet.is_empty() {
+                                output.push_str(&format!("   {}\n", result.snippet));
+                            }
+                            if let Some(ref published) = result.published_at {
+                                output.push_str(&format!("   Published: {}\n", published));
+                            }
+                            output.push('\n');
+                        }
+
                         return Ok(ToolResult {
                             success: true,
-                            output: format!("No results found for \"{}\".", query),
+                            output,
                             error: None,
                         });
                     }
+                    Err(e) => {
+                        let error_str = e.to_string();
 
-                    // Format results into a readable text response.
-                    let mut output = format!(
-                        "Search results for \"{}\" ({} found):\n\n",
-                        query,
-                        results.results.len()
-                    );
-                    for (i, result) in results.results.iter().enumerate() {
-                        output.push_str(&format!("{}. {}\n", i + 1, result.title));
-                        output.push_str(&format!("   URL: {}\n", result.url));
-                        if !result.snippet.is_empty() {
-                            output.push_str(&format!("   {}\n", result.snippet));
+                        // Classify the error to decide rotation vs cooldown.
+                        let classified = {
+                            let (status, body) = parse_http_error(&error_str);
+                            if let Some(code) = status {
+                                ClassifiedError::from_http(code, Some(body))
+                            } else {
+                                ClassifiedError::from_message(&error_str)
+                            }
+                        };
+
+                        // Try credential rotation first (before recording cooldown).
+                        if classified.should_rotate_credential
+                            && entry.credential_pool.is_some()
+                            && entry.shared_api_key.is_some()
+                        {
+                            if let (Some(pool), Some(key)) =
+                                (&entry.credential_pool, &entry.shared_api_key)
+                            {
+                                let old_key = key.get();
+                                pool.mark_exhausted(&old_key, &classified.reason);
+                                match pool.next_credential() {
+                                    Some(new_key) => {
+                                        key.set(&new_key);
+                                        tracing::info!(
+                                            provider = %entry.provider_name,
+                                            key_prefix = %new_key.chars().take(4).collect::<String>(),
+                                            "search credential rotated, retrying same provider"
+                                        );
+                                        continue 'credential_retry;
+                                    }
+                                    None => {
+                                        tracing::warn!(
+                                            provider = %entry.provider_name,
+                                            "all credentials exhausted, failing over"
+                                        );
+                                    }
+                                }
+                            }
                         }
-                        if let Some(ref published) = result.published_at {
-                            output.push_str(&format!("   Published: {}\n", published));
+
+                        // No rotation possible — record cooldown and move on.
+                        let reason = self
+                            .cooldown
+                            .classify_and_record(&entry.provider_name, &error_str);
+
+                        // Additional pass: if classify_and_record didn't find a cooldown
+                        // (e.g., non-HTTP errors), try parsing the raw error string directly.
+                        if !self.cooldown.is_cooled_down(&entry.provider_name) {
+                            if let Some(parsed) = parse_search_cooldown(&error_str) {
+                                self.cooldown
+                                    .record_failure_with_cooldown(&entry.provider_name, parsed);
+                            }
                         }
-                        output.push('\n');
+
+                        tracing::warn!(
+                            err = %e,
+                            provider = %entry.provider_name,
+                            reason = ?reason,
+                            "search provider failed, trying next"
+                        );
+                        last_error = Some(e);
+                        break 'credential_retry;
                     }
-
-                    return Ok(ToolResult {
-                        success: true,
-                        output,
-                        error: None,
-                    });
-                }
-                Err(e) => {
-                    let error_str = e.to_string();
-                    // classify_and_record internally uses parse_search_cooldown
-                    // to extract specific cooldown durations from the response body
-                    // (e.g., retry_after JSON field, "try again in X seconds" text).
-                    // Falls back to the default cooldown for the classified error type.
-                    let reason = self.cooldown.classify_and_record(provider_name, &error_str);
-
-                    // Additional pass: if classify_and_record didn't find a cooldown
-                    // (e.g., non-HTTP errors), try parsing the raw error string directly.
-                    if !self.cooldown.is_cooled_down(provider_name) {
-                        if let Some(parsed) = parse_search_cooldown(&error_str) {
-                            self.cooldown
-                                .record_failure_with_cooldown(provider_name, parsed);
-                        }
-                    }
-
-                    tracing::warn!(
-                        err = %e,
-                        provider = %provider_name,
-                        reason = ?reason,
-                        "search provider failed, trying next"
-                    );
-                    last_error = Some(e);
-                    // Continue to next provider in chain.
                 }
             }
         }

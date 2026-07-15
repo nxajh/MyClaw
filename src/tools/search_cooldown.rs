@@ -117,7 +117,7 @@ impl SearchProviderCooldown {
 }
 
 /// Parse "HTTP {status}: {body}" from provider error messages.
-fn parse_http_error(msg: &str) -> (Option<u16>, &str) {
+pub fn parse_http_error(msg: &str) -> (Option<u16>, &str) {
     // Match patterns like "HTTP 429:" or "HTTP 503 Service Unavailable:"
     if let Some(pos) = msg.find("HTTP ") {
         let rest = &msg[pos + 5..];

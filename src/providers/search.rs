@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 
+#[derive(Clone)]
 pub struct SearchRequest {
     pub query: String,
     pub limit: Option<usize>,

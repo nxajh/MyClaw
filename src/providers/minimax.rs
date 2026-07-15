@@ -7,6 +7,7 @@
 use async_trait::async_trait;
 
 use crate::providers::anthropic::AnthropicProvider;
+use crate::providers::credential_pool::SharedApiKey;
 use crate::providers::search::{SearchProvider, SearchRequest, SearchResult, SearchResults};
 use crate::providers::{BoxStream, ChatProvider, ChatRequest, StreamEvent};
 
@@ -16,19 +17,20 @@ const SEARCH_BASE_URL: &str = "https://api.minimaxi.com";
 #[derive(Clone)]
 pub struct MiniMaxProvider {
     inner: AnthropicProvider,
-    api_key: String,
+    api_key: SharedApiKey,
     base_url: String,
 }
 
 impl MiniMaxProvider {
-    pub fn new(api_key: String) -> Self {
+    pub fn new(api_key: impl Into<SharedApiKey>) -> Self {
         Self::with_base_url(api_key, DEFAULT_BASE_URL.to_string())
     }
 
-    pub fn with_base_url(api_key: String, base_url: String) -> Self {
+    pub fn with_base_url(api_key: impl Into<SharedApiKey>, base_url: String) -> Self {
+        let key = api_key.into();
         Self {
-            inner: AnthropicProvider::with_base_url(api_key.clone(), base_url.clone()),
-            api_key,
+            inner: AnthropicProvider::with_base_url(key.get(), base_url.clone()),
+            api_key: key,
             base_url,
         }
     }
@@ -75,7 +77,7 @@ impl SearchProvider for MiniMaxProvider {
             tokio::runtime::Handle::current().block_on(async {
                 let resp = reqwest::Client::new()
                     .post(&url)
-                    .header("Authorization", format!("Bearer {}", self.api_key))
+                    .header("Authorization", format!("Bearer {}", self.api_key.get()))
                     .header("Content-Type", "application/json")
                     .json(&body)
                     .send()
