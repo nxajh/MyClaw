@@ -14,10 +14,12 @@ use futures_util::StreamExt;
 
 use crate::agents::resource_provider::ResourceProvider;
 use crate::agents::scheduling::work_unit;
-use crate::agents::tokens::estimate_message_tokens;
+use crate::agents::session::Session;
+use crate::agents::tokens::{estimate_history_tokens, estimate_message_tokens, estimate_tokens};
 use crate::agents::tool_executor::MemoryToolExecutor;
 use crate::agents::tool_registry::ToolRegistry;
 use crate::config::agent::ContextConfig;
+use crate::storage::SummaryRecord;
 use crate::providers::capability_chat::{ChatProvider, ToolSpec};
 use crate::providers::{
     BoxStream, ChatMessage, ChatRequest, ChatUsage, ContentPart, ProviderRegistry, StreamEvent,
@@ -102,6 +104,248 @@ impl ContextEngine {
         );
         crate::agents::agent::fold_absent_tool(&mut messages, tool_specs, "send_media", "媒体发送结果");
         messages
+    }
+
+    // ── Compaction control flow ──────────────────────────────────────────────
+
+    /// Compact `session.history` when it's over (or `force`d past) the model's
+    /// context threshold, returning the rebuilt `messages` prefix on success.
+    ///
+    /// Called as a pre-send guard each loop iteration and as the context-overflow
+    /// backstop. The threshold decision uses a direct history estimate
+    /// (`estimate_history_tokens`) rather than the token tracker, so a stale or
+    /// under-counted tracker can't let an over-window request slip through. Returns
+    /// `None` when no compaction was needed (`!force`) or none was possible (no
+    /// boundary / summarizer error).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn maybe_compact(
+        &self,
+        session: &mut Session,
+        system_prompt: &str,
+        model_id: &str,
+        provider: Arc<dyn ChatProvider>,
+        tool_specs: &[ToolSpec],
+        task_state: Option<&Arc<tokio::sync::RwLock<crate::tools::TaskState>>>,
+        force: bool,
+        override_retain: Option<usize>,
+    ) -> Option<(Vec<ChatMessage>, u64, u64)> {
+        let cfg = self.registry.get_chat_model_config(model_id).ok()?;
+        let window = cfg.context_window?;
+        let estimate = estimate_history_tokens(system_prompt, &session.history);
+        if !force && !self.should_compact(estimate, window) {
+            return None;
+        }
+
+        let sys_prompt_tokens = estimate_tokens(system_prompt);
+        let tool_spec_tokens: u64 = tool_specs
+            .iter()
+            .map(|s| {
+                estimate_tokens(&s.name)
+                    + s.description.as_deref().map_or(0, estimate_tokens)
+                    + estimate_tokens(&s.input_schema.to_string())
+                    + 8
+            })
+            .sum();
+        let boundary = self.compaction_boundary_with_retain(
+            &session.history,
+            window,
+            sys_prompt_tokens,
+            tool_spec_tokens,
+            override_retain,
+        )?;
+
+        // Snapshot history for the summarizer (which reads a slice); the live
+        // session is passed through for the memory tools inside the summarizer.
+        let history_snap: Vec<ChatMessage> = session.history.to_vec();
+        match self
+            .execute_compaction(
+                &history_snap,
+                system_prompt,
+                tool_specs,
+                boundary,
+                model_id,
+                Arc::clone(&provider),
+                session,
+            )
+            .await
+        {
+            Ok(result) => {
+                let version = session.compact_version + 1;
+                let summary_prefix = "[CONTEXT COMPACTION — REFERENCE ONLY] ";
+
+                // Inject active task/goal state so the model retains its plan
+                // across context compaction.
+                let task_injection = if let Some(task_state) = task_state {
+                    let state = task_state.read().await;
+                    state.format_for_injection()
+                } else {
+                    None
+                };
+
+                let summary_text = match &task_injection {
+                    Some(tasks) => format!("{}{}\n\n{}", summary_prefix, result.summary, tasks),
+                    None => format!("{}{}", summary_prefix, result.summary),
+                };
+                let summary_msg = ChatMessage::user_text(summary_text);
+                let last_compacted_id = session
+                    .message_ids
+                    .get(boundary.saturating_sub(1))
+                    .copied()
+                    .unwrap_or(0);
+                session.apply_compaction(
+                    result.compact_start,
+                    result.compact_end,
+                    summary_msg,
+                    version,
+                    last_compacted_id,
+                    result.summary_tokens,
+                );
+                session
+                    .token_tracker
+                    .adjust_for_compaction(result.removed_tokens, result.summary_tokens);
+                if let Some(ref hook) = session.persist {
+                    hook.save_compaction(
+                        &session.id,
+                        &SummaryRecord {
+                            id: 0,
+                            version,
+                            summary: result.summary.clone(),
+                            up_to_message: last_compacted_id,
+                            token_estimate: Some(result.summary_tokens),
+                            created_at: chrono::Utc::now(),
+                        },
+                    );
+                    let surviving: Vec<(i64, ChatMessage)> = session
+                        .message_ids
+                        .iter()
+                        .zip(session.history.iter())
+                        .map(|(&id, msg)| (id, msg.clone()))
+                        .collect();
+                    hook.rotate_history(&session.id, &surviving);
+                    for (i, id) in session.message_ids.iter_mut().enumerate() {
+                        *id = (i + 1) as i64;
+                    }
+                }
+                let messages = self.rebuild_messages(system_prompt, &session.history, tool_specs);
+                tracing::info!(
+                    summary_tokens = result.summary_tokens,
+                    removed_tokens = result.removed_tokens,
+                    estimate,
+                    window,
+                    "compaction completed"
+                );
+                Some((messages, result.removed_tokens, result.summary_tokens))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    session = %session.id,
+                    model = %model_id,
+                    msg_count = session.history.len(),
+                    err = %e,
+                    "compaction failed, continuing"
+                );
+                None
+            }
+        }
+    }
+
+    /// Compact repeatedly until the history estimate drops below the compaction
+    /// threshold, or no further progress is possible.
+    ///
+    /// A single `maybe_compact` pass folds only a bounded prefix into the rolling
+    /// summary, so a history far over the window may need multiple passes within
+    /// one turn. `force` applies only to the first pass; later passes are gated
+    /// by `should_compact`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn compact_until_fit(
+        &self,
+        session: &mut Session,
+        system_prompt: &str,
+        model_id: &str,
+        provider: Arc<dyn ChatProvider>,
+        tool_specs: &[ToolSpec],
+        task_state: Option<&Arc<tokio::sync::RwLock<crate::tools::TaskState>>>,
+        force: bool,
+    ) -> Option<Vec<ChatMessage>> {
+        const MAX_PASSES: usize = 10;
+        let configured_retain = self.retain_work_units();
+        let mut retain = configured_retain;
+        let mut latest: Option<Vec<ChatMessage>> = None;
+        let mut stall_count: usize = 0;
+
+        for pass in 0..MAX_PASSES {
+            let force_pass = force && pass == 0;
+            let override_retain = if retain != configured_retain {
+                Some(retain)
+            } else {
+                None
+            };
+            match self
+                .maybe_compact(
+                    session,
+                    system_prompt,
+                    model_id,
+                    Arc::clone(&provider),
+                    tool_specs,
+                    task_state,
+                    force_pass,
+                    override_retain,
+                )
+                .await
+            {
+                Some((messages, removed, summary)) => {
+                    let net = removed.saturating_sub(summary);
+                    if removed > 0 && (net as f64) / (removed as f64) < 0.05 {
+                        stall_count += 1;
+                    } else {
+                        stall_count = 0;
+                    }
+
+                    if stall_count >= 2 && retain > 1 {
+                        retain -= 1;
+                        tracing::info!(
+                            retain,
+                            pass,
+                            "compaction stalled, lowering retain_work_units"
+                        );
+                        stall_count = 0;
+                    }
+                    latest = Some(messages);
+                }
+                None => break,
+            }
+        }
+
+        // Last-resort fallback: force-drop oldest half when compaction fails.
+        if latest.is_none() && force && session.history.len() > 6 {
+            let drop_boundary = session.history.len() / 2;
+            let version = session.compact_version + 1;
+            let dropped_tokens: u64 = session.history[..drop_boundary]
+                .iter()
+                .map(estimate_message_tokens)
+                .sum();
+            tracing::warn!(
+                session = %session.id,
+                msg_count = session.history.len(),
+                dropped = drop_boundary,
+                dropped_tokens,
+                "compaction exhausted all passes; force-dropping oldest half as last resort"
+            );
+            session.drop_pre_boundary(drop_boundary, version);
+            session
+                .token_tracker
+                .adjust_for_compaction(dropped_tokens, 0);
+            let messages = self.rebuild_messages(system_prompt, &session.history, tool_specs);
+            latest = Some(messages);
+        } else if latest.is_none() && force {
+            tracing::warn!(
+                session = %session.id,
+                msg_count = session.history.len(),
+                "compaction repeatedly failed; context will continue growing"
+            );
+        }
+
+        latest
     }
 
     /// Public read of the configured retain_work_units.

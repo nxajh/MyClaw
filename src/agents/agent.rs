@@ -20,7 +20,7 @@ use crate::agents::context_engine::ContextEngine;
 use crate::agents::error::AgentError;
 use crate::agents::loop_breaker::{LoopBreak, LoopBreakReason};
 use crate::agents::session::Session;
-use crate::agents::tokens::{estimate_history_tokens, estimate_message_tokens, estimate_tokens};
+use crate::agents::tokens::{estimate_history_tokens, estimate_tokens};
 use crate::agents::turn::{TurnContext, TurnResult};
 use crate::agents::turn_event::TurnEvent;
 use crate::config::sub_agent::SubAgentConfig;
@@ -31,7 +31,6 @@ use crate::providers::{
     BoxStream, Capability, ContentPart, FileModality, MediaInlineDecision, MediaPolicy,
     ProviderRegistry, StreamEvent, ToolCall, modality_from_mime,
 };
-use crate::storage::SummaryRecord;
 
 /// "An agent" — just its config (name, system prompt fragment, three
 /// capability filters, optional model override). Everything else lives
@@ -199,14 +198,13 @@ impl Agent {
             // fix for the "974 msgs sent at 31k tracked → context overflow" bug.
             // Loops until under threshold so a history far over the window
             // converges within this turn rather than one chunk per user turn.
-            if let Some(compacted) = compact_until_fit(
-                context,
+            if let Some(compacted) = context.compact_until_fit(
                 session,
-                runtime,
                 turn_ctx.system_prompt,
                 &model_id,
                 Arc::clone(&provider),
                 &tool_specs,
+                runtime.task_state.as_ref(),
                 false,
             )
             .await
@@ -283,14 +281,13 @@ impl Agent {
             if response.stop_reason == StopReason::ContextOverflow {
                 overflow_retries += 1;
                 let recovered = if overflow_retries <= MAX_OVERFLOW_RETRIES {
-                    compact_until_fit(
-                        context,
+                    context.compact_until_fit(
                         session,
-                        runtime,
                         turn_ctx.system_prompt,
                         &model_id,
                         Arc::clone(&provider),
                         &tool_specs,
+                        runtime.task_state.as_ref(),
                         true, // force: bypass the threshold, we know it overflowed
                     )
                     .await
@@ -886,266 +883,6 @@ fn persist_last(session: &mut Session) {
             *slot = id;
         }
     }
-}
-
-/// Compact `session.history` when it's over (or `force`d past) the model's
-/// context threshold, returning the rebuilt `messages` prefix on success.
-///
-/// Called as a pre-send guard each loop iteration and as the context-overflow
-/// backstop. The threshold decision uses a direct history estimate
-/// (`estimate_history_tokens`) rather than the token tracker, so a stale or
-/// under-counted tracker can't let an over-window request slip through. Returns
-/// `None` when no compaction was needed (`!force`) or none was possible (no
-/// boundary / summarizer error).
-#[allow(clippy::too_many_arguments)]
-async fn maybe_compact(
-    context: &ContextEngine,
-    session: &mut Session,
-    runtime: &AgentRuntime,
-    system_prompt: &str,
-    model_id: &str,
-    provider: Arc<dyn ChatProvider>,
-    tool_specs: &[ToolSpec],
-    force: bool,
-    override_retain: Option<usize>,
-) -> Option<(Vec<ChatMessage>, u64, u64)> {
-    let cfg = runtime.providers.get_chat_model_config(model_id).ok()?;
-    let window = cfg.context_window?;
-    let estimate = estimate_history_tokens(system_prompt, &session.history);
-    if !force && !context.should_compact(estimate, window) {
-        return None;
-    }
-
-    let sys_prompt_tokens = estimate_tokens(system_prompt);
-    let tool_spec_tokens: u64 = tool_specs
-        .iter()
-        .map(|s| {
-            estimate_tokens(&s.name)
-                + s.description.as_deref().map_or(0, estimate_tokens)
-                + estimate_tokens(&s.input_schema.to_string())
-                + 8
-        })
-        .sum();
-    let boundary = context.compaction_boundary_with_retain(
-        &session.history,
-        window,
-        sys_prompt_tokens,
-        tool_spec_tokens,
-        override_retain,
-    )?;
-
-    // Snapshot history for the summarizer (which reads a slice); the live
-    // session is passed through for the memory tools inside the summarizer.
-    let history_snap: Vec<ChatMessage> = session.history.to_vec();
-    match context
-        .execute_compaction(
-            &history_snap,
-            system_prompt,
-            tool_specs,
-            boundary,
-            model_id,
-            Arc::clone(&provider),
-            session,
-        )
-        .await
-    {
-        Ok(result) => {
-            let version = session.compact_version + 1;
-            let summary_prefix = "[CONTEXT COMPACTION — REFERENCE ONLY] ";
-
-            // Inject active task/goal state so the model retains its plan
-            // across context compaction (similar to Hermes' format_for_injection).
-            let task_injection = if let Some(ref task_state) = runtime.task_state {
-                let state = task_state.read().await;
-                state.format_for_injection()
-            } else {
-                None
-            };
-
-            let summary_text = match &task_injection {
-                Some(tasks) => format!("{}{}\n\n{}", summary_prefix, result.summary, tasks),
-                None => format!("{}{}", summary_prefix, result.summary),
-            };
-            let summary_msg = ChatMessage::user_text(summary_text);
-            let last_compacted_id = session
-                .message_ids
-                .get(boundary.saturating_sub(1))
-                .copied()
-                .unwrap_or(0);
-            session.apply_compaction(
-                result.compact_start,
-                result.compact_end,
-                summary_msg,
-                version,
-                last_compacted_id,
-                result.summary_tokens,
-            );
-            session
-                .token_tracker
-                .adjust_for_compaction(result.removed_tokens, result.summary_tokens);
-            // Persist compaction to disk: save summary metadata to meta.json
-            // and archive the old history segment (rotate_history writes surviving
-            // messages to a fresh history.jsonl so the next restart loads the
-            // compacted state instead of the full un-compacted history).
-            if let Some(ref hook) = session.persist {
-                hook.save_compaction(
-                    &session.id,
-                    &SummaryRecord {
-                        id: 0,
-                        version,
-                        summary: result.summary.clone(),
-                        up_to_message: last_compacted_id,
-                        token_estimate: Some(result.summary_tokens),
-                        created_at: chrono::Utc::now(),
-                    },
-                );
-                let surviving: Vec<(i64, ChatMessage)> = session
-                    .message_ids
-                    .iter()
-                    .zip(session.history.iter())
-                    .map(|(&id, msg)| (id, msg.clone()))
-                    .collect();
-                hook.rotate_history(&session.id, &surviving);
-                // Line numbers restart at 1 after rotation; remap IDs.
-                for (i, id) in session.message_ids.iter_mut().enumerate() {
-                    *id = (i + 1) as i64;
-                }
-            }
-            let messages = context.rebuild_messages(system_prompt, &session.history, tool_specs);
-            tracing::info!(
-                summary_tokens = result.summary_tokens,
-                removed_tokens = result.removed_tokens,
-                estimate,
-                window,
-                "compaction completed"
-            );
-            Some((messages, result.removed_tokens, result.summary_tokens))
-        }
-        Err(e) => {
-            tracing::warn!(
-                session = %session.id,
-                model = %model_id,
-                msg_count = session.history.len(),
-                err = %e,
-                "compaction failed, continuing"
-            );
-            None
-        }
-    }
-}
-
-/// Compact repeatedly until the history estimate drops below the compaction
-/// threshold, or no further progress is possible.
-///
-/// A single `maybe_compact` pass folds only a bounded prefix (≤ the compaction
-/// input budget) into the rolling summary, so a history far over the window
-/// used to shrink by one chunk per *user turn*, taking multiple turns (and
-/// multiple stalls) to converge. Looping the passes within one turn drives it
-/// under threshold before we send, while keeping each summary's input bounded.
-///
-/// `force` applies only to the first pass (the provider-overflow backstop knows
-/// the request overflowed even when our estimate sits under threshold); later
-/// passes are gated by `should_compact`, so the loop stops the moment we fit.
-/// Each `Some` pass strictly shrinks history (one fewer work unit), so the loop
-/// terminates; `MAX_PASSES` is a defensive cap against pathological summary
-/// growth.
-#[allow(clippy::too_many_arguments)]
-async fn compact_until_fit(
-    context: &ContextEngine,
-    session: &mut Session,
-    runtime: &AgentRuntime,
-    system_prompt: &str,
-    model_id: &str,
-    provider: Arc<dyn ChatProvider>,
-    tool_specs: &[ToolSpec],
-    force: bool,
-) -> Option<Vec<ChatMessage>> {
-    const MAX_PASSES: usize = 10;
-    let configured_retain = context.retain_work_units();
-    let mut retain = configured_retain;
-    let mut latest: Option<Vec<ChatMessage>> = None;
-    let mut stall_count: usize = 0;
-
-    for pass in 0..MAX_PASSES {
-        let force_pass = force && pass == 0;
-        let override_retain = if retain != configured_retain {
-            Some(retain)
-        } else {
-            None
-        };
-        match maybe_compact(
-            context,
-            session,
-            runtime,
-            system_prompt,
-            model_id,
-            Arc::clone(&provider),
-            tool_specs,
-            force_pass,
-            override_retain,
-        )
-        .await
-        {
-            Some((messages, removed, summary)) => {
-                // Stall detection: if net savings < 5% of the removed tokens
-                // (or effectively zero), we're re-summarising the same old
-                // summary. Lower retain_work_units to expand the compactable
-                // range, down to a minimum of 1.
-                let net = removed.saturating_sub(summary);
-                if removed > 0 && (net as f64) / (removed as f64) < 0.05 {
-                    stall_count += 1;
-                } else {
-                    stall_count = 0;
-                }
-
-                if stall_count >= 2 && retain > 1 {
-                    retain -= 1;
-                    tracing::info!(
-                        retain,
-                        pass,
-                        "compaction stalled, lowering retain_work_units"
-                    );
-                    stall_count = 0;
-                }
-                latest = Some(messages);
-            }
-            None => break,
-        }
-    }
-
-    // Last-resort fallback: if compaction completely failed and we were forced
-    // (provider overflow), drop the oldest half of history to avoid a guaranteed
-    // 400 on the next request. This is destructive but better than an infinite
-    // retry loop.
-    if latest.is_none() && force && session.history.len() > 6 {
-        let drop_boundary = session.history.len() / 2;
-        let version = session.compact_version + 1;
-        let dropped_tokens: u64 = session.history[..drop_boundary]
-            .iter()
-            .map(estimate_message_tokens)
-            .sum();
-        tracing::warn!(
-            session = %session.id,
-            msg_count = session.history.len(),
-            dropped = drop_boundary,
-            dropped_tokens,
-            "compaction exhausted all passes; force-dropping oldest half as last resort"
-        );
-        session.drop_pre_boundary(drop_boundary, version);
-        session
-            .token_tracker
-            .adjust_for_compaction(dropped_tokens, 0);
-        let messages = context.rebuild_messages(system_prompt, &session.history, tool_specs);
-        latest = Some(messages);
-    } else if latest.is_none() && force {
-        tracing::warn!(
-            session = %session.id,
-            msg_count = session.history.len(),
-            "compaction repeatedly failed; context will continue growing"
-        );
-    }
-
-    latest
 }
 
 /// Pull the text of the most recent user message from history, if any.
