@@ -20,7 +20,7 @@ use crate::agents::context_engine::ContextEngine;
 use crate::agents::error::AgentError;
 use crate::agents::loop_breaker::{LoopBreak, LoopBreakReason};
 use crate::agents::session::Session;
-use crate::agents::tokens::{estimate_history_tokens, estimate_tokens};
+use crate::agents::tokens::{estimate_history_tokens, estimate_message_tokens, estimate_tokens};
 use crate::agents::turn::{TurnContext, TurnResult};
 use crate::agents::turn_event::TurnEvent;
 use crate::config::sub_agent::SubAgentConfig;
@@ -1119,9 +1119,35 @@ async fn compact_until_fit(
         }
     }
 
-    // If we never succeeded and history is well above threshold, emit a
-    // warning so operators know context is growing uncontrolled.
-    if latest.is_none() && force {
+    // Last-resort fallback: if compaction completely failed and we were forced
+    // (provider overflow), drop the oldest half of history to avoid a guaranteed
+    // 400 on the next request. This is destructive but better than an infinite
+    // retry loop.
+    if latest.is_none() && force && session.history.len() > 6 {
+        let drop_boundary = session.history.len() / 2;
+        let version = session.compact_version + 1;
+        let dropped_tokens: u64 = session.history[..drop_boundary]
+            .iter()
+            .map(estimate_message_tokens)
+            .sum();
+        tracing::warn!(
+            session = %session.id,
+            msg_count = session.history.len(),
+            dropped = drop_boundary,
+            dropped_tokens,
+            "compaction exhausted all passes; force-dropping oldest half as last resort"
+        );
+        session.drop_pre_boundary(drop_boundary, version);
+        session
+            .token_tracker
+            .adjust_for_compaction(dropped_tokens, 0);
+        let mut messages: Vec<ChatMessage> =
+            std::iter::once(ChatMessage::system_text(system_prompt))
+                .chain(session.history.iter().cloned())
+                .collect();
+        crate::agents::session::sanitize_history(&mut messages);
+        latest = Some(messages);
+    } else if latest.is_none() && force {
         tracing::warn!(
             session = %session.id,
             msg_count = session.history.len(),

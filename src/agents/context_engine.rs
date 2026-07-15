@@ -615,10 +615,7 @@ fn strip_images(msg: &ChatMessage) -> ChatMessage {
     cleaned
 }
 
-fn build_summarizer_prompt(
-    msg_count: usize,
-    existing_summary: Option<&str>,
-) -> String {
+fn build_summarizer_prompt(msg_count: usize, existing_summary: Option<&str>) -> String {
     match existing_summary {
         Some(base) => format!(
             "Below is a PREVIOUS SUMMARY followed by NEW conversation messages.\n\
@@ -629,11 +626,14 @@ fn build_summarizer_prompt(
              Merge the new messages into the previous summary. Produce a single \n\
              updated summary that covers everything.\n\
              \n\
-             Output the summary as plain text with the following REQUIRED sections. \n\
-             Mark items as Resolved or Pending so the model knows what is active:\n\
+             Output the summary as plain text with the following sections. \n\
+             Include the first section ONLY if there is genuinely unfinished, user-requested work \n\
+             that the model MUST actively continue. If the user's last request was completed or \n\
+             the topic has moved on, OMIT it entirely.\n\
              \n\
-             ## Active Task\n\
-             What the user is currently doing and its status.\n\
+             ## Conversation State (OPTIONAL — omit if nothing is actively in progress)\n\
+             Only include genuinely unfinished work the user explicitly asked for. \n\
+             Do NOT include completed tasks, background context, or system status here.\n\
              \n\
              ## Key Decisions\n\
              Important choices made and why.\n\
@@ -659,7 +659,7 @@ fn build_summarizer_prompt(
              - Omit raw tool output (large code blocks, logs, file contents)\n\
              - Use the same language as the conversation\n\
              - Be thorough but concise: every important detail should be preserved\n\
-             - Each fact appears in exactly ONE section only — the most appropriate one. Never repeat the same information across Active Task / Key Decisions / Resolved / Pending. If something was completed, it belongs in Resolved, not also in Active Task."
+             - Each fact appears in exactly ONE section only — the most appropriate one. Never repeat the same information across Conversation State / Key Decisions / Resolved / Pending. If something was completed, it belongs in Resolved, not in Conversation State."
         ),
         None => format!(
             "Summarize the conversation history above. This summary will replace \
@@ -669,7 +669,7 @@ fn build_summarizer_prompt(
              Output the summary as plain text.\n\
              \n\
              Required sections:\n\
-             1. **User Goals**: What is the user trying to accomplish? Current status of each goal.\n\
+             1. **Conversation State (OPTIONAL)**: Only include if there is genuinely unfinished, user-requested work in progress. Omit entirely if the user's requests have been completed.\n\
              2. **Key Decisions**: Important choices made and why.\n\
              3. **Technical Context**: Files modified, code locations, APIs used, configurations changed.\n\
              4. **Errors & Fixes**: Problems encountered and their solutions.\n\
@@ -713,23 +713,51 @@ fn append_evidence_index(
         model_id
     ));
     if !paths.is_empty() {
-        summary.push_str(&format!("- File paths: {}\n", paths.iter().take(20).cloned().collect::<Vec<_>>().join(", ")));
+        summary.push_str(&format!(
+            "- File paths: {}\n",
+            paths
+                .iter()
+                .take(20)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
     if !commands.is_empty() {
-        summary.push_str(&format!("- Commands: {}\n", commands.iter().take(10).cloned().collect::<Vec<_>>().join(" | ")));
+        summary.push_str(&format!(
+            "- Commands: {}\n",
+            commands
+                .iter()
+                .take(10)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" | ")
+        ));
     }
     if !commits.is_empty() {
-        summary.push_str(&format!("- Commit hashes: {}\n", commits.iter().take(20).cloned().collect::<Vec<_>>().join(", ")));
+        summary.push_str(&format!(
+            "- Commit hashes: {}\n",
+            commits
+                .iter()
+                .take(20)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
     if !runs.is_empty() {
-        summary.push_str(&format!("- CI/run IDs: {}\n", runs.iter().take(20).cloned().collect::<Vec<_>>().join(", ")));
+        summary.push_str(&format!(
+            "- CI/run IDs: {}\n",
+            runs.iter().take(20).cloned().collect::<Vec<_>>().join(", ")
+        ));
     }
     summary
 }
 
 fn extract_shell_commands(messages: &[ChatMessage]) -> Vec<String> {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let re = RE.get_or_init(|| regex::Regex::new(r#"(?s)"command"\s*:\s*"([^"]{1,240})""#).unwrap());
+    let re =
+        RE.get_or_init(|| regex::Regex::new(r#"(?s)"command"\s*:\s*"([^"]{1,240})""#).unwrap());
     let mut seen = std::collections::HashSet::new();
     let mut commands = Vec::new();
     for msg in messages {
@@ -765,7 +793,10 @@ fn extract_commit_hashes(messages: &[ChatMessage]) -> Vec<String> {
 
 fn extract_ci_runs(messages: &[ChatMessage]) -> Vec<String> {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let re = RE.get_or_init(|| regex::Regex::new(r"(?i)\b(?:run id|run_id|workflow run|CI run)[:= ]+([0-9]{5,})\b").unwrap());
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"(?i)\b(?:run id|run_id|workflow run|CI run)[:= ]+([0-9]{5,})\b")
+            .unwrap()
+    });
     let mut seen = std::collections::HashSet::new();
     let mut runs = Vec::new();
     for msg in messages {

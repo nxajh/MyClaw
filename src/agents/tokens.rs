@@ -6,9 +6,29 @@
 
 use crate::providers::{ChatMessage, ContentPart};
 
-/// Estimate token count from text length (~4 bytes per token).
+/// Estimate token count from text length.
+///
+/// CJK characters (Chinese, Japanese, Korean) typically map to ~1 token each
+/// in BPE tokenizers, but occupy 3 UTF-8 bytes — so a naive `bytes / 4`
+/// underestimates them by ~1.3–2.7×. We split the count: CJK chars count as
+/// 1 token each, remaining bytes use the standard `bytes / 4` heuristic.
 pub fn estimate_tokens(text: &str) -> u64 {
-    (text.len() as u64).div_ceil(4)
+    let mut cjk = 0u64;
+    let mut other_bytes = 0u64;
+    for ch in text.chars() {
+        let code = ch as u32;
+        if (0x4E00..=0x9FFF).contains(&code)
+            || (0x3400..=0x4DBF).contains(&code)
+            || (0x3040..=0x30FF).contains(&code)
+            || (0xAC00..=0xD7AF).contains(&code)
+            || (0xFF00..=0xFFEF).contains(&code)
+        {
+            cjk += 1;
+        } else {
+            other_bytes += ch.len_utf8() as u64;
+        }
+    }
+    cjk + other_bytes.div_ceil(4)
 }
 
 /// Estimate token count for a `ChatMessage`.
@@ -144,5 +164,21 @@ mod tracker_tests {
         let est = estimate_history_tokens("you are a bot", &history);
         // Strictly greater than the system prompt alone + nonzero per message.
         assert!(est > estimate_tokens("you are a bot"));
+    }
+
+    #[test]
+    fn estimate_tokens_cjk_not_underestimated() {
+        // 100 CJK chars: old formula = 300 bytes / 4 = 75 tokens (too low).
+        // New formula = 100 tokens (1 per CJK char).
+        let cjk_text = "字".repeat(100);
+        assert_eq!(estimate_tokens(&cjk_text), 100);
+
+        // Mixed: 50 CJK + 100 ASCII bytes
+        let mixed = format!("{}{}", "字".repeat(50), "a".repeat(100));
+        // 50 CJK tokens + ceil(100/4) = 50 + 25 = 75
+        assert_eq!(estimate_tokens(&mixed), 75);
+
+        // Pure ASCII unchanged: "hello" = 5 bytes / 4 = 2 tokens
+        assert_eq!(estimate_tokens("hello"), 2);
     }
 }
