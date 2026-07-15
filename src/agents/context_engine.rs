@@ -75,6 +75,35 @@ impl ContextEngine {
         self.compact_threshold
     }
 
+    /// Rebuild the LLM request message list after history mutation
+    /// (compaction or force-drop fallback).
+    ///
+    /// Assembles: system prompt + cloned history + `sanitize_history` +
+    /// `fold_absent_tool` for the on-demand send tools. This is the single
+    /// post-mutation rebuild path; the initial `run()` assembly is kept
+    /// inline because its ordering with `filter_modality_redundant_tools`
+    /// (which needs the sanitized messages before `tool_specs` exist) is
+    /// different.
+    pub fn rebuild_messages(
+        &self,
+        system_prompt: &str,
+        history: &[ChatMessage],
+        tool_specs: &[ToolSpec],
+    ) -> Vec<ChatMessage> {
+        let mut messages: Vec<ChatMessage> = std::iter::once(ChatMessage::system_text(system_prompt))
+            .chain(history.iter().cloned())
+            .collect();
+        crate::agents::session::sanitize_history(&mut messages);
+        crate::agents::agent::fold_absent_tool(
+            &mut messages,
+            tool_specs,
+            "send_message",
+            "消息发送结果",
+        );
+        crate::agents::agent::fold_absent_tool(&mut messages, tool_specs, "send_media", "媒体发送结果");
+        messages
+    }
+
     /// Public read of the configured retain_work_units.
     pub fn retain_work_units(&self) -> usize {
         self.retain_work_units

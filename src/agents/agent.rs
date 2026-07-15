@@ -811,7 +811,7 @@ fn filter_modality_redundant_tools(
 /// on the calling assistant message and drop the tool-result message, so no
 /// orphan tool call survives to be rejected by the provider. No-op when the tool
 /// is declared. Operates on the cloned `messages` only.
-fn fold_absent_tool(
+pub(crate) fn fold_absent_tool(
     messages: &mut Vec<ChatMessage>,
     tool_specs: &[ToolSpec],
     tool_name: &str,
@@ -1011,13 +1011,7 @@ async fn maybe_compact(
                     *id = (i + 1) as i64;
                 }
             }
-            let mut messages: Vec<ChatMessage> =
-                std::iter::once(ChatMessage::system_text(system_prompt))
-                    .chain(session.history.iter().cloned())
-                    .collect();
-            crate::agents::session::sanitize_history(&mut messages);
-            fold_absent_tool(&mut messages, tool_specs, "send_message", "消息发送结果");
-            fold_absent_tool(&mut messages, tool_specs, "send_media", "媒体发送结果");
+            let messages = context.rebuild_messages(system_prompt, &session.history, tool_specs);
             tracing::info!(
                 summary_tokens = result.summary_tokens,
                 removed_tokens = result.removed_tokens,
@@ -1141,11 +1135,7 @@ async fn compact_until_fit(
         session
             .token_tracker
             .adjust_for_compaction(dropped_tokens, 0);
-        let mut messages: Vec<ChatMessage> =
-            std::iter::once(ChatMessage::system_text(system_prompt))
-                .chain(session.history.iter().cloned())
-                .collect();
-        crate::agents::session::sanitize_history(&mut messages);
+        let messages = context.rebuild_messages(system_prompt, &session.history, tool_specs);
         latest = Some(messages);
     } else if latest.is_none() && force {
         tracing::warn!(
