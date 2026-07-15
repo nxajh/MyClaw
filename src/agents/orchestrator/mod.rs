@@ -21,7 +21,7 @@ mod scheduled;
 mod test_support;
 mod turn;
 
-pub use ctx::{ChannelRegistry, OrchestratorCtx, SharedTurnTracker};
+pub use ctx::{ChannelRegistry, OrchestratorCtx};
 pub use event::OrchestratorEvent;
 pub(crate) use scheduled::run_scheduled_turn;
 
@@ -426,6 +426,7 @@ impl Orchestrator {
                 );
 
                 // Spawn: LLM execution runs independently of the main loop.
+                let due_owned: Vec<_> = due.into_iter().cloned().collect();
                 let self_ctx = self.ctx.clone();
                 let turn_tracker = self.ctx.turn_tracker.clone();
                 tokio::spawn(async move {
@@ -435,7 +436,7 @@ impl Orchestrator {
                         target_channel,
                         target_account,
                         prompt,
-                        due.into_iter().cloned().collect(),
+                        due_owned,
                         state,
                         state_path.to_path_buf(),
                     )
