@@ -251,13 +251,13 @@ impl AttachmentManager {
     }
 
     /// 与 memory 索引做 diff，变更时生成通知式 system-reminder。
-    /// 只注入 user + feedback + rule 类型（agent 必须始终遵守的偏好和纠正）。
-    /// project + reference 通过 memory_list / memory_search 按需查找。
+    /// 只注入 inject=always 的记忆（agent 必须始终遵守的偏好和纠正）。
+    /// inject=search 的通过 memory_list / memory_search 按需查找。
     pub fn diff_memory(&mut self, entries: &[crate::memory::IndexEntry], history: &[ChatMessage]) {
-        // Filter to injectable types (user, feedback, rule)
+        // Filter to injectable entries (inject: always)
         let injectable: Vec<&crate::memory::IndexEntry> = entries
             .iter()
-            .filter(|e| crate::memory::should_inject(&e.mem_type))
+            .filter(|e| crate::memory::should_inject(&e.inject))
             .collect();
 
         let new_key: String = injectable

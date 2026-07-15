@@ -383,6 +383,7 @@ fn build_frontmatter(
     description: &str,
     tags: &[String],
     mem_type: &str,
+    inject: &str,
     created_at: &str,
     updated_at: Option<&str>,
 ) -> String {
@@ -391,10 +392,12 @@ fn build_frontmatter(
 name: {}
 description: {}
 type: {}
+inject: {}
 created_at: {}",
         yaml_scalar(name),
         yaml_scalar(description),
         yaml_scalar(mem_type),
+        inject,
         yaml_scalar(created_at)
     );
     if let Some(ua) = updated_at {
@@ -844,14 +847,22 @@ impl Tool for MemoryManageTool {
                 },
                 "memory_type": {
                     "type": "string",
-                    "description": "Category. Types 'user', 'feedback', and 'rule' are auto-injected into every conversation. \
-                     Use 'project' for project context or 'reference' for external docs (on-demand). You may also invent \
-                     custom types if none of these fit. Default: project."
+                    "description": "Semantic category (user, feedback, rule, project, reference, or custom). \
+                     Does NOT control injection — use the `inject` field for that. Default: project."
+                },
+                "inject": {
+                    "type": "string",
+                    "enum": ["always", "search"],
+                    "description": "Injection policy. `always`: description injected into every conversation's \
+                     system-reminder (use for behavioral rules, personality traits, communication preferences \
+                     that affect every interaction). `search`: available via memory_search only, never \
+                     auto-injected (use for technical gotchas, situational facts, project context). \
+                     Default: search."
                 },
                 "description": {
                     "type": "string",
                     "description": "Brief description of the key content (1-2 sentences). \
-                     Required for user/feedback types (injected into system prompt). \
+                     Required for inject=always (injected into system prompt). \
                      Auto-generated from content if omitted. Formerly known as 'summary'."
                 },
                 "tags": {
@@ -945,13 +956,14 @@ impl MemoryManageTool {
         }
 
         let mem_type = self.resolve_type(args);
+        let inject = self.resolve_inject(args);
         let description = self.resolve_description(args, content);
         let tags = self.resolve_tags(args);
         let filename = format!("{}.md", name);
         let now = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
         let warnings = lint_memory_content(name, content, &files);
-        let frontmatter = build_frontmatter(name, &description, &tags, &mem_type, &now, None);
+        let frontmatter = build_frontmatter(name, &description, &tags, &mem_type, &inject, &now, None);
         let file_content = format!("{}{}", frontmatter, content);
 
         let target = self
@@ -1023,6 +1035,11 @@ impl MemoryManageTool {
         // Preserve existing metadata unless overridden
         let mem_type = normalize_optional_filter(args["memory_type"].as_str())
             .unwrap_or_else(|| existing.mem_type.clone());
+        let inject = match args["inject"].as_str() {
+            Some("always") => "always".to_string(),
+            Some("search") => "search".to_string(),
+            _ => existing.inject.clone(),
+        };
         let description =
             if args["description"].as_str().is_some() || args["summary"].as_str().is_some() {
                 self.resolve_description(args, content)
@@ -1054,6 +1071,7 @@ impl MemoryManageTool {
             &description,
             &tags,
             &mem_type,
+            &inject,
             &existing.created_at,
             Some(&now),
         );
@@ -1138,6 +1156,13 @@ impl MemoryManageTool {
     fn resolve_type(&self, args: &serde_json::Value) -> String {
         normalize_optional_filter(args["memory_type"].as_str())
             .unwrap_or_else(|| "project".to_string())
+    }
+
+    fn resolve_inject(&self, args: &serde_json::Value) -> String {
+        match args["inject"].as_str() {
+            Some("always") => "always".to_string(),
+            _ => "search".to_string(),
+        }
     }
 
     /// Resolve description: explicit parameter, or auto-generate from content.

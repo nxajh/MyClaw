@@ -21,11 +21,13 @@
 //! No separate index file. The index is generated dynamically by scanning
 //! `memory/*.md` frontmatter. Cross-session sync via file watcher.
 //!
-//! ## System-reminder injection policy
+//! ## Injection policy
 //!
-//! Only `user`, `feedback`, and `rule` types are injected into
-//! system-reminders — these are facts the agent must always obey.
-//! All other types are available via memory_list / memory_search.
+//! Each memory file has an `inject` field in frontmatter (`always` or `search`).
+//! `always` entries are injected into every conversation's system-reminder
+//! (diff-based). `search` entries are available via memory_list / memory_search
+//! but never auto-injected. The `type` field is purely semantic categorization
+//! and does not control injection.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -44,6 +46,7 @@ pub const MEMORY_DIR_NAME: &str = "memory";
 pub struct MemoryFile {
     pub name: String,
     pub mem_type: String,
+    pub inject: String,
     pub description: String,
     pub tags: Vec<String>,
     pub created_at: String,
@@ -65,6 +68,7 @@ pub struct LinkRef {
 pub struct IndexEntry {
     pub name: String,
     pub mem_type: String,
+    pub inject: String,
     pub description: String,
     pub tags: Vec<String>,
     pub link_count: usize,
@@ -75,6 +79,7 @@ impl From<&MemoryFile> for IndexEntry {
         Self {
             name: f.name.clone(),
             mem_type: f.mem_type.clone(),
+            inject: f.inject.clone(),
             description: f.description.clone(),
             tags: f.tags.clone(),
             link_count: f.links.len(),
@@ -84,10 +89,10 @@ impl From<&MemoryFile> for IndexEntry {
 
 // ── Injection helpers ──────────────────────────────────────────────────────
 
-/// Types injected into every conversation's system-reminder.
-/// Open string matching — not limited to a fixed enum.
-pub fn should_inject(mem_type: &str) -> bool {
-    matches!(mem_type, "user" | "feedback" | "rule")
+/// Whether a memory entry should be auto-injected into system-reminders.
+/// Based on the per-entry `inject` field, not the semantic `type`.
+pub fn should_inject(inject: &str) -> bool {
+    inject == "always"
 }
 
 // ── Directory management ───────────────────────────────────────────────────
@@ -152,6 +157,7 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
     let mut abstract_val: Option<String> = None;
     let mut tags: Vec<String> = Vec::new();
     let mut mem_type: Option<String> = None;
+    let mut inject: Option<String> = None;
     let mut created_at = None;
     let mut updated_at: Option<String> = None;
 
@@ -167,6 +173,7 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
                 "abstract" => abstract_val = Some(value.to_string()),
                 "tags" => tags = parse_tags(value),
                 "type" => mem_type = Some(value.to_string()),
+                "inject" => inject = Some(value.to_string()),
                 "created_at" => created_at = Some(value.to_string()),
                 "updated_at" => updated_at = Some(value.to_string()),
                 _ => {}
@@ -183,6 +190,7 @@ fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
     Some(MemoryFile {
         name: name?,
         mem_type: mem_type?,
+        inject: inject.unwrap_or_else(|| "search".to_string()),
         description,
         tags,
         created_at: created_at.unwrap_or_default(),
@@ -307,13 +315,13 @@ pub fn build_backlinks(files: &[MemoryFile]) -> HashMap<String, Vec<String>> {
 // ── Index formatting (for system-reminder injection) ──────────────────────
 
 /// Generate a formatted index string for system-reminder injection.
-/// Only includes types matching `should_inject` (user, feedback, rule).
+/// Only includes entries with `inject: always`.
 /// Groups entries by type, types sorted alphabetically.
 pub fn format_wiki_index(entries: &[IndexEntry]) -> String {
-    // Filter to injected types only
+    // Filter to injected entries only
     let injectable: Vec<&IndexEntry> = entries
         .iter()
-        .filter(|e| should_inject(&e.mem_type))
+        .filter(|e| should_inject(&e.inject))
         .collect();
 
     if injectable.is_empty() {
@@ -433,7 +441,7 @@ mod tests {
 
     #[test]
     fn test_parse_frontmatter_with_description() {
-        let content = "---\nname: user_lang\ndescription: 用户偏好使用中文进行所有交流\ntags: [user, language, preference]\ntype: user\ncreated_at: 2026-05-07\n---\n\n中文交流。";
+        let content = "---\nname: user_lang\ndescription: 用户偏好使用中文进行所有交流\ninject: always\ntags: [user, language, preference]\ntype: user\ncreated_at: 2026-05-07\n---\n\n中文交流。";
         let dir = std::env::temp_dir().join("myclaw_test_memory_parse_desc");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("user_lang.md");
@@ -444,6 +452,7 @@ mod tests {
         assert_eq!(mf.description, "用户偏好使用中文进行所有交流");
         assert_eq!(mf.tags, vec!["user", "language", "preference"]);
         assert_eq!(mf.mem_type, "user");
+        assert_eq!(mf.inject, "always");
         assert_eq!(mf.created_at, "2026-05-07");
         assert!(mf.updated_at.is_none());
         assert_eq!(mf.content, "中文交流。");
@@ -562,6 +571,7 @@ mod tests {
             MemoryFile {
                 name: "alpha".into(),
                 mem_type: "entity".into(),
+                inject: "search".into(),
                 description: String::new(),
                 tags: vec![],
                 created_at: String::new(),
@@ -582,6 +592,7 @@ mod tests {
             MemoryFile {
                 name: "beta".into(),
                 mem_type: "entity".into(),
+                inject: "search".into(),
                 description: String::new(),
                 tags: vec![],
                 created_at: String::new(),
@@ -610,6 +621,7 @@ mod tests {
             IndexEntry {
                 name: "project1".into(),
                 mem_type: "entity".into(),
+                inject: "search".into(),
                 description: "Project context".into(),
                 tags: vec![],
                 link_count: 0,
@@ -617,6 +629,7 @@ mod tests {
             IndexEntry {
                 name: "no_diff".into(),
                 mem_type: "feedback".into(),
+                inject: "always".into(),
                 description: "不要总结 diff".into(),
                 tags: vec!["workflow".into()],
                 link_count: 1,
@@ -624,6 +637,7 @@ mod tests {
             IndexEntry {
                 name: "lang".into(),
                 mem_type: "user".into(),
+                inject: "always".into(),
                 description: "中文回复".into(),
                 tags: vec![],
                 link_count: 0,
@@ -631,6 +645,7 @@ mod tests {
             IndexEntry {
                 name: "rule1".into(),
                 mem_type: "rule".into(),
+                inject: "always".into(),
                 description: "Always test".into(),
                 tags: vec![],
                 link_count: 0,
@@ -652,6 +667,7 @@ mod tests {
         let entries = vec![IndexEntry {
             name: "project1".into(),
             mem_type: "entity".into(),
+            inject: "search".into(),
             description: "Project context".into(),
             tags: vec![],
             link_count: 0,
