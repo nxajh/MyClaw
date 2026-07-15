@@ -21,7 +21,7 @@ mod scheduled;
 mod test_support;
 mod turn;
 
-pub use ctx::{ChannelRegistry, OrchestratorCtx};
+pub use ctx::{ChannelRegistry, OrchestratorCtx, SharedTurnTracker};
 pub use event::OrchestratorEvent;
 pub(crate) use scheduled::run_scheduled_turn;
 
@@ -190,6 +190,7 @@ impl Orchestrator {
             runtime: parts.agent_runtime,
             delegator: parts.delegator,
             scheduler: parts.scheduler,
+            turn_tracker: Arc::new(ctx::TurnTracker::new()),
         });
 
         let orchestrator = Orchestrator {
@@ -293,6 +294,7 @@ impl Orchestrator {
             &self.ctx.channels,
             &unfinished_subagents,
             &self.ctx.delegator,
+            &self.ctx.turn_tracker,
         );
 
         // Merge the event sources (user messages / delegation / scheduler)
@@ -367,6 +369,14 @@ impl Orchestrator {
         for h in self.listener_handles.drain(..) {
             h.abort();
         }
+
+        // Drain in-flight turn tasks before returning so tool results are
+        // persisted before the daemon's hot_switch fork+execv kills this
+        // process. Without this, a turn executing tools when SIGUSR1 arrives
+        // gets killed mid-persist, leaving orphan tool_calls that startup
+        // recovery blindly replays → crash loop.
+        self.ctx.turn_tracker.drain(Duration::from_secs(30)).await;
+
         info!("all listeners stopped, exiting");
         Ok(())
     }
@@ -416,19 +426,30 @@ impl Orchestrator {
                 );
 
                 // Spawn: LLM execution runs independently of the main loop.
-                tokio::spawn(run_heartbeat_task(
-                    self.ctx.clone(),
-                    target_channel,
-                    target_account,
-                    prompt,
-                    due.into_iter().cloned().collect(),
-                    state,
-                    state_path.to_path_buf(),
-                ));
+                let self_ctx = self.ctx.clone();
+                let turn_tracker = self.ctx.turn_tracker.clone();
+                tokio::spawn(async move {
+                    let _guard = turn_tracker.track();
+                    run_heartbeat_task(
+                        self_ctx,
+                        target_channel,
+                        target_account,
+                        prompt,
+                        due.into_iter().cloned().collect(),
+                        state,
+                        state_path.to_path_buf(),
+                    )
+                    .await;
+                });
             }
             SchedulerEvent::Cron(trigger) => {
                 tracing::debug!(session_key = %trigger.session_key, "cron job triggered (from scheduler)");
-                tokio::spawn(run_cron_task(self.ctx.clone(), trigger));
+                let self_ctx = self.ctx.clone();
+                let turn_tracker = self.ctx.turn_tracker.clone();
+                tokio::spawn(async move {
+                    let _guard = turn_tracker.track();
+                    run_cron_task(self_ctx, trigger).await;
+                });
             }
         }
     }

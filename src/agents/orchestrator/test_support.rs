@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use parking_lot::RwLock;
 
-use super::ctx::{ChannelRegistry, OrchestratorCtx};
+use super::ctx::{ChannelRegistry, OrchestratorCtx, TurnTracker};
 use crate::agents::context_engine::ContextEngine;
 use crate::agents::resource_provider::ResourceProvider;
 use crate::agents::session::SessionManager;
@@ -139,6 +139,7 @@ pub(crate) fn test_ctx(channels: Vec<((String, String), Arc<dyn Channel>)>) -> O
         runtime: test_runtime(),
         delegator: None,
         scheduler: None,
+        turn_tracker: Arc::new(TurnTracker::new()),
     }
 }
 

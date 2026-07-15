@@ -11,8 +11,11 @@
 //! methods on `Orchestrator`.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use dashmap::DashMap;
+use tokio::sync::Notify;
 
 use super::key::SessionKey;
 use crate::agents::{AgentRuntime, AskRouter, DelegationCoordinator, SessionContext};
@@ -56,6 +59,83 @@ impl ChannelRegistry {
     }
 }
 
+/// Tracks the number of in-flight turn tasks so the orchestrator can drain
+/// them before a hot switch (fork+execv). Without draining, a turn executing
+/// tools when SIGUSR1 arrives gets killed mid-persist, leaving orphan
+/// tool_calls that startup recovery blindly replays → crash loop.
+pub struct TurnTracker {
+    active: AtomicUsize,
+    notify: Notify,
+}
+
+/// Shared handle; cheaply clonable.
+pub type SharedTurnTracker = Arc<TurnTracker>;
+
+impl TurnTracker {
+    pub fn new() -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            notify: Notify::new(),
+        }
+    }
+
+    /// Increment the active counter and return a guard that decrements on drop.
+    /// Call **inside** the spawned task body so the counter is only released
+    /// when the task truly finishes (or panics).
+    pub fn track(self: &SharedTurnTracker) -> TurnGuard {
+        self.active.fetch_add(1, Ordering::SeqCst);
+        TurnGuard {
+            tracker: Arc::clone(self),
+        }
+    }
+
+    /// Wait until no turn tasks remain active, or `timeout` elapses (total,
+    /// not per-iteration).
+    pub async fn drain(self: &SharedTurnTracker, timeout: Duration) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let remaining = self.active.load(Ordering::SeqCst);
+            if remaining == 0 {
+                tracing::debug!("turn tracker: drained, no active turns");
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    active_turns = remaining,
+                    timeout_secs = timeout.as_secs(),
+                    "turn drain timed out — proceeding to hot switch with in-flight turns"
+                );
+                return;
+            }
+            tracing::info!(
+                active_turns = remaining,
+                "waiting for in-flight turn tasks to finish before hot switch"
+            );
+            let _ = tokio::time::timeout_at(deadline, self.notify.notified()).await;
+        }
+    }
+}
+
+impl Default for TurnTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// RAII guard: decrements the active counter on drop and notifies the drainer.
+pub struct TurnGuard {
+    tracker: SharedTurnTracker,
+}
+
+impl Drop for TurnGuard {
+    fn drop(&mut self) {
+        let prev = self.tracker.active.fetch_sub(1, Ordering::SeqCst);
+        if prev == 1 {
+            self.tracker.notify.notify_one();
+        }
+    }
+}
+
 /// Shared, cheaply-clonable dependencies used across the orchestrator.
 pub struct OrchestratorCtx {
     /// Live channels, keyed by (channel_type, account_id).
@@ -72,6 +152,8 @@ pub struct OrchestratorCtx {
     pub delegator: Option<Arc<DelegationCoordinator>>,
     /// Shared scheduler for run-result tracking from cron tasks.
     pub scheduler: Option<crate::agents::SharedScheduler>,
+    /// In-flight turn task counter for drain-on-hot-switch.
+    pub turn_tracker: SharedTurnTracker,
 }
 
 impl OrchestratorCtx {

@@ -267,7 +267,9 @@ impl Interceptor for SlashCommand {
             .clone()
             .unwrap_or_else(|| msg.id.clone());
 
+        let turn_tracker = ctx.turn_tracker.clone();
         tokio::spawn(async move {
+            let _guard = turn_tracker.track();
             let cmd_ctx = commands::CommandContext {
                 user_id: &sk,
                 registry: &registry_cmd,
@@ -355,7 +357,9 @@ pub(super) async fn dispatch_turn(
         .unwrap_or_else(|| msg.id.clone());
     let inbound_thread_id = msg.receiver.thread_id.clone();
 
+    let turn_tracker = ctx.turn_tracker.clone();
     tokio::spawn(async move {
+        let _guard = turn_tracker.track();
         // Successful turns: process_turn does the final `channel.send_message(text)`
         // fallback internally. We only handle the error notice here.
         let result = session_ctx

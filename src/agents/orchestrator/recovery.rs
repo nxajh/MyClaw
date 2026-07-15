@@ -91,6 +91,7 @@ impl CompletionSink {
 /// Spawn the recovery turn for one session. The LLM work runs in the
 /// background so the event loop starts without blocking.
 fn spawn_recovery(
+    turn_tracker: super::ctx::SharedTurnTracker,
     session_ctx: Arc<SessionContext>,
     runtime: AgentRuntime,
     label: &'static str,
@@ -98,6 +99,7 @@ fn spawn_recovery(
     sink: CompletionSink,
 ) {
     tokio::spawn(async move {
+        let _guard = turn_tracker.track();
         let _turn_guard = session_ctx.turn_lock.lock().await;
         let mut session = session_ctx.session.lock().await;
 
@@ -133,6 +135,7 @@ pub(super) fn run_startup(
     channels: &super::ctx::ChannelRegistry,
     unfinished: &[UnfinishedSubAgent],
     delegator: &Option<Arc<DelegationCoordinator>>,
+    turn_tracker: &super::ctx::SharedTurnTracker,
 ) {
     // `list_all_sessions` returns one entry per persisted session *record*, but
     // recovery is keyed by `owner` (the routing key) and always resumes that
@@ -153,6 +156,7 @@ pub(super) fn run_startup(
         tracing::info!(session = %key, "startup recovery: found incomplete turn, spawning background task");
         let session_ctx = sessions.get_or_create_context(&key);
         spawn_recovery(
+            turn_tracker.clone(),
             session_ctx,
             runtime.clone(),
             "startup recovery",
@@ -178,6 +182,7 @@ pub(super) fn run_startup(
         tracing::info!(task_id = %sa.task_id, agent = %sa.agent_name, "sub-agent startup recovery: found incomplete turn, spawning background task");
         let session_ctx = sessions.get_or_create_context(&sub_sk);
         spawn_recovery(
+            turn_tracker.clone(),
             session_ctx,
             runtime.clone(),
             "sub-agent startup recovery",
