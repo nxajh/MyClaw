@@ -172,6 +172,14 @@ impl Tool for WebSearchTool {
                                 (&entry.credential_pool, &entry.shared_api_key)
                             {
                                 let old_key = key.get();
+                                let old_prefix = old_key.chars().take(4).collect::<String>();
+                                tracing::warn!(
+                                    err = %error_str,
+                                    provider = %entry.provider_name,
+                                    key_prefix = %old_prefix,
+                                    reason = ?classified.reason,
+                                    "credential failed, rotating to next key"
+                                );
                                 pool.mark_exhausted(&old_key, &classified.reason);
                                 match pool.next_credential() {
                                     Some(new_key) => {
