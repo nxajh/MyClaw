@@ -190,28 +190,40 @@ pub fn do_hot_switch(socket_fd: i32, client_fd: i32) -> anyhow::Result<()> {
     let mut status: libc::c_int = 0;
     let result = unsafe { libc::waitpid(pid, &mut status, 0) };
 
-    if result > 0 && libc::WIFEXITED(status) && libc::WEXITSTATUS(status) != 0 {
-        // Child crashed — roll back.
-        tracing::error!(
-            exit_code = libc::WEXITSTATUS(status),
-            "child process exited with error, hot switch failed — rolling back"
-        );
-        crate::SHUTDOWN_FLAG.store(false, Ordering::SeqCst);
-        tracing::info!("shutdown flag cleared, daemon continues running");
+    if result > 0 {
+        let child_exited_with_error = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) != 0;
+        let child_killed_by_signal = libc::WIFSIGNALED(status);
 
-        // Restore systemd MAINPID to self — the fork set MAINPID to the dead child,
-        // so systemd is now tracking a non-existent process and won't auto-restart
-        // if we crash later.
-        if let Err(e) = sd_notify::notify(
-            false,
-            &[sd_notify::NotifyState::MainPid(std::process::id())],
-        ) {
-            tracing::warn!(err = %e, "sd_notify MAINPID rollback failed");
-        } else {
-            tracing::debug!("sd_notify MAINPID restored to self on rollback");
+        if child_exited_with_error || child_killed_by_signal {
+            if child_killed_by_signal {
+                tracing::error!(
+                    signo = libc::WTERMSIG(status),
+                    "child process killed by signal, hot switch failed — rolling back"
+                );
+            } else {
+                tracing::error!(
+                    exit_code = libc::WEXITSTATUS(status),
+                    "child process exited with error, hot switch failed — rolling back"
+                );
+            }
+
+            crate::SHUTDOWN_FLAG.store(false, Ordering::SeqCst);
+            tracing::info!("shutdown flag cleared, daemon continues running");
+
+            // Restore systemd MAINPID to self — the fork set MAINPID to the dead child,
+            // so systemd is now tracking a non-existent process and won't auto-restart
+            // if we crash later.
+            if let Err(e) = sd_notify::notify(
+                false,
+                &[sd_notify::NotifyState::MainPid(std::process::id())],
+            ) {
+                tracing::warn!(err = %e, "sd_notify MAINPID rollback failed");
+            } else {
+                tracing::debug!("sd_notify MAINPID restored to self on rollback");
+            }
+
+            return Err(anyhow::anyhow!("hot switch failed, daemon continues"));
         }
-
-        return Err(anyhow::anyhow!("hot switch failed, daemon continues"));
     }
 
     // Child exited normally (unlikely — usually execve replaces the process image).
