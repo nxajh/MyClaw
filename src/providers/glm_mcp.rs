@@ -215,7 +215,8 @@ impl SearchProvider for GlmMcpSearchProvider {
             );
         }
 
-        // result.content[0].text is a JSON-encoded array of search results.
+        // result.content[0].text is a JSON-encoded array of search results,
+        // but may be doubly encoded (a JSON string wrapping a JSON array).
         let inner_text = rpc["result"]["content"][0]["text"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("GLM MCP search: unexpected response structure"))?;
@@ -228,7 +229,15 @@ impl SearchProvider for GlmMcpSearchProvider {
             content: String,
         }
 
-        let items: Vec<McpSearchItem> = serde_json::from_str(inner_text)
+        // Handle double encoding: text may be `"[{\"title\":...}]"`
+        // (a JSON string) rather than raw `[{"title":...}]`.
+        let json_str = match serde_json::from_str::<serde_json::Value>(inner_text) {
+            Ok(serde_json::Value::String(s)) => s,
+            Ok(other) => other.to_string(),
+            Err(_) => inner_text.to_string(),
+        };
+
+        let items: Vec<McpSearchItem> = serde_json::from_str(&json_str)
             .map_err(|e| anyhow::anyhow!("GLM MCP search: failed to parse results array: {}", e))?;
 
         let results: Vec<SearchResult> = items
