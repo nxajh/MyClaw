@@ -46,6 +46,7 @@ pub mod credential_pool;
 pub mod deepseek;
 pub mod fallback;
 pub mod glm;
+pub mod glm_mcp;
 pub mod google;
 pub mod http;
 pub mod kimi;

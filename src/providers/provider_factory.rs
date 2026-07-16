@@ -302,14 +302,25 @@ impl ProviderFactory {
         let id = request.provider_id.as_str();
         match id {
             well_known::GLM => {
-                let mut p = crate::providers::glm::GlmProvider::with_base_url(
-                    request.api_key,
-                    request.base_url,
-                );
-                if let Some(ua) = request.user_agent {
-                    p = p.with_user_agent(ua);
+                if request.base_url.contains("mcp") {
+                    let mut p = crate::providers::glm_mcp::GlmMcpSearchProvider::new(
+                        request.api_key,
+                        request.base_url,
+                    );
+                    if let Some(ua) = request.user_agent {
+                        p = p.with_user_agent(ua);
+                    }
+                    Some(Box::new(p))
+                } else {
+                    let mut p = crate::providers::glm::GlmProvider::with_base_url(
+                        request.api_key,
+                        request.base_url,
+                    );
+                    if let Some(ua) = request.user_agent {
+                        p = p.with_user_agent(ua);
+                    }
+                    Some(Box::new(p))
                 }
-                Some(Box::new(p))
             }
             well_known::GOOGLE => {
                 let p = crate::providers::google::GoogleProvider::with_base_url(
