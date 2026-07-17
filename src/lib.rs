@@ -25,6 +25,7 @@ pub mod storage;
 pub mod str_utils;
 pub mod sys_info;
 pub mod tools;
+pub mod update_state;
 
 #[cfg(feature = "tui")]
 pub mod tui;

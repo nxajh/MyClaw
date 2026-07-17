@@ -1361,6 +1361,10 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
                     libc::kill(old_pid as libc::pid_t, libc::SIGUSR2);
                 }
             }
+            // Mark update-state completed so `myclaw status` can confirm the switch.
+            if let Err(e) = crate::update_state::UpdateState::mark_completed(new_pid) {
+                tracing::warn!(err = %e, "failed to write update-state completed");
+            }
         } else {
             // Normal startup: tell systemd we are ready to accept connections.
             if let Err(e) = sd_notify::notify(

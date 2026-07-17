@@ -41,6 +41,8 @@ fn print_text_status(cfg: &Option<myclaw::config::AppConfig>) {
         }
     }
 
+    print_last_update_text();
+
     match cfg {
         Some(cfg) => {
             println!("  Config: ✅ loaded ({})", cfg.config_path.display());
@@ -122,8 +124,56 @@ fn print_json_status(cfg: &Option<myclaw::config::AppConfig>) -> Result<()> {
         status["sub_agents"] = serde_json::json!(agents.len());
         status["mcp_servers"] = serde_json::json!(c.mcp_servers.len());
     }
+    if let Ok(Some(u)) = myclaw::update_state::UpdateState::load() {
+        status["last_update"] = serde_json::json!({
+            "status": u.status.as_str(),
+            "run_id": u.run_id,
+            "commit": u.commit,
+            "binary_path": u.binary_path,
+            "binary_sha256": u.binary_sha256,
+            "old_pid": u.old_pid,
+            "new_pid": u.new_pid,
+            "error": u.error,
+            "updated_at": u.updated_at,
+        });
+    }
     println!("{}", serde_json::to_string_pretty(&status)?);
     Ok(())
+}
+
+fn print_last_update_text() {
+    match myclaw::update_state::UpdateState::load() {
+        Ok(Some(u)) => {
+            println!("  Last update: {}", u.status.as_str());
+            if let Some(ref id) = u.run_id {
+                println!("    run_id: {id}");
+            }
+            if let Some(ref sha) = u.commit {
+                println!("    commit: {sha}");
+            }
+            if let Some(ref path) = u.binary_path {
+                println!("    binary_path: {path}");
+            }
+            if let Some(ref h) = u.binary_sha256 {
+                let short = if h.len() > 12 { &h[..12] } else { h.as_str() };
+                println!("    binary_sha256: {short}…");
+            }
+            if let Some(pid) = u.old_pid {
+                println!("    old_pid: {pid}");
+            }
+            if let Some(pid) = u.new_pid {
+                println!("    new_pid: {pid}");
+            }
+            if let Some(ref err) = u.error {
+                println!("    error: {err}");
+            }
+            println!("    updated_at: {}", u.updated_at);
+        }
+        Ok(None) => {}
+        Err(e) => {
+            println!("  Last update: ⚠️  unreadable ({e})");
+        }
+    }
 }
 
 /// Read process uptime from /proc.
