@@ -1,7 +1,7 @@
 //! Xiaomi MiMo provider — dual-protocol: Anthropic or OpenAI.
 //!
-//! The protocol is determined by the user's config (`protocol = "anthropic"` or
-//! `protocol = "openai"`). When Anthropic, uses mimo-v2.5-pro with MiMo-specific
+//! The protocol is determined by the user's config (`protocol = "messages"` or
+//! `protocol = "chat_completions"`). When Messages, uses mimo-v2.5-pro with MiMo-specific
 //! thinking patches. When OpenAI, uses the standard OpenAI Chat Completions
 //! client which supports text, image, video, and audio inputs.
 //!

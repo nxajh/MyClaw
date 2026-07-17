@@ -120,11 +120,11 @@ impl ProviderFactory {
             return p;
         }
         match provider_id.as_str() {
-            well_known::ANTHROPIC => Protocol::Anthropic,
-            well_known::XIAOMI => Protocol::Anthropic,
-            well_known::MINIMAX => Protocol::Anthropic,
-            well_known::GOOGLE => Protocol::Google,
-            _ => Protocol::OpenAi,
+            well_known::ANTHROPIC => Protocol::Messages,
+            well_known::XIAOMI => Protocol::Messages,
+            well_known::MINIMAX => Protocol::Messages,
+            well_known::GOOGLE => Protocol::GenerateContent,
+            _ => Protocol::ChatCompletions,
         }
     }
 
@@ -171,7 +171,7 @@ impl ProviderFactory {
                     request.api_key,
                     request.base_url,
                 );
-                if protocol == Protocol::OpenAi {
+                if protocol == Protocol::ChatCompletions {
                     p = p.with_openai();
                 }
                 if let Some(ua) = request.user_agent {
@@ -180,7 +180,7 @@ impl ProviderFactory {
                 Ok(Box::new(p))
             }
             // ── OpenAI-compatible providers ──
-            (_, Protocol::OpenAi) if id != well_known::GOOGLE && id != well_known::DEEPSEEK => {
+            (_, Protocol::ChatCompletions) if id != well_known::GOOGLE && id != well_known::DEEPSEEK => {
                 let client = OpenAiChatCompletionsClient::new(request.api_key, request.base_url);
                 let client = match request.user_agent {
                     Some(ua) => client.with_user_agent(ua),
@@ -189,7 +189,7 @@ impl ProviderFactory {
                 Ok(Box::new(client))
             }
             // ── Anthropic-protocol providers ──
-            (_, Protocol::Anthropic) => {
+            (_, Protocol::Messages) => {
                 let client =
                     crate::providers::protocols::anthropic::messages::AnthropicMessagesClient::new(
                         request.api_key,

@@ -334,19 +334,19 @@ impl MediaPolicy {
         let video = model_config.supports_input(Modality::Video);
 
         match protocol {
-            crate::config::provider::Protocol::OpenAi => Self {
+            crate::config::provider::Protocol::ChatCompletions => Self {
                 image: MediaInputPolicy::inline_base64(image, Some(25 * 1024 * 1024)),
                 audio: MediaInputPolicy::inline_base64(audio, Some(25 * 1024 * 1024)),
                 video: MediaInputPolicy::inline_base64(video, Some(50 * 1024 * 1024)),
                 other: MediaInputPolicy::marker(false),
             },
-            crate::config::provider::Protocol::Anthropic => Self {
+            crate::config::provider::Protocol::Messages => Self {
                 image: MediaInputPolicy::inline_base64(image, Some(25 * 1024 * 1024)),
                 audio: MediaInputPolicy::marker(audio),
                 video: MediaInputPolicy::marker(video),
                 other: MediaInputPolicy::marker(false),
             },
-            crate::config::provider::Protocol::Google => Self {
+            crate::config::provider::Protocol::GenerateContent => Self {
                 image: MediaInputPolicy::inline_base64(image, Some(25 * 1024 * 1024)),
                 audio: MediaInputPolicy::inline_base64(audio, Some(25 * 1024 * 1024)),
                 video: MediaInputPolicy::inline_base64(video, Some(50 * 1024 * 1024)),
@@ -370,7 +370,7 @@ impl MediaPolicy {
     ) -> Self {
         Self::for_provider_protocol_model(
             provider_id,
-            crate::config::provider::Protocol::OpenAi,
+            crate::config::provider::Protocol::ChatCompletions,
             model_config,
         )
     }
@@ -630,7 +630,7 @@ mod tests {
         ]);
         let policy = MediaPolicy::for_provider_protocol_model(
             &ProviderId::new("open_ai"),
-            crate::config::provider::Protocol::OpenAi,
+            crate::config::provider::Protocol::ChatCompletions,
             &cfg,
         );
 
@@ -644,7 +644,7 @@ mod tests {
     fn model_without_image_support_marks_image_even_if_protocol_supports() {
         let cfg = model_config(vec![crate::providers::capability::Modality::Text]);
         let policy =
-            MediaPolicy::for_protocol_model(crate::config::provider::Protocol::OpenAi, &cfg);
+            MediaPolicy::for_protocol_model(crate::config::provider::Protocol::ChatCompletions, &cfg);
 
         assert_eq!(
             policy.decision_for(FileModality::Image, Some(1000)),

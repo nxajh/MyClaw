@@ -150,7 +150,7 @@ pub enum Protocol {
 ```
 
 **解析优先级**：
-1. 显式配置 `protocol = "anthropic"` → 使用该值
+1. 显式配置 `protocol = "messages"` → 使用该值
 2. Provider 默认值：`anthropic` / `xiaomi` / `minimax` → Anthropic
 3. 其他 → OpenAI（默认值）
 
@@ -350,11 +350,11 @@ ProviderFactory 是构建所有 Provider trait 对象的唯一入口。替代 `d
 ```rust
 match (provider_id.as_str(), protocol) {
     // OpenAI-compatible providers
-    ("openai" | "kimi" | "generic", Protocol::OpenAi) => {
+    ("openai" | "kimi" | "generic", Protocol::ChatCompletions) => {
         OpenAiChatCompletionsClient::new(api_key, base_url)
     }
     // Anthropic-compatible providers
-    ("anthropic" | "xiaomi" | "minimax" | "generic", Protocol::Anthropic) => {
+    ("anthropic" | "xiaomi" | "minimax" | "generic", Protocol::Messages) => {
         AnthropicMessagesClient::new(api_key, base_url)
     }
     // Fallback: ProviderHandle
@@ -382,8 +382,8 @@ pub fn build_embedding_provider(&self, req) -> Option<Box<dyn EmbeddingProvider>
 fn resolve_protocol(provider_id: &ProviderId, configured: Option<Protocol>) -> Protocol {
     if let Some(p) = configured { return p; }
     match provider_id.as_str() {
-        "anthropic" | "xiaomi" | "minimax" => Protocol::Anthropic,
-        _ => Protocol::OpenAi,
+        "anthropic" | "xiaomi" | "minimax" => Protocol::Messages,
+        _ => Protocol::ChatCompletions,
     }
 }
 ```
@@ -442,7 +442,7 @@ api_key = "${ANTHROPIC_API_KEY}"
 ```toml
 [providers.anthropic.chat]
 base_url = "https://us.jinl.in"
-protocol = "anthropic"    # 新增：显式指定 API 协议
+protocol = "messages"    # 新增：显式指定 API 协议
 ```
 
 ### 9.2 实际配置示例
@@ -455,7 +455,7 @@ api_key = "${ANTHROPIC_API_KEY}"
 
 [providers.anthropic.chat]
 base_url = "https://us.jinl.in"
-protocol = "anthropic"
+protocol = "messages"
 ```
 
 ```toml
@@ -466,7 +466,7 @@ api_key = "${OPENAI_API_KEY}"
 
 [providers.openai.chat]
 base_url = "https://api.openai.com/v1"
-protocol = "openai"
+protocol = "chat_completions"
 ```
 
 ```toml
@@ -477,7 +477,7 @@ api_key = "${XIAOMI_API_KEY}"
 
 [providers.xiaomi.chat]
 base_url = "https://api.xiaomimimo.com/anthropic/v1"
-protocol = "anthropic"
+protocol = "messages"
 ```
 
 ```toml
@@ -488,7 +488,7 @@ api_key = "${KIMI_API_KEY}"
 
 [providers.kimi.chat]
 base_url = "https://api.moonshot.cn/v1"
-protocol = "openai"
+protocol = "chat_completions"
 ```
 
 ### 9.3 向后兼容
@@ -496,7 +496,7 @@ protocol = "openai"
 - `provider` 和 `protocol` 都是 `Option` 字段，不设置时走 fallback
 - 不设 `provider` → 尝试 URL host 推断
 - 不设 `protocol` → 使用 Provider 默认值（anthropic/xiaomi/minimax → Anthropic，其余 → OpenAI）
-- **关键场景**：anthropic 用代理 `us.jinl.in`，必须显式指定 `provider="anthropic"` + `protocol="anthropic"`，否则 Factory 会 fallback 到 ProviderHandle
+- **关键场景**：anthropic 用代理 `us.jinl.in`，必须显式指定 `provider="anthropic"` + `protocol="messages"`，否则 Factory 会 fallback 到 ProviderHandle
 
 ---
 
@@ -696,14 +696,14 @@ provider = "anthropic"
 api_key = "..."
 [providers.anthropic.chat]
 base_url = "https://us.jinl.in"
-protocol = "anthropic"
+protocol = "messages"
 
 # Case 4: 未知代理 + 显式指定
 [providers.my-proxy]
 provider = "generic"
 [providers.my-proxy.chat]
 base_url = "https://proxy.example.com/v1"
-protocol = "openai"
+protocol = "chat_completions"
 ```
 
 ### 15.4 已有测试

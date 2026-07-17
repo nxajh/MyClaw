@@ -18,15 +18,17 @@ pub use crate::providers::capability::{
 
 /// API protocol used by a provider capability.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum Protocol {
     /// OpenAI Chat Completions protocol (or OpenAI-compatible).
     #[default]
-    OpenAi,
+    #[serde(rename = "chat_completions")]
+    ChatCompletions,
     /// Anthropic Messages protocol (or Anthropic-compatible).
-    Anthropic,
+    #[serde(rename = "messages")]
+    Messages,
     /// Google Generate Content API protocol (Gemini).
-    Google,
+    #[serde(rename = "generate_content")]
+    GenerateContent,
 }
 
 // ── AuthStyle ─────────────────────────────────────────────────────────────────

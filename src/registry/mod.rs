@@ -357,7 +357,7 @@ impl Registry {
             .map(|id| {
                 crate::providers::MediaPolicy::for_provider_protocol_model(
                     id,
-                    protocol.unwrap_or(crate::config::provider::Protocol::OpenAi),
+                    protocol.unwrap_or(crate::config::provider::Protocol::ChatCompletions),
                     &model_config,
                 )
             })
