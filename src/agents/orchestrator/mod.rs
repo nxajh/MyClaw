@@ -377,6 +377,15 @@ impl Orchestrator {
         // recovery blindly replays → crash loop.
         self.ctx.turn_tracker.drain(Duration::from_secs(30)).await;
 
+        // Also drain background sub-agents so their sessions persist cleanly.
+        // Without this, async-delegated sub-agents are killed mid-turn by
+        // fork+execv, leaving zombie sub-sessions that trigger recovery spam
+        // on every restart. Allow up to 60s — each sub-agent already has its
+        // own 300s wall-clock budget, but most finish within seconds.
+        if let Some(ref delegator) = self.ctx.delegator {
+            delegator.drain(Duration::from_secs(60)).await;
+        }
+
         info!("all listeners stopped, exiting");
         Ok(())
     }

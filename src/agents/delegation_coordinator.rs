@@ -116,6 +116,58 @@ impl DelegationCoordinator {
         self.running.iter().map(|e| e.key().clone()).collect()
     }
 
+    /// Number of currently-running background sub-agents.
+    pub fn running_count(&self) -> usize {
+        self.running.len()
+    }
+
+    /// Wait for all background sub-agents to finish, or until `timeout` elapses.
+    /// Called during hot switch drain so sub-agent sessions persist cleanly
+    /// instead of being killed mid-turn by fork+execv.
+    ///
+    /// Unlike `TurnTracker::drain` which uses an atomic counter + Notify,
+    /// this drains the `DashMap` of JoinHandles directly. Each handle is
+    /// awaited with the remaining budget, so total wait is bounded by `timeout`.
+    pub async fn drain(&self, timeout: std::time::Duration) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            // Take ownership of handles by removing from the map. The sub-agent
+            // task body normally self-removes on completion, but during drain we
+            // need to own the handles to await them.
+            let handles: Vec<(String, JoinHandle<()>)> = self
+                .running
+                .iter()
+                .map(|e| e.key().clone())
+                .collect::<Vec<_>>()
+                .into_iter()
+                .filter_map(|id| self.running.remove(&id).map(|(_, h)| (id, h)))
+                .collect();
+            if handles.is_empty() {
+                tracing::debug!("sub-agent drain: no running sub-agents");
+                return;
+            }
+            let remaining = handles.len();
+            let budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if budget.is_zero() {
+                tracing::warn!(
+                    active_sub_agents = remaining,
+                    "sub-agent drain timed out — proceeding to hot switch with running sub-agents"
+                );
+                return;
+            }
+            tracing::info!(
+                active_sub_agents = remaining,
+                "waiting for sub-agents to finish before hot switch"
+            );
+            let futs: Vec<_> = handles.into_iter().map(|(_, h)| h).collect();
+            let _ = tokio::time::timeout_at(
+                deadline,
+                futures_util::future::join_all(futs),
+            )
+            .await;
+        }
+    }
+
     /// Remove orphaned worktree directories left behind by crashed or
     /// timed-out sub-agent runs. Called once at daemon startup.
     pub fn cleanup_stale_worktrees(&self) {
