@@ -219,7 +219,16 @@ impl SearchProvider for GlmMcpSearchProvider {
         // but may be doubly encoded (a JSON string wrapping a JSON array).
         let inner_text = rpc["result"]["content"][0]["text"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("GLM MCP search: unexpected response structure"))?;
+            .ok_or_else(|| {
+                tracing::warn!("GLM MCP search: unexpected response structure, rpc={}", data);
+                anyhow::anyhow!("GLM MCP search: unexpected response structure")
+            })?;
+
+        tracing::debug!(
+            inner_text_len = inner_text.len(),
+            inner_text_preview = &inner_text[..inner_text.len().min(200)],
+            "GLM MCP search: raw inner text"
+        );
 
         #[derive(serde::Deserialize)]
         struct McpSearchItem {
@@ -237,8 +246,23 @@ impl SearchProvider for GlmMcpSearchProvider {
             Err(_) => inner_text.to_string(),
         };
 
-        let items: Vec<McpSearchItem> = serde_json::from_str(&json_str)
-            .map_err(|e| anyhow::anyhow!("GLM MCP search: failed to parse results array: {}", e))?;
+        let items: Vec<McpSearchItem> = serde_json::from_str(&json_str).map_err(|e| {
+            tracing::warn!(
+                error = %e,
+                json_str_preview = &json_str[..json_str.len().min(300)],
+                "GLM MCP search: failed to parse results array"
+            );
+            anyhow::anyhow!("GLM MCP search: failed to parse results array: {}", e)
+        })?;
+
+        // Empty results array is not an error — just return zero results.
+        if items.is_empty() {
+            return Ok(SearchResults {
+                results: vec![],
+                total: Some(0),
+                query: req.query,
+            });
+        }
 
         let results: Vec<SearchResult> = items
             .into_iter()
