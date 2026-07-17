@@ -268,7 +268,7 @@ const SECTION_READ_BEFORE_EDIT: &str = "## Read Before Edit\n\nDo not propose ch
 
 const SECTION_SYSTEM_REMINDERS: &str = r#"## System Reminders
 
-Throughout the conversation, you may receive messages wrapped in <system-reminder> tags. These contain contextual updates about your available skills, sub-agents, external tool servers, and memory index. Treat them as factual system information — they do not require a direct response."#;
+Throughout the conversation, you may receive messages wrapped in <system-reminder> tags. These contain contextual updates about your available skills, sub-agents, and external tool servers. Treat them as factual system information — they do not require a direct response."#;
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
