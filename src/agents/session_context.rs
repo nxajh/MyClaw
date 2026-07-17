@@ -198,17 +198,45 @@ impl SessionContext {
             prompt_config.run_mode = rm;
         }
 
+        // inject:always memories live in the system prompt (not
+        // system-reminder) so they survive context compaction without
+        // re-injection on every turn. The system prompt is rebuilt each
+        // turn, so memory file changes are picked up automatically.
+        let memory_section = {
+            let knowledge_dir = &runtime.defaults.prompt.knowledge_dir;
+            if knowledge_dir.is_empty() {
+                String::new()
+            } else {
+                let memory_dir = std::path::Path::new(knowledge_dir);
+                let files = crate::memory::scan_memory_files(memory_dir);
+                let entries: Vec<crate::memory::IndexEntry> =
+                    files.iter().map(crate::memory::IndexEntry::from).collect();
+                let index = crate::memory::format_wiki_index(&entries);
+                if index.is_empty() || index == "暂无需要遵守的记忆。" {
+                    String::new()
+                } else {
+                    format!(
+                        "\n\n## Memory\nThe following memories are loaded and must be obeyed. \
+                         For project context and reference docs, use memory_list() to browse, \
+                         memory_search(query) to find.\n{}",
+                        index
+                    )
+                }
+            }
+        };
+
         // Sub-agent delegations set `system_prompt_override` to bypass
         // the full SystemPromptBuilder (sub-agents want a minimal
         // AGENT.md-derived identity prompt, not the full behavioral
-        // ruleset).
+        // ruleset). Memory section is appended to both paths so
+        // behavioral rules persist even for sub-agents.
         let system_prompt = match &session_override.system_prompt_override {
-            Some(custom) => custom.clone(),
-            None => runtime.build_system_prompt(&prompt_config),
+            Some(custom) => format!("{}{}", custom, memory_section),
+            None => format!("{}{}", runtime.build_system_prompt(&prompt_config), memory_section),
         };
 
         // RFC §三.A line 312-323: process_turn computes the attachment
-        // delta (skills/agents/MCP/memory/date/autonomy) against the
+        // delta (skills/agents/MCP/date/autonomy) against the
         // history's announced state and prepends a <system-reminder> to
         // the user content before recording the turn.
         let reminder = {
@@ -231,15 +259,6 @@ impl SessionContext {
             // (sourced from the shared ResourceProvider via ContextEngine).
             attachments.diff_date(runtime.context_engine.timezone_offset(), &session.history);
             attachments.diff_autonomy(&prompt_config.permission_mode, &session.history);
-            // Inject user/feedback memory index as system-reminder.
-            let knowledge_dir = &runtime.defaults.prompt.knowledge_dir;
-            if !knowledge_dir.is_empty() {
-                let memory_dir = std::path::Path::new(knowledge_dir);
-                let files = crate::memory::scan_memory_files(memory_dir);
-                let entries: Vec<crate::memory::IndexEntry> =
-                    files.iter().map(crate::memory::IndexEntry::from).collect();
-                attachments.diff_memory(&entries, &session.history);
-            }
             let text = attachments.build_text(&skills_snap);
             attachments.clear_pending();
             text
