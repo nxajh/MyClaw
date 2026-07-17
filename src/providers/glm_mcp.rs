@@ -224,9 +224,15 @@ impl SearchProvider for GlmMcpSearchProvider {
                 anyhow::anyhow!("GLM MCP search: unexpected response structure")
             })?;
 
+        let preview_end = inner_text
+            .char_indices()
+            .take_while(|(i, _)| *i <= 200)
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
         tracing::debug!(
             inner_text_len = inner_text.len(),
-            inner_text_preview = &inner_text[..inner_text.len().min(200)],
+            inner_text_preview = &inner_text[..preview_end],
             "GLM MCP search: raw inner text"
         );
 
@@ -247,9 +253,15 @@ impl SearchProvider for GlmMcpSearchProvider {
         };
 
         let items: Vec<McpSearchItem> = serde_json::from_str(&json_str).map_err(|e| {
+            let preview_end = json_str
+                .char_indices()
+                .take_while(|(i, _)| *i <= 300)
+                .last()
+                .map(|(i, c)| i + c.len_utf8())
+                .unwrap_or(0);
             tracing::warn!(
                 error = %e,
-                json_str_preview = &json_str[..json_str.len().min(300)],
+                json_str_preview = &json_str[..preview_end],
                 "GLM MCP search: failed to parse results array"
             );
             anyhow::anyhow!("GLM MCP search: failed to parse results array: {}", e)
