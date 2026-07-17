@@ -260,7 +260,7 @@ Do not save task progress, completed-work logs, or temporary TODO state. If a fa
 Use the memory_manage tool to add/replace/remove memories. Use memory_search to find existing entries.
 Each memory must have: name, description (1-2 sentence summary), and memory_type.
 The memory_manage content parameter is BODY ONLY: plain markdown without YAML frontmatter and without `---` blocks.
-Types `user`, `feedback`, and `rule` are injected into every conversation. Use `project` or `reference` for on-demand context, or a custom type if neither fits.
+Only memories with `inject: "always"` are injected into every conversation's system-reminder, regardless of `memory_type`. Use `inject: "always"` for behavioral rules and preferences that must always be obeyed. Use `inject: "search"` (default) for technical gotchas and project context that are only needed on demand.
 Tags are optional but recommended for searchability (e.g. ["rust","qqbot","bug"]).
 When applicable, add a `## See Also` section with markdown links to 1-3 related memories."#;
 
