@@ -279,15 +279,24 @@ impl AttachmentManager {
         let old_key = self.memory_index.as_deref().unwrap_or("");
         let same = new_key == old_key;
 
-        if same {
-            // Check if history still contains a memory reminder
-            let has_memory_reminder = history.iter().any(|msg| {
-                let text = msg.text_content();
-                text.contains("<system-reminder>") && text.contains("## Memory")
-            });
-            if has_memory_reminder {
-                return;
-            }
+        // Check if history still contains a memory reminder. This is
+        // checked regardless of `same` so that a daemon restart (which
+        // resets `memory_index` to None) does not cause a redundant
+        // re-injection when the memory is already present in history.
+        let has_memory_reminder = history.iter().any(|msg| {
+            let text = msg.text_content();
+            text.contains("<system-reminder>") && text.contains("## Memory")
+        });
+
+        if same && has_memory_reminder {
+            return;
+        }
+
+        // Daemon restart case: memory_index was lost but the memory
+        // is already in history. Initialize the index without injecting.
+        if !same && self.memory_index.is_none() && has_memory_reminder {
+            self.memory_index = Some(new_key);
+            return;
         }
 
         // Build structured index grouped by mem_type string
