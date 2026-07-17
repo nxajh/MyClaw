@@ -1,14 +1,22 @@
 import { useState, useMemo } from 'react'
 import { Edit3, Loader2, Check, X } from 'lucide-react'
 import { inputCls, btnPrimary, btnGhost } from './PageLayout'
-import { parseFrontmatter, getStyle, type MemType } from '../lib/memoryUtils'
+import {
+  parseFrontmatter, getStyle, getInjectStyle, normalizeInject,
+  type MemType, type InjectPolicy,
+} from '../lib/memoryUtils'
 
 const TYPE_OPTIONS: { value: MemType; label: string }[] = [
-  { value: 'user', label: '👤 User Preference (Always Injected)' },
-  { value: 'feedback', label: '🎯 Feedback & Alignment (Always Injected)' },
-  { value: 'rule', label: '⚙️ Rule (Always Injected)' },
-  { value: 'project', label: '📂 Project Context (On-Demand)' },
-  { value: 'reference', label: '📄 External Reference (On-Demand)' },
+  { value: 'user', label: '👤 User Preference' },
+  { value: 'feedback', label: '🎯 Feedback & Alignment' },
+  { value: 'rule', label: '⚙️ Rule' },
+  { value: 'project', label: '📂 Project Context' },
+  { value: 'reference', label: '📄 External Reference' },
+]
+
+const INJECT_OPTIONS: { value: InjectPolicy; label: string }[] = [
+  { value: 'search', label: 'Search — on-demand only' },
+  { value: 'always', label: 'Always — every conversation' },
 ]
 
 interface Props {
@@ -22,12 +30,26 @@ export default function MemoryEditor({ initial, onSave, onCancel, saving }: Prop
   const isNew = !initial.name
 
   const parsed = useMemo(() => {
-    if (isNew) return { body: '', meta: { name: '', type: 'project' as MemType, description: '', tags: [] as string[], created_at: '', updated_at: '' } }
+    if (isNew) {
+      return {
+        body: '',
+        meta: {
+          name: '',
+          type: 'project' as MemType,
+          inject: 'search' as InjectPolicy,
+          description: '',
+          tags: [] as string[],
+          created_at: '',
+          updated_at: '',
+        },
+      }
+    }
     return parseFrontmatter(initial.content)
   }, [initial, isNew])
 
   const [name, setName] = useState(isNew ? '' : (parsed.meta.name || initial.name.replace('.md', '')))
   const [memType, setMemType] = useState<MemType>(parsed.meta.type)
+  const [inject, setInject] = useState<InjectPolicy>(normalizeInject(parsed.meta.inject))
   const [description, setDescription] = useState(parsed.meta.description || '')
   const [tagsInput, setTagsInput] = useState(parsed.meta.tags ? parsed.meta.tags.join(', ') : '')
   const [body, setBody] = useState(parsed.body || '')
@@ -44,6 +66,7 @@ export default function MemoryEditor({ initial, onSave, onCancel, saving }: Prop
 name: "${cleanName}"
 description: "${desc}"
 type: "${memType}"
+inject: "${inject}"
 created_at: "${today}"
 tags: ${tagsStr}
 ---
@@ -68,6 +91,7 @@ ${body.trim()}`
       const p = parseFrontmatter(rawText)
       setName(p.meta.name || name)
       setMemType(p.meta.type || memType)
+      setInject(normalizeInject(p.meta.inject))
       setDescription(p.meta.description || description)
       setTagsInput(p.meta.tags ? p.meta.tags.join(', ') : tagsInput)
       setBody(p.body)
@@ -79,6 +103,8 @@ ${body.trim()}`
     if (editorMode === 'raw') return rawText.trim().length > 0 && (isNew ? name.trim().endsWith('.md') : true)
     return name.trim().length > 0 && body.trim().length > 0
   }
+
+  const injectHelp = getInjectStyle(inject).desc
 
   return (
     <div className="space-y-4">
@@ -113,8 +139,26 @@ ${body.trim()}`
               <p className="text-xs text-zinc-500">{getStyle(memType).desc}</p>
             </div>
             <div className="space-y-1.5 md:col-span-2">
+              <label className="text-xs font-semibold text-zinc-400">Injection</label>
+              <select
+                value={inject}
+                onChange={(e) => setInject(normalizeInject(e.target.value))}
+                className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-sm text-zinc-300 focus:border-zinc-700 outline-none transition-colors duration-150"
+              >
+                {INJECT_OPTIONS.map(opt => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+              <p className="text-xs text-zinc-500">
+                Controls system-reminder injection. Independent of type. {injectHelp}
+              </p>
+            </div>
+            <div className="space-y-1.5 md:col-span-2">
               <label className="text-xs font-semibold text-zinc-400">Description</label>
               <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="1-2 sentences summarizing this memory..." className={inputCls} />
+              {inject === 'always' && (
+                <p className="text-xs text-indigo-400/80">Always-injected entries use description in every conversation — keep it concise.</p>
+              )}
             </div>
             <div className="space-y-1.5 md:col-span-2">
               <label className="text-xs font-semibold text-zinc-400">Tags (Comma-separated)</label>
@@ -137,7 +181,13 @@ ${body.trim()}`
           )}
           <div className="space-y-1.5">
             <label className="text-xs font-semibold text-zinc-400 font-mono">Full File (includes frontmatter)</label>
-            <textarea value={rawText} onChange={(e) => setRawText(e.target.value)} rows={18} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-sm font-mono text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-700 resize-y transition-colors" placeholder={'---\nname: "my_fact"\ndescription: "..."\ntype: "project"\n---\n\nContent...'} />
+            <textarea
+              value={rawText}
+              onChange={(e) => setRawText(e.target.value)}
+              rows={18}
+              className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-sm font-mono text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-700 resize-y transition-colors"
+              placeholder={'---\nname: "my_fact"\ndescription: "..."\ntype: "project"\ninject: "search"\n---\n\nContent...'}
+            />
           </div>
         </div>
       )}

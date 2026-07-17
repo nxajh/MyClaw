@@ -8,7 +8,15 @@ import {
 } from '../components/PageLayout'
 import MemoryEditor from '../components/MemoryEditor'
 import MemoryViewer from '../components/MemoryViewer'
-import { getStyle, type MemoryFile } from '../lib/memoryUtils'
+import {
+  getStyle, getInjectStyle, normalizeInject,
+  type MemoryFile, type InjectPolicy,
+} from '../lib/memoryUtils'
+
+/** Normalize inject for list rows (API may omit until backend ships inject field). */
+function enrichMemoryRow(f: MemoryFile): MemoryFile {
+  return { ...f, inject: normalizeInject(f.inject) }
+}
 
 const TABS = ['all', 'user', 'feedback', 'rule', 'project', 'reference'] as const
 type Tab = typeof TABS[number]
@@ -20,6 +28,15 @@ const TAB_LABELS: Record<Tab, string> = {
   rule: '⚙️ Rules',
   project: '📂 Projects',
   reference: '📄 References',
+}
+
+const INJECT_FILTERS = ['all', 'always', 'search'] as const
+type InjectFilter = typeof INJECT_FILTERS[number]
+
+const INJECT_FILTER_LABELS: Record<InjectFilter, string> = {
+  all: 'Any inject',
+  always: 'Always',
+  search: 'Search',
 }
 
 export default function Memory() {
@@ -40,6 +57,7 @@ export default function Memory() {
   const [saving, setSaving] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [activeTab, setActiveTab] = useState<Tab>('all')
+  const [injectFilter, setInjectFilter] = useState<InjectFilter>('all')
 
   const isEditing = view.mode === 'edit' || view.mode === 'new'
 
@@ -65,7 +83,8 @@ export default function Memory() {
     setError(null)
     try {
       const res = await request('memory.list')
-      setFiles((res as MemoryFile[]) || [])
+      const rows = ((res as MemoryFile[]) || []).map(enrichMemoryRow)
+      setFiles(rows)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -121,9 +140,16 @@ export default function Memory() {
 
   const backToList = () => setView({ mode: 'list' })
 
+  const alwaysCount = useMemo(
+    () => files.filter(f => normalizeInject(f.inject) === 'always').length,
+    [files],
+  )
+
   const filteredFiles = useMemo(() => {
     return files.filter(f => {
       const matchesTab = activeTab === 'all' || f.type === activeTab
+      const inj = normalizeInject(f.inject)
+      const matchesInject = injectFilter === 'all' || inj === injectFilter
       const q = searchQuery.toLowerCase()
       const matchesSearch =
         !q ||
@@ -131,10 +157,11 @@ export default function Memory() {
         f.name.toLowerCase().includes(q) ||
         (f.description || '').toLowerCase().includes(q) ||
         (f.tags && f.tags.some(t => t.toLowerCase().includes(q))) ||
-        (f.content || '').toLowerCase().includes(q)
-      return matchesTab && matchesSearch
+        (f.content || '').toLowerCase().includes(q) ||
+        inj.includes(q)
+      return matchesTab && matchesInject && matchesSearch
     })
-  }, [files, activeTab, searchQuery])
+  }, [files, activeTab, injectFilter, searchQuery])
 
   // ── View mode: detail viewer ──
   if (view.mode === 'view') {
@@ -178,7 +205,7 @@ export default function Memory() {
     <PageShell>
       <PageHeader
         title="Memory"
-        subtitle={`${files.length} entries · Manage facts and rules guiding MyClaw`}
+        subtitle={`${files.length} entries · ${alwaysCount} always-injected · type is semantic, inject controls system-reminder`}
         icon={<Brain size={18} className="text-violet-400" />}
         actions={
           <button onClick={() => setView({ mode: 'new' })} disabled={status !== 'connected'} className={btnPrimary}>
@@ -187,7 +214,7 @@ export default function Memory() {
         }
       />
 
-      {/* Tabs */}
+      {/* Type tabs */}
       <div className="flex flex-wrap gap-1 border-b border-zinc-800/60 pb-1">
         {TABS.map(tab => {
           const isActive = activeTab === tab
@@ -204,10 +231,34 @@ export default function Memory() {
         })}
       </div>
 
+      {/* Inject filter — orthogonal to type */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="text-xs text-zinc-500 mr-1">Inject</span>
+        {INJECT_FILTERS.map(f => {
+          const isActive = injectFilter === f
+          const count = f === 'all'
+            ? files.length
+            : files.filter(file => normalizeInject(file.inject) === f).length
+          const s = f === 'all' ? null : getInjectStyle(f as InjectPolicy)
+          const cls = isActive
+            ? (s ? s.badgeBg : 'bg-zinc-800 text-zinc-100 border border-zinc-700/60')
+            : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/30 border border-transparent'
+          return (
+            <button
+              key={f}
+              onClick={() => setInjectFilter(f)}
+              className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all border ${cls}`}
+            >
+              {INJECT_FILTER_LABELS[f]} <span className="opacity-50">{count}</span>
+            </button>
+          )
+        })}
+      </div>
+
       <SearchField
         value={searchQuery}
         onChange={setSearchQuery}
-        placeholder="Search by name, description, or tags..."
+        placeholder="Search by name, description, tags, or inject…"
       />
 
       {error && <ErrorBanner message={error} />}
@@ -220,7 +271,7 @@ export default function Memory() {
           icon={<Brain size={28} />}
           action={
             files.length > 0 ? (
-              <button onClick={() => { setSearchQuery(''); setActiveTab('all') }} className={btnPrimary}>
+              <button onClick={() => { setSearchQuery(''); setActiveTab('all'); setInjectFilter('all') }} className={btnPrimary}>
                 Reset filters
               </button>
             ) : (
@@ -239,6 +290,7 @@ export default function Memory() {
         <div className="space-y-2">
           {filteredFiles.map((file) => {
             const style = getStyle(file.type)
+            const injectStyle = getInjectStyle(file.inject)
             const links = (file.link_count || 0) + (file.backlink_count || 0)
             return (
               <EntityListItem
@@ -246,8 +298,13 @@ export default function Memory() {
                 density="comfortable"
                 onClick={() => openFile(file.name)}
                 leading={
-                  <span className={`text-xs uppercase font-semibold tracking-wider px-2 py-1 rounded-md shrink-0 ${style.badgeBg}`}>
-                    {style.label.split(' ').slice(1).join(' ') || style.label}
+                  <span className="flex flex-col gap-1 shrink-0 items-start">
+                    <span className={`text-xs uppercase font-semibold tracking-wider px-2 py-1 rounded-md ${style.badgeBg}`}>
+                      {style.label.split(' ').slice(1).join(' ') || style.label}
+                    </span>
+                    <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-md ${injectStyle.badgeBg}`}>
+                      {injectStyle.label}
+                    </span>
                   </span>
                 }
                 title={

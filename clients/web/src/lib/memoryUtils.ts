@@ -1,4 +1,5 @@
 export type MemType = 'user' | 'feedback' | 'rule' | 'project' | 'reference'
+export type InjectPolicy = 'always' | 'search'
 
 export interface MemoryFile {
   name: string
@@ -7,6 +8,8 @@ export interface MemoryFile {
   description?: string
   tags?: string[]
   type?: string
+  /** Injection policy: always → system-reminder every turn; search → on-demand only */
+  inject?: InjectPolicy | string
   link_count?: number
   backlink_count?: number
   created_at?: string
@@ -17,6 +20,7 @@ export interface MemoryFile {
 export interface ParsedMeta {
   name: string
   type: MemType
+  inject: InjectPolicy
   description: string
   tags: string[]
   created_at: string
@@ -44,7 +48,7 @@ export const typeStyles: Record<string, {
     text: 'text-blue-400',
     badgeBg: 'bg-blue-500/10 text-blue-400 border border-blue-500/20',
     label: '👤 User Preference',
-    desc: 'Always-injected user preferences (highest scope)',
+    desc: 'Semantic category: user preferences and personal facts',
   },
   feedback: {
     bg: 'bg-red-500/5',
@@ -53,7 +57,7 @@ export const typeStyles: Record<string, {
     text: 'text-red-400',
     badgeBg: 'bg-red-500/10 text-red-400 border border-red-500/20',
     label: '🎯 Feedback Correction',
-    desc: 'Always-injected behavior corrections (strict constraints)',
+    desc: 'Semantic category: corrections and alignment notes',
   },
   rule: {
     bg: 'bg-emerald-500/5',
@@ -62,7 +66,7 @@ export const typeStyles: Record<string, {
     text: 'text-emerald-400',
     badgeBg: 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20',
     label: '⚙️ Rule',
-    desc: 'Always-injected operational rules and constraints',
+    desc: 'Semantic category: operational rules and constraints',
   },
   project: {
     bg: 'bg-purple-500/5',
@@ -71,7 +75,7 @@ export const typeStyles: Record<string, {
     text: 'text-purple-400',
     badgeBg: 'bg-purple-500/10 text-purple-400 border border-purple-500/20',
     label: '📂 Project Context',
-    desc: 'On-demand workspace background knowledge',
+    desc: 'Semantic category: workspace / project background knowledge',
   },
   reference: {
     bg: 'bg-amber-500/5',
@@ -80,12 +84,38 @@ export const typeStyles: Record<string, {
     text: 'text-amber-400',
     badgeBg: 'bg-amber-500/10 text-amber-400 border border-amber-500/20',
     label: '📄 Reference Doc',
-    desc: 'On-demand external APIs, specs, and definitions',
+    desc: 'Semantic category: external APIs, specs, and definitions',
+  },
+}
+
+/** Visual style for inject policy chips (orthogonal to type). */
+export const injectStyles: Record<InjectPolicy, {
+  badgeBg: string
+  label: string
+  desc: string
+}> = {
+  always: {
+    badgeBg: 'bg-indigo-500/10 text-indigo-300 border border-indigo-500/25',
+    label: 'Always',
+    desc: 'Description injected into every conversation system-reminder',
+  },
+  search: {
+    badgeBg: 'bg-zinc-800/80 text-zinc-400 border border-zinc-700/50',
+    label: 'Search',
+    desc: 'Available via search only — never auto-injected',
   },
 }
 
 export function getStyle(type?: string) {
   return typeStyles[type || ''] || typeStyles.project
+}
+
+export function normalizeInject(v?: string | null): InjectPolicy {
+  return v === 'always' ? 'always' : 'search'
+}
+
+export function getInjectStyle(inject?: string | null) {
+  return injectStyles[normalizeInject(inject)]
 }
 
 export function formatBytes(b: number) {
@@ -101,7 +131,15 @@ function asMemType(v: string): MemType {
 }
 
 export function parseFrontmatter(raw: string): ParsedFrontmatter {
-  const emptyMeta: ParsedMeta = { name: '', type: 'project', description: '', tags: [], created_at: '', updated_at: '' }
+  const emptyMeta: ParsedMeta = {
+    name: '',
+    type: 'project',
+    inject: 'search',
+    description: '',
+    tags: [],
+    created_at: '',
+    updated_at: '',
+  }
   const trimmed = raw.trim()
   if (!trimmed.startsWith('---')) return { body: raw, meta: emptyMeta }
   const nextDash = trimmed.indexOf('\n---', 3)
@@ -114,6 +152,7 @@ export function parseFrontmatter(raw: string): ParsedFrontmatter {
   let descriptionVal = ''
   let summaryVal = ''
   let abstractVal = ''
+  let injectVal = ''
 
   yaml.split('\n').forEach((line) => {
     const colon = line.indexOf(':')
@@ -126,6 +165,7 @@ export function parseFrontmatter(raw: string): ParsedFrontmatter {
       }
       if (k === 'name') meta.name = v
       else if (k === 'type') meta.type = asMemType(v)
+      else if (k === 'inject') injectVal = v
       else if (k === 'description') descriptionVal = v
       else if (k === 'summary') summaryVal = v
       else if (k === 'abstract') abstractVal = v
@@ -139,6 +179,7 @@ export function parseFrontmatter(raw: string): ParsedFrontmatter {
   })
 
   meta.description = descriptionVal || summaryVal || abstractVal
+  meta.inject = normalizeInject(injectVal)
 
   return { body, meta }
 }

@@ -1412,9 +1412,11 @@ fn handle_api_request(
                             "description": f.description,
                             "tags": f.tags,
                             "type": f.mem_type,
+                            "inject": f.inject,
                             "link_count": f.links.len(),
                             "backlink_count": bl_count,
                             "created_at": f.created_at,
+                            "updated_at": f.updated_at,
                             "content": f.content,
                         })
                     }).collect();

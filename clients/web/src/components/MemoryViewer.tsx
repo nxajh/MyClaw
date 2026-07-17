@@ -3,7 +3,7 @@ import { ChevronLeft, Pencil, Trash2, Calendar, Tag, Link2 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { ErrorBanner } from './PageLayout'
-import { parseFrontmatter, getStyle, formatBytes } from '../lib/memoryUtils'
+import { parseFrontmatter, getStyle, getInjectStyle, formatBytes } from '../lib/memoryUtils'
 
 interface Props {
   name: string
@@ -18,6 +18,7 @@ export default function MemoryViewer({ name, content, error, onEdit, onBack, onD
   const [confirmDelete, setConfirmDelete] = useState(false)
   const parsed = parseFrontmatter(content)
   const style = getStyle(parsed.meta.type)
+  const injectStyle = getInjectStyle(parsed.meta.inject)
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -52,9 +53,17 @@ export default function MemoryViewer({ name, content, error, onEdit, onBack, onD
         {/* Metadata panel */}
         <div className={`p-5 rounded-2xl border ${style.border} bg-zinc-900/30 space-y-3`}>
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <span className={`text-xs uppercase font-semibold tracking-wider px-2.5 py-1 rounded-full ${style.badgeBg}`}>
-              {style.label}
-            </span>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className={`text-xs uppercase font-semibold tracking-wider px-2.5 py-1 rounded-full ${style.badgeBg}`}>
+                {style.label}
+              </span>
+              <span
+                className={`text-xs font-semibold tracking-wide px-2.5 py-1 rounded-full ${injectStyle.badgeBg}`}
+                title={injectStyle.desc}
+              >
+                Inject · {injectStyle.label}
+              </span>
+            </div>
             <div className="flex items-center gap-3 text-xs text-zinc-500 font-mono">
               {parsed.meta.updated_at || parsed.meta.created_at ? (
                 <span className="flex items-center gap-1"><Calendar size={11} />{parsed.meta.updated_at || parsed.meta.created_at}</span>
