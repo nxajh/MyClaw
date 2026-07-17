@@ -215,6 +215,16 @@ impl SearchProvider for GlmMcpSearchProvider {
             );
         }
 
+        // Check MCP-level isError flag — GLM returns content filter errors
+        // and rate limits this way rather than via JSON-RPC error.
+        if rpc["result"]["isError"].as_bool() == Some(true) {
+            let err_text = rpc["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or("unknown MCP error");
+            tracing::warn!(error_text = err_text, "GLM MCP search: server returned isError");
+            anyhow::bail!("GLM MCP search: {}", err_text);
+        }
+
         // result.content[0].text is a JSON-encoded array of search results,
         // but may be doubly encoded (a JSON string wrapping a JSON array).
         let inner_text = rpc["result"]["content"][0]["text"]

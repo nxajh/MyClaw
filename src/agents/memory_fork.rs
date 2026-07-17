@@ -533,7 +533,7 @@ fn build_extraction_prompt(knowledge_dir: &str) -> String {
          \n\
          Other rules:\n\
          - Write memories as declarative facts, not instructions\n\
-         - Only memories with `inject: "always"` are injected into every conversation — regardless of type. Use `project`/`reference` with `inject: "search"` for on-demand context\n\
+         - Only memories with `inject: 'always'` are injected into every conversation — regardless of type. Use `project`/`reference` with `inject: 'search'` for on-demand context\n\
          - If no memory changes are needed, respond with exactly: no memory changes needed\n\
          \n\
          You have a limited turn budget. Be efficient: decide what to write, then write it.\n\
