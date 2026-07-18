@@ -45,6 +45,14 @@ pub fn render_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
                         );
                         empty_name_count += 1;
                     }
+                    if tc.arguments.trim().is_empty() {
+                        tracing::warn!(
+                            idx = i,
+                            id = %tc.id,
+                            name = %tc.name,
+                            "render_openai_chat_body: EMPTY tool_call arguments (will be sanitized to \"{{}}\")"
+                        );
+                    }
                 }
             }
         }

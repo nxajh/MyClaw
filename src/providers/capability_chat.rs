@@ -267,12 +267,22 @@ impl ToolCall {
     /// Convert to the OpenAI / OpenAI-compatible wire format used in
     /// assistant message tool_calls arrays.
     pub fn to_openai(&self) -> serde_json::Value {
+        // Sanitize: some providers (e.g. xAI) reject empty or non-JSON arguments
+        // with HTTP 400. Replace with "{}" so malformed historical entries don't
+        // break future requests.
+        let args = if self.arguments.trim().is_empty()
+            || serde_json::from_str::<serde_json::Value>(&self.arguments).is_err()
+        {
+            "{}".to_string()
+        } else {
+            self.arguments.clone()
+        };
         serde_json::json!({
             "id": self.id,
             "type": "function",
             "function": {
                 "name": self.name,
-                "arguments": self.arguments,
+                "arguments": args,
             }
         })
     }
