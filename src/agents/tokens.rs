@@ -37,7 +37,19 @@ pub fn estimate_message_tokens(msg: &ChatMessage) -> u64 {
     for part in &msg.parts {
         tokens += match part {
             ContentPart::Text { text } => estimate_tokens(text),
-            ContentPart::File { path, .. } => estimate_tokens(path) + 12,
+            ContentPart::File { path, .. } => {
+                // The rendered request base64-encodes file content inline
+                // (data URL for images, raw base64 for audio).  A naive
+                // path-length estimate misses ~99% of the actual token cost,
+                // which suppresses compaction and causes context overflow.
+                // Base64 expands by 4/3; at ~4 bytes/token that's
+                // `file_bytes / 3` tokens for the payload alone.
+                let path_tokens = estimate_tokens(path);
+                let media_tokens = std::fs::metadata(crate::providers::media::resolve_path(path))
+                    .map(|m| m.len() / 3)
+                    .unwrap_or(0);
+                path_tokens + 12 + media_tokens
+            }
             ContentPart::Thinking { thinking, .. } => estimate_tokens(thinking),
         };
     }
