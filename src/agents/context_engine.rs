@@ -129,9 +129,30 @@ impl ContextEngine {
         force: bool,
         override_retain: Option<usize>,
     ) -> Option<(Vec<ChatMessage>, u64, u64)> {
-        let cfg = self.registry.get_chat_model_config(model_id).ok()?;
-        let window = cfg.context_window?;
+        let cfg = match self.registry.get_chat_model_config(model_id) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(model_id, error = %e, "maybe_compact: model config lookup failed, skipping compaction");
+                return None;
+            }
+        };
+        let window = match cfg.context_window {
+            Some(w) => w,
+            None => {
+                tracing::warn!(model_id, "maybe_compact: context_window is None, skipping compaction");
+                return None;
+            }
+        };
         let estimate = estimate_history_tokens(system_prompt, &session.history);
+        tracing::debug!(
+            model_id,
+            estimate,
+            window,
+            threshold = (window as f64 * self.compact_threshold) as u64,
+            force,
+            history_len = session.history.len(),
+            "maybe_compact: compaction check"
+        );
         if !force && !self.should_compact(estimate, window) {
             return None;
         }
