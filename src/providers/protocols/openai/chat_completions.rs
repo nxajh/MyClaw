@@ -361,6 +361,11 @@ fn parse_openai_sse(line: &str, tool_index_map: &mut HashMap<u32, String>) -> Ve
         }
 
         if let Some(ref r) = choice.finish_reason {
+            tracing::debug!(
+                finish_reason = %r,
+                saw_tool_call = %emitted_tool_event,
+                "SSE finish_reason received"
+            );
             let reason = match r.as_str() {
                 "stop" => StopReason::EndTurn,
                 "length" => StopReason::MaxTokens,

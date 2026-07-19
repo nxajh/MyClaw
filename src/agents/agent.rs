@@ -326,6 +326,14 @@ impl Agent {
 
             // No tool calls → final response. Persist + return.
             if response.tool_calls.is_empty() {
+                tracing::debug!(
+                    model = %model_id,
+                    stop = ?response.stop_reason,
+                    text_len = response.text.len(),
+                    has_reasoning = response.reasoning_content.is_some(),
+                    reasoning_len = response.reasoning_content.as_ref().map(|s| s.len()).unwrap_or(0),
+                    "no tool calls in response — treating as final"
+                );
                 // Emit Done event before persisting so the streaming UI gets
                 // the final-text signal in the canonical order.
                 push_or_drop(

@@ -60,6 +60,7 @@ pub fn render_openai_chat_body<'a>(req: &ChatRequest<'a>) -> serde_json::Value {
             msg_count = req.messages.len(),
             model = req.model,
             empty_name_count,
+            tool_count = req.tools.map(|t| t.len()).unwrap_or(0),
             "render_openai_chat_body: rendering request"
         );
     }
