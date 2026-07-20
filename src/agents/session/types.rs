@@ -351,6 +351,82 @@ impl Session {
         }
     }
 
+    /// Close an incomplete turn the user chose to abort.
+    ///
+    /// - Trailing `user` (turn never started) → drop that user message.
+    /// - Trailing `tool` results (LLM never continued) → append a closing
+    ///   assistant placeholder so the next user message is protocol-valid.
+    /// - Trailing `assistant` with unfulfilled tool_calls → fill cancelled
+    ///   tool results + closing assistant placeholder.
+    ///
+    /// Returns the number of messages removed from the tail (for
+    /// `truncate_messages` persistence). Newly appended closure messages are
+    /// left with `message_ids = 0` so callers can persist them.
+    pub fn close_incomplete_turn_on_abort(&mut self) -> usize {
+        if self.history.is_empty() {
+            self.incomplete_turn = false;
+            return 0;
+        }
+
+        // Case C: trailing user(s) — turn never produced an assistant response.
+        // Drop every consecutive trailing user so a duplicated inbound cannot
+        // leave an open tail after abort.
+        if self.history.last().is_some_and(|m| m.role == "user") {
+            let mut removed = 0usize;
+            while self.history.last().is_some_and(|m| m.role == "user") {
+                self.history.pop();
+                self.message_ids.pop();
+                removed += 1;
+            }
+            self.incomplete_turn = false;
+            return removed;
+        }
+
+        // Collect trailing tool results / pending tool_calls (same walk as
+        // history_has_incomplete_turn / run_recovery).
+        let mut completed_ids = std::collections::HashSet::new();
+        let mut has_trailing_tools = false;
+        let mut pending_calls: Vec<crate::providers::ToolCall> = Vec::new();
+        for msg in self.history.iter().rev() {
+            if msg.role == "tool" {
+                if let Some(ref id) = msg.tool_call_id {
+                    completed_ids.insert(id.clone());
+                }
+                has_trailing_tools = true;
+            } else if msg.role == "assistant" {
+                if let Some(ref calls) = msg.tool_calls {
+                    for call in calls {
+                        if !completed_ids.contains(&call.id) {
+                            pending_calls.push(call.clone());
+                        }
+                    }
+                }
+                break;
+            } else {
+                break;
+            }
+        }
+
+        if pending_calls.is_empty() && !has_trailing_tools {
+            self.incomplete_turn = false;
+            return 0;
+        }
+
+        for call in &pending_calls {
+            self.add_tool_result(
+                call.id.clone(),
+                &call.name,
+                "cancelled: aborted by user".to_string(),
+                true,
+            );
+        }
+        // Always close with an assistant message so the next user turn is not
+        // adjacent to tool results (Gemini maps tool → user role).
+        self.add_assistant("（已取消）".to_string());
+        self.incomplete_turn = false;
+        0
+    }
+
     /// Roll back history to the given length.
     /// Removes all messages added after position `len` (both in-memory history and message_ids).
     /// Used when a turn fails completely (e.g. empty LLM response) to undo all

@@ -117,6 +117,8 @@ pub fn sanitize_history(history: &mut Vec<ChatMessage>) {
 
     // Step 4: Trim trailing assistant messages whose tool_calls are all unfulfilled.
     // These are left behind when the process crashes during tool execution.
+    // Mid-history unfulfilled calls are closed in step 5 instead of dropped so
+    // later user messages stay valid against providers that reject tool→user.
     let mut trimmed = 0;
     while let Some(last) = history.last() {
         if last.role == "assistant" {
@@ -136,6 +138,134 @@ pub fn sanitize_history(history: &mut Vec<ChatMessage>) {
             "sanitized trailing assistant messages with unfulfilled tool_calls"
         );
     }
+
+    // Step 5: Close interrupted tool rounds that are followed by a later user/
+    // assistant message (e.g. crash/hot-reload mid-tools, then a new user turn).
+    // Providers like Gemini reject functionResponse without a subsequent model
+    // turn, and reject functionCall without a matching functionResponse.
+    close_interrupted_tool_rounds(history);
+
+    // Step 6: Merge adjacent same-role user/assistant messages. Consecutive
+    // `user` rows break Gemini / some OpenAI-compatible endpoints; consecutive
+    // assistants are also invalid on strict alternation providers.
+    merge_adjacent_same_role(history);
+}
+
+/// Insert cancelled tool results / placeholder assistant messages so a later
+/// user turn never sits directly after an open tool round.
+fn close_interrupted_tool_rounds(history: &mut Vec<ChatMessage>) {
+    let mut i = 0;
+    while i < history.len() {
+        if history[i].role != "assistant" {
+            i += 1;
+            continue;
+        }
+        let Some(calls) = history[i].tool_calls.clone() else {
+            i += 1;
+            continue;
+        };
+        if calls.is_empty() {
+            i += 1;
+            continue;
+        }
+
+        // Gather fulfilled tool ids immediately following this assistant.
+        let mut j = i + 1;
+        let mut fulfilled: std::collections::HashSet<String> = std::collections::HashSet::new();
+        while j < history.len() && history[j].role == "tool" {
+            if let Some(ref id) = history[j].tool_call_id {
+                fulfilled.insert(id.clone());
+            }
+            j += 1;
+        }
+
+        let missing: Vec<_> = calls
+            .iter()
+            .filter(|tc| !fulfilled.contains(&tc.id))
+            .cloned()
+            .collect();
+
+        // Only rewrite when this tool round is not the live tail — the live tail
+        // is either recovered (run_recovery) or closed by abort.
+        let followed_by_later_turn = j < history.len();
+        if !followed_by_later_turn {
+            break;
+        }
+
+        if !missing.is_empty() {
+            let mut insert_at = j;
+            for tc in &missing {
+                let mut msg = ChatMessage::text("tool", "cancelled: turn interrupted");
+                msg.tool_call_id = Some(tc.id.clone());
+                msg.name = Some(tc.name.clone());
+                msg.is_error = Some(true);
+                history.insert(insert_at, msg);
+                insert_at += 1;
+            }
+            j = insert_at;
+            tracing::warn!(
+                missing = missing.len(),
+                "sanitized unfulfilled tool_calls before a later turn"
+            );
+        }
+
+        // Google maps tool results to role=user; a real user message right after
+        // tools becomes adjacent user roles → 400. Insert a closing model turn.
+        if j < history.len() && history[j].role == "user" {
+            history.insert(j, ChatMessage::assistant_text("（已中断）"));
+            tracing::warn!("inserted placeholder assistant between tool results and user");
+            i = j + 2;
+            continue;
+        }
+        i = j;
+    }
+}
+
+/// Merge consecutive `user`/`assistant` messages (not tool/system) so providers
+/// that require strict role alternation accept the request.
+fn merge_adjacent_same_role(history: &mut Vec<ChatMessage>) {
+    if history.len() < 2 {
+        return;
+    }
+    let mut out: Vec<ChatMessage> = Vec::with_capacity(history.len());
+    let mut merged = 0usize;
+    for msg in history.drain(..) {
+        let can_merge = matches!(msg.role.as_str(), "user" | "assistant")
+            && msg.tool_calls.as_ref().is_none_or(|tc| tc.is_empty());
+        if let Some(last) = out.last_mut() {
+            let last_can_merge = matches!(last.role.as_str(), "user" | "assistant")
+                && last.tool_calls.as_ref().is_none_or(|tc| tc.is_empty());
+            if can_merge && last_can_merge && last.role == msg.role {
+                // Keep non-text parts from both; separate text chunks with a blank line.
+                let last_has_text = last.parts.iter().any(|p| {
+                    matches!(p, crate::providers::ContentPart::Text { text } if !text.is_empty())
+                });
+                let msg_has_text = msg.parts.iter().any(|p| {
+                    matches!(p, crate::providers::ContentPart::Text { text } if !text.is_empty())
+                });
+                if last_has_text && msg_has_text {
+                    last.parts.push(crate::providers::ContentPart::Text {
+                        text: "\n\n".to_string(),
+                    });
+                }
+                last.parts.extend(msg.parts);
+                // Prefer keeping model/usage metadata from the later message when present.
+                if msg.model.is_some() {
+                    last.model = msg.model;
+                }
+                if msg.usage.is_some() {
+                    last.usage = msg.usage;
+                }
+                merged += 1;
+                continue;
+            }
+        }
+        out.push(msg);
+    }
+    if merged > 0 {
+        tracing::warn!(merged, "merged adjacent same-role messages before model send");
+    }
+    *history = out;
 }
 
 /// Same as `sanitize_history` but keeps IDs paired with their messages throughout,
@@ -199,4 +329,91 @@ pub(super) fn sanitize_paired(pairs: Vec<(i64, ChatMessage)>) -> Vec<(i64, ChatM
         tracing::warn!(removed, "sanitized orphan tool results from history");
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_history;
+    use crate::providers::capability_chat::ChatMessage;
+    use crate::providers::ToolCall;
+
+    fn asst_tools(ids: &[&str]) -> ChatMessage {
+        let mut msg = ChatMessage::assistant_text("call");
+        msg.tool_calls = Some(
+            ids.iter()
+                .map(|id| ToolCall {
+                    id: (*id).to_string(),
+                    name: "shell".into(),
+                    arguments: "{}".into(),
+                })
+                .collect(),
+        );
+        msg
+    }
+
+    fn tool(id: &str) -> ChatMessage {
+        let mut msg = ChatMessage::text("tool", "ok");
+        msg.tool_call_id = Some(id.into());
+        msg.name = Some("shell".into());
+        msg
+    }
+
+    #[test]
+    fn merges_adjacent_user_messages() {
+        let mut history = vec![
+            ChatMessage::user_text("one"),
+            ChatMessage::user_text("two"),
+            ChatMessage::assistant_text("ok"),
+        ];
+        sanitize_history(&mut history);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].role, "user");
+        assert!(history[0].text_content().contains("one"));
+        assert!(history[0].text_content().contains("two"));
+        assert_eq!(history[1].role, "assistant");
+    }
+
+    #[test]
+    fn closes_tool_round_before_later_user() {
+        let mut history = vec![
+            ChatMessage::user_text("hi"),
+            asst_tools(&["t1"]),
+            tool("t1"),
+            ChatMessage::user_text("again"),
+        ];
+        sanitize_history(&mut history);
+        // tool → placeholder assistant → user (merged path keeps all three roles)
+        assert!(history.iter().any(|m| m.role == "assistant" && m.tool_calls.is_none()));
+        assert_eq!(history.last().map(|m| m.role.as_str()), Some("user"));
+        // No adjacent user/user after sanitize.
+        for w in history.windows(2) {
+            assert!(
+                !(w[0].role == "user" && w[1].role == "user"),
+                "adjacent user messages remain"
+            );
+            // tool must not be immediately followed by user
+            assert!(
+                !(w[0].role == "tool" && w[1].role == "user"),
+                "tool directly followed by user"
+            );
+        }
+    }
+
+    #[test]
+    fn fills_missing_tool_results_mid_history() {
+        let mut history = vec![
+            ChatMessage::user_text("hi"),
+            asst_tools(&["t1", "t2"]),
+            tool("t1"),
+            ChatMessage::user_text("later"),
+        ];
+        sanitize_history(&mut history);
+        let tool_ids: Vec<_> = history
+            .iter()
+            .filter(|m| m.role == "tool")
+            .filter_map(|m| m.tool_call_id.clone())
+            .collect();
+        assert!(tool_ids.contains(&"t1".to_string()));
+        assert!(tool_ids.contains(&"t2".to_string()));
+    }
 }

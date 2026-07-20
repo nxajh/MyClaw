@@ -92,12 +92,29 @@ pub struct Orchestrator {
     scheduler_rx: Option<mpsc::Receiver<SchedulerEvent>>,
 }
 
-/// Return `true` if the session history ends with an incomplete tool execution:
-/// either trailing tool-result messages, or assistant tool_calls whose IDs have
-/// no matching tool-result — indicating the turn was interrupted mid-execution.
+/// Return `true` if the session history ends mid-turn and needs recovery or a
+/// retry/abort prompt.
+///
+/// Incomplete shapes:
+/// - Case A: last assistant has tool_calls whose IDs lack matching tool results
+/// - Case B: history ends on tool-result messages (LLM never continued)
+/// - Case C: history ends on a user message (turn never produced an assistant)
+///
+/// A fully closed assistant text reply (no pending tool_calls) is complete even
+/// if earlier tool rounds exist deeper in history.
 pub(super) fn history_has_incomplete_turn(
     history: &[crate::providers::capability_chat::ChatMessage],
 ) -> bool {
+    let Some(last) = history.last() else {
+        return false;
+    };
+
+    // Case C: trailing user — no assistant response yet.
+    if last.role == "user" {
+        return true;
+    }
+
+    // Walk the open tool round at the tail only.
     let mut completed_ids = std::collections::HashSet::new();
     let mut has_trailing_tools = false;
     let mut found_pending = false;
@@ -115,15 +132,92 @@ pub(super) fn history_has_incomplete_turn(
                     }
                 }
             }
-            break;
+            // Case B: tools fulfilled and waiting for the next LLM call, or
+            // Case A: some tool_calls still pending. A plain assistant text
+            // reply (no tool_calls, no trailing tools) is complete.
+            return found_pending || has_trailing_tools;
         } else {
-            // Case C: last message is user/system — turn was never started.
+            // system / other — not a mid-turn marker by itself.
             break;
         }
     }
-    // Check if the very last message is a user message (no assistant response yet).
-    let last_is_user = history.last().is_some_and(|m| m.role == "user");
-    found_pending || has_trailing_tools || last_is_user
+    // Trailing tools with no preceding assistant in the reverse walk is still
+    // incomplete (orphan tool tail after sanitize edge cases).
+    has_trailing_tools
+}
+
+#[cfg(test)]
+mod incomplete_turn_tests {
+    use super::history_has_incomplete_turn;
+    use crate::providers::capability_chat::ChatMessage;
+    use crate::providers::ToolCall;
+
+    fn asst_with_tools(ids: &[&str]) -> ChatMessage {
+        let mut msg = ChatMessage::assistant_text("calling");
+        msg.tool_calls = Some(
+            ids.iter()
+                .map(|id| ToolCall {
+                    id: (*id).to_string(),
+                    name: "shell".into(),
+                    arguments: "{}".into(),
+                })
+                .collect(),
+        );
+        msg
+    }
+
+    fn tool_result(id: &str) -> ChatMessage {
+        let mut msg = ChatMessage::text("tool", "ok");
+        msg.tool_call_id = Some(id.to_string());
+        msg.name = Some("shell".into());
+        msg
+    }
+
+    #[test]
+    fn complete_assistant_text_is_not_incomplete() {
+        let history = vec![
+            ChatMessage::user_text("hi"),
+            ChatMessage::assistant_text("hello"),
+        ];
+        assert!(!history_has_incomplete_turn(&history));
+    }
+
+    #[test]
+    fn trailing_user_is_incomplete() {
+        let history = vec![
+            ChatMessage::user_text("hi"),
+            ChatMessage::assistant_text("hello"),
+            ChatMessage::user_text("again"),
+        ];
+        assert!(history_has_incomplete_turn(&history));
+    }
+
+    #[test]
+    fn trailing_tools_without_final_assistant_are_incomplete() {
+        let history = vec![
+            ChatMessage::user_text("hi"),
+            asst_with_tools(&["t1"]),
+            tool_result("t1"),
+        ];
+        assert!(history_has_incomplete_turn(&history));
+    }
+
+    #[test]
+    fn pending_tool_calls_are_incomplete() {
+        let history = vec![ChatMessage::user_text("hi"), asst_with_tools(&["t1", "t2"])];
+        assert!(history_has_incomplete_turn(&history));
+    }
+
+    #[test]
+    fn fulfilled_tools_then_assistant_text_is_complete() {
+        let history = vec![
+            ChatMessage::user_text("hi"),
+            asst_with_tools(&["t1"]),
+            tool_result("t1"),
+            ChatMessage::assistant_text("done"),
+        ];
+        assert!(!history_has_incomplete_turn(&history));
+    }
 }
 
 /// Fully-assembled components ready for the Orchestrator to use.

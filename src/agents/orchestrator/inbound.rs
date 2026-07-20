@@ -118,7 +118,8 @@ impl Interceptor for AskReply {
 /// Handle a retry/abort callback from an EmptyResponse prompt (RFC §11 Phase 5
 /// structured `CallbackAction`). For retry, extract the saved text and rewrite
 /// `msg.content`, then fall through to the standard dispatch. For abort, clear
-/// `pending_retry` and ack inline.
+/// `pending_retry` + `incomplete_turn`, close any open tool/user tail in history,
+/// persist the closed form, and ack inline.
 struct Callback;
 
 #[async_trait]
@@ -155,6 +156,12 @@ impl Interceptor for Callback {
         if is_retry {
             match pending {
                 Some(user_msg) => {
+                    // Retry continues the incomplete turn; clear the load-time
+                    // flag so CrashRecovery does not re-prompt if the spawn is
+                    // delayed. The actual recovery path re-reads history.
+                    if let Ok(mut session) = session_ctx.session.try_lock() {
+                        session.incomplete_turn = false;
+                    }
                     // Rewrite content and fall through to dispatch.
                     msg.content.text = user_msg;
                     Flow::Next(msg)
@@ -165,6 +172,32 @@ impl Interceptor for Callback {
                 }
             }
         } else {
+            // Abort must fully close the incomplete turn: drop orphan trailing
+            // user, or fill cancelled tool results + assistant placeholder so
+            // the next real user message is not stacked onto an open tool round.
+            if let Ok(mut session) = session_ctx.session.try_lock() {
+                let before_len = session.history.len();
+                let removed = session.close_incomplete_turn_on_abort();
+                session.incomplete_turn = false;
+                if let Some(hook) = session.persist.clone() {
+                    if removed > 0 {
+                        // Tail user dropped — truncate persisted history.
+                        hook.truncate_messages(&session.id, before_len - removed);
+                    } else if session.history.len() > before_len {
+                        // Closure messages appended — persist each new one.
+                        let new_from = before_len;
+                        for idx in new_from..session.history.len() {
+                            if let Some(id) =
+                                hook.persist_message(&session.id, &session.history[idx])
+                            {
+                                if let Some(slot) = session.message_ids.get_mut(idx) {
+                                    *slot = id;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             send_text(&channel, &reply_target, MSG_ABORT_ACK).await;
             Flow::Stop
         }
@@ -191,13 +224,21 @@ impl Interceptor for CrashRecovery {
         let sk = key.to_string();
         let session_ctx = ctx.session_context_for(&sk);
         if let Ok(mut session) = session_ctx.session.try_lock() {
-            if session.incomplete_turn {
+            // Re-check history shape: a stale incomplete_turn flag (or a
+            // session repaired offline) must not block a completed turn.
+            let still_incomplete = session.incomplete_turn
+                && super::history_has_incomplete_turn(&session.history);
+            if session.incomplete_turn && !still_incomplete {
+                session.incomplete_turn = false;
+            }
+            if still_incomplete {
                 session.incomplete_turn = false;
 
                 let last_user_msg = session
                     .history
-                    .last()
-                    .filter(|m| m.role == "user")
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == "user")
                     .map(|m| m.text_content().to_string())
                     .unwrap_or_default();
                 *session_ctx.pending_retry.lock().await = Some(last_user_msg);
@@ -569,11 +610,13 @@ mod tests {
         let ch = MockChannel::new();
         let ctx = with_channel(ch.clone());
         let k = key();
-        ctx.session_context_for(&k.to_string())
-            .session
-            .lock()
-            .await
-            .incomplete_turn = true;
+        {
+            let sc = ctx.session_context_for(&k.to_string());
+            let mut session = sc.session.lock().await;
+            session.incomplete_turn = true;
+            // History must actually look incomplete; a bare flag is no longer enough.
+            session.add_user("orphaned question".into());
+        }
 
         let flow = CrashRecovery
             .handle(&ctx, &k, inbound_msg("user1", "hi"))
@@ -582,6 +625,52 @@ mod tests {
         // The incomplete-turn prompt is an Interactive payload (retry + abort).
         let sent = ch.sent.lock().unwrap();
         assert!(sent.iter().any(|m| m.content.buttons.len() == 2));
+    }
+
+    #[tokio::test]
+    async fn crash_recovery_clears_stale_flag_when_history_complete() {
+        let ctx = test_ctx(vec![]);
+        let k = key();
+        {
+            let sc = ctx.session_context_for(&k.to_string());
+            let mut session = sc.session.lock().await;
+            session.incomplete_turn = true;
+            session.add_user("hi".into());
+            session.add_assistant("hello".into());
+        }
+
+        let flow = CrashRecovery
+            .handle(&ctx, &k, inbound_msg("user1", "next"))
+            .await;
+        assert_eq!(next_content(flow).as_deref(), Some("next"));
+        let sc = ctx.session_context_for(&k.to_string());
+        assert!(!sc.session.lock().await.incomplete_turn);
+    }
+
+    #[tokio::test]
+    async fn callback_abort_closes_trailing_user() {
+        let ch = MockChannel::new();
+        let ctx = with_channel(ch.clone());
+        let k = key();
+        {
+            let sc = ctx.session_context_for(&k.to_string());
+            let mut session = sc.session.lock().await;
+            session.incomplete_turn = true;
+            session.add_user("orphaned".into());
+        }
+        let content = CallbackAction::Abort {
+            session_key_prefix: "x".into(),
+        }
+        .serialize();
+        let flow = Callback
+            .handle(&ctx, &k, inbound_msg("user1", &content))
+            .await;
+        assert!(matches!(flow, Flow::Stop));
+        let sc = ctx.session_context_for(&k.to_string());
+        let session = sc.session.lock().await;
+        assert!(!session.incomplete_turn);
+        assert!(session.history.is_empty());
+        assert!(ch.texts().iter().any(|t| t == MSG_ABORT_ACK));
     }
 
     // ── retry_abort_content helper ─────────────────────────────────────────

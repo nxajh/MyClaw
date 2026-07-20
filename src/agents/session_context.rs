@@ -175,6 +175,8 @@ impl SessionContext {
         // SessionManager; capture a clone so the post-turn `add_user`
         // persistence call sees the same hook.
         let persist_hook = session.persist.clone();
+        // A new turn owns the incomplete-turn state from here on.
+        session.incomplete_turn = false;
         // Record inbound and persist last_message safely under turn_lock.
         session.record_inbound(inbound_msg.clone());
         if let Some(hook) = &persist_hook {
