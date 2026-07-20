@@ -262,7 +262,9 @@ Each memory must have: name, description (1-2 sentence summary), and memory_type
 The memory_manage content parameter is BODY ONLY: plain markdown without YAML frontmatter and without `---` blocks.
 Only memories with `inject: "always"` are injected into every conversation's system-reminder, regardless of `memory_type`. Use `inject: "always"` for behavioral rules and preferences that must always be obeyed. Use `inject: "search"` (default) for technical gotchas and project context that are only needed on demand.
 Tags are optional but recommended for searchability (e.g. ["rust","qqbot","bug"]).
-When applicable, add a `## See Also` section with markdown links to 1-3 related memories."#;
+When applicable, add a `## See Also` section with 1-3 related memories. Canonical link format:
+- [Related: other_memory_name](other_memory_name.md)
+Logical name has no .md; the href MUST be `<name>.md` (never bare name, never path prefix)."#;
 
 const SECTION_READ_BEFORE_EDIT: &str = "## Read Before Edit\n\nDo not propose changes to code you haven't read. If asked about or modifying a file, read it first.";
 

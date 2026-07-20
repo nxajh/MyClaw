@@ -15,7 +15,9 @@
 //! Memory content...
 //!
 //! ## See Also
-//! - [User timezone preference](user_timezone.md)
+//! - [Related: user_timezone](user_timezone.md)
+//!
+//! Canonical See Also href is always `<logical_name>.md` (logical name has no suffix).
 //! ```
 //!
 //! No separate index file. The index is generated dynamically by scanning

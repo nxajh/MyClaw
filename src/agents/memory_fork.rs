@@ -524,12 +524,15 @@ fn build_extraction_prompt(knowledge_dir: &str) -> String {
          - If updating an existing file, update its description to reflect the latest content\n\
          \n\
          See Also (cross-links):\n\
-         At the END of the content, add a `## See Also` section with markdown links to related memories:\n\
+         At the END of the content, add a `## See Also` section with markdown links to related memories.\n\
+         Canonical format (always use this — do not omit the .md suffix on the href):\n\
          ## See Also\n\
          - [Related: other_memory_name](other_memory_name.md)\n\
          \n\
-         Use the memory name (without .md) as both the link text suffix and the target. Link to 1-3\n\
-         closely related memories from the existing index. This keeps the knowledge graph connected.\n\
+         Rules:\n\
+         - Memory logical name has no .md (e.g. other_memory_name); the href MUST be that name plus .md\n\
+         - Label: `[Related: <name>]` or a short description; target: `(<name>.md)` only — no bare name, no path prefix\n\
+         - Link to 1-3 closely related memories from the existing index so the knowledge graph stays connected\n\
          \n\
          Other rules:\n\
          - Write memories as declarative facts, not instructions\n\

@@ -371,7 +371,8 @@ fn lint_memory_content(name: &str, content: &str, files: &[MemoryFile]) -> Vec<S
     }
     if files.len() > 1 && links.is_empty() && !content.to_lowercase().contains("## see also") {
         warnings.push(
-            "No See Also links found; add 1-3 related memory links when applicable.".to_string(),
+            "No See Also links found; add 1-3 links as `[Related: name](name.md)` when applicable."
+                .to_string(),
         );
     }
     warnings
@@ -843,7 +844,7 @@ impl Tool for MemoryManageTool {
                 },
                 "content": {
                     "type": "string",
-                    "description": "Memory content. Required for add and replace. BODY ONLY: plain markdown content, no YAML frontmatter and no `---` blocks. Add a `## See Also` section with markdown links to 1-3 related memories when applicable."
+                    "description": "Memory content. Required for add and replace. BODY ONLY: plain markdown content, no YAML frontmatter and no `---` blocks. When applicable, end with `## See Also` and 1-3 links in canonical form: `[Related: other_memory_name](other_memory_name.md)` — href must be `<name>.md` (not bare name, not a path)."
                 },
                 "memory_type": {
                     "type": "string",
