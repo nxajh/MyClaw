@@ -9,6 +9,7 @@ use crate::providers::capability_chat::ChatProvider;
 use crate::providers::capability_embedding::EmbeddingProvider;
 use crate::providers::image::ImageGenerationProvider;
 use crate::providers::protocols::openai::chat_completions::OpenAiChatCompletionsClient;
+use crate::providers::protocols::openai::responses::OpenAiResponsesClient;
 use crate::providers::provider_id::well_known;
 use crate::providers::search::SearchProvider;
 use crate::providers::stt::SttProvider;
@@ -178,6 +179,15 @@ impl ProviderFactory {
                     p = p.with_user_agent(ua);
                 }
                 Ok(Box::new(p))
+            }
+            // ── OpenAI Responses API (grok-4.5 via CPA / api.x.ai) ────────────
+            (_, Protocol::Responses) => {
+                let client = OpenAiResponsesClient::new(request.api_key, request.base_url);
+                let client = match request.user_agent {
+                    Some(ua) => client.with_user_agent(ua),
+                    None => client,
+                };
+                Ok(Box::new(client))
             }
             // ── OpenAI-compatible providers ──
             (_, Protocol::ChatCompletions) if id != well_known::GOOGLE && id != well_known::DEEPSEEK => {

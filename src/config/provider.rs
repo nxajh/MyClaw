@@ -23,6 +23,9 @@ pub enum Protocol {
     #[default]
     #[serde(rename = "chat_completions")]
     ChatCompletions,
+    /// OpenAI Responses API protocol (used by grok-4.5 via CPA / api.x.ai).
+    #[serde(rename = "responses")]
+    Responses,
     /// Anthropic Messages protocol (or Anthropic-compatible).
     #[serde(rename = "messages")]
     Messages,

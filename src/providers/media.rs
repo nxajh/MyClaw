@@ -352,6 +352,12 @@ impl MediaPolicy {
                 video: MediaInputPolicy::inline_base64(video, Some(50 * 1024 * 1024)),
                 other: MediaInputPolicy::marker(false),
             },
+            crate::config::provider::Protocol::Responses => Self {
+                image: MediaInputPolicy::inline_base64(image, Some(25 * 1024 * 1024)),
+                audio: MediaInputPolicy::inline_base64(audio, Some(25 * 1024 * 1024)),
+                video: MediaInputPolicy::inline_base64(video, Some(50 * 1024 * 1024)),
+                other: MediaInputPolicy::marker(false),
+            },
         }
     }
 
