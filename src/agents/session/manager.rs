@@ -241,11 +241,9 @@ impl SessionManager {
         // history) so we don't carry the detected items on the Session.
         let _ = breakpoints;
 
-        // Detect incomplete turn (last message is user without assistant
-        // reply). Only check the most recent turn — earlier orphan user
-        // messages are ignored because compaction or manual cleanup may
-        // have removed them.
-        if session.history.last().is_some_and(|m| m.role == "user") {
+        // Detect incomplete turn: when the session history ends with user or tool,
+        // or an assistant message with pending tool calls.
+        if crate::agents::orchestrator::history_has_incomplete_turn(&session.history) {
             session.incomplete_turn = true;
             tracing::warn!(session = %session_id, "detected incomplete turn on load");
         }

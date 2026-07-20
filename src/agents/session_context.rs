@@ -175,11 +175,13 @@ impl SessionContext {
         // SessionManager; capture a clone so the post-turn `add_user`
         // persistence call sees the same hook.
         let persist_hook = session.persist.clone();
-        // record_inbound is already done by dispatch_turn in the orchestrator
-        // inbound chain on a *standalone* Session clone.  We must repeat it
-        // here on the SessionContext-owned Session so that tools like
-        // `send_message` can resolve `session.reply_target()`.
+        // Record inbound and persist last_message safely under turn_lock.
         session.record_inbound(inbound_msg.clone());
+        if let Some(hook) = &persist_hook {
+            if let Some(ref msg) = session.last_message {
+                hook.save_last_message(&session.id, msg);
+            }
+        }
         let channel_for_send = channel.clone();
         // RFC §7.6: install per-turn streaming handle BEFORE Agent::run.
         // Channels that don't support streaming return None; the

@@ -327,15 +327,9 @@ pub(super) async fn dispatch_turn(
 ) {
     let sk = key.to_string();
 
-    // B12: store the full inbound message on the session.
-    {
-        let mut session = ctx.sessions.get_or_create(&sk);
-        session.record_inbound(msg.clone());
-    }
-    let persisted = msg.to_persisted();
-    if let Err(e) = ctx.sessions.backend().save_last_message(&sk, &persisted) {
-        tracing::warn!(session = %sk, err = %e, "failed to persist last_message");
-    }
+    // B12: store the full inbound message right before processing the turn inside
+    // process_turn where turn_lock is held, to avoid appending or overwriting
+    // history while a previous turn is still running.
 
     let channel = match ctx.channel(&key.account_key()) {
         Some(c) => c,
