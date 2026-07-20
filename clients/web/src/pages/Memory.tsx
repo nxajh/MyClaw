@@ -10,24 +10,13 @@ import MemoryEditor from '../components/MemoryEditor'
 import MemoryViewer from '../components/MemoryViewer'
 import {
   getStyle, getInjectStyle, normalizeInject,
+  collectTypeFilters, typeFilterLabel,
   type MemoryFile, type InjectPolicy,
 } from '../lib/memoryUtils'
 
-/** Normalize inject for list rows (API may omit until backend ships inject field). */
+/** Normalize inject for list rows (API always sends inject; default search if omitted). */
 function enrichMemoryRow(f: MemoryFile): MemoryFile {
   return { ...f, inject: normalizeInject(f.inject) }
-}
-
-const TABS = ['all', 'user', 'feedback', 'rule', 'project', 'reference'] as const
-type Tab = typeof TABS[number]
-
-const TAB_LABELS: Record<Tab, string> = {
-  all: 'All Memories',
-  user: '👤 Preferences',
-  feedback: '🎯 Alignments',
-  rule: '⚙️ Rules',
-  project: '📂 Projects',
-  reference: '📄 References',
 }
 
 const INJECT_FILTERS = ['all', 'always', 'search'] as const
@@ -56,7 +45,7 @@ export default function Memory() {
   const [view, setView] = useState<View>({ mode: 'list' })
   const [saving, setSaving] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
-  const [activeTab, setActiveTab] = useState<Tab>('all')
+  const [activeTab, setActiveTab] = useState<string>('all')
   const [injectFilter, setInjectFilter] = useState<InjectFilter>('all')
 
   const isEditing = view.mode === 'edit' || view.mode === 'new'
@@ -100,10 +89,11 @@ export default function Memory() {
       setView({ mode: 'view', name: res.name, content: res.content })
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
+      toast(`Failed to open ${name}`, 'error')
     } finally {
       setLoadingFile(false)
     }
-  }, [request])
+  }, [request, toast])
 
   const handleSave = useCallback(async (name: string, content: string) => {
     setSaving(true)
@@ -139,6 +129,15 @@ export default function Memory() {
   }, [status, fetchFiles])
 
   const backToList = () => setView({ mode: 'list' })
+
+  const typeTabs = useMemo(() => collectTypeFilters(files), [files])
+
+  // Drop active custom tab if it disappears after refresh
+  useEffect(() => {
+    if (activeTab !== 'all' && !typeTabs.includes(activeTab)) {
+      setActiveTab('all')
+    }
+  }, [activeTab, typeTabs])
 
   const alwaysCount = useMemo(
     () => files.filter(f => normalizeInject(f.inject) === 'always').length,
@@ -177,6 +176,7 @@ export default function Memory() {
           onEdit={() => setView({ mode: 'edit', name: view.name, content: view.content })}
           onBack={backToList}
           onDelete={handleDelete}
+          onOpenMemory={openFile}
         />
       </div>
     )
@@ -214,9 +214,9 @@ export default function Memory() {
         }
       />
 
-      {/* Type tabs */}
+      {/* Type tabs — fixed five + any custom types present in data */}
       <div className="flex flex-wrap gap-1 border-b border-zinc-800/60 pb-1">
-        {TABS.map(tab => {
+        {typeTabs.map(tab => {
           const isActive = activeTab === tab
           const count = tab === 'all' ? files.length : files.filter(f => f.type === tab).length
           const s = tab === 'all' ? null : getStyle(tab)
@@ -225,7 +225,7 @@ export default function Memory() {
             : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/30 border border-transparent'
           return (
             <button key={tab} onClick={() => setActiveTab(tab)} className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-all ${tabColor}`}>
-              {TAB_LABELS[tab]} <span className="opacity-50">{count}</span>
+              {typeFilterLabel(tab)} <span className="opacity-50">{count}</span>
             </button>
           )
         })}
@@ -302,7 +302,7 @@ export default function Memory() {
                     <span className={`text-xs uppercase font-semibold tracking-wider px-2 py-1 rounded-md ${style.badgeBg}`}>
                       {style.label.split(' ').slice(1).join(' ') || style.label}
                     </span>
-                    <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-md ${injectStyle.badgeBg}`}>
+                    <span className={`text-xs font-semibold px-2 py-0.5 rounded-md ${injectStyle.badgeBg}`}>
                       {injectStyle.label}
                     </span>
                   </span>

@@ -2,7 +2,7 @@ import { useState, useMemo } from 'react'
 import { Edit3, Loader2, Check, X } from 'lucide-react'
 import { inputCls, btnPrimary, btnGhost } from './PageLayout'
 import {
-  parseFrontmatter, getStyle, getInjectStyle, normalizeInject,
+  parseFrontmatter, getStyle, getInjectStyle, normalizeInject, yamlDoubleQuoted,
   type MemType, type InjectPolicy,
 } from '../lib/memoryUtils'
 
@@ -59,15 +59,16 @@ export default function MemoryEditor({ initial, onSave, onCancel, saving }: Prop
   const buildMarkdown = () => {
     const cleanName = name.trim().toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_-]/g, '')
     const tagsArray = tagsInput.split(',').map(t => t.trim()).filter(Boolean)
-    const tagsStr = tagsArray.length > 0 ? `[${tagsArray.map(t => `"${t}"`).join(', ')}]` : '[]'
+    const tagsStr = tagsArray.length > 0
+      ? `[${tagsArray.map(t => yamlDoubleQuoted(t)).join(', ')}]`
+      : '[]'
     const today = parsed.meta.created_at || new Date().toISOString().split('T')[0]
-    const desc = description.trim()
     return `---
-name: "${cleanName}"
-description: "${desc}"
-type: "${memType}"
-inject: "${inject}"
-created_at: "${today}"
+name: ${yamlDoubleQuoted(cleanName)}
+description: ${yamlDoubleQuoted(description.trim())}
+type: ${yamlDoubleQuoted(memType)}
+inject: ${yamlDoubleQuoted(inject)}
+created_at: ${yamlDoubleQuoted(today)}
 tags: ${tagsStr}
 ---
 

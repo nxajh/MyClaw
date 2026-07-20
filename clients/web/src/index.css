@@ -1,11 +1,48 @@
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
 
+/* ── Theme tokens (foundation for gradual CSS-variable migration) ─────────── */
+/* Dark-first. Light mode still remaps zinc utilities below until call sites
+   switch to var(--mc-*). Tokens keep surfaces/text/border consistent. */
+:root,
+html.dark {
+  color-scheme: dark;
+  --mc-bg-base: #09090b;       /* zinc-950 */
+  --mc-bg-raised: #18181b;     /* zinc-900 */
+  --mc-bg-muted: #27272a;      /* zinc-800 */
+  --mc-bg-soft: #3f3f46;       /* zinc-700 */
+  --mc-text-primary: #f4f4f5;  /* zinc-100 */
+  --mc-text-secondary: #a1a1aa;/* zinc-400 */
+  --mc-text-muted: #71717a;    /* zinc-500 */
+  --mc-border: #27272a;        /* zinc-800 */
+  --mc-border-strong: #3f3f46; /* zinc-700 */
+  --mc-accent: #818cf8;        /* indigo-400 */
+  --mc-scrollbar: #3f3f46;
+  --mc-composer-fade-from: rgb(9 9 11);
+}
+
+html.light {
+  color-scheme: light;
+  --mc-bg-base: #f4f4f5;
+  --mc-bg-raised: #fafafa;
+  --mc-bg-muted: #f0f0f1;
+  --mc-bg-soft: #e4e4e7;
+  --mc-text-primary: #1a1a1e;
+  --mc-text-secondary: #52525b;
+  --mc-text-muted: #71717a;
+  --mc-border: #e4e4e7;
+  --mc-border-strong: #d4d4d8;
+  --mc-accent: #4f46e5;
+  --mc-scrollbar: #d4d4d8;
+  --mc-composer-fade-from: #f4f4f5;
+}
+
 /* ── Theme: light mode color overrides ───────────────────────────────────── */
 /* The app is dark-first with hardcoded zinc utility classes everywhere.
    For light mode we remap each zinc utility class individually.
    NOTE: Tailwind v4 generates class names with literal slashes (e.g. "bg-zinc-800\/60"),
-   so we must escape and target each used opacity variant explicitly. */
+   so we must escape and target each used opacity variant explicitly.
+   Long-term: replace zinc utilities with token classes using --mc-* above. */
 
 /* ── Backgrounds: solid ─────────────────────────────────────────────────── */
 html.light .bg-zinc-950       { background-color: #f4f4f5; }
@@ -264,11 +301,11 @@ html.light .skeleton-line {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #3f3f46; /* zinc-700 */
+  background: var(--mc-scrollbar);
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #52525b; /* zinc-600 */
+  background: color-mix(in srgb, var(--mc-scrollbar) 80%, var(--mc-text-muted));
 }
 ::-webkit-scrollbar-corner {
   background: transparent;
@@ -277,7 +314,7 @@ html.light .skeleton-line {
 /* Firefox */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #3f3f46 transparent;
+  scrollbar-color: var(--mc-scrollbar) transparent;
 }
 
 /* ── highlight.js overrides for code blocks ───────────────────────────────── */
@@ -334,12 +371,13 @@ pre {
   }
 }
 
-/* Composer top fade — theme-aware (utility from-zinc-950 remap is unreliable for gradients) */
+/* Composer top fade — theme-aware via tokens */
 .composer-fade {
-  background: linear-gradient(to top, rgb(9 9 11) 0%, rgb(9 9 11 / 0) 100%);
-}
-html.light .composer-fade {
-  background: linear-gradient(to top, #f4f4f5 0%, rgb(244 244 245 / 0) 100%);
+  background: linear-gradient(
+    to top,
+    var(--mc-composer-fade-from) 0%,
+    color-mix(in srgb, var(--mc-composer-fade-from) 0%, transparent) 100%
+  );
 }
 
 /* Breathing border for the actively-generating assistant bubble */

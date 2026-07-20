@@ -124,10 +124,91 @@ export function formatBytes(b: number) {
   return `${(b / (1024 * 1024)).toFixed(1)} MB`
 }
 
+/** Escape a string for YAML double-quoted scalars. */
+export function yamlDoubleQuoted(s: string): string {
+  return `"${s
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t')}"`
+}
+
+/** Unescape a YAML double-quoted scalar body (quotes already stripped). */
+function unescapeYamlDoubleQuoted(s: string): string {
+  return s.replace(/\\(.)/g, (_, c: string) => {
+    if (c === 'n') return '\n'
+    if (c === 'r') return '\r'
+    if (c === 't') return '\t'
+    if (c === '"' || c === '\\') return c
+    return c
+  })
+}
+
+export interface SeeAlsoLink {
+  /** Display label (without "Related:" prefix). */
+  label: string
+  /** Filename for memory.read / openFile, always ends with .md */
+  name: string
+}
+
+/**
+ * Extract links from a trailing `## See Also` section.
+ * Accepts normal markdown links: `[label](name.md)` or `[label](name)`.
+ * Skips external http(s) URLs and in-page anchors.
+ */
+export function extractSeeAlso(body: string): SeeAlsoLink[] {
+  const section = body.match(/^##\s+See\s+Also\s*$/im)
+  if (!section || section.index === undefined) return []
+
+  let after = body.slice(section.index + section[0].length)
+  const nextHeading = after.match(/\n##\s+/)
+  if (nextHeading?.index !== undefined) {
+    after = after.slice(0, nextHeading.index)
+  }
+
+  const out: SeeAlsoLink[] = []
+  const seen = new Set<string>()
+  for (const m of after.matchAll(/\[([^\]]+)\]\(([^)\s]+)\)/g)) {
+    const rawLabel = m[1].trim()
+    let target = m[2].trim()
+    if (!target || /^https?:\/\//i.test(target) || target.startsWith('#')) continue
+    // Keep only the last path segment (allow relative ./foo.md)
+    target = target.replace(/^\.\//, '').split(/[\\/]/).pop() || target
+    const bare = target.replace(/\.md$/i, '').trim()
+    if (!bare || bare.includes('..')) continue
+    const name = `${bare}.md`
+    if (seen.has(name)) continue
+    seen.add(name)
+    const label = rawLabel.replace(/^Related:\s*/i, '').trim() || bare
+    out.push({ label, name })
+  }
+  return out
+}
+
 const KNOWN_TYPES: MemType[] = ['user', 'feedback', 'rule', 'project', 'reference']
 
 function asMemType(v: string): MemType {
   return (KNOWN_TYPES as string[]).includes(v) ? v as MemType : 'project'
+}
+
+/** Known semantic types plus any custom types present in the list. */
+export function collectTypeFilters(files: { type?: string }[]): string[] {
+  const base = ['user', 'feedback', 'rule', 'project', 'reference']
+  const baseSet = new Set(base)
+  const extras = [
+    ...new Set(
+      files
+        .map((f) => f.type)
+        .filter((t): t is string => !!t && !baseSet.has(t)),
+    ),
+  ].sort()
+  return ['all', ...base, ...extras]
+}
+
+export function typeFilterLabel(tab: string): string {
+  if (tab === 'all') return 'All Memories'
+  return getStyle(tab).label
 }
 
 export function parseFrontmatter(raw: string): ParsedFrontmatter {
@@ -159,9 +240,11 @@ export function parseFrontmatter(raw: string): ParsedFrontmatter {
     if (colon !== -1) {
       const k = line.slice(0, colon).trim()
       let v = line.slice(colon + 1).trim()
-      // strip surrounding quotes
-      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
-        v = v.slice(1, -1)
+      // strip surrounding quotes and unescape common YAML double-quote escapes
+      if (v.startsWith('"') && v.endsWith('"') && v.length >= 2) {
+        v = unescapeYamlDoubleQuoted(v.slice(1, -1))
+      } else if (v.startsWith("'") && v.endsWith("'") && v.length >= 2) {
+        v = v.slice(1, -1).replace(/''/g, "'")
       }
       if (k === 'name') meta.name = v
       else if (k === 'type') meta.type = asMemType(v)
@@ -173,7 +256,15 @@ export function parseFrontmatter(raw: string): ParsedFrontmatter {
       else if (k === 'updated_at') meta.updated_at = v
       else if (k === 'tags') {
         const inner = v.startsWith('[') && v.endsWith(']') ? v.slice(1, -1) : v
-        meta.tags = inner.split(',').map((x) => x.trim().replace(/^["']|["']$/g, '')).filter(Boolean)
+        meta.tags = inner.split(',').map((x) => {
+          let t = x.trim()
+          if (t.startsWith('"') && t.endsWith('"') && t.length >= 2) {
+            t = unescapeYamlDoubleQuoted(t.slice(1, -1))
+          } else if (t.startsWith("'") && t.endsWith("'") && t.length >= 2) {
+            t = t.slice(1, -1).replace(/''/g, "'")
+          }
+          return t
+        }).filter(Boolean)
       }
     }
   })

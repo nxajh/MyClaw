@@ -3,7 +3,9 @@ import { ChevronLeft, Pencil, Trash2, Calendar, Tag, Link2 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { ErrorBanner } from './PageLayout'
-import { parseFrontmatter, getStyle, getInjectStyle, formatBytes } from '../lib/memoryUtils'
+import {
+  parseFrontmatter, getStyle, getInjectStyle, formatBytes, extractSeeAlso,
+} from '../lib/memoryUtils'
 
 interface Props {
   name: string
@@ -12,13 +14,16 @@ interface Props {
   onEdit: () => void
   onBack: () => void
   onDelete: (name: string) => void
+  /** Open a related memory by filename (e.g. foo.md). */
+  onOpenMemory?: (name: string) => void
 }
 
-export default function MemoryViewer({ name, content, error, onEdit, onBack, onDelete }: Props) {
+export default function MemoryViewer({ name, content, error, onEdit, onBack, onDelete, onOpenMemory }: Props) {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const parsed = parseFrontmatter(content)
   const style = getStyle(parsed.meta.type)
   const injectStyle = getInjectStyle(parsed.meta.inject)
+  const seeAlso = extractSeeAlso(parsed.body)
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -86,20 +91,32 @@ export default function MemoryViewer({ name, content, error, onEdit, onBack, onD
               ))}
             </div>
           )}
-          {/* See Also links rendered from body */}
-          {(() => {
-            const seeAlso = extractSeeAlso(parsed.body)
-            if (seeAlso.length === 0) return null
-            return (
-              <div className="flex flex-wrap gap-1.5 pt-1.5">
-                {seeAlso.map(link => (
-                  <span key={link} className="flex items-center gap-1 text-xs text-zinc-500 bg-zinc-900/40 px-2 py-0.5 rounded-md border border-zinc-800/60">
-                    <Link2 size={10} />{link}
+          {seeAlso.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 pt-1.5">
+              <span className="text-xs text-zinc-500 shrink-0">See Also</span>
+              {seeAlso.map((link) => {
+                const clickable = !!onOpenMemory
+                const cls = clickable
+                  ? 'flex items-center gap-1 text-xs text-indigo-300/90 bg-indigo-500/10 hover:bg-indigo-500/20 px-2 py-0.5 rounded-md border border-indigo-500/25 transition-colors cursor-pointer'
+                  : 'flex items-center gap-1 text-xs text-zinc-500 bg-zinc-900/40 px-2 py-0.5 rounded-md border border-zinc-800/60'
+                return clickable ? (
+                  <button
+                    key={link.name}
+                    type="button"
+                    onClick={() => onOpenMemory!(link.name)}
+                    className={cls}
+                    title={`Open ${link.name}`}
+                  >
+                    <Link2 size={10} />{link.label}
+                  </button>
+                ) : (
+                  <span key={link.name} className={cls} title={link.name}>
+                    <Link2 size={10} />{link.label}
                   </span>
-                ))}
-              </div>
-            )
-          })()}
+                )
+              })}
+            </div>
+          )}
         </div>
 
         {/* Body */}
@@ -114,13 +131,4 @@ export default function MemoryViewer({ name, content, error, onEdit, onBack, onD
       </div>
     </div>
   )
-}
-
-function extractSeeAlso(body: string): string[] {
-  const section = body.match(/^##\s+See\s+Also\s*$/im)
-  if (!section) return []
-  const afterSection = body.slice(section.index! + section[0].length)
-  // Match markdown links: [label](memory-name) or [label](memory-name.md)
-  const links = [...afterSection.matchAll(/\[([^\]]+)\]\(memory-?([^)]+)\)/gi)]
-  return links.map(m => m[2].replace(/\.md$/, ''))
 }
