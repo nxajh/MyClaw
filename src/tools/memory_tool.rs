@@ -369,6 +369,46 @@ fn lint_memory_content(name: &str, content: &str, files: &[MemoryFile]) -> Vec<S
             ));
         }
     }
+    // Detect non-canonical See Also hrefs (bare logical names without .md).
+    // extract_links ignores them, so flag any [label](target) in ## See Also
+    // whose target is not external and does not end with .md.
+    {
+        let mut in_see_also = false;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("## ") {
+                in_see_also = trimmed.eq_ignore_ascii_case("## see also");
+                continue;
+            }
+            if !in_see_also {
+                continue;
+            }
+            if let Some(open) = trimmed.find("](") {
+                if let Some(close_rel) = trimmed[open + 2..].find(')') {
+                    let target = trimmed[open + 2..open + 2 + close_rel].trim();
+                    if target.is_empty()
+                        || target.starts_with("http://")
+                        || target.starts_with("https://")
+                        || target.starts_with('#')
+                        || target.starts_with("mailto:")
+                    {
+                        continue;
+                    }
+                    let segment = target
+                        .rsplit(['/', '\\'])
+                        .next()
+                        .unwrap_or(target)
+                        .trim();
+                    if !segment.to_ascii_lowercase().ends_with(".md") {
+                        warnings.push(format!(
+                            "See Also link target '{}' must use canonical href `<name>.md` (bare names are not indexed).",
+                            target
+                        ));
+                    }
+                }
+            }
+        }
+    }
     if files.len() > 1 && links.is_empty() && !content.to_lowercase().contains("## see also") {
         warnings.push(
             "No See Also links found; add 1-3 links as `[Related: name](name.md)` when applicable."

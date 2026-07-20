@@ -232,7 +232,8 @@ fn parse_tags(value: &str) -> Vec<String> {
 }
 
 /// Extract markdown links from the `## See Also` section.
-/// Returns `Vec<LinkRef>` with target names (no path, no `.md`).
+/// Returns `Vec<LinkRef>` with logical target names (no path, no `.md`).
+/// Only canonical hrefs are accepted: last path segment must end with `.md`.
 pub fn extract_links_from_content(content: &str) -> Vec<LinkRef> {
     extract_links(content)
 }
@@ -254,7 +255,7 @@ fn extract_links(content: &str) -> Vec<LinkRef> {
             continue;
         }
 
-        // Parse markdown link: [label](target)
+        // Parse markdown link: [label](name.md)
         if let Some(link) = parse_md_link(trimmed) {
             links.push(link);
         }
@@ -264,6 +265,10 @@ fn extract_links(content: &str) -> Vec<LinkRef> {
 }
 
 /// Parse a single markdown link `[label](target)` from a line.
+///
+/// Canonical form requires a `.md` suffix on the href (after any path segment).
+/// Bare names like `(other_memory_name)` are rejected and not indexed.
+/// Logical `LinkRef.target` is stored without the `.md` suffix.
 fn parse_md_link(line: &str) -> Option<LinkRef> {
     let bracket_start = line.find('[')?;
     let rest_after_bracket = &line[bracket_start + 1..];
@@ -274,22 +279,42 @@ fn parse_md_link(line: &str) -> Option<LinkRef> {
     let paren_start = rest.find('(')?;
     let rest_after_paren = &rest[paren_start + 1..];
     let paren_end_rel = rest_after_paren.find(')')?;
-    let target_raw = &rest_after_paren[..paren_end_rel];
+    let target_raw = rest_after_paren[..paren_end_rel].trim();
 
-    // Strip path prefix (take last component) and .md suffix
-    let target = target_raw
-        .rsplit('/')
+    if target_raw.is_empty() {
+        return None;
+    }
+    // External / non-memory hrefs are not graph edges
+    if target_raw.starts_with("http://")
+        || target_raw.starts_with("https://")
+        || target_raw.starts_with('#')
+        || target_raw.starts_with("mailto:")
+    {
+        return None;
+    }
+
+    // Last path segment only (allow accidental relative paths, still require .md)
+    let segment = target_raw
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or(target_raw)
-        .trim_end_matches(".md")
-        .to_string();
+        .trim();
+    if segment.is_empty() || segment == ".." || segment.contains("..") {
+        return None;
+    }
 
-    if target.is_empty() {
+    // Require .md suffix — bare logical names are not accepted
+    let stem = segment
+        .strip_suffix(".md")
+        .or_else(|| segment.strip_suffix(".MD"))
+        .or_else(|| segment.strip_suffix(".Md"))
+        .or_else(|| segment.strip_suffix(".mD"))?;
+    if stem.is_empty() {
         return None;
     }
 
     Some(LinkRef {
-        target,
+        target: stem.to_string(),
         label: label.to_string(),
     })
 }
@@ -549,15 +574,31 @@ mod tests {
 
     #[test]
     fn test_extract_links() {
-        let content = "Some content.\n\n## See Also\n- [Used by foo](foo.md)\n- [Related to bar](bar)\n- [Nested path](subdir/baz.md)\n\n## Other\n- Not a link section";
+        let content = "Some content.\n\n## See Also\n- [Used by foo](foo.md)\n- [Related to bar](bar)\n- [Nested path](subdir/baz.md)\n- [External](https://example.com/x.md)\n- [Anchor](#section)\n\n## Other\n- Not a link section";
         let links = extract_links(content);
-        assert_eq!(links.len(), 3);
+        // Bare `(bar)` is rejected; external/anchor skipped. Only canonical .md hrefs count.
+        assert_eq!(links.len(), 2);
         assert_eq!(links[0].label, "Used by foo");
         assert_eq!(links[0].target, "foo");
-        assert_eq!(links[1].label, "Related to bar");
-        assert_eq!(links[1].target, "bar");
-        assert_eq!(links[2].label, "Nested path");
-        assert_eq!(links[2].target, "baz");
+        assert_eq!(links[1].label, "Nested path");
+        assert_eq!(links[1].target, "baz");
+    }
+
+    #[test]
+    fn test_parse_md_link_requires_md_suffix() {
+        assert!(parse_md_link("- [Related: foo](foo.md)").is_some());
+        assert!(parse_md_link("- [Related: foo](path/to/foo.md)").is_some());
+        assert_eq!(
+            parse_md_link("- [Related: foo](path/to/foo.md)")
+                .unwrap()
+                .target,
+            "foo"
+        );
+        // bare logical name — no longer accepted
+        assert!(parse_md_link("- [Related: foo](foo)").is_none());
+        assert!(parse_md_link("- [Related: foo](subdir/foo)").is_none());
+        assert!(parse_md_link("- [empty](.md)").is_none());
+        assert!(parse_md_link("- [ext](https://example.com/a.md)").is_none());
     }
 
     #[test]
