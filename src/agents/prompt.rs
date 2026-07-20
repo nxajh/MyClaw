@@ -241,7 +241,7 @@ NEVER answer these from memory or mental computation — ALWAYS use a tool:
 - System state (OS, disk, memory, processes, ports) → use shell
 - File contents, sizes, line counts → use file_read
 - Git history, branches, diffs → use shell
-- Current facts (versions, news, weather) → use web_search if available; otherwise state explicitly that the information cannot be verified"#;
+- Current facts (versions, news, weather) → use search_web if available; otherwise state explicitly that the information cannot be verified"#;
 
 const SECTION_TOOL_PRIORITY: &str = r#"## Tool Priority
 

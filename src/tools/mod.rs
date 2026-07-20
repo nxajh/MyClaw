@@ -70,7 +70,7 @@ use std::sync::Arc;
 
 /// Create all built-in tools that don't depend on shared state managed by
 /// the daemon (router / channels / scheduler / etc). Tools requiring such
-/// state — `ask_user`, `web_search`, `agent_delegate`, `agent_list`,
+/// state — `ask_user`, `search_web`, `agent_delegate`, `agent_list`,
 /// `agent_kill`, `tool_search` — are registered by daemon.rs::build_tools.
 pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
     let shell = ShellTool::new();
