@@ -154,6 +154,8 @@ fn find_downloaded_binary(dest: &Path) -> Result<PathBuf> {
     anyhow::bail!("downloaded artifact does not contain 'myclaw' binary");
 }
 
+const GH_REPO: &str = "nxajh/MyClaw";
+
 /// Query `gh` for latest successful master build: (databaseId, headSha?).
 fn get_latest_run_meta() -> Result<(String, Option<String>)> {
     let output = std::process::Command::new("gh")
@@ -164,12 +166,13 @@ fn get_latest_run_meta() -> Result<(String, Option<String>)> {
             "--branch=master",
             "--status=success",
             "--limit=1",
+            "--repo",
+            GH_REPO,
             "--json",
             "databaseId,headSha",
             "-q",
             ".[0] | \"\\(.databaseId)\\t\\(.headSha // \"\")\"",
         ])
-        .current_dir(find_project_dir()?)
         .output()
         .context("failed to execute 'gh' — is it installed and authenticated?")?;
 
@@ -208,12 +211,13 @@ fn download_artifact(run_id: &str, dest: &Path) -> Result<()> {
             "run",
             "download",
             run_id,
+            "--repo",
+            GH_REPO,
             "--name",
             "myclaw-linux-x86_64",
             "--dir",
             dest.to_str().context("temp dir path is not valid UTF-8")?,
         ])
-        .current_dir(find_project_dir()?)
         .status()
         .context("failed to download artifact")?;
 
@@ -221,42 +225,6 @@ fn download_artifact(run_id: &str, dest: &Path) -> Result<()> {
         anyhow::bail!("gh run download failed");
     }
     Ok(())
-}
-
-/// Determine the MyClaw project root directory (needed by `gh` which requires
-/// being inside a git repository). Falls back to CWD.
-fn find_project_dir() -> Result<PathBuf> {
-    // Walk up from CWD looking for a .git directory whose repo has a remote
-    // (not just any .git — ~/.myclaw/workspace/.git has no remotes).
-    let mut dir = std::env::current_dir().context("failed to get current directory")?;
-    loop {
-        let git_dir = dir.join(".git");
-        if git_dir.exists() && dir_has_git_remote(&dir) {
-            return Ok(dir);
-        }
-        if !dir.pop() {
-            break;
-        }
-    }
-    // Fallback: check common workspace layout (~/.myclaw/workspace/MyClaw)
-    if let Ok(home) = std::env::var("HOME") {
-        let candidate = PathBuf::from(home).join(".myclaw").join("workspace").join("MyClaw");
-        if candidate.join(".git").exists() {
-            return Ok(candidate);
-        }
-    }
-    // Last resort: CWD
-    std::env::current_dir().context("failed to get current directory")
-}
-
-/// Check if a directory has a git remote configured.
-fn dir_has_git_remote(dir: &Path) -> bool {
-    std::process::Command::new("git")
-        .args(["remote"])
-        .current_dir(dir)
-        .output()
-        .map(|o| !o.stdout.is_empty())
-        .unwrap_or(false)
 }
 
 /// Send SIGUSR1 to the running myclaw daemon to trigger hot switch.
