@@ -86,7 +86,10 @@ impl AttachmentManager {
             for line in text.lines() {
                 let trimmed = line.trim();
 
-                // Section headers
+                // Section headers — recognized sections set current_section;
+                // any other "## " header resets to None to prevent entries
+                // from one section (e.g. ## Memory) being misattributed to
+                // the previous section (e.g. agents).
                 if trimmed.starts_with("## Skills") {
                     current_section = Some("skills");
                     continue;
@@ -97,6 +100,10 @@ impl AttachmentManager {
                 }
                 if trimmed.starts_with("## MCP Server Instructions") {
                     current_section = Some("mcp");
+                    continue;
+                }
+                if trimmed.starts_with("## ") {
+                    current_section = None;
                     continue;
                 }
 
