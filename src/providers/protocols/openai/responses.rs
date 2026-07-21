@@ -92,9 +92,6 @@ impl ChatProvider for OpenAiResponsesClient {
         // Apply hosted tools: filter local function tools, add hosted built-ins.
         if !self.hosted_tools.is_empty() {
             apply_hosted_tools(&mut body, &self.hosted_tools);
-            if let Some(tools) = body.get("tools") {
-                tracing::debug!(tools = %tools, "responses body after hosted_tools");
-            }
         }
         let client = self.client.clone();
         let headers = self.common_headers();
