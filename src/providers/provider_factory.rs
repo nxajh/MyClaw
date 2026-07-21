@@ -29,6 +29,7 @@ pub struct BuildChatProviderRequest {
     pub api_key: SharedApiKey,
     pub auth_style: AuthStyle,
     pub user_agent: Option<String>,
+    pub hosted_tools: Vec<String>,
 }
 
 /// Request to build an embedding provider.
@@ -187,6 +188,7 @@ impl ProviderFactory {
                     Some(ua) => client.with_user_agent(ua),
                     None => client,
                 };
+                let client = client.with_hosted_tools(request.hosted_tools);
                 Ok(Box::new(client))
             }
             // ── OpenAI-compatible providers ──

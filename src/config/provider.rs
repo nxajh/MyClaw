@@ -67,6 +67,11 @@ pub struct ChatSection {
     pub auth_style: Option<AuthStyle>,
     /// Explicit protocol override. If not set, inferred from base_url host.
     pub protocol: Option<Protocol>,
+    /// Server-side hosted tools to inject (e.g. ["web_search"] for grok).
+    /// When set, local function tools with matching names are replaced by
+    /// built-in tool types in the request body.
+    #[serde(default)]
+    pub hosted_tools: Vec<String>,
     pub models: HashMap<String, ChatModelConfig>,
 }
 

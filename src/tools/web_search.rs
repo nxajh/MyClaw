@@ -28,7 +28,7 @@ impl WebSearchTool {
 #[async_trait]
 impl Tool for WebSearchTool {
     fn name(&self) -> &str {
-        "search_web"
+        "web_search"
     }
 
     fn description(&self) -> &str {

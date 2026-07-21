@@ -271,6 +271,7 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
                     api_key: shared_key.clone(),
                     auth_style: auth_style.into(),
                     user_agent: user_agent.clone(),
+                    hosted_tools: chat.hosted_tools.clone(),
                 };
 
                 let chat_provider = factory.build_chat_provider(request).with_context(|| {

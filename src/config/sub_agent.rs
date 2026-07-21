@@ -16,7 +16,7 @@
 //! [[agents]]
 //! name = "researcher"
 //! system_prompt = "You are a research specialist. Find and summarize information."
-//! tools = ["search_web", "http_request", "memory_search", "memory_view"]
+//! tools = ["web_search", "http_request", "memory_search", "memory_view"]
 //! max_tool_calls = 20
 //! ```
 

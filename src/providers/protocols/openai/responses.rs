@@ -24,6 +24,7 @@ pub struct OpenAiResponsesClient {
     client: Client,
     user_agent: Option<String>,
     body_override: Option<BodyOverrideFn>,
+    hosted_tools: Vec<String>,
 }
 
 impl OpenAiResponsesClient {
@@ -34,6 +35,7 @@ impl OpenAiResponsesClient {
             client: build_reqwest_client(),
             user_agent: None,
             body_override: None,
+            hosted_tools: Vec::new(),
         }
     }
 
@@ -44,6 +46,11 @@ impl OpenAiResponsesClient {
 
     pub fn with_body_override(mut self, f: BodyOverrideFn) -> Self {
         self.body_override = Some(f);
+        self
+    }
+
+    pub fn with_hosted_tools(mut self, tools: Vec<String>) -> Self {
+        self.hosted_tools = tools;
         self
     }
 
@@ -77,10 +84,15 @@ impl ChatProvider for OpenAiResponsesClient {
     fn chat(&self, req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
         let url = self.responses_url();
         let body = render_responses_body(&req);
-        let body = match self.body_override {
+        let mut body = match self.body_override {
             Some(f) => f(body, &req),
             None => body,
         };
+
+        // Apply hosted tools: filter local function tools, add hosted built-ins.
+        if !self.hosted_tools.is_empty() {
+            apply_hosted_tools(&mut body, &self.hosted_tools);
+        }
         let client = self.client.clone();
         let headers = self.common_headers();
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(100);
@@ -226,6 +238,31 @@ impl ChatProvider for OpenAiResponsesClient {
 
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
+}
+
+/// Replace local function tools with hosted built-in tools.
+///
+/// For each hosted tool name (e.g. "web_search"):
+/// - Remove the matching function tool from `tools` array
+/// - Append `{"type": "<name>"}` as a built-in tool
+fn apply_hosted_tools(body: &mut serde_json::Value, hosted_tools: &[String]) {
+    if body.get("tools").is_none() {
+        body["tools"] = serde_json::json!([]);
+    }
+    if let Some(tools) = body.get_mut("tools").and_then(|t| t.as_array_mut()) {
+        tools.retain(|t| {
+            if t.get("type").and_then(|s| s.as_str()) == Some("function") {
+                if let Some(name) = t.get("name").and_then(|n| n.as_str()) {
+                    return !hosted_tools.iter().any(|ht| ht == name);
+                }
+            }
+            true
+        });
+        for ht in hosted_tools {
+            tools.push(serde_json::json!({"type": ht}));
+        }
+    }
+    body["parallel_tool_calls"] = serde_json::json!(true);
 }
 
 /// Parse a single Responses API SSE data line into StreamEvents.

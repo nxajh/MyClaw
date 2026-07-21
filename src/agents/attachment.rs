@@ -601,7 +601,7 @@ impl AttachmentManager {
             "full" => "All tools are permitted. No restrictions apply.",
             "read_only" => {
                 "Autonomy is now READ-ONLY. \
-                You may only use read-only tools (file_read, list_dir, search, search_web, etc.). \
+                You may only use read-only tools (file_read, list_dir, search, web_search, etc.). \
                 Shell execution, file writes, HTTP calls, and agent delegation are blocked."
             }
             _ => {
