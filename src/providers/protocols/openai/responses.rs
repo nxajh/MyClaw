@@ -125,6 +125,10 @@ impl ChatProvider for OpenAiResponsesClient {
             // Maps output_index → call_id for function calls (to correlate
             // argument deltas with their call_id).
             let mut index_to_call_id: HashMap<u64, String> = HashMap::new();
+            // Maps output_index → sequential tool_calls index (0, 1, 2, ...).
+            // Needed because output_index counts ALL output items (reasoning,
+            // message, function_call), not just function calls.
+            let mut index_to_tool_idx: HashMap<u64, u32> = HashMap::new();
             let mut buffer = String::new();
             let mut utf8_buf = Vec::new();
             let mut current_event_type: Option<String> = None;
@@ -191,7 +195,12 @@ impl ChatProvider for OpenAiResponsesClient {
                     }
 
                     let event_type = current_event_type.as_deref().unwrap_or("");
-                    let events = parse_responses_sse(event_type, data, &mut index_to_call_id);
+                    let events = parse_responses_sse(
+                        event_type,
+                        data,
+                        &mut index_to_call_id,
+                        &mut index_to_tool_idx,
+                    );
 
                     for ev in events {
                         match &ev {
@@ -271,10 +280,12 @@ fn apply_hosted_tools(body: &mut serde_json::Value, hosted_tools: &[String]) {
 /// (e.g. "response.output_text.delta").
 /// `data` is the raw JSON string from the `data:` line.
 /// `index_to_call_id` maps output_index → call_id for function call correlation.
+/// `index_to_tool_idx` maps output_index → sequential tool_calls index.
 fn parse_responses_sse(
     event_type: &str,
     data: &str,
     index_to_call_id: &mut HashMap<u64, String>,
+    index_to_tool_idx: &mut HashMap<u64, u32>,
 ) -> Vec<StreamEvent> {
     use crate::providers::{ChatUsage, StopReason};
 
@@ -325,6 +336,8 @@ fn parse_responses_sse(
                         .and_then(|i| i.as_u64())
                         .unwrap_or(0);
                     index_to_call_id.insert(output_index, call_id.clone());
+                    let tool_idx = index_to_tool_idx.len() as u32;
+                    index_to_tool_idx.insert(output_index, tool_idx);
 
                     return vec![StreamEvent::ToolCallStart {
                         id: call_id,
@@ -349,8 +362,12 @@ fn parse_responses_sse(
                     .get(&output_index)
                     .cloned()
                     .unwrap_or_default();
+                let tool_idx = index_to_tool_idx
+                    .get(&output_index)
+                    .copied()
+                    .unwrap_or(0);
                 return vec![StreamEvent::ToolCallDelta {
-                    index: output_index as u32,
+                    index: tool_idx,
                     id: call_id,
                     name: String::new(),
                     delta: delta.to_string(),
