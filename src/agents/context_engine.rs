@@ -167,29 +167,82 @@ impl ContextEngine {
                     + 8
             })
             .sum();
+        let compress_budget = window
+            .saturating_sub(SUMMARY_OUTPUT_RESERVE)
+            .saturating_sub(sys_prompt_tokens)
+            .saturating_sub(tool_spec_tokens)
+            .saturating_sub(COMPRESSION_SAFETY_MARGIN);
         let boundary = self.compaction_boundary_with_retain(
             &session.history,
             window,
             sys_prompt_tokens,
             tool_spec_tokens,
             override_retain,
-        )?;
+        );
 
         // Snapshot history for the summarizer (which reads a slice); the live
         // session is passed through for the memory tools inside the summarizer.
         let history_snap: Vec<ChatMessage> = session.history.to_vec();
-        match self
-            .execute_compaction(
+
+        // Prefer normal retain-based compaction. When the boundary is missing or
+        // the incremental range is empty (typical: single-user long tool chain
+        // where every work unit shares one user_start), fall back to retain=0
+        // full-fold of the entire history into one summary message.
+        let compact_outcome = if let Some(boundary) = boundary {
+            match self
+                .execute_compaction(
+                    &history_snap,
+                    system_prompt,
+                    tool_specs,
+                    boundary,
+                    model_id,
+                    Arc::clone(&provider),
+                    session,
+                    Some(compress_budget),
+                )
+                .await
+            {
+                Ok(result) => Ok(result),
+                Err(e) if is_empty_compact_error(&e) => {
+                    tracing::warn!(
+                        session = %session.id,
+                        err = %e,
+                        history_len = history_snap.len(),
+                        "incremental compaction empty; full-fold retain=0"
+                    );
+                    self.execute_full_fold_compaction(
+                        &history_snap,
+                        system_prompt,
+                        tool_specs,
+                        model_id,
+                        Arc::clone(&provider),
+                        session,
+                        compress_budget,
+                    )
+                    .await
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            tracing::warn!(
+                session = %session.id,
+                history_len = history_snap.len(),
+                force,
+                "no retain boundary; full-fold retain=0"
+            );
+            self.execute_full_fold_compaction(
                 &history_snap,
                 system_prompt,
                 tool_specs,
-                boundary,
                 model_id,
                 Arc::clone(&provider),
                 session,
+                compress_budget,
             )
             .await
-        {
+        };
+
+        match compact_outcome {
             Ok(result) => {
                 let version = session.compact_version + 1;
                 let summary_prefix = "[CONTEXT COMPACTION — REFERENCE ONLY] ";
@@ -208,9 +261,11 @@ impl ContextEngine {
                     None => format!("{}{}", summary_prefix, result.summary),
                 };
                 let summary_msg = ChatMessage::user_text(summary_text);
+                // Use compact_end (not the retain boundary) so full-fold
+                // retain=0 still records the correct up_to_message.
                 let last_compacted_id = session
                     .message_ids
-                    .get(boundary.saturating_sub(1))
+                    .get(result.compact_end.saturating_sub(1))
                     .copied()
                     .unwrap_or(0);
                 session.apply_compaction(
@@ -337,25 +392,64 @@ impl ContextEngine {
             }
         }
 
-        // Last-resort fallback: force-drop oldest half when compaction fails.
-        if latest.is_none() && force && session.history.len() > 6 {
-            let drop_boundary = session.history.len() / 2;
+        // Last-resort fallback: hard full-fold (retain=0) into one user summary.
+        // Never half-cut history — that drops all user turns and yields illegal
+        // messages (e.g. GLM 1214) on single-user tool chains.
+        if latest.is_none() && force && !session.history.is_empty() {
             let version = session.compact_version + 1;
-            let dropped_tokens: u64 = session.history[..drop_boundary]
+            let removed_tokens: u64 = session
+                .history
                 .iter()
                 .map(estimate_message_tokens)
                 .sum();
+            let hard = hard_fold_history(&session.history);
+            let summary_text =
+                format!("[CONTEXT COMPACTION — REFERENCE ONLY] {}", hard);
+            let summary_msg = ChatMessage::user_text(summary_text);
+            let summary_tokens = estimate_message_tokens(&summary_msg);
+            let end = session.history.len();
+            let last_compacted_id = session.message_ids.last().copied().unwrap_or(0);
             tracing::warn!(
                 session = %session.id,
-                msg_count = session.history.len(),
-                dropped = drop_boundary,
-                dropped_tokens,
-                "compaction exhausted all passes; force-dropping oldest half as last resort"
+                msg_count = end,
+                removed_tokens,
+                summary_tokens,
+                "compaction exhausted all passes; hard full-fold retain=0 as last resort"
             );
-            session.drop_pre_boundary(drop_boundary, version);
+            session.apply_compaction(
+                0,
+                end,
+                summary_msg,
+                version,
+                last_compacted_id,
+                summary_tokens,
+            );
             session
                 .token_tracker
-                .adjust_for_compaction(dropped_tokens, 0);
+                .adjust_for_compaction(removed_tokens, summary_tokens);
+            if let Some(ref hook) = session.persist {
+                hook.save_compaction(
+                    &session.id,
+                    &SummaryRecord {
+                        id: 0,
+                        version,
+                        summary: hard,
+                        up_to_message: last_compacted_id,
+                        token_estimate: Some(summary_tokens),
+                        created_at: chrono::Utc::now(),
+                    },
+                );
+                let surviving: Vec<(i64, ChatMessage)> = session
+                    .message_ids
+                    .iter()
+                    .zip(session.history.iter())
+                    .map(|(&id, msg)| (id, msg.clone()))
+                    .collect();
+                hook.rotate_history(&session.id, &surviving);
+                for (i, id) in session.message_ids.iter_mut().enumerate() {
+                    *id = (i + 1) as i64;
+                }
+            }
             let messages = self.rebuild_messages(system_prompt, &session.history, tool_specs);
             latest = Some(messages);
         } else if latest.is_none() && force {
@@ -447,6 +541,10 @@ impl ContextEngine {
     /// system_prompt + tool_definitions) matches and the summarizer
     /// call hits the cache. Execution is gated separately by
     /// `MemoryToolExecutor`, which permits only the memory tools.
+    ///
+    /// When `compress_budget` is set and the slice to summarize exceeds it,
+    /// skip the LLM summarizer and produce a deterministic hard-fold instead
+    /// (avoids feeding an already-over-window history into the same model).
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_compaction(
         &self,
@@ -457,6 +555,7 @@ impl ContextEngine {
         model_id: &str,
         provider: Arc<dyn ChatProvider>,
         session: &crate::agents::session::Session,
+        compress_budget: Option<u64>,
     ) -> anyhow::Result<CompactionResult> {
         let (replace_start, compact_start, compact_end, existing_summary) =
             find_incremental_range(history, boundary);
@@ -481,17 +580,69 @@ impl ContextEngine {
             "compaction range determined"
         );
 
-        let summary = self
-            .summarize(
-                &to_compact,
-                existing_summary.as_deref(),
-                system_prompt,
-                tool_specs,
-                model_id,
-                provider,
-                session,
-            )
-            .await?;
+        let slice_tokens: u64 = to_compact.iter().map(estimate_message_tokens).sum();
+        let use_hard = compress_budget.is_some_and(|b| b == 0 || slice_tokens > b);
+
+        let summary = if use_hard {
+            tracing::warn!(
+                session = %session.id,
+                slice_tokens,
+                compress_budget = ?compress_budget,
+                "compaction slice exceeds summarizer budget; hard-fold"
+            );
+            let mut body = hard_fold_history(&to_compact);
+            if let Some(existing) = existing_summary.as_deref() {
+                let existing = existing
+                    .strip_prefix("[CONTEXT COMPACTION — REFERENCE ONLY]")
+                    .unwrap_or(existing)
+                    .trim();
+                if !existing.is_empty() {
+                    body = format!(
+                        "## Prior Summary\n{}\n\n## Folded Updates\n{}",
+                        truncate_chars(existing, HARD_PRIOR_SUMMARY_CHARS),
+                        body
+                    );
+                }
+            }
+            body
+        } else {
+            match self
+                .summarize(
+                    &to_compact,
+                    existing_summary.as_deref(),
+                    system_prompt,
+                    tool_specs,
+                    model_id,
+                    provider,
+                    session,
+                )
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        session = %session.id,
+                        err = %e,
+                        "summarize failed; hard-fold fallback"
+                    );
+                    let mut body = hard_fold_history(&to_compact);
+                    if let Some(existing) = existing_summary.as_deref() {
+                        let existing = existing
+                            .strip_prefix("[CONTEXT COMPACTION — REFERENCE ONLY]")
+                            .unwrap_or(existing)
+                            .trim();
+                        if !existing.is_empty() {
+                            body = format!(
+                                "## Prior Summary\n{}\n\n## Folded Updates\n{}",
+                                truncate_chars(existing, HARD_PRIOR_SUMMARY_CHARS),
+                                body
+                            );
+                        }
+                    }
+                    body
+                }
+            }
+        };
 
         let (ok, reasons) = audit_summary_quality(&to_compact, &summary);
         if !ok {
@@ -515,6 +666,72 @@ impl ContextEngine {
             summary_tokens,
             removed_tokens,
             compacted_count,
+        })
+    }
+
+    /// Full-fold retain=0: replace entire history with a single summary.
+    /// Used when retain-based boundary is missing or incremental range is empty
+    /// (single-user long tool chains).
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_full_fold_compaction(
+        &self,
+        history: &[ChatMessage],
+        system_prompt: &str,
+        tool_specs: &[ToolSpec],
+        model_id: &str,
+        provider: Arc<dyn ChatProvider>,
+        session: &crate::agents::session::Session,
+        compress_budget: u64,
+    ) -> anyhow::Result<CompactionResult> {
+        if history.is_empty() {
+            anyhow::bail!("no content to compact");
+        }
+
+        // If the only content under boundary=len is a prior summary (or the
+        // incremental slice is otherwise empty), hard-fold the whole history
+        // directly — re-entering execute_compaction would bail again.
+        let (_rs, cs, ce, _existing) = find_incremental_range(history, history.len());
+        if cs >= ce {
+            tracing::warn!(
+                session = %session.id,
+                history_len = history.len(),
+                "full-fold: empty incremental slice; hard-fold entire history"
+            );
+            let summary = hard_fold_history(history);
+            let summary_tokens =
+                estimate_message_tokens(&ChatMessage::user_text(summary.clone()));
+            let removed_tokens: u64 = history.iter().map(estimate_message_tokens).sum();
+            return Ok(CompactionResult {
+                compact_start: 0,
+                compact_end: history.len(),
+                summary,
+                summary_tokens,
+                removed_tokens,
+                compacted_count: history.len(),
+            });
+        }
+
+        // boundary = len → compact everything; find_incremental_range still
+        // strips an existing leading summary from the LLM input but replace
+        // covers [0, len) so the result is a single new summary message.
+        self.execute_compaction(
+            history,
+            system_prompt,
+            tool_specs,
+            history.len(),
+            model_id,
+            provider,
+            session,
+            Some(compress_budget),
+        )
+        .await
+        .map(|mut r| {
+            // Always replace the full history when full-folding.
+            r.compact_start = 0;
+            r.compact_end = history.len();
+            r.removed_tokens = history.iter().map(estimate_message_tokens).sum();
+            r.compacted_count = history.len();
+            r
         })
     }
 
@@ -833,6 +1050,124 @@ fn find_incremental_range(
     }
 }
 
+fn is_empty_compact_error(err: &anyhow::Error) -> bool {
+    format!("{err:#}").contains("no content to compact")
+}
+
+/// Max chars kept from a prior summary when hard-folding an update on top.
+const HARD_PRIOR_SUMMARY_CHARS: usize = 6_000;
+/// Per-message body budget in hard-fold (user / assistant text).
+const HARD_MSG_CHARS: usize = 400;
+/// Per tool-result body budget in hard-fold.
+const HARD_TOOL_CHARS: usize = 200;
+/// Total hard-fold body budget (before evidence index).
+const HARD_TOTAL_CHARS: usize = 12_000;
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// Deterministic, LLM-free fold of a message slice into a compact text body.
+/// Preserves user turns, assistant text (or tool names), and short tool results.
+fn hard_fold_history(msgs: &[ChatMessage]) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(
+        "[HARD FOLD] Summarizer skipped or failed; deterministic history fold.".to_string(),
+    );
+
+    let mut user_n = 0usize;
+    let mut tool_n = 0usize;
+    let mut asst_n = 0usize;
+
+    for m in msgs {
+        match m.role.as_str() {
+            "user" => {
+                user_n += 1;
+                let text = m.text_content();
+                // Skip prior compaction marker bodies (re-injected separately).
+                if text.starts_with("[CONTEXT COMPACTION — REFERENCE ONLY]") {
+                    lines.push(format!(
+                        "U{user_n}: [prior compaction summary, {} chars]",
+                        text.chars().count()
+                    ));
+                    continue;
+                }
+                lines.push(format!("U{user_n}: {}", truncate_chars(text.trim(), HARD_MSG_CHARS)));
+            }
+            "assistant" => {
+                asst_n += 1;
+                let text = m.text_content();
+                let tools = m
+                    .tool_calls
+                    .as_ref()
+                    .map(|tcs| {
+                        tcs.iter()
+                            .map(|tc| tc.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .unwrap_or_default();
+                if text.trim().is_empty() && !tools.is_empty() {
+                    lines.push(format!("A{asst_n}: [tools: {tools}]"));
+                } else if !tools.is_empty() {
+                    lines.push(format!(
+                        "A{asst_n}: {} [tools: {tools}]",
+                        truncate_chars(text.trim(), HARD_MSG_CHARS)
+                    ));
+                } else {
+                    lines.push(format!(
+                        "A{asst_n}: {}",
+                        truncate_chars(text.trim(), HARD_MSG_CHARS)
+                    ));
+                }
+            }
+            "tool" => {
+                tool_n += 1;
+                let name = m.name.as_deref().unwrap_or("tool");
+                let id = m.tool_call_id.as_deref().unwrap_or("?");
+                let body = m.text_content();
+                let err = m.is_error.unwrap_or(false);
+                let flag = if err { " ERR" } else { "" };
+                lines.push(format!(
+                    "T{tool_n}{flag} {name}#{id}: {}",
+                    truncate_chars(body.trim(), HARD_TOOL_CHARS)
+                ));
+            }
+            other => {
+                lines.push(format!(
+                    "{other}: {}",
+                    truncate_chars(m.text_content().trim(), HARD_MSG_CHARS)
+                ));
+            }
+        }
+    }
+
+    lines.push(format!(
+        "\n## Counts\nuser={user_n} assistant={asst_n} tool={tool_n} total={}",
+        msgs.len()
+    ));
+
+    let mut out = lines.join("\n");
+    if out.chars().count() > HARD_TOTAL_CHARS {
+        // Keep head + tail so early user goal and late tool results survive.
+        let head_budget = HARD_TOTAL_CHARS * 2 / 3;
+        let tail_budget = HARD_TOTAL_CHARS / 3;
+        let head: String = out.chars().take(head_budget).collect();
+        let total_chars = out.chars().count();
+        let tail: String = out
+            .chars()
+            .skip(total_chars.saturating_sub(tail_budget))
+            .collect();
+        out = format!("{head}\n…\n{tail}");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -889,6 +1224,131 @@ mod tests {
         assert_eq!(compact_start, 1);
         assert_eq!(compact_end, 1);
         assert!(existing.is_some());
+    }
+
+    #[test]
+    fn empty_compact_error_detected() {
+        let err = anyhow::anyhow!("no content to compact");
+        assert!(is_empty_compact_error(&err));
+        let other = anyhow::anyhow!("summarize failed");
+        assert!(!is_empty_compact_error(&other));
+    }
+
+    /// xiaoliu-class failure: one user + many tool rounds after a prior summary
+    /// makes every work unit share user_start → incremental range is empty.
+    #[test]
+    fn single_user_tool_chain_incremental_range_is_empty() {
+        let mut history = vec![
+            ChatMessage::user_text("[CONTEXT COMPACTION — REFERENCE ONLY] prior work"),
+            ChatMessage::user_text("中兴在互联网有多大份额？"),
+        ];
+        for i in 0..20 {
+            let mut a = ChatMessage::assistant_text("");
+            a.tool_calls = Some(vec![ToolCall {
+                id: format!("c{i}"),
+                name: "web_search".into(),
+                arguments: format!(r#"{{"query":"q{i}"}}"#),
+            }]);
+            history.push(a);
+            let mut t = ChatMessage::text("tool", format!("result {i}"));
+            t.tool_call_id = Some(format!("c{i}"));
+            history.push(t);
+        }
+
+        // Boundary pinned at the sole real user (index 1) — nothing after the
+        // existing summary and before boundary is compactable.
+        let boundary = 1;
+        let (replace_start, compact_start, compact_end, existing) =
+            find_incremental_range(&history, boundary);
+        assert_eq!(replace_start, 0);
+        assert_eq!(compact_start, 1);
+        assert_eq!(compact_end, 1);
+        assert!(existing.is_some());
+        assert!(history[compact_start..compact_end].is_empty());
+
+        // Full-fold boundary = len has content.
+        let (rs, cs, ce, _) = find_incremental_range(&history, history.len());
+        assert_eq!(rs, 0);
+        assert_eq!(cs, 1);
+        assert_eq!(ce, history.len());
+        assert!(!history[cs..ce].is_empty());
+    }
+
+    #[test]
+    fn hard_fold_preserves_user_and_tool_names() {
+        let mut a = ChatMessage::assistant_text("looking up");
+        a.tool_calls = Some(vec![ToolCall {
+            id: "c1".into(),
+            name: "web_search".into(),
+            arguments: "{}".into(),
+        }]);
+        let mut t = ChatMessage::text("tool", "ZTE share is X%");
+        t.tool_call_id = Some("c1".into());
+        let history = vec![
+            ChatMessage::user_text("中兴份额?"),
+            a,
+            t,
+            ChatMessage::assistant_text("share is X%"),
+        ];
+        let fold = hard_fold_history(&history);
+        assert!(fold.contains("中兴份额"));
+        assert!(fold.contains("web_search"));
+        assert!(fold.contains("ZTE share") || fold.contains("share is X%"));
+        assert!(fold.contains("user=1"));
+        assert!(fold.chars().count() < HARD_TOTAL_CHARS);
+    }
+
+    #[test]
+    fn hard_fold_respects_total_budget() {
+        let mut history = Vec::new();
+        history.push(ChatMessage::user_text("goal ".repeat(200)));
+        for i in 0..200 {
+            history.push(ChatMessage::assistant_text(format!(
+                "assistant blob {i} {}",
+                "x".repeat(300)
+            )));
+            let mut t = ChatMessage::text("tool", format!("tool blob {i} {}", "y".repeat(300)));
+            t.tool_call_id = Some(format!("c{i}"));
+            history.push(t);
+        }
+        let fold = hard_fold_history(&history);
+        // Allow small overhead for the head/tail splice marker.
+        assert!(
+            fold.chars().count() <= HARD_TOTAL_CHARS + 8,
+            "fold len {}",
+            fold.chars().count()
+        );
+        assert!(fold.contains("goal"));
+    }
+
+    #[test]
+    fn hard_fold_then_apply_leaves_single_user_message() {
+        // Simulates last-resort path: hard fold entire history → apply_compaction.
+        let mut history = vec![ChatMessage::user_text("q")];
+        for i in 0..10 {
+            let mut a = ChatMessage::assistant_text("");
+            a.tool_calls = Some(vec![ToolCall {
+                id: format!("c{i}"),
+                name: "web_search".into(),
+                arguments: "{}".into(),
+            }]);
+            history.push(a);
+            let mut t = ChatMessage::text("tool", "r");
+            t.tool_call_id = Some(format!("c{i}"));
+            history.push(t);
+        }
+        let body = hard_fold_history(&history);
+        let summary = format!("[CONTEXT COMPACTION — REFERENCE ONLY] {body}");
+        // After replace, only one user message remains — legal for any provider.
+        let mut after = history.clone();
+        let end = after.len();
+        after.drain(0..end);
+        after.insert(0, ChatMessage::user_text(summary));
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].role, "user");
+        assert!(after[0]
+            .text_content()
+            .starts_with("[CONTEXT COMPACTION — REFERENCE ONLY]"));
     }
 }
 

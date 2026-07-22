@@ -114,6 +114,7 @@ pub async fn cmd_compact(ctx: CommandContext<'_>) -> String {
             &model_id,
             Arc::clone(&provider),
             &session,
+            None,
         )
         .await
     {

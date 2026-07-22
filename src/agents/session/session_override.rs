@@ -149,6 +149,37 @@ pub fn sanitize_history(history: &mut Vec<ChatMessage>) {
     // `user` rows break Gemini / some OpenAI-compatible endpoints; consecutive
     // assistants are also invalid on strict alternation providers.
     merge_adjacent_same_role(history);
+
+    // Step 7: Provider invariant — history must contain at least one user
+    // message. Force-drop / crash recovery can leave assistant+tool-only tails
+    // (GLM 1214 / messages 参数非法). Synthesize a minimal user turn.
+    ensure_at_least_one_user(history);
+}
+
+/// Ensure `history` has ≥1 user message so providers that require a user turn
+/// (and our own compaction/summary markers) never see an empty-of-user prefix.
+fn ensure_at_least_one_user(history: &mut Vec<ChatMessage>) {
+    if history.iter().any(|m| m.role == "user") {
+        return;
+    }
+    if history.is_empty() {
+        history.push(ChatMessage::user_text(
+            "[CONTEXT RECOVERY] prior turns were dropped; continue from the latest request.",
+        ));
+        tracing::warn!("history empty after sanitize; injected recovery user message");
+        return;
+    }
+    // Prepend so existing assistant/tool tail stays a legal continuation.
+    history.insert(
+        0,
+        ChatMessage::user_text(
+            "[CONTEXT RECOVERY] earlier user turns were dropped to fit the context window; treat the following as prior work product and continue.",
+        ),
+    );
+    tracing::warn!(
+        remaining = history.len() - 1,
+        "history had no user message after sanitize; prepended recovery user"
+    );
 }
 
 /// Insert cancelled tool results / placeholder assistant messages so a later
@@ -397,6 +428,28 @@ mod tests {
                 "tool directly followed by user"
             );
         }
+    }
+
+    #[test]
+    fn injects_user_when_history_has_only_assistant_tool_tail() {
+        // xiaoliu force-drop half left no user → GLM 1214.
+        let mut history = vec![asst_tools(&["t1"]), tool("t1"), ChatMessage::assistant_text("mid")];
+        sanitize_history(&mut history);
+        assert!(
+            history.iter().any(|m| m.role == "user"),
+            "must inject recovery user: {:?}",
+            history.iter().map(|m| m.role.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(history[0].role, "user");
+        assert!(history[0].text_content().contains("CONTEXT RECOVERY"));
+    }
+
+    #[test]
+    fn injects_user_when_history_empty() {
+        let mut history: Vec<ChatMessage> = vec![];
+        sanitize_history(&mut history);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].role, "user");
     }
 
     #[test]
