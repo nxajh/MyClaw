@@ -257,11 +257,38 @@ const RECENT_SSE_CAP: usize = 12;
 /// Truncate each dumped SSE payload to keep WARN lines readable.
 const RECENT_SSE_ITEM_MAX: usize = 400;
 
+/// Byte index at or before `idx` that is a UTF-8 char boundary.
+fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+/// Byte index at or after `idx` that is a UTF-8 char boundary.
+fn ceil_char_boundary(s: &str, mut idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    while idx < s.len() && !s.is_char_boundary(idx) {
+        idx += 1;
+    }
+    idx
+}
+
 fn push_recent_sse(buf: &mut std::collections::VecDeque<String>, data: &str) {
     let clipped = if data.len() > RECENT_SSE_ITEM_MAX {
         // Prefer head (structure) + tail (finish_reason often at end of short chunks).
-        let head = &data[..RECENT_SSE_ITEM_MAX.saturating_sub(32)];
-        let tail = &data[data.len().saturating_sub(24)..];
+        // Must slice on char boundaries — GLM tool_call arguments frequently contain
+        // CJK, and a raw byte cut at 368 panic'd the SSE reader worker
+        // (2026-07-23 xiaoliu view_image: "byte index 368 is not a char boundary").
+        let head_end = floor_char_boundary(data, RECENT_SSE_ITEM_MAX.saturating_sub(32));
+        let head = &data[..head_end];
+        let tail_start = ceil_char_boundary(data, data.len().saturating_sub(24));
+        let tail = &data[tail_start..];
         format!("{head}…{tail}")
     } else {
         data.to_string()
@@ -555,6 +582,54 @@ mod tests {
         assert_eq!(buf.len(), RECENT_SSE_CAP);
         assert_eq!(buf.front().map(String::as_str), Some("chunk-8"));
         assert_eq!(buf.back().map(String::as_str), Some("chunk-19"));
+    }
+
+    #[test]
+    fn push_recent_sse_cjk_mid_char_does_not_panic() {
+        // Repro of 2026-07-23 xiaoliu: long view_image SSE data with CJK in
+        // function.arguments; old code sliced at byte 368 inside a 3-byte char.
+        let prefix = r#"{"id":"2026072314374382605a644f604a5b","created":1784788663,"object":"chat.completion.chunk","model":"glm-5.2","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_b920f2366cb943b49f3da0a7","index":0,"type":"function","function":{"name":"view_image","arguments":""#;
+        // Pad with CJK so that RECENT_SSE_ITEM_MAX-32 (368) lands mid-character
+        // for many offsets (each 请 is 3 bytes).
+        let cjk = "请描述这张图片中的全部文字与关键数据".repeat(40);
+        let suffix = r#""}}]}}],"finish_reason":"tool_calls"}"#;
+        let data = format!("{prefix}{cjk}{suffix}");
+        assert!(data.len() > RECENT_SSE_ITEM_MAX);
+
+        let mut buf = std::collections::VecDeque::new();
+        // Must not panic on char-boundary unsafe byte slices.
+        push_recent_sse(&mut buf, &data);
+        assert_eq!(buf.len(), 1);
+        let clipped = buf.front().unwrap();
+        assert!(clipped.contains('…'), "expected head…tail clip: {clipped}");
+        assert!(clipped.is_char_boundary(clipped.len()));
+        // Round-trip: every prefix of clipped is still valid UTF-8 (slice ok).
+        for i in 0..=clipped.len() {
+            if clipped.is_char_boundary(i) {
+                let _ = &clipped[..i];
+            }
+        }
+    }
+
+    #[test]
+    fn push_recent_sse_exact_mid_utf8_at_368() {
+        // Construct so byte index 368 is inside a multi-byte char.
+        let mut s = String::new();
+        while s.len() < 367 {
+            s.push('a');
+        }
+        // Now len=367; next 请 occupies 367..370 — index 368 is mid-char.
+        s.push('请');
+        while s.len() <= RECENT_SSE_ITEM_MAX {
+            s.push('描');
+        }
+        s.push_str(r#","finish_reason":"tool_calls"}"#);
+        assert!(!s.is_char_boundary(368));
+
+        let mut buf = std::collections::VecDeque::new();
+        push_recent_sse(&mut buf, &s);
+        assert_eq!(buf.len(), 1);
+        assert!(buf.front().unwrap().contains('…'));
     }
 
     #[test]
