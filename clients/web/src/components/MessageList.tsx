@@ -23,7 +23,9 @@ function ensureKatexCss() {
   katexCssLoaded = true
   return import('katex/dist/katex.min.css')
 }
-const hasMath = (text: string) => /\$[^$]+\$|\$\$[^$]+\$\$/.test(text)
+/** Detect $ / $$ or LaTeX \( \) / \[ \] math delimiters (used before/after normalize). */
+const hasMath = (text: string) =>
+  /\$\$[\s\S]+?\$\$|\$[^$\n]+?\$|\\\([\s\S]+?\\\)|\\\[[\s\S]+?\\\]/.test(text)
 // Lazy-load rehype-katex only when needed
 let RehypeKatex: any = null
 async function loadRehypeKatex() {
@@ -32,6 +34,75 @@ async function loadRehypeKatex() {
     RehypeKatex = mod.default
   }
   return RehypeKatex
+}
+
+/**
+ * Convert LaTeX math delimiters to remark-math form:
+ *   \[...\] → $$...$$  (display)
+ *   \(...\) → $...$    (inline)
+ * Skips fenced code blocks and inline code so examples stay literal.
+ * Display-only; does not mutate stored message text.
+ */
+function normalizeMathDelimiters(text: string): string {
+  type Seg = { kind: 'code' | 'prose'; text: string }
+  const segs: Seg[] = []
+  const lines = text.split('\n')
+  let buf: string[] = []
+  let inFence = false
+  let fenceMarker = ''
+  let fenceLen = 0
+
+  const flush = (kind: 'code' | 'prose') => {
+    if (buf.length === 0) return
+    segs.push({ kind, text: buf.join('\n') })
+    buf = []
+  }
+
+  for (const line of lines) {
+    const m = line.match(/^(\s{0,3})(`{3,}|~{3,})(.*)$/)
+    if (m) {
+      const marker = m[2][0]
+      const len = m[2].length
+      const after = m[3]
+      if (!inFence) {
+        flush('prose')
+        inFence = true
+        fenceMarker = marker
+        fenceLen = len
+        buf = [line]
+        continue
+      }
+      if (marker === fenceMarker && len >= fenceLen && after.trim() === '') {
+        buf.push(line)
+        flush('code')
+        inFence = false
+        continue
+      }
+    }
+    buf.push(line)
+  }
+  flush(inFence ? 'code' : 'prose')
+
+  return segs
+    .map((seg) => (seg.kind === 'code' ? seg.text : normalizeMathInProse(seg.text)))
+    .join('\n')
+}
+
+function normalizeMathInProse(text: string): string {
+  const stash: string[] = []
+  // Protect inline code spans (`` `...` `` / `...`)
+  const masked = text.replace(/(?<!\\)(`+)((?:(?!\1)[\s\S])*?)\1/g, (m) => {
+    const i = stash.length
+    stash.push(m)
+    return `\uE000${i}\uE001`
+  })
+
+  // \[...\] display first (allow newlines); skip if backslash-escaped
+  let out = masked.replace(/(?<!\\)\\\[([\s\S]*?)(?<!\\)\\\]/g, (_m, body: string) => `$$${body}$$`)
+  // \(...\) inline
+  out = out.replace(/(?<!\\)\\\(([\s\S]*?)(?<!\\)\\\)/g, (_m, body: string) => `$${body}$`)
+
+  return out.replace(/\uE000(\d+)\uE001/g, (_m, i: string) => stash[Number(i)] ?? '')
 }
 
 // ── PreCodeBlock with syntax highlighting + language label ────────────────
@@ -211,7 +282,12 @@ function closeUnclosedFences(text: string): string {
 
 function ContentBlock({ text, done }: { text: string; done: boolean }) {
   const [katexReady, setKatexReady] = useState(!!RehypeKatex)
-  const needsMath = hasMath(text)
+  // Render-only pipeline: fence fix → LaTeX delimiter normalize → remark-math ($/$$)
+  const prepared = useMemo(
+    () => normalizeMathDelimiters(closeUnclosedFences(text)),
+    [text],
+  )
+  const needsMath = hasMath(prepared)
 
   useEffect(() => {
     if (done && needsMath && !katexReady) {
@@ -223,6 +299,7 @@ function ContentBlock({ text, done }: { text: string; done: boolean }) {
   const searchQ = useContext(SearchContext)
 
   if (!done) {
+    // Streaming: raw text only (no math pipeline — delimiters may be incomplete)
     return <div className={`${proseClasses} whitespace-pre-wrap`}>{searchQ ? highlightText(text, searchQ) : text}</div>
   }
 
@@ -243,7 +320,7 @@ function ContentBlock({ text, done }: { text: string; done: boolean }) {
             return <PreCodeBlock className={codeChild?.props?.className || ''}>{children}</PreCodeBlock>
           },
         }}
-      >{closeUnclosedFences(text)}</Markdown>
+      >{prepared}</Markdown>
     </div>
   )
 }
