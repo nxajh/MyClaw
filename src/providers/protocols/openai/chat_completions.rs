@@ -116,6 +116,10 @@ impl ChatProvider for OpenAiChatCompletionsClient {
             // close (which yields neither).
             let mut saw_done_sentinel = false;
             let mut tool_index_map: HashMap<u32, String> = HashMap::new();
+            // Rolling dump of recent `data:` payloads for anomaly diagnosis
+            // (e.g. finish_reason=tool_calls with no parsed tool events).
+            let mut recent_sse_data: std::collections::VecDeque<String> =
+                std::collections::VecDeque::with_capacity(RECENT_SSE_CAP + 1);
             let mut buffer = String::new();
             let mut utf8_buf = Vec::new();
             let mut stream = resp.bytes_stream();
@@ -155,10 +159,17 @@ impl ChatProvider for OpenAiChatCompletionsClient {
                 while let Some(pos) = buffer.find('\n') {
                     let line = buffer[..pos].to_string();
                     buffer.drain(..=pos);
-                    if line.trim().strip_prefix("data:").map(str::trim) == Some("[DONE]") {
-                        saw_done_sentinel = true;
+                    let trimmed = line.trim();
+                    if let Some(data) = trimmed.strip_prefix("data:") {
+                        let data = data.trim();
+                        if data == "[DONE]" {
+                            saw_done_sentinel = true;
+                        } else if !data.is_empty() {
+                            push_recent_sse(&mut recent_sse_data, data);
+                        }
                     }
-                    let events = parse_openai_sse(&line, &mut tool_index_map);
+                    let events =
+                        parse_openai_sse(&line, &mut tool_index_map, saw_tool_call);
                     for ev in events {
                         match ev {
                             StreamEvent::ToolCallStart { .. }
@@ -204,6 +215,23 @@ impl ChatProvider for OpenAiChatCompletionsClient {
                         }
                     }
                 };
+                // finish_reason=tool_calls (or equivalent) but no ToolCallStart/Delta
+                // was ever parsed — agent may treat bridge text as a final reply.
+                if matches!(final_reason, StopReason::ToolUse) && !saw_tool_call {
+                    tracing::warn!(
+                        url = %url,
+                        stream_saw_tool_call = false,
+                        recent_sse_count = recent_sse_data.len(),
+                        recent_sse = %format_recent_sse(&recent_sse_data),
+                        "finish_reason=tool_calls but no tool call events parsed; dumping recent SSE data"
+                    );
+                } else {
+                    tracing::debug!(
+                        stream_saw_tool_call = saw_tool_call,
+                        ?final_reason,
+                        "SSE stream completed"
+                    );
+                }
                 let _ = tx
                     .send(StreamEvent::Done {
                         reason: final_reason,
@@ -224,7 +252,44 @@ impl ChatProvider for OpenAiChatCompletionsClient {
     }
 }
 
-fn parse_openai_sse(line: &str, tool_index_map: &mut HashMap<u32, String>) -> Vec<StreamEvent> {
+/// Max recent `data:` payloads retained for anomaly dumps.
+const RECENT_SSE_CAP: usize = 12;
+/// Truncate each dumped SSE payload to keep WARN lines readable.
+const RECENT_SSE_ITEM_MAX: usize = 400;
+
+fn push_recent_sse(buf: &mut std::collections::VecDeque<String>, data: &str) {
+    let clipped = if data.len() > RECENT_SSE_ITEM_MAX {
+        // Prefer head (structure) + tail (finish_reason often at end of short chunks).
+        let head = &data[..RECENT_SSE_ITEM_MAX.saturating_sub(32)];
+        let tail = &data[data.len().saturating_sub(24)..];
+        format!("{head}…{tail}")
+    } else {
+        data.to_string()
+    };
+    if buf.len() >= RECENT_SSE_CAP {
+        buf.pop_front();
+    }
+    buf.push_back(clipped);
+}
+
+fn format_recent_sse(buf: &std::collections::VecDeque<String>) -> String {
+    buf.iter()
+        .enumerate()
+        .map(|(i, s)| format!("[{i}] {s}"))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+/// Parse one OpenAI Chat Completions SSE `data:` line into stream events.
+///
+/// `stream_saw_tool_call` is the stream-level flag (true if any prior chunk
+/// already emitted ToolCallStart/Delta). Used only for accurate finish_reason
+/// logging — not for parsing decisions.
+fn parse_openai_sse(
+    line: &str,
+    tool_index_map: &mut HashMap<u32, String>,
+    stream_saw_tool_call: bool,
+) -> Vec<StreamEvent> {
     use crate::providers::{ChatUsage, StopReason};
 
     let line = line.trim();
@@ -247,10 +312,11 @@ fn parse_openai_sse(line: &str, tool_index_map: &mut HashMap<u32, String>) -> Ve
     }
     #[derive(serde::Deserialize)]
     struct Choice {
+        #[serde(default)]
         delta: Delta,
         finish_reason: Option<String>,
     }
-    #[derive(serde::Deserialize)]
+    #[derive(serde::Deserialize, Default)]
     struct Delta {
         content: Option<String>,
         reasoning_content: Option<String>,
@@ -262,6 +328,9 @@ fn parse_openai_sse(line: &str, tool_index_map: &mut HashMap<u32, String>) -> Ve
         index: u32,
         id: Option<String>,
         function: Option<FuncDelta>,
+        /// Some providers put type on the tool_call object; ignored for events.
+        #[serde(default, rename = "type")]
+        type_: Option<String>,
     }
     #[derive(serde::Deserialize, serde::Serialize)]
     #[allow(dead_code)]
@@ -284,7 +353,18 @@ fn parse_openai_sse(line: &str, tool_index_map: &mut HashMap<u32, String>) -> Ve
 
     let chunk: Chunk = match serde_json::from_str(data) {
         Ok(c) => c,
-        Err(_) => return vec![],
+        Err(e) => {
+            // Only log parse failures that look like they might contain tool calls
+            // or finish reasons — silent drop of garbage is still fine for noise.
+            if data.contains("tool_call") || data.contains("finish_reason") {
+                tracing::warn!(
+                    error = %e,
+                    raw_data = %truncate_for_log(data, RECENT_SSE_ITEM_MAX),
+                    "SSE chunk JSON parse failed (possible tool_calls lost)"
+                );
+            }
+            return vec![];
+        }
     };
 
     if chunk.choices.is_empty() {
@@ -303,9 +383,12 @@ fn parse_openai_sse(line: &str, tool_index_map: &mut HashMap<u32, String>) -> Ve
     let mut events = Vec::new();
 
     for choice in &chunk.choices {
-        let mut emitted_tool_event = false;
+        let mut chunk_emitted_tool_event = false;
         if let Some(tcs) = &choice.delta.tool_calls {
-            tracing::debug!(raw_tool_calls = %serde_json::to_string(tcs).unwrap_or_default(), "SSE tool_calls delta");
+            tracing::debug!(
+                raw_tool_calls = %serde_json::to_string(tcs).unwrap_or_default(),
+                "SSE tool_calls delta"
+            );
 
             for tc in tcs {
                 let id = tc.id.clone().unwrap_or_default();
@@ -321,7 +404,7 @@ fn parse_openai_sse(line: &str, tool_index_map: &mut HashMap<u32, String>) -> Ve
                         name: func.and_then(|f| f.name.clone()).unwrap_or_default(),
                         initial_arguments: initial_args,
                     });
-                    emitted_tool_event = true;
+                    chunk_emitted_tool_event = true;
                 } else {
                     let args = func.and_then(|f| f.arguments.clone()).unwrap_or_default();
                     if !args.is_empty() {
@@ -338,14 +421,23 @@ fn parse_openai_sse(line: &str, tool_index_map: &mut HashMap<u32, String>) -> Ve
                             name: delta_name,
                             delta: args,
                         });
-                        emitted_tool_event = true;
+                        chunk_emitted_tool_event = true;
+                    } else if !id.is_empty() || func.is_some_and(|f| f.name.is_some()) {
+                        // Partial start (id without name, or name without id) — log
+                        // so we can see non-standard streaming shapes.
+                        tracing::debug!(
+                            index = tc.index,
+                            id = %id,
+                            has_name = func.is_some_and(|f| f.name.is_some()),
+                            "SSE tool_calls delta ignored (no complete start / no args)"
+                        );
                     }
                 }
             }
         }
 
         // Skip content when tool_calls were present (some providers send both).
-        if !emitted_tool_event {
+        if !chunk_emitted_tool_event {
             if let Some(text) = &choice.delta.content {
                 if !text.is_empty() {
                     events.push(StreamEvent::Delta { text: text.clone() });
@@ -361,9 +453,12 @@ fn parse_openai_sse(line: &str, tool_index_map: &mut HashMap<u32, String>) -> Ve
         }
 
         if let Some(ref r) = choice.finish_reason {
+            // stream_saw_tool_call = any prior chunk; chunk_emitted_tool_event =
+            // this finish chunk only (almost always false for tool_calls finish).
             tracing::debug!(
                 finish_reason = %r,
-                saw_tool_call = %emitted_tool_event,
+                stream_saw_tool_call = stream_saw_tool_call,
+                chunk_emitted_tool_event = chunk_emitted_tool_event,
                 "SSE finish_reason received"
             );
             let reason = match r.as_str() {
@@ -381,4 +476,100 @@ fn parse_openai_sse(line: &str, tool_index_map: &mut HashMap<u32, String>) -> Ve
     }
 
     events
+}
+
+fn truncate_for_log(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::StopReason;
+
+    fn parse_line(line: &str, stream_saw: bool) -> Vec<StreamEvent> {
+        let mut map = HashMap::new();
+        parse_openai_sse(line, &mut map, stream_saw)
+    }
+
+    #[test]
+    fn finish_reason_tool_calls_logs_stream_level_flag() {
+        // finish chunk alone: stream_saw=true should still parse Done(ToolUse)
+        let events = parse_line(
+            r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+            true,
+        );
+        assert!(
+            matches!(
+                events.as_slice(),
+                [StreamEvent::Done {
+                    reason: StopReason::ToolUse
+                }]
+            ),
+            "got: {events:?}"
+        );
+    }
+
+    #[test]
+    fn tool_call_start_then_finish() {
+        let mut map = HashMap::new();
+        let start = parse_openai_sse(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"web_search","arguments":"{\"q\":\"x\"}"}}]}}]}"#,
+            &mut map,
+            false,
+        );
+        assert!(
+            matches!(
+                start.as_slice(),
+                [StreamEvent::ToolCallStart {
+                    id,
+                    name,
+                    ..
+                }] if id == "call_1" && name == "web_search"
+            ),
+            "got: {start:?}"
+        );
+        let finish = parse_openai_sse(
+            r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+            &mut map,
+            true,
+        );
+        assert!(matches!(
+            finish.as_slice(),
+            [StreamEvent::Done {
+                reason: StopReason::ToolUse
+            }]
+        ));
+    }
+
+    #[test]
+    fn recent_sse_ring_buffer_caps() {
+        let mut buf = std::collections::VecDeque::new();
+        for i in 0..20 {
+            push_recent_sse(&mut buf, &format!("chunk-{i}"));
+        }
+        assert_eq!(buf.len(), RECENT_SSE_CAP);
+        assert_eq!(buf.front().map(String::as_str), Some("chunk-8"));
+        assert_eq!(buf.back().map(String::as_str), Some("chunk-19"));
+    }
+
+    #[test]
+    fn empty_delta_finish_chunk_does_not_claim_chunk_tool() {
+        // Documents: finish chunk almost never carries tool_calls; stream flag matters.
+        let events = parse_line(
+            r#"data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+            false,
+        );
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            StreamEvent::Done {
+                reason: StopReason::ToolUse
+            }
+        ));
+    }
 }
