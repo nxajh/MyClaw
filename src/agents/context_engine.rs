@@ -186,8 +186,8 @@ impl ContextEngine {
 
         // Prefer normal retain-based compaction. When the boundary is missing or
         // the incremental range is empty (typical: single-user long tool chain
-        // where every work unit shares one user_start), fall back to retain=0
-        // full-fold of the entire history into one summary message.
+        // where every work unit shares one user_start), fall back to folding
+        // the completed prefix only — never past an open trailing user.
         let compact_outcome = if let Some(boundary) = boundary {
             match self
                 .execute_compaction(
@@ -208,7 +208,8 @@ impl ContextEngine {
                         session = %session.id,
                         err = %e,
                         history_len = history_snap.len(),
-                        "incremental compaction empty; full-fold retain=0"
+                        protected_from = ?open_user_protected_from(&history_snap),
+                        "incremental compaction empty; fold completed prefix (protect open user)"
                     );
                     self.execute_full_fold_compaction(
                         &history_snap,
@@ -228,7 +229,8 @@ impl ContextEngine {
                 session = %session.id,
                 history_len = history_snap.len(),
                 force,
-                "no retain boundary; full-fold retain=0"
+                protected_from = ?open_user_protected_from(&history_snap),
+                "no retain boundary; fold completed prefix (protect open user)"
             );
             self.execute_full_fold_compaction(
                 &history_snap,
@@ -392,66 +394,79 @@ impl ContextEngine {
             }
         }
 
-        // Last-resort fallback: hard full-fold (retain=0) into one user summary.
-        // Never half-cut history — that drops all user turns and yields illegal
-        // messages (e.g. GLM 1214) on single-user tool chains.
+        // Last-resort fallback: hard-fold the completed prefix only. Never swallow
+        // an open trailing user (protected tail). Never half-cut mid-tool-chain
+        // without a summary — that drops user turns and yields illegal shapes.
         if latest.is_none() && force && !session.history.is_empty() {
-            let version = session.compact_version + 1;
-            let removed_tokens: u64 = session
-                .history
-                .iter()
-                .map(estimate_message_tokens)
-                .sum();
-            let hard = hard_fold_history(&session.history);
-            let summary_text =
-                format!("[CONTEXT COMPACTION — REFERENCE ONLY] {}", hard);
-            let summary_msg = ChatMessage::user_text(summary_text);
-            let summary_tokens = estimate_message_tokens(&summary_msg);
-            let end = session.history.len();
-            let last_compacted_id = session.message_ids.last().copied().unwrap_or(0);
-            tracing::warn!(
-                session = %session.id,
-                msg_count = end,
-                removed_tokens,
-                summary_tokens,
-                "compaction exhausted all passes; hard full-fold retain=0 as last resort"
-            );
-            session.apply_compaction(
-                0,
-                end,
-                summary_msg,
-                version,
-                last_compacted_id,
-                summary_tokens,
-            );
-            session
-                .token_tracker
-                .adjust_for_compaction(removed_tokens, summary_tokens);
-            if let Some(ref hook) = session.persist {
-                hook.save_compaction(
-                    &session.id,
-                    &SummaryRecord {
-                        id: 0,
-                        version,
-                        summary: hard,
-                        up_to_message: last_compacted_id,
-                        token_estimate: Some(summary_tokens),
-                        created_at: chrono::Utc::now(),
-                    },
+            let protected_from =
+                open_user_protected_from(&session.history).unwrap_or(session.history.len());
+            let fold_end = protected_from;
+            if fold_end == 0 {
+                tracing::warn!(
+                    session = %session.id,
+                    msg_count = session.history.len(),
+                    "compaction last-resort: nothing before open user; skip fold"
                 );
-                let surviving: Vec<(i64, ChatMessage)> = session
+            } else {
+                let version = session.compact_version + 1;
+                let to_fold = &session.history[..fold_end];
+                let removed_tokens: u64 = to_fold.iter().map(estimate_message_tokens).sum();
+                let hard = hard_fold_history(to_fold);
+                let summary_text =
+                    format!("[CONTEXT COMPACTION — REFERENCE ONLY] {}", hard);
+                let summary_msg = ChatMessage::user_text(summary_text);
+                let summary_tokens = estimate_message_tokens(&summary_msg);
+                let last_compacted_id = session
                     .message_ids
-                    .iter()
-                    .zip(session.history.iter())
-                    .map(|(&id, msg)| (id, msg.clone()))
-                    .collect();
-                hook.rotate_history(&session.id, &surviving);
-                for (i, id) in session.message_ids.iter_mut().enumerate() {
-                    *id = (i + 1) as i64;
+                    .get(fold_end.saturating_sub(1))
+                    .copied()
+                    .unwrap_or(0);
+                tracing::warn!(
+                    session = %session.id,
+                    fold_end,
+                    protected_from,
+                    msg_count = session.history.len(),
+                    removed_tokens,
+                    summary_tokens,
+                    "compaction exhausted all passes; hard-fold completed prefix (protect open user)"
+                );
+                session.apply_compaction(
+                    0,
+                    fold_end,
+                    summary_msg,
+                    version,
+                    last_compacted_id,
+                    summary_tokens,
+                );
+                session
+                    .token_tracker
+                    .adjust_for_compaction(removed_tokens, summary_tokens);
+                if let Some(ref hook) = session.persist {
+                    hook.save_compaction(
+                        &session.id,
+                        &SummaryRecord {
+                            id: 0,
+                            version,
+                            summary: hard,
+                            up_to_message: last_compacted_id,
+                            token_estimate: Some(summary_tokens),
+                            created_at: chrono::Utc::now(),
+                        },
+                    );
+                    let surviving: Vec<(i64, ChatMessage)> = session
+                        .message_ids
+                        .iter()
+                        .zip(session.history.iter())
+                        .map(|(&id, msg)| (id, msg.clone()))
+                        .collect();
+                    hook.rotate_history(&session.id, &surviving);
+                    for (i, id) in session.message_ids.iter_mut().enumerate() {
+                        *id = (i + 1) as i64;
+                    }
                 }
+                let messages = self.rebuild_messages(system_prompt, &session.history, tool_specs);
+                latest = Some(messages);
             }
-            let messages = self.rebuild_messages(system_prompt, &session.history, tool_specs);
-            latest = Some(messages);
         } else if latest.is_none() && force {
             tracing::warn!(
                 session = %session.id,
@@ -557,6 +572,10 @@ impl ContextEngine {
         session: &crate::agents::session::Session,
         compress_budget: Option<u64>,
     ) -> anyhow::Result<CompactionResult> {
+        // P0 invariant: never compact past an open trailing user turn.
+        let protected_from = open_user_protected_from(history).unwrap_or(history.len());
+        let boundary = boundary.min(protected_from);
+
         let (replace_start, compact_start, compact_end, existing_summary) =
             find_incremental_range(history, boundary);
 
@@ -669,9 +688,11 @@ impl ContextEngine {
         })
     }
 
-    /// Full-fold retain=0: replace entire history with a single summary.
+    /// Fold the completed prefix of history into a summary.
+    ///
     /// Used when retain-based boundary is missing or incremental range is empty
-    /// (single-user long tool chains).
+    /// (single-user long tool chains). **Never** extends past an open trailing
+    /// user (`open_user_protected_from`) — after apply, that user remains intact.
     #[allow(clippy::too_many_arguments)]
     async fn execute_full_fold_compaction(
         &self,
@@ -687,38 +708,48 @@ impl ContextEngine {
             anyhow::bail!("no content to compact");
         }
 
-        // If the only content under boundary=len is a prior summary (or the
-        // incremental slice is otherwise empty), hard-fold the whole history
+        // Fold only up to the protected open-user tail (or whole history if none).
+        let fold_end = open_user_protected_from(history).unwrap_or(history.len());
+        if fold_end == 0 {
+            anyhow::bail!("no content to compact");
+        }
+
+        // If the only content under fold_end is a prior summary (or the
+        // incremental slice is otherwise empty), hard-fold that prefix
         // directly — re-entering execute_compaction would bail again.
-        let (_rs, cs, ce, _existing) = find_incremental_range(history, history.len());
+        let (_rs, cs, ce, _existing) = find_incremental_range(history, fold_end);
         if cs >= ce {
+            // Prefer folding completed work units before the open user if any
+            // exist earlier; otherwise hard-fold [0, fold_end).
+            let summary = hard_fold_history(&history[..fold_end]);
+            let summary_tokens =
+                estimate_message_tokens(&ChatMessage::user_text(summary.clone()));
+            let removed_tokens: u64 =
+                history[..fold_end].iter().map(estimate_message_tokens).sum();
             tracing::warn!(
                 session = %session.id,
                 history_len = history.len(),
-                "full-fold: empty incremental slice; hard-fold entire history"
+                fold_end,
+                "full-fold: empty incremental slice; hard-fold completed prefix"
             );
-            let summary = hard_fold_history(history);
-            let summary_tokens =
-                estimate_message_tokens(&ChatMessage::user_text(summary.clone()));
-            let removed_tokens: u64 = history.iter().map(estimate_message_tokens).sum();
             return Ok(CompactionResult {
                 compact_start: 0,
-                compact_end: history.len(),
+                compact_end: fold_end,
                 summary,
                 summary_tokens,
                 removed_tokens,
-                compacted_count: history.len(),
+                compacted_count: fold_end,
             });
         }
 
-        // boundary = len → compact everything; find_incremental_range still
-        // strips an existing leading summary from the LLM input but replace
-        // covers [0, len) so the result is a single new summary message.
+        // boundary = fold_end → compact completed prefix; find_incremental_range
+        // strips an existing leading summary from the LLM input. compact_end is
+        // clamped again inside execute_compaction.
         self.execute_compaction(
             history,
             system_prompt,
             tool_specs,
-            history.len(),
+            fold_end,
             model_id,
             provider,
             session,
@@ -726,11 +757,14 @@ impl ContextEngine {
         )
         .await
         .map(|mut r| {
-            // Always replace the full history when full-folding.
+            // Replace from 0 through the (already protected) compact_end.
             r.compact_start = 0;
-            r.compact_end = history.len();
-            r.removed_tokens = history.iter().map(estimate_message_tokens).sum();
-            r.compacted_count = history.len();
+            r.compact_end = r.compact_end.min(fold_end);
+            r.removed_tokens = history[..r.compact_end]
+                .iter()
+                .map(estimate_message_tokens)
+                .sum();
+            r.compacted_count = r.compact_end;
             r
         })
     }
@@ -1054,6 +1088,58 @@ fn is_empty_compact_error(err: &anyhow::Error) -> bool {
     format!("{err:#}").contains("no content to compact")
 }
 
+/// If history ends with one or more unanswered `user` messages, return the
+/// index of the first real (non-compaction-summary) open user in that trailing
+/// streak.
+///
+/// Compaction must never set `compact_end` past this index — the open user
+/// (and any preceding pure-attachment user siblings in the trailing streak)
+/// must survive `apply_compaction` as live history so the model still sees
+/// the current request. Leading compaction-summary user messages inside the
+/// trailing streak are *not* protected (they can be re-folded) and are skipped
+/// when computing the index.
+fn open_user_protected_from(history: &[ChatMessage]) -> Option<usize> {
+    if history.is_empty() {
+        return None;
+    }
+    // Start of the trailing user-role streak (may include summaries + reminders).
+    let mut streak_start = history.len();
+    while streak_start > 0 && history[streak_start - 1].role == "user" {
+        streak_start -= 1;
+    }
+    if streak_start == history.len() {
+        return None; // last message is not user → no open user turn
+    }
+    // Skip compaction summaries at the front of the streak; protect from the
+    // first non-summary user (attachment reminder or real request).
+    let mut protected = streak_start;
+    while protected < history.len()
+        && history[protected]
+            .text_content()
+            .starts_with("[CONTEXT COMPACTION — REFERENCE ONLY]")
+    {
+        protected += 1;
+    }
+    if protected >= history.len() {
+        // Trailing streak is only prior summary/summaries — no open request.
+        None
+    } else {
+        Some(protected)
+    }
+}
+
+/// Strip a leading `<system-reminder>...</system-reminder>` block so hard-fold
+/// keeps the real user body instead of burning the per-msg budget on injection.
+fn strip_leading_system_reminder(text: &str) -> &str {
+    let t = text.trim_start();
+    if let Some(rest) = t.strip_prefix("<system-reminder>") {
+        if let Some(end) = rest.find("</system-reminder>") {
+            return rest[end + "</system-reminder>".len()..].trim();
+        }
+    }
+    text
+}
+
 /// Max chars kept from a prior summary when hard-folding an update on top.
 const HARD_PRIOR_SUMMARY_CHARS: usize = 6_000;
 /// Per-message body budget in hard-fold (user / assistant text).
@@ -1070,6 +1156,42 @@ fn truncate_chars(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
     out.push('…');
     out
+}
+
+/// Truncate preferring the tail (user intent often at the end after injection).
+fn truncate_chars_prefer_tail(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max {
+        return s.to_string();
+    }
+    let keep = max.saturating_sub(1);
+    let skip = count.saturating_sub(keep);
+    let mut out = String::from("…");
+    out.extend(s.chars().skip(skip));
+    out
+}
+
+/// User text for hard-fold: strip system-reminder, keep body, prefer tail if long.
+fn user_text_for_hard_fold(text: &str) -> String {
+    if text.starts_with("[CONTEXT COMPACTION — REFERENCE ONLY]") {
+        return format!(
+            "[prior compaction summary, {} chars]",
+            text.chars().count()
+        );
+    }
+    let body = strip_leading_system_reminder(text);
+    if body.is_empty() {
+        if text.contains("<system-reminder>") {
+            return "[system-reminder only]".to_string();
+        }
+        return String::new();
+    }
+    // Short bodies kept whole; long bodies keep the tail (request text).
+    if body.chars().count() <= HARD_MSG_CHARS {
+        body.to_string()
+    } else {
+        truncate_chars_prefer_tail(body, HARD_MSG_CHARS)
+    }
 }
 
 /// Deterministic, LLM-free fold of a message slice into a compact text body.
@@ -1089,7 +1211,7 @@ fn hard_fold_history(msgs: &[ChatMessage]) -> String {
             "user" => {
                 user_n += 1;
                 let text = m.text_content();
-                // Skip prior compaction marker bodies (re-injected separately).
+                // Prior compaction markers are re-injected separately when present.
                 if text.starts_with("[CONTEXT COMPACTION — REFERENCE ONLY]") {
                     lines.push(format!(
                         "U{user_n}: [prior compaction summary, {} chars]",
@@ -1097,7 +1219,7 @@ fn hard_fold_history(msgs: &[ChatMessage]) -> String {
                     ));
                     continue;
                 }
-                lines.push(format!("U{user_n}: {}", truncate_chars(text.trim(), HARD_MSG_CHARS)));
+                lines.push(format!("U{user_n}: {}", user_text_for_hard_fold(&text)));
             }
             "assistant" => {
                 asst_n += 1;
@@ -1323,7 +1445,7 @@ mod tests {
 
     #[test]
     fn hard_fold_then_apply_leaves_single_user_message() {
-        // Simulates last-resort path: hard fold entire history → apply_compaction.
+        // Simulates last-resort path: hard fold entire completed history → apply.
         let mut history = vec![ChatMessage::user_text("q")];
         for i in 0..10 {
             let mut a = ChatMessage::assistant_text("");
@@ -1337,6 +1459,7 @@ mod tests {
             t.tool_call_id = Some(format!("c{i}"));
             history.push(t);
         }
+        assert!(open_user_protected_from(&history).is_none());
         let body = hard_fold_history(&history);
         let summary = format!("[CONTEXT COMPACTION — REFERENCE ONLY] {body}");
         // After replace, only one user message remains — legal for any provider.
@@ -1349,6 +1472,137 @@ mod tests {
         assert!(after[0]
             .text_content()
             .starts_with("[CONTEXT COMPACTION — REFERENCE ONLY]"));
+    }
+
+    #[test]
+    fn open_user_protected_from_trailing_user() {
+        let history = vec![
+            ChatMessage::user_text("[CONTEXT COMPACTION — REFERENCE ONLY] prior"),
+            ChatMessage::assistant_text("done"),
+            ChatMessage::user_text("new request"),
+        ];
+        assert_eq!(open_user_protected_from(&history), Some(2));
+    }
+
+    #[test]
+    fn open_user_protected_from_trailing_user_streak() {
+        // attachment system-reminder user + real user at tail
+        let history = vec![
+            ChatMessage::assistant_text("old"),
+            ChatMessage::user_text("<system-reminder>\n## Skills\n</system-reminder>"),
+            ChatMessage::user_text("actual question"),
+        ];
+        assert_eq!(open_user_protected_from(&history), Some(1));
+    }
+
+    #[test]
+    fn open_user_protected_from_completed_turn_is_none() {
+        let history = vec![
+            ChatMessage::user_text("q"),
+            ChatMessage::assistant_text("a"),
+        ];
+        assert_eq!(open_user_protected_from(&history), None);
+    }
+
+    #[test]
+    fn hard_fold_strips_system_reminder_keeps_body() {
+        let reminder = "<system-reminder>\n## Memory\n- lots of injected memory text that would burn the 400 char budget if kept first\n".repeat(5);
+        let text = format!(
+            "{reminder}</system-reminder>\n现在的memory没有和原始消息内容建立关联 这个问题需要解决"
+        );
+        let history = vec![ChatMessage::user_text(text)];
+        let fold = hard_fold_history(&history);
+        assert!(
+            fold.contains("memory没有和原始消息"),
+            "fold must keep user body, got: {fold}"
+        );
+        assert!(
+            !fold.contains("<system-reminder>"),
+            "fold should not keep raw system-reminder tags"
+        );
+    }
+
+    #[test]
+    fn full_fold_range_stops_before_open_user() {
+        // Repro of 14f4fba2: summary + long chain + new open user.
+        // fold_end must be the open user index, not history.len().
+        let mut history = vec![
+            ChatMessage::user_text("[CONTEXT COMPACTION — REFERENCE ONLY] prior work"),
+            ChatMessage::user_text("old question"),
+        ];
+        for i in 0..5 {
+            let mut a = ChatMessage::assistant_text("");
+            a.tool_calls = Some(vec![ToolCall {
+                id: format!("c{i}"),
+                name: "web_search".into(),
+                arguments: "{}".into(),
+            }]);
+            history.push(a);
+            let mut t = ChatMessage::text("tool", format!("result {i}"));
+            t.tool_call_id = Some(format!("c{i}"));
+            history.push(t);
+        }
+        history.push(ChatMessage::user_text(
+            "现在的memory没有和原始消息内容建立关联 这个问题需要解决",
+        ));
+
+        let protected = open_user_protected_from(&history).expect("open user");
+        assert_eq!(protected, history.len() - 1);
+
+        // Simulate full-fold apply: compact [0, protected), leave open user.
+        let body = hard_fold_history(&history[..protected]);
+        let summary = format!("[CONTEXT COMPACTION — REFERENCE ONLY] {body}");
+        let mut after = history.clone();
+        after.drain(0..protected);
+        after.insert(0, ChatMessage::user_text(summary));
+
+        assert!(
+            after.len() >= 2,
+            "must keep summary + open user, got len={}",
+            after.len()
+        );
+        assert!(after[0]
+            .text_content()
+            .starts_with("[CONTEXT COMPACTION — REFERENCE ONLY]"));
+        let last = after.last().unwrap();
+        assert_eq!(last.role, "user");
+        assert!(
+            last.text_content()
+                .contains("memory没有和原始消息内容建立关联"),
+            "open user body must survive verbatim: {}",
+            last.text_content()
+        );
+    }
+
+    #[test]
+    fn empty_incremental_with_open_user_does_not_claim_full_len() {
+        // summary + unanswered user: protect the open user, not the summary.
+        let history = vec![
+            ChatMessage::user_text("[CONTEXT COMPACTION — REFERENCE ONLY] prior"),
+            ChatMessage::user_text("unanswered"),
+        ];
+        let protected = open_user_protected_from(&history).unwrap();
+        assert_eq!(protected, 1);
+        let (_rs, cs, ce, _) = find_incremental_range(&history, protected);
+        // Only the summary sits before protected; incremental slice is empty.
+        assert!(cs >= ce || history[cs..ce].is_empty());
+        // Hard-fold of prefix leaves the open user after apply.
+        let mut after = history.clone();
+        after.drain(0..protected);
+        after.insert(
+            0,
+            ChatMessage::user_text("[CONTEXT COMPACTION — REFERENCE ONLY] folded"),
+        );
+        assert_eq!(after.len(), 2);
+        assert_eq!(after[1].text_content(), "unanswered");
+    }
+
+    #[test]
+    fn open_user_skips_compaction_summary_in_trailing_streak() {
+        let history = vec![
+            ChatMessage::user_text("[CONTEXT COMPACTION — REFERENCE ONLY] only summary"),
+        ];
+        assert_eq!(open_user_protected_from(&history), None);
     }
 }
 
