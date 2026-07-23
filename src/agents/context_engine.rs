@@ -15,7 +15,9 @@ use futures_util::StreamExt;
 use crate::agents::resource_provider::ResourceProvider;
 use crate::agents::scheduling::work_unit;
 use crate::agents::session::Session;
-use crate::agents::tokens::{estimate_history_tokens, estimate_message_tokens, estimate_tokens};
+use crate::agents::tokens::{
+    estimate_history_tokens_with_media, estimate_message_tokens, estimate_tokens,
+};
 use crate::agents::tool_executor::MemoryToolExecutor;
 use crate::agents::tool_registry::ToolRegistry;
 use crate::config::agent::ContextConfig;
@@ -113,10 +115,12 @@ impl ContextEngine {
     ///
     /// Called as a pre-send guard each loop iteration and as the context-overflow
     /// backstop. The threshold decision uses a direct history estimate
-    /// (`estimate_history_tokens`) rather than the token tracker, so a stale or
-    /// under-counted tracker can't let an over-window request slip through. Returns
-    /// `None` when no compaction was needed (`!force`) or none was possible (no
-    /// boundary / summarizer error).
+    /// (`estimate_history_tokens_with_media` under the model's MediaPolicy) rather
+    /// than the token tracker, so a stale or under-counted tracker can't let an
+    /// over-window request slip through. File parts are sized as markers when the
+    /// model cannot inline them (e.g. glm-5.2 text-only), avoiding false overflow
+    /// from base64 estimates. Returns `None` when no compaction was needed
+    /// (`!force`) or none was possible (no boundary / summarizer error).
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn maybe_compact(
         &self,
@@ -143,7 +147,10 @@ impl ContextEngine {
                 return None;
             }
         };
-        let estimate = estimate_history_tokens(system_prompt, &session.history);
+        // Match lower_media_for: text-only models pay marker cost, vision pays base64.
+        let media_policy = self.registry.get_chat_media_policy(model_id);
+        let estimate =
+            estimate_history_tokens_with_media(system_prompt, &session.history, media_policy);
         tracing::debug!(
             model_id,
             estimate,
@@ -151,6 +158,7 @@ impl ContextEngine {
             threshold = (window as f64 * self.compact_threshold) as u64,
             force,
             history_len = session.history.len(),
+            has_media_policy = media_policy.is_some(),
             "maybe_compact: compaction check"
         );
         if !force && !self.should_compact(estimate, window) {
@@ -1194,8 +1202,28 @@ fn user_text_for_hard_fold(text: &str) -> String {
     }
 }
 
+/// Collect File-part path markers so hard-fold does not drop media references.
+/// `text_content()` only joins Text parts; pure-image user turns would otherwise
+/// fold to empty / system-reminder-only and lose `[图片: path]`.
+fn media_markers_for_hard_fold(msg: &ChatMessage) -> String {
+    let mut markers = Vec::new();
+    for part in &msg.parts {
+        if let ContentPart::File {
+            path, mime_type, ..
+        } = part
+        {
+            markers.push(crate::providers::media::marker_for_file(
+                path,
+                mime_type.as_deref(),
+            ));
+        }
+    }
+    markers.join(" ")
+}
+
 /// Deterministic, LLM-free fold of a message slice into a compact text body.
-/// Preserves user turns, assistant text (or tool names), and short tool results.
+/// Preserves user turns, assistant text (or tool names), short tool results,
+/// and media path markers from File parts.
 fn hard_fold_history(msgs: &[ChatMessage]) -> String {
     let mut lines: Vec<String> = Vec::new();
     lines.push(
@@ -1211,6 +1239,7 @@ fn hard_fold_history(msgs: &[ChatMessage]) -> String {
             "user" => {
                 user_n += 1;
                 let text = m.text_content();
+                let media = media_markers_for_hard_fold(m);
                 // Prior compaction markers are re-injected separately when present.
                 if text.starts_with("[CONTEXT COMPACTION — REFERENCE ONLY]") {
                     lines.push(format!(
@@ -1219,7 +1248,14 @@ fn hard_fold_history(msgs: &[ChatMessage]) -> String {
                     ));
                     continue;
                 }
-                lines.push(format!("U{user_n}: {}", user_text_for_hard_fold(&text)));
+                let body = user_text_for_hard_fold(&text);
+                let line = match (body.is_empty(), media.is_empty()) {
+                    (true, true) => String::new(),
+                    (true, false) => media,
+                    (false, true) => body,
+                    (false, false) => format!("{media} {body}"),
+                };
+                lines.push(format!("U{user_n}: {line}"));
             }
             "assistant" => {
                 asst_n += 1;
@@ -1520,6 +1556,62 @@ mod tests {
             !fold.contains("<system-reminder>"),
             "fold should not keep raw system-reminder tags"
         );
+    }
+
+    #[test]
+    fn hard_fold_preserves_image_file_marker() {
+        // Pure-image user turn: text_content() is empty; marker must still appear
+        // so view_image can find the path after hard-fold.
+        let path = "sessions/5687fcde/files/image-3e8610fd.png";
+        let msg = ChatMessage {
+            role: "user".into(),
+            parts: vec![ContentPart::File {
+                path: path.into(),
+                mime_type: Some("image/png".into()),
+                name: Some("shot.png".into()),
+                size_bytes: Some(829_062),
+            }],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            is_error: None,
+            model: None,
+            usage: None,
+        };
+        assert!(msg.text_content().is_empty());
+        let fold = hard_fold_history(&[msg]);
+        assert!(
+            fold.contains(&format!("[图片: {path}]")),
+            "hard-fold must keep image marker, got: {fold}"
+        );
+    }
+
+    #[test]
+    fn hard_fold_image_plus_text_keeps_both() {
+        let path = "sessions/x/files/a.png";
+        let msg = ChatMessage {
+            role: "user".into(),
+            parts: vec![
+                ContentPart::File {
+                    path: path.into(),
+                    mime_type: Some("image/png".into()),
+                    name: None,
+                    size_bytes: Some(1000),
+                },
+                ContentPart::Text {
+                    text: "这是什么".into(),
+                },
+            ],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            is_error: None,
+            model: None,
+            usage: None,
+        };
+        let fold = hard_fold_history(&[msg]);
+        assert!(fold.contains(&format!("[图片: {path}]")), "got: {fold}");
+        assert!(fold.contains("这是什么"), "got: {fold}");
     }
 
     #[test]

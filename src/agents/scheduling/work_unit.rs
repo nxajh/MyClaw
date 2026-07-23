@@ -102,24 +102,13 @@ pub fn find_compaction_boundary(history: &[ChatMessage], retain_count: usize) ->
     }
 }
 
-/// Rough per-message token estimator (4 chars ≈ 1 token + metadata overhead).
-/// Mirrors `estimate_message_tokens` in agent_impl without creating a circular import.
+/// Per-message token estimator for budget-boundary walks.
+///
+/// Delegates to [`crate::agents::tokens::estimate_message_tokens`] so File parts
+/// use the same marker-cost default as compaction when no MediaPolicy is known
+/// at this layer (boundary selection does not have model_id).
 fn estimate_msg_tokens(msg: &ChatMessage) -> u64 {
-    use crate::providers::ContentPart;
-    let text_len: usize = msg
-        .parts
-        .iter()
-        .map(|p| match p {
-            ContentPart::Text { text } => text.len(),
-            ContentPart::Thinking { thinking, .. } => thinking.len(),
-            ContentPart::File { path, .. } => path.len() + 16,
-        })
-        .sum();
-    let tool_len: usize = msg
-        .tool_calls
-        .as_ref()
-        .map_or(0, |tcs| tcs.iter().map(|tc| tc.arguments.len() + 32).sum());
-    ((text_len + tool_len) as u64).div_ceil(4) + 4
+    crate::agents::tokens::estimate_message_tokens(msg)
 }
 
 /// Find the latest compaction boundary whose compressible prefix fits within `compress_budget`.
@@ -250,5 +239,30 @@ mod tests {
         ];
         // 3 个 work units，保留 2 个，边界应在第二轮的 user 消息（index 3）
         assert_eq!(find_compaction_boundary(&history, 2), 3);
+    }
+
+    #[test]
+    fn estimate_msg_tokens_file_is_marker_not_base64() {
+        use crate::providers::ContentPart;
+        let msg = ChatMessage {
+            role: "user".into(),
+            parts: vec![ContentPart::File {
+                path: "sessions/x/files/big.png".into(),
+                mime_type: Some("image/png".into()),
+                name: None,
+                size_bytes: Some(829_062),
+            }],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            is_error: None,
+            model: None,
+            usage: None,
+        };
+        let t = estimate_msg_tokens(&msg);
+        assert!(
+            t < 200,
+            "work_unit estimate must not treat File as base64 payload, got {t}"
+        );
     }
 }
