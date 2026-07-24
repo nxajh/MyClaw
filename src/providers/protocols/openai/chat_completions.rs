@@ -509,7 +509,11 @@ fn truncate_for_log(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max])
+        // Must cut on a char boundary — used when logging unparseable SSE
+        // payloads that often contain CJK tool args. Raw `&s[..max]` panic'd
+        // at max=400 mid-'换' on 2026-07-24 xiaoliu (file_edit arguments).
+        let end = floor_char_boundary(s, max);
+        format!("{}…", &s[..end])
     }
 }
 
@@ -646,5 +650,33 @@ mod tests {
                 reason: StopReason::ToolUse
             }
         ));
+    }
+
+    #[test]
+    fn truncate_for_log_cjk_mid_char_does_not_panic() {
+        // Repro of 2026-07-24 xiaoliu: "byte index 400 is not a char boundary;
+        // it is inside '换' (bytes 399..402)" while logging tool_call SSE.
+        let mut s = String::new();
+        while s.len() < 399 {
+            s.push('a');
+        }
+        // len=399; next 换 occupies 399..402 — index 400 is mid-char.
+        s.push('换');
+        s.push_str("其余中文内容继续填充以便超过截断上限");
+        assert!(s.len() > RECENT_SSE_ITEM_MAX);
+        assert!(!s.is_char_boundary(400));
+
+        let clipped = truncate_for_log(&s, RECENT_SSE_ITEM_MAX);
+        assert!(clipped.ends_with('…'), "got: {clipped}");
+        // Result must be valid UTF-8 at every char boundary (no panic on slice).
+        assert!(clipped.is_char_boundary(clipped.len()));
+        let without_ellipsis = clipped.trim_end_matches('…');
+        assert!(without_ellipsis.len() <= RECENT_SSE_ITEM_MAX);
+        assert!(s.starts_with(without_ellipsis));
+    }
+
+    #[test]
+    fn truncate_for_log_short_unchanged() {
+        assert_eq!(truncate_for_log("hello", 400), "hello");
     }
 }
