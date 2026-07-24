@@ -814,8 +814,10 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         // to read them using the proper session backend.
 
         // ── Notify old process ────────────────────────────────────────────
-        // SIGUSR2 is sent after full initialization (just before orchestrator.run())
-        // so the old process doesn't exit before we are truly ready to serve.
+        // SIGUSR2 is sent after full initialization, but Light C defers it until
+        // after channels are up and *before* orchestrator.run() so readiness is
+        // real. Old process no longer exits on SIGUSR2 alone; it exits after
+        // do_hot_switch returns.
     }
 
     // Write PID file for hot-switch coordination (used by `myclaw update`).
@@ -1313,15 +1315,21 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         tracing::debug!("shutdown signal received, initiating graceful shutdown");
     });
 
-    // ── SIGUSR2: new process ready, exit immediately ──────────────────────
+    // ── SIGUSR2: new process ready (do NOT exit immediately) ──────────────
+    // Light C: SIGUSR2 means "new process is ready / status may go completed".
+    // The old process must finish drain + do_hot_switch bookkeeping, then
+    // exit(0) from the main path after do_hot_switch returns. Exiting here
+    // races with incomplete tool-result persist and fuels recovery re-exec loops.
     #[cfg(unix)]
     {
         let mut sigusr2 =
             signal(SignalKind::user_defined2()).expect("failed to register SIGUSR2 handler");
         tokio::spawn(async move {
             sigusr2.recv().await;
-            tracing::info!("SIGUSR2 received, new process ready, exiting");
-            std::process::exit(0);
+            tracing::info!(
+                "SIGUSR2 received — new process ready; old process will exit after hot-switch bookkeeping"
+            );
+            crate::hot_switch::mark_new_process_ready();
         });
     }
 
@@ -1380,8 +1388,14 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         }
     }
 
+    // Capture shared handles before `run` consumes the orchestrator so Light C
+    // can drain turns *after* fork while the new process is coming up.
+    let deferred_turn_tracker = orchestrator.turn_tracker();
+    let deferred_delegator = orchestrator.delegator();
+
     // Run the message dispatch loop (blocks until shutdown). `run` consumes the
     // orchestrator and aborts its listener tasks before returning.
+    // On hot-switch path, turn drain is deferred until after fork (below).
     orchestrator
         .run(shutdown_rx, unfinished_subagents)
         .await
@@ -1389,31 +1403,75 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
     tracing::debug!("dispatch loop ended, listeners aborted");
 
-    // ── Hot switch: fork+execv new binary, inherit listen socket ──────────
-    // When SIGUSR1 set the shutdown flag (triggered by `myclaw update`), the
-    // new binary is already on disk.  Fork a child, execv it with the inherited
-    // listen socket fd, and wait for the child to signal readiness via SIGUSR2.
-    // If the fork/execv fails, roll back (clear shutdown flag) — currently that
-    // path is not reached because we exit after this block.
+    // ── Hot switch: fork first, then drain in-flight turns ────────────────
+    // Light C sequence (no A / no USR3):
+    //   1. Fork+exec new binary immediately so readiness is independent of
+    //      long shell tools.
+    //   2. Wait for SIGUSR2 (new ready) with polling — old does NOT exit(0)
+    //      in the signal handler.
+    //   3. Drain turns / sub-agents so tool results (incl. short `myclaw
+    //      update`) persist while the new process is already serving.
+    //   4. Exit 0. New process deferred recovery until we die.
     #[cfg(unix)]
     if crate::is_shutting_down() {
         let socket_fd = LISTEN_SOCKET_FD.load(Ordering::SeqCst);
         tracing::debug!(
             socket_fd,
-            "shutdown flag set, executing hot switch (fork+execv)"
+            "shutdown flag set, executing hot switch (fork+execv first, drain after)"
         );
         let client_fd = CLIENT_SOCKET_FD.load(Ordering::SeqCst);
-        if let Err(e) =
-            tokio::task::block_in_place(|| crate::hot_switch::do_hot_switch(socket_fd, client_fd))
-        {
-            tracing::error!(err = %e, "hot switch failed — exiting with non-zero code for systemd restart");
-            // do_hot_switch already rolled back MAINPID to self.  Exit with non-zero
-            // so systemd Restart=on-failure will immediately re-launch the daemon.
-            // This is safer than trying to re-enter the dispatch loop (orchestrator.run()
-            // consumes self and signal handlers are one-shot).
-            std::process::exit(1);
+
+        // Phase 1: fork in a blocking task (polls for SIGUSR2 readiness).
+        // Phase 2: drain turns concurrently so short `myclaw update` can finish
+        // and persist while the new process initializes. Contract B: update
+        // must not poll for completed, so drain should not hang on update alone.
+        let switch_handle = tokio::task::spawn_blocking(move || {
+            crate::hot_switch::do_hot_switch(socket_fd, client_fd)
+        });
+
+        tracing::info!(
+            active = deferred_turn_tracker.active_count(),
+            "hot switch: draining in-flight turns concurrent with new process startup"
+        );
+        deferred_turn_tracker
+            .drain(std::time::Duration::from_secs(30))
+            .await;
+        if let Some(ref delegator) = deferred_delegator {
+            delegator.drain(std::time::Duration::from_secs(60)).await;
         }
-        // do_hot_switch succeeded: parent exits via SIGUSR2 handler (never reaches here).
+        tracing::info!("hot switch: post-fork drain complete");
+
+        let switch_result = switch_handle.await;
+        match switch_result {
+            Ok(Ok(())) => {
+                tracing::info!(
+                    "hot switch: new process ready and turns drained — old process exiting cleanly"
+                );
+                let pid_file = crate::signal::pid_file_path();
+                if pid_file.exists() {
+                    if let Ok(contents) = std::fs::read_to_string(&pid_file) {
+                        if contents.trim() == std::process::id().to_string() {
+                            let _ = std::fs::remove_file(&pid_file);
+                        }
+                    }
+                }
+                std::process::exit(0);
+            }
+            Ok(Err(e)) => {
+                tracing::error!(
+                    err = %e,
+                    "hot switch failed — exiting with non-zero code for systemd restart"
+                );
+                std::process::exit(1);
+            }
+            Err(e) => {
+                tracing::error!(
+                    err = %e,
+                    "hot switch join failed — exiting with non-zero code for systemd restart"
+                );
+                std::process::exit(1);
+            }
+        }
     }
 
     tracing::info!("myclaw daemon stopped");

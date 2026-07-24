@@ -148,6 +148,21 @@ pub fn old_pid() -> Option<i32>
 ```
 
 ```rust
+pub fn mark_new_process_ready()
+pub fn is_new_process_ready() -> bool
+pub fn pid_alive(pid: i32) -> bool
+pub async fn wait_for_old_process_exit(old_pid: i32, timeout: Duration)
+pub const RECOVERY_WAIT_OLD_TIMEOUT: Duration // 90s
+```
+
+Light C hot-switch (anti restart-storm, no recovery blacklist A, no USR3):
+1. `myclaw update` is short + idempotent (no wait for completed; no second SIGUSR1 when already completed/switching).
+2. SIGUSR1 → loop exit → **fork first**, drain turns concurrent with new process startup.
+3. SIGUSR2 = new ready (sets flag); **old does not exit in the signal handler**.
+4. Old drains in-flight tools, then `exit(0)` after `do_hot_switch` returns Ok.
+5. New defers startup recovery until old PID exits (or 90s timeout).
+
+```rust
 fn build_child_envp(socket_fd: i32, client_fd: i32, current_pid: u32) -> anyhow::Result<Vec<CString>>
 ```
 

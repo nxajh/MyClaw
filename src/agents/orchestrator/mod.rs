@@ -382,14 +382,36 @@ impl Orchestrator {
         // Sessions register a SessionContext synchronously; the recovery
         // LLM work spawns into background tasks so the event loop starts
         // without blocking.
-        recovery::run_startup(
-            &self.ctx.sessions,
-            &self.ctx.runtime,
-            &self.ctx.channels,
-            &unfinished_subagents,
-            &self.ctx.delegator,
-            &self.ctx.turn_tracker,
-        );
+        //
+        // Light C: on hot-switch startups, defer recovery until the old
+        // process has exited (or timeout) so incomplete tool results the
+        // old process is still draining can persist before we re-exec.
+        let sessions = Arc::clone(&self.ctx.sessions);
+        let runtime = self.ctx.runtime.clone();
+        let channels = self.ctx.channels.clone();
+        let unfinished = unfinished_subagents;
+        let delegator = self.ctx.delegator.clone();
+        let turn_tracker = Arc::clone(&self.ctx.turn_tracker);
+        tokio::spawn(async move {
+            #[cfg(unix)]
+            if crate::hot_switch::is_hot_switch() {
+                if let Some(old) = crate::hot_switch::old_pid() {
+                    crate::hot_switch::wait_for_old_process_exit(
+                        old,
+                        crate::hot_switch::RECOVERY_WAIT_OLD_TIMEOUT,
+                    )
+                    .await;
+                }
+            }
+            recovery::run_startup(
+                &sessions,
+                &runtime,
+                &channels,
+                &unfinished,
+                &delegator,
+                &turn_tracker,
+            );
+        });
 
         // Merge the event sources (user messages / delegation / scheduler)
         // into a single stream. No adapter tasks / manual fan-in: each source
@@ -464,24 +486,43 @@ impl Orchestrator {
             h.abort();
         }
 
-        // Drain in-flight turn tasks before returning so tool results are
-        // persisted before the daemon's hot_switch fork+execv kills this
-        // process. Without this, a turn executing tools when SIGUSR1 arrives
-        // gets killed mid-persist, leaving orphan tool_calls that startup
-        // recovery blindly replays → crash loop.
-        self.ctx.turn_tracker.drain(Duration::from_secs(30)).await;
+        // Light C / hot switch: when SIGUSR1 requested a switch, **do not**
+        // drain here. The composition root forks the new process first, then
+        // drains so in-flight tools (e.g. short `myclaw update`) can finish
+        // and persist while the new binary is already coming up. Immediate
+        // drain-before-fork + 30s timeout was part of the restart storm:
+        // drain timed out on a shell waiting for UPDATE_STATUS=completed,
+        // then the old process died with orphan tool_calls.
+        //
+        // Normal stop (SIGINT/SIGTERM without hot switch): drain before return
+        // so tool results and sub-agents persist before process exit.
+        if crate::is_shutting_down() {
+            info!(
+                active_turns = self.ctx.turn_tracker.active_count(),
+                "listeners stopped; deferring turn drain until after hot-switch fork"
+            );
+        } else {
+            // Drain in-flight turn tasks before returning so tool results are
+            // persisted before the process exits.
+            self.ctx.turn_tracker.drain(Duration::from_secs(30)).await;
 
-        // Also drain background sub-agents so their sessions persist cleanly.
-        // Without this, async-delegated sub-agents are killed mid-turn by
-        // fork+execv, leaving zombie sub-sessions that trigger recovery spam
-        // on every restart. Allow up to 60s — each sub-agent already has its
-        // own 300s wall-clock budget, but most finish within seconds.
-        if let Some(ref delegator) = self.ctx.delegator {
-            delegator.drain(Duration::from_secs(60)).await;
+            // Also drain background sub-agents so their sessions persist cleanly.
+            if let Some(ref delegator) = self.ctx.delegator {
+                delegator.drain(Duration::from_secs(60)).await;
+            }
+            info!("all listeners stopped, turns drained, exiting");
         }
-
-        info!("all listeners stopped, exiting");
         Ok(())
+    }
+
+    /// Shared turn tracker (for deferred drain after hot-switch fork).
+    pub fn turn_tracker(&self) -> ctx::SharedTurnTracker {
+        Arc::clone(&self.ctx.turn_tracker)
+    }
+
+    /// Shared delegator (for deferred drain after hot-switch fork).
+    pub fn delegator(&self) -> Option<Arc<DelegationCoordinator>> {
+        self.ctx.delegator.clone()
     }
 
     /// Handle a scheduler event (from the Scheduler task via mpsc).

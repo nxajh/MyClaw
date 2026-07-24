@@ -89,6 +89,11 @@ impl TurnTracker {
         }
     }
 
+    /// Snapshot of in-flight turn tasks.
+    pub fn active_count(self: &SharedTurnTracker) -> usize {
+        self.active.load(Ordering::SeqCst)
+    }
+
     /// Wait until no turn tasks remain active, or `timeout` elapses (total,
     /// not per-iteration).
     pub async fn drain(self: &SharedTurnTracker, timeout: Duration) {
@@ -103,13 +108,13 @@ impl TurnTracker {
                 tracing::warn!(
                     active_turns = remaining,
                     timeout_secs = timeout.as_secs(),
-                    "turn drain timed out — proceeding to hot switch with in-flight turns"
+                    "turn drain timed out — proceeding with in-flight turns (history may need recovery)"
                 );
                 return;
             }
             tracing::info!(
                 active_turns = remaining,
-                "waiting for in-flight turn tasks to finish before hot switch"
+                "waiting for in-flight turn tasks to finish"
             );
             let _ = tokio::time::timeout_at(deadline, self.notify.notified()).await;
         }
