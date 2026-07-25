@@ -20,9 +20,10 @@ pub async fn cmd_model(args: &str, ctx: CommandContext<'_>) -> String {
             }
         };
         let hint = if current_override.model.is_some() {
-            "\n_使用 `/model off` 恢复路由默认。_"
+            "\n_使用 `/model off` 恢复路由默认。_\n\
+             _锁定期间不会自动换模；空回复/额度问题时请 `/model off` 或换其他模型。_"
         } else {
-            "\n_使用 `/model <名称>` 覆盖会话模型。_"
+            "\n_使用 `/model <名称>` 覆盖会话模型（锁定后不自动降级）。_"
         };
         return format!("🤖 **当前模型**\n\n{}{}", active_model, hint);
     }
@@ -48,11 +49,17 @@ pub async fn cmd_model(args: &str, ctx: CommandContext<'_>) -> String {
                         .map(|v| format!(", 上下文: {}K", v / 1024))
                         .unwrap_or_default();
                     format!(
-                        "✅ 会话模型已覆盖为: `{}`{}\n_本会话后续所有请求均使用此模型。_",
+                        "✅ 会话模型已覆盖为: `{}`{}\n\
+                         _本会话后续请求均使用此模型，不会自动降级到 fallback。_\n\
+                         _若该模型空回复/额度不足：`/model off` 或 `/model <其他>`。_",
                         model_id, cw
                     )
                 }
-                Err(_) => format!("✅ 会话模型已覆盖为: `{}`", model_id),
+                Err(_) => format!(
+                    "✅ 会话模型已覆盖为: `{}`\n\
+                     _锁定后不自动降级；问题可用 `/model off` 解锁。_",
+                    model_id
+                ),
             }
         }
         None => format!("❌ 未找到模型 `{}`。使用 /models 查看可用模型。", args),

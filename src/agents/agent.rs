@@ -334,15 +334,6 @@ impl Agent {
                     reasoning_len = response.reasoning_content.as_ref().map(|s| s.len()).unwrap_or(0),
                     "no tool calls in response — treating as final"
                 );
-                // Emit Done event before persisting so the streaming UI gets
-                // the final-text signal in the canonical order.
-                push_or_drop(
-                    &mut session.turn_stream,
-                    TurnEvent::Done {
-                        text: response.text.clone(),
-                    },
-                )
-                .await;
                 if response.text.trim().is_empty() {
                     // Empty response: retry up to MAX_EMPTY_RETRIES like
                     // AgentLoop's chat_loop does. The provider sometimes
@@ -362,12 +353,29 @@ impl Agent {
                         } else {
                             tracing::warn!(
                                 stop = ?response.stop_reason,
+                                model = %model_id,
+                                is_override = turn_ctx.model_id.is_some(),
                                 "empty response after {} retries, giving up",
                                 MAX_EMPTY_RETRIES
                             );
                         }
+                        // Surface a user-visible notice instead of silent give-up.
+                        // Override path mentions locked model + /model off; default
+                        // routing keeps a shorter actionable message.
+                        let msg = crate::agents::user_messages::msg_empty_response(
+                            turn_ctx.model_id,
+                        );
+                        push_or_drop(
+                            &mut session.turn_stream,
+                            TurnEvent::Done {
+                                text: msg.clone(),
+                            },
+                        )
+                        .await;
+                        session.add_assistant(msg.clone());
+                        persist_last(session);
                         return Ok(TurnResult {
-                            text: String::new(),
+                            text: msg,
                             stop_reason: response.stop_reason,
                             pending_retry: Some(last_user_text(session)),
                         });
@@ -387,8 +395,17 @@ impl Agent {
                             "empty response, retrying"
                         );
                     }
+                    // No Done yet — we will re-call the model.
                     continue;
                 }
+                // Emit Done before persisting so streaming UI gets final text.
+                push_or_drop(
+                    &mut session.turn_stream,
+                    TurnEvent::Done {
+                        text: response.text.clone(),
+                    },
+                )
+                .await;
                 let mut msg = ChatMessage::assistant_text(response.text.clone());
                 msg.model = Some(model_id.clone());
                 msg.usage = llm_usage(

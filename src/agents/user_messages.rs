@@ -141,6 +141,46 @@ fn message_for_classified(c: &crate::providers::ClassifiedError) -> String {
 pub const MSG_INCOMPLETE_TURN: &str =
     "⚠️ 检测到上次请求未处理完成（可能是服务重启）。\n\n请选择重试或放弃。";
 
+/// Shown when the model returned empty text after all same-model retries.
+/// Default-routing variant (no session model override).
+pub const MSG_EMPTY_RESPONSE: &str =
+    "⚠️ 模型多次返回空回复，未能生成有效内容。\n\n\
+     请重新完整描述你的问题后发送；若刚发过图，请配上文字说明。\n\
+     也可使用 /model 切换模型后重试。";
+
+/// Empty-response copy when the session has a `/model` override (deadlock preference).
+/// Mentions the locked model and how to unlock (`/model off`).
+pub fn msg_empty_response_override(model_id: &str) -> String {
+    format!(
+        "⚠️ 模型 `{model_id}` 多次返回空回复，未能生成有效内容。\n\n\
+         当前会话已锁定该模型（不会自动降级）。可选：\n\
+         • 重新完整描述问题后发送（勿只发「继续」）\n\
+         • `/model off` 恢复默认路由\n\
+         • `/model <名称>` 切换其他模型"
+    )
+}
+
+/// Build empty-response user text. `override_model` is `Some(id)` when
+/// the turn used a session model override.
+pub fn msg_empty_response(override_model: Option<&str>) -> String {
+    match override_model {
+        Some(m) if !m.is_empty() => msg_empty_response_override(m),
+        _ => MSG_EMPTY_RESPONSE.to_string(),
+    }
+}
+
+/// Soft guidance when the user only sends a bare "continue" with no
+/// actionable incomplete work — do not hard-block; prepend/return as notice.
+pub const MSG_BARE_CONTINUE: &str =
+    "⚠️ 当前没有清晰的未完成任务可「继续」。\n\
+     请完整重述你的问题或目标后再发送（避免只发「继续」）。\
+     若上下文已乱，可用 /new 开新会话。";
+
+/// Soft guidance for image-only turns (no user text beyond system-reminder).
+pub const MSG_IMAGE_ONLY_HINT: &str =
+    "（系统提示：本轮仅收到图片、无用户文字说明。请先根据图片内容作答；\
+     若无法判断意图，请向用户确认要做什么，勿虚构未提出的任务。）";
+
 /// Inline-button label: retry the incomplete/empty turn.
 pub const BTN_RETRY: &str = "🔄 重试";
 
@@ -277,5 +317,27 @@ mod tests {
         .into();
         let msg = user_facing_error_message(&e);
         assert!(msg.contains("自动中断"), "got: {msg}");
+    }
+
+    #[test]
+    fn empty_response_default_mentions_retry_and_model() {
+        let msg = msg_empty_response(None);
+        assert!(msg.contains("空回复"), "got: {msg}");
+        assert!(msg.contains("/model"), "got: {msg}");
+        assert!(!msg.contains("`grok"), "got: {msg}");
+    }
+
+    #[test]
+    fn empty_response_override_mentions_locked_model_and_off() {
+        let msg = msg_empty_response(Some("grok-4.5"));
+        assert!(msg.contains("grok-4.5"), "got: {msg}");
+        assert!(msg.contains("/model off"), "got: {msg}");
+        assert!(msg.contains("不会自动降级") || msg.contains("锁定"), "got: {msg}");
+    }
+
+    #[test]
+    fn empty_response_override_empty_str_falls_back_to_default() {
+        let msg = msg_empty_response(Some(""));
+        assert_eq!(msg, MSG_EMPTY_RESPONSE);
     }
 }

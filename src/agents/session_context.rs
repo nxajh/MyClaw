@@ -175,6 +175,8 @@ impl SessionContext {
         // SessionManager; capture a clone so the post-turn `add_user`
         // persistence call sees the same hook.
         let persist_hook = session.persist.clone();
+        // Snapshot before clearing — bare-"继续" soft-block uses this.
+        let was_incomplete_turn = session.incomplete_turn;
         // A new turn owns the incomplete-turn state from here on.
         session.incomplete_turn = false;
         // Record inbound and persist last_message safely under turn_lock.
@@ -249,9 +251,63 @@ impl SessionContext {
             text
         };
 
+        // P3: bare "继续"/continue with no media and no clear open work →
+        // soft guidance only (do not call the model). Incomplete-turn /
+        // pending_retry / trailing incomplete history still fall through.
+        if media_parts.is_empty() && is_bare_continue(&content) {
+            let has_open = was_incomplete_turn
+                || self.pending_retry.lock().await.is_some()
+                || history_looks_incomplete(&session.history);
+            if !has_open {
+                let msg = crate::agents::user_messages::MSG_BARE_CONTINUE.to_string();
+                // Tear down stream/channel without running the agent.
+                let turn_stream = session.turn_stream.take();
+                session.channel = None;
+                if let Some(s) = turn_stream {
+                    s.abort().await;
+                }
+                if let Some(ch) = channel_for_send {
+                    let receiver = {
+                        let mut r =
+                            crate::channels::MessageReceiver::new(reply_target.clone());
+                        if let Some(ref last_msg) = session.last_message {
+                            r.reply_to_message_id = Some(
+                                last_msg
+                                    .receiver
+                                    .reply_to_message_id
+                                    .clone()
+                                    .unwrap_or_else(|| last_msg.id.clone()),
+                            );
+                            r.thread_id = last_msg.receiver.thread_id.clone();
+                        }
+                        r
+                    };
+                    let message = crate::channels::ChannelOutboundMessage {
+                        receiver,
+                        content: crate::channels::ChannelMessageContent::text(msg.clone()),
+                        options: Default::default(),
+                    };
+                    let _ = ch.send_message(&message).await;
+                }
+                return Ok(TurnResult {
+                    text: msg,
+                    stop_reason: crate::providers::StopReason::EndTurn,
+                    pending_retry: None,
+                });
+            }
+        }
+
+        // P3: pure-image (or media-only) turns get an explicit model-side hint
+        // so the agent does not invent tasks from compaction noise.
+        let content_for_model = if !media_parts.is_empty() && content.trim().is_empty() {
+            crate::agents::user_messages::MSG_IMAGE_ONLY_HINT.to_string()
+        } else {
+            content
+        };
+
         let user_content = match reminder {
-            Some(rem) => format!("{}\n\n{}", rem, content),
-            None => content,
+            Some(rem) => format!("{}\n\n{}", rem, content_for_model),
+            None => content_for_model,
         };
         if media_parts.is_empty() {
             session.add_user(user_content);
@@ -400,5 +456,85 @@ fn age_session_media(session: &mut Session, hook: Option<&dyn crate::agents::Per
                 hook.update_message(&session_id, msg_id, aged);
             }
         }
+    }
+}
+
+/// True when the user text is only a bare continue cue (no real question).
+fn is_bare_continue(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() {
+        return false;
+    }
+    matches!(
+        t,
+        "继续"
+            | "繼續"
+            | "接着"
+            | "接着做"
+            | "接着来"
+            | "接着说"
+            | "继续吧"
+            | "继续啊"
+            | "继续。"
+            | "继续！"
+            | "continue"
+            | "Continue"
+            | "CONTINUE"
+            | "go on"
+            | "Go on"
+            | "keep going"
+            | "Keep going"
+    )
+}
+
+/// Cheap local check: history ends with an open tool round or orphan user
+/// (mirrors orchestrator incomplete-turn shape without importing it).
+fn history_looks_incomplete(history: &[crate::providers::ChatMessage]) -> bool {
+    let Some(last) = history.last() else {
+        return false;
+    };
+    match last.role.as_str() {
+        "user" => true,
+        "assistant" => last
+            .tool_calls
+            .as_ref()
+            .is_some_and(|t| !t.is_empty()),
+        "tool" => true,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod p3_helpers_tests {
+    use super::*;
+    use crate::providers::ChatMessage;
+
+    #[test]
+    fn bare_continue_detects_common_cues() {
+        assert!(is_bare_continue("继续"));
+        assert!(is_bare_continue("  继续  "));
+        assert!(is_bare_continue("continue"));
+        assert!(is_bare_continue("Continue"));
+        assert!(!is_bare_continue("继续做那个 SEO 修复"));
+        assert!(!is_bare_continue("请继续分析日志"));
+        assert!(!is_bare_continue(""));
+        assert!(!is_bare_continue("hello"));
+    }
+
+    #[test]
+    fn history_incomplete_on_trailing_user_or_tool() {
+        assert!(!history_looks_incomplete(&[]));
+        assert!(history_looks_incomplete(&[ChatMessage::user_text("hi")]));
+        assert!(!history_looks_incomplete(&[
+            ChatMessage::user_text("hi"),
+            ChatMessage::assistant_text("ok"),
+        ]));
+        let mut asst = ChatMessage::assistant_text("");
+        asst.tool_calls = Some(vec![crate::providers::ToolCall {
+            id: "1".into(),
+            name: "shell".into(),
+            arguments: "{}".into(),
+        }]);
+        assert!(history_looks_incomplete(&[asst]));
     }
 }

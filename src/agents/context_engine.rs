@@ -1227,7 +1227,10 @@ fn media_markers_for_hard_fold(msg: &ChatMessage) -> String {
 fn hard_fold_history(msgs: &[ChatMessage]) -> String {
     let mut lines: Vec<String> = Vec::new();
     lines.push(
-        "[HARD FOLD] Summarizer skipped or failed; deterministic history fold.".to_string(),
+        "[HARD FOLD] Summarizer skipped or failed; deterministic history fold. \
+         Do NOT invent user tasks from this fold; only continue work the user \
+         explicitly requested in clear text."
+            .to_string(),
     );
 
     let mut user_n = 0usize;
@@ -1454,6 +1457,19 @@ mod tests {
         assert!(fold.contains("ZTE share") || fold.contains("share is X%"));
         assert!(fold.contains("user=1"));
         assert!(fold.chars().count() < HARD_TOTAL_CHARS);
+        assert!(
+            fold.contains("Do NOT invent user tasks"),
+            "hard-fold banner must discourage fake tasks, got: {fold}"
+        );
+    }
+
+    #[test]
+    fn summarizer_prompt_forbids_invented_tasks() {
+        let p = build_summarizer_prompt(12, None);
+        assert!(p.contains("do NOT invent user tasks") || p.contains("NEVER invent"));
+        assert!(p.contains("继续") || p.contains("continue"));
+        let merge = build_summarizer_prompt(3, Some("old summary"));
+        assert!(merge.contains("NEVER invent") || merge.contains("do NOT invent"));
     }
 
     #[test]
@@ -1716,6 +1732,24 @@ fn strip_images(msg: &ChatMessage) -> ChatMessage {
 }
 
 fn build_summarizer_prompt(msg_count: usize, existing_summary: Option<&str>) -> String {
+    // Anti-hallucination rules shared by merge and fresh summary paths.
+    // Prevents fabricating active user tasks from compressed/dirty history
+    // (root cause of pure-image turns being rewritten as full Villagers-style quests).
+    const ANTI_FAKE_TASK_RULES: &str = "\
+CRITICAL — do NOT invent user tasks:\n\
+- NEVER invent, reconstruct, or complete a user request that was not explicitly present\n\
+  in the messages being summarized. If the latest user input is only an image marker,\n\
+  a bare word like \"继续\"/\"continue\", a system-reminder, or incomplete fragments,\n\
+  do NOT invent a full task for the agent to execute.\n\
+- Conversation State / Pending may only list work the user EXPLICITLY asked for in\n\
+  clear natural-language text. Prefer OMIT over guess.\n\
+- Image-only or media-marker turns are NOT open tasks unless the user also wrote what\n\
+  to do with them.\n\
+- Do NOT promote items found only in prior compaction summaries, tool chatter, or\n\
+  assistant speculation into active user tasks.\n\
+- If uncertain whether work is still open, put a short note under Pending as\n\
+  \"[Pending] unclear — user should restate\" rather than inventing steps.\n";
+
     match existing_summary {
         Some(base) => format!(
             "Below is a PREVIOUS SUMMARY followed by NEW conversation messages.\n\
@@ -1751,7 +1785,7 @@ fn build_summarizer_prompt(msg_count: usize, existing_summary: Option<&str>) -> 
              Problems encountered and their solutions.\n\
              \n\
              ## Evidence Index\n\
-             Compact evidence needed for later verification: file paths with line numbers where available, commands run, commit hashes, CI/run IDs, artifact paths, log paths, versions, PIDs, and deployment targets.\n\\
+             Compact evidence needed for later verification: file paths with line numbers where available, commands run, commit hashes, CI/run IDs, artifact paths, log paths, versions, PIDs, and deployment targets.\n\
              \n\
              Rules:\n\
              - Mark resolved items clearly (prefix with [Resolved])\n\
@@ -1759,7 +1793,9 @@ fn build_summarizer_prompt(msg_count: usize, existing_summary: Option<&str>) -> 
              - Omit raw tool output (large code blocks, logs, file contents)\n\
              - Use the same language as the conversation\n\
              - Be thorough but concise: every important detail should be preserved\n\
-             - Each fact appears in exactly ONE section only — the most appropriate one. Never repeat the same information across Conversation State / Key Decisions / Resolved / Pending. If something was completed, it belongs in Resolved, not in Conversation State."
+             - Each fact appears in exactly ONE section only — the most appropriate one. Never repeat the same information across Conversation State / Key Decisions / Resolved / Pending. If something was completed, it belongs in Resolved, not in Conversation State.\n\
+             \n\
+             {ANTI_FAKE_TASK_RULES}"
         ),
         None => format!(
             "Summarize the conversation history above. This summary will replace \
@@ -1773,14 +1809,16 @@ fn build_summarizer_prompt(msg_count: usize, existing_summary: Option<&str>) -> 
              2. **Key Decisions**: Important choices made and why.\n\
              3. **Technical Context**: Files modified, code locations, APIs used, configurations changed.\n\
              4. **Errors & Fixes**: Problems encountered and their solutions.\n\
-             5. **Pending Work**: What still needs to be done.\n\
-             6. **Evidence Index**: Compact verification evidence such as file paths with line numbers where available, commands run, commit hashes, CI/run IDs, artifact paths, log paths, versions, PIDs, and deployment targets.\n\\
+             5. **Pending Work**: What still needs to be done. Only user-explicit open work; omit if none.\n\
+             6. **Evidence Index**: Compact verification evidence such as file paths with line numbers where available, commands run, commit hashes, CI/run IDs, artifact paths, log paths, versions, PIDs, and deployment targets.\n\
              \n\
              Rules:\n\
              - Omit raw tool output (large code blocks, logs, file dumps) — keep only key facts\n\
              - Use the same language as the conversation\n\
              - Be thorough: losing context means the user has to repeat themselves\n\
-             - This conversation has {msg_count} messages to summarize"
+             - This conversation has {msg_count} messages to summarize\n\
+             \n\
+             {ANTI_FAKE_TASK_RULES}"
         ),
     }
 }
