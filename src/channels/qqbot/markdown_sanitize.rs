@@ -490,9 +490,15 @@ mod tests {
             out,
             "CIPS的交易量\\$24.45万亿听起来很大，但对比一下——SWIFT日均交易量超过**\\$5万亿**，一年是**\\$1,800万亿+**。CIPS只占SWIFT的~1.3%。"
         );
-        assert!(!out.contains("$24.45"), "bare $24.45 must not remain: {out}");
-        assert!(!out.contains("**$5"), "bare **$5 must not remain: {out}");
-        assert!(!out.contains("**$1,800"), "bare **$1,800 must not remain: {out}");
+        // Substring "$24.45" also matches inside "\$24.45" — check bare `$` only.
+        assert!(
+            !out.contains("量$24") && !out.contains("**$5") && !out.contains("**$1,800"),
+            "bare currency $ must not remain: {out}"
+        );
+        assert!(
+            out.contains("\\$24.45") && out.contains("**\\$5") && out.contains("**\\$1,800"),
+            "escaped currency expected: {out}"
+        );
     }
 
     #[test]
