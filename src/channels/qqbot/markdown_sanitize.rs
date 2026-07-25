@@ -121,6 +121,17 @@ pub fn sanitize_qq_markdown_dollars(input: &str) -> String {
                 continue;
             }
 
+            // Currency-looking open ($ + optional spaces + digit): always literal.
+            // Never allow pairing as inline math — multi-amount prose like
+            // `$24.45…**$5万亿**…**$1,800**` was previously glued into one
+            // false math span by looks_like_math.
+            if is_currency_looking_open(&chars, i) {
+                out.push('\\');
+                out.push('$');
+                i += 1;
+                continue;
+            }
+
             // Inline $...$ (same line, bounded length).
             if let Some(close) = find_closing_inline_dollar(&chars, i + 1) {
                 let body_len = close - (i + 1);
@@ -254,6 +265,15 @@ fn find_closing_inline_dollar(chars: &[char], start: usize) -> Option<usize> {
     None
 }
 
+/// `$` at `i` followed by optional spaces then a digit (currency open).
+fn is_currency_looking_open(chars: &[char], i: usize) -> bool {
+    let mut j = i + 1;
+    while j < chars.len() && chars[j] == ' ' {
+        j += 1;
+    }
+    j < chars.len() && chars[j].is_ascii_digit()
+}
+
 /// Pure currency body between dollars, e.g. `99`, `1,234.56`, ` 12.5 `.
 fn is_currency_only(content: &str) -> bool {
     let t = content.trim();
@@ -304,44 +324,67 @@ fn is_currency_only(content: &str) -> bool {
 }
 
 /// Heuristic: paired `$...$` body looks like math rather than prose/currency.
+///
+/// Tightened after multi-amount Chinese prose was misclassified as math because
+/// of ASCII words (e.g. SWIFT) and markdown `*` bold markers.
 fn looks_like_math(content: &str) -> bool {
     if content.is_empty() || is_currency_only(content) {
         return false;
     }
+    // CJK prose between dollars is never treated as math.
+    if content.chars().any(|c| {
+        ('\u{4e00}'..='\u{9fff}').contains(&c)
+            || ('\u{3400}'..='\u{4dbf}').contains(&c)
+            || ('\u{f900}'..='\u{faff}').contains(&c)
+    }) {
+        return false;
+    }
+    // LaTeX commands always count as math.
+    if content.contains('\\') {
+        return true;
+    }
     let mut has_alpha = false;
-    let mut has_mathish = false;
+    let mut has_digit = false;
+    let mut has_strong = false;
+    let mut has_weak_op = false;
     for c in content.chars() {
         if c.is_ascii_alphabetic() {
             has_alpha = true;
         }
+        if c.is_ascii_digit() {
+            has_digit = true;
+        }
+        // Strong math tokens. Do NOT count `*` (markdown bold) or lone `-`.
         if matches!(
             c,
             '^' | '_'
                 | '='
-                | '+'
-                | '-'
-                | '*'
-                | '/'
-                | '\\'
                 | '{'
                 | '}'
-                | '('
-                | ')'
                 | '['
                 | ']'
-                | '<'
-                | '>'
                 | '|'
                 | '·'
                 | '×'
                 | '÷'
                 | '±'
+                | '<'
+                | '>'
         ) {
-            has_mathish = true;
+            has_strong = true;
+        }
+        if matches!(c, '+' | '/' | '(' | ')') {
+            has_weak_op = true;
         }
     }
-    // LaTeX command or identifiers / operators
-    has_alpha || has_mathish || content.contains('\\')
+    // $E=mc^2$, $x^2+1$, $a+b$ — need letter(s) plus math structure.
+    if has_strong {
+        return true;
+    }
+    if has_alpha && (has_weak_op || has_digit) {
+        return true;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -436,5 +479,42 @@ mod tests {
         // We do not rewrite inside protected math; body kept as authored.
         let s = r"$f=\$x$";
         assert_eq!(sanitize_qq_markdown_dollars(s), s);
+    }
+
+    #[test]
+    fn multi_amount_chinese_prose_all_escaped() {
+        // Regression: $24.45 … **$5** … **$1,800** was glued into false math.
+        let inp = "CIPS的交易量$24.45万亿听起来很大，但对比一下——SWIFT日均交易量超过**$5万亿**，一年是**$1,800万亿+**。CIPS只占SWIFT的~1.3%。";
+        let out = sanitize_qq_markdown_dollars(inp);
+        assert_eq!(
+            out,
+            "CIPS的交易量\\$24.45万亿听起来很大，但对比一下——SWIFT日均交易量超过**\\$5万亿**，一年是**\\$1,800万亿+**。CIPS只占SWIFT的~1.3%。"
+        );
+        assert!(!out.contains("$24.45"), "bare $24.45 must not remain: {out}");
+        assert!(!out.contains("**$5"), "bare **$5 must not remain: {out}");
+        assert!(!out.contains("**$1,800"), "bare **$1,800 must not remain: {out}");
+    }
+
+    #[test]
+    fn bold_and_tilde_currency() {
+        assert_eq!(
+            sanitize_qq_markdown_dollars("一年是**$1,800万亿+**。"),
+            "一年是**\\$1,800万亿+**。"
+        );
+        assert_eq!(
+            sanitize_qq_markdown_dollars("已完成~$550亿交易"),
+            "已完成~\\$550亿交易"
+        );
+        assert_eq!(
+            sanitize_qq_markdown_dollars("冻结$3,000亿储备"),
+            "冻结\\$3,000亿储备"
+        );
+    }
+
+    #[test]
+    fn currency_open_never_pairs_through_markdown() {
+        // Even with ASCII words and ** between amounts, each $digit is escaped.
+        let out = sanitize_qq_markdown_dollars("about $12 trillion and **$8** more");
+        assert_eq!(out, "about \\$12 trillion and **\\$8** more");
     }
 }
