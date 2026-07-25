@@ -14,6 +14,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
 use super::keyboard::*;
+use super::markdown_sanitize::sanitize_qq_markdown_dollars;
 use super::message::split_message_chunk;
 use super::token::TokenManager;
 use super::types::*;
@@ -1263,6 +1264,8 @@ Type any command or just chat!"#;
         };
 
         // Send reply directly via REST API (bypass orchestrator), with chunking.
+        // Sanitize `$` before split (same as send_message path).
+        let reply = sanitize_qq_markdown_dollars(&reply);
         let chunks = split_message_chunk(
             &reply,
             self.capabilities().message_chunk_limit,
@@ -1324,9 +1327,11 @@ impl Channel for QQBotChannel {
     ) -> anyhow::Result<crate::channels::OutboundSendResult> {
         // When files are present, text is used as caption on the first file,
         // not as a separate text message (RFC §14.5).
+        // QQ msg_type=2 treats bare `$` as formula; escape currency before split.
         let chunks = if msg.content.files.is_empty() {
+            let sanitized = sanitize_qq_markdown_dollars(&msg.content.text);
             split_message_chunk(
-                &msg.content.text,
+                &sanitized,
                 self.capabilities().message_chunk_limit,
                 self.capabilities().message_len_unit,
             )
