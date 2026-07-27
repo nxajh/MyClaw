@@ -773,11 +773,8 @@ impl QQBotChannel {
         });
         if !msg_id.is_empty() {
             body["msg_id"] = serde_json::Value::String(msg_id.to_string());
-            body["msg_seq"] = serde_json::Value::Number(msg_seq.into());
-        } else {
-            let seq = self.next_msg_seq();
-            body["msg_seq"] = serde_json::Value::Number(seq.into());
         }
+        body["msg_seq"] = serde_json::Value::Number(msg_seq.into());
         body
     }
 
@@ -791,11 +788,8 @@ impl QQBotChannel {
         });
         if !msg_id.is_empty() {
             body["msg_id"] = serde_json::Value::String(msg_id.to_string());
-            body["msg_seq"] = serde_json::Value::Number(msg_seq.into());
-        } else {
-            let seq = self.next_msg_seq();
-            body["msg_seq"] = serde_json::Value::Number(seq.into());
         }
+        body["msg_seq"] = serde_json::Value::Number(msg_seq.into());
         body
     }
 
@@ -1017,10 +1011,8 @@ impl QQBotChannel {
 
         if !msg_id.is_empty() {
             body["msg_id"] = serde_json::Value::String(msg_id.to_string());
-            body["msg_seq"] = serde_json::Value::Number(self.next_msg_seq().into());
-        } else {
-            body["msg_seq"] = serde_json::Value::Number(self.next_msg_seq().into());
         }
+        body["msg_seq"] = serde_json::Value::Number(self.next_msg_seq().into());
 
         let ua = user_agent();
         let resp = self
@@ -1102,10 +1094,8 @@ impl QQBotChannel {
 
         if !msg_id.is_empty() {
             body["msg_id"] = serde_json::Value::String(msg_id.to_string());
-            body["msg_seq"] = serde_json::Value::Number(self.next_msg_seq().into());
-        } else {
-            body["msg_seq"] = serde_json::Value::Number(self.next_msg_seq().into());
         }
+        body["msg_seq"] = serde_json::Value::Number(self.next_msg_seq().into());
 
         let ua = user_agent();
         let resp = self
@@ -1369,8 +1359,8 @@ impl Channel for QQBotChannel {
 
         let count = chunks.len();
         for (i, chunk) in chunks.iter().enumerate() {
-            // msg_seq must be unique per chunk for the same msg_id (1-based).
-            let msg_seq = (i as u32) + 1;
+            // msg_seq must be unique and monotonic globally across the session.
+            let msg_seq = self.next_msg_seq();
             let is_last = i == count - 1;
 
             let result = if is_last {
@@ -1567,6 +1557,7 @@ impl Channel for QQBotChannel {
             } else if let Some(ref thread_id) = msg.receiver.thread_id {
                 msg_body["msg_id"] = serde_json::json!(thread_id);
             }
+            msg_body["msg_seq"] = serde_json::Value::Number(self.next_msg_seq().into());
             self.send_rest_with_retry(&msg_url, &msg_body).await?;
         }
 
