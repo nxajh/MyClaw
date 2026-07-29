@@ -2032,7 +2032,7 @@ mod tests {
     fn split_long_short_paragraphs() {
         // 25 short CJK paragraphs → each ~2 visual lines + gap = ~75 total
         let paras: Vec<String> = (1..=25)
-            .map(|i| format!("段落{i:02d}: 这是一段测试文字。"))
+            .map(|i| format!("段落{i:02}: 这是一段测试文字。"))
             .collect();
         let text = paras.join("\n\n");
         let chunks = split_by_visual_lines(&text, 30);
