@@ -87,6 +87,55 @@ pub fn user_agent() -> String {
     format!("MyClaw/{} (Rust; {})", env!("MYCLAW_VERSION"), os)
 }
 
+/// Maximum non-empty paragraphs per QQ message bubble.
+///
+/// QQ's markdown renderer has a client-side layout bug: when a single message
+/// contains too many paragraph blocks (separated by blank lines), the renderer
+/// corrupts spacing — paragraphs collide or gaps disappear. Empirically, the
+/// bug triggers at ~26 short paragraphs or ~8 long paragraphs (~40+ rendered
+/// lines). 20 is a safe threshold confirmed by controlled testing.
+const QQ_MAX_PARAGRAPHS_PER_BUBBLE: usize = 20;
+
+/// Pre-split text into chunks of at most `max_paragraphs` non-empty paragraphs.
+///
+/// Paragraphs are blocks separated by blank lines (`\n\n`). Splits always land
+/// on blank-line boundaries to preserve markdown structure. Empty split segments
+/// (from multiple consecutive blank lines) are preserved within chunks.
+fn split_by_paragraphs(text: &str, max_paragraphs: usize) -> Vec<String> {
+    let non_empty = text.split("\n\n").filter(|p| !p.trim().is_empty()).count();
+    if non_empty <= max_paragraphs {
+        return vec![text.to_string()];
+    }
+
+    let parts: Vec<&str> = text.split("\n\n").collect();
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut count = 0usize;
+
+    for part in &parts {
+        if !part.trim().is_empty() {
+            count += 1;
+            if count > max_paragraphs && !current.is_empty() {
+                chunks.push(current.trim_end().to_string());
+                current.clear();
+                count = 1;
+            }
+        }
+        if !current.is_empty() {
+            current.push_str("\n\n");
+        }
+        current.push_str(part);
+    }
+
+    if !current.trim().is_empty() {
+        chunks.push(current.trim_end().to_string());
+    }
+    if chunks.is_empty() {
+        chunks.push(text.to_string());
+    }
+    chunks
+}
+
 // ── QQ Bot Channel ────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -1320,11 +1369,19 @@ impl Channel for QQBotChannel {
         // QQ msg_type=2 treats bare `$` as formula; escape currency before split.
         let chunks = if msg.content.files.is_empty() {
             let sanitized = sanitize_qq_markdown_dollars(&msg.content.text);
-            split_message_chunk(
-                &sanitized,
-                self.capabilities().message_chunk_limit,
-                self.capabilities().message_len_unit,
-            )
+            // Pre-split by paragraph count to mitigate QQ client-side layout bug,
+            // then apply character-limit splitting to each sub-text.
+            let pre_chunks =
+                split_by_paragraphs(&sanitized, QQ_MAX_PARAGRAPHS_PER_BUBBLE);
+            let mut all = Vec::new();
+            for pre in pre_chunks {
+                all.append(&mut split_message_chunk(
+                    &pre,
+                    self.capabilities().message_chunk_limit,
+                    self.capabilities().message_len_unit,
+                ));
+            }
+            all
         } else {
             Vec::new()
         };
@@ -1910,5 +1967,52 @@ impl QQBotChannel {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_by_paragraphs_under_limit() {
+        let text = "para1\n\npara2\n\npara3";
+        assert_eq!(split_by_paragraphs(text, 20), vec![text]);
+    }
+
+    #[test]
+    fn split_by_paragraphs_exact_limit() {
+        let paras: Vec<String> = (1..=20).map(|i| format!("p{i}")).collect();
+        let text = paras.join("\n\n");
+        assert_eq!(split_by_paragraphs(&text, 20), vec![text]);
+    }
+
+    #[test]
+    fn split_by_paragraphs_over_limit() {
+        let paras: Vec<String> = (1..=25).map(|i| format!("p{i}")).collect();
+        let text = paras.join("\n\n");
+        let chunks = split_by_paragraphs(&text, 20);
+        assert_eq!(chunks.len(), 2);
+        // First chunk: 20 paragraphs
+        assert_eq!(chunks[0].matches('\n').count().saturating_sub(1) / 2 + 1, 20);
+        // Second chunk: 5 paragraphs
+        assert!(chunks[1].contains("p21"));
+        assert!(chunks[1].contains("p25"));
+        assert!(!chunks[1].contains("p20"));
+    }
+
+    #[test]
+    fn split_by_paragraphs_preserves_blank_lines() {
+        // Double blank lines should be preserved within chunks
+        let text = "p1\n\n\n\np2\n\np3";
+        let chunks = split_by_paragraphs(text, 20);
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].contains("p1\n\n\n\np2"));
+    }
+
+    #[test]
+    fn split_by_paragraphs_single_paragraph() {
+        let text = "just one paragraph, no blank lines";
+        assert_eq!(split_by_paragraphs(text, 20), vec![text]);
     }
 }
