@@ -1994,7 +1994,7 @@ mod tests {
         let chunks = split_by_paragraphs(&text, 20);
         assert_eq!(chunks.len(), 2);
         // First chunk: 20 paragraphs
-        assert_eq!(chunks[0].matches('\n').count().saturating_sub(1) / 2 + 1, 20);
+        assert_eq!(chunks[0].split("\n\n").count(), 20);
         // Second chunk: 5 paragraphs
         assert!(chunks[1].contains("p21"));
         assert!(chunks[1].contains("p25"));
