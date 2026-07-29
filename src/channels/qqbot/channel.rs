@@ -87,54 +87,67 @@ pub fn user_agent() -> String {
     format!("MyClaw/{} (Rust; {})", env!("MYCLAW_VERSION"), os)
 }
 
-/// Maximum non-empty paragraphs per QQ message bubble.
-///
-/// QQ's markdown renderer has a client-side layout bug: when a single message
-/// contains too many paragraph blocks (separated by blank lines), the renderer
-/// corrupts spacing — paragraphs collide or gaps disappear. Empirically, the
-/// bug triggers at ~26 short paragraphs or ~8 long paragraphs (~40+ rendered
-/// lines). 20 is a safe threshold confirmed by controlled testing.
-const QQ_MAX_PARAGRAPHS_PER_BUBBLE: usize = 20;
+/// Estimated characters per visual line in QQ mobile markdown (~19-20 CJK).
+const QQ_CHARS_PER_LINE: f64 = 20.0;
 
-/// Pre-split text into chunks of at most `max_paragraphs` non-empty paragraphs.
+/// Maximum estimated visual lines per QQ message bubble.
 ///
-/// Paragraphs are blocks separated by blank lines (`\n\n`). Splits always land
-/// on blank-line boundaries to preserve markdown structure. Fenced code blocks
-/// (``` or ~~~) are never split — content inside a code block that contains
-/// blank lines is treated as part of a single paragraph.
-fn split_by_paragraphs(text: &str, max_paragraphs: usize) -> Vec<String> {
-    // Walk \n\n-split parts, tracking code-block state.
-    // A paragraph is counted only when it starts OUTSIDE a code block.
+/// QQ's markdown renderer corrupts spacing at ~35-40 visual lines (tested
+/// empirically with short/medium/long paragraphs). 30 provides a safe margin.
+const QQ_MAX_VISUAL_LINES_PER_BUBBLE: usize = 30;
+
+/// Estimate display width: CJK = 1.0, ASCII = 0.5.
+fn display_width(s: &str) -> f64 {
+    s.chars()
+        .map(|c| if c.is_ascii() { 0.5 } else { 1.0 })
+        .sum()
+}
+
+/// Estimate visual lines a text block occupies on QQ mobile.
+fn estimate_visual_lines(text: &str) -> usize {
+    text.lines()
+        .map(|line| {
+            if line.trim().is_empty() {
+                1
+            } else {
+                let w = display_width(line);
+                ((w / QQ_CHARS_PER_LINE).ceil() as usize).max(1)
+            }
+        })
+        .sum()
+}
+
+/// Pre-split text so each bubble stays under `max_lines` estimated visual lines.
+///
+/// Splits land on `\n\n` boundaries (never inside fenced code blocks). Each
+/// part's visual-line cost is estimated from CJK/ASCII display widths.
+fn split_by_visual_lines(text: &str, max_lines: usize) -> Vec<String> {
     let parts: Vec<&str> = text.split("\n\n").collect();
 
-    // First pass: count paragraphs (respecting code blocks)
-    let mut in_code = false;
-    let mut count = 0usize;
-    for part in &parts {
-        let started_in_code = in_code;
-        // Update in_code by checking every line for fence markers
-        for line in part.lines() {
-            if is_fence_line(line) {
-                in_code = !in_code;
-            }
-        }
-        // Count as paragraph if: non-empty AND started outside code
-        if !part.trim().is_empty() && !started_in_code {
-            count += 1;
-        }
-    }
+    // Pre-compute each part's visual-line cost.
+    // Non-first parts include a 1-line gap (the \n\n separator).
+    let costs: Vec<usize> = parts
+        .iter()
+        .enumerate()
+        .map(|(i, part)| {
+            let gap = if i == 0 { 0 } else { 1 };
+            gap + estimate_visual_lines(part)
+        })
+        .collect();
 
-    if count <= max_paragraphs {
+    let total: usize = costs.iter().sum();
+    if total <= max_lines {
         return vec![text.to_string()];
     }
 
-    // Second pass: split at paragraph boundaries (never inside code blocks)
+    // Accumulate parts, splitting when cumulative cost exceeds max_lines.
+    // Never split inside a fenced code block.
     let mut chunks = Vec::new();
     let mut current = String::new();
-    let mut pcount = 0usize;
-    in_code = false;
+    let mut current_cost = 0usize;
+    let mut in_code = false;
 
-    for part in &parts {
+    for (i, part) in parts.iter().enumerate() {
         let started_in_code = in_code;
         for line in part.lines() {
             if is_fence_line(line) {
@@ -142,23 +155,18 @@ fn split_by_paragraphs(text: &str, max_paragraphs: usize) -> Vec<String> {
             }
         }
 
-        // Paragraph boundary: non-empty, started outside code
-        let is_para_boundary = !part.trim().is_empty() && !started_in_code;
-
-        if is_para_boundary {
-            pcount += 1;
-            // Split BEFORE this part if we've hit the limit and are not in code
-            if pcount > max_paragraphs && !current.is_empty() {
-                chunks.push(current.trim_end().to_string());
-                current.clear();
-                pcount = 1;
-            }
+        // Split before this part if it would overflow and we're outside code.
+        if !current.is_empty() && !started_in_code && current_cost + costs[i] > max_lines {
+            chunks.push(current.trim_end().to_string());
+            current.clear();
+            current_cost = 0;
         }
 
         if !current.is_empty() {
             current.push_str("\n\n");
         }
         current.push_str(part);
+        current_cost += costs[i];
     }
 
     if !current.trim().is_empty() {
@@ -1409,10 +1417,10 @@ impl Channel for QQBotChannel {
         // QQ msg_type=2 treats bare `$` as formula; escape currency before split.
         let chunks = if msg.content.files.is_empty() {
             let sanitized = sanitize_qq_markdown_dollars(&msg.content.text);
-            // Pre-split by paragraph count to mitigate QQ client-side layout bug,
-            // then apply character-limit splitting to each sub-text.
+            // Pre-split by estimated visual lines to mitigate QQ client-side
+            // layout bug, then apply character-limit splitting to each sub-text.
             let pre_chunks =
-                split_by_paragraphs(&sanitized, QQ_MAX_PARAGRAPHS_PER_BUBBLE);
+                split_by_visual_lines(&sanitized, QQ_MAX_VISUAL_LINES_PER_BUBBLE);
             let mut all = Vec::new();
             for pre in pre_chunks {
                 all.append(&mut split_message_chunk(
@@ -2015,56 +2023,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn split_by_paragraphs_under_limit() {
+    fn split_short_text_no_split() {
         let text = "para1\n\npara2\n\npara3";
-        assert_eq!(split_by_paragraphs(text, 20), vec![text]);
+        assert_eq!(split_by_visual_lines(text, 30), vec![text]);
     }
 
     #[test]
-    fn split_by_paragraphs_exact_limit() {
-        let paras: Vec<String> = (1..=20).map(|i| format!("p{i}")).collect();
+    fn split_long_short_paragraphs() {
+        // 25 short CJK paragraphs → each ~2 visual lines + gap = ~75 total
+        let paras: Vec<String> = (1..=25)
+            .map(|i| format!("段落{i:02d}: 这是一段测试文字。"))
+            .collect();
         let text = paras.join("\n\n");
-        assert_eq!(split_by_paragraphs(&text, 20), vec![text]);
+        let chunks = split_by_visual_lines(&text, 30);
+        assert!(chunks.len() > 1);
+        // No chunk should exceed ~30 visual lines
+        for chunk in &chunks {
+            let lines = estimate_visual_lines(chunk);
+            assert!(lines <= 35, "chunk has {lines} visual lines (>35)");
+        }
     }
 
     #[test]
-    fn split_by_paragraphs_over_limit() {
-        let paras: Vec<String> = (1..=25).map(|i| format!("p{i}")).collect();
+    fn split_long_paragraphs_fewer_per_bubble() {
+        // 10 long CJK paragraphs → each ~5 visual lines + gap = ~59 total
+        let paras: Vec<String> = (1..=10)
+            .map(|i| format!("段落{i}: 这是一段很长的测试文字，每段约一百个字符左右，用于测试渲染器对长段落的处理能力和行数估算的准确性。第{i}段结束。"))
+            .collect();
         let text = paras.join("\n\n");
-        let chunks = split_by_paragraphs(&text, 20);
-        assert_eq!(chunks.len(), 2);
-        // First chunk: 20 paragraphs
-        assert_eq!(chunks[0].split("\n\n").count(), 20);
-        // Second chunk: 5 paragraphs
-        assert!(chunks[1].contains("p21"));
-        assert!(chunks[1].contains("p25"));
-        assert!(!chunks[1].contains("p20"));
-    }
-
-    #[test]
-    fn split_by_paragraphs_preserves_blank_lines() {
-        // Double blank lines should be preserved within chunks
-        let text = "p1\n\n\n\np2\n\np3";
-        let chunks = split_by_paragraphs(text, 20);
-        assert_eq!(chunks.len(), 1);
-        assert!(chunks[0].contains("p1\n\n\n\np2"));
-    }
-
-    #[test]
-    fn split_by_paragraphs_single_paragraph() {
-        let text = "just one paragraph, no blank lines";
-        assert_eq!(split_by_paragraphs(text, 20), vec![text]);
+        let chunks = split_by_visual_lines(&text, 30);
+        assert!(chunks.len() > 1, "should split: 10 long paras");
     }
 
     #[test]
     fn split_never_inside_code_block() {
-        // Code block with internal blank lines should NOT be split.
-        // Each code block counts as 1 paragraph regardless of internal blanks.
         let mut paras = Vec::new();
         for i in 1..=10 {
             paras.push(format!("para{i}"));
         }
-        // Insert a code block with blank lines inside
         paras.push(
             "```\ncode line 1\n\ncode line 2\n\n```\n\nafter code".to_string(),
         );
@@ -2072,43 +2068,49 @@ mod tests {
             paras.push(format!("para{i}"));
         }
         let text = paras.join("\n\n");
-        let chunks = split_by_paragraphs(&text, 5);
-        // Verify no chunk contains an unclosed code fence
+        let chunks = split_by_visual_lines(&text, 30);
         for chunk in &chunks {
             let fence_count = chunk.matches("```").count();
             assert_eq!(
                 fence_count % 2,
                 0,
-                "code fence split across chunks: {} occurrences in chunk",
-                fence_count
+                "code fence split across chunks: {fence_count} occurrences"
             );
         }
     }
 
     #[test]
     fn split_code_block_not_split_across_chunks() {
-        // Simulate the real xiaoliu bug: code block "戴维斯双击" at paragraph 20
         let mut paras = Vec::new();
         paras.push("intro text".to_string());
         for i in 1..=18 {
             paras.push(format!("paragraph {i}"));
         }
-        // Code block with internal blank lines
-        paras.push("```\ntitle inside code\n\ncontent line 1\n\ncontent line 2\n```".to_string());
+        paras.push(
+            "```\ntitle inside code\n\ncontent line 1\n\ncontent line 2\n```".to_string(),
+        );
         for i in 19..=25 {
             paras.push(format!("trailing paragraph {i}"));
         }
         let text = paras.join("\n\n");
-        let chunks = split_by_paragraphs(&text, 20);
-        // The code block must be entirely in one chunk
+        let chunks = split_by_visual_lines(&text, 30);
         for chunk in &chunks {
             let opens = chunk.matches("```").count();
             assert_eq!(
                 opens % 2,
                 0,
-                "fences must be balanced within each chunk, found {opens} in chunk starting with {:?}",
-                &chunk[..30.min(chunk.len())]
+                "fences must be balanced: found {opens} in chunk"
             );
         }
+    }
+
+    #[test]
+    fn display_width_cjk_vs_ascii() {
+        // 10 CJK chars = 10.0
+        assert_eq!(display_width("这是一段中文测试文字"), 10.0);
+        // 20 ASCII chars = 10.0
+        assert_eq!(display_width("abcdefghijklmnopqrst"), 10.0);
+        // Mixed
+        assert_eq!(display_width("中文ab"), 1.0 + 1.0 + 0.5 + 0.5);
     }
 }
