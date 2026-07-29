@@ -99,28 +99,62 @@ const QQ_MAX_PARAGRAPHS_PER_BUBBLE: usize = 20;
 /// Pre-split text into chunks of at most `max_paragraphs` non-empty paragraphs.
 ///
 /// Paragraphs are blocks separated by blank lines (`\n\n`). Splits always land
-/// on blank-line boundaries to preserve markdown structure. Empty split segments
-/// (from multiple consecutive blank lines) are preserved within chunks.
+/// on blank-line boundaries to preserve markdown structure. Fenced code blocks
+/// (``` or ~~~) are never split — content inside a code block that contains
+/// blank lines is treated as part of a single paragraph.
 fn split_by_paragraphs(text: &str, max_paragraphs: usize) -> Vec<String> {
-    let non_empty = text.split("\n\n").filter(|p| !p.trim().is_empty()).count();
-    if non_empty <= max_paragraphs {
+    // Walk \n\n-split parts, tracking code-block state.
+    // A paragraph is counted only when it starts OUTSIDE a code block.
+    let parts: Vec<&str> = text.split("\n\n").collect();
+
+    // First pass: count paragraphs (respecting code blocks)
+    let mut in_code = false;
+    let mut count = 0usize;
+    for part in &parts {
+        let started_in_code = in_code;
+        // Update in_code by checking every line for fence markers
+        for line in part.lines() {
+            if is_fence_line(line) {
+                in_code = !in_code;
+            }
+        }
+        // Count as paragraph if: non-empty AND started outside code
+        if !part.trim().is_empty() && !started_in_code {
+            count += 1;
+        }
+    }
+
+    if count <= max_paragraphs {
         return vec![text.to_string()];
     }
 
-    let parts: Vec<&str> = text.split("\n\n").collect();
+    // Second pass: split at paragraph boundaries (never inside code blocks)
     let mut chunks = Vec::new();
     let mut current = String::new();
-    let mut count = 0usize;
+    let mut pcount = 0usize;
+    in_code = false;
 
     for part in &parts {
-        if !part.trim().is_empty() {
-            count += 1;
-            if count > max_paragraphs && !current.is_empty() {
-                chunks.push(current.trim_end().to_string());
-                current.clear();
-                count = 1;
+        let started_in_code = in_code;
+        for line in part.lines() {
+            if is_fence_line(line) {
+                in_code = !in_code;
             }
         }
+
+        // Paragraph boundary: non-empty, started outside code
+        let is_para_boundary = !part.trim().is_empty() && !started_in_code;
+
+        if is_para_boundary {
+            pcount += 1;
+            // Split BEFORE this part if we've hit the limit and are not in code
+            if pcount > max_paragraphs && !current.is_empty() {
+                chunks.push(current.trim_end().to_string());
+                current.clear();
+                pcount = 1;
+            }
+        }
+
         if !current.is_empty() {
             current.push_str("\n\n");
         }
@@ -134,6 +168,12 @@ fn split_by_paragraphs(text: &str, max_paragraphs: usize) -> Vec<String> {
         chunks.push(text.to_string());
     }
     chunks
+}
+
+/// Check if a line is a markdown fence (``` or ~~~).
+fn is_fence_line(line: &str) -> bool {
+    let trimmed = line.trim_start_matches([' ', '\t']);
+    trimmed.starts_with("```") || trimmed.starts_with("~~~")
 }
 
 // ── QQ Bot Channel ────────────────────────────────────────────────────────────
@@ -2014,5 +2054,61 @@ mod tests {
     fn split_by_paragraphs_single_paragraph() {
         let text = "just one paragraph, no blank lines";
         assert_eq!(split_by_paragraphs(text, 20), vec![text]);
+    }
+
+    #[test]
+    fn split_never_inside_code_block() {
+        // Code block with internal blank lines should NOT be split.
+        // Each code block counts as 1 paragraph regardless of internal blanks.
+        let mut paras = Vec::new();
+        for i in 1..=10 {
+            paras.push(format!("para{i}"));
+        }
+        // Insert a code block with blank lines inside
+        paras.push(
+            "```\ncode line 1\n\ncode line 2\n\n```\n\nafter code".to_string(),
+        );
+        for i in 11..=25 {
+            paras.push(format!("para{i}"));
+        }
+        let text = paras.join("\n\n");
+        let chunks = split_by_paragraphs(&text, 5);
+        // Verify no chunk contains an unclosed code fence
+        for chunk in &chunks {
+            let fence_count = chunk.matches("```").count();
+            assert_eq!(
+                fence_count % 2,
+                0,
+                "code fence split across chunks: {} occurrences in chunk",
+                fence_count
+            );
+        }
+    }
+
+    #[test]
+    fn split_code_block_not_split_across_chunks() {
+        // Simulate the real xiaoliu bug: code block "戴维斯双击" at paragraph 20
+        let mut paras = Vec::new();
+        paras.push("intro text".to_string());
+        for i in 1..=18 {
+            paras.push(format!("paragraph {i}"));
+        }
+        // Code block with internal blank lines
+        paras.push("```\ntitle inside code\n\ncontent line 1\n\ncontent line 2\n```".to_string());
+        for i in 19..=25 {
+            paras.push(format!("trailing paragraph {i}"));
+        }
+        let text = paras.join("\n\n");
+        let chunks = split_by_paragraphs(&text, 20);
+        // The code block must be entirely in one chunk
+        for chunk in &chunks {
+            let opens = chunk.matches("```").count();
+            assert_eq!(
+                opens % 2,
+                0,
+                "fences must be balanced within each chunk, found {opens} in chunk starting with {:?}",
+                &chunk[..30.min(chunk.len())]
+            );
+        }
     }
 }
