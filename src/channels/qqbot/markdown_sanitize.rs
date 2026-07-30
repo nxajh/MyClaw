@@ -254,9 +254,6 @@ fn find_closing_inline_dollar(chars: &[char], start: usize) -> Option<usize> {
     None
 }
 
-/// `$` at `i` followed by optional spaces then a digit (currency open).
-
-
 /// Pure currency body between dollars, e.g. `99`, `1,234.56`, ` 12.5 `.
 fn is_currency_only(content: &str) -> bool {
     let t = content.trim();
