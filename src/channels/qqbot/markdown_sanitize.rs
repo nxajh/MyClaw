@@ -121,17 +121,6 @@ pub fn sanitize_qq_markdown_dollars(input: &str) -> String {
                 continue;
             }
 
-            // Currency-looking open ($ + optional spaces + digit): always literal.
-            // Never allow pairing as inline math — multi-amount prose like
-            // `$24.45…**$5万亿**…**$1,800**` was previously glued into one
-            // false math span by looks_like_math.
-            if is_currency_looking_open(&chars, i) {
-                out.push('\\');
-                out.push('$');
-                i += 1;
-                continue;
-            }
-
             // Inline $...$ (same line, bounded length).
             if let Some(close) = find_closing_inline_dollar(&chars, i + 1) {
                 let body_len = close - (i + 1);
@@ -266,13 +255,7 @@ fn find_closing_inline_dollar(chars: &[char], start: usize) -> Option<usize> {
 }
 
 /// `$` at `i` followed by optional spaces then a digit (currency open).
-fn is_currency_looking_open(chars: &[char], i: usize) -> bool {
-    let mut j = i + 1;
-    while j < chars.len() && chars[j] == ' ' {
-        j += 1;
-    }
-    j < chars.len() && chars[j].is_ascii_digit()
-}
+
 
 /// Pure currency body between dollars, e.g. `99`, `1,234.56`, ` 12.5 `.
 fn is_currency_only(content: &str) -> bool {
@@ -343,14 +326,25 @@ fn looks_like_math(content: &str) -> bool {
     if content.contains('\\') {
         return true;
     }
+
     let mut has_alpha = false;
     let mut has_digit = false;
     let mut has_strong = false;
     let mut has_weak_op = false;
+    let mut max_consecutive_alpha = 0;
+    let mut current_alpha_run = 0;
+
     for c in content.chars() {
         if c.is_ascii_alphabetic() {
             has_alpha = true;
+            current_alpha_run += 1;
+            if current_alpha_run > max_consecutive_alpha {
+                max_consecutive_alpha = current_alpha_run;
+            }
+        } else {
+            current_alpha_run = 0;
         }
+
         if c.is_ascii_digit() {
             has_digit = true;
         }
@@ -377,13 +371,42 @@ fn looks_like_math(content: &str) -> bool {
             has_weak_op = true;
         }
     }
+
+    // Common English words often found between unescaped currency dollars.
+    // If we see these, reject unless it has strong math tokens.
+    let lower = content.to_ascii_lowercase();
+    let has_english_words = ["and", "the", "for", "but", "not", "with", "than", "costs", "price", "sale"]
+        .iter()
+        .any(|&w| {
+            if let Some(idx) = lower.find(w) {
+                let before_ok = idx == 0 || !lower.as_bytes()[idx - 1].is_ascii_alphabetic();
+                let after_ok = idx + w.len() == lower.len() || !lower.as_bytes()[idx + w.len()].is_ascii_alphabetic();
+                before_ok && after_ok
+            } else {
+                false
+            }
+        });
+
+    if has_english_words {
+        return false;
+    }
+
     // $E=mc^2$, $x^2+1$, $a+b$ — need letter(s) plus math structure.
     if has_strong {
         return true;
     }
-    if has_alpha && (has_weak_op || has_digit) {
+
+    // Reject things like "10 and that costs" which have long English words and no strong math tokens.
+    // 4 allows "sin", "cos", "tan", "max" etc., but rejects most longer prose words.
+    if max_consecutive_alpha >= 4 {
+        return false;
+    }
+
+    // Pure math expressions like "$10+20$" or "$a+b$" without strong tokens.
+    if has_weak_op && (has_digit || has_alpha) {
         return true;
     }
+
     false
 }
 
@@ -437,6 +460,18 @@ mod tests {
             sanitize_qq_markdown_dollars("$1,234.56$"),
             "\\$1,234.56\\$"
         );
+    }
+
+    #[test]
+    fn formula_starting_with_digit() {
+        let s = "测试 $10^2$ 和 $10+20$ 结尾";
+        assert_eq!(sanitize_qq_markdown_dollars(s), s);
+    }
+
+    #[test]
+    fn formula_with_short_func() {
+        let s = "函数 $sin(x)$ 和 $max(a, b)$";
+        assert_eq!(sanitize_qq_markdown_dollars(s), s);
     }
 
     #[test]
