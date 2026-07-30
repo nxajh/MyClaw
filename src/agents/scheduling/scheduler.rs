@@ -328,6 +328,7 @@ impl Scheduler {
                             prompt: j.prompt.clone(),
                             target_channel: parse_target_channel(&j.target),
                             target_account: parse_target_account(&j.target),
+                            target_recipient: j.delivery.as_ref().and_then(|d| d.to.clone()),
                             job_id: j.id.clone(),
                             model: j.model.clone(),
                         })).await;

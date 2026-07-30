@@ -87,7 +87,7 @@ pub(crate) async fn run_heartbeat_task(
             tracing::debug!("heartbeat: nothing needs attention");
         }
         Ok(response) if !response.trim().is_empty() => {
-            send_to_target_internal(&orch, target_channel, target_account, &response).await;
+            send_to_target_internal(&orch, target_channel, target_account, None, &response).await;
         }
         Ok(_) => {}
         Err(e) => {
@@ -103,6 +103,7 @@ pub(crate) async fn run_cron_task(orch: Arc<OrchestratorCtx>, trigger: super::Cr
         prompt,
         target_channel,
         target_account,
+        target_recipient,
         job_id,
         model,
     } = trigger;
@@ -143,6 +144,7 @@ pub(crate) async fn run_cron_task(orch: Arc<OrchestratorCtx>, trigger: super::Cr
                 &orch,
                 target_channel.clone(),
                 target_account.clone(),
+                target_recipient.clone(),
                 response,
             )
             .await;
@@ -152,7 +154,7 @@ pub(crate) async fn run_cron_task(orch: Arc<OrchestratorCtx>, trigger: super::Cr
     // Send failure alert to channel if generated.
     if let Some(alert_msg) = failure_alert {
         tracing::warn!(job_id = %job_id, alert = %alert_msg, "sending failure alert");
-        send_to_target_internal(&orch, target_channel, target_account, &alert_msg).await;
+        send_to_target_internal(&orch, target_channel, target_account, target_recipient, &alert_msg).await;
     }
 }
 
@@ -161,6 +163,7 @@ async fn send_to_target_internal(
     orch: &OrchestratorCtx,
     target_channel: Option<String>,
     target_account: Option<String>,
+    target_recipient: Option<String>,
     content: &str,
 ) {
     let (ch_type, acc_id) = match (target_channel, target_account) {
@@ -196,10 +199,14 @@ async fn send_to_target_internal(
         }
     };
 
-    // Resolve recipient from scheduler.last_recipient.
-    let recipient = match orch.scheduler.as_ref() {
-        Some(s) => s.last_recipient.lock().await.clone().unwrap_or_default(),
-        None => String::new(),
+    // Resolve recipient: explicit target_recipient first, else last_recipient.
+    let recipient = if let Some(r) = target_recipient {
+        r
+    } else {
+        match orch.scheduler.as_ref() {
+            Some(s) => s.last_recipient.lock().await.clone().unwrap_or_default(),
+            None => String::new(),
+        }
     };
 
     let message = crate::channels::ChannelOutboundMessage {

@@ -53,6 +53,7 @@ pub struct CronTrigger {
     pub prompt: String,
     pub target_channel: Option<String>,
     pub target_account: Option<String>,
+    pub target_recipient: Option<String>,
     pub job_id: String,
     pub model: Option<String>,
 }
