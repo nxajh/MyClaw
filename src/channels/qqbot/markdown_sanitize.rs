@@ -404,6 +404,12 @@ fn looks_like_math(content: &str) -> bool {
         return true;
     }
 
+    // Bare variable names: $x$, $n$, $ab$ — letters/digits, no spaces.
+    // Prose between currency dollars always has spaces, so this is safe.
+    if has_alpha && !content.contains(' ') {
+        return true;
+    }
+
     false
 }
 
@@ -463,6 +469,13 @@ mod tests {
     fn formula_starting_with_digit() {
         let s = "测试 $10^2$ 和 $10+20$ 结尾";
         assert_eq!(sanitize_qq_markdown_dollars(s), s);
+    }
+
+    #[test]
+    fn bare_variable_name() {
+        assert_eq!(sanitize_qq_markdown_dollars("变量 $x$ 的值"), "变量 $x$ 的值");
+        assert_eq!(sanitize_qq_markdown_dollars("$n$"), "$n$");
+        assert_eq!(sanitize_qq_markdown_dollars("矩阵 $AB$ 转置"), "矩阵 $AB$ 转置");
     }
 
     #[test]
