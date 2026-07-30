@@ -56,7 +56,7 @@ impl Tool for CronJobTool {
                 },
                 "schedule": {
                     "type": "string",
-                    "description": "Schedule: cron expression 'sec min hour day month weekday' (e.g. '0 0 9 * * *'), or 'every 30m', or 'at 2026-05-15T09:00:00+08:00'."
+                    "description": "Schedule: cron expression 'sec min hour day month weekday' (Unix-style: 0=Sunday) (e.g. '0 0 9 * * *'), or 'every 30m', or 'at 2026-05-15T09:00:00+08:00'."
                 },
                 "prompt": {
                     "type": "string",
