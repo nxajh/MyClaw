@@ -843,55 +843,65 @@ pub fn scan_prompt_injection(prompt: &str) -> Result<(), String> {
 /// `cron` crate v0.15 uses 1-7 for Sunday-Saturday.
 /// This translates the 6th field (weekday) of a 6-field cron expression.
 pub fn normalize_weekday_unix(schedule: &str) -> String {
-    let parts: Vec<&str> = schedule.trim().split_whitespace().collect();
+    let parts: Vec<&str> = schedule.split_whitespace().collect();
     if parts.len() != 6 {
-        return schedule.to_string(); // Not a standard 6-field cron
+        return schedule.to_string();
     }
-    
-    // We only process the weekday field (index 5)
     let weekday_part = parts[5];
-    
-    // If it's just '*', leave it
     if weekday_part == "*" {
         return schedule.to_string();
     }
-    
-    let mut normalized_weekday = String::new();
-    let mut i = 0;
-    while i < weekday_part.len() {
-        if weekday_part[i..].starts_with("*/") {
-            normalized_weekday.push_str("*/");
-            i += 2;
-        } else if let Some(c) = weekday_part.chars().nth(i) {
-            if c.is_digit(10) {
-                // Parse number
-                let mut num_str = String::new();
-                while i < weekday_part.len() && weekday_part.chars().nth(i).unwrap().is_digit(10) {
-                    num_str.push(weekday_part.chars().nth(i).unwrap());
-                    i += 1;
-                }
-                if let Ok(num) = num_str.parse::<u32>() {
-                    // Unix: 0=Sun, 1=Mon... 6=Sat, 7=Sun
-                    // Quartz (cron 0.15): 1=Sun, 2=Mon... 7=Sat
-                    let new_num = match num {
-                        0 | 7 => 1,
-                        1..=6 => num + 1,
-                        _ => num, // Leave invalid as is to let parser fail
-                    };
-                    normalized_weekday.push_str(&new_num.to_string());
-                }
-                continue;
+
+    let normalized = weekday_part
+        .split('/')
+        .enumerate()
+        .map(|(i, segment)| {
+            if i == 1 {
+                segment.to_string() // step part: leave unchanged
             } else {
-                normalized_weekday.push(c);
+                shift_weekday_segment(segment)
             }
-            i += 1;
-        } else {
-            break;
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+
+    format!(
+        "{} {} {} {} {} {}",
+        parts[0], parts[1], parts[2], parts[3], parts[4], normalized
+    )
+}
+
+/// Shift weekday numbers in a comma-separated segment (e.g. "1,3,5" → "2,4,6").
+fn shift_weekday_segment(segment: &str) -> String {
+    segment
+        .split(',')
+        .map(shift_weekday_item)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Shift a single weekday item: single number, range, or named day.
+fn shift_weekday_item(item: &str) -> String {
+    if let Some(dash) = item.find('-') {
+        let (start, end) = (&item[..dash], &item[dash + 1..]);
+        if let (Ok(s), Ok(e)) = (start.parse::<u32>(), end.parse::<u32>()) {
+            return format!("{}-{}", shift_weekday_num(s), shift_weekday_num(e));
         }
+        return item.to_string(); // named range like MON-FRI
     }
-    
-    // Reconstruct
-    format!("{} {} {} {} {} {}", parts[0], parts[1], parts[2], parts[3], parts[4], normalized_weekday)
+    if let Ok(n) = item.parse::<u32>() {
+        return shift_weekday_num(n).to_string();
+    }
+    item.to_string()
+}
+
+/// Shift a weekday number from Unix (0=Sun..7=Sun) to cron-crate (1=Sun..7=Sat).
+fn shift_weekday_num(n: u32) -> u32 {
+    match n {
+        0 | 7 => 1,
+        1..=6 => n + 1,
+        _ => n,
+    }
 }
 
 /// Validate a schedule string (cron expression).
@@ -1646,8 +1656,10 @@ mod tests {
         assert_eq!(normalize_weekday_unix("0 0 9 * * 7"), "0 0 9 * * 1"); // Sun
         assert_eq!(normalize_weekday_unix("0 0 9 * * 1-5"), "0 0 9 * * 2-6"); // Mon-Fri
         assert_eq!(normalize_weekday_unix("0 0 9 * * 0,6"), "0 0 9 * * 1,7"); // Sun,Sat
-        assert_eq!(normalize_weekday_unix("0 0 9 * * */2"), "0 0 9 * * */2"); // Unchanged parsing of *
+        assert_eq!(normalize_weekday_unix("0 0 9 * * */2"), "0 0 9 * * */2"); // step unchanged
+        assert_eq!(normalize_weekday_unix("0 0 9 * * 1-5/2"), "0 0 9 * * 2-6/2");
         assert_eq!(normalize_weekday_unix("0 0 9 * * MON-FRI"), "0 0 9 * * MON-FRI");
+        assert_eq!(normalize_weekday_unix("0 0 9 * * MON,5"), "0 0 9 * * MON,6");
         assert_eq!(normalize_weekday_unix("not a cron"), "not a cron");
     }
 
