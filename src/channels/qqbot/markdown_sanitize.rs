@@ -650,24 +650,24 @@ mod tests {
     #[test]
     fn pad_bold_cjk_boundary() {
         let zws = '\u{200B}';
-        let input = "出了**\"政策\"**。着**当前**。";
+        // Use actual CJK curly quotes (U+201C/U+201D), not ASCII "
+        let input = "出了**\u{201c}政策\u{201d}**。着**当前**。";
         let out = pad_bold_markers_for_cjk(input);
-        // Each ** adjacent to CJK gets ZWS on the CJK side
         assert!(
             out.contains(&format!("了{zws}**")),
-            "missing ZWS before ** after CJK"
+            "missing ZWS before ** after CJK: {out:?}"
         );
         assert!(
-            out.contains(&format!("**{zws}\"")),
-            "missing ZWS after ** before CJK punct"
+            out.contains(&format!("**{zws}\u{201c}")),
+            "missing ZWS after ** before CJK punct: {out:?}"
         );
         assert!(
             out.contains(&format!("着{zws}**")),
-            "missing ZWS before ** after CJK"
+            "missing ZWS before ** after CJK: {out:?}"
         );
         assert!(
             out.contains(&format!("**{zws}当")),
-            "missing ZWS after ** before CJK"
+            "missing ZWS after ** before CJK: {out:?}"
         );
     }
 
