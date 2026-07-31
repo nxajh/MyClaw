@@ -1,8 +1,8 @@
-//! QQ Bot markdown `$` sanitization (msg_type=2).
+//! QQ Bot markdown sanitization (msg_type=2).
 //!
-//! QQ treats bare `$` / `$$` as formula delimiters. Model output often uses `$99`
-//! for currency, which mis-pairs and breaks rendering. This module implements
-//! **tier A**: protect real math and code, escape remaining bare `$` to `\$`.
+//! Two transforms:
+//! 1. Escape bare `$` so currency does not trigger formula mode.
+//! 2. Pad `**` bold markers with ZWS when adjacent to CJK characters.
 //!
 //! Pipeline: sanitize **before** `split_message_chunk`. Idempotent on `\$`.
 
@@ -413,6 +413,84 @@ fn looks_like_math(content: &str) -> bool {
     false
 }
 
+/// Check if a char is non-ASCII (CJK, CJK punctuation, emoji, etc.) — these
+/// confuse QQ's markdown parser when adjacent to `**`.
+fn is_cjk_adjacent(c: char) -> bool {
+    !c.is_ascii() && c != '\u{200B}'
+}
+
+/// Pad `**` bold markers with zero-width spaces (`\u{200B}`) when adjacent
+/// to CJK characters. QQ's markdown parser sometimes fails to recognize `**`
+/// as delimiters when flush against CJK text/punctuation. ZWS is invisible
+/// but gives the parser a "word boundary" to latch onto.
+pub fn pad_bold_markers_for_cjk(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    let mut in_fence = false;
+
+    while i < n {
+        let at_line_start = i == 0 || chars[i - 1] == '\n';
+
+        if at_line_start {
+            let fence_char = if i + 2 < n
+                && chars[i] == '`'
+                && chars[i + 1] == '`'
+                && chars[i + 2] == '`'
+            {
+                Some('`')
+            } else if i + 2 < n
+                && chars[i] == '~'
+                && chars[i + 1] == '~'
+                && chars[i + 2] == '~'
+            {
+                Some('~')
+            } else {
+                None
+            };
+            if let Some(fc) = fence_char {
+                in_fence = !in_fence;
+                while i < n && chars[i] == fc {
+                    out.push(chars[i]);
+                    i += 1;
+                }
+                continue;
+            }
+        }
+
+        if in_fence {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+
+        if chars[i] == '*' && i + 1 < n && chars[i + 1] == '*' {
+            let needs_before = i > 0 && is_cjk_adjacent(chars[i - 1]);
+            let needs_after = i + 2 < n && is_cjk_adjacent(chars[i + 2]);
+            if needs_before {
+                out.push('\u{200B}');
+            }
+            out.push_str("**");
+            if needs_after {
+                out.push('\u{200B}');
+            }
+            i += 2;
+            continue;
+        }
+
+        out.push(chars[i]);
+        i += 1;
+    }
+
+    out
+}
+
+/// Combined sanitization: escape `$` then pad `**` for CJK.
+pub fn sanitize_qq_markdown(input: &str) -> String {
+    pad_bold_markers_for_cjk(&sanitize_qq_markdown_dollars(input))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -567,5 +645,50 @@ mod tests {
         // Even with ASCII words and ** between amounts, each $digit is escaped.
         let out = sanitize_qq_markdown_dollars("about $12 trillion and **$8** more");
         assert_eq!(out, "about \\$12 trillion and **\\$8** more");
+    }
+
+    #[test]
+    fn pad_bold_cjk_boundary() {
+        let zws = '\u{200B}';
+        let input = "出了**\"政策\"**。着**当前**。";
+        let out = pad_bold_markers_for_cjk(input);
+        // Each ** adjacent to CJK gets ZWS on the CJK side
+        assert!(
+            out.contains(&format!("了{zws}**")),
+            "missing ZWS before ** after CJK"
+        );
+        assert!(
+            out.contains(&format!("**{zws}\"")),
+            "missing ZWS after ** before CJK punct"
+        );
+        assert!(
+            out.contains(&format!("着{zws}**")),
+            "missing ZWS before ** after CJK"
+        );
+        assert!(
+            out.contains(&format!("**{zws}当")),
+            "missing ZWS after ** before CJK"
+        );
+    }
+
+    #[test]
+    fn pad_bold_ascii_unchanged() {
+        let input = "this is **bold** text";
+        assert_eq!(pad_bold_markers_for_cjk(input), input);
+    }
+
+    #[test]
+    fn pad_bold_inside_fence_untouched() {
+        let input = "```\n**bold**\n```";
+        assert_eq!(pad_bold_markers_for_cjk(input), input);
+    }
+
+    #[test]
+    fn sanitize_qq_markdown_combined() {
+        let input = "价格 $99，**重要**提示";
+        let out = sanitize_qq_markdown(input);
+        // $ escaped, ** padded with ZWS
+        assert!(out.contains("\\$99"), "dollar should be escaped: {out}");
+        assert!(out.contains('\u{200B}'), "should contain ZWS: {out}");
     }
 }

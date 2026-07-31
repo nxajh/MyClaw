@@ -12,4 +12,4 @@ pub mod types;
 use super::message;
 
 pub use channel::QQBotChannel;
-pub use markdown_sanitize::sanitize_qq_markdown_dollars;
+pub use markdown_sanitize::{sanitize_qq_markdown, sanitize_qq_markdown_dollars};

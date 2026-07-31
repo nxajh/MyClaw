@@ -1351,8 +1351,8 @@ Type any command or just chat!"#;
         };
 
         // Send reply directly via REST API (bypass orchestrator), with chunking.
-        // Sanitize `$` before split (same as send_message path).
-        let reply = sanitize_qq_markdown_dollars(&reply);
+        // Sanitize `$` and pad `**` before split (same as send_message path).
+        let reply = sanitize_qq_markdown(&reply);
         let chunks = split_message_chunk(
             &reply,
             self.capabilities().message_chunk_limit,
@@ -1414,9 +1414,9 @@ impl Channel for QQBotChannel {
     ) -> anyhow::Result<crate::channels::OutboundSendResult> {
         // When files are present, text is used as caption on the first file,
         // not as a separate text message (RFC §14.5).
-        // QQ msg_type=2 treats bare `$` as formula; escape currency before split.
+        // QQ msg_type=2: escape `$` and pad `**` for CJK before split.
         let chunks = if msg.content.files.is_empty() {
-            let sanitized = sanitize_qq_markdown_dollars(&msg.content.text);
+            let sanitized = sanitize_qq_markdown(&msg.content.text);
             // Pre-split by estimated visual lines to mitigate QQ client-side
             // layout bug, then apply character-limit splitting to each sub-text.
             let pre_chunks =
