@@ -717,6 +717,9 @@ mod tests {
         let input = "价格 $99，**重要**提示";
         let out = sanitize_qq_markdown(input);
         assert!(out.contains("\\$99"), "dollar should be escaped: {out}");
-        assert!(out.contains(" ** "), "should contain space-padded **: {out}");
+        // Opening ** after CJK punctuation "，": space before
+        assert!(out.contains("， **重"), "should have space before opening **: {out}");
+        // Closing ** before CJK "提示": space after
+        assert!(out.contains("要** 提"), "should have space after closing **: {out}");
     }
 }
