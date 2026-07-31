@@ -14,7 +14,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
 use super::keyboard::*;
-use super::markdown_sanitize::sanitize_qq_markdown_dollars;
+use super::markdown_sanitize::sanitize_qq_markdown;
 use super::message::split_message_chunk;
 use super::token::TokenManager;
 use super::types::*;
