@@ -469,11 +469,11 @@ pub fn pad_bold_markers_for_cjk(input: &str) -> String {
             let needs_before = i > 0 && is_cjk_adjacent(chars[i - 1]);
             let needs_after = i + 2 < n && is_cjk_adjacent(chars[i + 2]);
             if needs_before {
-                out.push('\u{200B}');
+                out.push(' ');
             }
             out.push_str("**");
             if needs_after {
-                out.push('\u{200B}');
+                out.push(' ');
             }
             i += 2;
             continue;
@@ -649,25 +649,24 @@ mod tests {
 
     #[test]
     fn pad_bold_cjk_boundary() {
-        let zws = '\u{200B}';
         // Use actual CJK curly quotes (U+201C/U+201D), not ASCII "
         let input = "出了**\u{201c}政策\u{201d}**。着**当前**。";
         let out = pad_bold_markers_for_cjk(input);
         assert!(
-            out.contains(&format!("了{zws}**")),
-            "missing ZWS before ** after CJK: {out:?}"
+            out.contains("了 **"),
+            "missing space before ** after CJK: {out:?}"
         );
         assert!(
-            out.contains(&format!("**{zws}\u{201c}")),
-            "missing ZWS after ** before CJK punct: {out:?}"
+            out.contains("** \u{201c}"),
+            "missing space after ** before CJK punct: {out:?}"
         );
         assert!(
-            out.contains(&format!("着{zws}**")),
-            "missing ZWS before ** after CJK: {out:?}"
+            out.contains("着 **"),
+            "missing space before ** after CJK: {out:?}"
         );
         assert!(
-            out.contains(&format!("**{zws}当")),
-            "missing ZWS after ** before CJK: {out:?}"
+            out.contains("** 当"),
+            "missing space after ** before CJK: {out:?}"
         );
     }
 
@@ -687,8 +686,7 @@ mod tests {
     fn sanitize_qq_markdown_combined() {
         let input = "价格 $99，**重要**提示";
         let out = sanitize_qq_markdown(input);
-        // $ escaped, ** padded with ZWS
         assert!(out.contains("\\$99"), "dollar should be escaped: {out}");
-        assert!(out.contains('\u{200B}'), "should contain ZWS: {out}");
+        assert!(out.contains(" ** "), "should contain space-padded **: {out}");
     }
 }
