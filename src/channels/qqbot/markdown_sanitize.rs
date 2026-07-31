@@ -419,16 +419,24 @@ fn is_cjk_adjacent(c: char) -> bool {
     !c.is_ascii() && c != '\u{200B}'
 }
 
-/// Pad `**` bold markers with zero-width spaces (`\u{200B}`) when adjacent
-/// to CJK characters. QQ's markdown parser sometimes fails to recognize `**`
-/// as delimiters when flush against CJK text/punctuation. ZWS is invisible
-/// but gives the parser a "word boundary" to latch onto.
+/// Pad `**` bold markers with spaces when adjacent to CJK characters.
+///
+/// QQ's markdown parser sometimes fails to recognize `**` as delimiters when
+/// flush against CJK text/punctuation. We insert ASCII spaces to create word
+/// boundaries — but must respect CommonMark rules:
+/// - Opening `**`: space BEFORE is fine, space AFTER is not (must be followed
+///   by non-space).
+/// - Closing `**`: space BEFORE is not allowed (must be preceded by non-space),
+///   space AFTER is fine.
+///
+/// To know which `**` is opening vs closing, we track bold toggle state.
 pub fn pad_bold_markers_for_cjk(input: &str) -> String {
     let chars: Vec<char> = input.chars().collect();
     let n = chars.len();
     let mut out = String::with_capacity(input.len());
     let mut i = 0;
     let mut in_fence = false;
+    let mut bold_open = false;
 
     while i < n {
         let at_line_start = i == 0 || chars[i - 1] == '\n';
@@ -466,17 +474,35 @@ pub fn pad_bold_markers_for_cjk(input: &str) -> String {
         }
 
         if chars[i] == '*' && i + 1 < n && chars[i + 1] == '*' {
-            let needs_before = i > 0 && is_cjk_adjacent(chars[i - 1]);
-            let needs_after = i + 2 < n && is_cjk_adjacent(chars[i + 2]);
-            if needs_before {
-                out.push(' ');
-            }
-            out.push_str("**");
-            if needs_after {
-                out.push(' ');
+            let prev = if i > 0 { Some(chars[i - 1]) } else { None };
+            let next = if i + 2 < n { Some(chars[i + 2]) } else { None };
+
+            if !bold_open {
+                // Opening **: space before CJK is fine, but NOT after.
+                if let Some(p) = prev {
+                    if is_cjk_adjacent(p) {
+                        out.push(' ');
+                    }
+                }
+                out.push_str("**");
+                bold_open = true;
+            } else {
+                // Closing **: space before is NOT allowed, space after CJK is fine.
+                out.push_str("**");
+                if let Some(nx) = next {
+                    if is_cjk_adjacent(nx) {
+                        out.push(' ');
+                    }
+                }
+                bold_open = false;
             }
             i += 2;
             continue;
+        }
+
+        // Reset bold state at paragraph boundaries (unmatched ** shouldn't bleed)
+        if chars[i] == '\n' && i + 1 < n && chars[i + 1] == '\n' {
+            bold_open = false;
         }
 
         out.push(chars[i]);
@@ -652,21 +678,25 @@ mod tests {
         // Use actual CJK curly quotes (U+201C/U+201D), not ASCII "
         let input = "出了**\u{201c}政策\u{201d}**。着**当前**。";
         let out = pad_bold_markers_for_cjk(input);
+        // Opening **: space before CJK, no space after
         assert!(
-            out.contains("了 **"),
-            "missing space before ** after CJK: {out:?}"
+            out.contains("了 **\u{201c}"),
+            "opening: space before CJK, no space after: {out:?}"
         );
+        // Closing **: no space before (preceded by "), space after CJK punct
         assert!(
-            out.contains("** \u{201c}"),
-            "missing space after ** before CJK punct: {out:?}"
+            out.contains("\u{201d}** 。"),
+            "closing: no space before, space after CJK: {out:?}"
         );
+        // Second pair: opening after CJK "着"
         assert!(
-            out.contains("着 **"),
-            "missing space before ** after CJK: {out:?}"
+            out.contains("着 **当"),
+            "opening 2: space before CJK: {out:?}"
         );
+        // Second pair: closing, no space before "当", space after punct
         assert!(
-            out.contains("** 当"),
-            "missing space after ** before CJK: {out:?}"
+            out.contains("前** 。"),
+            "closing 2: space after CJK punct: {out:?}"
         );
     }
 
