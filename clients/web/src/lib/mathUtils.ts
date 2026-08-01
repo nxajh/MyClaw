@@ -11,7 +11,9 @@ export const hasMath = (text: string) =>
   /\$\$[\s\S]+?\$\$|\$[^$\n]+?\$|\\\([\s\S]+?\\\)|\\\[[\s\S]+?\\\]/.test(text)
 
 // Lazy-load rehype-katex only when needed
-export let RehypeKatex: any = null
+let RehypeKatex: any = null
+export function isRehypeKatexLoaded() { return RehypeKatex !== null }
+export function getRehypeKatex() { return RehypeKatex }
 export async function loadRehypeKatex() {
   if (!RehypeKatex) {
     const mod = await import('rehype-katex')

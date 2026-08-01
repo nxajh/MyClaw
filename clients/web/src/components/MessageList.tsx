@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo, memo, createContext, useContext, type ReactNode } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo, memo, createContext, useContext, type ReactNode } from 'react'
 import type { RefObject } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -15,50 +15,41 @@ import Fullscreen from 'yet-another-react-lightbox/plugins/fullscreen'
 import 'yet-another-react-lightbox/styles.css'
 import type { ChatMessage, MessageBlock } from '../hooks/useWebSocket'
 import ToolCallCard from './ToolCallCard'
-import { hasMath, normalizeMathDelimiters, closeUnclosedFences, ensureKatexCss, loadRehypeKatex } from '../lib/mathUtils'
+import { hasMath, normalizeMathDelimiters, closeUnclosedFences, ensureKatexCss, loadRehypeKatex, isRehypeKatexLoaded, getRehypeKatex } from '../lib/mathUtils'
 
 // ── Error Boundary ────────────────────────────────────────────────────────────
 
-interface ErrorBoundaryState {
-  hasError: boolean
-  error?: Error
-}
+function ChatErrorBoundary({ children }: { children: ReactNode }) {
+  const [state, setState] = useState<{ hasError: boolean; error?: Error }>({ hasError: false })
 
-class ChatErrorBoundary extends React.Component<{ children: ReactNode }, ErrorBoundaryState> {
-  constructor(props: { children: ReactNode }) {
-    super(props)
-    this.state = { hasError: false }
-  }
-
-  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
-    return { hasError: true, error }
-  }
-
-  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
-    console.error('[ChatErrorBoundary] Render error:', error, errorInfo)
-  }
-
-  render() {
-    if (this.state.hasError) {
-      return (
-        <div className="flex flex-col items-center justify-center h-full p-8 text-center">
-          <div className="text-4xl mb-4">⚠️</div>
-          <h2 className="text-lg font-semibold text-zinc-200 mb-2">消息渲染出错</h2>
-          <p className="text-sm text-zinc-500 mb-4">
-            {this.state.error?.message || '未知错误'}
-          </p>
-          <button
-            onClick={() => this.setState({ hasError: false })}
-            className="px-4 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-sm transition-colors"
-          >
-            重试
-          </button>
-        </div>
-      )
+  useEffect(() => {
+    const handler = (error: Error) => {
+      console.error('[ChatErrorBoundary] Uncaught error:', error)
+      setState({ hasError: true, error })
     }
+    window.addEventListener('error', (e) => handler(e.error))
+    return () => window.removeEventListener('error', handler as any)
+  }, [])
 
-    return this.props.children
+  if (state.hasError) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full p-8 text-center">
+        <div className="text-4xl mb-4">⚠️</div>
+        <h2 className="text-lg font-semibold text-zinc-200 mb-2">消息渲染出错</h2>
+        <p className="text-sm text-zinc-500 mb-4">
+          {state.error?.message || '未知错误'}
+        </p>
+        <button
+          onClick={() => setState({ hasError: false })}
+          className="px-4 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-sm transition-colors"
+        >
+          重试
+        </button>
+      </div>
+    )
   }
+
+  return <>{children}</>
 }
 
 // ── PreCodeBlock with syntax highlighting + language label ────────────────
@@ -121,7 +112,7 @@ const ThinkingBlock = memo(function ThinkingBlock({ text, isStreaming }: { text:
     if (isStreaming && !wasStreaming.current && userToggled.current && !open) {
       setOpen(true)
     }
-    wasStreaming.current = isStreaming
+    wasStreaming.current = isStreaming ?? false
   }, [isStreaming, open])
 
   // When streaming ends, auto-collapse if user hasn't manually opened it.
@@ -223,7 +214,7 @@ const SystemReminderCard = memo(function SystemReminderCard({ text }: { text: st
 })
 
 const ContentBlock = memo(function ContentBlock({ text, done }: { text: string; done: boolean }) {
-  const [katexReady, setKatexReady] = useState(!!RehypeKatex)
+  const [katexReady, setKatexReady] = useState(isRehypeKatexLoaded())
   // Render-only pipeline: fence fix → LaTeX delimiter normalize → remark-math ($/$$)
   const prepared = useMemo(
     () => normalizeMathDelimiters(closeUnclosedFences(text)),
@@ -246,7 +237,7 @@ const ContentBlock = memo(function ContentBlock({ text, done }: { text: string; 
   }
 
   const rehypePlugins: any[] = [rehypeHighlight]
-  if (needsMath && katexReady && RehypeKatex) rehypePlugins.push(RehypeKatex)
+  if (needsMath && katexReady && getRehypeKatex()) rehypePlugins.push(getRehypeKatex())
 
   return (
     <div className={proseClasses}>
@@ -265,7 +256,7 @@ const ContentBlock = memo(function ContentBlock({ text, done }: { text: string; 
       >{prepared}</Markdown>
     </div>
   )
-}
+})
 
 // ── Block renderer ───────────────────────────────────────────────────────
 
@@ -887,7 +878,7 @@ interface Props {
 export default function MessageList({ messages, containerRef, onRetry }: Props) {
   // Preload KaTeX CSS on mount so math renders without a flash
   useEffect(() => {
-    if (RehypeKatex) ensureKatexCss()
+    if (isRehypeKatexLoaded()) ensureKatexCss()
   }, [])
   const { sendMessage, setMessages, isGenerating: globalGenerating, request } = useWebSocketContext()
   const { toast } = useToast()
