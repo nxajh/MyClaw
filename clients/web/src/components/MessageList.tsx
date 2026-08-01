@@ -4,7 +4,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeHighlight from 'rehype-highlight'
-import { ChevronDown, ChevronRight, Copy, Check, ArrowDown, ArrowUp, RotateCcw, Search, X, Pencil, Trash2, Pin } from 'lucide-react'
+import { ChevronDown, ChevronRight, Copy, Check, ArrowDown, ArrowUp, RotateCcw, Pencil, Trash2, Pin } from 'lucide-react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useToast } from './Toast'
@@ -16,6 +16,14 @@ import 'yet-another-react-lightbox/styles.css'
 import type { ChatMessage, MessageBlock } from '../hooks/useWebSocket'
 import ToolCallCard from './ToolCallCard'
 import { hasMath, normalizeMathDelimiters, closeUnclosedFences, ensureKatexCss, loadRehypeKatex, isRehypeKatexLoaded, getRehypeKatex } from '../lib/mathUtils'
+import { searchableMessageText, messageTimestamp, timeDividerLabel, shouldShowTimeDivider, highlightText } from '../lib/searchUtils'
+import {
+  releaseUnusedBlobUrls,
+  getImageCache,
+  FileRequestContext,
+  LazyImage,
+  renderFileRef
+} from '../lib/fileUtils'
 
 // ── Error Boundary ────────────────────────────────────────────────────────────
 
@@ -304,46 +312,6 @@ function MessageActions({ blocks, isLast, isGenerating, onRetry, onDelete, onPin
 }
 
 // ── Image lightbox context ───────────────────────────────────────────────
-// Module-level registry: tracks all loaded image blob URLs for the lightbox.
-
-const BLOB_CACHE_LIMIT = 80
-const imageCache = new Map<string, string>() // path -> blob URL
-
-function cacheBlobUrl(key: string, url: string) {
-  const old = imageCache.get(key)
-  if (old && old !== url) URL.revokeObjectURL(old)
-  if (old) imageCache.delete(key)
-  imageCache.set(key, url)
-  while (imageCache.size > BLOB_CACHE_LIMIT) {
-    const oldest = imageCache.entries().next().value as [string, string] | undefined
-    if (!oldest) break
-    imageCache.delete(oldest[0])
-    URL.revokeObjectURL(oldest[1])
-  }
-}
-
-function releaseUnusedBlobUrls(messages: ChatMessage[], activeUrls: string[]) {
-  const keepKeys = new Set<string>()
-  messages.forEach((msg) => {
-    if (msg.role !== 'user') return
-    msg.images?.forEach((file) => keepKeys.add(file.path))
-    msg.files?.forEach((file) => keepKeys.add(file.path))
-  })
-  const keepUrls = new Set(activeUrls)
-  imageCache.forEach((url, key) => {
-    if (!keepKeys.has(key) && !keepUrls.has(url)) {
-      imageCache.delete(key)
-      URL.revokeObjectURL(url)
-    }
-  })
-}
-
-function base64ToBlobUrl(data: string, mime: string): string {
-  const bin = atob(data)
-  const bytes = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-  return URL.createObjectURL(new Blob([bytes], { type: mime }))
-}
 
 interface LightboxCtx {
   open: (blobUrl: string) => void
@@ -353,401 +321,20 @@ const LightboxContext = createContext<LightboxCtx>({ open: () => {} })
 
 // ── File preview modal context ─────────────────────────────────────────
 
-interface PreviewItem { src: string; mime: string; name: string }
-interface PreviewCtx { open: (item: PreviewItem) => void }
+import { FilePreviewModal, type PreviewItem } from './FilePreviewModal'
+
+interface PreviewCtx {
+  open: (item: PreviewItem) => void
+}
+
 const PreviewContext = createContext<PreviewCtx>({ open: () => {} })
-
-function FilePreviewModal({ item, onClose }: { item: PreviewItem; onClose: () => void }) {
-  const [zoom, setZoom] = useState(1)
-  const [rotation, setRotation] = useState(0)
-  const isImage = item.mime.startsWith('image/')
-  const isVideo = item.mime.startsWith('video/')
-  const isAudio = item.mime.startsWith('audio/')
-  const isPdf = item.mime === 'application/pdf'
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-
-  const handleZoomIn = () => setZoom((z) => Math.min(z + 0.25, 5))
-  const handleZoomOut = () => setZoom((z) => Math.max(z - 0.25, 0.25))
-  const handleResetZoom = () => { setZoom(1); setRotation(0) }
-  const handleRotate = () => setRotation((r) => (r + 90) % 360)
-
-  const handleDownload = () => {
-    const a = document.createElement('a')
-    a.href = item.src
-    a.download = item.name
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-black/90" onClick={onClose}>
-      {/* Header bar */}
-      <div className="flex items-center justify-between px-4 py-2 bg-zinc-900/80 border-b border-zinc-800 shrink-0">
-        <span className="text-sm text-zinc-300 truncate max-w-[60%]">{item.name}</span>
-        <div className="flex items-center gap-2">
-          {(isImage || isPdf) && (
-            <>
-              <button onClick={(e) => { e.stopPropagation(); handleZoomOut() }} className="p-1.5 rounded hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 transition-colors" title="Zoom out">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
-              </button>
-              <button onClick={(e) => { e.stopPropagation(); handleResetZoom() }} className="px-1.5 py-1 text-[11px] text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700 rounded transition-colors">
-                {Math.round(zoom * 100)}%
-              </button>
-              <button onClick={(e) => { e.stopPropagation(); handleZoomIn() }} className="p-1.5 rounded hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 transition-colors" title="Zoom in">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
-              </button>
-              {isImage && (
-                <button onClick={(e) => { e.stopPropagation(); handleRotate() }} className="p-1.5 rounded hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 transition-colors" title="Rotate">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>
-                </button>
-              )}
-            </>
-          )}
-          <button onClick={(e) => { e.stopPropagation(); handleDownload() }} className="p-1.5 rounded hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 transition-colors" title="Download">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          </button>
-          <button onClick={onClose} className="p-1.5 rounded hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 transition-colors" title="Close">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-          </button>
-        </div>
-      </div>
-      {/* Content area */}
-      <div className="flex-1 overflow-auto flex items-center justify-center p-4" onClick={(e) => e.stopPropagation()}>
-        {isImage && (
-          <img src={item.src} alt={item.name} style={{ transform: `scale(${zoom}) rotate(${rotation}deg)` }} className="max-w-full max-h-full object-contain transition-transform" />
-        )}
-        {isVideo && (
-          <video controls autoPlay src={item.src} className="max-w-full max-h-full rounded-lg" />
-        )}
-        {isAudio && (
-          <div className="flex flex-col items-center gap-4">
-            <span className="text-6xl">🎵</span>
-            <audio controls autoPlay src={item.src} className="w-80" />
-          </div>
-        )}
-        {isPdf && (
-          <iframe src={item.src} title={item.name} style={{ transform: `scale(${zoom})`, transformOrigin: 'top center' }} className="w-full h-full border-0 rounded-lg" />
-        )}
-        {!isImage && !isVideo && !isAudio && !isPdf && (
-          <div className="flex flex-col items-center gap-4 text-center">
-            <span className="text-6xl">📄</span>
-            <p className="text-zinc-300 text-sm">{item.name}</p>
-            <p className="text-zinc-600 text-xs">此文件类型不支持预览</p>
-            <button onClick={handleDownload} className="px-4 py-2 rounded-lg bg-zinc-800 border border-zinc-700 hover:border-zinc-500 text-sm text-zinc-300 transition-colors">
-              下载文件
-            </button>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-/** Convert a data-URL (data:mime;base64,...) to a blob-URL. */
-function dataUrlToBlobUrl(dataUrl: string): string {
-  const [header, b64] = dataUrl.split(',')
-  const mime = header.match(/data:(.*?);/)?.[1] || 'application/octet-stream'
-  return base64ToBlobUrl(b64, mime)
-}
-
-interface FileRequestCtx { request: (method: string, params?: Record<string, unknown>, timeoutMs?: number) => Promise<unknown> }
-const FileRequestContext = createContext<FileRequestCtx>({ request: async () => { throw new Error('File request context is unavailable') } })
-
-function LazyImage({ path, mime, name }: { path: string; mime?: string; name?: string }) {
-  const [src, setSrc] = useState<string | null>(() => imageCache.get(path) ?? null)
-  const [error, setError] = useState(false)
-  const ctx = useContext(LightboxContext)
-  const { request } = useContext(FileRequestContext)
-
-  useEffect(() => {
-    if (imageCache.has(path)) {
-      const cached = imageCache.get(path)!
-      setSrc(cached)
-      return
-    }
-    const fetchImage = async () => {
-      try {
-        const res = await request('file.read', { path }) as { data?: string; mime?: string } | undefined
-        if (res?.data) {
-          const mimeStr = res.mime || mime || 'image/png'
-          const dataUrl = `data:${mimeStr};base64,${res.data}`
-          const blobUrl = dataUrlToBlobUrl(dataUrl)
-          cacheBlobUrl(path, blobUrl)
-          setSrc(blobUrl)
-        } else {
-          setError(true)
-        }
-      } catch {
-        setError(true)
-      }
-    }
-    fetchImage()
-  }, [path, mime, request])
-
-  if (error) {
-    return <div className="text-xs text-zinc-600 italic">🖼️ {name || 'Image unavailable'}</div>
-  }
-
-  if (!src) {
-    return (
-      <div className="w-32 h-24 rounded-lg bg-zinc-800 border border-zinc-700 flex items-center justify-center">
-        <div className="h-4 w-4 border-2 border-zinc-600 border-t-zinc-300 rounded-full animate-spin" />
-      </div>
-    )
-  }
-
-  return (
-    <img
-      src={src}
-      alt={name || 'Attached image'}
-      className="max-w-full max-h-48 sm:max-h-64 lg:max-h-80 rounded-lg border border-zinc-700 object-contain cursor-pointer hover:border-zinc-500 transition-colors"
-      onClick={() => ctx.open(src)}
-    />
-  )
-}
-
-// ── Non-image file components (audio, video, PDF, generic) ──────────────
-
-function AudioFileCard({ path, name }: { path: string; name?: string }) {
-  const [src, setSrc] = useState<string | null>(() => imageCache.get(path) ?? null)
-  const [error, setError] = useState(false)
-  const { request } = useContext(FileRequestContext)
-
-  useEffect(() => {
-    if (imageCache.has(path)) { setSrc(imageCache.get(path)!); return }
-    const fetchFile = async () => {
-      try {
-        const res = await request('file.read', { path }) as { data?: string; mime?: string } | undefined
-        if (res?.data) {
-          const mimeStr = res.mime || 'audio/mpeg'
-          const blobUrl = base64ToBlobUrl(res.data, mimeStr)
-          cacheBlobUrl(path, blobUrl)
-          setSrc(blobUrl)
-        } else { setError(true) }
-      } catch { setError(true) }
-    }
-    fetchFile()
-  }, [path, request])
-
-  if (error) return <div className="text-xs text-zinc-600 italic">🎵 {name || 'Audio unavailable'}</div>
-  if (!src) return <div className="w-48 h-10 rounded-lg bg-zinc-800 border border-zinc-700 animate-pulse" />
-
-  return (
-    <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-zinc-800/60 border border-zinc-700">
-      <span className="text-xs text-zinc-400 truncate max-w-[120px]">{name || 'Audio'}</span>
-      <audio controls src={src} className="h-8 flex-1 min-w-0" />
-    </div>
-  )
-}
-
-function VideoFileCard({ path, name }: { path: string; name?: string }) {
-  const [src, setSrc] = useState<string | null>(() => imageCache.get(path) ?? null)
-  const [error, setError] = useState(false)
-  const [playError, setPlayError] = useState(false)
-  const [fileSize, setFileSize] = useState<number | null>(null)
-  const [downloading, setDownloading] = useState(false)
-  const { request } = useContext(FileRequestContext)
-
-  useEffect(() => {
-    if (imageCache.has(path)) { setSrc(imageCache.get(path)!); return }
-    const fetchFile = async () => {
-      try {
-        const res = await request('file.read', { path }) as { data?: string; mime?: string; size?: number } | undefined
-        if (res?.data) {
-          const mimeStr = res.mime || 'video/mp4'
-          const blobUrl = base64ToBlobUrl(res.data, mimeStr)
-          cacheBlobUrl(path, blobUrl)
-          setSrc(blobUrl)
-          setFileSize(res.size ?? null)
-        } else { setError(true) }
-      } catch { setError(true) }
-    }
-    fetchFile()
-  }, [path, request])
-
-  const handleDownload = async () => {
-    if (!src) return
-    setDownloading(true)
-    try {
-      const a = document.createElement('a')
-      a.href = src
-      a.download = name || 'video'
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-    } finally { setDownloading(false) }
-  }
-
-  if (error) return <div className="text-xs text-zinc-600 italic">🎬 {name || 'Video unavailable'}</div>
-  if (!src) return (
-    <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-zinc-800/60 border border-zinc-700">
-      <div className="h-4 w-4 border-2 border-zinc-600 border-t-zinc-300 rounded-full animate-spin" />
-      <span className="text-xs text-zinc-500">Loading video{name ? `: ${name}` : ''}…</span>
-    </div>
-  )
-
-  // Browser can't play this codec (e.g. H.265/HEVC .mov) — show download card.
-  if (playError) return (
-    <button
-      onClick={handleDownload}
-      disabled={downloading}
-      className="flex items-center gap-2 px-3 py-2 rounded-lg bg-zinc-800/60 border border-zinc-700 hover:border-zinc-500 transition-colors text-left"
-    >
-      <span className="text-lg">🎬</span>
-      <div className="flex-1 min-w-0">
-        <div className="text-xs text-zinc-300 truncate">{name || 'Video'}</div>
-        <div className="text-[10px] text-zinc-600">
-          {fileSize != null ? `${(fileSize / 1048576).toFixed(1)} MB · ` : ''}浏览器不支持此编码，请下载播放
-        </div>
-      </div>
-      {downloading && <div className="h-3 w-3 border-2 border-zinc-600 border-t-zinc-300 rounded-full animate-spin" />}
-    </button>
-  )
-
-  return (
-    <div className="flex flex-col gap-1">
-      <video
-        controls
-        src={src}
-        className="max-w-full max-h-48 sm:max-h-64 lg:max-h-80 rounded-lg border border-zinc-700"
-        preload="metadata"
-        onError={() => setPlayError(true)}
-      />
-      <div className="flex items-center gap-2 text-[10px] text-zinc-600">
-        <span className="truncate">{name || 'Video'}</span>
-        {fileSize != null && <span>({(fileSize / 1048576).toFixed(1)} MB)</span>}
-      </div>
-    </div>
-  )
-}
-
-function FileCard({ path, mime, name }: { path: string; mime?: string; name?: string }) {
-  const [loading, setLoading] = useState(false)
-  const previewCtx = useContext(PreviewContext)
-  const { request } = useContext(FileRequestContext)
-
-  const handleClick = async () => {
-    setLoading(true)
-    try {
-      let blobUrl = imageCache.get(path)
-      let resolvedMime = mime || 'application/octet-stream'
-      if (!blobUrl) {
-        const res = await request('file.read', { path }) as { data?: string; mime?: string } | undefined
-        if (!res?.data) return
-        resolvedMime = res.mime || mime || 'application/octet-stream'
-        blobUrl = base64ToBlobUrl(res.data, resolvedMime)
-        cacheBlobUrl(path, blobUrl)
-      }
-      previewCtx.open({ src: blobUrl, mime: resolvedMime, name: name || 'file' })
-    } finally { setLoading(false) }
-  }
-
-  return (
-    <button
-      onClick={handleClick}
-      disabled={loading}
-      className="flex items-center gap-2 px-3 py-2 rounded-lg bg-zinc-800/60 border border-zinc-700 hover:border-zinc-500 transition-colors text-left"
-    >
-      <span className="text-lg">📄</span>
-      <div className="flex-1 min-w-0">
-        <div className="text-xs text-zinc-300 truncate">{name || 'File'}</div>
-        {mime && <div className="text-[10px] text-zinc-600">{mime}</div>}
-      </div>
-      {loading && <div className="h-3 w-3 border-2 border-zinc-600 border-t-zinc-300 rounded-full animate-spin" />}
-    </button>
-  )
-}
-
-function renderFileRef(file: { path: string; mime?: string; name?: string }, index: number) {
-  const mime = file.mime || ''
-  if (mime.startsWith('audio/')) return <AudioFileCard key={index} path={file.path} name={file.name} />
-  if (mime.startsWith('video/')) return <VideoFileCard key={index} path={file.path} name={file.name} />
-  return <FileCard key={index} path={file.path} mime={file.mime} name={file.name} />
-}
 
 // ── Search context ─────────────────────────────────────────────────────
 
 const SearchContext = createContext<string>('')
 const PINNED_MESSAGES_KEY = 'myclaw_pinned_messages'
 
-
-function searchableMessageText(msg: ChatMessage): string {
-  if (msg.role === 'user') return msg.content
-  return msg.blocks.map((b) => {
-    if (b.type === 'content' || b.type === 'thinking') return b.text
-    return [b.name, JSON.stringify(b.args), b.output || ''].join(' ')
-  }).join(' ')
-}
-
-function messageTimestamp(id: string): number | null {
-  const m = id.match(/-(\d{13})$/)
-  return m ? Number(m[1]) : null
-}
-
-function timeDividerLabel(ts: number): string {
-  const d = new Date(ts)
-  const now = new Date()
-  const sameDay = d.toDateString() === now.toDateString()
-  const yesterday = new Date(now)
-  yesterday.setDate(now.getDate() - 1)
-  const prefix = sameDay ? 'Today' : d.toDateString() === yesterday.toDateString() ? 'Yesterday' : d.toLocaleDateString()
-  return `${prefix} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
-}
-
-function shouldShowTimeDivider(prev: ChatMessage | undefined, msg: ChatMessage): boolean {
-  const ts = messageTimestamp(msg.id)
-  if (!ts) return false
-  const prevTs = prev ? messageTimestamp(prev.id) : null
-  if (!prevTs) return true
-  return ts - prevTs > 30 * 60 * 1000 || new Date(ts).toDateString() !== new Date(prevTs).toDateString()
-}
-
-function highlightText(text: string, query: string): ReactNode {
-  if (!query) return text
-  const regex = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi')
-  const parts = text.split(regex)
-  if (parts.length === 1) return text
-  return parts.map((part, i) =>
-    regex.test(part) ? <mark key={i} className="bg-amber-500/30 text-amber-200 rounded px-0.5">{part}</mark> : part
-  )
-}
-
-function SearchBar({ query, setQuery, matchCount, matchIdx, onPrev, onNext, onClose }: {
-  query: string; setQuery: (q: string) => void; matchCount: number; matchIdx: number
-  onPrev: () => void; onNext: () => void; onClose: () => void
-}) {
-  const inputRef = useRef<HTMLInputElement>(null)
-  useEffect(() => { inputRef.current?.focus() }, [])
-
-  return (
-    <div className="absolute top-2 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 px-3 py-2 rounded-xl bg-zinc-900 border border-zinc-700 shadow-2xl">
-      <Search size={14} className="text-zinc-500 shrink-0" />
-      <input
-        ref={inputRef}
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') { e.preventDefault(); e.shiftKey ? onPrev() : onNext() }
-          if (e.key === 'Escape') onClose()
-        }}
-        placeholder="Search messages…"
-        className="bg-transparent text-sm text-zinc-100 placeholder-zinc-600 outline-none w-48 sm:w-64"
-      />
-      <span className="text-xs text-zinc-500 shrink-0">
-        {matchCount > 0 ? `${matchIdx + 1}/${matchCount}` : query ? 'No results' : ''}
-      </span>
-      <button onClick={onPrev} disabled={matchCount === 0} className="p-1 rounded hover:bg-zinc-800 text-zinc-400 disabled:opacity-30"><ChevronDown size={14} className="rotate-180" /></button>
-      <button onClick={onNext} disabled={matchCount === 0} className="p-1 rounded hover:bg-zinc-800 text-zinc-400 disabled:opacity-30"><ChevronDown size={14} /></button>
-      <button onClick={onClose} className="p-1 rounded hover:bg-zinc-800 text-zinc-400"><X size={14} /></button>
-    </div>
-  )
-}
+import { SearchBar } from './SearchBar'
 
 // ── Editable user bubble ───────────────────────────────────────────────
 
@@ -917,9 +504,10 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
   const pinnedMessages = pinnedIds.map(id => messages.find(m => m.id === id)).filter(Boolean) as ChatMessage[]
   const slides = useMemo(() => {
     const seen = new Set<string>()
+    const cache = getImageCache()
     return messages.flatMap((msg) => {
       if (msg.role !== 'user') return []
-      return (msg.images ?? []).map((img) => imageCache.get(img.path)).filter((url): url is string => !!url)
+      return (msg.images ?? []).map((img) => cache.get(img.path)).filter((url): url is string => !!url)
     }).filter((url) => {
       if (seen.has(url)) return false
       seen.add(url)
