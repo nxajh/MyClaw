@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo, memo, createContext, useContext, type ReactNode } from 'react'
+import React, { useState, useEffect, useRef, useCallback, useMemo, memo, createContext, useContext, type ReactNode } from 'react'
 import type { RefObject } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -15,6 +15,50 @@ import Fullscreen from 'yet-another-react-lightbox/plugins/fullscreen'
 import 'yet-another-react-lightbox/styles.css'
 import type { ChatMessage, MessageBlock } from '../hooks/useWebSocket'
 import ToolCallCard from './ToolCallCard'
+
+// ── Error Boundary ────────────────────────────────────────────────────────────
+
+interface ErrorBoundaryState {
+  hasError: boolean
+  error?: Error
+}
+
+class ChatErrorBoundary extends React.Component<{ children: ReactNode }, ErrorBoundaryState> {
+  constructor(props: { children: ReactNode }) {
+    super(props)
+    this.state = { hasError: false }
+  }
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { hasError: true, error }
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.error('[ChatErrorBoundary] Render error:', error, errorInfo)
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex flex-col items-center justify-center h-full p-8 text-center">
+          <div className="text-4xl mb-4">⚠️</div>
+          <h2 className="text-lg font-semibold text-zinc-200 mb-2">消息渲染出错</h2>
+          <p className="text-sm text-zinc-500 mb-4">
+            {this.state.error?.message || '未知错误'}
+          </p>
+          <button
+            onClick={() => this.setState({ hasError: false })}
+            className="px-4 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-sm transition-colors"
+          >
+            重试
+          </button>
+        </div>
+      )
+    }
+
+    return this.props.children
+  }
+}
 
 // Lazy-load KaTeX CSS only when math content is detected
 let katexCssLoaded = false
@@ -150,7 +194,7 @@ function GeneratingDots() {
 
 // ── Thinking block with throttled updates ────────────────────────────────
 
-function ThinkingBlock({ text, isStreaming }: { text: string; isStreaming?: boolean }) {
+const ThinkingBlock = memo(function ThinkingBlock({ text, isStreaming }: { text: string; isStreaming?: boolean }) {
   const [open, setOpen] = useState(false)
   const [displayText, setDisplayText] = useState(text)
   const rafRef = useRef<number | null>(null)
@@ -197,7 +241,7 @@ function ThinkingBlock({ text, isStreaming }: { text: string; isStreaming?: bool
       )}
     </div>
   )
-}
+})
 
 // ── Content renderer ─────────────────────────────────────────────────────
 
@@ -230,7 +274,7 @@ function splitSystemReminders(text: string): ContentSegment[] {
   return segments
 }
 
-function SystemReminderCard({ text }: { text: string }) {
+const SystemReminderCard = memo(function SystemReminderCard({ text }: { text: string }) {
   const [open, setOpen] = useState(false)
   const lines = text.split('\n').filter(Boolean).length
   const preview = text.split('\n').find(line => line.trim())?.trim() || 'System reminder'
@@ -256,7 +300,7 @@ function SystemReminderCard({ text }: { text: string }) {
       )}
     </div>
   )
-}
+})
 
 /// Auto-close unclosed fenced code blocks so the rest of the document
 /// isn't swallowed into a code block per CommonMark spec.
@@ -280,7 +324,7 @@ function closeUnclosedFences(text: string): string {
   return inFence ? text + '\n' + fenceMarker.repeat(Math.max(fenceLen, 3)) + '\n' : text
 }
 
-function ContentBlock({ text, done }: { text: string; done: boolean }) {
+const ContentBlock = memo(function ContentBlock({ text, done }: { text: string; done: boolean }) {
   const [katexReady, setKatexReady] = useState(!!RehypeKatex)
   // Render-only pipeline: fence fix → LaTeX delimiter normalize → remark-math ($/$$)
   const prepared = useMemo(
@@ -943,6 +987,10 @@ interface Props {
 }
 
 export default function MessageList({ messages, containerRef, onRetry }: Props) {
+  // Preload KaTeX CSS on mount so math renders without a flash
+  useEffect(() => {
+    if (RehypeKatex) ensureKatexCss()
+  }, [])
   const { sendMessage, setMessages, isGenerating: globalGenerating, request } = useWebSocketContext()
   const { toast } = useToast()
   const [isNearBottom, setIsNearBottom] = useState(true)
@@ -1129,6 +1177,7 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
   const virtualItems = virtualizer.getVirtualItems()
 
   return (
+    <ChatErrorBoundary>
     <SearchContext.Provider value={searchQuery}>
     <FileRequestContext.Provider value={{ request }}>
     <LightboxContext.Provider value={lightboxCtx.current}>
@@ -1242,5 +1291,6 @@ export default function MessageList({ messages, containerRef, onRetry }: Props) 
     </LightboxContext.Provider>
     </FileRequestContext.Provider>
     </SearchContext.Provider>
+    </ChatErrorBoundary>
   )
 }
