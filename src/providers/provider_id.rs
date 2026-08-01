@@ -37,6 +37,7 @@ pub mod well_known {
     pub const MINIMAX: &str = "minimax";
     pub const GOOGLE: &str = "google";
     pub const DEEPSEEK: &str = "deepseek";
+    pub const QWEN: &str = "qwen";
 }
 
 // ── URL host detection ───────────────────────────────────────────────────────
@@ -66,6 +67,8 @@ pub fn detect_from_url(base_url: &str) -> Option<ProviderId> {
         Some(ProviderId::new(well_known::GOOGLE))
     } else if host.contains("deepseek") {
         Some(ProviderId::new(well_known::DEEPSEEK))
+    } else if host.contains("aliyuncs.com") || host.contains("dashscope") {
+        Some(ProviderId::new(well_known::QWEN))
     } else if host.contains("openai.com") || host.contains("siliconflow") {
         Some(ProviderId::new(well_known::OPENAI))
     } else {

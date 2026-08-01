@@ -167,6 +167,16 @@ impl ProviderFactory {
                 };
                 Ok(Box::new(client))
             }
+            // ── Qwen: OpenAI client + Qwen body override (enable_thinking + reasoning echo) ──
+            (well_known::QWEN, _) => {
+                let client = OpenAiChatCompletionsClient::new(request.api_key, request.base_url)
+                    .with_body_override(crate::providers::qwen::qwen_body_override);
+                let client = match request.user_agent {
+                    Some(ua) => client.with_user_agent(ua),
+                    None => client,
+                };
+                Ok(Box::new(client))
+            }
             // ── Xiaomi: config-driven protocol (Anthropic or OpenAI) ──
             (well_known::XIAOMI, _) => {
                 let mut p = crate::providers::xiaomi::XiaomiProvider::with_base_url(
@@ -192,7 +202,7 @@ impl ProviderFactory {
                 Ok(Box::new(client))
             }
             // ── OpenAI-compatible providers ──
-            (_, Protocol::ChatCompletions) if id != well_known::GOOGLE && id != well_known::DEEPSEEK => {
+            (_, Protocol::ChatCompletions) if id != well_known::GOOGLE && id != well_known::DEEPSEEK && id != well_known::QWEN => {
                 let client = OpenAiChatCompletionsClient::new(request.api_key, request.base_url);
                 let client = match request.user_agent {
                     Some(ua) => client.with_user_agent(ua),

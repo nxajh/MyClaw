@@ -51,10 +51,11 @@ pub mod google;
 pub mod http;
 pub mod kimi;
 pub mod media;
-pub mod minimax;
-pub mod openai;
 pub mod provider_factory;
 pub mod provider_id;
+pub mod qwen;
+pub mod minimax;
+pub mod openai;
 pub mod shared;
 pub mod xiaomi;
 
