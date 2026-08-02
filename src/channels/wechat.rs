@@ -35,7 +35,7 @@ use parking_lot::RwLock;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::channels::message::{
     ChannelInboundMessage, ChannelMessageContent, MessageReceiver, MessageSender,
@@ -906,6 +906,7 @@ impl Channel for WechatChannel {
                 match this.api.get_updates().await {
                     Ok(resp) => {
                         consecutive_errors = 0;
+                        debug!("WeChat: get_updates returned {} msgs", resp.msgs.len());
                         for msg in resp.msgs {
                             let event = parse_inbound(&msg);
                             if !this.dedup.check_and_record(&event.msg_id) {
