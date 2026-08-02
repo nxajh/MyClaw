@@ -45,7 +45,7 @@ use crate::{Channel, DedupState};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const CHANNEL_VERSION: &str = "2.1.7";
+const CHANNEL_VERSION: &str = "2.4.6";
 const ILINK_APP_ID: &str = "bot";
 const QR_POLL_INTERVAL_SECS: u64 = 3;
 const QR_MAX_ATTEMPTS: u64 = 60;
@@ -122,6 +122,7 @@ fn decrypt_ecb(ciphertext: &[u8], key: &[u8; 16]) -> Result<Vec<u8>, String> {
 fn build_base_info() -> BaseInfo {
     BaseInfo {
         channel_version: CHANNEL_VERSION.to_string(),
+        bot_agent: Some("MyClaw".to_string()),
     }
 }
 
@@ -139,6 +140,8 @@ fn build_client_version() -> u32 {
 #[derive(Debug, Clone, Serialize)]
 struct BaseInfo {
     channel_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bot_agent: Option<String>,
 }
 
 // ── Inbound message types ─────────────────────────────────────────────────────
@@ -211,9 +214,13 @@ struct GetUpdatesResponse {
     #[serde(default)]
     ret: i64,
     #[serde(default)]
+    errcode: i64,
+    #[serde(default)]
     errmsg: String,
     #[serde(rename = "get_updates_buf", default)]
     get_updates_buf: String,
+    #[serde(default)]
+    longpolling_timeout_ms: u64,
     #[serde(default)]
     msgs: Vec<IlinkMessage>,
 }
@@ -509,17 +516,21 @@ impl ApiClient {
             )
             .await?;
 
-        let new_buf = resp
-            .get("get_updates_buf")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if !new_buf.is_empty() {
-            self.state.write().get_updates_buf = new_buf;
+        let parsed: GetUpdatesResponse =
+            serde_json::from_value(resp.clone()).map_err(|e| ApiError::Parse(format!("get_updates: {e}")))?;
+
+        if parsed.ret != 0 || parsed.errcode != 0 {
+            return Err(ApiError::Api(
+                if parsed.errcode != 0 { parsed.errcode } else { parsed.ret },
+                if parsed.errmsg.is_empty() { "get_updates error".into() } else { parsed.errmsg },
+            ));
         }
 
-        serde_json::from_value(resp.clone())
-            .map_err(|e| ApiError::Parse(format!("get_updates: {e}")))
+        let new_buf = parsed.get_updates_buf.as_str();
+        if !new_buf.is_empty() {
+            self.state.write().get_updates_buf = new_buf.to_string();
+        }
+        Ok(parsed)
     }
 
     async fn send_text(
@@ -605,6 +616,26 @@ impl ApiClient {
             )
             .await?;
         serde_json::from_value(resp).map_err(|e| ApiError::Parse(format!("get_qrcode_status: {e}")))
+    }
+
+    async fn notify_start(&self) -> Result<(), ApiError> {
+        let req = serde_json::json!({
+            "base_info": build_base_info(),
+        });
+        let resp = self
+            .api_post("ilink/bot/msg/notifystart", &req)
+            .await?;
+        self.check_ret(&resp)
+    }
+
+    async fn notify_stop(&self) -> Result<(), ApiError> {
+        let req = serde_json::json!({
+            "base_info": build_base_info(),
+        });
+        let resp = self
+            .api_post("ilink/bot/msg/notifystop", &req)
+            .await?;
+        self.check_ret(&resp)
     }
 }
 
@@ -750,6 +781,11 @@ impl WechatChannel {
     async fn login(&self) -> anyhow::Result<()> {
         if self.api.state.read().bot_token.is_some() {
             info!("WeChat: using saved bot_token");
+            if let Err(e) = self.api.notify_start().await {
+                warn!("WeChat: notifyStart failed (ignored): {e}");
+            } else {
+                info!("WeChat: notifyStart sent");
+            }
             return Ok(());
         }
 
@@ -774,13 +810,20 @@ impl WechatChannel {
                         "WeChat QR login confirmed: {} ({})",
                         status.nickname, status.ilink_bot_id
                     );
-                    let mut st = self.api.state.write();
-                    st.bot_token = Some(status.bot_token);
-                    st.bot_wxid = Some(status.ilink_bot_id.clone());
-                    st.bot_nickname = Some(status.nickname.clone());
-                    if !status.baseurl.is_empty() {
-                        info!("WeChat: API base updated to {}", status.baseurl);
-                        st.api_base = Some(status.baseurl);
+                    {
+                        let mut st = self.api.state.write();
+                        st.bot_token = Some(status.bot_token);
+                        st.bot_wxid = Some(status.ilink_bot_id.clone());
+                        st.bot_nickname = Some(status.nickname.clone());
+                        if !status.baseurl.is_empty() {
+                            info!("WeChat: API base updated to {}", status.baseurl);
+                            st.api_base = Some(status.baseurl);
+                        }
+                    }
+                    if let Err(e) = self.api.notify_start().await {
+                        warn!("WeChat: notifyStart failed (ignored): {e}");
+                    } else {
+                        info!("WeChat: notifyStart sent");
                     }
                     return Ok(());
                 }
@@ -908,7 +951,7 @@ impl Channel for WechatChannel {
                     }
                     Err(ApiError::Api(-14, _)) => {
                         warn!(
-                            "WeChat: rate limited (-14), pausing {}s",
+                            "WeChat: stale token / session invalid (-14), pausing {}s",
                             RATE_LIMIT_PAUSE_SECS
                         );
                         tokio::time::sleep(Duration::from_secs(RATE_LIMIT_PAUSE_SECS)).await;
@@ -971,7 +1014,7 @@ mod tests {
 
     #[test]
     fn test_client_version_encoding() {
-        assert_eq!(build_client_version(), 131335); // 2.1.7
+        assert_eq!(build_client_version(), 132102); // 2.4.6
     }
 
     #[test]
