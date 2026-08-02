@@ -164,6 +164,8 @@ struct IlinkMessage {
     message_state: i64,
     #[serde(default)]
     list: Vec<MessageItem>,
+    #[serde(rename = "item_list", default)]
+    item_list: Vec<MessageItem>,
     #[serde(default)]
     context_token: String,
 }
@@ -178,6 +180,15 @@ impl IlinkMessage {
     }
     fn is_group(&self) -> bool {
         !self.group_id.is_empty()
+    }
+    /// Return the item list from the API response.
+    /// The iLink API uses `item_list`, but older versions used `list`.
+    fn items(&self) -> &[MessageItem] {
+        if !self.item_list.is_empty() {
+            &self.item_list
+        } else {
+            &self.list
+        }
     }
 }
 
@@ -653,7 +664,7 @@ struct InboundEvent {
 }
 
 fn parse_inbound(msg: &IlinkMessage) -> InboundEvent {
-    let content = match msg.list.first() {
+    let content = match msg.items().first() {
         Some(first) if first.item_type == ITEM_TYPE_TEXT => InboundContent::Text(
             first
                 .text_item
@@ -1048,6 +1059,7 @@ mod tests {
                 }),
                 voice_item: None,
             }],
+            item_list: vec![],
             context_token: "ctx_tok".into(),
         };
         let event = parse_inbound(&msg);
@@ -1077,6 +1089,7 @@ mod tests {
                     text: "转写出来的内容".into(),
                 }),
             }],
+            item_list: vec![],
             context_token: String::new(),
         };
         let event = parse_inbound(&msg);
@@ -1101,6 +1114,7 @@ mod tests {
                 text_item: None,
                 voice_item: Some(VoiceItem { text: "   ".into() }),
             }],
+            item_list: vec![],
             context_token: String::new(),
         };
         assert!(matches!(
