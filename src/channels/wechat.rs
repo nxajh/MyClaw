@@ -301,11 +301,8 @@ struct SendMessageMsg {
     from_user_id: String,
     to_user_id: String,
     client_id: String,
-    #[serde(rename = "type")]
     message_type: i64,
-    #[serde(rename = "state")]
     message_state: i64,
-    #[serde(rename = "list")]
     item_list: Vec<SendMessageItem>,
     #[serde(rename = "context_token", skip_serializing_if = "Option::is_none")]
     context_token: Option<String>,
