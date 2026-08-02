@@ -288,7 +288,7 @@ struct GetUpdatesRequest {
 
 #[derive(Debug, Clone, Serialize)]
 struct SendMessageRequest {
-    #[serde(rename = "snake_case")]
+    #[serde(rename = "msg")]
     msg: SendMessageMsg,
     #[serde(rename = "base_info")]
     base_info: BaseInfo,
