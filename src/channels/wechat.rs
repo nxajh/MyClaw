@@ -909,7 +909,7 @@ impl Channel for WechatChannel {
                         debug!("WeChat: get_updates returned {} msgs", resp.msgs.len());
                         for msg in resp.msgs {
                             let event = parse_inbound(&msg);
-                            if !this.dedup.check_and_record(&event.msg_id) {
+                            if this.dedup.check_and_record(&event.msg_id) {
                                 continue;
                             }
                             match this.check_authorization(
