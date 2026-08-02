@@ -444,10 +444,16 @@ pub fn truncate_index(content: &str, max_lines: usize, max_bytes: usize) -> Stri
     };
 
     if truncated.len() > max_bytes {
-        if let Some(pos) = truncated[..max_bytes].rfind('\n') {
+        // Find the last char boundary at or before max_bytes to avoid panicking
+        // on multi-byte UTF-8 sequences.
+        let mut end = max_bytes;
+        while end > 0 && !truncated.is_char_boundary(end) {
+            end -= 1;
+        }
+        if let Some(pos) = truncated[..end].rfind('\n') {
             truncated.truncate(pos);
         } else {
-            truncated.truncate(max_bytes);
+            truncated.truncate(end);
         }
     }
 
