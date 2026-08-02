@@ -950,11 +950,15 @@ impl Channel for WechatChannel {
                         }
                     }
                     Err(ApiError::Api(-14, _)) => {
-                        warn!(
-                            "WeChat: stale token / session invalid (-14), pausing {}s",
-                            RATE_LIMIT_PAUSE_SECS
-                        );
-                        tokio::time::sleep(Duration::from_secs(RATE_LIMIT_PAUSE_SECS)).await;
+                        warn!("WeChat: stale token / session invalid (-14), clearing token and re-login");
+                        this.api.state.write().bot_token = None;
+                        if let Err(login_err) = this.login().await {
+                            warn!("WeChat: re-login failed: {login_err}, pausing {}s", RATE_LIMIT_PAUSE_SECS);
+                            tokio::time::sleep(Duration::from_secs(RATE_LIMIT_PAUSE_SECS)).await;
+                        } else {
+                            info!("WeChat: re-login successful after stale token");
+                            consecutive_errors = 0;
+                        }
                     }
                     Err(e) => {
                         consecutive_errors += 1;
