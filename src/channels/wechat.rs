@@ -47,7 +47,7 @@ use crate::{Channel, DedupState};
 
 const CHANNEL_VERSION: &str = "2.4.6";
 const ILINK_APP_ID: &str = "bot";
-const QR_POLL_INTERVAL_SECS: u64 = 3;
+const QR_POLL_INTERVAL_SECS: u64 = 1;
 const QR_MAX_ATTEMPTS: u64 = 60;
 const RATE_LIMIT_PAUSE_SECS: u64 = 3600;
 const MAX_CONSECUTIVE_ERRORS: u32 = 10;
@@ -332,12 +332,14 @@ struct GetConfigRequest {
     base_info: BaseInfo,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 struct GetBotQrCodeRequest {
     #[serde(rename = "base_info")]
     base_info: BaseInfo,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 struct GetQrCodeStatusRequest {
     #[serde(rename = "qrcode")]
@@ -597,24 +599,16 @@ impl ApiClient {
     }
 
     async fn get_bot_qrcode(&self) -> Result<QrCodeResponse, ApiError> {
-        let _req = GetBotQrCodeRequest {
-            base_info: build_base_info(),
-        };
-        let resp = self.api_get("ilink/bot/getbotqrcode").await?;
+        let resp = self.api_get("ilink/bot/get_bot_qrcode?bot_type=3").await?;
         serde_json::from_value(resp).map_err(|e| ApiError::Parse(format!("get_bot_qrcode: {e}")))
     }
 
     async fn get_qrcode_status(&self, qrcode: &str) -> Result<QrStatus, ApiError> {
-        let req = GetQrCodeStatusRequest {
-            qrcode: qrcode.to_string(),
-            base_info: build_base_info(),
-        };
-        let resp = self
-            .api_post(
-                "ilink/bot/getqrcodeqrt",
-                &serde_json::to_value(&req).unwrap(),
-            )
-            .await?;
+        let endpoint = format!(
+            "ilink/bot/get_qrcode_status?qrcode={}",
+            urlencoding::encode(qrcode)
+        );
+        let resp = self.api_get(&endpoint).await?;
         serde_json::from_value(resp).map_err(|e| ApiError::Parse(format!("get_qrcode_status: {e}")))
     }
 
@@ -794,8 +788,8 @@ impl WechatChannel {
 
         if !qr_resp.qrcode_img_content.is_empty() {
             info!(
-                "WeChat QR code image available (base64, {} bytes)",
-                qr_resp.qrcode_img_content.len()
+                "WeChat QR login URL: {} (qrcode={})",
+                qr_resp.qrcode_img_content, qr_resp.qrcode
             );
         }
 
