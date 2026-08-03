@@ -1054,7 +1054,14 @@ struct InboundEvent {
 }
 
 fn parse_inbound(msg: &IlinkMessage) -> InboundEvent {
-    let content = match msg.items().first() {
+    let first = msg.items().first();
+    debug!(
+        "WeChat: parse_inbound items_count={} first_type={:?}",
+        msg.items().len(),
+        first.map(|f| f.item_type)
+    );
+
+    let content = match first {
         Some(first) if first.item_type == ITEM_TYPE_TEXT => InboundContent::Text(
             first
                 .text_item
@@ -1076,6 +1083,12 @@ fn parse_inbound(msg: &IlinkMessage) -> InboundEvent {
         }
         Some(first) if first.item_type == ITEM_TYPE_IMAGE => {
             if let Some(ref img) = first.image_item {
+                debug!(
+                    "WeChat: image item found: encrypt_qp={} full_url={} aeskey={}",
+                    !img.media.encrypt_query_param.is_empty(),
+                    !img.media.full_url.is_empty(),
+                    !img.aeskey.is_empty()
+                );
                 if !img.media.encrypt_query_param.is_empty() || !img.media.full_url.is_empty() {
                     InboundContent::MediaRequest {
                         item_type: ITEM_TYPE_IMAGE,
@@ -1505,8 +1518,17 @@ impl Channel for WechatChannel {
                         consecutive_errors = 0;
                         debug!("WeChat: get_updates returned {} msgs", resp.msgs.len());
                         for msg in resp.msgs {
+                            // Debug: log raw message structure
+                            let item_types: Vec<i64> = msg.items().iter().map(|i| i.item_type).collect();
+                            debug!(
+                                "WeChat: inbound msg_id={} from={} type={} item_types={:?} ctx={}",
+                                msg.client_id, msg.from_user_id, msg.message_type, item_types,
+                                !msg.context_token.is_empty()
+                            );
+
                             let event = parse_inbound(&msg);
                             if this.dedup.check_and_record(&event.msg_id) {
+                                debug!("WeChat: dedup skip msg_id={}", event.msg_id);
                                 continue;
                             }
                             match this.check_authorization(
@@ -1514,16 +1536,22 @@ impl Channel for WechatChannel {
                                 crate::channels::MessageScope::Direct,
                             ) {
                                 crate::channels::AuthDecision::Allow => {}
-                                crate::channels::AuthDecision::Ignore => continue,
+                                crate::channels::AuthDecision::Ignore => {
+                                    debug!("WeChat: auth ignore sender={}", event.sender_wxid);
+                                    continue;
+                                }
                                 crate::channels::AuthDecision::Reject { reason } => {
                                     warn!(sender = %event.sender_wxid, reason, "wechat: rejected by policy");
                                     continue;
                                 }
                             }
 
+                            debug!("WeChat: processing msg_id={} content={:?}", event.msg_id, event.content);
+
                             let content = match event.content {
                                 InboundContent::Text(t) => {
                                     if t.trim().is_empty() {
+                                        debug!("WeChat: skip empty text msg_id={}", event.msg_id);
                                         continue;
                                     }
                                     ChannelMessageContent::text(t)
@@ -1534,6 +1562,12 @@ impl Channel for WechatChannel {
                                     aeskey_hex,
                                     filename,
                                 } => {
+                                    debug!(
+                                        "WeChat: media download item_type={} filename={} encrypt_qp={} full_url={}",
+                                        item_type, filename,
+                                        !media.encrypt_query_param.is_empty(),
+                                        !media.full_url.is_empty()
+                                    );
                                     match this.api.download_cdn_media(&media, aeskey_hex.as_deref()).await {
                                         Ok(data) => {
                                             let mime = match item_type {
@@ -1565,7 +1599,10 @@ impl Channel for WechatChannel {
                                         }
                                     }
                                 }
-                                InboundContent::Unknown => continue,
+                                InboundContent::Unknown => {
+                                    debug!("WeChat: skip unknown content msg_id={}", event.msg_id);
+                                    continue;
+                                }
                             };
 
                             if !event.context_token.is_empty() {
@@ -1604,6 +1641,7 @@ impl Channel for WechatChannel {
                                 interruption_scope_id: None,
                             };
                             // tx is moved into the async block; we send on it directly.
+                            debug!("WeChat: dispatching msg_id={} to session", event.msg_id);
                             if let Err(e) = tx.send(channel_msg).await {
                                 warn!("WeChat dispatch error (receiver dropped): {e}");
                                 break;
