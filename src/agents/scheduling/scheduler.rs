@@ -1251,6 +1251,7 @@ pub async fn run_webhook_server(
     pre_bound: Option<std::net::TcpListener>,
 ) {
     let listener = if let Some(std_listener) = pre_bound {
+        let _ = std_listener.set_nonblocking(true);
         match tokio::net::TcpListener::from_std(std_listener) {
             Ok(l) => l,
             Err(e) => {

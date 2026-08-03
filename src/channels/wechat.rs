@@ -727,7 +727,6 @@ impl ApiClient {
         status: Option<&str>,
         context_token: Option<&str>,
     ) -> Result<(), ApiError> {
-        debug!("WeChat: send_tool_progress to={} item_type={} tool={} ctx_token={:?}", to_user_id, item_type, tool_name, context_token);
         let now_ms = chrono::Utc::now().timestamp_millis();
         let mut item_json = serde_json::json!({
             "type": item_type,
@@ -790,7 +789,6 @@ impl ApiClient {
             .send()
             .await
             .map_err(|e| ApiError::Network(e.to_string()))?;
-        debug!("WeChat: send_tool_progress response status={}", resp.status());
         if !resp.status().is_success() {
             return Err(ApiError::Http(
                 resp.status().as_u16(),
@@ -1357,7 +1355,6 @@ impl Channel for WechatChannel {
         recipient: &str,
         event: crate::channels::ToolEvent,
     ) {
-        debug!("WeChat: on_tool_event recipient={} event={:?}", recipient, event);
         let ctx_token = self
             .api
             .state
