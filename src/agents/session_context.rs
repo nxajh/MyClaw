@@ -334,6 +334,12 @@ impl SessionContext {
             run_mode: prompt_config.run_mode,
         };
 
+        // Notify channel that processing has started (typing indicator, etc.)
+        if let Some(ref ch) = channel {
+            ch.on_status(&reply_target, crate::ProcessingStatus::Thinking)
+                .await;
+        }
+
         let result = self.agent.run(&mut session, turn_ctx, &runtime).await;
         // Per-turn channel + turn_stream are transient. Consume the
         // stream first (RFC §7.6): finish on success delivers FinalDelivered;
@@ -343,6 +349,11 @@ impl SessionContext {
 
         match (result, turn_stream) {
             (Ok(turn_result), stream) => {
+                // Notify channel that processing completed successfully
+                if let Some(ref ch) = channel {
+                    ch.on_status(&reply_target, crate::ProcessingStatus::Done)
+                        .await;
+                }
                 // ── Media aging ────────────────────────────────────────────
                 // After the model has seen the media in this turn, replace
                 // inline File parts in history with compact text markers so
@@ -413,6 +424,21 @@ impl SessionContext {
             (Err(e), stream) => {
                 if let Some(s) = stream {
                     s.abort().await;
+                }
+                // Notify channel of error + send error notice to user
+                if let Some(ref ch) = channel {
+                    ch.on_status(&reply_target, crate::ProcessingStatus::Error)
+                        .await;
+                    // Best-effort error notice
+                    let err_msg = crate::agents::user_messages::MSG_TURN_FAILED.to_string();
+                    let receiver =
+                        crate::channels::MessageReceiver::new(reply_target.clone());
+                    let message = crate::channels::ChannelOutboundMessage {
+                        receiver,
+                        content: crate::channels::ChannelMessageContent::text(err_msg),
+                        options: Default::default(),
+                    };
+                    let _ = ch.send_message(&message).await;
                 }
                 let channel_name = channel_for_send
                     .as_ref()

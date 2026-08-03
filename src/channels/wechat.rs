@@ -2,20 +2,18 @@
 //!
 //! Implements the [`Channel`] trait for the WeChat iLink Bot API.
 //!
-//! # Features (v1)
+//! # Features
 //!
 //! - Long-poll `getupdates` for incoming messages
 //! - Send text messages via `sendmessage`
 //! - QR login flow (fetches QR code + polls for confirmation)
-//! - Typing indicators
+//! - Typing indicators (per-user typing_ticket)
 //! - Allowed-user filtering
 //! - Dedup of recently-seen messages
-//!
-//! # Not in v1
-//!
-//! - Media upload/download (CDN)
-//! - Video/voice/file attachments
-//! - Group @mention detection
+//! - Media upload/download (CDN with AES-128-ECB encryption)
+//! - Image, video, and file attachment send/receive
+//! - Context token persistence across restarts
+//! - Markdown filtering for WeChat-incompatible syntax
 
 #![allow(dead_code)]
 
@@ -38,10 +36,11 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::channels::message::{
-    ChannelInboundMessage, ChannelMessageContent, MessageReceiver, MessageSender,
+    ChannelFile, ChannelFileMeta, ChannelInboundMessage, ChannelMessageContent, LocalFileBody,
+    MessageReceiver, MessageSender,
 };
 use crate::config::channel::WechatAccountConfig;
-use crate::{Channel, DedupState};
+use crate::{Channel, DedupState, ProcessingStatus};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -54,10 +53,21 @@ const MAX_CONSECUTIVE_ERRORS: u32 = 10;
 
 const MESSAGE_TYPE_BOT: i64 = 2;
 const MESSAGE_STATE_FINISH: i64 = 2;
+const MESSAGE_STATE_GENERATING: i64 = 1;
 const ITEM_TYPE_TEXT: i64 = 1;
+const ITEM_TYPE_IMAGE: i64 = 2;
 const ITEM_TYPE_VOICE: i64 = 3;
+const ITEM_TYPE_FILE: i64 = 4;
+const ITEM_TYPE_VIDEO: i64 = 5;
+const ITEM_TYPE_TOOL_CALL_START: i64 = 11;
+const ITEM_TYPE_TOOL_CALL_RESULT: i64 = 12;
 const TYPING_STATUS_TYPING: i64 = 1;
 const TYPING_STATUS_CANCEL: i64 = 2;
+
+// Upload media type constants (proto: UploadMediaType).
+const UPLOAD_MEDIA_IMAGE: i64 = 1;
+const UPLOAD_MEDIA_VIDEO: i64 = 2;
+const UPLOAD_MEDIA_FILE: i64 = 3;
 
 // ── Crypto helpers ─────────────────────────────────────────────────────────────
 
@@ -200,6 +210,12 @@ struct MessageItem {
     text_item: Option<TextItem>,
     #[serde(default)]
     voice_item: Option<VoiceItem>,
+    #[serde(default)]
+    image_item: Option<InboundImageItem>,
+    #[serde(default)]
+    video_item: Option<InboundVideoItem>,
+    #[serde(default)]
+    file_item: Option<InboundFileItem>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -216,6 +232,46 @@ struct TextItem {
 struct VoiceItem {
     #[serde(default)]
     text: String,
+}
+
+/// CDN media reference (`CDNMedia`). `aes_key` is base64-encoded bytes in JSON.
+#[derive(Debug, Clone, Deserialize)]
+struct CDNMedia {
+    #[serde(default)]
+    encrypt_query_param: String,
+    #[serde(default)]
+    aes_key: String,
+    #[serde(default, rename = "type")]
+    encrypt_type: i64,
+    #[serde(default)]
+    full_url: String,
+}
+
+/// Inbound image item (`type == 2`). `aeskey` is a hex-encoded raw 16-byte AES
+/// key, preferred over `media.aes_key` for inbound decryption.
+#[derive(Debug, Clone, Deserialize)]
+struct InboundImageItem {
+    #[serde(default)]
+    media: CDNMedia,
+    /// Raw AES-128 key as hex string (16 bytes); preferred over media.aes_key.
+    #[serde(default)]
+    aeskey: String,
+}
+
+/// Inbound video item (`type == 5`).
+#[derive(Debug, Clone, Deserialize)]
+struct InboundVideoItem {
+    #[serde(default)]
+    media: CDNMedia,
+}
+
+/// Inbound file item (`type == 4`).
+#[derive(Debug, Clone, Deserialize)]
+struct InboundFileItem {
+    #[serde(default)]
+    media: CDNMedia,
+    #[serde(default)]
+    file_name: String,
 }
 
 // ── Response types ────────────────────────────────────────────────────────────
@@ -312,13 +368,49 @@ struct SendMessageMsg {
 struct SendMessageItem {
     #[serde(rename = "type")]
     item_type: i64,
-    #[serde(rename = "text_item")]
-    text_item: SendTextItem,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "text_item")]
+    text_item: Option<SendTextItem>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "image_item")]
+    image_item: Option<SendImageItem>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "video_item")]
+    video_item: Option<SendVideoItem>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "file_item")]
+    file_item: Option<SendFileItem>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct SendTextItem {
     text: String,
+}
+
+/// CDN media reference for outbound messages.
+#[derive(Debug, Clone, Serialize)]
+struct SendCDNMedia {
+    #[serde(rename = "encrypt_query_param")]
+    encrypt_query_param: String,
+    #[serde(rename = "aes_key")]
+    aes_key: String,
+    #[serde(rename = "encrypt_type")]
+    encrypt_type: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SendImageItem {
+    media: SendCDNMedia,
+    mid_size: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SendVideoItem {
+    media: SendCDNMedia,
+    video_size: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SendFileItem {
+    media: SendCDNMedia,
+    file_name: String,
+    len: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -380,7 +472,7 @@ struct SharedState {
     bot_wxid: Option<String>,
     bot_nickname: Option<String>,
     get_updates_buf: String,
-    typing_ticket: Option<String>,
+    typing_tickets: HashMap<String, String>,
     aes_key: Option<String>,
     context_tokens: HashMap<String, String>,
     api_base: Option<String>,
@@ -396,6 +488,15 @@ struct ApiClient {
     client_version: String,
 }
 
+#[derive(Debug, Clone)]
+struct UploadedMediaInfo {
+    filekey: String,
+    download_encrypted_query_param: String,
+    aeskey_hex: String,
+    file_size: i64,
+    file_size_ciphertext: i64,
+}
+
 impl ApiClient {
     fn new(config: &WechatAccountConfig) -> Self {
         let http = Client::builder()
@@ -408,6 +509,15 @@ impl ApiClient {
         }
         if let Some(ref key) = config.aes_key {
             state.aes_key = Some(key.clone());
+        }
+        // Restore persisted context tokens
+        let token_path = std::env::var("HOME")
+            .map(|h| format!("{h}/.myclaw/state/wechat_context_tokens.json"))
+            .unwrap_or_else(|_| "/tmp/wechat_context_tokens.json".to_string());
+        if let Ok(json) = std::fs::read_to_string(&token_path) {
+            if let Ok(tokens) = serde_json::from_str::<HashMap<String, String>>(&json) {
+                state.context_tokens = tokens;
+            }
         }
         Self {
             api_base: config.api_base.trim_end_matches('/').to_string(),
@@ -559,9 +669,12 @@ impl ApiClient {
                 message_state: MESSAGE_STATE_FINISH,
                 item_list: vec![SendMessageItem {
                     item_type: ITEM_TYPE_TEXT,
-                    text_item: SendTextItem {
-                        text: text.to_string(),
-                    },
+                    text_item: Some(SendTextItem {
+                        text: filter_markdown(text),
+                    }),
+                    image_item: None,
+                    video_item: None,
+                    file_item: None,
                 }],
                 context_token: context_token.map(String::from),
             },
@@ -577,7 +690,11 @@ impl ApiClient {
     }
 
     async fn send_typing(&self, to_user_id: &str, typing: bool) -> Result<(), ApiError> {
-        let ticket = self.state.read().typing_ticket.clone().unwrap_or_default();
+        let ticket = self.state.read()
+            .typing_tickets
+            .get(to_user_id)
+            .cloned()
+            .unwrap_or_default();
         let req = SendTypingRequest {
             ilink_user_id: to_user_id.to_string(),
             typing_ticket: ticket,
@@ -604,6 +721,232 @@ impl ApiClient {
             .await?;
         self.check_ret(&resp)?;
         serde_json::from_value(resp).map_err(|e| ApiError::Parse(format!("get_config: {e}")))
+    }
+
+    // ── CDN media methods ──────────────────────────────────────────────
+
+    /// Parse CDN aes_key (base64) into raw 16-byte key.
+    fn parse_cdn_aes_key(aes_key_base64: &str) -> Result<Vec<u8>, ApiError> {
+        if aes_key_base64.is_empty() {
+            return Err(ApiError::Parse("empty aes_key".into()));
+        }
+        let decoded = BASE64
+            .decode(aes_key_base64.as_bytes())
+            .map_err(|e| ApiError::Parse(format!("aes_key base64: {e}")))?;
+        if decoded.len() == 16 {
+            Ok(decoded)
+        } else if decoded.len() == 32 {
+            let hex_str = String::from_utf8_lossy(&decoded);
+            hex::decode(hex_str.as_ref())
+                .map_err(|e| ApiError::Parse(format!("aes_key hex: {e}")))
+        } else {
+            Err(ApiError::Parse(format!(
+                "aes_key decoded to {} bytes, expected 16 or 32",
+                decoded.len()
+            )))
+        }
+    }
+
+    /// Download and AES-128-ECB decrypt media from CDN.
+    async fn download_cdn_media(
+        &self,
+        media: &CDNMedia,
+        aeskey_hex: Option<&str>,
+    ) -> Result<Vec<u8>, ApiError> {
+        let key_bytes = if let Some(hex) = aeskey_hex.filter(|h| !h.is_empty()) {
+            hex::decode(hex).map_err(|e| ApiError::Parse(format!("aeskey hex: {e}")))?
+        } else {
+            Self::parse_cdn_aes_key(&media.aes_key)?
+        };
+        if key_bytes.len() < 16 {
+            return Err(ApiError::Parse("aes key too short".into()));
+        }
+        let key: [u8; 16] = key_bytes[..16].try_into().unwrap();
+
+        let url = if !media.full_url.is_empty() {
+            media.full_url.clone()
+        } else {
+            let base = self
+                .state
+                .read()
+                .api_base
+                .clone()
+                .unwrap_or_else(|| self.api_base.clone());
+            format!(
+                "{}/download?encrypted_query_param={}",
+                base.trim_end_matches('/'),
+                urlencoding::encode(&media.encrypt_query_param)
+            )
+        };
+
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(ApiError::Http(
+                resp.status().as_u16(),
+                resp.text().await.unwrap_or_default(),
+            ));
+        }
+        let ciphertext = resp
+            .bytes()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+        decrypt_ecb(&ciphertext, &key).map_err(|e| ApiError::Parse(format!("decrypt: {e}")))
+    }
+
+    /// Compute AES-128-ECB ciphertext size (PKCS7 padding to 16-byte boundary).
+    fn aes_ecb_padded_size(plaintext_size: usize) -> usize {
+        ((plaintext_size / 16) + 1) * 16
+    }
+
+    async fn get_upload_url(
+        &self,
+        filekey: &str,
+        media_type: i64,
+        to_user_id: &str,
+        rawsize: i64,
+        rawfilemd5: &str,
+        filesize: i64,
+        aeskey_hex: &str,
+    ) -> Result<serde_json::Value, ApiError> {
+        let req = serde_json::json!({
+            "filekey": filekey,
+            "media_type": media_type,
+            "to_user_id": to_user_id,
+            "rawsize": rawsize,
+            "rawfilemd5": rawfilemd5,
+            "filesize": filesize,
+            "no_need_thumb": true,
+            "aeskey": aeskey_hex,
+            "base_info": build_base_info(),
+        });
+        let resp = self.api_post("ilink/bot/getuploadurl", &req).await?;
+        self.check_ret(&resp)?;
+        Ok(resp)
+    }
+
+    /// Upload encrypted buffer to CDN, return download param.
+    async fn upload_to_cdn(
+        &self,
+        plaintext: &[u8],
+        upload_full_url: Option<&str>,
+        upload_param: &str,
+        filekey: &str,
+        aes_key: &[u8; 16],
+    ) -> Result<String, ApiError> {
+        let ciphertext = encrypt_ecb(plaintext, aes_key);
+        let url = if let Some(full) = upload_full_url.filter(|s| !s.trim().is_empty()) {
+            full.to_string()
+        } else {
+            let base = self
+                .state
+                .read()
+                .api_base
+                .clone()
+                .unwrap_or_else(|| self.api_base.clone());
+            format!(
+                "{}/upload?encrypted_query_param={}&filekey={}",
+                base.trim_end_matches('/'),
+                urlencoding::encode(upload_param),
+                urlencoding::encode(filekey)
+            )
+        };
+        let resp = self
+            .http
+            .post(&url)
+            .header("Content-Type", "application/octet-stream")
+            .body(ciphertext)
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+        if !resp.status().is_success() {
+            let err_msg = resp
+                .headers()
+                .get("x-error-message")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("unknown error");
+            return Err(ApiError::Http(resp.status().as_u16(), err_msg.to_string()));
+        }
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| ApiError::Parse(format!("cdn upload response: {e}")))?;
+        let download_param = body
+            .get("encrypt_query_param")
+            .or_else(|| body.get("encrypted_query_param"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if download_param.is_empty() {
+            return Err(ApiError::Parse("CDN upload: no download param".into()));
+        }
+        Ok(download_param)
+    }
+
+    /// Full media upload pipeline.
+    async fn upload_media(
+        &self,
+        data: &[u8],
+        to_user_id: &str,
+        media_type: i64,
+    ) -> Result<UploadedMediaInfo, ApiError> {
+        use md5::{Digest, Md5};
+        let rawsize = data.len() as i64;
+        let mut hasher = Md5::new();
+        hasher.update(data);
+        let rawfilemd5: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        let filesize = Self::aes_ecb_padded_size(data.len()) as i64;
+        let filekey: String = (0..16).map(|_| format!("{:02x}", rand::random::<u8>())).collect();
+        let aes_key_bytes: [u8; 16] = {
+            let mut arr = [0u8; 16];
+            for byte in arr.iter_mut() {
+                *byte = rand::random();
+            }
+            arr
+        };
+        let aeskey_hex: String = aes_key_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+
+        let resp = self
+            .get_upload_url(
+                &filekey,
+                media_type,
+                to_user_id,
+                rawsize,
+                &rawfilemd5,
+                filesize,
+                &aeskey_hex,
+            )
+            .await?;
+        let upload_full_url = resp
+            .get("upload_full_url")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let upload_param = resp
+            .get("upload_param")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let download_param = self
+            .upload_to_cdn(
+                data,
+                upload_full_url.as_deref(),
+                upload_param,
+                &filekey,
+                &aes_key_bytes,
+            )
+            .await?;
+
+        Ok(UploadedMediaInfo {
+            filekey,
+            download_encrypted_query_param: download_param,
+            aeskey_hex,
+            file_size: rawsize,
+            file_size_ciphertext: filesize,
+        })
     }
 
     async fn get_bot_qrcode(&self) -> Result<QrCodeResponse, ApiError> {
@@ -646,6 +989,12 @@ impl ApiClient {
 #[derive(Debug, Clone)]
 enum InboundContent {
     Text(String),
+    MediaRequest {
+        item_type: i64,
+        media: CDNMedia,
+        aeskey_hex: Option<String>,
+        filename: String,
+    },
     Unknown,
 }
 
@@ -679,6 +1028,58 @@ fn parse_inbound(msg: &IlinkMessage) -> InboundEvent {
             {
                 t if t.trim().is_empty() => InboundContent::Unknown,
                 t => InboundContent::Text(t),
+            }
+        }
+        Some(first) if first.item_type == ITEM_TYPE_IMAGE => {
+            if let Some(ref img) = first.image_item {
+                if !img.media.encrypt_query_param.is_empty() || !img.media.full_url.is_empty() {
+                    InboundContent::MediaRequest {
+                        item_type: ITEM_TYPE_IMAGE,
+                        media: img.media.clone(),
+                        aeskey_hex: Some(img.aeskey.clone()),
+                        filename: format!("image_{}.jpg", msg.create_time_ms),
+                    }
+                } else {
+                    InboundContent::Unknown
+                }
+            } else {
+                InboundContent::Unknown
+            }
+        }
+        Some(first) if first.item_type == ITEM_TYPE_VIDEO => {
+            if let Some(ref vid) = first.video_item {
+                if !vid.media.encrypt_query_param.is_empty() || !vid.media.full_url.is_empty() {
+                    InboundContent::MediaRequest {
+                        item_type: ITEM_TYPE_VIDEO,
+                        media: vid.media.clone(),
+                        aeskey_hex: None,
+                        filename: format!("video_{}.mp4", msg.create_time_ms),
+                    }
+                } else {
+                    InboundContent::Unknown
+                }
+            } else {
+                InboundContent::Unknown
+            }
+        }
+        Some(first) if first.item_type == ITEM_TYPE_FILE => {
+            if let Some(ref f) = first.file_item {
+                if !f.media.encrypt_query_param.is_empty() || !f.media.full_url.is_empty() {
+                    InboundContent::MediaRequest {
+                        item_type: ITEM_TYPE_FILE,
+                        media: f.media.clone(),
+                        aeskey_hex: None,
+                        filename: if f.file_name.is_empty() {
+                            format!("file_{}", msg.create_time_ms)
+                        } else {
+                            f.file_name.clone()
+                        },
+                    }
+                } else {
+                    InboundContent::Unknown
+                }
+            } else {
+                InboundContent::Unknown
             }
         }
         _ => InboundContent::Unknown,
@@ -858,6 +1259,21 @@ impl Channel for WechatChannel {
         &WECHAT_CAPS
     }
 
+    async fn on_status(&self, recipient: &str, status: ProcessingStatus) {
+        match status {
+            ProcessingStatus::Thinking => {
+                if let Err(e) = self.api.send_typing(recipient, true).await {
+                    debug!("WeChat: typing indicator failed: {e}");
+                }
+            }
+            ProcessingStatus::Done | ProcessingStatus::Error => {
+                if let Err(e) = self.api.send_typing(recipient, false).await {
+                    debug!("WeChat: typing cancel failed: {e}");
+                }
+            }
+        }
+    }
+
     fn security_policy(&self) -> crate::channels::ChannelSecurityPolicy {
         self.build_security_policy()
     }
@@ -866,9 +1282,6 @@ impl Channel for WechatChannel {
         &self,
         message: &crate::channels::ChannelOutboundMessage,
     ) -> anyhow::Result<crate::channels::OutboundSendResult> {
-        if !message.content.files.is_empty() {
-            anyhow::bail!("wechat channel does not support outbound file sending");
-        }
         let ctx_token = self
             .api
             .state
@@ -876,16 +1289,109 @@ impl Channel for WechatChannel {
             .context_tokens
             .get(&message.receiver.id)
             .cloned();
-        let chunks = crate::channels::message::split_message_chunk(
-            &message.content.text,
-            self.capabilities().message_chunk_limit,
-            self.capabilities().message_len_unit,
-        );
-        for chunk in chunks {
-            self.api
-                .send_text(&message.receiver.id, &chunk, ctx_token.as_deref())
-                .await?;
+
+        // Send text first if any
+        if !message.content.text.trim().is_empty() {
+            let chunks = crate::channels::message::split_message_chunk(
+                &message.content.text,
+                self.capabilities().message_chunk_limit,
+                self.capabilities().message_len_unit,
+            );
+            for chunk in chunks {
+                self.api
+                    .send_text(&message.receiver.id, &chunk, ctx_token.as_deref())
+                    .await?;
+            }
         }
+
+        // Send files via CDN upload
+        for file in &message.content.files {
+            use tokio::io::AsyncReadExt;
+            let mut reader = file.body.open().await?;
+            let mut buf = Vec::new();
+            reader.read_to_end(&mut buf).await?;
+
+            let mime = file.meta.mime_type.as_deref().unwrap_or("application/octet-stream");
+            let (media_type, item_type) = if mime.starts_with("image/") {
+                (UPLOAD_MEDIA_IMAGE, ITEM_TYPE_IMAGE)
+            } else if mime.starts_with("video/") {
+                (UPLOAD_MEDIA_VIDEO, ITEM_TYPE_VIDEO)
+            } else {
+                (UPLOAD_MEDIA_FILE, ITEM_TYPE_FILE)
+            };
+
+            let uploaded = self
+                .api
+                .upload_media(&buf, &message.receiver.id, media_type)
+                .await?;
+
+            let aes_key_b64 = BASE64.encode(
+                hex::decode(&uploaded.aeskey_hex).unwrap_or_default(),
+            );
+
+            let req = SendMessageRequest {
+                msg: SendMessageMsg {
+                    from_user_id: String::new(),
+                    to_user_id: message.receiver.id.clone(),
+                    client_id: format!("myclaw_{}", uuid::Uuid::new_v4()),
+                    message_type: MESSAGE_TYPE_BOT,
+                    message_state: MESSAGE_STATE_FINISH,
+                    item_list: vec![match item_type {
+                        ITEM_TYPE_IMAGE => SendMessageItem {
+                            item_type: ITEM_TYPE_IMAGE,
+                            text_item: None,
+                            image_item: Some(SendImageItem {
+                                media: SendCDNMedia {
+                                    encrypt_query_param: uploaded.download_encrypted_query_param,
+                                    aes_key: aes_key_b64,
+                                    encrypt_type: 1,
+                                },
+                                mid_size: uploaded.file_size_ciphertext,
+                            }),
+                            video_item: None,
+                            file_item: None,
+                        },
+                        ITEM_TYPE_VIDEO => SendMessageItem {
+                            item_type: ITEM_TYPE_VIDEO,
+                            text_item: None,
+                            image_item: None,
+                            video_item: Some(SendVideoItem {
+                                media: SendCDNMedia {
+                                    encrypt_query_param: uploaded.download_encrypted_query_param,
+                                    aes_key: aes_key_b64,
+                                    encrypt_type: 1,
+                                },
+                                video_size: uploaded.file_size_ciphertext,
+                            }),
+                            file_item: None,
+                        },
+                        _ => SendMessageItem {
+                            item_type: ITEM_TYPE_FILE,
+                            text_item: None,
+                            image_item: None,
+                            video_item: None,
+                            file_item: Some(SendFileItem {
+                                media: SendCDNMedia {
+                                    encrypt_query_param: uploaded.download_encrypted_query_param,
+                                    aes_key: aes_key_b64,
+                                    encrypt_type: 1,
+                                },
+                                file_name: file.meta.file_name.clone(),
+                                len: uploaded.file_size.to_string(),
+                            }),
+                        },
+                    }],
+                    context_token: ctx_token.clone(),
+                },
+                base_info: build_base_info(),
+            };
+            let resp = self
+                .api
+                .api_post("ilink/bot/sendmessage", &serde_json::to_value(&req).unwrap())
+                .await?;
+            self.api.check_ret(&resp)?;
+        }
+
         Ok(crate::channels::OutboundSendResult::empty())
     }
 
@@ -922,12 +1428,51 @@ impl Channel for WechatChannel {
                             }
 
                             let content = match event.content {
-                                InboundContent::Text(t) => t,
+                                InboundContent::Text(t) => {
+                                    if t.trim().is_empty() {
+                                        continue;
+                                    }
+                                    ChannelMessageContent::text(t)
+                                }
+                                InboundContent::MediaRequest {
+                                    item_type,
+                                    media,
+                                    aeskey_hex,
+                                    filename,
+                                } => {
+                                    match this.api.download_cdn_media(&media, aeskey_hex.as_deref()).await {
+                                        Ok(data) => {
+                                            let mime = match item_type {
+                                                ITEM_TYPE_IMAGE => "image/jpeg",
+                                                ITEM_TYPE_VIDEO => "video/mp4",
+                                                ITEM_TYPE_FILE => "application/octet-stream",
+                                                _ => "application/octet-stream",
+                                            };
+                                            let tmp_dir = std::env::temp_dir();
+                                            let tmp_path = tmp_dir.join(format!("wechat_media_{}", uuid::Uuid::new_v4()));
+                                            if let Err(e) = std::fs::write(&tmp_path, &data) {
+                                                warn!("WeChat: failed to write media temp file: {e}");
+                                                continue;
+                                            }
+                                            let mut content = ChannelMessageContent::text(String::new());
+                                            content.files.push(ChannelFile {
+                                                meta: ChannelFileMeta {
+                                                    file_name: filename,
+                                                    mime_type: Some(mime.to_string()),
+                                                    size_bytes: Some(data.len() as u64),
+                                                },
+                                                body: std::sync::Arc::new(LocalFileBody::new(&tmp_path)),
+                                            });
+                                            content
+                                        }
+                                        Err(e) => {
+                                            warn!("WeChat: media download failed: {e}");
+                                            continue;
+                                        }
+                                    }
+                                }
                                 InboundContent::Unknown => continue,
                             };
-                            if content.trim().is_empty() {
-                                continue;
-                            }
 
                             if !event.context_token.is_empty() {
                                 this.api
@@ -935,13 +1480,32 @@ impl Channel for WechatChannel {
                                     .write()
                                     .context_tokens
                                     .insert(event.chat_id.clone(), event.context_token.clone());
+                                // Persist context tokens to disk
+                                {
+                                    let state = this.api.state.read();
+                                    let path = std::env::var("HOME")
+                                        .map(|h| format!("{h}/.myclaw/state/wechat_context_tokens.json"))
+                                        .unwrap_or_else(|_| "/tmp/wechat_context_tokens.json".to_string());
+                                    let _ = std::fs::write(&path, serde_json::to_string(&state.context_tokens).unwrap_or_default());
+                                }
+                            }
+
+                            // Fetch typing_ticket for this user (best-effort)
+                            if let Ok(config) = this.api.get_config(&event.sender_wxid).await {
+                                if !config.typing_ticket.is_empty() {
+                                    this.api
+                                        .state
+                                        .write()
+                                        .typing_tickets
+                                        .insert(event.sender_wxid.clone(), config.typing_ticket);
+                                }
                             }
 
                             let channel_msg = ChannelInboundMessage {
                                 id: event.msg_id,
                                 sender: MessageSender::new(event.sender_wxid),
                                 receiver: MessageReceiver::new(event.chat_id),
-                                content: ChannelMessageContent::text(content),
+                                content: content,
                                 timestamp: event.raw_timestamp as u64,
                                 interruption_scope_id: None,
                             };
@@ -1013,6 +1577,35 @@ impl Channel for WechatChannel {
     }
 }
 
+/// Filter markdown for WeChat: strip image syntax, simplify H5/H6.
+fn filter_markdown(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    for line in text.lines() {
+        // Remove image markdown ![alt](url)
+        let mut filtered = line.to_string();
+        while let Some(start) = filtered.find("![") {
+            if let Some(end) = filtered[start..].find("](") {
+                let url_start = start + end + 2;
+                if let Some(url_end) = filtered[url_start..].find(')') {
+                    filtered = format!("{}{}", &filtered[..start], &filtered[url_start + url_end + 1..]);
+                    continue;
+                }
+            }
+            break;
+        }
+        // Convert H5/H6 to bold
+        let trimmed = filtered.trim_start();
+        let leading_hashes = filtered.len() - trimmed.len();
+        if trimmed.starts_with("#####") {
+            let content = trimmed.trim_start_matches('#').trim();
+            filtered = format!("{}**{}**", &filtered[..leading_hashes], content);
+        }
+        result.push_str(&filtered);
+        result.push('\n');
+    }
+    result.trim_end().to_string()
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1056,6 +1649,9 @@ mod tests {
                     text: "hello".into(),
                 }),
                 voice_item: None,
+                image_item: None,
+                video_item: None,
+                file_item: None,
             }],
             item_list: vec![],
             context_token: "ctx_tok".into(),
@@ -1086,6 +1682,9 @@ mod tests {
                 voice_item: Some(VoiceItem {
                     text: "转写出来的内容".into(),
                 }),
+                image_item: None,
+                video_item: None,
+                file_item: None,
             }],
             item_list: vec![],
             context_token: String::new(),
@@ -1111,6 +1710,9 @@ mod tests {
                 item_type: ITEM_TYPE_VOICE,
                 text_item: None,
                 voice_item: Some(VoiceItem { text: "   ".into() }),
+                image_item: None,
+                video_item: None,
+                file_item: None,
             }],
             item_list: vec![],
             context_token: String::new(),
