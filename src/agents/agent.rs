@@ -501,6 +501,11 @@ impl Agent {
                 }
 
                 // Notify channel of tool call start (for reply progress).
+                tracing::debug!(
+                    "on_tool_event Start: channel={} reply_target={}",
+                    session.channel.is_some(),
+                    session.reply_target().is_some()
+                );
                 if let (Some(ch), Some(rt)) =
                     (session.channel.as_ref(), session.reply_target())
                 {
