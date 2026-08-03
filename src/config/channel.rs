@@ -132,6 +132,23 @@ pub struct TelegramChannelConfig {
 
 // ── QQBotAccountConfig ───────────────────────────────────────────────────────
 
+/// Per-group configuration for QQ Bot.
+///
+/// Allows overriding settings on a per-group basis. The wildcard key `"*"`
+/// serves as a fallback for groups without an explicit entry.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GroupConfig {
+    /// Custom prompt for this group (prepended to system prompt).
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// Max history messages to include (default 20 when unset).
+    #[serde(default)]
+    pub history_limit: Option<usize>,
+    /// Group display name.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
 /// QQ Bot account-level configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QQBotAccountConfig {
@@ -153,6 +170,10 @@ pub struct QQBotAccountConfig {
     /// Replaces the legacy `group_allow_from` field (Phase 4 rename).
     #[serde(default, alias = "group_allow_from")]
     pub allowed_groups: Option<Vec<String>>,
+    /// Per-group configuration overrides, keyed by group OpenID.
+    /// The wildcard key `"*"` applies to any group without an explicit entry.
+    #[serde(default)]
+    pub group_config: HashMap<String, GroupConfig>,
 }
 
 // ── QQBotChannelConfig ───────────────────────────────────────────────────────

@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use std::time::Duration;
@@ -124,6 +125,27 @@ fn estimate_visual_lines(text: &str) -> usize {
         .sum()
 }
 
+/// Extract quoted message content from a QQ reply event payload.
+///
+/// When a user replies to a message (QQ `message_type` = 103), the inbound
+/// event contains a `msg_elements` array where index `[0]` holds the quoted
+/// original message. This function returns the quoted text, if present.
+fn extract_quote_content(data: &serde_json::Value) -> Option<String> {
+    let has_reply = data.get("message_type").and_then(|v| v.as_u64()) == Some(103)
+        || data.get("msg_elements").is_some();
+    if !has_reply {
+        return None;
+    }
+    let elements = data.get("msg_elements")?.as_array()?;
+    let first = elements.first()?;
+    let content = first.get("content").and_then(|v| v.as_str())?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
 /// Pre-split text so each bubble stays under `max_lines` estimated visual lines.
 ///
 /// Splits land on `\n\n` boundaries (never inside fenced code blocks). Each
@@ -191,6 +213,85 @@ fn is_fence_line(line: &str) -> bool {
     trimmed.starts_with("```") || trimmed.starts_with("~~~")
 }
 
+/// Check if a URL points to a private/loopback address (SSRF protection).
+fn is_ssrf_blocked(url: &str) -> bool {
+    // Parse host from URL
+    let host = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("");
+
+    // Block obvious private ranges
+    if host == "localhost" || host == "0.0.0.0" || host.is_empty() {
+        return true;
+    }
+
+    // Check IP-based hosts
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return ip.is_loopback()
+            || ip.is_private()
+            || ip.is_link_local()
+            || ip.is_unspecified()
+            || matches!(ip, std::net::IpAddr::V4(v4) if v4.is_broadcast());
+    }
+
+    // Block .local, .internal, .localhost TLDs
+    if host.ends_with(".local")
+        || host.ends_with(".internal")
+        || host.ends_with(".localhost")
+    {
+        return true;
+    }
+
+    false
+}
+
+/// Strip model reasoning/thinking content and framework scaffolding tags.
+fn strip_internal_tags(text: &str) -> String {
+    let patterns: &[(&str, &str)] = &[
+        // XML-style thinking tags
+        ("<thinking>", "</thinking>"),
+        ("<think>", "</think>"),
+        ("<system-reminder>", "</system-reminder>"),
+        ("<previous_response>", "</previous_response>"),
+    ];
+
+    let mut result = text.to_string();
+    for (open, close) in patterns {
+        // Remove complete blocks
+        while let Some(start) = result.find(open) {
+            if let Some(end) = result[start..].find(close) {
+                let end_abs = start + end + close.len();
+                result.replace_range(start..end_abs, "");
+            } else {
+                // Unclosed tag — remove from start to end of string
+                result.replace_range(start.., "");
+                break;
+            }
+        }
+        // Remove standalone tags
+        result = result.replace(open, "").replace(close, "");
+    }
+
+    // Deepseek format: `think`...`/think`
+    while let Some(start) = result.find("`think`") {
+        if let Some(end) = result[start..].find("`/think`") {
+            let end_abs = start + end + "`/think`".len();
+            result.replace_range(start..end_abs, "");
+        } else {
+            break;
+        }
+    }
+
+    result.trim().to_string()
+}
+
 // ── QQ Bot Channel ────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -211,6 +312,13 @@ pub struct QQBotChannel {
     pub(super) msg_seq_counter: Arc<AtomicU32>,
     /// Startup instant for uptime reporting.
     pub(super) started_at: std::time::Instant,
+    /// Per-group recent message history (group_openid → deque of (sender, content)).
+    pub(super) group_history:
+        Arc<Mutex<std::collections::HashMap<String, VecDeque<(String, String)>>>>,
+    /// Passive reply limiter (QQ allows ~4 replies per msg_id per hour).
+    pub(super) reply_limiter: Arc<Mutex<ReplyLimiter>>,
+    /// Per-sender + global rate limiter.
+    pub(super) rate_limiter: Arc<Mutex<RateLimiter>>,
 }
 
 impl QQBotChannel {
@@ -232,6 +340,9 @@ impl QQBotChannel {
             session: Arc::new(Mutex::new(None)),
             msg_seq_counter: Arc::new(AtomicU32::new(1)),
             started_at: std::time::Instant::now(),
+            group_history: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            reply_limiter: Arc::new(Mutex::new(ReplyLimiter::new())),
+            rate_limiter: Arc::new(Mutex::new(RateLimiter::new())),
         };
         crate::channels::warn_if_locked_down(&ch);
         ch
@@ -372,6 +483,10 @@ impl QQBotChannel {
                     debug!(msg_id = %msg.id, "duplicate C2C message, skipping");
                     return None;
                 }
+                if !self.rate_limiter.lock().check(&msg.sender.id) {
+                    warn!(sender = %msg.sender.id, "qqbot: rate limited");
+                    return None;
+                }
                 if !apply_auth(self, &msg.sender.id, crate::channels::MessageScope::Direct) {
                     return None;
                 }
@@ -386,7 +501,7 @@ impl QQBotChannel {
                 Some(msg)
             }
             "GROUP_AT_MESSAGE_CREATE" => {
-                let msg = match self.parse_group_message(data) {
+                let mut msg = match self.parse_group_message(data) {
                     Some(m) => m,
                     None => {
                         tracing::warn!(
@@ -398,6 +513,10 @@ impl QQBotChannel {
                 };
                 if self.dedup.check_and_record(&msg.id) {
                     debug!(msg_id = %msg.id, "duplicate group message, skipping");
+                    return None;
+                }
+                if !self.rate_limiter.lock().check(&msg.sender.id) {
+                    warn!(sender = %msg.sender.id, "qqbot: rate limited");
                     return None;
                 }
                 let group_id = msg.receiver.id.strip_prefix("group:").unwrap_or("");
@@ -413,6 +532,8 @@ impl QQBotChannel {
                 ) {
                     return None;
                 }
+                // Inject recent group chat history as context.
+                self.inject_group_history(&mut msg, group_id);
                 Some(msg)
             }
             "INTERACTION_CREATE" => {
@@ -562,6 +683,66 @@ impl QQBotChannel {
         })
     }
 
+    /// Resolve the per-group history limit from config.
+    ///
+    /// Checks for an explicit entry for `group_openid`, then falls back to the
+    /// wildcard `"*"` entry, and finally to the default of 20.
+    fn resolve_group_history_limit(&self, group_openid: &str) -> usize {
+        self.config
+            .group_config
+            .get(group_openid)
+            .and_then(|c| c.history_limit)
+            .or_else(|| {
+                self.config
+                    .group_config
+                    .get("*")
+                    .and_then(|c| c.history_limit)
+            })
+            .unwrap_or(20)
+    }
+
+    /// Record a group message in the per-group history buffer.
+    ///
+    /// Called for **all** group events (even rejected ones) so the bot has
+    /// recent context when it is eventually @-mentioned.
+    fn record_group_history(&self, group_openid: &str, sender: &str, content: &str) {
+        let limit = self.resolve_group_history_limit(group_openid);
+        let mut history = self.group_history.lock();
+        let entries = history.entry(group_openid.to_string()).or_default();
+        entries.push_back((sender.to_string(), content.to_string()));
+        while entries.len() > limit {
+            entries.pop_front();
+        }
+    }
+
+    /// Prepend recent group chat history to an inbound message's text.
+    ///
+    /// The last entry in the buffer (the current message) is excluded so only
+    /// *prior* messages appear in the history block. If there is no prior
+    /// history the message is left unchanged.
+    fn inject_group_history(&self, msg: &mut ChannelInboundMessage, group_openid: &str) {
+        let history = self.group_history.lock();
+        if let Some(entries) = history.get(group_openid) {
+            // Exclude the last entry — it is the current message being processed.
+            if entries.len() <= 1 {
+                return;
+            }
+            let prior_count = entries.len() - 1;
+            let history_text = entries
+                .iter()
+                .take(prior_count)
+                .map(|(sender, content)| format!("[{}] {}", sender, content))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !history_text.is_empty() {
+                msg.content.text = format!(
+                    "[Chat history begins]\n{}\n[Chat history ends]\n[Current message]\n{}",
+                    history_text, msg.content.text
+                );
+            }
+        }
+    }
+
     /// Ingest voice/audio attachments from a raw inbound `data` payload.
     ///
     /// Per the official QQ v2 schema, an inbound voice attachment is
@@ -621,6 +802,10 @@ impl QQBotChannel {
             } else {
                 format!("https://{audio_url}")
             };
+            if is_ssrf_blocked(&full_url) {
+                warn!(url = %full_url, "qqbot: blocked SSRF attempt to private address");
+                continue;
+            }
             let resp = match self
                 .http_client
                 .get(&full_url)
@@ -638,6 +823,10 @@ impl QQBotChannel {
                             } else {
                                 format!("https://{fallback}")
                             };
+                            if is_ssrf_blocked(&fb_full) {
+                                warn!(url = %fb_full, "qqbot: blocked SSRF attempt (SILK fallback) to private address");
+                                continue;
+                            }
                             warn!(
                                 "qqbot: voice_wav_url download failed ({e}), falling back to raw SILK"
                             );
@@ -737,6 +926,10 @@ impl QQBotChannel {
             } else {
                 format!("https://{url}")
             };
+            if is_ssrf_blocked(&full_url) {
+                warn!(url = %full_url, "qqbot: blocked SSRF attempt to private address");
+                continue;
+            }
             match self
                 .http_client
                 .get(&full_url)
@@ -806,6 +999,10 @@ impl QQBotChannel {
             } else {
                 format!("https://{url}")
             };
+            if is_ssrf_blocked(&full_url) {
+                warn!(url = %full_url, "qqbot: blocked SSRF attempt to private address");
+                continue;
+            }
             match self
                 .http_client
                 .get(&full_url)
@@ -1444,7 +1641,7 @@ impl Channel for QQBotChannel {
         // not as a separate text message (RFC §14.5).
         // QQ msg_type=2: escape `$` and pad `**` for CJK before split.
         let chunks = if msg.content.files.is_empty() {
-            let sanitized = sanitize_qq_markdown(&msg.content.text);
+            let sanitized = sanitize_qq_markdown(&strip_internal_tags(&msg.content.text));
             // Pre-split by estimated visual lines to mitigate QQ client-side
             // layout bug, then apply character-limit splitting to each sub-text.
             let pre_chunks =
@@ -1462,7 +1659,14 @@ impl Channel for QQBotChannel {
             Vec::new()
         };
         // reply_to_message_id carries the original message event ID for passive replies.
-        let msg_id = msg.receiver.reply_to_message_id.as_deref().unwrap_or("");
+        let raw_msg_id = msg.receiver.reply_to_message_id.as_deref().unwrap_or("");
+        // Check passive reply limit (QQ allows ~4 passive replies per msg_id per hour).
+        let can_reply_passive = if !raw_msg_id.is_empty() {
+            self.reply_limiter.lock().check_and_record(raw_msg_id)
+        } else {
+            false // No msg_id = active message
+        };
+        let msg_id = if can_reply_passive { raw_msg_id } else { "" };
 
         // Normalize recipient: bare openids (from startup recovery fallback)
         // are treated as c2c: prefixed.
@@ -1689,16 +1893,16 @@ impl Channel for QQBotChannel {
             };
 
             let caption_text = if idx == 0 && !msg.content.text.trim().is_empty() {
-                msg.content.text.as_str()
+                strip_internal_tags(msg.content.text.as_str())
             } else {
-                " "
+                " ".to_string()
             };
             let mut msg_body = serde_json::json!({
                 "content": caption_text,
                 "msg_type": 7,
                 "media": { "file_info": file_info },
             });
-            if let Some(ref msg_id) = msg.receiver.reply_to_message_id {
+            if !msg_id.is_empty() {
                 msg_body["msg_id"] = serde_json::json!(msg_id);
             } else if let Some(ref thread_id) = msg.receiver.thread_id {
                 msg_body["msg_id"] = serde_json::json!(thread_id);
@@ -1821,6 +2025,140 @@ impl ReconnectManager {
 
     fn reset(&mut self) {
         self.attempt = 0;
+    }
+}
+
+// ── Reply limiter (passive reply cap) ─────────────────────────────────────────
+
+/// Tracks passive reply counts per message_id to avoid hitting QQ's limit
+/// (~4 replies/msg_id within 1 hour).
+struct ReplyLimiter {
+    /// msg_id → (reply_count, first_seen_ms)
+    entries: std::collections::HashMap<String, (u32, u128)>,
+    /// Max replies per msg_id
+    limit: u32,
+    /// TTL in ms (1 hour)
+    ttl_ms: u128,
+}
+
+impl ReplyLimiter {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            limit: 4,
+            ttl_ms: 3_600_000,
+        }
+    }
+
+    /// Check if we can still reply passively to this msg_id.
+    /// Returns false when limit exceeded or TTL expired.
+    fn check_and_record(&mut self, msg_id: &str) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+
+        // Periodic cleanup: remove expired entries
+        self.entries
+            .retain(|_, (_, first_seen)| now - *first_seen < self.ttl_ms);
+
+        match self.entries.get_mut(msg_id) {
+            Some((count, _)) => {
+                if *count >= self.limit {
+                    return false;
+                }
+                *count += 1;
+                true
+            }
+            None => {
+                // LRU eviction if too many entries
+                if self.entries.len() > 10_000 {
+                    if let Some(oldest_key) = self
+                        .entries
+                        .iter()
+                        .min_by_key(|(_, (_, first))| *first)
+                        .map(|(k, _)| k.clone())
+                    {
+                        self.entries.remove(&oldest_key);
+                    }
+                }
+                self.entries.insert(msg_id.to_string(), (1, now));
+                true
+            }
+        }
+    }
+}
+
+// ── Rate limiter ──────────────────────────────────────────────────────────────
+
+/// Simple token-bucket rate limiter with per-sender and global tracking.
+struct RateLimiter {
+    /// sender_id → (count, window_start_ms)
+    sender_buckets: std::collections::HashMap<String, (u32, u128)>,
+    /// global count in current window
+    global_count: u32,
+    global_window_start: u128,
+    /// Max messages per sender per 60s window
+    sender_limit: u32,
+    /// Max messages globally per 60s window
+    global_limit: u32,
+}
+
+impl RateLimiter {
+    fn new() -> Self {
+        Self {
+            sender_buckets: std::collections::HashMap::new(),
+            global_count: 0,
+            global_window_start: 0,
+            sender_limit: 30,  // 30 msgs/min per sender
+            global_limit: 300, // 300 msgs/min global
+        }
+    }
+
+    /// Returns true if the message is allowed, false if rate limited.
+    fn check(&mut self, sender_id: &str) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let window_ms: u128 = 60_000;
+
+        // Reset global window if expired
+        if now - self.global_window_start > window_ms {
+            self.global_count = 0;
+            self.global_window_start = now;
+        }
+
+        // Check global limit
+        if self.global_count >= self.global_limit {
+            return false;
+        }
+
+        // Check sender limit
+        let sender_key = sender_id.to_string();
+        match self.sender_buckets.get_mut(&sender_key) {
+            Some((count, window_start)) => {
+                if now - *window_start > window_ms {
+                    *count = 0;
+                    *window_start = now;
+                }
+                if *count >= self.sender_limit {
+                    return false;
+                }
+                *count += 1;
+            }
+            None => {
+                // Evict old entries if map too large
+                if self.sender_buckets.len() > 5000 {
+                    self.sender_buckets
+                        .retain(|_, (_, ws)| now - *ws < window_ms);
+                }
+                self.sender_buckets.insert(sender_key, (1, now));
+            }
+        }
+
+        self.global_count += 1;
+        true
     }
 }
 
@@ -2067,8 +2405,37 @@ impl QQBotChannel {
                         }
                         _ => {}
                     }
+                    // Feature 2: Record group history for ALL group events
+                    // (before auth/filtering) so even rejected messages are
+                    // captured as context for future @-mentions.
+                    if event_type.contains("GROUP") {
+                        if let (Some(group_openid), Some(sender), Some(content)) = (
+                            payload.d.get("group_openid").and_then(|v| v.as_str()),
+                            payload
+                                .d
+                                .get("author")
+                                .and_then(|a| a.get("member_openid"))
+                                .and_then(|v| v.as_str()),
+                            payload
+                                .d
+                                .get("content")
+                                .and_then(|v| v.as_str())
+                                .map(str::trim),
+                        ) {
+                            self.record_group_history(group_openid, sender, content);
+                        }
+                    }
                     // User messages
                     if let Some(mut channel_msg) = self.handle_dispatch(event_type, &payload.d) {
+                        // Feature 1: Quote message resolution — when the user
+                        // replied to a message (message_type=103), prepend the
+                        // quoted content so the model has full context.
+                        if let Some(quoted) = extract_quote_content(&payload.d) {
+                            channel_msg.content.text = format!(
+                                "[Quoted message begins]\n{}\n[Quoted message ends]\n[Current message]\n{}",
+                                quoted, channel_msg.content.text
+                            );
+                        }
                         // Bot- prefixed slash commands — intercept before orchestrator
                         let msg_id = payload.d.get("id").and_then(|v| v.as_str()).unwrap_or("");
                         if self
@@ -2276,5 +2643,246 @@ mod tests {
         mgr.attempt = 5;
         mgr.reset();
         assert_eq!(mgr.attempt, 0);
+    }
+
+    // ── Feature 1: Quote message extraction ──────────────────────────────────
+
+    #[test]
+    fn quote_message_extraction() {
+        // Reply event with message_type=103 and msg_elements
+        let data = serde_json::json!({
+            "id": "MSG123",
+            "message_type": 103,
+            "content": "that's interesting",
+            "author": { "member_openid": "user_a" },
+            "group_openid": "group_1",
+            "msg_elements": [
+                { "content": "original message text", "elem_type": 1 }
+            ]
+        });
+        let quoted = extract_quote_content(&data);
+        assert_eq!(quoted.as_deref(), Some("original message text"));
+
+        // Normal message (no quote) — should return None
+        let normal = serde_json::json!({
+            "id": "MSG456",
+            "content": "hello world",
+            "author": { "member_openid": "user_b" },
+            "group_openid": "group_1"
+        });
+        assert!(extract_quote_content(&normal).is_none());
+
+        // msg_elements present but empty array
+        let empty_elements = serde_json::json!({
+            "id": "MSG789",
+            "msg_elements": []
+        });
+        assert!(extract_quote_content(&empty_elements).is_none());
+
+        // msg_elements present but content is empty string
+        let empty_content = serde_json::json!({
+            "message_type": 103,
+            "msg_elements": [{ "content": "   " }]
+        });
+        assert!(extract_quote_content(&empty_content).is_none());
+    }
+
+    // ── Feature 2: Group history ──────────────────────────────────────────────
+
+    /// Build a minimal test channel with the given group config.
+    fn test_channel(group_config: Vec<(&str, Option<usize>)>) -> QQBotChannel {
+        use crate::config::channel::{GroupConfig, QQBotAccountConfig};
+        let mut gc = std::collections::HashMap::new();
+        for (gid, limit) in group_config {
+            gc.insert(
+                gid.to_string(),
+                GroupConfig {
+                    history_limit: limit,
+                    ..Default::default()
+                },
+            );
+        }
+        let config = QQBotAccountConfig {
+            enabled: true,
+            app_id: "test_app".to_string(),
+            client_secret: "test_secret".to_string(),
+            allowed_users: None,
+            allowed_groups: Some(vec!["*".to_string()]),
+            group_config: gc,
+        };
+        QQBotChannel::new("test".to_string(), config)
+    }
+
+    #[test]
+    fn group_history_capped_at_limit() {
+        let ch = test_channel(vec![("*", Some(3))]);
+        // Insert 5 messages; limit is 3 → only last 3 should remain.
+        for i in 0..5 {
+            ch.record_group_history("grp1", &format!("user{i}"), &format!("msg{i}"));
+        }
+        let history = ch.group_history.lock();
+        let entries = history.get("grp1").unwrap();
+        assert_eq!(entries.len(), 3, "history should be capped at 3");
+        // First two entries (msg0, msg1) should have been evicted.
+        assert_eq!(entries[0].1, "msg2");
+        assert_eq!(entries[1].1, "msg3");
+        assert_eq!(entries[2].1, "msg4");
+    }
+
+    #[test]
+    fn group_history_inject_format() {
+        let ch = test_channel(vec![("*", Some(20))]);
+        // Record some prior messages.
+        ch.record_group_history("grp1", "alice", "hello");
+        ch.record_group_history("grp1", "bob", "how are you?");
+        // Record the current message.
+        ch.record_group_history("grp1", "carol", "@bot what's up");
+
+        let mut msg = ChannelInboundMessage {
+            id: "m1".to_string(),
+            sender: MessageSender::new("carol".to_string()),
+            receiver: MessageReceiver::new("group:grp1".to_string()),
+            content: ChannelMessageContent::text("@bot what's up".to_string()),
+            timestamp: 0,
+            interruption_scope_id: None,
+        };
+        ch.inject_group_history(&mut msg, "grp1");
+
+        // The injected text should contain the two prior messages but NOT the
+        // current message (carol's @bot what's up) in the history block.
+        assert!(msg.content.text.contains("[Chat history begins]"));
+        assert!(msg.content.text.contains("[alice] hello"));
+        assert!(msg.content.text.contains("[bob] how are you?"));
+        assert!(msg.content.text.contains("[Chat history ends]"));
+        assert!(msg.content.text.contains("[Current message]"));
+        assert!(msg.content.text.contains("@bot what's up"));
+        // The current message should NOT appear in the history block.
+        let history_section = msg
+            .content
+            .text
+            .split("[Chat history ends]")
+            .next()
+            .unwrap_or("");
+        assert!(
+            !history_section.contains("[carol]"),
+            "current sender should not appear in history block"
+        );
+    }
+
+    #[test]
+    fn group_history_inject_empty_no_change() {
+        // When there is only the current message (no prior history), injection
+        // should be a no-op.
+        let ch = test_channel(vec![]);
+        ch.record_group_history("grp1", "alice", "hello");
+
+        let mut msg = ChannelInboundMessage {
+            id: "m1".to_string(),
+            sender: MessageSender::new("alice".to_string()),
+            receiver: MessageReceiver::new("group:grp1".to_string()),
+            content: ChannelMessageContent::text("hello".to_string()),
+            timestamp: 0,
+            interruption_scope_id: None,
+        };
+        let original = msg.content.text.clone();
+        ch.inject_group_history(&mut msg, "grp1");
+        assert_eq!(msg.content.text, original, "text should be unchanged");
+    }
+
+    // ── Feature 3: Per-group config resolution ────────────────────────────────
+
+    #[test]
+    fn per_group_config_resolves() {
+        let ch = test_channel(vec![("group_specific", Some(10)), ("*", Some(5))]);
+
+        // Explicit per-group entry wins.
+        assert_eq!(ch.resolve_group_history_limit("group_specific"), 10);
+        // Unknown group falls back to wildcard "*".
+        assert_eq!(ch.resolve_group_history_limit("unknown_group"), 5);
+    }
+
+    #[test]
+    fn per_group_config_default_when_no_wildcard() {
+        // No wildcard, no explicit entry → default 20.
+        let ch = test_channel(vec![("group_a", Some(3))]);
+        assert_eq!(ch.resolve_group_history_limit("group_a"), 3);
+        assert_eq!(ch.resolve_group_history_limit("group_b"), 20);
+    }
+
+    // ── Outbound safety: reply limiter, SSRF, rate limiter, sanitize ──────────
+
+    #[test]
+    fn reply_limiter_allows_then_blocks() {
+        let mut rl = ReplyLimiter::new();
+        // First 4 replies should be allowed.
+        for i in 1..=4 {
+            assert!(
+                rl.check_and_record("msg-001"),
+                "reply #{i} should be allowed"
+            );
+        }
+        // 5th reply should be blocked.
+        assert!(
+            !rl.check_and_record("msg-001"),
+            "reply #5 should be blocked"
+        );
+        // A different msg_id should still work.
+        assert!(
+            rl.check_and_record("msg-002"),
+            "different msg_id should be allowed"
+        );
+    }
+
+    #[test]
+    fn ssrf_blocks_localhost() {
+        assert!(is_ssrf_blocked("http://127.0.0.1:8080/img.png"));
+        assert!(is_ssrf_blocked("https://localhost/file"));
+        assert!(is_ssrf_blocked("http://192.168.1.1/secret"));
+        assert!(is_ssrf_blocked("http://10.0.0.1/internal"));
+        assert!(is_ssrf_blocked("http://169.254.169.254/metadata"));
+    }
+
+    #[test]
+    fn ssrf_allows_public() {
+        assert!(!is_ssrf_blocked("https://example.com/image.png"));
+        assert!(!is_ssrf_blocked("https://multimedia.nt.qq.com/audio.wav"));
+    }
+
+    #[test]
+    fn rate_limiter_blocks_after_limit() {
+        let mut rl = RateLimiter::new();
+        // sender_limit is 30; first 30 should pass.
+        for _ in 0..30 {
+            assert!(rl.check("user_a"), "should allow within sender limit");
+        }
+        // 31st should be blocked.
+        assert!(
+            !rl.check("user_a"),
+            "should block after sender limit exceeded"
+        );
+        // Different sender should still work.
+        assert!(rl.check("user_b"), "different sender should be allowed");
+    }
+
+    #[test]
+    fn strip_internal_tags_removes_thinking() {
+        // XML-style thinking tags
+        let input = "<thinking>secret reasoning</thinking>Hello world";
+        assert_eq!(strip_internal_tags(input), "Hello world");
+
+        // <think> tags
+        let input2 = "Hi <think>hidden</think> there";
+        assert_eq!(strip_internal_tags(input2), "Hi  there");
+
+        // system-reminder tags
+        let input3 = "<system-reminder>do not leak</system-reminder>visible text";
+        assert_eq!(strip_internal_tags(input3), "visible text");
+
+        // Deepseek format with backticks
+        let input4 = "`think`reasoning here`/think`answer";
+        assert_eq!(strip_internal_tags(input4), "answer");
+
+        // No tags → unchanged
+        assert_eq!(strip_internal_tags("plain text"), "plain text");
     }
 }
