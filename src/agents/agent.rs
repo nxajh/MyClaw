@@ -500,6 +500,20 @@ impl Agent {
                     .await;
                 }
 
+                // Notify channel of tool call start (for reply progress).
+                if let (Some(ch), Some(rt)) =
+                    (session.channel.as_ref(), session.reply_target())
+                {
+                    ch.on_tool_event(
+                        rt,
+                        crate::channels::ToolEvent::Start {
+                            tool_name: call.name.clone(),
+                            tool_call_id: call.id.clone(),
+                        },
+                    )
+                    .await;
+                }
+
                 let result = tool_executor
                     .execute(call, session, Some(&permission_mode), &allowed_tools)
                     .await;
@@ -565,6 +579,21 @@ impl Agent {
                     },
                 )
                 .await;
+
+                // Notify channel of tool call completion (for reply progress).
+                if let (Some(ch), Some(rt)) =
+                    (session.channel.as_ref(), session.reply_target())
+                {
+                    ch.on_tool_event(
+                        rt,
+                        crate::channels::ToolEvent::End {
+                            tool_name: call.name.clone(),
+                            tool_call_id: call.id.clone(),
+                            success: !is_error,
+                        },
+                    )
+                    .await;
+                }
 
                 session.add_tool_result(call.id.clone(), &call.name, result_content, is_error);
                 persist_last(session);

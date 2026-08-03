@@ -39,6 +39,7 @@ pub use agents::{
 };
 pub use channels::{
     Channel, ChannelOutboundMessage, DedupState, OutboundSendResult, ProcessingStatus,
+    ToolEvent,
 };
 pub use config::{AppConfig, ConfigLoader};
 pub use providers::ProviderRegistry;

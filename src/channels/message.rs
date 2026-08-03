@@ -433,6 +433,22 @@ pub enum ProcessingStatus {
     Error,
 }
 
+/// Tool lifecycle event for channels that show per-tool progress.
+#[derive(Debug, Clone)]
+pub enum ToolEvent {
+    /// A tool call is about to start.
+    Start {
+        tool_name: String,
+        tool_call_id: String,
+    },
+    /// A tool call finished (success or failure).
+    End {
+        tool_name: String,
+        tool_call_id: String,
+        success: bool,
+    },
+}
+
 /// Marker trait for channel adapters.
 #[async_trait]
 pub trait Channel: Send + Sync {
@@ -477,6 +493,11 @@ pub trait Channel: Send + Sync {
     /// Default implementation does nothing — channels can override to show
     /// status indicators (e.g. reactions).
     async fn on_status(&self, _recipient: &str, _status: ProcessingStatus) {}
+
+    /// Notify the channel about tool call lifecycle events.
+    /// Default implementation does nothing — channels can override to show
+    /// per-tool progress (e.g. WeChat reply progress).
+    async fn on_tool_event(&self, _recipient: &str, _event: ToolEvent) {}
 
     /// Declarative capabilities (RFC §6.1). Default points at
     /// `MINIMAL_CAPABILITIES`; each channel overrides to publish its own

@@ -711,6 +711,58 @@ impl ApiClient {
         self.check_ret(&resp)
     }
 
+    /// Send a tool call progress item (TOOL_CALL_START or TOOL_CALL_RESULT).
+    async fn send_tool_progress(
+        &self,
+        to_user_id: &str,
+        item_type: i64,
+        tool_name: &str,
+        tool_call_id: &str,
+        status: Option<&str>,
+        context_token: Option<&str>,
+    ) -> Result<(), ApiError> {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut item_json = serde_json::json!({
+            "type": item_type,
+            "create_time_ms": now_ms,
+        });
+        match item_type {
+            ITEM_TYPE_TOOL_CALL_START => {
+                item_json["is_completed"] = serde_json::json!(false);
+                item_json["tool_call_start_item"] = serde_json::json!({
+                    "tool_name": tool_name,
+                    "tool_call_id": tool_call_id,
+                });
+            }
+            ITEM_TYPE_TOOL_CALL_RESULT => {
+                item_json["is_completed"] = serde_json::json!(true);
+                item_json["tool_call_result_item"] = serde_json::json!({
+                    "tool_name": tool_name,
+                    "tool_call_id": tool_call_id,
+                    "status": status.unwrap_or("completed"),
+                });
+            }
+            _ => return Err(ApiError::Parse("invalid tool item type".into())),
+        }
+        let msg = serde_json::json!({
+            "from_user_id": "",
+            "to_user_id": to_user_id,
+            "client_id": format!("myclaw_{}", uuid::Uuid::new_v4()),
+            "message_type": MESSAGE_TYPE_BOT,
+            "message_state": MESSAGE_STATE_GENERATING,
+            "item_list": [item_json],
+            "context_token": context_token,
+        });
+        let req = serde_json::json!({
+            "msg": msg,
+            "base_info": build_base_info(),
+        });
+        let resp = self
+            .api_post("ilink/bot/sendmessage", &req)
+            .await?;
+        self.check_ret(&resp)
+    }
+
     async fn get_config(&self, ilink_user_id: &str) -> Result<GetConfigResponse, ApiError> {
         let req = GetConfigRequest {
             ilink_user_id: ilink_user_id.to_string(),
@@ -1272,6 +1324,56 @@ impl Channel for WechatChannel {
                     debug!("WeChat: typing cancel failed: {e}");
                 }
             }
+        }
+    }
+
+    async fn on_tool_event(
+        &self,
+        recipient: &str,
+        event: crate::channels::ToolEvent,
+    ) {
+        let ctx_token = self
+            .api
+            .state
+            .read()
+            .context_tokens
+            .get(recipient)
+            .cloned();
+        let result = match &event {
+            crate::channels::ToolEvent::Start {
+                tool_name,
+                tool_call_id,
+            } => {
+                self.api
+                    .send_tool_progress(
+                        recipient,
+                        ITEM_TYPE_TOOL_CALL_START,
+                        tool_name,
+                        tool_call_id,
+                        None,
+                        ctx_token.as_deref(),
+                    )
+                    .await
+            }
+            crate::channels::ToolEvent::End {
+                tool_name,
+                tool_call_id,
+                success,
+            } => {
+                self.api
+                    .send_tool_progress(
+                        recipient,
+                        ITEM_TYPE_TOOL_CALL_RESULT,
+                        tool_name,
+                        tool_call_id,
+                        Some(if *success { "completed" } else { "failed" }),
+                        ctx_token.as_deref(),
+                    )
+                    .await
+            }
+        };
+        if let Err(e) = result {
+            debug!("WeChat: tool progress send failed: {e}");
         }
     }
 
