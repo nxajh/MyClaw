@@ -763,10 +763,35 @@ impl ApiClient {
             "msg": msg,
             "base_info": build_base_info(),
         });
-        let resp = self
-            .api_post("ilink/bot/sendmessage", &req)
-            .await?;
-        self.check_ret(&resp)
+        // sendmessage for tool items returns empty body (200, Content-Length: 0),
+        // so we can't use api_post which calls resp.json(). Just check HTTP status.
+        let mut http_req = self.http.post(self.url("ilink/bot/sendmessage"));
+        http_req = http_req.header("AuthorizationType", "ilink_bot_token");
+        if let Some(token) = self
+            .state
+            .read()
+            .bot_token
+            .clone()
+            .filter(|t| !t.is_empty())
+        {
+            http_req = http_req.header("Authorization", format!("Bearer {token}"));
+        }
+        http_req = http_req
+            .header("X-WECHAT-UIN", Self::random_uin_header())
+            .header("iLink-App-Id", ILINK_APP_ID)
+            .header("iLink-App-ClientVersion", &self.client_version);
+        let resp = http_req
+            .json(&req)
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(ApiError::Http(
+                resp.status().as_u16(),
+                resp.text().await.unwrap_or_default(),
+            ));
+        }
+        Ok(())
     }
 
     async fn get_config(&self, ilink_user_id: &str) -> Result<GetConfigResponse, ApiError> {
