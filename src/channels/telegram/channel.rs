@@ -1846,7 +1846,20 @@ impl Channel for TelegramChannel {
                     .insert(recipient.to_string(), status_ids);
             }
             ProcessingStatus::Done => {
-                // Remove 🤔 reaction from all tracked messages (send() already handles cleanup, but this is a safety net).
+                // Stop typing keep-alive (critical for streaming path where
+                // send_message is skipped — typing would run forever otherwise).
+                self.stop_internal_typing(recipient);
+
+                // Remove ack reactions (👀) — normally done in send_message,
+                // but streaming path skips it.
+                let ack_info = self.pending_acks.lock().remove(recipient);
+                if let Some(msg_ids) = ack_info {
+                    for (chat_id, msg_id) in msg_ids {
+                        self.remove_ack(chat_id, msg_id).await;
+                    }
+                }
+
+                // Remove 🤔 reaction from all tracked messages.
                 let status_info = self.status_reactions.lock().remove(recipient);
                 if let Some(msg_ids) = status_info {
                     for (chat_id, msg_id) in msg_ids {
@@ -1855,6 +1868,8 @@ impl Channel for TelegramChannel {
                 }
             }
             ProcessingStatus::Error => {
+                // Stop typing on error too.
+                self.stop_internal_typing(recipient);
                 // Replace 🤔 with ❌ on all tracked messages.
                 // Keep entries in status_reactions for cleanup on next message.
                 let info = self.status_reactions.lock().get(recipient).cloned();
