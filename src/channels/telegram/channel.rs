@@ -1973,8 +1973,19 @@ impl TurnStream for TelegramTurnStream {
             TurnEvent::Done { text } => {
                 self.accumulated = text;
                 self.finished = true;
-                self.flush_preview().await;
-                self.delivery = StreamDelivery::FinalDelivered;
+                if self.accumulated.chars().count() > STREAM_PREVIEW_LIMIT {
+                    // Final text exceeds Telegram's 4096-char edit limit.
+                    // Delete the truncated preview; let send_message handle
+                    // proper chunking via the fallback path.
+                    if let Some(mid) = self.msg_id {
+                        let _ = self.channel.delete_message_raw(self.chat_id, mid).await;
+                        self.msg_id = None;
+                    }
+                    // Leave delivery as Visible/Pending → triggers fallback.
+                } else {
+                    self.flush_preview().await;
+                    self.delivery = StreamDelivery::FinalDelivered;
+                }
             }
             TurnEvent::Error { .. } | TurnEvent::EmptyResponse { .. } => {
                 self.finished = true;
