@@ -335,7 +335,7 @@ impl SessionContext {
         };
 
         // Notify channel that processing has started (typing indicator, etc.)
-        if let Some(ref ch) = channel {
+        if let Some(ref ch) = channel_for_send {
             ch.on_status(&reply_target, crate::ProcessingStatus::Thinking)
                 .await;
         }
@@ -350,7 +350,7 @@ impl SessionContext {
         match (result, turn_stream) {
             (Ok(turn_result), stream) => {
                 // Notify channel that processing completed successfully
-                if let Some(ref ch) = channel {
+                if let Some(ref ch) = channel_for_send {
                     ch.on_status(&reply_target, crate::ProcessingStatus::Done)
                         .await;
                 }
@@ -426,7 +426,7 @@ impl SessionContext {
                     s.abort().await;
                 }
                 // Notify channel of error + send error notice to user
-                if let Some(ref ch) = channel {
+                if let Some(ref ch) = channel_for_send {
                     ch.on_status(&reply_target, crate::ProcessingStatus::Error)
                         .await;
                     // Best-effort error notice

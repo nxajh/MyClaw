@@ -235,7 +235,7 @@ struct VoiceItem {
 }
 
 /// CDN media reference (`CDNMedia`). `aes_key` is base64-encoded bytes in JSON.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 struct CDNMedia {
     #[serde(default)]
     encrypt_query_param: String,
