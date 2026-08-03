@@ -131,12 +131,13 @@ fn decrypt_ecb(ciphertext: &[u8], key: &[u8; 16]) -> Result<Vec<u8>, String> {
         })
         .collect();
     let pad_val = *decrypted.last().unwrap_or(&0);
+    let dec_preview: Vec<u8> = decrypted.iter().take(16).copied().collect();
     debug!(
         "WeChat: decrypt_ecb: ct_len={} dec_len={} pad_val={} dec_first={:02x?}",
         ciphertext.len(),
         decrypted.len(),
         pad_val,
-        &decrypted[..decrypted.len().min(16)]
+        dec_preview
     );
     pkcs7_unpad(&decrypted)
 }
@@ -862,13 +863,14 @@ impl ApiClient {
             .bytes()
             .await
             .map_err(|e| ApiError::Network(e.to_string()))?;
+        let ct_preview: Vec<u8> = ciphertext.iter().take(16).copied().collect();
         debug!(
             "WeChat: CDN download complete: status={} ct_type={} ct_len={} key_hex={} first_bytes={:02x?}",
             status.as_u16(),
             content_type,
             ciphertext.len(),
             hex::encode(&key),
-            &ciphertext[..ciphertext.len().min(16)]
+            ct_preview
         );
         decrypt_ecb(&ciphertext, &key).map_err(|e| ApiError::Parse(format!("decrypt: {e}")))
     }
