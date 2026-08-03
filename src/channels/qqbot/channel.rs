@@ -20,7 +20,7 @@ use super::token::TokenManager;
 use super::types::*;
 use crate::channels::message::{
     ChannelFile, ChannelFileMeta, ChannelInboundMessage, ChannelMessageContent, LocalFileBody,
-    MessageReceiver, MessageSender,
+    MessageReceiver, MessageSender, ProcessingStatus,
 };
 use crate::config::channel::QQBotAccountConfig;
 use crate::{Channel, DedupState};
@@ -95,6 +95,13 @@ const QQ_CHARS_PER_LINE: f64 = 20.0;
 /// QQ's markdown renderer corrupts spacing at ~35-40 visual lines (tested
 /// empirically with short/medium/long paragraphs). 30 provides a safe margin.
 const QQ_MAX_VISUAL_LINES_PER_BUBBLE: usize = 30;
+
+/// Maximum file size for inline base64 upload (10 MB).
+///
+/// QQ Bot inline file upload (msg_type=7) requires base64-encoding the entire
+/// payload, so large files risk memory exhaustion. Chunked upload is not yet
+/// implemented; exceeding this limit returns an error to the caller.
+const MAX_INLINE_UPLOAD_BYTES: usize = 10_485_760;
 
 /// Estimate display width: CJK = 1.0, ASCII = 0.5.
 fn display_width(s: &str) -> f64 {
@@ -202,6 +209,8 @@ pub struct QQBotChannel {
     pub(super) session: Arc<Mutex<Option<SessionState>>>,
     /// Monotonic counter for proactive message msg_seq to avoid collisions.
     pub(super) msg_seq_counter: Arc<AtomicU32>,
+    /// Startup instant for uptime reporting.
+    pub(super) started_at: std::time::Instant,
 }
 
 impl QQBotChannel {
@@ -216,12 +225,13 @@ impl QQBotChannel {
             dedup: DedupState::new(),
             last_seq: Arc::new(Mutex::new(None)),
             http_client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
+                .timeout(Duration::from_secs(120))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             typing_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session: Arc::new(Mutex::new(None)),
             msg_seq_counter: Arc::new(AtomicU32::new(1)),
+            started_at: std::time::Instant::now(),
         };
         crate::channels::warn_if_locked_down(&ch);
         ch
@@ -1312,13 +1322,13 @@ impl QQBotChannel {
             "/bot-help" => {
                 // C2C: send with keyboard buttons; group: fall through to cmd-input tags.
                 if let Some(openid) = reply_target.strip_prefix("c2c:") {
-                    let help_text = "**🤖 MyClaw Bot Commands**\n\n*Channel-level commands (handled locally)*\n• `/bot-ping` — Check bot latency\n• `/bot-version` — Show bot version\n• `/bot-help` — Show this help\n\n*Orchestrator commands (handled by AI)*\n• `/help` — Show AI commands\n• `/new` — New conversation\n• `/status` — Show status\n\nType any command or just chat!";
+                    let help_text = "**🤖 MyClaw Bot Commands**\n\n*Channel-level commands (handled locally)*\n• `/bot-ping` — Check bot latency\n• `/bot-version` — Show bot version\n• `/bot-help` — Show this help\n• `/bot-status` — Show bot status\n• `/bot-clear` — Start a new conversation\n\n*Orchestrator commands (handled by AI)*\n• `/help` — Show AI commands\n• `/new` — New conversation\n• `/status` — Show status\n\nType any command or just chat!";
                     let kb = Keyboard::from_pairs(&[
                         ("/bot-ping", "/bot-ping"),
                         ("/bot-version", "/bot-version"),
-                        ("/help", "/help"),
-                        ("/new", "/new"),
-                        ("/status", "/status"),
+                        ("/bot-status", "/bot-status"),
+                        ("/bot-help", "/bot-help"),
+                        ("/bot-clear", "/bot-clear"),
                     ]);
                     if self
                         .send_c2c_keyboard(openid, help_text, &kb, msg_id)
@@ -1332,12 +1342,14 @@ impl QQBotChannel {
                 // Group or keyboard fallback: use cmd-input tags.
                 let help_text = r#"**🤖 MyClaw Bot Commands**
 
-<qqbot-cmd-input text="/bot-ping" /> <qqbot-cmd-input text="/bot-version" /> <qqbot-cmd-input text="/bot-help" />
+<qqbot-cmd-input text="/bot-ping" /> <qqbot-cmd-input text="/bot-version" /> <qqbot-cmd-input text="/bot-help" /> <qqbot-cmd-input text="/bot-status" /> <qqbot-cmd-input text="/bot-clear" />
 
 *Channel-level commands (handled locally)*
 • `/bot-ping` — Check bot latency
 • `/bot-version` — Show bot version
 • `/bot-help` — Show this help
+• `/bot-status` — Show bot status
+• `/bot-clear` — Start a new conversation
 
 *Orchestrator commands (handled by AI)*
 • `/help` — Show AI commands
@@ -1346,6 +1358,22 @@ impl QQBotChannel {
 
 Type any command or just chat!"#;
                 help_text.to_string()
+            }
+            // ── Register new commands above this line ──────────────────────
+            "/bot-status" => {
+                let uptime = self.started_at.elapsed();
+                let hours = uptime.as_secs() / 3600;
+                let mins = (uptime.as_secs() % 3600) / 60;
+                format!(
+                    "**🟢 QQ Bot Status**\n\n• Account: `{}`\n• Version: {}\n• Uptime: {}h {}m\n• Session: Active",
+                    self.account_id,
+                    env!("MYCLAW_VERSION"),
+                    hours,
+                    mins,
+                )
+            }
+            "/bot-clear" => {
+                "Please use /new in chat to start a new conversation".to_string()
             }
             _ => return false,
         };
@@ -1546,6 +1574,19 @@ impl Channel for QQBotChannel {
             let mut data = Vec::new();
             tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut data).await?;
 
+            // Pre-check: reject files exceeding the inline base64 upload limit.
+            if data.len() > MAX_INLINE_UPLOAD_BYTES {
+                warn!(
+                    size = data.len(),
+                    limit = MAX_INLINE_UPLOAD_BYTES,
+                    "QQ Bot file upload exceeds 10MB inline limit"
+                );
+                anyhow::bail!(
+                    "QQ Bot file upload size {} exceeds 10MB inline limit; chunked upload not yet implemented",
+                    data.len()
+                );
+            }
+
             // Determine file_type: 1=image, 2=video, 3=voice, 4=file
             let file_type = match crate::providers::media::modality_from_mime(
                 file.meta.mime_type.as_deref(),
@@ -1689,46 +1730,125 @@ impl Channel for QQBotChannel {
         // Try to fetch a token to verify credentials.
         self.token_manager.get_token().await.is_ok()
     }
+
+    /// Override on_status to drive QQ typing indicators from orchestrator
+    /// lifecycle events. Thinking → start typing keep-alive; Done/Error → stop.
+    async fn on_status(&self, recipient: &str, status: ProcessingStatus) {
+        match status {
+            ProcessingStatus::Thinking => {
+                self.start_internal_typing(recipient);
+            }
+            ProcessingStatus::Done | ProcessingStatus::Error => {
+                self.stop_internal_typing(recipient);
+            }
+        }
+    }
+
+    /// Override on_tool_event to provide per-tool typing feedback.
+    /// Tool execution starts a fresh typing pulse so the user sees activity
+    /// during long-running tool calls. End is a no-op because QQ typing
+    /// auto-expires; the keep-alive loop continues until `on_status(Done)`.
+    async fn on_tool_event(&self, recipient: &str, event: crate::channels::ToolEvent) {
+        match event {
+            crate::channels::ToolEvent::Start { .. } => {
+                self.start_internal_typing(recipient);
+            }
+            crate::channels::ToolEvent::End { .. } => {
+                // Typing auto-expires; no explicit stop needed for QQ.
+            }
+        }
+    }
+}
+
+// ── Reconnect state machine ──────────────────────────────────────────────────
+
+/// Manages WebSocket reconnection backoff state, extracted from `ws_loop`
+/// for testability.
+///
+/// Tracks the number of consecutive rapid disconnects and computes the
+/// appropriate sleep duration before the next attempt based on the disconnect
+/// type.
+struct ReconnectManager {
+    attempt: usize,
+    last_disconnect: std::time::Instant,
+}
+
+impl ReconnectManager {
+    fn new() -> Self {
+        Self {
+            attempt: 0,
+            last_disconnect: std::time::Instant::now(),
+        }
+    }
+
+    /// Returns the delay before the next reconnect attempt based on disconnect
+    /// type.
+    ///
+    /// - `TryResume`: resets attempt counter, returns 1 s (fast retry).
+    /// - `Clean`: increments attempt on rapid disconnect, uses indexed backoff
+    ///   schedule (caps at 60 s after `RAPID_RECONNECT_LIMIT` rapid failures).
+    /// - `TokenExpired`: returns 3 s.
+    /// - `Fatal`: returns 0 s (caller stops reconnecting).
+    fn next_delay(&mut self, disconnect: &WsDisconnect) -> Duration {
+        let now = std::time::Instant::now();
+        let rapid =
+            now.duration_since(self.last_disconnect).as_secs() < RAPID_RECONNECT_WINDOW_SECS;
+        self.last_disconnect = now;
+
+        match disconnect {
+            WsDisconnect::TryResume => {
+                self.attempt = 0;
+                Duration::from_secs(1)
+            }
+            WsDisconnect::Clean => {
+                if rapid {
+                    self.attempt += 1;
+                } else {
+                    self.attempt = 0;
+                }
+                if self.attempt >= RAPID_RECONNECT_LIMIT {
+                    Duration::from_secs(60)
+                } else {
+                    Duration::from_secs(
+                        RECONNECT_DELAYS[self.attempt.min(RECONNECT_DELAYS.len() - 1)],
+                    )
+                }
+            }
+            WsDisconnect::TokenExpired => Duration::from_secs(3),
+            WsDisconnect::Fatal => Duration::from_secs(0),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.attempt = 0;
+    }
 }
 
 // ── WebSocket loop ────────────────────────────────────────────────────────────
 
 impl QQBotChannel {
     /// Main WebSocket loop with auto-reconnect and incremental delay.
+    ///
+    /// Reconnection state (attempt counter, rapid-disconnect window) is
+    /// delegated to [`ReconnectManager`].
     async fn ws_loop(&self, tx: mpsc::Sender<ChannelInboundMessage>) {
-        let mut attempt = 0usize;
-        let mut last_disconnect = std::time::Instant::now();
+        let mut mgr = ReconnectManager::new();
 
         loop {
             let result = self.ws_connect(&tx).await;
-            let now = std::time::Instant::now();
-            let rapid = now.duration_since(last_disconnect).as_secs() < RAPID_RECONNECT_WINDOW_SECS;
-            last_disconnect = now;
 
             match result {
                 Ok(WsDisconnect::TryResume) => {
-                    // Resume-capable disconnect — try immediately with short delay
                     info!(account = %self.account_id, "QQ Bot WebSocket disconnected (resumable), reconnecting");
-                    attempt = 0;
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    let delay = mgr.next_delay(&WsDisconnect::TryResume);
+                    tokio::time::sleep(delay).await;
                 }
                 Ok(WsDisconnect::Clean) => {
                     warn!(account = %self.account_id, "QQ Bot WebSocket disconnected, reconnecting");
-                    if rapid {
-                        attempt += 1;
-                    } else {
-                        attempt = 0;
-                    }
-                    let delay = if attempt >= RAPID_RECONNECT_LIMIT {
-                        Duration::from_secs(60)
-                    } else {
-                        Duration::from_secs(
-                            RECONNECT_DELAYS[attempt.min(RECONNECT_DELAYS.len() - 1)],
-                        )
-                    };
+                    let delay = mgr.next_delay(&WsDisconnect::Clean);
                     // Clean disconnect clears session
                     *self.session.lock() = None;
-                    info!(account = %self.account_id, delay_secs = delay.as_secs(), attempt, "reconnecting");
+                    info!(account = %self.account_id, delay_secs = delay.as_secs(), "reconnecting");
                     tokio::time::sleep(delay).await;
                 }
                 Ok(WsDisconnect::TokenExpired) => {
@@ -1737,7 +1857,8 @@ impl QQBotChannel {
                         error!(account = %self.account_id, err = %e, "token refresh failed");
                     }
                     *self.session.lock() = None;
-                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    let delay = mgr.next_delay(&WsDisconnect::TokenExpired);
+                    tokio::time::sleep(delay).await;
                 }
                 Ok(WsDisconnect::Fatal) => {
                     error!(account = %self.account_id, "QQ Bot WebSocket fatal disconnect, stopping reconnect");
@@ -1745,18 +1866,7 @@ impl QQBotChannel {
                 }
                 Err(e) => {
                     error!(account = %self.account_id, err = %e, "QQ Bot WebSocket error, reconnecting");
-                    if rapid {
-                        attempt += 1;
-                    } else {
-                        attempt = 0;
-                    }
-                    let delay = if attempt >= RAPID_RECONNECT_LIMIT {
-                        Duration::from_secs(60)
-                    } else {
-                        Duration::from_secs(
-                            RECONNECT_DELAYS[attempt.min(RECONNECT_DELAYS.len() - 1)],
-                        )
-                    };
+                    let delay = mgr.next_delay(&WsDisconnect::Clean);
                     tokio::time::sleep(delay).await;
                 }
             }
@@ -1987,9 +2097,18 @@ impl QQBotChannel {
                         self.ingest_video_file_attachments(&payload.d, &mut channel_msg)
                             .await;
 
-                        if tx.send(channel_msg.clone()).await.is_err() {
-                            warn!(account = %self.account_id, "channel receiver dropped, stopping listen");
-                            return Some(WsDisconnect::Clean);
+                        match tx.try_send(channel_msg.clone()) {
+                            Ok(()) => {}
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                error!(
+                                    account = %self.account_id,
+                                    "QQBot inbound queue full, dropping message"
+                                );
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                warn!(account = %self.account_id, "channel receiver dropped, stopping listen");
+                                return Some(WsDisconnect::Clean);
+                            }
                         }
                         // Start typing keep-alive for C2C messages.
                         self.start_internal_typing(&channel_msg.receiver.id);
@@ -2112,5 +2231,50 @@ mod tests {
         assert_eq!(display_width("abcdefghijklmnopqrst"), 10.0);
         // Mixed
         assert_eq!(display_width("中文ab"), 1.0 + 1.0 + 0.5 + 0.5);
+    }
+
+    #[test]
+    fn reconnect_manager_try_resume_resets_attempt() {
+        let mut mgr = ReconnectManager::new();
+        // Simulate a few rapid Clean disconnects to ramp up attempt.
+        mgr.attempt = 2;
+        let delay = mgr.next_delay(&WsDisconnect::TryResume);
+        assert_eq!(delay, Duration::from_secs(1));
+        assert_eq!(mgr.attempt, 0);
+    }
+
+    #[test]
+    fn reconnect_manager_clean_first_rapid() {
+        let mut mgr = ReconnectManager::new();
+        // Immediately after construction → rapid.
+        let delay = mgr.next_delay(&WsDisconnect::Clean);
+        assert_eq!(delay, Duration::from_secs(RECONNECT_DELAYS[1]));
+        assert_eq!(mgr.attempt, 1);
+    }
+
+    #[test]
+    fn reconnect_manager_caps_at_60s() {
+        let mut mgr = ReconnectManager::new();
+        // Simulate RAPID_RECONNECT_LIMIT rapid disconnects.
+        for _ in 0..RAPID_RECONNECT_LIMIT {
+            mgr.next_delay(&WsDisconnect::Clean);
+        }
+        let delay = mgr.next_delay(&WsDisconnect::Clean);
+        assert_eq!(delay, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn reconnect_manager_token_expired_fixed_delay() {
+        let mut mgr = ReconnectManager::new();
+        let delay = mgr.next_delay(&WsDisconnect::TokenExpired);
+        assert_eq!(delay, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn reconnect_manager_reset() {
+        let mut mgr = ReconnectManager::new();
+        mgr.attempt = 5;
+        mgr.reset();
+        assert_eq!(mgr.attempt, 0);
     }
 }
