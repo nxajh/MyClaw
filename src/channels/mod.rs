@@ -18,6 +18,7 @@ pub use message::{
     ChannelInboundMessage, ChannelMessageContent, ChannelOutboundMessage, DedupState, InlineButton,
     LenUnit, LocalFileBody, MINIMAL_CAPABILITIES, MessageId, MessageReceiver, MessageSender,
     OutboundSendResult, PersistedChannelMessage, ProcessingStatus, SendOptions,
+    ToolEvent,
 };
 #[cfg(feature = "qqbot")]
 pub use qqbot::QQBotChannel;
