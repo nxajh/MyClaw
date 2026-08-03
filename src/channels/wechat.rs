@@ -869,7 +869,7 @@ impl ApiClient {
             status.as_u16(),
             content_type,
             ciphertext.len(),
-            hex::encode(&key),
+            hex::encode(key),
             ct_preview
         );
         decrypt_ecb(&ciphertext, &key).map_err(|e| ApiError::Parse(format!("decrypt: {e}")))
