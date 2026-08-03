@@ -803,6 +803,7 @@ impl ApiClient {
         ((plaintext_size / 16) + 1) * 16
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn get_upload_url(
         &self,
         filekey: &str,
@@ -1505,7 +1506,7 @@ impl Channel for WechatChannel {
                                 id: event.msg_id,
                                 sender: MessageSender::new(event.sender_wxid),
                                 receiver: MessageReceiver::new(event.chat_id),
-                                content: content,
+                                content,
                                 timestamp: event.raw_timestamp as u64,
                                 interruption_scope_id: None,
                             };
