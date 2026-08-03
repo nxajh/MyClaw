@@ -1654,11 +1654,13 @@ impl QQBotChannel {
             "/bot-help" => {
                 // C2C: send with keyboard buttons; group: fall through to cmd-input tags.
                 if let Some(openid) = reply_target.strip_prefix("c2c:") {
-                    let help_text = "**🤖 MyClaw Bot Commands**\n\n*Channel-level commands (handled locally)*\n• `/bot-ping` — Check bot latency\n• `/bot-version` — Show bot version\n• `/bot-help` — Show this help\n• `/bot-status` — Show bot status\n• `/bot-clear` — Start a new conversation\n\n*Orchestrator commands (handled by AI)*\n• `/help` — Show AI commands\n• `/new` — New conversation\n• `/status` — Show status\n\nType any command or just chat!";
+                    let help_text = "**🤖 MyClaw Bot Commands**\n\n*Channel-level commands (handled locally)*\n• `/bot-ping` — Check bot latency\n• `/bot-version` — Show bot version\n• `/bot-help` — Show this help\n• `/bot-status` — Show bot status\n• `/bot-me` — Show your chat info\n• `/bot-groups` — Show group activity\n• `/bot-clear` — Start a new conversation\n\n*Orchestrator commands (handled by AI)*\n• `/help` — Show AI commands\n• `/new` — New conversation\n• `/status` — Show status\n\nType any command or just chat!";
                     let kb = Keyboard::from_pairs(&[
                         ("/bot-ping", "/bot-ping"),
                         ("/bot-version", "/bot-version"),
                         ("/bot-status", "/bot-status"),
+                        ("/bot-me", "/bot-me"),
+                        ("/bot-groups", "/bot-groups"),
                         ("/bot-help", "/bot-help"),
                         ("/bot-clear", "/bot-clear"),
                     ]);
@@ -1674,13 +1676,15 @@ impl QQBotChannel {
                 // Group or keyboard fallback: use cmd-input tags.
                 let help_text = r#"**🤖 MyClaw Bot Commands**
 
-<qqbot-cmd-input text="/bot-ping" /> <qqbot-cmd-input text="/bot-version" /> <qqbot-cmd-input text="/bot-help" /> <qqbot-cmd-input text="/bot-status" /> <qqbot-cmd-input text="/bot-clear" />
+<qqbot-cmd-input text="/bot-ping" /> <qqbot-cmd-input text="/bot-version" /> <qqbot-cmd-input text="/bot-help" /> <qqbot-cmd-input text="/bot-status" /> <qqbot-cmd-input text="/bot-me" /> <qqbot-cmd-input text="/bot-groups" /> <qqbot-cmd-input text="/bot-clear" />
 
 *Channel-level commands (handled locally)*
 • `/bot-ping` — Check bot latency
 • `/bot-version` — Show bot version
 • `/bot-help` — Show this help
 • `/bot-status` — Show bot status
+• `/bot-me` — Show your chat info
+• `/bot-groups` — Show group activity
 • `/bot-clear` — Start a new conversation
 
 *Orchestrator commands (handled by AI)*
@@ -1691,17 +1695,63 @@ impl QQBotChannel {
 Type any command or just chat!"#;
                 help_text.to_string()
             }
+            "/bot-me" => {
+                let scope = if reply_target.starts_with("group:") {
+                    "Group"
+                } else {
+                    "Private"
+                };
+                format!(
+                    "**👤 Your Info**\n\n• Chat: {}\n• Target: `{}`",
+                    scope, reply_target
+                )
+            }
+            "/bot-groups" => {
+                let history = self.group_history.lock();
+                if history.is_empty() {
+                    "No group activity recorded".to_string()
+                } else {
+                    let mut lines = vec!["**📋 Group Activity**\n".to_string()];
+                    for (gid, msgs) in history.iter() {
+                        let limit = self.resolve_group_history_limit(gid);
+                        let group_name = self
+                            .config
+                            .group_config
+                            .get(gid)
+                            .and_then(|c| c.name.as_deref())
+                            .or_else(|| {
+                                self.config
+                                    .group_config
+                                    .get("*")
+                                    .and_then(|c| c.name.as_deref())
+                            })
+                            .unwrap_or("(unnamed)");
+                        let gid_display: String = gid.chars().take(12).collect();
+                        lines.push(format!(
+                            "• `{}` ({}) — {} msgs (limit: {})",
+                            gid_display, group_name, msgs.len(), limit
+                        ));
+                    }
+                    lines.join("\n")
+                }
+            }
             // ── Register new commands above this line ──────────────────────
             "/bot-status" => {
                 let uptime = self.started_at.elapsed();
                 let hours = uptime.as_secs() / 3600;
                 let mins = (uptime.as_secs() % 3600) / 60;
+                let history = self.group_history.lock();
+                let group_count = history.len();
+                let total_msgs: usize = history.values().map(|v| v.len()).sum();
+                drop(history);
                 format!(
-                    "**🟢 QQ Bot Status**\n\n• Account: `{}`\n• Version: {}\n• Uptime: {}h {}m\n• Session: Active",
+                    "**🟢 QQ Bot Status**\n\n• Account: `{}`\n• Version: {}\n• Uptime: {}h {}m\n• Active groups: {} ({} msgs buffered)\n• Session: Active",
                     self.account_id,
                     env!("MYCLAW_VERSION"),
                     hours,
                     mins,
+                    group_count,
+                    total_msgs,
                 )
             }
             "/bot-clear" => {
