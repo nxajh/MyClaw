@@ -193,8 +193,8 @@ fn split_by_visual_lines(text: &str, max_lines: usize) -> Vec<String> {
         // the incoming part starts with one. A blank line inside a table
         // (produced by some generators) should not cause a mid-table split.
         let breaks_table = !current.is_empty()
-            && current.lines().last().map_or(false, is_gfm_table_line)
-            && part.lines().next().map_or(false, is_gfm_table_line);
+            && current.lines().last().is_some_and(is_gfm_table_line)
+            && part.lines().next().is_some_and(is_gfm_table_line);
 
         // Split before this part if it would overflow and we're outside code,
         // unless doing so would break a table continuation.
