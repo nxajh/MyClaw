@@ -504,6 +504,7 @@ impl Agent {
                 if let (Some(ch), Some(rt)) =
                     (session.channel.as_ref(), session.reply_target())
                 {
+                    tracing::debug!("TOOL_EVENT_START channel={:?} target={}", session.channel.as_ref().map(|c| c.name().to_string()), rt);
                     ch.on_tool_event(
                         rt,
                         crate::channels::ToolEvent::Start {
