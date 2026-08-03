@@ -750,15 +750,19 @@ impl ApiClient {
             }
             _ => return Err(ApiError::Parse("invalid tool item type".into())),
         }
-        let msg = serde_json::json!({
+        // Reference implementation uses message_state=FINISH(2) for tool progress,
+        // and omits context_token when it's None (rather than sending null).
+        let mut msg = serde_json::json!({
             "from_user_id": "",
             "to_user_id": to_user_id,
             "client_id": format!("myclaw_{}", uuid::Uuid::new_v4()),
             "message_type": MESSAGE_TYPE_BOT,
-            "message_state": MESSAGE_STATE_GENERATING,
+            "message_state": MESSAGE_STATE_FINISH,
             "item_list": [item_json],
-            "context_token": context_token,
         });
+        if let Some(ct) = context_token {
+            msg["context_token"] = serde_json::json!(ct);
+        }
         let req = serde_json::json!({
             "msg": msg,
             "base_info": build_base_info(),
