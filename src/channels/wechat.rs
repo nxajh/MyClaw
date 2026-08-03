@@ -115,7 +115,10 @@ fn encrypt_ecb(plaintext: &[u8], key: &[u8; 16]) -> Vec<u8> {
 #[allow(dead_code)]
 fn decrypt_ecb(ciphertext: &[u8], key: &[u8; 16]) -> Result<Vec<u8>, String> {
     if !ciphertext.len().is_multiple_of(16) {
-        return Err("Ciphertext length is not a multiple of 16".into());
+        return Err(format!(
+            "Ciphertext length {} is not a multiple of 16",
+            ciphertext.len()
+        ));
     }
     let mut dec = Decryptor::<Aes128>::new(key.into());
     let decrypted: Vec<u8> = ciphertext
@@ -127,6 +130,14 @@ fn decrypt_ecb(ciphertext: &[u8], key: &[u8; 16]) -> Result<Vec<u8>, String> {
             block.to_vec()
         })
         .collect();
+    let pad_val = *decrypted.last().unwrap_or(&0);
+    debug!(
+        "WeChat: decrypt_ecb: ct_len={} dec_len={} pad_val={} dec_first={:02x?}",
+        ciphertext.len(),
+        decrypted.len(),
+        pad_val,
+        &decrypted[..decrypted.len().min(16)]
+    );
     pkcs7_unpad(&decrypted)
 }
 
@@ -834,9 +845,16 @@ impl ApiClient {
             .send()
             .await
             .map_err(|e| ApiError::Network(e.to_string()))?;
-        if !resp.status().is_success() {
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("unknown")
+            .to_string();
+        if !status.is_success() {
             return Err(ApiError::Http(
-                resp.status().as_u16(),
+                status.as_u16(),
                 resp.text().await.unwrap_or_default(),
             ));
         }
@@ -844,6 +862,14 @@ impl ApiClient {
             .bytes()
             .await
             .map_err(|e| ApiError::Network(e.to_string()))?;
+        debug!(
+            "WeChat: CDN download complete: status={} ct_type={} ct_len={} key_hex={} first_bytes={:02x?}",
+            status.as_u16(),
+            content_type,
+            ciphertext.len(),
+            hex::encode(&key),
+            &ciphertext[..ciphertext.len().min(16)]
+        );
         decrypt_ecb(&ciphertext, &key).map_err(|e| ApiError::Parse(format!("decrypt: {e}")))
     }
 
