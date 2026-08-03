@@ -104,7 +104,8 @@ fn encrypt_ecb(plaintext: &[u8], key: &[u8; 16]) -> Vec<u8> {
     padded
         .chunks(16)
         .flat_map(|chunk| {
-            let mut block: aes::Block = (*chunk.try_into::<[u8; 16]>().unwrap()).into();
+            let arr: [u8; 16] = chunk.try_into().unwrap();
+            let mut block = aes::Block::from(arr);
             enc.encrypt_block_mut(&mut block);
             block.to_vec()
         })
@@ -123,7 +124,8 @@ fn decrypt_ecb(ciphertext: &[u8], key: &[u8; 16]) -> Result<Vec<u8>, String> {
     let decrypted: Vec<u8> = ciphertext
         .chunks(16)
         .flat_map(|chunk| {
-            let mut block: aes::Block = (*chunk.try_into::<[u8; 16]>().unwrap()).into();
+            let arr: [u8; 16] = chunk.try_into().unwrap();
+            let mut block = aes::Block::from(arr);
             dec.decrypt_block_mut(&mut block);
             block.to_vec()
         })
