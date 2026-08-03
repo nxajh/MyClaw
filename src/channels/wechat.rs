@@ -1632,6 +1632,8 @@ impl Channel for WechatChannel {
                                 }
                             }
 
+                            // tx is moved into the async block; we send on it directly.
+                            debug!("WeChat: dispatching msg_id={} to session", event.msg_id);
                             let channel_msg = ChannelInboundMessage {
                                 id: event.msg_id,
                                 sender: MessageSender::new(event.sender_wxid),
@@ -1640,8 +1642,6 @@ impl Channel for WechatChannel {
                                 timestamp: event.raw_timestamp as u64,
                                 interruption_scope_id: None,
                             };
-                            // tx is moved into the async block; we send on it directly.
-                            debug!("WeChat: dispatching msg_id={} to session", event.msg_id);
                             if let Err(e) = tx.send(channel_msg).await {
                                 warn!("WeChat dispatch error (receiver dropped): {e}");
                                 break;
