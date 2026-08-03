@@ -234,11 +234,19 @@ fn is_ssrf_blocked(url: &str) -> bool {
 
     // Check IP-based hosts
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        return ip.is_loopback()
-            || ip.is_private()
-            || ip.is_link_local()
-            || ip.is_unspecified()
-            || matches!(ip, std::net::IpAddr::V4(v4) if v4.is_broadcast());
+        if ip.is_loopback() || ip.is_unspecified() {
+            return true;
+        }
+        match ip {
+            std::net::IpAddr::V4(v4) => {
+                return v4.is_private()
+                    || v4.is_link_local()
+                    || v4.is_broadcast();
+            }
+            std::net::IpAddr::V6(v6) => {
+                return v6.is_loopback() || v6.is_unspecified();
+            }
+        }
     }
 
     // Block .local, .internal, .localhost TLDs
@@ -519,21 +527,26 @@ impl QQBotChannel {
                     warn!(sender = %msg.sender.id, "qqbot: rate limited");
                     return None;
                 }
-                let group_id = msg.receiver.id.strip_prefix("group:").unwrap_or("");
+                let group_id = msg
+                    .receiver
+                    .id
+                    .strip_prefix("group:")
+                    .unwrap_or("")
+                    .to_string();
                 // GROUP_AT_MESSAGE_CREATE is by definition an @-mention, so
                 // has_mention=true. Policy decides whether the group itself is allowed.
                 if !apply_auth(
                     self,
                     &msg.sender.id,
                     crate::channels::MessageScope::Group {
-                        id: group_id,
+                        id: &group_id,
                         has_mention: true,
                     },
                 ) {
                     return None;
                 }
                 // Inject recent group chat history as context.
-                self.inject_group_history(&mut msg, group_id);
+                self.inject_group_history(&mut msg, &group_id);
                 Some(msg)
             }
             "INTERACTION_CREATE" => {
