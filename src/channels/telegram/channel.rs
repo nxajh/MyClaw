@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -9,10 +10,12 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use crate::agents::TurnEvent;
 use crate::channels::message::{
     ChannelFile, ChannelFileMeta, ChannelInboundMessage, ChannelMessageContent, LocalFileBody,
     MessageReceiver, MessageSender,
 };
+use crate::channels::{StreamDelivery, TurnStream};
 use crate::config::channel::TelegramAccountConfig;
 use crate::{Channel, DedupState, ProcessingStatus};
 
@@ -22,6 +25,13 @@ use super::types::{Chat, GetUpdatesResponse, Message, SendChatActionRequest};
 
 const RICH_MESSAGE_LENGTH: usize = 32768;
 const CONTINUATION_OVERHEAD: usize = 30;
+
+/// Throttle interval for streaming preview edits (edit-on-stream).
+const STREAM_THROTTLE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Maximum preview text length (codepoints) to stay under Telegram's 4096-char
+/// limit for `sendMessage` / `editMessageText` during streaming.
+const STREAM_PREVIEW_LIMIT: usize = 4000;
 
 /// A GFM table delimiter row, e.g. `| --- | :--: |`.
 fn is_table_delimiter_local(line: &str) -> bool {
@@ -95,6 +105,9 @@ pub struct TelegramChannel {
     data_dir: std::path::PathBuf,
     /// Shared HTTP client with connection pool.
     http: reqwest::Client,
+    /// Lightweight ring buffer of recent sent messages (max 100 entries) for
+    /// debugging and potential reply-chain context.
+    message_cache: Arc<Mutex<VecDeque<(i64, String)>>>,
 }
 
 impl TelegramChannel {
@@ -128,6 +141,7 @@ impl TelegramChannel {
                 .timeout(std::time::Duration::from_secs(60))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
+            message_cache: Arc::new(Mutex::new(VecDeque::new())),
         };
         crate::channels::warn_if_locked_down(&ch);
         ch
@@ -139,6 +153,21 @@ impl TelegramChannel {
 
     fn http_client(&self) -> &reqwest::Client {
         &self.http
+    }
+
+    /// Return cached recent sent messages (message_id, text) for debugging
+    /// and potential reply-chain context. Returns up to 100 most recent entries.
+    fn get_cached_messages(&self, _chat_id: i64) -> Vec<(i64, String)> {
+        self.message_cache.lock().iter().cloned().collect()
+    }
+
+    /// Push a message to the ring buffer cache (max 100 entries).
+    fn cache_message(&self, message_id: i64, text: String) {
+        let mut cache = self.message_cache.lock();
+        if cache.len() >= 100 {
+            cache.pop_front();
+        }
+        cache.push_back((message_id, text));
     }
 
     /// Path to the file that persists the Telegram update offset.
@@ -404,6 +433,28 @@ impl TelegramChannel {
         thread_id: Option<&str>,
         reply_markup: Option<serde_json::Value>,
     ) -> anyhow::Result<Option<i64>> {
+        // Try sendRichMessage first; fall back to sendMessage on failure.
+        match self
+            .send_rich_message(chat_id, text, thread_id, reply_markup.clone())
+            .await
+        {
+            Ok(id) => Ok(id),
+            Err(e) => {
+                warn!("sendRichMessage failed ({e}), falling back to sendMessage");
+                self.send_plain_message(chat_id, text, thread_id, reply_markup)
+                    .await
+            }
+        }
+    }
+
+    /// Send via `sendRichMessage` (Telegram Markdown rendering).
+    async fn send_rich_message(
+        &self,
+        chat_id: &str,
+        text: &str,
+        thread_id: Option<&str>,
+        reply_markup: Option<serde_json::Value>,
+    ) -> anyhow::Result<Option<i64>> {
         let client = self.http_client();
 
         let normalized = Self::normalize_markdown_tables(text);
@@ -457,6 +508,66 @@ impl TelegramChannel {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             anyhow::bail!("sendRichMessage failed: {status} {body}");
+        }
+
+        let resp_json: serde_json::Value = resp.json().await?;
+        Ok(resp_json
+            .get("result")
+            .and_then(|r| r.get("message_id"))
+            .and_then(|m| m.as_i64()))
+    }
+
+    /// Plain-text fallback using standard `sendMessage` (no rich formatting).
+    async fn send_plain_message(
+        &self,
+        chat_id: &str,
+        text: &str,
+        thread_id: Option<&str>,
+        reply_markup: Option<serde_json::Value>,
+    ) -> anyhow::Result<Option<i64>> {
+        let client = self.http_client();
+        let mut body = serde_json::json!({
+            "chat_id": chat_id,
+            "text": text,
+        });
+        if let Some(tid) = thread_id {
+            body["message_thread_id"] = serde_json::Value::from(tid);
+        }
+        if let Some(ref markup) = reply_markup {
+            body["reply_markup"] = markup.clone();
+        }
+
+        let resp = client
+            .post(self.api_url("sendMessage"))
+            .json(&body)
+            .send()
+            .await?;
+
+        if resp.status().as_u16() == 429 {
+            let retry_after: u64 = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1);
+            tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
+            let resp = client.post(self.api_url("sendMessage")).json(&body).send().await?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                anyhow::bail!("sendMessage fallback failed after 429 retry: {status} {body}");
+            }
+            let resp_json: serde_json::Value = resp.json().await?;
+            return Ok(resp_json
+                .get("result")
+                .and_then(|r| r.get("message_id"))
+                .and_then(|m| m.as_i64()));
+        }
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("sendMessage fallback failed: {status} {body}");
         }
 
         let resp_json: serde_json::Value = resp.json().await?;
@@ -1544,7 +1655,10 @@ impl Channel for TelegramChannel {
                 .send_text(&chat_id, &text, thread_id.as_deref(), markup)
                 .await
             {
-                Ok(Some(id)) => ids.push(crate::channels::MessageId::new(id.to_string())),
+                Ok(Some(id)) => {
+                    self.cache_message(id, text.clone());
+                    ids.push(crate::channels::MessageId::new(id.to_string()));
+                }
                 Ok(None) => {}
                 Err(e) => {
                     warn!("Failed to send chunk {}/{}: {}", i + 1, count, e);
@@ -1753,9 +1867,132 @@ impl Channel for TelegramChannel {
             }
         }
     }
+
+    fn create_stream(&self, reply_target: &str) -> Option<Box<dyn TurnStream>> {
+        let (chat_id_str, thread_id) = Self::parse_reply_target(reply_target);
+        let chat_id: i64 = match chat_id_str.parse() {
+            Ok(id) => id,
+            Err(_) => return None,
+        };
+        Some(Box::new(TelegramTurnStream {
+            channel: self.clone(),
+            chat_id,
+            thread_id,
+            msg_id: None,
+            accumulated: String::new(),
+            last_edit: std::time::Instant::now() - STREAM_THROTTLE,
+            delivery: StreamDelivery::Pending,
+            finished: false,
+        }))
+    }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+// ── Telegram streaming preview (edit-on-stream) ───────────────────────────────
+
+/// Per-turn streaming handle for Telegram.
+///
+/// Buffers text chunks and periodically edits the preview message via
+/// `editMessageText` (throttled at `STREAM_THROTTLE`). On `finish`, does a
+/// final edit with the complete text.
+struct TelegramTurnStream {
+    channel: TelegramChannel,
+    chat_id: i64,
+    thread_id: Option<String>,
+    /// Message being live-edited; `None` until first chunk is flushed.
+    msg_id: Option<i64>,
+    accumulated: String,
+    last_edit: std::time::Instant,
+    delivery: StreamDelivery,
+    finished: bool,
+}
+
+impl TelegramTurnStream {
+    /// Send or edit the preview message with the current accumulated text.
+    async fn flush_preview(&mut self) {
+        let preview: String = self.accumulated.chars().take(STREAM_PREVIEW_LIMIT).collect();
+        match self.msg_id {
+            Some(mid) => {
+                if self
+                    .channel
+                    .edit_message_text_raw(self.chat_id, mid, &preview)
+                    .await
+                    .is_ok()
+                {
+                    self.delivery = StreamDelivery::Visible;
+                }
+            }
+            None => {
+                // First flush: send a new message.
+                if let Ok(Some(id)) = self
+                    .channel
+                    .send_text(
+                        &self.chat_id.to_string(),
+                        &preview,
+                        self.thread_id.as_deref(),
+                        None,
+                    )
+                    .await
+                {
+                    self.msg_id = Some(id);
+                    self.delivery = StreamDelivery::Visible;
+                }
+            }
+        }
+        self.last_edit = std::time::Instant::now();
+    }
+}
+
+#[async_trait]
+impl TurnStream for TelegramTurnStream {
+    async fn push(&mut self, event: TurnEvent) -> anyhow::Result<StreamDelivery> {
+        if self.finished {
+            return Ok(self.delivery);
+        }
+        match event {
+            TurnEvent::Chunk { delta } => {
+                self.accumulated.push_str(&delta);
+                if self.last_edit.elapsed() >= STREAM_THROTTLE {
+                    self.flush_preview().await;
+                }
+            }
+            TurnEvent::Done { text } => {
+                self.accumulated = text;
+                self.finished = true;
+                self.flush_preview().await;
+                self.delivery = StreamDelivery::FinalDelivered;
+            }
+            TurnEvent::Error { .. } | TurnEvent::EmptyResponse { .. } => {
+                self.finished = true;
+            }
+            TurnEvent::Cancelled { partial } => {
+                self.accumulated = partial;
+                self.finished = true;
+                self.flush_preview().await;
+            }
+            _ => {}
+        }
+        Ok(self.delivery)
+    }
+
+    fn status(&self) -> StreamDelivery {
+        self.delivery
+    }
+
+    async fn finish(self: Box<Self>) -> StreamDelivery {
+        let mut s = *self;
+        if !s.finished && !s.accumulated.is_empty() {
+            s.flush_preview().await;
+        }
+        s.delivery
+    }
+
+    async fn abort(self: Box<Self>) {
+        // Best-effort: delete the preview message if it was never finalized.
+        if let (Some(mid), false) = (self.msg_id, self.finished) {
+            let _ = self.channel.delete_message_raw(self.chat_id, mid).await;
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

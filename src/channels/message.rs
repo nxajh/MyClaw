@@ -79,7 +79,7 @@ impl ChannelCapabilities {
     /// Telegram bot: 32 768 codepoints (rich messages), edit/delete/buttons/media.
     pub const fn telegram() -> Self {
         Self {
-            supports_streaming: false,
+            supports_streaming: true,
             supports_edit: true,
             supports_delete: true,
             supports_inline_buttons: true,
