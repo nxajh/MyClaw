@@ -64,6 +64,9 @@ const ITEM_TYPE_TOOL_CALL_RESULT: i64 = 12;
 const TYPING_STATUS_TYPING: i64 = 1;
 const TYPING_STATUS_CANCEL: i64 = 2;
 
+/// CDN base URL for media download/upload (separate from the API base).
+const CDN_BASE_URL: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
+
 // Upload media type constants (proto: UploadMediaType).
 const UPLOAD_MEDIA_IMAGE: i64 = 1;
 const UPLOAD_MEDIA_VIDEO: i64 = 2;
@@ -818,15 +821,9 @@ impl ApiClient {
         let url = if !media.full_url.is_empty() {
             media.full_url.clone()
         } else {
-            let base = self
-                .state
-                .read()
-                .api_base
-                .clone()
-                .unwrap_or_else(|| self.api_base.clone());
             format!(
                 "{}/download?encrypted_query_param={}",
-                base.trim_end_matches('/'),
+                CDN_BASE_URL,
                 urlencoding::encode(&media.encrypt_query_param)
             )
         };
@@ -895,15 +892,9 @@ impl ApiClient {
         let url = if let Some(full) = upload_full_url.filter(|s| !s.trim().is_empty()) {
             full.to_string()
         } else {
-            let base = self
-                .state
-                .read()
-                .api_base
-                .clone()
-                .unwrap_or_else(|| self.api_base.clone());
             format!(
                 "{}/upload?encrypted_query_param={}&filekey={}",
-                base.trim_end_matches('/'),
+                CDN_BASE_URL,
                 urlencoding::encode(upload_param),
                 urlencoding::encode(filekey)
             )
