@@ -100,8 +100,9 @@ const QQ_MAX_VISUAL_LINES_PER_BUBBLE: usize = 30;
 /// Maximum file size for inline base64 upload (10 MB).
 ///
 /// QQ Bot inline file upload (msg_type=7) requires base64-encoding the entire
-/// payload, so large files risk memory exhaustion. Chunked upload is not yet
-/// implemented; exceeding this limit returns an error to the caller.
+/// payload, so large files risk memory exhaustion. Files with a `source_url`
+/// bypass this limit via URL direct upload; only files without a valid URL
+/// that exceed this limit will bail.
 const MAX_INLINE_UPLOAD_BYTES: usize = 10_485_760;
 
 /// Estimate display width: CJK = 1.0, ASCII = 0.5.
@@ -150,6 +151,9 @@ fn extract_quote_content(data: &serde_json::Value) -> Option<String> {
 ///
 /// Splits land on `\n\n` boundaries (never inside fenced code blocks). Each
 /// part's visual-line cost is estimated from CJK/ASCII display widths.
+/// GFM table rows are kept together: if the current buffer ends with a table
+/// line and the next part starts with one, the split is deferred so the table
+/// is not broken across bubbles.
 fn split_by_visual_lines(text: &str, max_lines: usize) -> Vec<String> {
     let parts: Vec<&str> = text.split("\n\n").collect();
 
@@ -170,7 +174,8 @@ fn split_by_visual_lines(text: &str, max_lines: usize) -> Vec<String> {
     }
 
     // Accumulate parts, splitting when cumulative cost exceeds max_lines.
-    // Never split inside a fenced code block.
+    // Never split inside a fenced code block, and never split between
+    // adjacent GFM table rows that happen to be separated by a blank line.
     let mut chunks = Vec::new();
     let mut current = String::new();
     let mut current_cost = 0usize;
@@ -184,8 +189,20 @@ fn split_by_visual_lines(text: &str, max_lines: usize) -> Vec<String> {
             }
         }
 
-        // Split before this part if it would overflow and we're outside code.
-        if !current.is_empty() && !started_in_code && current_cost + costs[i] > max_lines {
+        // Detect a GFM table continuation: current ends with a table row and
+        // the incoming part starts with one. A blank line inside a table
+        // (produced by some generators) should not cause a mid-table split.
+        let breaks_table = !current.is_empty()
+            && current.lines().last().map_or(false, is_gfm_table_line)
+            && part.lines().next().map_or(false, is_gfm_table_line);
+
+        // Split before this part if it would overflow and we're outside code,
+        // unless doing so would break a table continuation.
+        if !current.is_empty()
+            && !started_in_code
+            && !breaks_table
+            && current_cost + costs[i] > max_lines
+        {
             chunks.push(current.trim_end().to_string());
             current.clear();
             current_cost = 0;
@@ -205,6 +222,31 @@ fn split_by_visual_lines(text: &str, max_lines: usize) -> Vec<String> {
         chunks.push(text.to_string());
     }
     chunks
+}
+
+/// Check if a line is part of a GFM (GitHub Flavored Markdown) table.
+///
+/// A pipe-table row starts with `|` (the most common form). Separator rows
+/// without a leading pipe (e.g. `---|:---:|---`) are also recognised.
+fn is_gfm_table_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Pipe table row: | col1 | col2 |  (trailing pipe optional)
+    if trimmed.starts_with('|') {
+        return true;
+    }
+    // Separator-only row without leading pipe: --- | :---: | ---
+    let mut has_dash = false;
+    for c in trimmed.chars() {
+        match c {
+            '-' => has_dash = true,
+            '|' | ':' | ' ' | '\t' => {}
+            _ => return false,
+        }
+    }
+    has_dash
 }
 
 /// Check if a line is a markdown fence (``` or ~~~).
@@ -321,13 +363,15 @@ pub struct QQBotChannel {
     /// Startup instant for uptime reporting.
     pub(super) started_at: std::time::Instant,
     /// Per-group recent message history (group_openid → deque of (sender, content)).
-    pub(super) group_history:
-        Arc<Mutex<std::collections::HashMap<String, VecDeque<(String, String)>>>>,
+    pub(super) group_history: Arc<Mutex<GroupHistory>>,
     /// Passive reply limiter (QQ allows ~4 replies per msg_id per hour).
     pub(super) reply_limiter: Arc<Mutex<ReplyLimiter>>,
     /// Per-sender + global rate limiter.
     pub(super) rate_limiter: Arc<Mutex<RateLimiter>>,
 }
+
+/// Per-group message history: group_openid → VecDeque of (sender, content).
+type GroupHistory = std::collections::HashMap<String, VecDeque<(String, String)>>;
 
 impl QQBotChannel {
     pub fn new(account_id: String, config: QQBotAccountConfig) -> Self {
@@ -907,6 +951,7 @@ impl QQBotChannel {
                     file_name,
                     mime_type: Some(mime),
                     size_bytes: Some(bytes.len() as u64),
+                    source_url: None,
                 },
                 body: std::sync::Arc::new(LocalFileBody::new(temp_path)),
             });
@@ -965,6 +1010,7 @@ impl QQBotChannel {
                                     file_name: format!("image-{}.{}", uuid::Uuid::new_v4(), ext),
                                     mime_type: Some(ct.to_string()),
                                     size_bytes: Some(bytes.len() as u64),
+                                    source_url: Some(full_url.clone()),
                                 },
                                 body: std::sync::Arc::new(LocalFileBody::new(temp_path)),
                             });
@@ -1062,6 +1108,7 @@ impl QQBotChannel {
                                     file_name,
                                     mime_type: Some(mime),
                                     size_bytes: Some(bytes.len() as u64),
+                                    source_url: Some(full_url.clone()),
                                 },
                                 body: std::sync::Arc::new(LocalFileBody::new(temp_path)),
                             });
@@ -1197,6 +1244,81 @@ impl QQBotChannel {
         }
 
         Err(anyhow::anyhow!("QQ Bot REST returned {}: {}", status, text))
+    }
+
+    /// Upload a file to the QQ Bot `/files` endpoint and return the `file_info`
+    /// string needed for the subsequent message send.
+    ///
+    /// Handles token-expired (401 / code 11244) by refreshing and retrying once.
+    /// `files_url` is the fully constructed `/v2/groups/{id}/files` or
+    /// `/v2/users/{id}/files` endpoint. `upload_body` is the pre-built JSON
+    /// payload (either `file_data` base64 or `url` direct upload).
+    async fn upload_file_to_qq(
+        &self,
+        files_url: &str,
+        upload_body: &serde_json::Value,
+    ) -> anyhow::Result<String> {
+        let token = self.token_manager.get_token().await?;
+        let ua = user_agent();
+
+        let upload_resp = self
+            .http_client
+            .post(files_url)
+            .header("Authorization", format!("QQBot {}", token))
+            .header("Content-Type", "application/json")
+            .header("User-Agent", &ua)
+            .json(upload_body)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("upload failed: {e}"))?;
+
+        let upload_resp = if !upload_resp.status().is_success() {
+            let status = upload_resp.status();
+            let text = upload_resp.text().await.unwrap_or_default();
+
+            // Token expired? Force-refresh and retry once.
+            if status.as_u16() == 401 || text.contains("11244") {
+                warn!(
+                    account = %self.account_id,
+                    status = %status,
+                    "file upload got token-expired error, refreshing and retrying"
+                );
+                let new_token = self.token_manager.refresh().await?;
+                let retry_resp = self
+                    .http_client
+                    .post(files_url)
+                    .header("Authorization", format!("QQBot {}", new_token))
+                    .header("Content-Type", "application/json")
+                    .header("User-Agent", &ua)
+                    .json(upload_body)
+                    .send()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("upload retry failed: {e}"))?;
+                if !retry_resp.status().is_success() {
+                    let s = retry_resp.status();
+                    let t = retry_resp.text().await.unwrap_or_default();
+                    anyhow::bail!("upload returned {s}: {t}");
+                }
+                retry_resp
+            } else {
+                anyhow::bail!("upload returned {status}: {text}");
+            }
+        } else {
+            upload_resp
+        };
+
+        let upload_result: serde_json::Value = upload_resp
+            .json()
+            .await
+            .map_err(|e| anyhow::anyhow!("upload parse failed: {e}"))?;
+
+        upload_result
+            .get("file_info")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                anyhow::anyhow!("upload response missing file_info: {upload_result}")
+            })
     }
 
     /// Send a C2C message via REST API (plain text, msg_type=0).
@@ -1787,23 +1909,6 @@ impl Channel for QQBotChannel {
         self.stop_internal_typing(&recipient);
 
         for (idx, file) in msg.content.files.iter().enumerate() {
-            let mut reader = file.body.open().await?;
-            let mut data = Vec::new();
-            tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut data).await?;
-
-            // Pre-check: reject files exceeding the inline base64 upload limit.
-            if data.len() > MAX_INLINE_UPLOAD_BYTES {
-                warn!(
-                    size = data.len(),
-                    limit = MAX_INLINE_UPLOAD_BYTES,
-                    "QQ Bot file upload exceeds 10MB inline limit"
-                );
-                anyhow::bail!(
-                    "QQ Bot file upload size {} exceeds 10MB inline limit; chunked upload not yet implemented",
-                    data.len()
-                );
-            }
-
             // Determine file_type: 1=image, 2=video, 3=voice, 4=file
             let file_type = match crate::providers::media::modality_from_mime(
                 file.meta.mime_type.as_deref(),
@@ -1814,9 +1919,6 @@ impl Channel for QQBotChannel {
                 crate::providers::media::FileModality::Audio => 3,
                 crate::providers::media::FileModality::Other => 4,
             };
-
-            use base64::Engine;
-            let file_data = base64::engine::general_purpose::STANDARD.encode(&data);
 
             let (openid, is_group) = {
                 let raw = &msg.receiver.id;
@@ -1835,69 +1937,63 @@ impl Channel for QQBotChannel {
                 format!("{}/v2/users/{}/files", API_BASE, openid)
             };
 
-            let upload_body = serde_json::json!({
-                "file_type": file_type,
-                "srv_send_msg": false,
-                "file_data": file_data,
-                "file_name": file.meta.file_name,
-            });
-
-            let token = self.token_manager.get_token().await?;
-            let ua = user_agent();
-
-            // Upload with token-expired retry (same pattern as send_rest_with_retry).
-            let upload_resp = self
-                .http_client
-                .post(&files_url)
-                .header("Authorization", format!("QQBot {}", token))
-                .header("Content-Type", "application/json")
-                .header("User-Agent", &ua)
-                .json(&upload_body)
-                .send()
-                .await
-                .map_err(|e| anyhow::anyhow!("upload failed: {e}"))?;
-
-            let upload_resp = if !upload_resp.status().is_success() {
-                let status = upload_resp.status();
-                let text = upload_resp.text().await.unwrap_or_default();
-
-                // Token expired? Force-refresh and retry once.
-                if status.as_u16() == 401 || text.contains("11244") {
-                    warn!(account = %self.account_id, status = %status, "file upload got token-expired error, refreshing and retrying");
-                    let new_token = self.token_manager.refresh().await?;
-                    let retry_resp = self
-                        .http_client
-                        .post(&files_url)
-                        .header("Authorization", format!("QQBot {}", new_token))
-                        .header("Content-Type", "application/json")
-                        .header("User-Agent", &ua)
-                        .json(&upload_body)
-                        .send()
-                        .await
-                        .map_err(|e| anyhow::anyhow!("upload retry failed: {e}"))?;
-                    if !retry_resp.status().is_success() {
-                        let s = retry_resp.status();
-                        let t = retry_resp.text().await.unwrap_or_default();
-                        return Err(anyhow::anyhow!("upload returned {s}: {t}"));
+            // Try URL direct upload first: if the file has a source_url and it's
+            // SSRF-safe, pass the URL directly to QQ's API. This avoids
+            // downloading and base64-encoding large files locally.
+            let mut file_info: Option<String> = None;
+            if let Some(ref url) = file.meta.source_url {
+                if !is_ssrf_blocked(url) {
+                    let url_upload_body = serde_json::json!({
+                        "file_type": file_type,
+                        "srv_send_msg": false,
+                        "url": url,
+                        "file_name": file.meta.file_name,
+                    });
+                    match self.upload_file_to_qq(&files_url, &url_upload_body).await {
+                        Ok(info) => {
+                            debug!(url = %url, "QQ Bot file uploaded via URL direct upload");
+                            file_info = Some(info);
+                        }
+                        Err(e) => {
+                            warn!(
+                                url = %url,
+                                err = %e,
+                                "QQ Bot URL direct upload failed, falling back to base64"
+                            );
+                        }
                     }
-                    retry_resp
-                } else {
-                    return Err(anyhow::anyhow!("upload returned {status}: {text}"));
                 }
-            } else {
-                upload_resp
-            };
+            }
 
-            let upload_result: serde_json::Value = upload_resp
-                .json()
-                .await
-                .map_err(|e| anyhow::anyhow!("upload parse failed: {e}"))?;
-            let file_info = upload_result
-                .get("file_info")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("upload response missing file_info: {upload_result}")
-                })?;
+            // Fall back to base64 inline upload if URL upload was not attempted
+            // or failed. Reads the file body, base64-encodes, and uploads.
+            // Files exceeding the inline limit without a working URL upload bail.
+            let file_info = if let Some(info) = file_info {
+                info
+            } else {
+                let mut reader = file.body.open().await?;
+                let mut data = Vec::new();
+                tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut data).await?;
+
+                if data.len() > MAX_INLINE_UPLOAD_BYTES {
+                    anyhow::bail!(
+                        "QQ Bot file upload size {} exceeds {}B inline limit \
+                         and URL direct upload unavailable or failed",
+                        data.len(),
+                        MAX_INLINE_UPLOAD_BYTES
+                    );
+                }
+
+                use base64::Engine;
+                let file_data = base64::engine::general_purpose::STANDARD.encode(&data);
+                let upload_body = serde_json::json!({
+                    "file_type": file_type,
+                    "srv_send_msg": false,
+                    "file_data": file_data,
+                    "file_name": file.meta.file_name,
+                });
+                self.upload_file_to_qq(&files_url, &upload_body).await?
+            };
 
             let msg_url = if is_group {
                 format!("{}/v2/groups/{}/messages", API_BASE, openid)
@@ -2045,7 +2141,7 @@ impl ReconnectManager {
 
 /// Tracks passive reply counts per message_id to avoid hitting QQ's limit
 /// (~4 replies/msg_id within 1 hour).
-struct ReplyLimiter {
+pub(super) struct ReplyLimiter {
     /// msg_id → (reply_count, first_seen_ms)
     entries: std::collections::HashMap<String, (u32, u128)>,
     /// Max replies per msg_id
@@ -2105,7 +2201,7 @@ impl ReplyLimiter {
 // ── Rate limiter ──────────────────────────────────────────────────────────────
 
 /// Simple token-bucket rate limiter with per-sender and global tracking.
-struct RateLimiter {
+pub(super) struct RateLimiter {
     /// sender_id → (count, window_start_ms)
     sender_buckets: std::collections::HashMap<String, (u32, u128)>,
     /// global count in current window

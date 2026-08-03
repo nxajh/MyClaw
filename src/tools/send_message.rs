@@ -242,6 +242,7 @@ async fn prepare_file(file_arg: SendMessageFileArg) -> anyhow::Result<ChannelFil
             file_name,
             mime_type,
             size_bytes: Some(file_size),
+            source_url: None,
         },
         body: Arc::new(LocalFileBody::new(path)),
     })

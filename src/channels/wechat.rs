@@ -1586,6 +1586,7 @@ impl Channel for WechatChannel {
                                                     file_name: filename,
                                                     mime_type: Some(mime.to_string()),
                                                     size_bytes: Some(data.len() as u64),
+                                                    source_url: None,
                                                 },
                                                 body: std::sync::Arc::new(LocalFileBody::new(&tmp_path)),
                                             });

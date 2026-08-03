@@ -1287,6 +1287,7 @@ impl TelegramChannel {
                                             file_name: format!("photo-{}.png", largest.file_id),
                                             mime_type: Some("image/png".to_string()),
                                             size_bytes: Some(data.len() as u64),
+                                            source_url: None,
                                         },
                                         body: Arc::new(LocalFileBody::new(temp_path)),
                                     });
@@ -1323,6 +1324,7 @@ impl TelegramChannel {
                                         file_name: fname,
                                         mime_type: Some(mime),
                                         size_bytes: Some(data.len() as u64),
+                                        source_url: None,
                                     },
                                     body: Arc::new(LocalFileBody::new(temp_path)),
                                 });
@@ -1352,6 +1354,7 @@ impl TelegramChannel {
                                         file_name: fname,
                                         mime_type: Some(mime),
                                         size_bytes: Some(data.len() as u64),
+                                        source_url: None,
                                     },
                                     body: Arc::new(LocalFileBody::new(temp_path)),
                                 });
@@ -1383,6 +1386,7 @@ impl TelegramChannel {
                                         file_name: fname,
                                         mime_type: Some(mime),
                                         size_bytes: Some(data.len() as u64),
+                                        source_url: None,
                                     },
                                     body: Arc::new(LocalFileBody::new(temp_path)),
                                 });
@@ -1408,6 +1412,7 @@ impl TelegramChannel {
                                         file_name: fname,
                                         mime_type: Some("video/mp4".to_string()),
                                         size_bytes: Some(data.len() as u64),
+                                        source_url: None,
                                     },
                                     body: Arc::new(LocalFileBody::new(temp_path)),
                                 });
@@ -1448,6 +1453,7 @@ impl TelegramChannel {
                                         file_name: fname,
                                         mime_type: Some(mime),
                                         size_bytes: Some(data.len() as u64),
+                                        source_url: None,
                                     },
                                     body: Arc::new(LocalFileBody::new(temp_path)),
                                 });

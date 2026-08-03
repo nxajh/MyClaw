@@ -711,6 +711,7 @@ impl ClientChannel {
                                                                 file_name,
                                                                 mime_type: Some(mime),
                                                                 size_bytes: Some(bytes.len() as u64),
+                                                                source_url: None,
                                                             },
                                                             body: std::sync::Arc::new(LocalFileBody::new(temp_path)),
                                                         });
@@ -738,6 +739,7 @@ impl ClientChannel {
                                                                         file_name: fname,
                                                                         mime_type: Some("image/png".to_string()),
                                                                         size_bytes: Some(bytes.len() as u64),
+                                                                        source_url: None,
                                                                     },
                                                                     body: std::sync::Arc::new(LocalFileBody::new(temp_path)),
                                                                 });

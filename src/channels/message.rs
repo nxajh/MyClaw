@@ -195,6 +195,12 @@ pub struct ChannelFileMeta {
     pub mime_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<u64>,
+    /// Original public URL if this file was fetched from (or is available at)
+    /// a URL. Channels that support URL-based upload (e.g. QQ Bot) can pass
+    /// this directly to the platform API instead of downloading + base64.
+    /// Not persisted — runtime-only.
+    #[serde(skip)]
+    pub source_url: Option<String>,
 }
 
 /// A repeat-openable file body provider passed across the channel/session boundary.
