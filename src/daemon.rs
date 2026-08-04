@@ -914,6 +914,14 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // below). Same Arc, single inbox.
     let ask_router = Arc::new(crate::agents::AskRouter::new());
 
+    // Global user registry — replaces per-channel KnownSenders/RateLimiter.
+    // Orchestrator records every inbound message; slash commands query.
+    let data_dir = directories::ProjectDirs::from("", "", "myclaw")
+        .map(|d| d.data_dir().to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let known_users = Arc::new(crate::agents::KnownUsersRegistry::new(&data_dir));
+    known_users.migrate_legacy(&data_dir);
+
     // Build tool registry (all built-in + MCP + skill tools + ask_user).
     let (mut tools, task_state) = build_tools(
         &mcp_manager,
@@ -1211,6 +1219,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         workspace_dir: config.workspace_dir.clone(),
         scheduler: Some(shared_scheduler.clone()),
         ask_router: Arc::clone(&ask_router),
+        known_users: Arc::clone(&known_users),
         agent_runtime,
     };
 

@@ -75,6 +75,27 @@ pub(super) async fn dispatch(
             .await;
     }
 
+    // Rate limit check + user registration (unified — was scattered in each
+    // channel's internal KnownSenders/RateLimiter). Returns early if the
+    // sender is rate-limited.
+    let scope = if msg.receiver.id.starts_with("group:") {
+        format!("group:{}", &msg.receiver.id[6..])
+    } else {
+        "c2c".to_string()
+    };
+    if !ctx
+        .known_users
+        .check_and_record(&account.0, &account.1, &msg.sender.id, &scope)
+    {
+        tracing::warn!(
+            channel = %account.0,
+            account = %account.1,
+            sender = %msg.sender.id,
+            "rate limited, dropping"
+        );
+        return;
+    }
+
     let key = SessionKey::new(&account.0, &account.1, &msg.sender.id);
     let mut msg = msg;
     for stage in chain() {

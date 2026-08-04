@@ -558,6 +558,22 @@ pub trait Channel: Send + Sync {
     ) -> crate::channels::AuthDecision {
         crate::channels::security::evaluate(&self.security_policy(), sender, scope)
     }
+
+    /// Group statistics for the `/groups` slash command.
+    /// Only group-capable channels (e.g. QQBot) override this.
+    /// Default: empty vec.
+    fn group_stats(&self) -> Vec<crate::channels::GroupStat> {
+        vec![]
+    }
+}
+
+/// Per-group statistics surfaced by the `/groups` command.
+#[derive(Debug, Clone)]
+pub struct GroupStat {
+    pub group_id: String,
+    pub name: Option<String>,
+    pub buffered_messages: usize,
+    pub history_limit: usize,
 }
 
 /// Dedup state for a channel adapter (in-memory).

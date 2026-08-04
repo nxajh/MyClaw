@@ -239,6 +239,8 @@ pub struct OrchestratorParts {
     /// `Arc<AskRouter>`). The orchestrator's inbound dispatch calls
     /// `ask_router.fulfill(session.id, msg)` to wake any pending ask.
     pub ask_router: Arc<crate::agents::AskRouter>,
+    /// Global user registry — shared with slash commands.
+    pub known_users: Arc<crate::agents::KnownUsersRegistry>,
     /// AgentRuntime for the `Agent::run` per-turn path.
     pub agent_runtime: crate::agents::AgentRuntime,
     /// Workspace directory for persisting runtime state.
@@ -282,6 +284,7 @@ impl Orchestrator {
             channels,
             sessions: parts.session_manager,
             ask: parts.ask_router,
+            known_users: parts.known_users,
             runtime: parts.agent_runtime,
             delegator: parts.delegator,
             scheduler: parts.scheduler,
@@ -412,6 +415,17 @@ impl Orchestrator {
                 &delegator,
                 &turn_tracker,
             );
+        });
+
+        // Known-users persistence flush (every 60s).
+        let known_users_flush = Arc::clone(&self.ctx.known_users);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            interval.tick().await; // skip immediate first tick
+            loop {
+                interval.tick().await;
+                known_users_flush.flush();
+            }
         });
 
         // Merge the event sources (user messages / delegation / scheduler)

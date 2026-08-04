@@ -151,6 +151,9 @@ pub struct OrchestratorCtx {
     /// messages ahead of process_turn. Shared with the daemon-built
     /// `AskUserTool`.
     pub ask: Arc<AskRouter>,
+    /// Global user registry — replaces per-channel KnownSenders/RateLimiter.
+    /// `inbound::dispatch` records every inbound message; slash commands query.
+    pub known_users: Arc<crate::agents::KnownUsersRegistry>,
     /// AgentRuntime for the per-turn `Agent::run` path. Cloned into each turn.
     pub runtime: AgentRuntime,
     /// Delegation manager (shared with DelegateTaskTool via handler).
