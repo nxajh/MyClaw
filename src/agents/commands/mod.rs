@@ -49,8 +49,21 @@ pub struct CommandContext<'a> {
 
 /// Parse a slash command from message content.
 /// Returns `(command_name, args)` if the content starts with `/`.
+///
+/// Skips a leading `@bot_username` mention so that
+/// `@bot /ping` is treated the same as `/ping`.
 pub fn parse_command(content: &str) -> Option<(&str, &str)> {
     let trimmed = content.trim();
+    // Strip leading @mention (e.g. "@oci_my_claw_bot /ping" → "/ping").
+    let trimmed = if trimmed.starts_with('@') {
+        if let Some(space) = trimmed.find(' ') {
+            trimmed[space..].trim_start()
+        } else {
+            return None; // "@bot" with nothing after
+        }
+    } else {
+        trimmed
+    };
     if !trimmed.starts_with('/') {
         return None;
     }
