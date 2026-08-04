@@ -1161,9 +1161,12 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             resources,
             Arc::clone(&tools_arc),
         ));
-        let tool_executor = Arc::new(crate::agents::tool_executor::ToolExecutor::new(
-            config.tool_executor.timeout_secs,
-        ));
+        let tool_executor = Arc::new(
+            crate::agents::tool_executor::ToolExecutor::new(
+                config.tool_executor.timeout_secs,
+            )
+            .with_ask_router(Arc::clone(&ask_router)),
+        );
         let loop_breaker = Arc::new(crate::agents::loop_breaker::LoopBreaker::new(
             crate::agents::loop_breaker::LoopBreakerConfig {
                 max_tool_calls: config.loop_breaker.max_tool_calls,
