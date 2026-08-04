@@ -1876,6 +1876,29 @@ Type any command or just chat!"#;
                     lines.join("\n")
                 }
             }
+            "/bot-approve" => {
+                // Approval / autonomy control via Inline Keyboard (parity with
+                // the official plugin's /bot-approve). Each button injects an
+                // `/autonomy` command that the orchestrator processes.
+                if let Some(openid) = reply_target.strip_prefix("c2c:") {
+                    let text = "**🔐 Command Approval / Autonomy**\n\nChoose the bot's autonomy level:\n\n🟢 **Full** — all actions run without approval\n🟡 **Default** — safe actions auto-run, ask before external ones\n🔴 **Read-only** — only read/analyze tools";
+                    let kb = Keyboard::from_pairs(&[
+                        ("🟢 Full", "/autonomy full"),
+                        ("🟡 Default", "/autonomy default"),
+                        ("🔴 Read-only", "/autonomy read_only"),
+                    ]);
+                    if self
+                        .send_c2c_keyboard(openid, text, &kb, msg_id)
+                        .await
+                        .is_ok()
+                    {
+                        return true;
+                    }
+                    // Keyboard failed → fall through to cmd-input text below.
+                }
+                // Group or keyboard fallback: use cmd-input tags.
+                "**🔐 Command Approval / Autonomy**\n\n<qqbot-cmd-input text=\"/autonomy full\" /> <qqbot-cmd-input text=\"/autonomy default\" /> <qqbot-cmd-input text=\"/autonomy read_only\" />\n\n🟢 `full` — all actions run without approval\n🟡 `default` — safe actions auto-run, ask before external ones\n🔴 `read_only` — only read/analyze tools".to_string()
+            }
             // ── Register new commands above this line ──────────────────────
             "/bot-status" => {
                 let uptime = self.started_at.elapsed();
