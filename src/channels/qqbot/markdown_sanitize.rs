@@ -404,6 +404,11 @@ fn looks_like_math(content: &str) -> bool {
         return true;
     }
 
+    // Pure ratio or time formats (only digits, colons, and spaces), e.g., "$1:2$" or "$ 12 : 30 $"
+    if content.contains(':') && content.chars().all(|c| c.is_ascii_digit() || c == ':' || c == ' ') {
+        return true;
+    }
+
     // Bare variable names: $x$, $n$, $ab$ — letters/digits, no spaces.
     // Prose between currency dollars always has spaces, so this is safe.
     if has_alpha && !content.contains(' ') {
