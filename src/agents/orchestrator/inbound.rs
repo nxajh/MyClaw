@@ -330,14 +330,21 @@ impl Interceptor for SlashCommand {
             .unwrap_or_else(|| msg.id.clone());
 
         let turn_tracker = ctx.turn_tracker.clone();
+        let known_users_cmd = Arc::clone(&ctx.known_users);
+        let key_channel = key.channel.clone();
+        let key_account = key.account.clone();
         tokio::spawn(async move {
             let _guard = turn_tracker.track();
             let cmd_ctx = commands::CommandContext {
                 user_id: &sk,
+                channel_type: &key_channel,
+                account_id: &key_account,
                 registry: &registry_cmd,
                 session_manager: &sm_cmd,
                 runtime: &runtime_cmd,
                 session_ctx: session_ctx_cmd.as_ref(),
+                known_users: &known_users_cmd,
+                channel: channel_cmd.as_ref(),
             };
             if let Some(response) = commands::dispatch(&cmd_owned, &cmd_args_owned, cmd_ctx).await {
                 if let Some(channel) = channel_cmd {

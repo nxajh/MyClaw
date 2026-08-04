@@ -15,7 +15,8 @@ mod session;
 
 pub use config::{cmd_autonomy, cmd_config, cmd_settings};
 pub use info::{
-    cmd_btw, cmd_context, cmd_export, cmd_help, cmd_mcp, cmd_skill, cmd_status, cmd_tools,
+    cmd_btw, cmd_context, cmd_export, cmd_groups, cmd_help, cmd_mcp, cmd_ping, cmd_skill,
+    cmd_status, cmd_tools, cmd_users, cmd_whoami,
 };
 pub use model::{cmd_model, cmd_models, cmd_think};
 pub use reload::{cmd_reload, cmd_stop};
@@ -25,7 +26,12 @@ pub use session::{
 
 /// Context available to all command handlers.
 pub struct CommandContext<'a> {
+    /// The routing key (`channel:account:sender`) — used as the session key
+    /// by SessionManager. Existing command handlers rely on this being the
+    /// full routing key.
     pub user_id: &'a str,
+    pub channel_type: &'a str,
+    pub account_id: &'a str,
     pub registry: &'a Arc<dyn crate::providers::ProviderRegistry>,
     pub session_manager: &'a SessionManager,
     pub runtime: &'a AgentRuntime,
@@ -35,6 +41,10 @@ pub struct CommandContext<'a> {
     /// state — same Mutex used by Agent.run, so reads see the latest
     /// turn's state without stale-cache surprises.
     pub session_ctx: Option<&'a Arc<crate::agents::SessionContext>>,
+    /// Global user registry for `/users`, `/whoami`, `/ping` queries.
+    pub known_users: &'a Arc<crate::agents::KnownUsersRegistry>,
+    /// The channel that received this command (for `/groups`, etc.).
+    pub channel: Option<&'a Arc<dyn crate::channels::Channel>>,
 }
 
 /// Parse a slash command from message content.
@@ -65,6 +75,10 @@ pub fn command_catalog() -> Vec<(&'static str, &'static str)> {
     vec![
         ("help", "Show available commands"),
         ("status", "Show current session status"),
+        ("ping", "Bot health check"),
+        ("whoami", "Show your user identity"),
+        ("users", "List known users"),
+        ("groups", "Show group statistics"),
         ("new", "Start a new session"),
         ("reset", "Reset the current session"),
         ("compact", "Compact conversation history"),
@@ -106,6 +120,10 @@ pub fn is_known_command(cmd: &str) -> bool {
             | "h"
             | "?"
             | "status"
+            | "ping"
+            | "whoami"
+            | "users"
+            | "groups"
             | "new"
             | "reset"
             | "compact"
@@ -142,6 +160,10 @@ pub async fn dispatch(cmd: &str, args: &str, ctx: CommandContext<'_>) -> Option<
         // ── Batch 1: core ──
         "help" | "h" | "?" => Some(info::cmd_help()),
         "status" => Some(info::cmd_status(ctx).await),
+        "ping" => Some(info::cmd_ping(ctx)),
+        "whoami" => Some(info::cmd_whoami(ctx)),
+        "users" => Some(info::cmd_users(ctx)),
+        "groups" => Some(info::cmd_groups(ctx)),
         "new" | "reset" => Some(session::cmd_new(args, ctx).await),
         "compact" => Some(session::cmd_compact(ctx).await),
         "model" => Some(model::cmd_model(args, ctx).await),

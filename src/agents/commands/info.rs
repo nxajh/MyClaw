@@ -8,6 +8,10 @@ pub fn cmd_help() -> String {
      **基础**  \n\
      /help — 显示此帮助信息  \n\
      /status — 显示 provider 实时状态  \n\
+     /ping — 健康检查  \n\
+     /whoami — 显示你的用户身份  \n\
+     /users — 列出已知用户  \n\
+     /groups — 显示群组统计  \n\
      /new [名称] — 创建新会话  \n\
      /sessions — 列出所有会话  \n\
      /switch <序号> — 切换到指定会话  \n\
@@ -447,4 +451,142 @@ pub fn cmd_skill(ctx: CommandContext<'_>) -> String {
         ));
     }
     lines.join("\n")
+}
+
+/// `/ping` — lightweight health check.
+pub fn cmd_ping(ctx: CommandContext<'_>) -> String {
+    let user_count = ctx.known_users.count();
+    format!(
+        "🏓 **pong**\n\n\
+         Channel: `{}:{}`  \n\
+         Known users: {}\n\
+         _Bot is online and responsive._",
+        ctx.channel_type, ctx.account_id, user_count
+    )
+}
+
+/// `/whoami` — show the caller's routing identity.
+pub fn cmd_whoami(ctx: CommandContext<'_>) -> String {
+    // user_id is the routing key "channel:account:sender";
+    // extract the sender portion for KnownUser lookup.
+    let sender_id = ctx.user_id.rsplit(':').next().unwrap_or(ctx.user_id);
+    let users = ctx.known_users.users_for(ctx.channel_type, ctx.account_id);
+    let me: Vec<_> = users.iter().filter(|u| u.user_id == sender_id).collect();
+    if let Some(u) = me.first() {
+        format!(
+            "🪪 **Your identity**\n\n\
+             ```text\n\
+             Channel:    {}\n\
+             Account:    {}\n\
+             User ID:    {}\n\
+             Routing:    {}:{}:{}\n\
+             Messages:   {}\n\
+             First seen: {}\n\
+             Last seen:  {}\n\
+             Scope:      {}\n\
+             ```",
+            u.channel,
+            u.account,
+            u.user_id,
+            u.channel,
+            u.account,
+            u.user_id,
+            u.message_count,
+            format_ts(u.first_seen_ms),
+            format_ts(u.last_seen_ms),
+            u.scope,
+        )
+    } else {
+        format!(
+            "🪪 **Your identity**\n\n\
+             ```text\n\
+             Channel: {}\n\
+             Account: {}\n\
+             User ID: {}\n\
+             ```\n\n\
+             _Not yet recorded in the global registry._",
+            ctx.channel_type, ctx.account_id, sender_id
+        )
+    }
+}
+
+/// `/users` — list known users for this channel/account (or all).
+pub fn cmd_users(ctx: CommandContext<'_>) -> String {
+    let all = ctx.known_users.all_users();
+    if all.is_empty() {
+        return "👥 No known users yet.".to_string();
+    }
+
+    // Group by channel:account
+    use std::collections::BTreeMap;
+    let mut grouped: BTreeMap<String, Vec<&crate::agents::KnownUser>> = BTreeMap::new();
+    for u in &all {
+        let key = format!("{}:{}", u.channel, u.account);
+        grouped.entry(key).or_default().push(u);
+    }
+
+    let mut lines = vec![format!(
+        "👥 **Known Users** ({}, {} messages total)\n",
+        all.len(),
+        ctx.known_users.total_messages()
+    )];
+
+    for (acct, users) in &grouped {
+        lines.push(format!("\n**{}** ({} users)", acct, users.len()));
+        for u in users.iter().take(20) {
+            lines.push(format!(
+                "  `{}` — {} msgs, last {}",
+                u.user_id,
+                u.message_count,
+                format_ts(u.last_seen_ms)
+            ));
+        }
+        if users.len() > 20 {
+            lines.push(format!("  _... and {} more_", users.len() - 20));
+        }
+    }
+
+    lines.join("\n")
+}
+
+/// `/groups` — show group statistics from the channel's group_history.
+pub fn cmd_groups(ctx: CommandContext<'_>) -> String {
+    let stats = ctx
+        .channel
+        .map(|ch| ch.group_stats())
+        .unwrap_or_default();
+    if stats.is_empty() {
+        return "📋 This channel has no group support or no active groups.".to_string();
+    }
+
+    let mut lines = vec![format!("📋 **Group Statistics** ({} groups)\n", stats.len())];
+    lines.push("```text".to_string());
+    lines.push(format!(
+        "{:<20} {:>8} {:>8}  {}",
+        "Group ID", "Buffered", "Limit", "Name"
+    ));
+    lines.push("─".repeat(50));
+    for g in &stats {
+        lines.push(format!(
+            "{:<20} {:>8} {:>8}  {}",
+            &g.group_id,
+            g.buffered_messages,
+            g.history_limit,
+            g.name.as_deref().unwrap_or("-")
+        ));
+    }
+    lines.push("```".to_string());
+    lines.join("\n")
+}
+
+/// Format a unix-ms timestamp as a readable date string.
+fn format_ts(ts_ms: u64) -> String {
+    let secs = ts_ms / 1000;
+    let days = secs / 86400;
+    let year = 1970 + (days / 365);
+    let day_of_year = days % 365;
+    let month = (day_of_year / 30).min(11) + 1;
+    let day = (day_of_year % 30) + 1;
+    let hour = (secs % 86400) / 3600;
+    format!("{year}-{month:02}-{day:02} {hour:02}:00 UTC")
 }
