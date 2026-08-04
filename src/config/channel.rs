@@ -174,6 +174,18 @@ pub struct QQBotAccountConfig {
     /// The wildcard key `"*"` applies to any group without an explicit entry.
     #[serde(default)]
     pub group_config: HashMap<String, GroupConfig>,
+    /// Outbound debounce window in milliseconds. When > 0, rapid text-only
+    /// sends to the same recipient within this window are merged into a single
+    /// message to avoid message bombing. 0 (default) disables debouncing.
+    #[serde(default)]
+    pub debounce_window_ms: u64,
+    /// Debounce separator inserted between merged texts.
+    #[serde(default = "default_debounce_separator")]
+    pub debounce_separator: String,
+}
+
+fn default_debounce_separator() -> String {
+    "\n\n---\n\n".to_string()
 }
 
 // ── QQBotChannelConfig ───────────────────────────────────────────────────────

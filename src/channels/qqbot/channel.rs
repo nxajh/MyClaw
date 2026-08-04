@@ -372,6 +372,8 @@ pub struct QQBotChannel {
     pub(super) known_senders: Arc<Mutex<KnownSenders>>,
     /// Data directory for persistence (known-users store).
     pub(super) data_dir: std::path::PathBuf,
+    /// Outbound debounce merge (disabled when window_ms == 0).
+    pub(super) debouncer: Arc<DeliverDebouncer>,
 }
 
 /// Per-group message history: group_openid → VecDeque of (sender, content).
@@ -433,6 +435,10 @@ impl QQBotChannel {
             rate_limiter: Arc::new(Mutex::new(RateLimiter::new())),
             known_senders: Arc::new(Mutex::new(known_senders)),
             data_dir,
+            debouncer: Arc::new(DeliverDebouncer::new(
+                config.debounce_window_ms,
+                config.debounce_separator.clone(),
+            )),
         };
         crate::channels::warn_if_locked_down(&ch);
         ch
@@ -463,6 +469,52 @@ impl QQBotChannel {
     fn next_msg_seq(&self) -> u32 {
         self.msg_seq_counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Send plain text (no keyboard, no files) to a recipient, chunked.
+    /// Used by the debounce flush path. Returns an empty-id result on success.
+    async fn send_plain_text_chunked(
+        &self,
+        recipient: &str,
+        text: &str,
+        msg_id: &str,
+    ) -> anyhow::Result<crate::channels::OutboundSendResult> {
+        let sanitized = sanitize_qq_markdown(&strip_internal_tags(text));
+        let pre_chunks = split_by_visual_lines(&sanitized, QQ_MAX_VISUAL_LINES_PER_BUBBLE);
+        let mut chunks = Vec::new();
+        for pre in pre_chunks {
+            chunks.append(&mut split_message_chunk(
+                &pre,
+                self.capabilities().message_chunk_limit,
+                self.capabilities().message_len_unit,
+            ));
+        }
+        if chunks.is_empty() {
+            return Ok(crate::channels::OutboundSendResult::empty());
+        }
+        let count = chunks.len();
+        for (i, chunk) in chunks.iter().enumerate() {
+            let msg_seq = self.next_msg_seq();
+            let result = if let Some(openid) = recipient.strip_prefix("c2c:") {
+                self.send_c2c_message(openid, chunk, msg_id, msg_seq).await
+            } else if let Some(group_openid) = recipient.strip_prefix("group:") {
+                self.send_group_message(group_openid, chunk, msg_id, msg_seq)
+                    .await
+            } else {
+                anyhow::bail!(
+                    "invalid QQ Bot recipient format: {} (expected c2c:<openid> or group:<openid>)",
+                    recipient
+                )
+            };
+            if let Err(e) = result {
+                error!(chunk = i, err = %e, "failed to send debounced text chunk");
+                return Err(e);
+            }
+            if i < count - 1 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+        Ok(crate::channels::OutboundSendResult::empty())
     }
 
     /// Build the unified security policy from QQBot config (RFC §14.5).
@@ -1917,6 +1969,77 @@ impl Channel for QQBotChannel {
         &self,
         msg: &crate::channels::ChannelOutboundMessage,
     ) -> anyhow::Result<crate::channels::OutboundSendResult> {
+        // ── Outbound debounce merge ──────────────────────────────────────────
+        // When enabled and this is a text-only message (no files/buttons),
+        // coalesce rapid sends to the same recipient within the window into a
+        // single merged message (avoids message bombing).
+        if self.debouncer.enabled()
+            && msg.content.files.is_empty()
+            && msg.content.buttons.is_empty()
+            && !msg.content.text.trim().is_empty()
+        {
+            let raw_recipient = msg.receiver.id.clone();
+            if raw_recipient.is_empty() {
+                anyhow::bail!("QQBot send failed: no recipient");
+            }
+            let recipient = if raw_recipient.starts_with("c2c:")
+                || raw_recipient.starts_with("group:")
+            {
+                raw_recipient
+            } else {
+                format!("c2c:{}", raw_recipient)
+            };
+            let raw_msg_id = msg
+                .receiver
+                .reply_to_message_id
+                .as_deref()
+                .unwrap_or("")
+                .to_string();
+
+            let (rx, is_first) =
+                self.debouncer
+                    .enqueue(&recipient, msg.content.text.clone(), &raw_msg_id);
+            if is_first {
+                let ch = self.clone();
+                let recipient_clone = recipient.clone();
+                let window = Duration::from_millis(ch.debouncer.window_ms);
+                let separator = ch.debouncer.separator.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(window).await;
+                    if let Some(entry) = ch.debouncer.take(&recipient_clone) {
+                        let merged = entry.texts.join(&separator);
+                        // Resolve passive-reply budget once for the merged message.
+                        let msg_id = if !entry.msg_id.is_empty()
+                            && ch.reply_limiter.lock().check_and_record(&entry.msg_id)
+                        {
+                            entry.msg_id.clone()
+                        } else {
+                            String::new()
+                        };
+                        let result = ch
+                            .send_plain_text_chunked(
+                                &recipient_clone,
+                                &merged,
+                                &msg_id,
+                            )
+                            .await;
+                        ch.stop_internal_typing(&recipient_clone);
+                        for waiter in entry.waiters {
+                            let send_res = match &result {
+                                Ok(r) => Ok(r.clone()),
+                                Err(e) => Err(anyhow::anyhow!("{e:#}")),
+                            };
+                            let _ = waiter.send(send_res);
+                        }
+                    }
+                });
+            }
+            return match rx.await {
+                Ok(result) => result,
+                Err(_) => anyhow::bail!("QQBot debounce flush channel closed unexpectedly"),
+            };
+        }
+
         // When files are present, text is used as caption on the first file,
         // not as a separate text message (RFC §14.5).
         // QQ msg_type=2: escape `$` and pad `**` for CJK before split.
@@ -2505,6 +2628,77 @@ impl RateLimiter {
     }
 }
 
+// ── Deliver debouncer ─────────────────────────────────────────────────────────
+
+/// A pending debounced delivery for one recipient.
+struct PendingDeliver {
+    texts: Vec<String>,
+    msg_id: String,
+    waiters: Vec<
+        tokio::sync::oneshot::Sender<anyhow::Result<crate::channels::OutboundSendResult>>,
+    >,
+}
+
+/// Outbound debounce merge: coalesces rapid text-only sends to the same
+/// recipient within a window into a single message (avoids message bombing).
+///
+/// Modelled after the official plugin's `DeliverDebouncer`. The first send to a
+/// recipient within an idle window drives a flush task; subsequent sends within
+/// the window append to the buffer and await the shared flush result.
+pub(super) struct DeliverDebouncer {
+    window_ms: u64,
+    separator: String,
+    pending: std::sync::Mutex<std::collections::HashMap<String, PendingDeliver>>,
+}
+
+impl DeliverDebouncer {
+    fn new(window_ms: u64, separator: String) -> Self {
+        Self {
+            window_ms,
+            separator,
+            pending: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        self.window_ms > 0
+    }
+
+    /// Buffer a text. Returns a receiver for the eventual send result and
+    /// whether this caller is the first in the window (and must drive the flush).
+    fn enqueue(
+        &self,
+        recipient: &str,
+        text: String,
+        msg_id: &str,
+    ) -> (
+        tokio::sync::oneshot::Receiver<anyhow::Result<crate::channels::OutboundSendResult>>,
+        bool,
+    ) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut pending = self.pending.lock();
+        let is_first = !pending.contains_key(recipient);
+        let entry = pending
+            .entry(recipient.to_string())
+            .or_insert_with(|| PendingDeliver {
+                texts: Vec::new(),
+                msg_id: String::new(),
+                waiters: Vec::new(),
+            });
+        entry.texts.push(text);
+        if !msg_id.is_empty() {
+            entry.msg_id = msg_id.to_string();
+        }
+        entry.waiters.push(tx);
+        (rx, is_first)
+    }
+
+    /// Remove and return the pending entry for a recipient (flush driver only).
+    fn take(&self, recipient: &str) -> Option<PendingDeliver> {
+        self.pending.lock().remove(recipient)
+    }
+}
+
 // ── WebSocket loop ────────────────────────────────────────────────────────────
 
 impl QQBotChannel {
@@ -3052,6 +3246,8 @@ mod tests {
             allowed_users: None,
             allowed_groups: Some(vec!["*".to_string()]),
             group_config: gc,
+            debounce_window_ms: 0,
+            debounce_separator: "\n\n---\n\n".to_string(),
         };
         QQBotChannel::new("test".to_string(), config)
     }
@@ -3227,5 +3423,38 @@ mod tests {
 
         // No tags → unchanged
         assert_eq!(strip_internal_tags("plain text"), "plain text");
+    }
+
+    #[test]
+    fn debouncer_buffers_and_merges_texts() {
+        let d = DeliverDebouncer::new(100, "\n---\n".to_string());
+        assert!(d.enabled());
+
+        let (_, first1) = d.enqueue("c2c:u1", "hello".to_string(), "m1");
+        assert!(first1, "first enqueue should drive the flush");
+        let (_, first2) = d.enqueue("c2c:u1", "world".to_string(), "m1");
+        assert!(!first2, "second enqueue within window should not drive");
+
+        let entry = d.take("c2c:u1").expect("pending entry expected");
+        assert_eq!(entry.texts.len(), 2);
+        assert_eq!(entry.texts.join("\n---\n"), "hello\n---\nworld");
+        assert_eq!(entry.msg_id, "m1");
+        assert_eq!(entry.waiters.len(), 2);
+    }
+
+    #[test]
+    fn debouncer_separate_recipients_are_independent() {
+        let d = DeliverDebouncer::new(100, "\n".to_string());
+        let (_, f1) = d.enqueue("c2c:a", "one".to_string(), "");
+        let (_, f2) = d.enqueue("c2c:b", "two".to_string(), "");
+        assert!(f1 && f2, "distinct recipients each drive their own flush");
+        assert!(d.take("c2c:a").is_some());
+        assert!(d.take("c2c:b").is_some());
+    }
+
+    #[test]
+    fn debouncer_disabled_when_window_is_zero() {
+        let d = DeliverDebouncer::new(0, "\n".to_string());
+        assert!(!d.enabled());
     }
 }
