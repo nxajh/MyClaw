@@ -366,12 +366,6 @@ pub struct QQBotChannel {
     pub(super) group_history: Arc<Mutex<GroupHistory>>,
     /// Passive reply limiter (QQ allows ~4 replies per msg_id per hour).
     pub(super) reply_limiter: Arc<Mutex<ReplyLimiter>>,
-    /// Per-sender + global rate limiter.
-    pub(super) rate_limiter: Arc<Mutex<RateLimiter>>,
-    /// Known senders who have interacted with the bot.
-    pub(super) known_senders: Arc<Mutex<KnownSenders>>,
-    /// Data directory for persistence (known-users store).
-    pub(super) data_dir: std::path::PathBuf,
     /// Outbound debounce merge (disabled when window_ms == 0).
     pub(super) debouncer: Arc<DeliverDebouncer>,
 }
@@ -383,38 +377,6 @@ impl QQBotChannel {
     pub fn new(account_id: String, config: QQBotAccountConfig) -> Self {
         let app_id = config.app_id.clone();
         let client_secret = config.client_secret.clone();
-
-        let data_dir = directories::ProjectDirs::from("", "", "myclaw")
-            .map(|d| d.data_dir().to_path_buf())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-
-        // Load persisted known users (proactive-messaging store).
-        let known_users_path = data_dir.join(format!("qqbot_known_users_{account_id}.json"));
-        let known_senders = match std::fs::read_to_string(&known_users_path) {
-            Ok(contents) => match serde_json::from_str::<std::collections::HashMap<
-                String,
-                UserEntry,
-            >>(&contents)
-            {
-                Ok(map) => {
-                    tracing::info!(
-                        account = %account_id,
-                        users = map.len(),
-                        "qqbot: loaded known users from disk"
-                    );
-                    KnownSenders::from_snapshot(map)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        account = %account_id,
-                        err = %e,
-                        "qqbot: failed to parse known users file, starting empty"
-                    );
-                    KnownSenders::new()
-                }
-            },
-            Err(_) => KnownSenders::new(),
-        };
 
         // Extract debounce config before `config` is moved into the struct.
         let debounce_window_ms = config.debounce_window_ms;
@@ -436,9 +398,6 @@ impl QQBotChannel {
             started_at: std::time::Instant::now(),
             group_history: Arc::new(Mutex::new(std::collections::HashMap::new())),
             reply_limiter: Arc::new(Mutex::new(ReplyLimiter::new())),
-            rate_limiter: Arc::new(Mutex::new(RateLimiter::new())),
-            known_senders: Arc::new(Mutex::new(known_senders)),
-            data_dir,
             debouncer: Arc::new(DeliverDebouncer::new(
                 debounce_window_ms,
                 debounce_separator,
@@ -446,27 +405,6 @@ impl QQBotChannel {
         };
         crate::channels::warn_if_locked_down(&ch);
         ch
-    }
-
-    /// Path to the persisted known-users store for this account.
-    fn known_users_path(&self) -> std::path::PathBuf {
-        self.data_dir
-            .join(format!("qqbot_known_users_{}.json", self.account_id))
-    }
-
-    /// Persist the known-users snapshot to disk (best-effort).
-    fn save_known_users(&self) {
-        let snapshot = self.known_senders.lock().snapshot();
-        match serde_json::to_string(&snapshot) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(self.known_users_path(), json) {
-                    warn!(account = %self.account_id, err = %e, "qqbot: failed to save known users");
-                }
-            }
-            Err(e) => {
-                warn!(account = %self.account_id, err = %e, "qqbot: failed to serialize known users");
-            }
-        }
     }
 
     /// Return the next proactive msg_seq value (monotonically increasing).
@@ -650,14 +588,9 @@ impl QQBotChannel {
                     debug!(msg_id = %msg.id, "duplicate C2C message, skipping");
                     return None;
                 }
-                if !self.rate_limiter.lock().check(&msg.sender.id) {
-                    warn!(sender = %msg.sender.id, "qqbot: rate limited");
-                    return None;
-                }
                 if !apply_auth(self, &msg.sender.id, crate::channels::MessageScope::Direct) {
                     return None;
                 }
-                self.known_senders.lock().record(&msg.sender.id, "c2c");
                 if !msg.content.files.is_empty() {
                     tracing::info!(
                         msg_id = %msg.id,
@@ -683,10 +616,6 @@ impl QQBotChannel {
                     debug!(msg_id = %msg.id, "duplicate group message, skipping");
                     return None;
                 }
-                if !self.rate_limiter.lock().check(&msg.sender.id) {
-                    warn!(sender = %msg.sender.id, "qqbot: rate limited");
-                    return None;
-                }
                 let group_id = msg
                     .receiver
                     .id
@@ -705,9 +634,6 @@ impl QQBotChannel {
                 ) {
                     return None;
                 }
-                self.known_senders
-                    .lock()
-                    .record(&msg.sender.id, &format!("group:{}", group_id));
                 // Inject recent group chat history as context.
                 self.inject_group_history(&mut msg, &group_id);
                 Some(msg)
@@ -1783,194 +1709,6 @@ impl QQBotChannel {
             }
         });
     }
-
-    /// Try to handle a bot- prefixed slash command.
-    /// Returns true if the command was handled (message consumed), false to continue dispatch.
-    async fn try_bot_command(&self, content: &str, reply_target: &str, msg_id: &str) -> bool {
-        let trimmed = content.trim();
-
-        let reply = match trimmed {
-            "/bot-ping" => "pong 🏓".to_string(),
-            "/bot-version" => format!("MyClaw {}", env!("MYCLAW_VERSION")),
-            "/bot-help" => {
-                // C2C: send with keyboard buttons; group: fall through to cmd-input tags.
-                if let Some(openid) = reply_target.strip_prefix("c2c:") {
-                    let help_text = "**🤖 MyClaw Bot Commands**\n\n*Channel-level commands (handled locally)*\n• `/bot-ping` — Check bot latency\n• `/bot-version` — Show bot version\n• `/bot-help` — Show this help\n• `/bot-status` — Show bot status\n• `/bot-me` — Show your chat info\n• `/bot-groups` — Show group activity\n• `/bot-clear` — Start a new conversation\n\n*Orchestrator commands (handled by AI)*\n• `/help` — Show AI commands\n• `/new` — New conversation\n• `/status` — Show status\n\nType any command or just chat!";
-                    let kb = Keyboard::from_pairs(&[
-                        ("/bot-ping", "/bot-ping"),
-                        ("/bot-version", "/bot-version"),
-                        ("/bot-status", "/bot-status"),
-                        ("/bot-me", "/bot-me"),
-                        ("/bot-groups", "/bot-groups"),
-                        ("/bot-help", "/bot-help"),
-                        ("/bot-clear", "/bot-clear"),
-                    ]);
-                    if self
-                        .send_c2c_keyboard(openid, help_text, &kb, msg_id)
-                        .await
-                        .is_ok()
-                    {
-                        return true;
-                    }
-                    // Keyboard failed, fall through to text reply below.
-                }
-                // Group or keyboard fallback: use cmd-input tags.
-                let help_text = r#"**🤖 MyClaw Bot Commands**
-
-<qqbot-cmd-input text="/bot-ping" /> <qqbot-cmd-input text="/bot-version" /> <qqbot-cmd-input text="/bot-help" /> <qqbot-cmd-input text="/bot-status" /> <qqbot-cmd-input text="/bot-me" /> <qqbot-cmd-input text="/bot-groups" /> <qqbot-cmd-input text="/bot-clear" />
-
-*Channel-level commands (handled locally)*
-• `/bot-ping` — Check bot latency
-• `/bot-version` — Show bot version
-• `/bot-help` — Show this help
-• `/bot-status` — Show bot status
-• `/bot-me` — Show your chat info
-• `/bot-groups` — Show group activity
-• `/bot-clear` — Start a new conversation
-
-*Orchestrator commands (handled by AI)*
-• `/help` — Show AI commands
-• `/new` — New conversation
-• `/status` — Show status
-
-Type any command or just chat!"#;
-                help_text.to_string()
-            }
-            "/bot-me" => {
-                let scope = if reply_target.starts_with("group:") {
-                    "Group"
-                } else {
-                    "Private"
-                };
-                format!(
-                    "**👤 Your Info**\n\n• Chat: {}\n• Target: `{}`",
-                    scope, reply_target
-                )
-            }
-            "/bot-groups" => {
-                let history = self.group_history.lock();
-                if history.is_empty() {
-                    "No group activity recorded".to_string()
-                } else {
-                    let mut lines = vec!["**📋 Group Activity**\n".to_string()];
-                    for (gid, msgs) in history.iter() {
-                        let limit = self.resolve_group_history_limit(gid);
-                        let group_name = self
-                            .config
-                            .group_config
-                            .get(gid)
-                            .and_then(|c| c.name.as_deref())
-                            .or_else(|| {
-                                self.config
-                                    .group_config
-                                    .get("*")
-                                    .and_then(|c| c.name.as_deref())
-                            })
-                            .unwrap_or("(unnamed)");
-                        let gid_display: String = gid.chars().take(12).collect();
-                        lines.push(format!(
-                            "• `{}` ({}) — {} msgs (limit: {})",
-                            gid_display, group_name, msgs.len(), limit
-                        ));
-                    }
-                    lines.join("\n")
-                }
-            }
-            "/bot-approve" => {
-                // Approval / autonomy control via Inline Keyboard (parity with
-                // the official plugin's /bot-approve). Each button injects an
-                // `/autonomy` command that the orchestrator processes.
-                if let Some(openid) = reply_target.strip_prefix("c2c:") {
-                    let text = "**🔐 Command Approval / Autonomy**\n\nChoose the bot's autonomy level:\n\n🟢 **Full** — all actions run without approval\n🟡 **Default** — safe actions auto-run, ask before external ones\n🔴 **Read-only** — only read/analyze tools";
-                    let kb = Keyboard::from_pairs(&[
-                        ("🟢 Full", "/autonomy full"),
-                        ("🟡 Default", "/autonomy default"),
-                        ("🔴 Read-only", "/autonomy read_only"),
-                    ]);
-                    if self
-                        .send_c2c_keyboard(openid, text, &kb, msg_id)
-                        .await
-                        .is_ok()
-                    {
-                        return true;
-                    }
-                    // Keyboard failed → fall through to cmd-input text below.
-                }
-                // Group or keyboard fallback: use cmd-input tags.
-                "**🔐 Command Approval / Autonomy**\n\n<qqbot-cmd-input text=\"/autonomy full\" /> <qqbot-cmd-input text=\"/autonomy default\" /> <qqbot-cmd-input text=\"/autonomy read_only\" />\n\n🟢 `full` — all actions run without approval\n🟡 `default` — safe actions auto-run, ask before external ones\n🔴 `read_only` — only read/analyze tools".to_string()
-            }
-            // ── Register new commands above this line ──────────────────────
-            "/bot-status" => {
-                let uptime = self.started_at.elapsed();
-                let hours = uptime.as_secs() / 3600;
-                let mins = (uptime.as_secs() % 3600) / 60;
-                let history = self.group_history.lock();
-                let group_count = history.len();
-                let total_msgs: usize = history.values().map(|v| v.len()).sum();
-                drop(history);
-                let user_count = self.known_senders.lock().count();
-                format!(
-                    "**🟢 QQ Bot Status**\n\n• Account: `{}`\n• Version: {}\n• Uptime: {}h {}m\n• Active groups: {} ({} msgs buffered)\n• Known users: {}\n• Session: Active",
-                    self.account_id,
-                    env!("MYCLAW_VERSION"),
-                    hours,
-                    mins,
-                    group_count,
-                    total_msgs,
-                    user_count,
-                )
-            }
-            "/bot-clear" => {
-                "Please use /new in chat to start a new conversation".to_string()
-            }
-            "/bot-users" => {
-                let ks = self.known_senders.lock();
-                format!(
-                    "**👥 Known Users**\n\n• Total users: {}\n• Total messages: {}",
-                    ks.count(),
-                    ks.total_messages(),
-                )
-            }
-            _ => return false,
-        };
-
-        // Send reply directly via REST API (bypass orchestrator), with chunking.
-        // Sanitize `$` and pad `**` before split (same as send_message path).
-        let reply = sanitize_qq_markdown(&reply);
-        let chunks = split_message_chunk(
-            &reply,
-            self.capabilities().message_chunk_limit,
-            self.capabilities().message_len_unit,
-        );
-        if let Some(openid) = reply_target.strip_prefix("c2c:") {
-            for (i, chunk) in chunks.iter().enumerate() {
-                let seq = self.next_msg_seq() + i as u32;
-                if let Err(e) = self.send_c2c_message(openid, chunk, msg_id, seq).await {
-                    warn!(chunk = i, err = %e, "failed to send bot command reply chunk");
-                    return true;
-                }
-                if i > 0 {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-            }
-        } else if let Some(group_openid) = reply_target.strip_prefix("group:") {
-            for (i, chunk) in chunks.iter().enumerate() {
-                let seq = self.next_msg_seq() + i as u32;
-                if let Err(e) = self
-                    .send_group_message(group_openid, chunk, msg_id, seq)
-                    .await
-                {
-                    warn!(chunk = i, err = %e, "failed to send bot command reply chunk");
-                    return true;
-                }
-                if i > 0 {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-            }
-        }
-
-        true
-    }
 }
 
 // ── Channel trait implementation ──────────────────────────────────────────────
@@ -1986,6 +1724,19 @@ impl Channel for QQBotChannel {
 
     fn capabilities(&self) -> &crate::channels::message::ChannelCapabilities {
         &QQBOT_CAPS
+    }
+
+    fn group_stats(&self) -> Vec<crate::channels::GroupStat> {
+        let history = self.group_history.lock();
+        history
+            .iter()
+            .map(|(gid, deque)| crate::channels::GroupStat {
+                group_id: gid.clone(),
+                name: None,
+                buffered_messages: deque.len(),
+                history_limit: 20,
+            })
+            .collect()
     }
 
     fn security_policy(&self) -> crate::channels::ChannelSecurityPolicy {
@@ -2331,17 +2082,6 @@ impl Channel for QQBotChannel {
             channel.ws_loop(tx).await;
         });
 
-        // Periodic known-users persistence flush (every 60s).
-        let flush_channel = self.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
-            interval.tick().await; // skip immediate first tick
-            loop {
-                interval.tick().await;
-                flush_channel.save_known_users();
-            }
-        });
-
         Ok(rx)
     }
 
@@ -2504,156 +2244,6 @@ impl ReplyLimiter {
     }
 }
 
-// ── Known senders ────────────────────────────────────────────────────────────
-
-/// Tracks known users who have interacted with the bot, for proactive messaging
-/// and analytics.
-pub(super) struct KnownSenders {
-    /// sender_id → UserEntry
-    users: std::collections::HashMap<String, UserEntry>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct UserEntry {
-    message_count: u32,
-    first_seen_ms: u64,
-    last_seen_ms: u64,
-    scope: String, // "c2c" or "group:xxx"
-}
-
-impl KnownSenders {
-    fn new() -> Self {
-        Self {
-            users: std::collections::HashMap::new(),
-        }
-    }
-
-    /// Restore from a persisted snapshot.
-    fn from_snapshot(map: std::collections::HashMap<String, UserEntry>) -> Self {
-        Self { users: map }
-    }
-
-    /// Produce a serializable snapshot for persistence.
-    fn snapshot(&self) -> std::collections::HashMap<String, UserEntry> {
-        self.users.clone()
-    }
-
-    fn record(&mut self, sender_id: &str, scope: &str) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        match self.users.get_mut(sender_id) {
-            Some(entry) => {
-                entry.message_count += 1;
-                entry.last_seen_ms = now;
-            }
-            None => {
-                // Evict if too many entries (keep last 10k)
-                if self.users.len() > 10_000 {
-                    if let Some(oldest) = self
-                        .users
-                        .iter()
-                        .min_by_key(|(_, e)| e.last_seen_ms)
-                        .map(|(k, _)| k.clone())
-                    {
-                        self.users.remove(&oldest);
-                    }
-                }
-                self.users.insert(
-                    sender_id.to_string(),
-                    UserEntry {
-                        message_count: 1,
-                        first_seen_ms: now,
-                        last_seen_ms: now,
-                        scope: scope.to_string(),
-                    },
-                );
-            }
-        }
-    }
-
-    fn count(&self) -> usize {
-        self.users.len()
-    }
-
-    fn total_messages(&self) -> u32 {
-        self.users.values().map(|e| e.message_count).sum()
-    }
-}
-
-// ── Rate limiter ──────────────────────────────────────────────────────────────
-
-/// Simple token-bucket rate limiter with per-sender and global tracking.
-pub(super) struct RateLimiter {
-    /// sender_id → (count, window_start_ms)
-    sender_buckets: std::collections::HashMap<String, (u32, u128)>,
-    /// global count in current window
-    global_count: u32,
-    global_window_start: u128,
-    /// Max messages per sender per 60s window
-    sender_limit: u32,
-    /// Max messages globally per 60s window
-    global_limit: u32,
-}
-
-impl RateLimiter {
-    fn new() -> Self {
-        Self {
-            sender_buckets: std::collections::HashMap::new(),
-            global_count: 0,
-            global_window_start: 0,
-            sender_limit: 30,  // 30 msgs/min per sender
-            global_limit: 300, // 300 msgs/min global
-        }
-    }
-
-    /// Returns true if the message is allowed, false if rate limited.
-    fn check(&mut self, sender_id: &str) -> bool {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-        let window_ms: u128 = 60_000;
-
-        // Reset global window if expired
-        if now - self.global_window_start > window_ms {
-            self.global_count = 0;
-            self.global_window_start = now;
-        }
-
-        // Check global limit
-        if self.global_count >= self.global_limit {
-            return false;
-        }
-
-        // Check sender limit
-        let sender_key = sender_id.to_string();
-        match self.sender_buckets.get_mut(&sender_key) {
-            Some((count, window_start)) => {
-                if now - *window_start > window_ms {
-                    *count = 0;
-                    *window_start = now;
-                }
-                if *count >= self.sender_limit {
-                    return false;
-                }
-                *count += 1;
-            }
-            None => {
-                // Evict old entries if map too large
-                if self.sender_buckets.len() > 5000 {
-                    self.sender_buckets
-                        .retain(|_, (_, ws)| now - *ws < window_ms);
-                }
-                self.sender_buckets.insert(sender_key, (1, now));
-            }
-        }
-
-        self.global_count += 1;
-        true
-    }
-}
 
 // ── Deliver debouncer ─────────────────────────────────────────────────────────
 
@@ -2999,19 +2589,6 @@ impl QQBotChannel {
                                 "[Quoted message begins]\n{}\n[Quoted message ends]\n[Current message]\n{}",
                                 quoted, channel_msg.content.text
                             );
-                        }
-                        // Bot- prefixed slash commands — intercept before orchestrator
-                        let msg_id = payload.d.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                        if self
-                            .try_bot_command(
-                                &channel_msg.content.text,
-                                &channel_msg.receiver.id,
-                                msg_id,
-                            )
-                            .await
-                        {
-                            debug!(msg_id = %channel_msg.id, "bot command handled, skipping orchestrator");
-                            return None;
                         }
 
                         // Voice/audio: use QQ's native ASR text when present, else
@@ -3412,22 +2989,6 @@ mod tests {
     fn ssrf_allows_public() {
         assert!(!is_ssrf_blocked("https://example.com/image.png"));
         assert!(!is_ssrf_blocked("https://multimedia.nt.qq.com/audio.wav"));
-    }
-
-    #[test]
-    fn rate_limiter_blocks_after_limit() {
-        let mut rl = RateLimiter::new();
-        // sender_limit is 30; first 30 should pass.
-        for _ in 0..30 {
-            assert!(rl.check("user_a"), "should allow within sender limit");
-        }
-        // 31st should be blocked.
-        assert!(
-            !rl.check("user_a"),
-            "should block after sender limit exceeded"
-        );
-        // Different sender should still work.
-        assert!(rl.check("user_b"), "different sender should be allowed");
     }
 
     #[test]
