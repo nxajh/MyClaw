@@ -368,6 +368,8 @@ pub struct QQBotChannel {
     pub(super) reply_limiter: Arc<Mutex<ReplyLimiter>>,
     /// Per-sender + global rate limiter.
     pub(super) rate_limiter: Arc<Mutex<RateLimiter>>,
+    /// Known senders who have interacted with the bot.
+    pub(super) known_senders: Arc<Mutex<KnownSenders>>,
 }
 
 /// Per-group message history: group_openid → VecDeque of (sender, content).
@@ -395,6 +397,7 @@ impl QQBotChannel {
             group_history: Arc::new(Mutex::new(std::collections::HashMap::new())),
             reply_limiter: Arc::new(Mutex::new(ReplyLimiter::new())),
             rate_limiter: Arc::new(Mutex::new(RateLimiter::new())),
+            known_senders: Arc::new(Mutex::new(KnownSenders::new())),
         };
         crate::channels::warn_if_locked_down(&ch);
         ch
@@ -542,6 +545,7 @@ impl QQBotChannel {
                 if !apply_auth(self, &msg.sender.id, crate::channels::MessageScope::Direct) {
                     return None;
                 }
+                self.known_senders.lock().record(&msg.sender.id, "c2c");
                 if !msg.content.files.is_empty() {
                     tracing::info!(
                         msg_id = %msg.id,
@@ -589,6 +593,9 @@ impl QQBotChannel {
                 ) {
                     return None;
                 }
+                self.known_senders
+                    .lock()
+                    .record(&msg.sender.id, &format!("group:{}", group_id));
                 // Inject recent group chat history as context.
                 self.inject_group_history(&mut msg, &group_id);
                 Some(msg)
@@ -1744,18 +1751,28 @@ Type any command or just chat!"#;
                 let group_count = history.len();
                 let total_msgs: usize = history.values().map(|v| v.len()).sum();
                 drop(history);
+                let user_count = self.known_senders.lock().count();
                 format!(
-                    "**🟢 QQ Bot Status**\n\n• Account: `{}`\n• Version: {}\n• Uptime: {}h {}m\n• Active groups: {} ({} msgs buffered)\n• Session: Active",
+                    "**🟢 QQ Bot Status**\n\n• Account: `{}`\n• Version: {}\n• Uptime: {}h {}m\n• Active groups: {} ({} msgs buffered)\n• Known users: {}\n• Session: Active",
                     self.account_id,
                     env!("MYCLAW_VERSION"),
                     hours,
                     mins,
                     group_count,
                     total_msgs,
+                    user_count,
                 )
             }
             "/bot-clear" => {
                 "Please use /new in chat to start a new conversation".to_string()
+            }
+            "/bot-users" => {
+                let ks = self.known_senders.lock();
+                format!(
+                    "**👥 Known Users**\n\n• Total users: {}\n• Total messages: {}",
+                    ks.count(),
+                    ks.total_messages(),
+                )
             }
             _ => return false,
         };
@@ -2245,6 +2262,73 @@ impl ReplyLimiter {
                 true
             }
         }
+    }
+}
+
+// ── Known senders ────────────────────────────────────────────────────────────
+
+/// Tracks known users who have interacted with the bot, for proactive messaging
+/// and analytics.
+pub(super) struct KnownSenders {
+    /// sender_id → UserEntry
+    users: std::collections::HashMap<String, UserEntry>,
+}
+
+struct UserEntry {
+    message_count: u32,
+    first_seen_ms: u128,
+    last_seen_ms: u128,
+    scope: String, // "c2c" or "group:xxx"
+}
+
+impl KnownSenders {
+    fn new() -> Self {
+        Self {
+            users: std::collections::HashMap::new(),
+        }
+    }
+
+    fn record(&mut self, sender_id: &str, scope: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        match self.users.get_mut(sender_id) {
+            Some(entry) => {
+                entry.message_count += 1;
+                entry.last_seen_ms = now;
+            }
+            None => {
+                // Evict if too many entries (keep last 10k)
+                if self.users.len() > 10_000 {
+                    if let Some(oldest) = self
+                        .users
+                        .iter()
+                        .min_by_key(|(_, e)| e.last_seen_ms)
+                        .map(|(k, _)| k.clone())
+                    {
+                        self.users.remove(&oldest);
+                    }
+                }
+                self.users.insert(
+                    sender_id.to_string(),
+                    UserEntry {
+                        message_count: 1,
+                        first_seen_ms: now,
+                        last_seen_ms: now,
+                        scope: scope.to_string(),
+                    },
+                );
+            }
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.users.len()
+    }
+
+    fn total_messages(&self) -> u32 {
+        self.users.values().map(|e| e.message_count).sum()
     }
 }
 
