@@ -370,6 +370,8 @@ pub struct QQBotChannel {
     pub(super) rate_limiter: Arc<Mutex<RateLimiter>>,
     /// Known senders who have interacted with the bot.
     pub(super) known_senders: Arc<Mutex<KnownSenders>>,
+    /// Data directory for persistence (known-users store).
+    pub(super) data_dir: std::path::PathBuf,
 }
 
 /// Per-group message history: group_openid → VecDeque of (sender, content).
@@ -379,6 +381,38 @@ impl QQBotChannel {
     pub fn new(account_id: String, config: QQBotAccountConfig) -> Self {
         let app_id = config.app_id.clone();
         let client_secret = config.client_secret.clone();
+
+        let data_dir = directories::ProjectDirs::from("", "", "myclaw")
+            .map(|d| d.data_dir().to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+        // Load persisted known users (proactive-messaging store).
+        let known_users_path = data_dir.join(format!("qqbot_known_users_{account_id}.json"));
+        let known_senders = match std::fs::read_to_string(&known_users_path) {
+            Ok(contents) => match serde_json::from_str::<std::collections::HashMap<
+                String,
+                UserEntry,
+            >>(&contents)
+            {
+                Ok(map) => {
+                    tracing::info!(
+                        account = %account_id,
+                        users = map.len(),
+                        "qqbot: loaded known users from disk"
+                    );
+                    KnownSenders::from_snapshot(map)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        account = %account_id,
+                        err = %e,
+                        "qqbot: failed to parse known users file, starting empty"
+                    );
+                    KnownSenders::new()
+                }
+            },
+            Err(_) => KnownSenders::new(),
+        };
 
         let ch = Self {
             config,
@@ -397,10 +431,32 @@ impl QQBotChannel {
             group_history: Arc::new(Mutex::new(std::collections::HashMap::new())),
             reply_limiter: Arc::new(Mutex::new(ReplyLimiter::new())),
             rate_limiter: Arc::new(Mutex::new(RateLimiter::new())),
-            known_senders: Arc::new(Mutex::new(KnownSenders::new())),
+            known_senders: Arc::new(Mutex::new(known_senders)),
+            data_dir,
         };
         crate::channels::warn_if_locked_down(&ch);
         ch
+    }
+
+    /// Path to the persisted known-users store for this account.
+    fn known_users_path(&self) -> std::path::PathBuf {
+        self.data_dir
+            .join(format!("qqbot_known_users_{}.json", self.account_id))
+    }
+
+    /// Persist the known-users snapshot to disk (best-effort).
+    fn save_known_users(&self) {
+        let snapshot = self.known_senders.lock().snapshot();
+        match serde_json::to_string(&snapshot) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(self.known_users_path(), json) {
+                    warn!(account = %self.account_id, err = %e, "qqbot: failed to save known users");
+                }
+            }
+            Err(e) => {
+                warn!(account = %self.account_id, err = %e, "qqbot: failed to serialize known users");
+            }
+        }
     }
 
     /// Return the next proactive msg_seq value (monotonically increasing).
@@ -2125,6 +2181,17 @@ impl Channel for QQBotChannel {
             channel.ws_loop(tx).await;
         });
 
+        // Periodic known-users persistence flush (every 60s).
+        let flush_channel = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            interval.tick().await; // skip immediate first tick
+            loop {
+                interval.tick().await;
+                flush_channel.save_known_users();
+            }
+        });
+
         Ok(rx)
     }
 
@@ -2296,10 +2363,11 @@ pub(super) struct KnownSenders {
     users: std::collections::HashMap<String, UserEntry>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct UserEntry {
     message_count: u32,
-    first_seen_ms: u128,
-    last_seen_ms: u128,
+    first_seen_ms: u64,
+    last_seen_ms: u64,
     scope: String, // "c2c" or "group:xxx"
 }
 
@@ -2310,11 +2378,21 @@ impl KnownSenders {
         }
     }
 
+    /// Restore from a persisted snapshot.
+    fn from_snapshot(map: std::collections::HashMap<String, UserEntry>) -> Self {
+        Self { users: map }
+    }
+
+    /// Produce a serializable snapshot for persistence.
+    fn snapshot(&self) -> std::collections::HashMap<String, UserEntry> {
+        self.users.clone()
+    }
+
     fn record(&mut self, sender_id: &str, scope: &str) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_millis();
+            .as_millis() as u64;
         match self.users.get_mut(sender_id) {
             Some(entry) => {
                 entry.message_count += 1;
