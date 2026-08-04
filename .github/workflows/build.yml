@@ -36,6 +36,9 @@ jobs:
             target
           key: cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Install libclang (for silk-rs bindgen)
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+
       - name: Check
         run: cargo check
 

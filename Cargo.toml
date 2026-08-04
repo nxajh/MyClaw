@@ -17,6 +17,9 @@ tokio = { version = "1", features = ["full"] }
 # WebSocket (QQ Bot)
 tokio-tungstenite = { version = "0.26", features = ["native-tls"], optional = true }
 
+# SILK→WAV audio decoding (QQ Bot voice messages)
+silk2wav = { version = "0.1.0", optional = true }
+
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -93,7 +96,7 @@ crossterm = { version = "0.28", optional = true }
 
 [features]
 default = ["wechat", "qqbot", "telegram", "client", "tui"]
-qqbot = ["tokio-tungstenite"]
+qqbot = ["tokio-tungstenite", "silk2wav"]
 wechat = ["aes", "ecb", "md-5", "urlencoding"]
 telegram = []
 client = ["tokio-tungstenite"]

@@ -817,7 +817,9 @@ impl QQBotChannel {
     /// Priority:
     /// 1. `asr_refer_text` present → inject text directly, skip download.
     /// 2. `voice_wav_url` present → download WAV (no SILK decoding needed).
-    /// 3. Fallback → download `url` (SILK; requires SILK-aware audio model).
+    /// 3. Fallback → download `url` (SILK) and convert SILK→WAV locally via
+    ///    `silk2wav` so audio models can process it. On conversion failure the
+    ///    raw SILK bytes are kept.
     async fn ingest_voice_attachments(
         &self,
         data: &serde_json::Value,
@@ -917,7 +919,7 @@ impl QQBotChannel {
                     }
                 }
             };
-            let bytes = match resp.bytes().await {
+            let mut bytes = match resp.bytes().await {
                 Ok(b) => b,
                 Err(e) => {
                     warn!("qqbot: reading audio bytes failed for {full_url}: {e}");
@@ -925,13 +927,33 @@ impl QQBotChannel {
                 }
             };
             // If we downloaded from voice_wav_url the format is WAV; otherwise SILK.
-            let mime = if wav_url.is_some() {
+            // For raw SILK, attempt local SILK→WAV conversion so downstream audio
+            // models can understand it without needing a SILK-aware decoder.
+            let is_raw_silk = wav_url.is_none();
+            let mut mime = if wav_url.is_some() {
                 "audio/wav".to_string()
             } else if ctype.contains('/') {
                 ctype.to_string()
             } else {
                 "audio/silk".to_string()
             };
+            if is_raw_silk {
+                // SILK → WAV (24 kHz, QQ's default voice sample rate).
+                match silk2wav::silk_to_wav(&bytes, 24000) {
+                    Ok(wav_bytes) => {
+                        debug!(
+                            silk_bytes = bytes.len(),
+                            wav_bytes = wav_bytes.len(),
+                            "qqbot: SILK→WAV conversion succeeded"
+                        );
+                        bytes = wav_bytes.into();
+                        mime = "audio/wav".to_string();
+                    }
+                    Err(e) => {
+                        warn!("qqbot: SILK→WAV conversion failed ({e}), keeping raw SILK");
+                    }
+                }
+            }
             let file_name = att
                 .get("filename")
                 .and_then(|v| v.as_str())
