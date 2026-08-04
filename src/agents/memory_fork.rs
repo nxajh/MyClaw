@@ -501,6 +501,12 @@ fn build_extraction_prompt(knowledge_dir: &str) -> String {
          - Behavior corrections (things you did wrong that the user pointed out)\n\
          - Stable facts not derivable from code/git\n\
          \n\
+         ## Attribution & Viewpoints (CRITICAL)\n\
+         - NEVER attribute the Assistant's ideas, proposals, or analyses to the User.\n\
+         - Only save a viewpoint or preference as the User's if the User EXPLICITLY stated it in their message.\n\
+         - If the Assistant proposed a solution and the User merely agreed (e.g. \"ok\", \"looks good\"), save it as a project decision, NOT as a user preference or user viewpoint.\n\
+         - Be extremely careful with pronoun and role mix-ups. \"I\" in a user message means the User; \"I\" in an assistant message means the Assistant.\n\
+         \n\
          ## What NOT to save\n\
          - Task progress, completed-work logs, temporary TODO state\n\
          - Facts that will be stale in a week\n\

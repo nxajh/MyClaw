@@ -256,6 +256,8 @@ const SECTION_MEMORY_GUIDE: &str = r#"## Memory Writing Guide
 Write memories as declarative facts, not instructions.
 - "User prefers concise responses" ✓ — "Always respond concisely" ✗
 - "Project uses pytest with xdist" ✓ — "Run tests with pytest -n 4" ✗
+- NEVER attribute the Assistant's ideas, analyses, or proposals to the User.
+- If you proposed a solution and the user agreed, save it as a project decision, NOT a user preference.
 Do not save task progress, completed-work logs, or temporary TODO state. If a fact will be stale in a week, it does not belong in memory.
 Use the memory_manage tool to add/replace/remove memories. Use memory_search to find existing entries.
 Each memory must have: name, description (1-2 sentence summary), and memory_type.
