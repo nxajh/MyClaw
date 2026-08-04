@@ -480,6 +480,10 @@ impl ClientChannel {
                                         };
                                         if ok {
                                             is_authenticated = true;
+                                            let _ = ws_sender
+                                                .send(r#"{"type":"auth_ok"}"#.to_string())
+                                                .await;
+                                            tracing::debug!(conn_id = %conn_id_clone, "WebSocket client authenticated");
                                             let client_user = parsed["user_id"]
                                                 .as_str()
                                                 .or_else(|| parsed["user"].as_str())
@@ -602,10 +606,6 @@ impl ClientChannel {
                                                     }
                                                 }
                                             }
-                                            let _ = ws_sender
-                                                .send(r#"{"type":"auth_ok"}"#.to_string())
-                                                .await;
-                                            tracing::debug!(conn_id = %conn_id_clone, "WebSocket client authenticated");
                                         } else {
                                             let err = serde_json::json!({
                                                 "type": "error",
