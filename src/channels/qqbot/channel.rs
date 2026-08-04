@@ -416,6 +416,10 @@ impl QQBotChannel {
             Err(_) => KnownSenders::new(),
         };
 
+        // Extract debounce config before `config` is moved into the struct.
+        let debounce_window_ms = config.debounce_window_ms;
+        let debounce_separator = config.debounce_separator.clone();
+
         let ch = Self {
             config,
             account_id: account_id.clone(),
@@ -436,8 +440,8 @@ impl QQBotChannel {
             known_senders: Arc::new(Mutex::new(known_senders)),
             data_dir,
             debouncer: Arc::new(DeliverDebouncer::new(
-                config.debounce_window_ms,
-                config.debounce_separator.clone(),
+                debounce_window_ms,
+                debounce_separator,
             )),
         };
         crate::channels::warn_if_locked_down(&ch);
@@ -2648,7 +2652,7 @@ struct PendingDeliver {
 pub(super) struct DeliverDebouncer {
     window_ms: u64,
     separator: String,
-    pending: std::sync::Mutex<std::collections::HashMap<String, PendingDeliver>>,
+    pending: parking_lot::Mutex<std::collections::HashMap<String, PendingDeliver>>,
 }
 
 impl DeliverDebouncer {
@@ -2656,7 +2660,7 @@ impl DeliverDebouncer {
         Self {
             window_ms,
             separator,
-            pending: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pending: parking_lot::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
