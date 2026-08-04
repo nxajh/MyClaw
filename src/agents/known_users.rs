@@ -152,7 +152,7 @@ impl KnownUsersRegistry {
     /// unified `known_users.json`. Called once at startup. No-op if the
     /// unified file already exists (already migrated or created fresh).
     pub fn migrate_legacy(&self, data_dir: &Path) {
-        if self.users.len() > 0 {
+        if !self.users.is_empty() {
             return; // unified file already has data
         }
         let mut migrated = 0;
