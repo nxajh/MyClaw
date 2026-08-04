@@ -72,24 +72,28 @@ impl ToolExecutor {
                 });
             }
 
-            // Default mode: per-operation approval gate for write tools.
+            // Default mode: approval only for shell commands that contain
+            // process/service management commands (kill, systemctl, etc.).
+            // All other tools (file_write, file_edit, http, etc.) are
+            // auto-approved — these operate within the workspace and pose
+            // no system-level risk.
             if matches!(autonomy, PermissionMode::Default)
-                && is_write_tool(&call.name)
                 && !Self::is_approval_exempt(&call.name)
+                && Self::needs_approval(&call.name, &call.arguments)
             {
                 match self.request_approval(call, session).await {
                     ApprovalDecision::Approved => {
                         tracing::info!(
                             tool = %call.name,
                             session = %session.id,
-                            "write tool approved by user"
+                            "tool approved by user"
                         );
                     }
                     ApprovalDecision::Denied => {
                         tracing::info!(
                             tool = %call.name,
                             session = %session.id,
-                            "write tool denied by user"
+                            "tool denied by user"
                         );
                         return Ok(ToolResult {
                             success: false,
@@ -119,12 +123,28 @@ impl ToolExecutor {
             .await
     }
 
-    /// Tools exempt from the Default-mode approval gate even though
-    /// `is_write_tool` classifies them as writes. `agent_delegate` and
-    /// `agent_kill` manage sub-agent lifecycles, not user-facing side
-    /// effects — blocking them on approval would deadlock delegation.
+    /// Tools exempt from the Default-mode approval gate.
+    /// `agent_delegate` and `agent_kill` manage sub-agent lifecycles —
+    /// blocking them on approval would deadlock delegation.
     fn is_approval_exempt(name: &str) -> bool {
         matches!(name, "agent_delegate" | "agent_kill")
+    }
+
+    /// Determine whether a tool call needs user approval in Default mode.
+    ///
+    /// Only `shell` calls containing dangerous process/service-management
+    /// commands require approval. Everything else (file I/O, http, etc.)
+    /// is auto-approved.
+    fn needs_approval(tool_name: &str, arguments: &str) -> bool {
+        if tool_name != "shell" {
+            return false;
+        }
+        // arguments is a JSON string like {"command": "...", "workdir": "..."}
+        let command = serde_json::from_str::<serde_json::Value>(arguments)
+            .ok()
+            .and_then(|v| v.get("command")?.as_str().map(String::from))
+            .unwrap_or_default();
+        shell_has_dangerous_command(&command)
     }
 
     /// Send an approval prompt with Inline Keyboard buttons and wait
@@ -334,5 +354,87 @@ impl MemoryToolExecutor {
             .ok_or_else(|| anyhow::anyhow!("tool '{}' not found in registry", call.name))?;
         let args = parse_tool_args(&call.arguments);
         tool.execute(args, session).await
+    }
+}
+
+/// Check whether a shell command string contains process/service-management
+/// commands that require user approval in Default permission mode.
+///
+/// Splits on shell control operators (`|`, `&`, `;`, newline) and checks
+/// the first token (command basename) of each segment. This correctly
+/// handles pipelines: `ps aux | grep kill` does NOT trigger (the segment
+/// starting with `grep` is not `kill`).
+fn shell_has_dangerous_command(command: &str) -> bool {
+    for segment in command.split(['|', '&', ';', '\n']) {
+        let segment = segment.trim();
+        let first_token = match segment.split_whitespace().next() {
+            Some(t) => t,
+            None => continue,
+        };
+        // Strip path prefix (e.g. /usr/bin/kill → kill)
+        let basename = first_token.rsplit('/').next().unwrap_or(first_token);
+        if matches!(
+            basename,
+            "kill" | "pkill" | "killall"
+                | "systemctl" | "service"
+                | "reboot" | "shutdown" | "poweroff" | "halt"
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod danger_tests {
+    use super::shell_has_dangerous_command;
+
+    #[test]
+    fn detects_plain_kill() {
+        assert!(shell_has_dangerous_command("kill -9 12345"));
+    }
+
+    #[test]
+    fn detects_pkill_in_pipeline() {
+        assert!(shell_has_dangerous_command(
+            "ps aux | grep python | pkill -f python"
+        ));
+    }
+
+    #[test]
+    fn detects_systemctl_restart() {
+        assert!(shell_has_dangerous_command("systemctl restart nginx"));
+    }
+
+    #[test]
+    fn detects_service_command() {
+        assert!(shell_has_dangerous_command("service nginx stop"));
+    }
+
+    #[test]
+    fn detects_full_path() {
+        assert!(shell_has_dangerous_command("/usr/bin/kill 1234"));
+    }
+
+    #[test]
+    fn does_not_trigger_on_grep_kill() {
+        // `grep kill` — the command is `grep`, not `kill`
+        assert!(!shell_has_dangerous_command("ps aux | grep kill"));
+    }
+
+    #[test]
+    fn does_not_trigger_on_skill() {
+        // `skill` contains `kill` substring but is a different command
+        assert!(!shell_has_dangerous_command("skill --foo"));
+    }
+
+    #[test]
+    fn does_not_trigger_on_normal_commands() {
+        assert!(!shell_has_dangerous_command("ls -la /tmp"));
+        assert!(!shell_has_dangerous_command("cat /etc/hostname"));
+        assert!(!shell_has_dangerous_command("echo hello && sleep 1"));
+        assert!(!shell_has_dangerous_command(
+            "cargo build --release 2>&1 | head -20"
+        ));
     }
 }
