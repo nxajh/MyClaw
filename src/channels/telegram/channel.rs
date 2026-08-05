@@ -2340,7 +2340,11 @@ impl TurnStream for TelegramTurnStream {
                     }
                 }
                 TurnEvent::Thinking { delta } => {
-                    self.thinking_steps += 1;
+                    // Count bursts (thinking rounds), not individual deltas.
+                    // Each transition from non-thinking to thinking is one round.
+                    if !self.thinking_active {
+                        self.thinking_steps += 1;
+                    }
                     self.thinking_active = true;
                     // Rough token estimate: ~1 token per 4 chars, minimum 1 per event.
                     let est = (delta.len() / 4).max(1);
