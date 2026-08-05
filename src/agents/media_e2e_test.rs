@@ -99,7 +99,7 @@ fn runtime_with(providers: Arc<dyn ProviderRegistry>) -> AgentRuntime {
     use parking_lot::RwLock;
     let mut tools = crate::agents::ToolRegistry::new();
     // Register media retrieval tools — same as daemon.rs::build_tools.
-    for builtin in crate::tools::builtin_tools() {
+    for builtin in crate::tools::builtin_tools(None) {
         tools.register(builtin);
     }
     tools.register(Arc::new(crate::tools::ViewImageTool::new(Arc::clone(

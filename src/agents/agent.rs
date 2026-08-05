@@ -735,21 +735,39 @@ impl Agent {
             }
 
             for call in &pending_calls {
-                // If this call was the one that killed the daemon, skip
-                // re-execution and synthesize an error.
+                // If this call was the one that killed the daemon, check
+                // whether it can resume from a checkpoint (shell journal).
+                // Multi-segment shell commands write a `.shell_journal` that
+                // allows resuming from the first un-executed segment.
                 if interrupted_id.as_deref() == Some(call.id.as_str()) {
-                    let msg = "[recovery: this command was interrupted by a \
-                               daemon restart and will not be re-executed. \
-                               It may have partially or fully completed. \
-                               Check the current state before proceeding.]";
-                    session.add_tool_result(
-                        call.id.clone(),
-                        &call.name,
-                        msg.to_string(),
-                        true,
+                    let can_resume = call.name == "shell"
+                        && crate::tools::shell::ShellJournal::exists(
+                            runtime.sessions_dir.as_deref(),
+                            &session.id,
+                        );
+
+                    if !can_resume {
+                        let msg = "[recovery: this command was interrupted by a \
+                                   daemon restart and will not be re-executed. \
+                                   It may have partially or fully completed. \
+                                   Check the current state before proceeding.]";
+                        session.add_tool_result(
+                            call.id.clone(),
+                            &call.name,
+                            msg.to_string(),
+                            true,
+                        );
+                        persist_last(session);
+                        continue;
+                    }
+                    // Fall through: re-execute the shell call — the tool
+                    // will detect the journal and resume from the
+                    // appropriate segment.
+                    tracing::info!(
+                        session = %session.id,
+                        call_id = %call.id,
+                        "recovery: shell journal found — resuming from checkpoint"
                     );
-                    persist_last(session);
-                    continue;
                 }
 
                 let result = tool_executor

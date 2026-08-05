@@ -20,7 +20,7 @@ pub async fn run(
     let registry_arc: Arc<dyn myclaw::ProviderRegistry> = Arc::new(registry);
 
     let mut tools = myclaw::ToolRegistry::new();
-    for t in myclaw::tools::builtin_tools() {
+    for t in myclaw::tools::builtin_tools(None) {
         tools.register(t);
     }
     tools.register(Arc::new(myclaw::tools::ListDirTool::new()));

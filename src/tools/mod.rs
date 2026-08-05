@@ -26,7 +26,7 @@ mod memory_tool_tests;
 mod search;
 mod search_cooldown;
 mod send_message;
-mod shell;
+pub mod shell;
 mod skill_manage_tool;
 mod skill_tool;
 mod skills_list_tool;
@@ -72,8 +72,8 @@ use std::sync::Arc;
 /// the daemon (router / channels / scheduler / etc). Tools requiring such
 /// state — `ask_user`, `web_search`, `agent_delegate`, `agent_list`,
 /// `agent_kill`, `tool_search` — are registered by daemon.rs::build_tools.
-pub fn builtin_tools() -> Vec<Arc<dyn Tool>> {
-    let shell = ShellTool::new();
+pub fn builtin_tools(sessions_dir: Option<std::path::PathBuf>) -> Vec<Arc<dyn Tool>> {
+    let shell = ShellTool::new(sessions_dir);
     let shell_poll = ShellPollTool::new(shell.bg_registry());
     vec![
         // Core tools

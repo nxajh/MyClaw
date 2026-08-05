@@ -1,9 +1,17 @@
 //! Shell execution tool — foreground (with timeout + partial output) and background mode.
+//!
+//! Multi-segment commands (`a && b`, `a; b`, `a || b`) use **checkpoint
+//! execution**: the command is split into segments, a checkpoint script is
+//! generated with markers after each segment, and output is redirected to a
+//! file. If the daemon dies mid-execution, recovery reads the output file to
+//! determine which segments completed, then executes only the remaining ones.
 
 use crate::providers::{Tool, ToolResult};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
@@ -73,6 +81,345 @@ fn safe_char_boundary(s: &str, max_bytes: usize) -> usize {
     idx
 }
 
+// ── Segment splitting ──────────────────────────────────────────────────────
+
+/// Separator connecting two consecutive shell segments.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Sep {
+    AndThen,   // &&
+    OrElse,    // ||
+    Sequence,  // ; or \n
+    None,      // first segment (no preceding separator)
+}
+
+/// A single shell command segment extracted from a compound command.
+struct Segment {
+    command: String,
+    /// Separator that connects the **previous** segment to this one.
+    prev_sep: Sep,
+}
+
+fn sep_to_str(s: Sep) -> &'static str {
+    match s {
+        Sep::AndThen => "&&",
+        Sep::OrElse => "||",
+        Sep::Sequence => ";",
+        Sep::None => "",
+    }
+}
+
+/// Split a compound shell command into segments at `&&`, `||`, `;`, and `\n`
+/// boundaries. Respects single quotes, double quotes, backslash escaping, and
+/// `()` nesting. Pipe `|` and background `&` (single char) are **not**
+/// separators — they stay within the current segment.
+fn split_shell_command(command: &str) -> Vec<Segment> {
+    let mut pieces: Vec<String> = Vec::new();
+    let mut seps: Vec<Sep> = Vec::new();
+    let mut current = String::new();
+    let mut chars = command.chars().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut paren_depth = 0i32;
+
+    while let Some(ch) = chars.next() {
+        if in_single {
+            current.push(ch);
+            if ch == '\'' {
+                in_single = false;
+            }
+            continue;
+        }
+        if in_double {
+            current.push(ch);
+            if ch == '"' {
+                in_double = false;
+            }
+            continue;
+        }
+        match ch {
+            '\'' => {
+                in_single = true;
+                current.push(ch);
+            }
+            '"' => {
+                in_double = true;
+                current.push(ch);
+            }
+            '\\' => {
+                current.push(ch);
+                if let Some(&next) = chars.peek() {
+                    current.push(next);
+                    chars.next();
+                }
+            }
+            '(' => {
+                paren_depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                paren_depth -= 1;
+                current.push(ch);
+            }
+            '&' if paren_depth == 0 => {
+                if chars.peek() == Some(&'&') {
+                    chars.next();
+                    let trimmed = current.trim().to_string();
+                    if !trimmed.is_empty() {
+                        pieces.push(trimmed);
+                        seps.push(Sep::AndThen);
+                    }
+                    current.clear();
+                } else {
+                    current.push(ch); // single & = background
+                }
+            }
+            '|' if paren_depth == 0 => {
+                if chars.peek() == Some(&'|') {
+                    chars.next();
+                    let trimmed = current.trim().to_string();
+                    if !trimmed.is_empty() {
+                        pieces.push(trimmed);
+                        seps.push(Sep::OrElse);
+                    }
+                    current.clear();
+                } else {
+                    current.push(ch); // single | = pipe
+                }
+            }
+            ';' if paren_depth == 0 => {
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    pieces.push(trimmed);
+                    seps.push(Sep::Sequence);
+                }
+                current.clear();
+            }
+            '\n' if paren_depth == 0 => {
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    pieces.push(trimmed);
+                    seps.push(Sep::Sequence);
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        pieces.push(trimmed);
+    }
+
+    pieces
+        .into_iter()
+        .enumerate()
+        .map(|(i, cmd)| Segment {
+            command: cmd,
+            prev_sep: if i == 0 {
+                Sep::None
+            } else {
+                seps.get(i - 1).copied().unwrap_or(Sep::Sequence)
+            },
+        })
+        .collect()
+}
+
+// ── Checkpoint script generation ────────────────────────────────────────────
+
+/// Generate a shell script that executes segments `start_idx..` sequentially,
+/// printing a unique marker line after each segment to capture its exit code.
+///
+/// The marker format is: `__MYCLAW_CHK_{marker_id}_{abs_index}_{exit_code}__`
+///
+/// `&&` / `||` semantics are honoured: if a segment is skipped because the
+/// previous segment's exit code didn't meet the condition, the marker is still
+/// printed with the propagated exit code.
+fn generate_checkpoint_script(
+    segments: &[Segment],
+    start_idx: usize,
+    prev_exit_code: Option<i32>,
+    marker_id: &str,
+) -> String {
+    let mut s = String::new();
+
+    // On recovery, seed the exit code of the last known segment so that
+    // `&&` / `||` checks for the first executed segment work correctly.
+    if start_idx > 0 {
+        let code = prev_exit_code.unwrap_or(0);
+        s.push_str(&format!("_E{}={}\n", start_idx - 1, code));
+    }
+
+    for (i, seg) in segments.iter().enumerate().skip(start_idx) {
+
+        if i > 0 {
+            match seg.prev_sep {
+                Sep::AndThen => {
+                    s.push_str(&format!(
+                        "if [ $_E{} -ne 0 ]; then _E{}=$_E{}; else\n",
+                        i - 1,
+                        i,
+                        i - 1
+                    ));
+                }
+                Sep::OrElse => {
+                    s.push_str(&format!(
+                        "if [ $_E{} -eq 0 ]; then _E{}=$_E{}; else\n",
+                        i - 1,
+                        i,
+                        i - 1
+                    ));
+                }
+                Sep::Sequence | Sep::None => {}
+            }
+        }
+
+        s.push_str(&seg.command);
+        s.push('\n');
+        s.push_str(&format!("_E{}=$?\n", i));
+
+        if i > 0 {
+            match seg.prev_sep {
+                Sep::AndThen | Sep::OrElse => s.push_str("fi\n"),
+                _ => {}
+            }
+        }
+
+        s.push_str(&format!(
+            "printf '\\n__MYCLAW_CHK_{}_{}_%d__\\n' $_E{}\n",
+            marker_id, i, i
+        ));
+    }
+
+    if !segments.is_empty() {
+        s.push_str(&format!("exit $_E{}\n", segments.len() - 1));
+    }
+    s
+}
+
+// ── Checkpoint output parsing ───────────────────────────────────────────────
+
+struct ParsedSegment {
+    stdout: String,
+    exit_code: Option<i32>,
+    completed: bool,
+}
+
+/// Parse checkpoint output for segments `start_idx..start_idx+count`.
+/// Returns one `ParsedSegment` per requested segment. The first segment
+/// without a marker is considered interrupted; subsequent segments are
+/// marked as not-started.
+fn parse_segment_range(
+    content: &str,
+    marker_id: &str,
+    start_idx: usize,
+    count: usize,
+) -> Vec<ParsedSegment> {
+    let mut results = Vec::with_capacity(count);
+    let mut search_from = 0;
+
+    for offset in 0..count {
+        let abs_idx = start_idx + offset;
+        let prefix = format!("__MYCLAW_CHK_{}_{}_", marker_id, abs_idx);
+
+        if let Some(rel_pos) = content[search_from..].find(&prefix) {
+            let abs_pos = search_from + rel_pos;
+            let stdout = content[search_from..abs_pos]
+                .trim_end_matches('\n')
+                .to_string();
+
+            let line_end = content[abs_pos..]
+                .find('\n')
+                .map(|n| abs_pos + n)
+                .unwrap_or(content.len());
+            let marker_line = content[abs_pos..line_end].trim();
+            let exit_code = marker_line
+                .strip_prefix(&prefix)
+                .and_then(|r| r.strip_suffix("__"))
+                .and_then(|s| s.trim().parse::<i32>().ok());
+
+            results.push(ParsedSegment {
+                stdout,
+                exit_code,
+                completed: true,
+            });
+            search_from = line_end + 1;
+        } else {
+            // Interrupted — collect partial output, mark remaining as unstarted.
+            let partial = content[search_from..].to_string();
+            results.push(ParsedSegment {
+                stdout: partial,
+                exit_code: None,
+                completed: false,
+            });
+            for _ in (offset + 1)..count {
+                results.push(ParsedSegment {
+                    stdout: String::new(),
+                    exit_code: None,
+                    completed: false,
+                });
+            }
+            break;
+        }
+    }
+    results
+}
+
+// ── Shell journal ───────────────────────────────────────────────────────────
+
+/// Shell checkpoint journal — tracks segment-level progress so recovery
+/// can resume from the first un-executed segment after a daemon restart.
+#[derive(Serialize, Deserialize)]
+pub struct ShellJournal {
+    marker_id: String,
+    segments: Vec<String>,
+    seps: Vec<String>,
+}
+
+impl ShellJournal {
+    fn journal_path(dir: &Path, session_id: &str) -> PathBuf {
+        dir.join(session_id).join(".shell_journal")
+    }
+
+    fn output_path(dir: &Path, session_id: &str) -> PathBuf {
+        dir.join(session_id).join(".shell_output")
+    }
+
+    /// Read journal + output file. Returns `None` if journal is absent or
+    /// invalid.
+    fn load(
+        sessions_dir: Option<&Path>,
+        session_id: &str,
+    ) -> Option<(Self, String)> {
+        let dir = sessions_dir?;
+        let data = std::fs::read_to_string(Self::journal_path(dir, session_id)).ok()?;
+        let journal: Self = serde_json::from_str(&data).ok()?;
+        let output =
+            std::fs::read_to_string(Self::output_path(dir, session_id)).unwrap_or_default();
+        Some((journal, output))
+    }
+
+    fn write(&self, sessions_dir: &Path, session_id: &str) {
+        let path = Self::journal_path(sessions_dir, session_id);
+        if let Ok(json) = serde_json::to_string(self) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
+
+    fn clear(sessions_dir: Option<&Path>, session_id: &str) {
+        if let Some(dir) = sessions_dir {
+            let _ = std::fs::remove_file(Self::journal_path(dir, session_id));
+            let _ = std::fs::remove_file(Self::output_path(dir, session_id));
+        }
+    }
+
+    pub fn exists(sessions_dir: Option<&Path>, session_id: &str) -> bool {
+        sessions_dir
+            .map(|dir| Self::journal_path(dir, session_id).exists())
+            .unwrap_or(false)
+    }
+}
+
 pub struct BgProcEntry {
     stdout: Arc<Mutex<String>>,
     stderr: Arc<Mutex<String>>,
@@ -86,18 +433,20 @@ pub type BgProcRegistry = Arc<RwLock<HashMap<String, BgProcEntry>>>;
 
 pub struct ShellTool {
     bg_procs: BgProcRegistry,
+    sessions_dir: Option<PathBuf>,
 }
 
 impl Default for ShellTool {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }
 
 impl ShellTool {
-    pub fn new() -> Self {
+    pub fn new(sessions_dir: Option<PathBuf>) -> Self {
         Self {
             bg_procs: Arc::new(RwLock::new(HashMap::new())),
+            sessions_dir,
         }
     }
 
@@ -145,7 +494,7 @@ impl Tool for ShellTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _session: &crate::agents::session::Session,
+        session: &crate::agents::session::Session,
     ) -> anyhow::Result<ToolResult> {
         let command = args["command"]
             .as_str()
@@ -158,6 +507,18 @@ impl Tool for ShellTool {
         }
 
         let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(120).min(300);
+
+        // Multi-segment commands use checkpoint execution so that recovery
+        // can resume from the first un-executed segment after a daemon restart.
+        if self.sessions_dir.is_some() {
+            let segments = split_shell_command(command);
+            if segments.len() > 1 {
+                return self
+                    .run_with_checkpoints(&segments, workdir, timeout_secs, &session.id)
+                    .await;
+            }
+        }
+
         self.run_foreground(command, workdir, timeout_secs).await
     }
 }
@@ -293,6 +654,184 @@ impl ShellTool {
                 proc_id, command
             ),
             error: None,
+        })
+    }
+
+    async fn run_with_checkpoints(
+        &self,
+        segments: &[Segment],
+        workdir: Option<&str>,
+        timeout_secs: u64,
+        session_id: &str,
+    ) -> anyhow::Result<ToolResult> {
+        let sessions_dir = self.sessions_dir.as_deref().unwrap();
+        
+        let (start_idx, prev_exit_code, marker_id) = 
+            match ShellJournal::load(Some(sessions_dir), session_id) {
+                Some((journal, output)) => {
+                    let parsed = parse_segment_range(&output, &journal.marker_id, 0, journal.segments.len());
+                    let mut first_incomplete = 0;
+                    let mut last_code = None;
+                    for (i, p) in parsed.iter().enumerate() {
+                        if p.completed {
+                            first_incomplete = i + 1;
+                            last_code = p.exit_code;
+                        } else {
+                            break;
+                        }
+                    }
+                    if first_incomplete >= segments.len() {
+                        // Already fully completed (should be rare/impossible due to execution model, but handle it).
+                        ShellJournal::clear(Some(sessions_dir), session_id);
+                        return Ok(ToolResult {
+                            success: last_code.unwrap_or(0) == 0,
+                            output: output.clone(),
+                            error: None,
+                        });
+                    }
+                    (first_incomplete, last_code, journal.marker_id)
+                }
+                None => {
+                    let marker_id = uuid::Uuid::new_v4().simple().to_string();
+                    let journal = ShellJournal {
+                        marker_id: marker_id.clone(),
+                        segments: segments.iter().map(|s| s.command.clone()).collect(),
+                        seps: segments.iter().map(|s| sep_to_str(s.prev_sep).to_string()).collect(),
+                    };
+                    journal.write(sessions_dir, session_id);
+                    (0, None, marker_id)
+                }
+            };
+
+        let script = generate_checkpoint_script(segments, start_idx, prev_exit_code, &marker_id);
+        
+        // Ensure parent dir exists (session dir)
+        std::fs::create_dir_all(sessions_dir.join(session_id))?;
+        let script_path = sessions_dir.join(session_id).join(".shell_checkpoint.sh");
+        let output_path = ShellJournal::output_path(sessions_dir, session_id);
+        
+        std::fs::write(&script_path, &script)?;
+
+        let mut cmd = Command::new("sh");
+        cmd.arg(&script_path);
+        if let Some(dir) = workdir {
+            cmd.current_dir(dir);
+        }
+        
+        // Append mode so we keep output from previously completed segments
+        let out_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&output_path)?;
+        let err_file = out_file.try_clone()?; // Both to same file
+
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::from(out_file))
+            .stderr(Stdio::from(err_file));
+
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = std::fs::remove_file(&script_path);
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("failed to spawn checkpoint script: {}", e)),
+                });
+            }
+        };
+
+        let wait_result = timeout(Duration::from_secs(timeout_secs), child.wait()).await;
+        
+        let (state, child_exit_code, error) = match wait_result {
+            Ok(Ok(status)) => {
+                let code = status.code().unwrap_or(-1);
+                ("exited", Some(code), None)
+            }
+            Ok(Err(e)) => ("wait_error", None, Some(format!("wait failed: {}", e))),
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                ("timeout", None, Some(format!("command timed out after {}s", timeout_secs)))
+            }
+        };
+
+        // Clean up the script
+        let _ = std::fs::remove_file(&script_path);
+
+        // Read the combined output
+        let raw_output = std::fs::read_to_string(&output_path).unwrap_or_default();
+        let parsed = parse_segment_range(&raw_output, &marker_id, 0, segments.len());
+        
+        let mut final_code = child_exit_code.unwrap_or(-1);
+        let mut success = child_exit_code.unwrap_or(-1) == 0;
+        
+        // Reconstruct the formatted output for the user
+        let mut formatted = format!(
+            "state={}\nexit_code={}\ntimeout_secs={}\ntotal_bytes={}\n",
+            state,
+            child_exit_code.map(|c| c.to_string()).unwrap_or_else(|| "null".to_string()),
+            timeout_secs,
+            raw_output.len(),
+        );
+
+        if let Some(e) = &error {
+            formatted.push_str(&format!("error={}\n", e));
+        }
+        
+        formatted.push_str("\n--- Segments ---\n");
+        let mut all_completed = true;
+
+        for (i, (seg, p)) in segments.iter().zip(parsed.iter()).enumerate() {
+            let sep_str = sep_to_str(seg.prev_sep);
+            if !sep_str.is_empty() {
+                formatted.push_str(&format!(" [ {} ]\n", sep_str));
+            }
+            formatted.push_str(&format!("Segment {}: `{}`\n", i, seg.command));
+            
+            if p.completed {
+                let code = p.exit_code.unwrap_or(-1);
+                formatted.push_str(&format!("Status: Completed (Exit Code: {})\n", code));
+                if !p.stdout.is_empty() {
+                    formatted.push_str("Output:\n");
+                    formatted.push_str(&p.stdout);
+                    if !p.stdout.ends_with('\n') {
+                        formatted.push('\n');
+                    }
+                }
+                final_code = code; // last completed code
+            } else if p.stdout.is_empty() {
+                formatted.push_str("Status: Not Executed\n");
+                all_completed = false;
+            } else {
+                formatted.push_str("Status: Interrupted / Timed Out\n");
+                if !p.stdout.is_empty() {
+                    formatted.push_str("Partial Output:\n");
+                    formatted.push_str(&p.stdout);
+                    if !p.stdout.ends_with('\n') {
+                        formatted.push('\n');
+                    }
+                }
+                all_completed = false;
+            }
+        }
+        
+        if all_completed && state == "exited" {
+            // Clean up journal on full clean success
+            ShellJournal::clear(Some(sessions_dir), session_id);
+            success = final_code == 0;
+        }
+
+        let truncated = truncate_large_output(&formatted).await;
+        
+        Ok(ToolResult {
+            success,
+            output: add_truncation_metadata(truncated),
+            error: if !success && error.is_none() {
+                Some(format!("exit code {}", final_code))
+            } else {
+                error
+            },
         })
     }
 }
@@ -476,5 +1015,188 @@ impl Tool for ShellPollTool {
             output: add_truncation_metadata(truncated),
             error: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_single_command() {
+        let segs = split_shell_command("echo hello");
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].command, "echo hello");
+        assert_eq!(segs[0].prev_sep, Sep::None);
+    }
+
+    #[test]
+    fn split_and_then() {
+        let segs = split_shell_command("a && b");
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0].command, "a");
+        assert_eq!(segs[0].prev_sep, Sep::None);
+        assert_eq!(segs[1].command, "b");
+        assert_eq!(segs[1].prev_sep, Sep::AndThen);
+    }
+
+    #[test]
+    fn split_or_else() {
+        let segs = split_shell_command("a || b");
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[1].prev_sep, Sep::OrElse);
+    }
+
+    #[test]
+    fn split_sequence() {
+        let segs = split_shell_command("a; b");
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[1].prev_sep, Sep::Sequence);
+    }
+
+    #[test]
+    fn split_newline() {
+        let segs = split_shell_command("echo a\necho b");
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[1].prev_sep, Sep::Sequence);
+    }
+
+    #[test]
+    fn split_three_segments() {
+        let segs = split_shell_command("a && b && c");
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs[0].prev_sep, Sep::None);
+        assert_eq!(segs[1].prev_sep, Sep::AndThen);
+        assert_eq!(segs[2].prev_sep, Sep::AndThen);
+    }
+
+    #[test]
+    fn split_pipe_not_separator() {
+        let segs = split_shell_command("a | b && c");
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0].command, "a | b");
+        assert_eq!(segs[1].command, "c");
+    }
+
+    #[test]
+    fn split_quotes_respected() {
+        let segs = split_shell_command("echo \"a && b\" && c");
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0].command, "echo \"a && b\"");
+        assert_eq!(segs[1].command, "c");
+    }
+
+    #[test]
+    fn split_single_quotes_respected() {
+        let segs = split_shell_command("echo 'a; b' ; c");
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0].command, "echo 'a; b'");
+        assert_eq!(segs[1].command, "c");
+    }
+
+    #[test]
+    fn split_parens_respected() {
+        let segs = split_shell_command("(a && b) ; c");
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0].command, "(a && b)");
+        assert_eq!(segs[1].command, "c");
+    }
+
+    #[test]
+    fn script_simple_sequence() {
+        let segs = split_shell_command("echo a && echo b");
+        let script = generate_checkpoint_script(&segs, 0, None, "test123");
+        assert!(script.contains("echo a"));
+        assert!(script.contains("echo b"));
+        assert!(script.contains("__MYCLAW_CHK_test123_0_"));
+        assert!(script.contains("__MYCLAW_CHK_test123_1_"));
+        assert!(script.contains("exit $_E1"));
+    }
+
+    #[test]
+    fn script_recovery_start() {
+        let segs = split_shell_command("a && b && c");
+        let script = generate_checkpoint_script(&segs, 2, Some(0), "mid");
+        assert!(script.contains("_E1=0"));
+        assert!(script.contains("c"));
+        assert!(!script.contains("\na\n"));
+    }
+
+    #[test]
+    fn parse_all_completed() {
+        let content = "output_a\n\n__MYCLAW_CHK_abc_0_0__\noutput_b\n\n__MYCLAW_CHK_abc_1_0__\n";
+        let parsed = parse_segment_range(content, "abc", 0, 2);
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed[0].completed);
+        assert_eq!(parsed[0].exit_code, Some(0));
+        assert_eq!(parsed[0].stdout, "output_a");
+        assert!(parsed[1].completed);
+        assert_eq!(parsed[1].exit_code, Some(0));
+        assert_eq!(parsed[1].stdout, "output_b");
+    }
+
+    #[test]
+    fn parse_interrupted() {
+        let content = "output_a\n\n__MYCLAW_CHK_abc_0_0__\npartial_b";
+        let parsed = parse_segment_range(content, "abc", 0, 2);
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed[0].completed);
+        assert!(!parsed[1].completed);
+        assert_eq!(parsed[1].stdout, "partial_b");
+    }
+
+    #[test]
+    fn parse_nonzero_exit() {
+        let content = "err\n\n__MYCLAW_CHK_x_0_127__\n";
+        let parsed = parse_segment_range(content, "x", 0, 1);
+        assert_eq!(parsed[0].exit_code, Some(127));
+    }
+
+    #[test]
+    fn journal_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sid = "test_session";
+        std::fs::create_dir_all(tmp.path().join(sid)).unwrap();
+
+        let journal = ShellJournal {
+            marker_id: "abc123".to_string(),
+            segments: vec!["a".to_string(), "b".to_string()],
+            seps: vec!["".to_string(), "&&".to_string()],
+        };
+        journal.write(tmp.path(), sid);
+        assert!(ShellJournal::exists(Some(tmp.path()), sid));
+
+        std::fs::write(ShellJournal::output_path(tmp.path(), sid), "test output").unwrap();
+        let (loaded, output) = ShellJournal::load(Some(tmp.path()), sid).unwrap();
+        assert_eq!(loaded.marker_id, "abc123");
+        assert_eq!(loaded.segments, vec!["a", "b"]);
+        assert_eq!(output, "test output");
+
+        ShellJournal::clear(Some(tmp.path()), sid);
+        assert!(!ShellJournal::exists(Some(tmp.path()), sid));
+    }
+
+    #[test]
+    fn journal_none_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(ShellJournal::load(Some(tmp.path()), "nope").is_none());
+        assert!(!ShellJournal::exists(Some(tmp.path()), "nope"));
+    }
+
+    #[test]
+    fn script_and_parse_integration() {
+        let segs = split_shell_command("echo hello && echo world");
+        let marker = "inttest";
+        let script = generate_checkpoint_script(&segs, 0, None, marker);
+        assert!(!script.is_empty());
+
+        let simulated_output = "hello\n\n__MYCLAW_CHK_inttest_0_0__\nworld\n\n__MYCLAW_CHK_inttest_1_0__\n";
+        let parsed = parse_segment_range(simulated_output, marker, 0, 2);
+        assert!(parsed[0].completed);
+        assert_eq!(parsed[0].stdout, "hello");
+        assert_eq!(parsed[0].exit_code, Some(0));
+        assert!(parsed[1].completed);
+        assert_eq!(parsed[1].stdout, "world");
+        assert_eq!(parsed[1].exit_code, Some(0));
     }
 }

@@ -496,7 +496,7 @@ async fn build_tools(
     Arc<tokio::sync::RwLock<crate::tools::TaskState>>,
 ) {
     let mut tools = ToolRegistry::new();
-    let builtin = crate::tools::builtin_tools();
+    let builtin = crate::tools::builtin_tools(Some(workspace_dir.join("sessions")));
     for tool in builtin {
         tools.register(tool);
     }
