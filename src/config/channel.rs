@@ -30,20 +30,12 @@ pub struct WechatAccountConfig {
     /// Debounce window in milliseconds for merging rapid consecutive messages.
     #[serde(default = "default_wechat_debounce_ms")]
     pub debounce_ms: u64,
-    /// Stall watchdog threshold in seconds. Send a text notice if processing
-    /// exceeds this. Set to 0 to disable.
-    #[serde(default = "default_wechat_stall_timeout_secs")]
-    pub stall_timeout_secs: u64,
     /// Whether this account is enabled.
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
 
 fn default_wechat_debounce_ms() -> u64 {
-    0
-}
-
-fn default_wechat_stall_timeout_secs() -> u64 {
     0
 }
 
@@ -65,7 +57,6 @@ impl Default for WechatAccountConfig {
             allowed_users: Vec::new(),
             allowed_groups: None,
             debounce_ms: default_wechat_debounce_ms(),
-            stall_timeout_secs: default_wechat_stall_timeout_secs(),
             enabled: true,
         }
     }

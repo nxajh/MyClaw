@@ -1253,9 +1253,6 @@ pub struct WechatChannel {
     dedup: DedupState,
     debounce_ms: u64,
     debounce_buffer: Arc<Mutex<HashMap<String, WechatDebounceEntry>>>,
-    stall_timeout_secs: u64,
-    typing_started_at: Arc<Mutex<HashMap<String, std::time::Instant>>>,
-    stall_messages: Arc<Mutex<HashMap<String, ()>>>,
 }
 
 struct WechatDebounceEntry {
@@ -1273,9 +1270,6 @@ impl WechatChannel {
             api: ApiClient::new(&config),
             debounce_ms: config.debounce_ms,
             debounce_buffer: Arc::new(Mutex::new(HashMap::new())),
-            stall_timeout_secs: config.stall_timeout_secs,
-            typing_started_at: Arc::new(Mutex::new(HashMap::new())),
-            stall_messages: Arc::new(Mutex::new(HashMap::new())),
             config,
             dedup: DedupState::new(),
         };
@@ -1438,53 +1432,6 @@ impl WechatChannel {
             }
         }
     }
-
-    /// Background task: sends a "still thinking" text notice when a turn
-    /// exceeds stall_timeout_secs. Each stall notice is a separate text
-    /// message sent once per turn (WeChat cannot edit messages).
-    async fn stall_watchdog(&self) {
-        if self.stall_timeout_secs == 0 {
-            return;
-        }
-        let check_interval = Duration::from_secs(10);
-        let mut interval = tokio::time::interval(check_interval);
-        let stall_timeout = Duration::from_secs(self.stall_timeout_secs);
-
-        loop {
-            interval.tick().await;
-            let now = std::time::Instant::now;
-
-            let stalled: Vec<String> = {
-                let typing = self.typing_started_at.lock();
-                typing
-                    .iter()
-                    .filter_map(|(target, started)| {
-                        if now().duration_since(*started) >= stall_timeout {
-                            Some(target.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            };
-
-            for target in stalled {
-                let already_sent = self.stall_messages.lock().contains_key(&target);
-                if !already_sent {
-                    let secs = self.stall_timeout_secs;
-                    warn!("WeChat: stall detected for {target}, sending notice");
-                    if self
-                        .api
-                        .send_text(&target, &format!("🤔 还在思考中... (已等待 {secs}s)"), None)
-                        .await
-                        .is_ok()
-                    {
-                        self.stall_messages.lock().insert(target, ());
-                    }
-                }
-            }
-        }
-    }
 }
 
 #[async_trait]
@@ -1508,12 +1455,6 @@ impl Channel for WechatChannel {
                     .run_ids
                     .insert(recipient.to_string(), uuid::Uuid::new_v4().to_string());
 
-                if self.stall_timeout_secs > 0 {
-                    self.typing_started_at
-                        .lock()
-                        .insert(recipient.to_string(), std::time::Instant::now());
-                }
-
                 if let Err(e) = self.api.send_typing(recipient, true).await {
                     debug!("WeChat: typing indicator failed: {e}");
                 }
@@ -1521,8 +1462,6 @@ impl Channel for WechatChannel {
             ProcessingStatus::Done | ProcessingStatus::Error => {
                 // Clear the run_id for this turn.
                 self.api.state.write().run_ids.remove(recipient);
-                self.typing_started_at.lock().remove(recipient);
-                self.stall_messages.lock().remove(recipient);
 
                 if let Err(e) = self.api.send_typing(recipient, false).await {
                     debug!("WeChat: typing cancel failed: {e}");
@@ -1589,9 +1528,6 @@ impl Channel for WechatChannel {
         &self,
         message: &crate::channels::ChannelOutboundMessage,
     ) -> anyhow::Result<crate::channels::OutboundSendResult> {
-        // Clear stall tracking — the real reply is being sent.
-        self.stall_messages.lock().remove(&message.receiver.id);
-
         let ctx_token = self
             .api
             .state
@@ -1715,12 +1651,6 @@ impl Channel for WechatChannel {
     async fn listen(&self) -> anyhow::Result<mpsc::Receiver<ChannelInboundMessage>> {
         self.login().await?;
         let (tx, rx) = mpsc::channel::<ChannelInboundMessage>(100);
-
-        // Spawn stall watchdog if enabled.
-        if self.stall_timeout_secs > 0 {
-            let watchdog = self.clone();
-            tokio::spawn(async move { watchdog.stall_watchdog().await; });
-        }
 
         // Clone what the background task needs.
         let this = self.clone();
