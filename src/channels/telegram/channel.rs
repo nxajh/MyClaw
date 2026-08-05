@@ -396,27 +396,6 @@ impl TelegramChannel {
         }
     }
 
-    /// Ensure each line has balanced `**` pairs.
-    ///
-    /// Telegram's `sendRichMessage` markdown engine may pair `**` across
-    /// line boundaries, treating the text between them (including newlines
-    /// and list markers) as a single bold span. This eats list formatting
-    /// and merges lines. By guaranteeing every line has an even number of
-    /// `**`, we prevent cross-line pairing.
-    fn normalize_markdown_bold(text: &str) -> String {
-        text.lines()
-            .map(|line| {
-                let count = line.matches("**").count();
-                if count % 2 != 0 {
-                    format!("{line}**")
-                } else {
-                    line.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
     /// Ensure a blank line before GFM table blocks so Telegram's markdown
     /// parser recognises them. Without a preceding blank line (or message
     /// start), the parser treats `| col | col |` as literal text.
@@ -485,7 +464,7 @@ impl TelegramChannel {
     ) -> anyhow::Result<Option<i64>> {
         let client = self.http_client();
 
-        let normalized = Self::normalize_markdown_bold(&Self::normalize_markdown_tables(text));
+        let normalized = Self::normalize_markdown_tables(text);
         let mut rich_body = serde_json::json!({
             "chat_id": chat_id,
             "rich_message": {
@@ -633,7 +612,7 @@ impl TelegramChannel {
     ) -> anyhow::Result<bool> {
         let client = self.http_client();
 
-        let normalized = Self::normalize_markdown_bold(&Self::normalize_markdown_tables(text));
+        let normalized = Self::normalize_markdown_tables(text);
         let body = serde_json::json!({
             "chat_id": chat_id,
             "message_id": message_id,
