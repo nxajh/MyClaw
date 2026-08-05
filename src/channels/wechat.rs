@@ -368,6 +368,8 @@ struct SendMessageMsg {
     item_list: Vec<SendMessageItem>,
     #[serde(rename = "context_token", skip_serializing_if = "Option::is_none")]
     context_token: Option<String>,
+    #[serde(rename = "run_id", skip_serializing_if = "Option::is_none")]
+    run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -481,6 +483,10 @@ struct SharedState {
     typing_tickets: HashMap<String, String>,
     aes_key: Option<String>,
     context_tokens: HashMap<String, String>,
+    /// Per-recipient run_id (UUID) for the current turn. Tool progress
+    /// messages and the final text reply share the same run_id so the
+    /// WeChat client can group them into a single "AI reply" card.
+    run_ids: HashMap<String, String>,
     api_base: Option<String>,
 }
 
@@ -666,6 +672,7 @@ impl ApiClient {
         context_token: Option<&str>,
     ) -> Result<(), ApiError> {
         let client_id = format!("myclaw_{}", uuid::Uuid::new_v4());
+        let run_id = self.state.read().run_ids.get(to_user_id).cloned();
         let req = SendMessageRequest {
             msg: SendMessageMsg {
                 from_user_id: String::new(),
@@ -683,6 +690,7 @@ impl ApiClient {
                     file_item: None,
                 }],
                 context_token: context_token.map(String::from),
+                run_id,
             },
             base_info: build_base_info(),
         };
@@ -752,6 +760,7 @@ impl ApiClient {
         }
         // Reference implementation uses message_state=FINISH(2) for tool progress,
         // and omits context_token when it's None (rather than sending null).
+        let run_id = self.state.read().run_ids.get(to_user_id).cloned();
         let mut msg = serde_json::json!({
             "from_user_id": "",
             "to_user_id": to_user_id,
@@ -762,6 +771,9 @@ impl ApiClient {
         });
         if let Some(ct) = context_token {
             msg["context_token"] = serde_json::json!(ct);
+        }
+        if let Some(rid) = run_id {
+            msg["run_id"] = serde_json::json!(rid);
         }
         let req = serde_json::json!({
             "msg": msg,
@@ -1338,11 +1350,22 @@ impl Channel for WechatChannel {
     async fn on_status(&self, recipient: &str, status: ProcessingStatus) {
         match status {
             ProcessingStatus::Thinking => {
+                // Generate a per-turn run_id shared by all tool progress
+                // messages and the final text reply for this recipient.
+                self.api
+                    .state
+                    .write()
+                    .run_ids
+                    .insert(recipient.to_string(), uuid::Uuid::new_v4().to_string());
+
                 if let Err(e) = self.api.send_typing(recipient, true).await {
                     debug!("WeChat: typing indicator failed: {e}");
                 }
             }
             ProcessingStatus::Done | ProcessingStatus::Error => {
+                // Clear the run_id for this turn.
+                self.api.state.write().run_ids.remove(recipient);
+
                 if let Err(e) = self.api.send_typing(recipient, false).await {
                     debug!("WeChat: typing cancel failed: {e}");
                 }
@@ -1508,6 +1531,13 @@ impl Channel for WechatChannel {
                         },
                     }],
                     context_token: ctx_token.clone(),
+                    run_id: self
+                        .api
+                        .state
+                        .read()
+                        .run_ids
+                        .get(&message.receiver.id)
+                        .cloned(),
                 },
                 base_info: build_base_info(),
             };
