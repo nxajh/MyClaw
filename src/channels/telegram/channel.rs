@@ -2195,14 +2195,32 @@ impl TelegramTurnStream {
                 lines.push(format!("<b>{}</b>", escape_html(&text)));
             }
 
-            // Tool lines.
-            lines.extend(self.tool_lines.clone());
-
             // Pending commentary shown as 💬 when there are already tool calls.
+            let mut tail = Vec::new();
             if !self.pending_commentary.trim().is_empty() && !self.tool_lines.is_empty() {
                 let text = clip_detail(self.pending_commentary.trim());
-                lines.push(format!("<i>💬 {}</i>", escape_html(&text)));
+                tail.push(format!("<i>💬 {}</i>", escape_html(&text)));
             }
+
+            // Truncate oldest tool lines so total preview stays under
+            // STREAM_PREVIEW_LIMIT (Telegram editMessageText 4096-char cap).
+            let total = self.tool_lines.len();
+            let mut skip = total;
+            for s in 0..total {
+                let mut test = lines.clone();
+                test.extend(self.tool_lines[s..].iter().cloned());
+                test.extend(tail.clone());
+                if test.join("<br>").chars().count() <= STREAM_PREVIEW_LIMIT {
+                    skip = s;
+                    break;
+                }
+            }
+
+            if skip > 0 && skip < total {
+                lines.push(format!("<i>… {} earlier</i>", skip));
+            }
+            lines.extend(self.tool_lines[skip..].iter().cloned());
+            lines.extend(tail);
 
             lines.join("<br>")
         } else {
