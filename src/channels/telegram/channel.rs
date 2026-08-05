@@ -101,6 +101,11 @@ pub struct TelegramChannel {
     typing_started_at: Arc<Mutex<std::collections::HashMap<String, std::time::Instant>>>,
     /// Stall watchdog messages to delete when real reply arrives: reply_target → [(chat_id, msg_id)].
     stall_messages: ReactionTracker,
+    /// Streaming preview mode for this channel.
+    streaming_mode: crate::config::channel::StreamingMode,
+    /// Targets with active streams; stall watchdog skips these to avoid
+    /// redundant "still thinking" messages alongside the live preview.
+    streaming_targets: Arc<Mutex<std::collections::HashSet<String>>>,
     /// Directory for persisting state (e.g. Telegram update offset).
     data_dir: std::path::PathBuf,
     /// Shared HTTP client with connection pool.
@@ -134,6 +139,8 @@ impl TelegramChannel {
             stall_timeout_secs: config.stall_timeout_secs,
             typing_started_at: Arc::new(Mutex::new(std::collections::HashMap::new())),
             stall_messages: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            streaming_mode: config.streaming_mode,
+            streaming_targets: Arc::new(Mutex::new(std::collections::HashSet::new())),
             data_dir: directories::ProjectDirs::from("", "", "myclaw")
                 .map(|d| d.data_dir().to_path_buf())
                 .unwrap_or_else(|| std::path::PathBuf::from(".myclaw")),
@@ -983,9 +990,15 @@ impl TelegramChannel {
 
             let stalled: Vec<(String, std::time::Duration)> = {
                 let typing = self.typing_started_at.lock();
+                let streaming = self.streaming_targets.lock();
                 typing
                     .iter()
                     .filter_map(|(target, started)| {
+                        // Skip targets with an active stream — the live
+                        // preview already signals "I'm working".
+                        if streaming.contains(target) {
+                            return None;
+                        }
                         let elapsed = now.duration_since(*started);
                         if elapsed >= stall_timeout {
                             Some((target.clone(), elapsed))
@@ -1895,12 +1908,27 @@ impl Channel for TelegramChannel {
             Ok(id) => id,
             Err(_) => return None,
         };
+
+        // In "off" mode, don't create a stream at all.
+        if self.streaming_mode == crate::config::channel::StreamingMode::Off {
+            return None;
+        }
+
+        // Mark this target as actively streaming so the stall watchdog
+        // skips it (the live preview replaces the "still thinking" message).
+        self.streaming_targets
+            .lock()
+            .insert(reply_target.to_string());
+
         Some(Box::new(TelegramTurnStream {
             channel: self.clone(),
             chat_id,
             thread_id,
+            reply_target: reply_target.to_string(),
+            mode: self.streaming_mode,
             msg_id: None,
             accumulated: String::new(),
+            tool_lines: Vec::new(),
             last_edit: std::time::Instant::now() - STREAM_THROTTLE,
             delivery: StreamDelivery::Pending,
             finished: false,
@@ -1912,25 +1940,50 @@ impl Channel for TelegramChannel {
 
 /// Per-turn streaming handle for Telegram.
 ///
-/// Buffers text chunks and periodically edits the preview message via
-/// `editMessageText` (throttled at `STREAM_THROTTLE`). On `finish`, does a
-/// final edit with the complete text.
+/// Two modes:
+/// - **Partial**: accumulates ALL text chunks and live-edits a preview
+///   message. The final edit replaces it with the complete answer.
+/// - **Progress**: shows only tool-call progress lines (`🔧 tool_name`).
+///   When the turn completes, the preview is deleted and the final answer
+///   is sent as a separate message via the normal `send_message` path.
 struct TelegramTurnStream {
     channel: TelegramChannel,
     chat_id: i64,
     thread_id: Option<String>,
-    /// Message being live-edited; `None` until first chunk is flushed.
+    /// Original reply_target — used to remove from `streaming_targets`.
+    reply_target: String,
+    mode: crate::config::channel::StreamingMode,
+    /// Message being live-edited; `None` until first flush.
     msg_id: Option<i64>,
+    /// Accumulated text (partial mode only).
     accumulated: String,
+    /// Tool-call progress lines (progress mode): `["🔧 file_read", …]`.
+    tool_lines: Vec<String>,
     last_edit: std::time::Instant,
     delivery: StreamDelivery,
     finished: bool,
 }
 
 impl TelegramTurnStream {
-    /// Send or edit the preview message with the current accumulated text.
+    fn is_progress(&self) -> bool {
+        self.mode == crate::config::channel::StreamingMode::Progress
+    }
+
+    /// Build the preview text for the current mode.
+    fn preview_text(&self) -> String {
+        if self.is_progress() {
+            self.tool_lines.join("\n")
+        } else {
+            self.accumulated.chars().take(STREAM_PREVIEW_LIMIT).collect()
+        }
+    }
+
+    /// Send or edit the preview message.
     async fn flush_preview(&mut self) {
-        let preview: String = self.accumulated.chars().take(STREAM_PREVIEW_LIMIT).collect();
+        let preview = self.preview_text();
+        if preview.is_empty() {
+            return;
+        }
         match self.msg_id {
             Some(mid) => {
                 if self
@@ -1943,7 +1996,6 @@ impl TelegramTurnStream {
                 }
             }
             None => {
-                // First flush: send a new message.
                 if let Ok(Some(id)) = self
                     .channel
                     .send_text(
@@ -1961,6 +2013,21 @@ impl TelegramTurnStream {
         }
         self.last_edit = std::time::Instant::now();
     }
+
+    /// Delete the preview message (transition to `send_message` fallback).
+    async fn delete_preview(&mut self) {
+        if let Some(mid) = self.msg_id.take() {
+            let _ = self.channel.delete_message_raw(self.chat_id, mid).await;
+        }
+    }
+
+    /// Remove this target from the streaming tracker.
+    fn untrack(&self) {
+        self.channel
+            .streaming_targets
+            .lock()
+            .remove(&self.reply_target);
+    }
 }
 
 #[async_trait]
@@ -1969,39 +2036,62 @@ impl TurnStream for TelegramTurnStream {
         if self.finished {
             return Ok(self.delivery);
         }
-        match event {
-            TurnEvent::Chunk { delta } => {
-                self.accumulated.push_str(&delta);
-                if self.last_edit.elapsed() >= STREAM_THROTTLE {
-                    self.flush_preview().await;
-                }
-            }
-            TurnEvent::Done { text } => {
-                self.accumulated = text;
-                self.finished = true;
-                if self.accumulated.chars().count() > STREAM_PREVIEW_LIMIT {
-                    // Final text exceeds Telegram's 4096-char edit limit.
-                    // Delete the truncated preview; let send_message handle
-                    // proper chunking via the fallback path.
-                    if let Some(mid) = self.msg_id {
-                        let _ = self.channel.delete_message_raw(self.chat_id, mid).await;
-                        self.msg_id = None;
+
+        if self.is_progress() {
+            // ── Progress mode ───────────────────────────────────────────────
+            match event {
+                TurnEvent::ToolCall { name, .. } => {
+                    self.tool_lines.push(format!("🔧 {name}"));
+                    // Throttle: avoid edit-storm on rapid tool calls.
+                    if self.last_edit.elapsed() >= STREAM_THROTTLE {
+                        self.flush_preview().await;
                     }
-                    // Leave delivery as Visible/Pending → triggers fallback.
-                } else {
-                    self.flush_preview().await;
-                    self.delivery = StreamDelivery::FinalDelivered;
                 }
+                TurnEvent::Done { .. } => {
+                    // Delete preview; the final answer is sent by
+                    // `send_message` (delivery != FinalDelivered).
+                    self.delete_preview().await;
+                    self.finished = true;
+                }
+                TurnEvent::Cancelled { .. }
+                | TurnEvent::Error { .. }
+                | TurnEvent::EmptyResponse { .. } => {
+                    self.delete_preview().await;
+                    self.finished = true;
+                }
+                // Chunk / Thinking / ToolResult — ignored in progress mode.
+                _ => {}
             }
-            TurnEvent::Error { .. } | TurnEvent::EmptyResponse { .. } => {
-                self.finished = true;
+        } else {
+            // ── Partial mode (legacy) ──────────────────────────────────────
+            match event {
+                TurnEvent::Chunk { delta } => {
+                    self.accumulated.push_str(&delta);
+                    if self.last_edit.elapsed() >= STREAM_THROTTLE {
+                        self.flush_preview().await;
+                    }
+                }
+                TurnEvent::Done { text } => {
+                    self.accumulated = text;
+                    self.finished = true;
+                    if self.accumulated.chars().count() > STREAM_PREVIEW_LIMIT {
+                        self.delete_preview().await;
+                        // Leave delivery as Visible/Pending → triggers fallback.
+                    } else {
+                        self.flush_preview().await;
+                        self.delivery = StreamDelivery::FinalDelivered;
+                    }
+                }
+                TurnEvent::Error { .. } | TurnEvent::EmptyResponse { .. } => {
+                    self.finished = true;
+                }
+                TurnEvent::Cancelled { partial } => {
+                    self.accumulated = partial;
+                    self.finished = true;
+                    self.flush_preview().await;
+                }
+                _ => {}
             }
-            TurnEvent::Cancelled { partial } => {
-                self.accumulated = partial;
-                self.finished = true;
-                self.flush_preview().await;
-            }
-            _ => {}
         }
         Ok(self.delivery)
     }
@@ -2012,6 +2102,7 @@ impl TurnStream for TelegramTurnStream {
 
     async fn finish(self: Box<Self>) -> StreamDelivery {
         let mut s = *self;
+        s.untrack();
         if !s.finished && !s.accumulated.is_empty() {
             s.flush_preview().await;
         }
@@ -2019,6 +2110,7 @@ impl TurnStream for TelegramTurnStream {
     }
 
     async fn abort(self: Box<Self>) {
+        self.untrack();
         // Best-effort: delete the preview message if it was never finalized.
         if let (Some(mid), false) = (self.msg_id, self.finished) {
             let _ = self.channel.delete_message_raw(self.chat_id, mid).await;
@@ -2045,6 +2137,7 @@ mod tests {
             workspace_dir: None,
             debounce_ms: 0,        // disabled in tests
             stall_timeout_secs: 0, // disabled in tests
+            streaming_mode: crate::config::channel::StreamingMode::Partial,
         }
     }
 

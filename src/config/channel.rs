@@ -65,6 +65,24 @@ pub struct WechatChannelConfig {
 
 // ── TelegramAccountConfig ────────────────────────────────────────────────────
 
+/// Streaming preview mode for Telegram.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum StreamingMode {
+    /// No streaming preview; final message sent only when the turn completes.
+    #[serde(rename = "off")]
+    Off,
+    /// Accumulate ALL text chunks (including intermediate narration) into a
+    /// live-edited preview message. Legacy behaviour — can feel noisy when
+    /// the agent uses multiple tool-call rounds.
+    #[serde(rename = "partial")]
+    Partial,
+    /// Show only tool-call progress lines in the preview; the final answer
+    /// is sent as a separate message when the turn completes.
+    #[serde(rename = "progress")]
+    #[default]
+    Progress,
+}
+
 /// Telegram Bot API account-level configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TelegramAccountConfig {
@@ -103,6 +121,9 @@ pub struct TelegramAccountConfig {
     /// Debounce window in milliseconds for merging rapid consecutive messages from the same sender.
     #[serde(default = "default_debounce_ms")]
     pub debounce_ms: u64,
+    /// Streaming preview mode: `"progress"` (default), `"partial"`, or `"off"`.
+    #[serde(default)]
+    pub streaming_mode: StreamingMode,
 }
 
 fn default_debounce_ms() -> u64 {
