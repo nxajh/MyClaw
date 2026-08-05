@@ -29,7 +29,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use ecb::cipher::{BlockDecryptMut, BlockEncryptMut, KeyInit};
 #[cfg(feature = "wechat")]
 use ecb::{Decryptor, Encryptor};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -50,6 +50,7 @@ const QR_POLL_INTERVAL_SECS: u64 = 1;
 const QR_MAX_ATTEMPTS: u64 = 60;
 const RATE_LIMIT_PAUSE_SECS: u64 = 3600;
 const MAX_CONSECUTIVE_ERRORS: u32 = 10;
+const TYPING_TICKET_TTL: Duration = Duration::from_secs(300);
 
 const MESSAGE_TYPE_BOT: i64 = 2;
 const MESSAGE_STATE_FINISH: i64 = 2;
@@ -238,6 +239,8 @@ struct TextItem {
 struct VoiceItem {
     #[serde(default)]
     text: String,
+    #[serde(default)]
+    media: CDNMedia,
 }
 
 /// CDN media reference (`CDNMedia`). `aes_key` is base64-encoded bytes in JSON.
@@ -480,7 +483,7 @@ struct SharedState {
     bot_wxid: Option<String>,
     bot_nickname: Option<String>,
     get_updates_buf: String,
-    typing_tickets: HashMap<String, String>,
+    typing_tickets: HashMap<String, (String, std::time::Instant)>,
     aes_key: Option<String>,
     context_tokens: HashMap<String, String>,
     /// Per-recipient run_id (UUID) for the current turn. Tool progress
@@ -707,7 +710,7 @@ impl ApiClient {
         let ticket = self.state.read()
             .typing_tickets
             .get(to_user_id)
-            .cloned()
+            .map(|(t, _)| t.clone())
             .unwrap_or_default();
         let req = SendTypingRequest {
             ilink_user_id: to_user_id.to_string(),
@@ -1077,6 +1080,10 @@ impl ApiClient {
 #[derive(Debug, Clone)]
 enum InboundContent {
     Text(String),
+    Voice {
+        text: String,
+        media: CDNMedia,
+    },
     MediaRequest {
         item_type: i64,
         media: CDNMedia,
@@ -1106,16 +1113,19 @@ fn parse_inbound(msg: &IlinkMessage) -> InboundEvent {
                 .map(|t| t.text.clone())
                 .unwrap_or_default(),
         ),
-        // Voice: use WeChat's native ASR transcription as the text body.
+        // Voice: use WeChat's native ASR transcription as text, and download
+        // the SILK audio media alongside.
         Some(first) if first.item_type == ITEM_TYPE_VOICE => {
-            match first
-                .voice_item
-                .as_ref()
-                .map(|v| v.text.clone())
-                .unwrap_or_default()
+            let voice = first.voice_item.as_ref();
+            let text = voice.map(|v| v.text.clone()).unwrap_or_default();
+            let media = voice.map(|v| v.media.clone()).unwrap_or_default();
+            if text.trim().is_empty()
+                && media.encrypt_query_param.is_empty()
+                && media.full_url.is_empty()
             {
-                t if t.trim().is_empty() => InboundContent::Unknown,
-                t => InboundContent::Text(t),
+                InboundContent::Unknown
+            } else {
+                InboundContent::Voice { text, media }
             }
         }
         Some(first) if first.item_type == ITEM_TYPE_IMAGE => {
@@ -1241,12 +1251,31 @@ pub struct WechatChannel {
     api: ApiClient,
     config: WechatAccountConfig,
     dedup: DedupState,
+    debounce_ms: u64,
+    debounce_buffer: Arc<Mutex<HashMap<String, WechatDebounceEntry>>>,
+    stall_timeout_secs: u64,
+    typing_started_at: Arc<Mutex<HashMap<String, std::time::Instant>>>,
+    stall_messages: Arc<Mutex<HashMap<String, ()>>>,
+}
+
+struct WechatDebounceEntry {
+    sender: MessageSender,
+    receiver: MessageReceiver,
+    texts: Vec<String>,
+    files: Vec<ChannelFile>,
+    first_ts: u64,
+    timer: tokio::task::JoinHandle<()>,
 }
 
 impl WechatChannel {
     pub fn new(config: WechatAccountConfig) -> Self {
         let ch = Self {
             api: ApiClient::new(&config),
+            debounce_ms: config.debounce_ms,
+            debounce_buffer: Arc::new(Mutex::new(HashMap::new())),
+            stall_timeout_secs: config.stall_timeout_secs,
+            typing_started_at: Arc::new(Mutex::new(HashMap::new())),
+            stall_messages: Arc::new(Mutex::new(HashMap::new())),
             config,
             dedup: DedupState::new(),
         };
@@ -1262,10 +1291,20 @@ impl WechatChannel {
     /// `Some(...)` to reuse the unified `AllowList::from_config` path.
     fn build_security_policy(&self) -> crate::channels::ChannelSecurityPolicy {
         use crate::channels::{AllowList, ChannelSecurityPolicy, GroupAuthMode};
+        let (group_mode, group_allowlist) = match &self.config.allowed_groups {
+            None => (GroupAuthMode::Reject, AllowList::All),
+            Some(groups) if groups.iter().any(|g| g == "*") => {
+                (GroupAuthMode::AllowAll, AllowList::All)
+            }
+            Some(list) => (
+                GroupAuthMode::AllowList,
+                AllowList::Whitelist(list.clone()),
+            ),
+        };
         ChannelSecurityPolicy {
             allowed_users: AllowList::from_config(Some(self.config.allowed_users.clone())),
-            group_mode: GroupAuthMode::Reject, // Wechat has no group concept
-            group_allowlist: AllowList::All,
+            group_mode,
+            group_allowlist,
         }
     }
 
@@ -1337,6 +1376,120 @@ impl WechatChannel {
 static WECHAT_CAPS: crate::channels::message::ChannelCapabilities =
     crate::channels::message::ChannelCapabilities::wechat();
 
+impl WechatChannel {
+    /// Buffer an inbound message for debounce merging.
+    async fn debounce_send(
+        &self,
+        msg: ChannelInboundMessage,
+        tx: mpsc::Sender<ChannelInboundMessage>,
+    ) {
+        if self.debounce_ms == 0 {
+            let _ = tx.send(msg).await;
+            return;
+        }
+        let key = format!("{}|{}", msg.sender.id, msg.receiver.id);
+        let debounce_ms = self.debounce_ms;
+        let buffer = self.debounce_buffer.clone();
+        let sender_key = key.clone();
+        let tx_clone = tx.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(debounce_ms)).await;
+            let entry = buffer.lock().remove(&sender_key);
+            if let Some(entry) = entry {
+                let merged = ChannelInboundMessage {
+                    id: format!("debounced_{}", entry.first_ts),
+                    sender: entry.sender,
+                    receiver: entry.receiver,
+                    content: ChannelMessageContent {
+                        text: entry.texts.join("\n"),
+                        files: entry.files,
+                        buttons: vec![],
+                    },
+                    timestamp: entry.first_ts,
+                    interruption_scope_id: None,
+                };
+                let _ = tx_clone.send(merged).await;
+            }
+        });
+        {
+            let mut buf = self.debounce_buffer.lock();
+            if let Some(entry) = buf.get_mut(&key) {
+                if !msg.content.text.is_empty() {
+                    entry.texts.push(msg.content.text);
+                }
+                if !msg.content.files.is_empty() {
+                    entry.files.extend(msg.content.files);
+                }
+                entry.timer.abort();
+                entry.timer = handle;
+            } else {
+                buf.insert(
+                    key,
+                    WechatDebounceEntry {
+                        sender: msg.sender,
+                        receiver: msg.receiver,
+                        texts: if msg.content.text.is_empty() {
+                            vec![]
+                        } else {
+                            vec![msg.content.text]
+                        },
+                        files: msg.content.files,
+                        first_ts: msg.timestamp,
+                        timer: handle,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Background task: sends a "still thinking" text notice when a turn
+    /// exceeds stall_timeout_secs. Each stall notice is a separate text
+    /// message sent once per turn (WeChat cannot edit messages).
+    async fn stall_watchdog(&self) {
+        if self.stall_timeout_secs == 0 {
+            return;
+        }
+        let check_interval = Duration::from_secs(10);
+        let mut interval = tokio::time::interval(check_interval);
+        let stall_timeout = Duration::from_secs(self.stall_timeout_secs);
+
+        loop {
+            interval.tick().await;
+            let now = std::time::Instant::now;
+
+            let stalled: Vec<String> = {
+                let typing = self.typing_started_at.lock();
+                typing
+                    .iter()
+                    .filter_map(|(target, started)| {
+                        if now().duration_since(*started) >= stall_timeout {
+                            Some(target.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            };
+
+            for target in stalled {
+                let already_sent = self.stall_messages.lock().contains_key(&target);
+                if !already_sent {
+                    let secs = self.stall_timeout_secs;
+                    warn!("WeChat: stall detected for {target}, sending notice");
+                    if self
+                        .api
+                        .send_text(&target, &format!("🤔 还在思考中... (已等待 {secs}s)"), None)
+                        .await
+                        .is_ok()
+                    {
+                        self.stall_messages.lock().insert(target, ());
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl Channel for WechatChannel {
     fn name(&self) -> &str {
@@ -1358,6 +1511,12 @@ impl Channel for WechatChannel {
                     .run_ids
                     .insert(recipient.to_string(), uuid::Uuid::new_v4().to_string());
 
+                if self.stall_timeout_secs > 0 {
+                    self.typing_started_at
+                        .lock()
+                        .insert(recipient.to_string(), std::time::Instant::now());
+                }
+
                 if let Err(e) = self.api.send_typing(recipient, true).await {
                     debug!("WeChat: typing indicator failed: {e}");
                 }
@@ -1365,6 +1524,8 @@ impl Channel for WechatChannel {
             ProcessingStatus::Done | ProcessingStatus::Error => {
                 // Clear the run_id for this turn.
                 self.api.state.write().run_ids.remove(recipient);
+                self.typing_started_at.lock().remove(recipient);
+                self.stall_messages.lock().remove(recipient);
 
                 if let Err(e) = self.api.send_typing(recipient, false).await {
                     debug!("WeChat: typing cancel failed: {e}");
@@ -1431,6 +1592,9 @@ impl Channel for WechatChannel {
         &self,
         message: &crate::channels::ChannelOutboundMessage,
     ) -> anyhow::Result<crate::channels::OutboundSendResult> {
+        // Clear stall tracking — the real reply is being sent.
+        self.stall_messages.lock().remove(&message.receiver.id);
+
         let ctx_token = self
             .api
             .state
@@ -1555,6 +1719,12 @@ impl Channel for WechatChannel {
         self.login().await?;
         let (tx, rx) = mpsc::channel::<ChannelInboundMessage>(100);
 
+        // Spawn stall watchdog if enabled.
+        if self.stall_timeout_secs > 0 {
+            let watchdog = self.clone();
+            tokio::spawn(async move { watchdog.stall_watchdog().await; });
+        }
+
         // Clone what the background task needs.
         let this = self.clone();
 
@@ -1571,10 +1741,15 @@ impl Channel for WechatChannel {
                             if this.dedup.check_and_record(&event.msg_id) {
                                 continue;
                             }
-                            match this.check_authorization(
-                                &event.sender_wxid,
-                                crate::channels::MessageScope::Direct,
-                            ) {
+                            let scope = if event.is_group {
+                                crate::channels::MessageScope::Group {
+                                    id: &event.chat_id,
+                                    has_mention: false,
+                                }
+                            } else {
+                                crate::channels::MessageScope::Direct
+                            };
+                            match this.check_authorization(&event.sender_wxid, scope) {
                                 crate::channels::AuthDecision::Allow => {}
                                 crate::channels::AuthDecision::Ignore => continue,
                                 crate::channels::AuthDecision::Reject { reason } => {
@@ -1589,6 +1764,44 @@ impl Channel for WechatChannel {
                                         continue;
                                     }
                                     ChannelMessageContent::text(t)
+                                }
+                                InboundContent::Voice { text, media } => {
+                                    let mut content = ChannelMessageContent::text(text);
+                                    if !media.encrypt_query_param.is_empty()
+                                        || !media.full_url.is_empty()
+                                    {
+                                        match this.api.download_cdn_media(&media, None).await {
+                                            Ok(data) => {
+                                                let tmp_dir = std::env::temp_dir();
+                                                let tmp_path = tmp_dir.join(format!(
+                                                    "wechat_voice_{}",
+                                                    uuid::Uuid::new_v4()
+                                                ));
+                                                if std::fs::write(&tmp_path, &data).is_ok() {
+                                                    content.files.push(ChannelFile {
+                                                        meta: ChannelFileMeta {
+                                                            file_name: format!(
+                                                                "voice_{}.silk",
+                                                                event.raw_timestamp
+                                                            ),
+                                                            mime_type: Some(
+                                                                "audio/silk".to_string(),
+                                                            ),
+                                                            size_bytes: Some(data.len() as u64),
+                                                            source_url: None,
+                                                        },
+                                                        body: std::sync::Arc::new(
+                                                            LocalFileBody::new(&tmp_path),
+                                                        ),
+                                                    });
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!("WeChat: voice download failed: {e}");
+                                            }
+                                        }
+                                    }
+                                    content
                                 }
                                 InboundContent::MediaRequest {
                                     item_type,
@@ -1647,14 +1860,24 @@ impl Channel for WechatChannel {
                                 }
                             }
 
-                            // Fetch typing_ticket for this user (best-effort)
-                            if let Ok(config) = this.api.get_config(&event.sender_wxid).await {
-                                if !config.typing_ticket.is_empty() {
-                                    this.api
-                                        .state
-                                        .write()
-                                        .typing_tickets
-                                        .insert(event.sender_wxid.clone(), config.typing_ticket);
+                            // Fetch typing_ticket for this user (cached with TTL)
+                            {
+                                let need_fetch = {
+                                    let state = this.api.state.read();
+                                    match state.typing_tickets.get(&event.sender_wxid) {
+                                        Some((_, ts)) => ts.elapsed() > TYPING_TICKET_TTL,
+                                        None => true,
+                                    }
+                                };
+                                if need_fetch {
+                                    if let Ok(config) = this.api.get_config(&event.sender_wxid).await {
+                                        if !config.typing_ticket.is_empty() {
+                                            this.api.state.write().typing_tickets.insert(
+                                                event.sender_wxid.clone(),
+                                                (config.typing_ticket, std::time::Instant::now()),
+                                            );
+                                        }
+                                    }
                                 }
                             }
 
@@ -1666,10 +1889,7 @@ impl Channel for WechatChannel {
                                 timestamp: event.raw_timestamp as u64,
                                 interruption_scope_id: None,
                             };
-                            if let Err(e) = tx.send(channel_msg).await {
-                                warn!("WeChat dispatch error (receiver dropped): {e}");
-                                break;
-                            }
+                            this.debounce_send(channel_msg, tx.clone()).await;
                         }
                     }
                     Err(ApiError::Api(-14, _)) => {
@@ -1837,6 +2057,7 @@ mod tests {
                 text_item: None,
                 voice_item: Some(VoiceItem {
                     text: "转写出来的内容".into(),
+                    media: CDNMedia::default(),
                 }),
                 image_item: None,
                 video_item: None,
@@ -1847,8 +2068,8 @@ mod tests {
         };
         let event = parse_inbound(&msg);
         match event.content {
-            InboundContent::Text(t) => assert_eq!(t, "转写出来的内容"),
-            _ => panic!("expected voice ASR text"),
+            InboundContent::Voice { text, .. } => assert_eq!(text, "转写出来的内容"),
+            _ => panic!("expected voice content with ASR text"),
         }
     }
 
@@ -1865,7 +2086,7 @@ mod tests {
             list: vec![MessageItem {
                 item_type: ITEM_TYPE_VOICE,
                 text_item: None,
-                voice_item: Some(VoiceItem { text: "   ".into() }),
+                voice_item: Some(VoiceItem { text: "   ".into(), media: CDNMedia::default() }),
                 image_item: None,
                 video_item: None,
                 file_item: None,
