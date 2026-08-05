@@ -84,6 +84,24 @@ pub async fn cmd_status(ctx: CommandContext<'_>) -> String {
 
     lines.push("```".to_string());
     lines.push(String::new());
+    lines.push(format!(
+        "📊 **系统状态**\n\
+         ```text\n\
+         Version:      {}\n\
+         Known users:  {} (跨 {} channel)\n\
+         Total msgs:   {}\n\
+         ```",
+        env!("MYCLAW_VERSION"),
+        ctx.known_users.count(),
+        {
+            let users = ctx.known_users.all_users();
+            let channels: std::collections::HashSet<&str> =
+                users.iter().map(|u| u.channel.as_str()).collect();
+            channels.len()
+        },
+        ctx.known_users.total_messages(),
+    ));
+    lines.push(String::new());
     lines.push("_模型详情请使用 /models_".to_string());
 
     lines.join("\n")

@@ -1742,10 +1742,20 @@ impl Channel for QQBotChannel {
         history
             .iter()
             .map(|(gid, deque)| crate::channels::GroupStat {
-                group_id: gid.clone(),
-                name: None,
+                group_id: gid.chars().take(12).collect(),
+                name: self
+                    .config
+                    .group_config
+                    .get(gid)
+                    .and_then(|c| c.name.clone())
+                    .or_else(|| {
+                        self.config
+                            .group_config
+                            .get("*")
+                            .and_then(|c| c.name.clone())
+                    }),
                 buffered_messages: deque.len(),
-                history_limit: 20,
+                history_limit: self.resolve_group_history_limit(gid),
             })
             .collect()
     }
