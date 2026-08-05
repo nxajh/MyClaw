@@ -1938,6 +1938,94 @@ impl Channel for TelegramChannel {
 
 // ── Telegram streaming preview (edit-on-stream) ───────────────────────────────
 
+/// Resolve (emoji, label, detail) for a tool call, OpenClaw-style.
+fn resolve_tool_display(name: &str, args: &serde_json::Value) -> (String, String, String) {
+    let key = name.to_lowercase();
+    let (emoji, label) = match key.as_str() {
+        "shell" => ("🛠️", "Shell"),
+        "file_read" | "read_file" | "read" => ("📖", "Read"),
+        "file_write" | "write_file" | "write" => ("✍️", "Write"),
+        "file_edit" | "edit" | "patch" => ("📝", "Edit"),
+        "web_search" => ("🔍", "Search"),
+        "http_request" => ("🌐", "HTTP"),
+        "content_search" | "grep" => ("🔎", "Grep"),
+        "glob_search" | "glob" => ("📂", "Glob"),
+        "list_dir" | "ls" => ("📂", "List"),
+        "memory_manage" => ("🧠", "Memory"),
+        "memory_search" => ("🧠", "Memory"),
+        "agent_delegate" | "delegate" => ("✨", "Delegate"),
+        "calculator" => ("🔢", "Calc"),
+        "view_image" => ("🖼️", "Image"),
+        "view_video" => ("🎬", "Video"),
+        "hear_audio" => ("🎵", "Audio"),
+        "skill_view" => ("📜", "Skill"),
+        "skill_manage" => ("📜", "Skill"),
+        "send_message" => ("💬", "Send"),
+        "ask_user" => ("❓", "Ask"),
+        "task_create" => ("📋", "Task"),
+        "task_update" => ("📋", "Task"),
+        "task_list" => ("📋", "Task"),
+        "task_delete" => ("📋", "Task"),
+        "shell_poll" => ("📊", "Poll"),
+        _ => ("🔧", name),
+    }
+    .to_owned();
+
+    // Extract a short detail string from the most relevant arg field.
+    let detail_keys: &[&str] = match key.as_str() {
+        "shell" | "shell_poll" => &["command", "cmd"],
+        "file_read" | "read_file" | "read" => &["path", "file_path"],
+        "file_write" | "write_file" | "write" => &["path", "file_path"],
+        "file_edit" | "edit" | "patch" => &["path", "file_path"],
+        "web_search" => &["query", "q"],
+        "http_request" => &["url", "method"],
+        "content_search" | "grep" => &["pattern", "regex"],
+        "glob_search" | "glob" => &["pattern"],
+        "list_dir" | "ls" => &["path"],
+        "memory_manage" => &["name", "action"],
+        "memory_search" => &["query"],
+        "agent_delegate" | "delegate" => &["agent", "task"],
+        "calculator" => &["expression"],
+        "view_image" => &["path"],
+        "view_video" => &["path"],
+        "hear_audio" => &["path"],
+        "skill_view" | "skill_manage" => &["name", "action"],
+        "task_create" => &["subject"],
+        "task_update" => &["task_id", "status"],
+        "task_delete" => &["task_id"],
+        _ => &[],
+    };
+
+    let detail = detail_keys
+        .iter()
+        .find_map(|&k| {
+            args.get(k)
+                .and_then(|v| v.as_str())
+                .map(|s| {
+                    let s = s.trim();
+                    if s.chars().count() > 50 {
+                        let truncated: String = s.chars().take(47).collect();
+                        format!("{truncated}…")
+                    } else {
+                        s.to_string()
+                    }
+                })
+        })
+        .unwrap_or_default();
+
+    (emoji.to_string(), label.to_string(), detail)
+}
+
+/// Format a single tool-call progress line in Markdown.
+fn format_tool_line(name: &str, args: &serde_json::Value) -> String {
+    let (emoji, label, detail) = resolve_tool_display(name, args);
+    if detail.is_empty() {
+        format!("**{emoji} {label}**")
+    } else {
+        format!("**{emoji} {label}** `{detail}`")
+    }
+}
+
 /// Per-turn streaming handle for Telegram.
 ///
 /// Two modes:
@@ -1972,7 +2060,7 @@ impl TelegramTurnStream {
     /// Build the preview text for the current mode.
     fn preview_text(&self) -> String {
         if self.is_progress() {
-            self.tool_lines.join("\n")
+            self.tool_lines.join("\n\n")
         } else {
             self.accumulated.chars().take(STREAM_PREVIEW_LIMIT).collect()
         }
@@ -2040,8 +2128,8 @@ impl TurnStream for TelegramTurnStream {
         if self.is_progress() {
             // ── Progress mode ───────────────────────────────────────────────
             match event {
-                TurnEvent::ToolCall { name, .. } => {
-                    self.tool_lines.push(format!("🔧 {name}"));
+                TurnEvent::ToolCall { name, args, .. } => {
+                    self.tool_lines.push(format_tool_line(&name, &args));
                     // Throttle: avoid edit-storm on rapid tool calls.
                     if self.last_edit.elapsed() >= STREAM_THROTTLE {
                         self.flush_preview().await;
