@@ -1992,6 +1992,8 @@ impl Channel for TelegramChannel {
             tool_lines: Vec::new(),
             tool_count: 0,
             thinking_steps: 0,
+            commentary_notes: 0,
+            pending_commentary: String::new(),
             start: std::time::Instant::now(),
             last_edit: std::time::Instant::now() - STREAM_THROTTLE,
             delivery: StreamDelivery::Pending,
@@ -2150,6 +2152,12 @@ struct TelegramTurnStream {
     tool_count: usize,
     /// Thinking step count (progress mode, for collapse summary).
     thinking_steps: usize,
+    /// Commentary notes count (progress mode, for collapse summary).
+    commentary_notes: usize,
+    /// Pending commentary text accumulated from Chunk events; flushed to a
+    /// 💬 line when a ToolCall arrives (text before tools = commentary;
+    /// text after last tool = final answer, discarded on Done).
+    pending_commentary: String,
     /// Turn start time (progress mode, for collapse summary).
     start: std::time::Instant,
     last_edit: std::time::Instant,
@@ -2165,7 +2173,13 @@ impl TelegramTurnStream {
     /// Build the preview text for the current mode.
     fn preview_text(&self) -> String {
         if self.is_progress() {
-            self.tool_lines.join("<br>")
+            let mut lines = self.tool_lines.clone();
+            // Show pending commentary live (before it's flushed by a tool call).
+            if !self.pending_commentary.trim().is_empty() {
+                let text = clip_detail(self.pending_commentary.trim());
+                lines.push(format!("<i>💬 {}</i>", escape_html(&text)));
+            }
+            lines.join("<br>")
         } else {
             self.accumulated.chars().take(STREAM_PREVIEW_LIMIT).collect()
         }
@@ -2223,6 +2237,10 @@ impl TelegramTurnStream {
             let plural = if self.thinking_steps == 1 { "thought" } else { "thoughts" };
             parts.push(format!("🧠 {} {plural}", self.thinking_steps));
         }
+        if self.commentary_notes > 0 {
+            let plural = if self.commentary_notes == 1 { "note" } else { "notes" };
+            parts.push(format!("💬 {} {plural}", self.commentary_notes));
+        }
         if self.tool_count > 0 {
             let plural = if self.tool_count == 1 { "tool call" } else { "tool calls" };
             parts.push(format!("🛠️ {} {plural}", self.tool_count));
@@ -2267,7 +2285,24 @@ impl TurnStream for TelegramTurnStream {
         if self.is_progress() {
             // ── Progress mode ───────────────────────────────────────────────
             match event {
+                TurnEvent::Chunk { delta } => {
+                    // Accumulate text chunks. If a tool call follows, this
+                    // text was commentary (intermediate explanation); if Done
+                    // follows, it was the final answer streaming (discarded).
+                    self.pending_commentary.push_str(&delta);
+                    if self.last_edit.elapsed() >= STREAM_THROTTLE {
+                        self.flush_preview().await;
+                    }
+                }
                 TurnEvent::ToolCall { name, args, .. } => {
+                    // Flush pending commentary as a 💬 line before the tool call.
+                    if !self.pending_commentary.trim().is_empty() {
+                        self.commentary_notes += 1;
+                        let text = clip_detail(self.pending_commentary.trim());
+                        self.tool_lines
+                            .push(format!("<i>💬 {}</i>", escape_html(&text)));
+                        self.pending_commentary.clear();
+                    }
                     self.tool_count += 1;
                     self.tool_lines.push(format_tool_line(&name, &args));
                     // Throttle: avoid edit-storm on rapid tool calls.
@@ -2310,7 +2345,7 @@ impl TurnStream for TelegramTurnStream {
                     self.delete_preview().await;
                     self.finished = true;
                 }
-                // Chunk / ToolResult — ignored in progress mode.
+                // ToolResult handled above; Thinking handled above.
                 _ => {}
             }
         } else {
