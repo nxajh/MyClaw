@@ -1943,8 +1943,7 @@ impl Channel for WechatChannel {
     }
 }
 
-/// Filter markdown for WeChat: strip formatting markers that WeChat
-/// renders as literal text (it has no markdown support).
+/// Filter markdown for WeChat: strip image syntax, simplify H5/H6.
 fn filter_markdown(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     for line in text.lines() {
@@ -1960,40 +1959,17 @@ fn filter_markdown(text: &str) -> String {
             }
             break;
         }
-        // Convert H5/H6 to plain text (drop the ##### prefix)
+        // Convert H5/H6 to bold
         let trimmed = filtered.trim_start();
+        let leading_hashes = filtered.len() - trimmed.len();
         if trimmed.starts_with("#####") {
             let content = trimmed.trim_start_matches('#').trim();
-            let leading = &filtered[..filtered.len() - trimmed.len()];
-            filtered = format!("{}{}", leading, content);
+            filtered = format!("{}**{}**", &filtered[..leading_hashes], content);
         }
-        // Strip inline bold/italic markers (**, __, *, _)
-        filtered = strip_md_emphasis(&filtered);
-        // Strip inline code backticks
-        filtered = filtered.replace('`', "");
         result.push_str(&filtered);
         result.push('\n');
     }
     result.trim_end().to_string()
-}
-
-/// Remove `**`, `__`, `*`, `_` used for bold/italic, leaving inner text.
-fn strip_md_emphasis(s: &str) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    let mut result = String::with_capacity(s.len());
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        if (c == '*' || c == '_') && i + 1 < chars.len() && chars[i + 1] == c {
-            i += 2; // skip ** or __
-        } else if c == '*' || c == '_' {
-            i += 1; // skip * or _
-        } else {
-            result.push(c);
-            i += 1;
-        }
-    }
-    result
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
