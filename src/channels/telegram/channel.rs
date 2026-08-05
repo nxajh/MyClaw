@@ -2210,7 +2210,7 @@ impl TelegramTurnStream {
                 let mut test = lines.clone();
                 test.extend(self.tool_lines[s..].iter().cloned());
                 test.extend(tail.clone());
-                if test.join("<br>").chars().count() <= STREAM_PREVIEW_LIMIT {
+                if test.join("\n").chars().count() <= STREAM_PREVIEW_LIMIT {
                     skip = s;
                     break;
                 }
@@ -2222,7 +2222,7 @@ impl TelegramTurnStream {
             lines.extend(self.tool_lines[skip..].iter().cloned());
             lines.extend(tail);
 
-            lines.join("<br>")
+            lines.join("\n")
         } else {
             self.accumulated.chars().take(STREAM_PREVIEW_LIMIT).collect()
         }
