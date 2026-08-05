@@ -637,6 +637,67 @@ impl TelegramChannel {
         Ok(true)
     }
 
+    /// Send a text message with `parse_mode: HTML` (standard Telegram API).
+    async fn send_text_html(
+        &self,
+        chat_id: &str,
+        text: &str,
+        thread_id: Option<&str>,
+    ) -> anyhow::Result<Option<i64>> {
+        let client = self.http_client();
+        let mut body = serde_json::json!({
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+        });
+        if let Some(tid) = thread_id {
+            body["message_thread_id"] = serde_json::Value::from(tid);
+        }
+        let resp = client
+            .post(self.api_url("sendMessage"))
+            .json(&body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("sendMessage(HTML) failed: {status} {body}");
+        }
+        let resp_json: serde_json::Value = resp.json().await?;
+        Ok(resp_json
+            .get("result")
+            .and_then(|r| r.get("message_id"))
+            .and_then(|m| m.as_i64()))
+    }
+
+    /// Edit a message with `parse_mode: HTML` (standard Telegram API).
+    async fn edit_message_text_html(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        text: &str,
+    ) -> anyhow::Result<bool> {
+        let client = self.http_client();
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "parse_mode": "HTML",
+        });
+        let resp = client
+            .post(self.api_url("editMessageText"))
+            .json(&body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            warn!("editMessageText(HTML) failed: {status} {body}");
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
     async fn send_chat_action(
         &self,
         chat_id: &str,
@@ -1941,6 +2002,25 @@ impl Channel for TelegramChannel {
 
 // ── Telegram streaming preview (edit-on-stream) ───────────────────────────────
 
+/// Escape HTML special characters for Telegram parse_mode=HTML.
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Clip detail text to max 300 chars (matching OpenClaw's clipTelegramProgressText).
+fn clip_detail(s: &str) -> String {
+    const MAX: usize = 300;
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= MAX {
+        return s.to_string();
+    }
+    let clipped: String = chars.into_iter().take(MAX - 1).collect();
+    format!("{}…", clipped.trim_end())
+}
+
 /// Resolve (emoji, label, detail) for a tool call, OpenClaw-style.
 fn resolve_tool_display(name: &str, args: &serde_json::Value) -> (String, String, String) {
     let key = name.to_lowercase();
@@ -2019,13 +2099,27 @@ fn resolve_tool_display(name: &str, args: &serde_json::Value) -> (String, String
     (emoji.to_string(), label.to_string(), detail)
 }
 
-/// Format a single tool-call progress line in Markdown.
+/// Format a single tool-call progress line as Telegram HTML.
+///
+/// Output: `<b>📖 Read</b> <code>/path/to/file</code>`
+/// With optional status: `… <i>failed</i>`
 fn format_tool_line(name: &str, args: &serde_json::Value) -> String {
     let (emoji, label, detail) = resolve_tool_display(name, args);
+    let label_html = escape_html(&format!("{emoji} {label}"));
     if detail.is_empty() {
-        format!("**{emoji} {label}**")
+        format!("<b>{label_html}</b>")
     } else {
-        format!("**{emoji} {label}** `{detail}`")
+        let detail_clipped = clip_detail(&detail);
+        format!("<b>{label_html}</b> <code>{}</code>", escape_html(&detail_clipped))
+    }
+}
+
+/// Re-format a tool line to append a status suffix (e.g. `<i>failed</i>`).
+fn tool_line_with_status(line: &str, success: bool) -> String {
+    if success {
+        line.to_string()
+    } else {
+        format!("{line} <i>failed</i>")
     }
 }
 
@@ -2034,9 +2128,11 @@ fn format_tool_line(name: &str, args: &serde_json::Value) -> String {
 /// Two modes:
 /// - **Partial**: accumulates ALL text chunks and live-edits a preview
 ///   message. The final edit replaces it with the complete answer.
-/// - **Progress**: shows only tool-call progress lines (`🔧 tool_name`).
-///   When the turn completes, the preview is deleted and the final answer
-///   is sent as a separate message via the normal `send_message` path.
+/// - **Progress**: shows only tool-call progress lines with per-tool emoji,
+///   label, and arg detail (e.g. `📖 Read /path`), rendered as HTML.
+///   When the turn completes, the preview collapses to a one-line summary
+///   (e.g. `🛠️ 4 tool calls · ⏱️ 21s`) and the final answer is sent as a
+///   separate message via the normal `send_message` path.
 struct TelegramTurnStream {
     channel: TelegramChannel,
     chat_id: i64,
@@ -2069,7 +2165,7 @@ impl TelegramTurnStream {
     /// Build the preview text for the current mode.
     fn preview_text(&self) -> String {
         if self.is_progress() {
-            self.tool_lines.join("\n\n")
+            self.tool_lines.join("<br>")
         } else {
             self.accumulated.chars().take(STREAM_PREVIEW_LIMIT).collect()
         }
@@ -2085,7 +2181,7 @@ impl TelegramTurnStream {
             Some(mid) => {
                 if self
                     .channel
-                    .edit_message_text_raw(self.chat_id, mid, &preview)
+                    .edit_message_text_html(self.chat_id, mid, &preview)
                     .await
                     .is_ok()
                 {
@@ -2095,11 +2191,10 @@ impl TelegramTurnStream {
             None => {
                 if let Ok(Some(id)) = self
                     .channel
-                    .send_text(
+                    .send_text_html(
                         &self.chat_id.to_string(),
                         &preview,
                         self.thread_id.as_deref(),
-                        None,
                     )
                     .await
                 {
@@ -2142,7 +2237,7 @@ impl TelegramTurnStream {
         if let Some(mid) = self.msg_id {
             if self
                 .channel
-                .edit_message_text_raw(self.chat_id, mid, &summary)
+                .edit_message_text_html(self.chat_id, mid, &summary)
                 .await
                 .is_ok()
             {
@@ -2182,6 +2277,26 @@ impl TurnStream for TelegramTurnStream {
                 }
                 TurnEvent::Thinking { .. } => {
                     self.thinking_steps += 1;
+                }
+                TurnEvent::ToolResult { name, output, .. } => {
+                    // Detect failure from output and annotate the matching
+                    // tool line with `<i>failed</i>` (OpenClaw-style).
+                    let failed = output.starts_with("error")
+                        || output.starts_with("Error")
+                        || output.contains("failed:")
+                        || output.contains("panicked");
+                    if failed {
+                        // Find the last line for this tool name.
+                        let label = resolve_tool_display(&name, &serde_json::Value::Null).1;
+                        if let Some(line) = self
+                            .tool_lines
+                            .iter_mut()
+                            .rev()
+                            .find(|l| l.contains(&label) && !l.contains("<i>"))
+                        {
+                            *line = tool_line_with_status(line, false);
+                        }
+                    }
                 }
                 TurnEvent::Done { .. } => {
                     // Collapse preview into a one-line summary; the final
