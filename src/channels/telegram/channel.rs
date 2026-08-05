@@ -1993,6 +1993,8 @@ impl Channel for TelegramChannel {
             tool_count: 0,
             thinking_steps: 0,
             commentary_notes: 0,
+            thinking_tokens: 0,
+            thinking_active: false,
             pending_commentary: String::new(),
             start: std::time::Instant::now(),
             last_edit: std::time::Instant::now() - STREAM_THROTTLE,
@@ -2154,6 +2156,10 @@ struct TelegramTurnStream {
     thinking_steps: usize,
     /// Commentary notes count (progress mode, for collapse summary).
     commentary_notes: usize,
+    /// Estimated thinking token count (progress mode, for live thinking line).
+    thinking_tokens: usize,
+    /// Whether thinking is currently active (progress mode).
+    thinking_active: bool,
     /// Pending commentary text accumulated from Chunk events; flushed to a
     /// 💬 line when a ToolCall arrives (text before tools = commentary;
     /// text after last tool = final answer, discarded on Done).
@@ -2173,12 +2179,31 @@ impl TelegramTurnStream {
     /// Build the preview text for the current mode.
     fn preview_text(&self) -> String {
         if self.is_progress() {
-            let mut lines = self.tool_lines.clone();
-            // Show pending commentary live (before it's flushed by a tool call).
-            if !self.pending_commentary.trim().is_empty() {
+            let mut lines = Vec::new();
+
+            // Live thinking line at top (while reasoning is active).
+            if self.thinking_active && self.thinking_tokens > 0 {
+                lines.push(format!(
+                    "🧠 Thinking… (~{} tokens)",
+                    self.thinking_tokens
+                ));
+            }
+
+            // Headline: pending commentary shown as bold when no tool calls yet.
+            if !self.pending_commentary.trim().is_empty() && self.tool_lines.is_empty() {
+                let text = clip_detail(self.pending_commentary.trim());
+                lines.push(format!("<b>{}</b>", escape_html(&text)));
+            }
+
+            // Tool lines.
+            lines.extend(self.tool_lines.clone());
+
+            // Pending commentary shown as 💬 when there are already tool calls.
+            if !self.pending_commentary.trim().is_empty() && !self.tool_lines.is_empty() {
                 let text = clip_detail(self.pending_commentary.trim());
                 lines.push(format!("<i>💬 {}</i>", escape_html(&text)));
             }
+
             lines.join("<br>")
         } else {
             self.accumulated.chars().take(STREAM_PREVIEW_LIMIT).collect()
@@ -2286,6 +2311,8 @@ impl TurnStream for TelegramTurnStream {
             // ── Progress mode ───────────────────────────────────────────────
             match event {
                 TurnEvent::Chunk { delta } => {
+                    // Thinking ends when text starts.
+                    self.thinking_active = false;
                     // Accumulate text chunks. If a tool call follows, this
                     // text was commentary (intermediate explanation); if Done
                     // follows, it was the final answer streaming (discarded).
@@ -2295,6 +2322,8 @@ impl TurnStream for TelegramTurnStream {
                     }
                 }
                 TurnEvent::ToolCall { name, args, .. } => {
+                    // Thinking ends when a tool call starts.
+                    self.thinking_active = false;
                     // Flush pending commentary as a 💬 line before the tool call.
                     if !self.pending_commentary.trim().is_empty() {
                         self.commentary_notes += 1;
@@ -2310,8 +2339,15 @@ impl TurnStream for TelegramTurnStream {
                         self.flush_preview().await;
                     }
                 }
-                TurnEvent::Thinking { .. } => {
+                TurnEvent::Thinking { delta } => {
                     self.thinking_steps += 1;
+                    self.thinking_active = true;
+                    // Rough token estimate: ~1 token per 4 chars, minimum 1 per event.
+                    let est = (delta.len() / 4).max(1);
+                    self.thinking_tokens += est;
+                    if self.last_edit.elapsed() >= STREAM_THROTTLE {
+                        self.flush_preview().await;
+                    }
                 }
                 TurnEvent::ToolResult { name, output, .. } => {
                     // Detect failure from output and annotate the matching
