@@ -1294,12 +1294,9 @@ impl WechatChannel {
         let (group_mode, group_allowlist) = match &self.config.allowed_groups {
             None => (GroupAuthMode::Reject, AllowList::All),
             Some(groups) if groups.iter().any(|g| g == "*") => {
-                (GroupAuthMode::AllowAll, AllowList::All)
+                (GroupAuthMode::Open, AllowList::All)
             }
-            Some(list) => (
-                GroupAuthMode::AllowList,
-                AllowList::Whitelist(list.clone()),
-            ),
+            Some(list) => (GroupAuthMode::Open, AllowList::Whitelist(list.clone())),
         };
         ChannelSecurityPolicy {
             allowed_users: AllowList::from_config(Some(self.config.allowed_users.clone())),
