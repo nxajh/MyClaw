@@ -2345,8 +2345,6 @@ impl TurnStream for TelegramTurnStream {
                     self.delete_preview().await;
                     self.finished = true;
                 }
-                // ToolResult handled above; Thinking handled above.
-                _ => {}
             }
         } else {
             // ── Partial mode (legacy) ──────────────────────────────────────
