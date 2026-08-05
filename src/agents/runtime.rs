@@ -8,6 +8,7 @@
 //! one shared instance instead of rebuilding the executor stack each
 //! message.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -84,6 +85,11 @@ pub struct AgentRuntime {
     /// Shared task/goal state from task tools. Injected into the
     /// compaction summary so the model retains its plan across context resets.
     pub task_state: Option<Arc<tokio::sync::RwLock<crate::tools::TaskState>>>,
+    /// Root directory of session storage (`{workspace}/sessions`).
+    /// Used by the exec-marker mechanism so recovery can detect tools
+    /// that were executing when the daemon was killed (e.g. `myclaw update`).
+    /// `None` in tests / CLI mode — marker logic is skipped.
+    pub sessions_dir: Option<PathBuf>,
 }
 
 impl AgentRuntime {
@@ -110,6 +116,7 @@ impl AgentRuntime {
             mcp_manager: None,
             search_cooldown: None,
             task_state: None,
+            sessions_dir: None,
         }
     }
 
@@ -133,6 +140,11 @@ impl AgentRuntime {
         state: Arc<tokio::sync::RwLock<crate::tools::TaskState>>,
     ) -> Self {
         self.task_state = Some(state);
+        self
+    }
+
+    pub fn with_sessions_dir(mut self, dir: PathBuf) -> Self {
+        self.sessions_dir = Some(dir);
         self
     }
 

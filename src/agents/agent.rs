@@ -514,9 +514,26 @@ impl Agent {
                     .await;
                 }
 
+                // Write exec marker before execution so recovery can detect
+                // a tool that killed the daemon (e.g. `myclaw update`).
+                exec_marker_write(
+                    runtime.sessions_dir.as_deref(),
+                    &session.id,
+                    &call.id,
+                );
+
                 let result = tool_executor
                     .execute(call, session, Some(&permission_mode), &allowed_tools)
                     .await;
+
+                // Clear the marker now that execute() returned — the tool
+                // completed (or errored), so re-execution by recovery is
+                // no longer the concern. Guard ensures cleanup on any path.
+                let _marker_guard = ExecMarkerGuard {
+                    sessions_dir: runtime.sessions_dir.clone(),
+                    session_id: session.id.clone(),
+                };
+
                 let (result_content, is_error) = match &result {
                     Ok(r) => {
                         let mut out = r.output.clone();
@@ -702,7 +719,39 @@ impl Agent {
             let allowed_tools = self.allowed_tools(runtime);
             let tool_executor = &runtime.tool_executor;
 
+            // Check the exec marker: if present, the call_id it contains was
+            // mid-execution when the daemon died (e.g. `myclaw update` →
+            // `systemctl restart` → SIGKILL). Re-running such a call would
+            // kill the daemon again, creating a crash loop. Instead we
+            // synthesize an error result so the LLM can assess the situation.
+            let interrupted_id =
+                exec_marker_read(runtime.sessions_dir.as_deref(), &session.id);
+            if let Some(ref id) = interrupted_id {
+                tracing::warn!(
+                    session = %session.id,
+                    interrupted_call_id = %id,
+                    "recovery: exec marker found — a tool call was interrupted by daemon restart"
+                );
+            }
+
             for call in &pending_calls {
+                // If this call was the one that killed the daemon, skip
+                // re-execution and synthesize an error.
+                if interrupted_id.as_deref() == Some(call.id.as_str()) {
+                    let msg = "[recovery: this command was interrupted by a \
+                               daemon restart and will not be re-executed. \
+                               It may have partially or fully completed. \
+                               Check the current state before proceeding.]";
+                    session.add_tool_result(
+                        call.id.clone(),
+                        &call.name,
+                        msg.to_string(),
+                        true,
+                    );
+                    persist_last(session);
+                    continue;
+                }
+
                 let result = tool_executor
                     .execute(
                         call,
@@ -726,6 +775,10 @@ impl Agent {
                 session.add_tool_result(call.id.clone(), &call.name, result_content, is_error);
                 persist_last(session);
             }
+
+            // Clear any stale exec marker — recovery has handled all pending
+            // calls, so the marker is no longer needed.
+            exec_marker_clear(runtime.sessions_dir.as_deref(), &session.id);
         }
 
         // Cases B, C, and tail of A: drive Agent.run from the now-well-formed
@@ -935,6 +988,59 @@ fn persist_last(session: &mut Session) {
         if let Some(slot) = session.message_ids.last_mut() {
             *slot = id;
         }
+    }
+}
+
+// ── Exec marker ─────────────────────────────────────────────────────────────
+//
+// When a tool call kills the daemon (e.g. `shell("myclaw update")` triggers
+// `systemctl restart`), `execute()` never returns and the tool result is
+// never persisted. On restart, recovery sees an orphan tool_call and blindly
+// re-executes it — killing the daemon again in an infinite loop.
+//
+// The exec-marker breaks this cycle: before executing any tool we write a
+// tiny file `sessions/<id>/.exec_marker` containing the call_id. If the
+// daemon dies during execution the file survives. On recovery, any pending
+// call whose id matches the marker is treated as "interrupted" — a synthetic
+// error result is appended instead of re-executing.
+
+/// Write the call_id to `.exec_marker` so recovery can detect an
+/// interrupted execution. Silently no-ops if `sessions_dir` is None.
+fn exec_marker_write(sessions_dir: Option<&std::path::Path>, session_id: &str, call_id: &str) {
+    let Some(dir) = sessions_dir else {
+        return;
+    };
+    let path = dir.join(session_id).join(".exec_marker");
+    let _ = std::fs::write(&path, call_id);
+}
+
+/// Read the call_id from `.exec_marker`, or `None` if absent.
+fn exec_marker_read(sessions_dir: Option<&std::path::Path>, session_id: &str) -> Option<String> {
+    let dir = sessions_dir?;
+    let path = dir.join(session_id).join(".exec_marker");
+    std::fs::read_to_string(&path).ok()
+}
+
+/// Remove `.exec_marker`. Silently no-ops if the file doesn't exist.
+fn exec_marker_clear(sessions_dir: Option<&std::path::Path>, session_id: &str) {
+    let Some(dir) = sessions_dir else {
+        return;
+    };
+    let path = dir.join(session_id).join(".exec_marker");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// RAII guard that clears the exec marker when dropped. Created after
+/// `execute()` returns so the marker is removed as soon as the tool
+/// finishes — even on early returns from the loop.
+struct ExecMarkerGuard {
+    sessions_dir: Option<std::path::PathBuf>,
+    session_id: String,
+}
+
+impl Drop for ExecMarkerGuard {
+    fn drop(&mut self) {
+        exec_marker_clear(self.sessions_dir.as_deref(), &self.session_id);
     }
 }
 
@@ -1555,5 +1661,61 @@ mod tests {
             collect_stream(s, &mut turn_stream).await.is_err(),
             "provider Error must fail the turn"
         );
+    }
+
+    // ── Exec marker tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn exec_marker_write_read_clear_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions_dir = tmp.path();
+        let session_id = "test_session_abc";
+
+        // Initially no marker.
+        assert!(exec_marker_read(Some(sessions_dir), session_id).is_none());
+
+        // Write a marker.
+        std::fs::create_dir_all(sessions_dir.join(session_id)).unwrap();
+        exec_marker_write(Some(sessions_dir), session_id, "call_xyz");
+
+        // Read it back.
+        assert_eq!(
+            exec_marker_read(Some(sessions_dir), session_id).as_deref(),
+            Some("call_xyz")
+        );
+
+        // Clear it.
+        exec_marker_clear(Some(sessions_dir), session_id);
+        assert!(exec_marker_read(Some(sessions_dir), session_id).is_none());
+    }
+
+    #[test]
+    fn exec_marker_none_sessions_dir_is_noop() {
+        // When sessions_dir is None (tests / CLI), all operations silently
+        // do nothing — no panic, no file system access.
+        exec_marker_write(None, "any_session", "any_call");
+        assert!(exec_marker_read(None, "any_session").is_none());
+        exec_marker_clear(None, "any_session");
+    }
+
+    #[test]
+    fn exec_marker_guard_clears_on_drop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions_dir = tmp.path();
+        let session_id = "test_guard_session";
+
+        std::fs::create_dir_all(sessions_dir.join(session_id)).unwrap();
+        exec_marker_write(Some(sessions_dir), session_id, "call_guard");
+
+        {
+            let _guard = ExecMarkerGuard {
+                sessions_dir: Some(sessions_dir.to_path_buf()),
+                session_id: session_id.to_string(),
+            };
+            // Marker still present inside the scope.
+            assert!(exec_marker_read(Some(sessions_dir), session_id).is_some());
+        }
+        // Guard dropped — marker cleared.
+        assert!(exec_marker_read(Some(sessions_dir), session_id).is_none());
     }
 }

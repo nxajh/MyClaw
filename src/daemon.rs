@@ -1200,6 +1200,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         .with_mcp_manager(Arc::clone(&mcp_manager_arc))
         .with_search_cooldown(Arc::clone(&search_cooldown))
         .with_task_state(task_state)
+        .with_sessions_dir(config.workspace_dir.join("sessions"))
     };
 
     // DelegationCoordinator was constructed before the runtime existed
