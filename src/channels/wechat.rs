@@ -1253,6 +1253,8 @@ pub struct WechatChannel {
     dedup: DedupState,
     debounce_ms: u64,
     debounce_buffer: Arc<Mutex<HashMap<String, WechatDebounceEntry>>>,
+    /// Active typing keep-alive tasks, keyed by recipient (wxid).
+    typing_tasks: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
 }
 
 struct WechatDebounceEntry {
@@ -1270,6 +1272,7 @@ impl WechatChannel {
             api: ApiClient::new(&config),
             debounce_ms: config.debounce_ms,
             debounce_buffer: Arc::new(Mutex::new(HashMap::new())),
+            typing_tasks: Arc::new(Mutex::new(HashMap::new())),
             config,
             dedup: DedupState::new(),
         };
@@ -1432,6 +1435,64 @@ impl WechatChannel {
             }
         }
     }
+
+    /// Start a typing keep-alive background task for a recipient.
+    ///
+    /// WeChat's typing indicator expires after a few seconds. This spawns a
+    /// task that re-sends it every 3 seconds until `stop_typing_keepalive`
+    /// is called.
+    fn start_typing_keepalive(&self, recipient: &str) {
+        let mut tasks = self.typing_tasks.lock();
+        // Abort existing task for this recipient
+        if let Some(handle) = tasks.remove(recipient) {
+            handle.abort();
+        }
+
+        let api = self.api.clone();
+        let recipient_key = recipient.to_string();
+        let recipient_clone = recipient_key.clone();
+        let typing_tasks = self.typing_tasks.clone();
+
+        let handle = tokio::spawn(async move {
+            let interval = Duration::from_secs(3);
+            let max_duration = Duration::from_secs(120);
+            let start = tokio::time::Instant::now();
+            let mut consecutive_failures: u32 = 0;
+
+            loop {
+                if start.elapsed() >= max_duration {
+                    break;
+                }
+                if let Err(e) = api.send_typing(&recipient_key, true).await {
+                    consecutive_failures += 1;
+                    if consecutive_failures >= 3 {
+                        debug!("WeChat: typing keep-alive circuit breaker for {recipient_key}: {e}");
+                        break;
+                    }
+                } else {
+                    consecutive_failures = 0;
+                }
+                tokio::time::sleep(interval).await;
+            }
+
+            // Clean up entry if no new task has taken over.
+            let mut tasks = typing_tasks.lock();
+            if let Some(h) = tasks.get(&recipient_clone) {
+                if h.is_finished() {
+                    tasks.remove(&recipient_clone);
+                }
+            }
+        });
+        tasks.insert(recipient.to_string(), handle);
+    }
+
+    /// Stop (abort) the typing keep-alive task and send a cancel.
+    fn stop_typing_keepalive(&self, recipient: &str) {
+        let mut tasks = self.typing_tasks.lock();
+        if let Some(handle) = tasks.remove(recipient) {
+            handle.abort();
+        }
+    }
 }
 
 #[async_trait]
@@ -1455,14 +1516,13 @@ impl Channel for WechatChannel {
                     .run_ids
                     .insert(recipient.to_string(), uuid::Uuid::new_v4().to_string());
 
-                if let Err(e) = self.api.send_typing(recipient, true).await {
-                    debug!("WeChat: typing indicator failed: {e}");
-                }
+                self.start_typing_keepalive(recipient);
             }
             ProcessingStatus::Done | ProcessingStatus::Error => {
                 // Clear the run_id for this turn.
                 self.api.state.write().run_ids.remove(recipient);
 
+                self.stop_typing_keepalive(recipient);
                 if let Err(e) = self.api.send_typing(recipient, false).await {
                     debug!("WeChat: typing cancel failed: {e}");
                 }
@@ -1528,6 +1588,9 @@ impl Channel for WechatChannel {
         &self,
         message: &crate::channels::ChannelOutboundMessage,
     ) -> anyhow::Result<crate::channels::OutboundSendResult> {
+        // Stop typing keep-alive — the real reply is being sent.
+        self.stop_typing_keepalive(&message.receiver.id);
+
         let ctx_token = self
             .api
             .state
