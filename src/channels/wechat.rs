@@ -1979,10 +1979,21 @@ fn filter_markdown(text: &str) -> String {
 
 /// Remove `**`, `__`, `*`, `_` used for bold/italic, leaving inner text.
 fn strip_md_emphasis(s: &str) -> String {
-    s.replace("**", "")
-     .replace("__", "")
-     .replace('*', "")
-     .replace('_', "")
+    let chars: Vec<char> = s.chars().collect();
+    let mut result = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if (c == '*' || c == '_') && i + 1 < chars.len() && chars[i + 1] == c {
+            i += 2; // skip ** or __
+        } else if c == '*' || c == '_' {
+            i += 1; // skip * or _
+        } else {
+            result.push(c);
+            i += 1;
+        }
+    }
+    result
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
