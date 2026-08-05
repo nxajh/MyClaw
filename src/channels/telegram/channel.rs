@@ -1929,6 +1929,9 @@ impl Channel for TelegramChannel {
             msg_id: None,
             accumulated: String::new(),
             tool_lines: Vec::new(),
+            tool_count: 0,
+            thinking_steps: 0,
+            start: std::time::Instant::now(),
             last_edit: std::time::Instant::now() - STREAM_THROTTLE,
             delivery: StreamDelivery::Pending,
             finished: false,
@@ -2047,6 +2050,12 @@ struct TelegramTurnStream {
     accumulated: String,
     /// Tool-call progress lines (progress mode): `["🔧 file_read", …]`.
     tool_lines: Vec<String>,
+    /// Tool-call count (progress mode, for collapse summary).
+    tool_count: usize,
+    /// Thinking step count (progress mode, for collapse summary).
+    thinking_steps: usize,
+    /// Turn start time (progress mode, for collapse summary).
+    start: std::time::Instant,
     last_edit: std::time::Instant,
     delivery: StreamDelivery,
     finished: bool,
@@ -2109,6 +2118,41 @@ impl TelegramTurnStream {
         }
     }
 
+    /// Build the collapse summary line, OpenClaw-style.
+    ///
+    /// `🧠 2 thoughts · 🛠️ 4 tool calls · ⏱️ 21s`
+    fn collapse_summary(&self) -> String {
+        let elapsed = self.start.elapsed().as_secs().max(1);
+        let mut parts = Vec::new();
+        if self.thinking_steps > 0 {
+            let plural = if self.thinking_steps == 1 { "thought" } else { "thoughts" };
+            parts.push(format!("🧠 {} {plural}", self.thinking_steps));
+        }
+        if self.tool_count > 0 {
+            let plural = if self.tool_count == 1 { "tool call" } else { "tool calls" };
+            parts.push(format!("🛠️ {} {plural}", self.tool_count));
+        }
+        parts.push(format!("⏱️ {elapsed}s"));
+        parts.join(" · ")
+    }
+
+    /// Edit the preview message into a collapse summary.
+    async fn collapse_to_summary(&mut self) {
+        let summary = self.collapse_summary();
+        if let Some(mid) = self.msg_id {
+            if self
+                .channel
+                .edit_message_text_raw(self.chat_id, mid, &summary)
+                .await
+                .is_ok()
+            {
+                return;
+            }
+        }
+        // Fallback: delete if edit failed or no msg_id.
+        self.delete_preview().await;
+    }
+
     /// Remove this target from the streaming tracker.
     fn untrack(&self) {
         self.channel
@@ -2129,16 +2173,20 @@ impl TurnStream for TelegramTurnStream {
             // ── Progress mode ───────────────────────────────────────────────
             match event {
                 TurnEvent::ToolCall { name, args, .. } => {
+                    self.tool_count += 1;
                     self.tool_lines.push(format_tool_line(&name, &args));
                     // Throttle: avoid edit-storm on rapid tool calls.
                     if self.last_edit.elapsed() >= STREAM_THROTTLE {
                         self.flush_preview().await;
                     }
                 }
+                TurnEvent::Thinking { .. } => {
+                    self.thinking_steps += 1;
+                }
                 TurnEvent::Done { .. } => {
-                    // Delete preview; the final answer is sent by
-                    // `send_message` (delivery != FinalDelivered).
-                    self.delete_preview().await;
+                    // Collapse preview into a one-line summary; the final
+                    // answer is sent by `send_message` (delivery != FinalDelivered).
+                    self.collapse_to_summary().await;
                     self.finished = true;
                 }
                 TurnEvent::Cancelled { .. }
@@ -2147,7 +2195,7 @@ impl TurnStream for TelegramTurnStream {
                     self.delete_preview().await;
                     self.finished = true;
                 }
-                // Chunk / Thinking / ToolResult — ignored in progress mode.
+                // Chunk / ToolResult — ignored in progress mode.
                 _ => {}
             }
         } else {
