@@ -661,15 +661,21 @@ impl QQBotChannel {
 
                 let event_id = data.get("id").and_then(|v| v.as_str()).unwrap_or("");
 
-                // Determine sender and reply_target based on C2C vs group
-                let author = data.get("author");
-                let interaction_type = data.get("type").and_then(|v| v.as_u64()).unwrap_or(0);
+                // Determine sender and reply_target based on chat_type
+                // (0=guild, 1=group, 2=C2C). Note: `type` is the interaction
+                // kind (11=button callback), NOT the chat scene.
+                let chat_type = data.get("chat_type").and_then(|v| v.as_u64()).unwrap_or(2);
 
-                let (sender, reply_target) = if interaction_type == 2 {
-                    // Group interaction
-                    let member_openid = author
-                        .and_then(|a| a.get("member_openid"))
+                let (sender, reply_target) = if chat_type == 1 {
+                    // Group interaction — member_openid at top level
+                    let member_openid = data
+                        .get("member_openid")
                         .and_then(|v| v.as_str())
+                        .or_else(|| {
+                            data.get("author")
+                                .and_then(|a| a.get("member_openid"))
+                                .and_then(|v| v.as_str())
+                        })
                         .unwrap_or("unknown");
                     let group_openid = data
                         .get("group_openid")
@@ -677,10 +683,15 @@ impl QQBotChannel {
                         .unwrap_or("unknown");
                     (member_openid.to_string(), format!("group:{}", group_openid))
                 } else {
-                    // C2C interaction (type 1)
-                    let user_openid = author
-                        .and_then(|a| a.get("user_openid"))
+                    // C2C interaction — user_openid at top level
+                    let user_openid = data
+                        .get("user_openid")
                         .and_then(|v| v.as_str())
+                        .or_else(|| {
+                            data.get("author")
+                                .and_then(|a| a.get("user_openid"))
+                                .and_then(|v| v.as_str())
+                        })
                         .unwrap_or("unknown");
                     (user_openid.to_string(), format!("c2c:{}", user_openid))
                 };
