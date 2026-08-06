@@ -637,6 +637,40 @@ impl TelegramChannel {
         Ok(true)
     }
 
+    /// Send a message using rich_message format (markdown rendering), no reply_markup.
+    async fn send_rich_message_simple(
+        &self,
+        chat_id: &str,
+        markdown: &str,
+        thread_id: Option<&str>,
+    ) -> anyhow::Result<Option<i64>> {
+        let client = self.http_client();
+        let mut body = serde_json::json!({
+            "chat_id": chat_id,
+            "rich_message": {
+                "markdown": markdown,
+            },
+        });
+        if let Some(tid) = thread_id {
+            body["message_thread_id"] = serde_json::Value::from(tid);
+        }
+        let resp = client
+            .post(self.api_url("sendRichMessage"))
+            .json(&body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("sendRichMessage(preview) failed: {status} {body}");
+        }
+        let resp_json: serde_json::Value = resp.json().await?;
+        Ok(resp_json
+            .get("result")
+            .and_then(|r| r.get("message_id"))
+            .and_then(|m| m.as_i64()))
+    }
+
     /// Send a text message with `parse_mode: HTML` (standard Telegram API).
     async fn send_text_html(
         &self,
@@ -668,6 +702,35 @@ impl TelegramChannel {
             .get("result")
             .and_then(|r| r.get("message_id"))
             .and_then(|m| m.as_i64()))
+    }
+
+    /// Edit a message using rich_message format (markdown rendering).
+    async fn edit_message_rich(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        markdown: &str,
+    ) -> anyhow::Result<bool> {
+        let client = self.http_client();
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "rich_message": {
+                "markdown": markdown,
+            },
+        });
+        let resp = client
+            .post(self.api_url("editMessageText"))
+            .json(&body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            warn!("editMessageText(rich) failed: {status} {body}");
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     /// Edit a message with `parse_mode: HTML` (standard Telegram API).
@@ -2103,27 +2166,27 @@ fn resolve_tool_display(name: &str, args: &serde_json::Value) -> (String, String
     (emoji.to_string(), label.to_string(), detail)
 }
 
-/// Format a single tool-call progress line as Telegram HTML.
+/// Format a single tool-call progress line as Telegram Markdown.
 ///
-/// Output: `<b>📖 Read</b> <code>/path/to/file</code>`
-/// With optional status: `… <i>failed</i>`
+/// Output: `**📖 Read** \`/path/to/file\``
+/// With optional status: `… _failed_`
 fn format_tool_line(name: &str, args: &serde_json::Value) -> String {
     let (emoji, label, detail) = resolve_tool_display(name, args);
-    let label_html = escape_html(&format!("{emoji} {label}"));
+    let label_full = format!("{emoji} {label}");
     if detail.is_empty() {
-        format!("<b>{label_html}</b>")
+        format!("**{label_full}**")
     } else {
         let detail_clipped = clip_detail(&detail);
-        format!("<b>{label_html}</b> <code>{}</code>", escape_html(&detail_clipped))
+        format!("**{label_full}** `{detail_clipped}`")
     }
 }
 
-/// Re-format a tool line to append a status suffix (e.g. `<i>failed</i>`).
+/// Re-format a tool line to append a status suffix (e.g. `_failed_`).
 fn tool_line_with_status(line: &str, success: bool) -> String {
     if success {
         line.to_string()
     } else {
-        format!("{line} <i>failed</i>")
+        format!("{line} _failed_")
     }
 }
 
@@ -2192,14 +2255,14 @@ impl TelegramTurnStream {
             // Headline: pending commentary shown as bold when no tool calls yet.
             if !self.pending_commentary.trim().is_empty() && self.tool_lines.is_empty() {
                 let text = clip_detail(self.pending_commentary.trim());
-                lines.push(format!("<b>{}</b>", escape_html(&text)));
+                lines.push(format!("**{}**", text));
             }
 
             // Pending commentary shown as 💬 when there are already tool calls.
             let mut tail = Vec::new();
             if !self.pending_commentary.trim().is_empty() && !self.tool_lines.is_empty() {
                 let text = clip_detail(self.pending_commentary.trim());
-                tail.push(format!("<i>💬 {}</i>", escape_html(&text)));
+                tail.push(format!("💬 {}", text));
             }
 
             // Truncate oldest tool lines so total preview stays under
@@ -2217,7 +2280,7 @@ impl TelegramTurnStream {
             }
 
             if skip > 0 && skip < total {
-                lines.push(format!("<i>… {} earlier</i>", skip));
+                lines.push(format!("… {} earlier", skip));
             }
             lines.extend(self.tool_lines[skip..].iter().cloned());
             lines.extend(tail);
@@ -2238,7 +2301,7 @@ impl TelegramTurnStream {
             Some(mid) => {
                 if self
                     .channel
-                    .edit_message_text_html(self.chat_id, mid, &preview)
+                    .edit_message_rich(self.chat_id, mid, &preview)
                     .await
                     .is_ok()
                 {
@@ -2248,7 +2311,7 @@ impl TelegramTurnStream {
             None => {
                 if let Ok(Some(id)) = self
                     .channel
-                    .send_text_html(
+                    .send_rich_message_simple(
                         &self.chat_id.to_string(),
                         &preview,
                         self.thread_id.as_deref(),
@@ -2298,7 +2361,7 @@ impl TelegramTurnStream {
         if let Some(mid) = self.msg_id {
             if self
                 .channel
-                .edit_message_text_html(self.chat_id, mid, &summary)
+                .edit_message_rich(self.chat_id, mid, &summary)
                 .await
                 .is_ok()
             {
@@ -2347,7 +2410,7 @@ impl TurnStream for TelegramTurnStream {
                         self.commentary_notes += 1;
                         let text = clip_detail(self.pending_commentary.trim());
                         self.tool_lines
-                            .push(format!("<i>💬 {}</i>", escape_html(&text)));
+                            .push(format!("💬 {}", text));
                         self.pending_commentary.clear();
                     }
                     self.tool_count += 1;
@@ -2373,7 +2436,7 @@ impl TurnStream for TelegramTurnStream {
                 }
                 TurnEvent::ToolResult { name, output, .. } => {
                     // Detect failure from output and annotate the matching
-                    // tool line with `<i>failed</i>` (OpenClaw-style).
+                    // tool line with `_failed_` (OpenClaw-style).
                     let failed = output.starts_with("error")
                         || output.starts_with("Error")
                         || output.contains("failed:")
@@ -2385,7 +2448,7 @@ impl TurnStream for TelegramTurnStream {
                             .tool_lines
                             .iter_mut()
                             .rev()
-                            .find(|l| l.contains(&label) && !l.contains("<i>"))
+                            .find(|l| l.contains(&label) && !l.contains("_failed_"))
                         {
                             *line = tool_line_with_status(line, false);
                         }
