@@ -2014,6 +2014,84 @@ fn escape_html(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Convert inline markdown (bold, italic, code) to HTML tags, escaping everything else.
+/// Used for commentary text rendered in HTML parse_mode previews.
+fn markdown_inline_to_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        // **bold**
+        if chars[i] == '*' && i + 1 < chars.len() && chars[i + 1] == '*' {
+            if let Some(end) = find_double_marker(&chars, i + 2, '*') {
+                let inner: String = chars[i + 2..end].iter().collect();
+                out.push_str("<b>");
+                out.push_str(&escape_html(&inner));
+                out.push_str("</b>");
+                i = end + 2;
+                continue;
+            }
+        }
+        // `code`
+        if chars[i] == '`' {
+            if let Some(end) = find_single_marker(&chars, i + 1, '`') {
+                let inner: String = chars[i + 1..end].iter().collect();
+                out.push_str("<code>");
+                out.push_str(&escape_html(&inner));
+                out.push_str("</code>");
+                i = end + 1;
+                continue;
+            }
+        }
+        // *italic* (single *, not part of **)
+        if chars[i] == '*' && (i + 1 >= chars.len() || chars[i + 1] != '*') {
+            if let Some(end) = find_single_marker(&chars, i + 1, '*') {
+                let inner: String = chars[i + 1..end].iter().collect();
+                out.push_str("<i>");
+                out.push_str(&escape_html(&inner));
+                out.push_str("</i>");
+                i = end + 1;
+                continue;
+            }
+        }
+        // Escape everything else
+        match chars[i] {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Find the position of a double-char closing marker (e.g. `**`), skipping
+/// nested single markers. Returns the start index of the closing `**`.
+fn find_double_marker(chars: &[char], start: usize, ch: char) -> Option<usize> {
+    let mut i = start;
+    while i + 1 < chars.len() {
+        if chars[i] == ch && chars[i + 1] == ch {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Find the position of a single-char closing marker (e.g. `*` or `` ` ``).
+fn find_single_marker(chars: &[char], start: usize, ch: char) -> Option<usize> {
+    let mut i = start;
+    while i < chars.len() {
+        if chars[i] == ch {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Clip detail text to max 300 chars (matching OpenClaw's clipTelegramProgressText).
 fn clip_detail(s: &str) -> String {
     const MAX: usize = 300;
@@ -2192,14 +2270,14 @@ impl TelegramTurnStream {
             // Headline: pending commentary shown as bold when no tool calls yet.
             if !self.pending_commentary.trim().is_empty() && self.tool_lines.is_empty() {
                 let text = clip_detail(self.pending_commentary.trim());
-                lines.push(format!("<b>{}</b>", escape_html(&text)));
+                lines.push(format!("<b>{}</b>", markdown_inline_to_html(&text)));
             }
 
             // Pending commentary shown as 💬 when there are already tool calls.
             let mut tail = Vec::new();
             if !self.pending_commentary.trim().is_empty() && !self.tool_lines.is_empty() {
                 let text = clip_detail(self.pending_commentary.trim());
-                tail.push(format!("<i>💬 {}</i>", escape_html(&text)));
+                tail.push(format!("<i>💬 {}</i>", markdown_inline_to_html(&text)));
             }
 
             // Truncate oldest tool lines so total preview stays under
@@ -2347,7 +2425,7 @@ impl TurnStream for TelegramTurnStream {
                         self.commentary_notes += 1;
                         let text = clip_detail(self.pending_commentary.trim());
                         self.tool_lines
-                            .push(format!("<i>💬 {}</i>", escape_html(&text)));
+                            .push(format!("<i>💬 {}</i>", markdown_inline_to_html(&text)));
                         self.pending_commentary.clear();
                     }
                     self.tool_count += 1;
