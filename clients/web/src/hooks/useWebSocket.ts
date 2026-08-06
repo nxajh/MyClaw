@@ -430,6 +430,20 @@ export function useWebSocket() {
         break
       }
 
+      case 'empty_response': {
+        flushPendingDelta()
+        setMessages((prev) => {
+          const last = prev[prev.length - 1]
+          if (last && last.role === 'assistant' && !last.done) {
+            return [...prev.slice(0, -1), { ...last, done: true }]
+          }
+          return prev
+        })
+        setIsGenerating(false)
+        currentAssistantId.current = null
+        break
+      }
+
       // Non-streamed server reply (slash-command output, ask_user prompts,
       // acks). Fills the pending assistant placeholder, or appends a new one.
       case 'message': {
