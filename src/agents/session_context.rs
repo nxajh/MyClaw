@@ -385,7 +385,7 @@ impl SessionContext {
                     None => crate::channels::StreamDelivery::Pending,
                 };
                 if delivery != crate::channels::StreamDelivery::FinalDelivered {
-                    if let Some(ch) = channel_for_send {
+                    if let Some(ref ch) = channel_for_send {
                         if !turn_result.text.trim().is_empty() {
                             let receiver = {
                                 let mut r =
