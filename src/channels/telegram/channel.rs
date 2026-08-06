@@ -2196,7 +2196,7 @@ fn tool_line_with_status(line: &str, success: bool) -> String {
 /// - **Partial**: accumulates ALL text chunks and live-edits a preview
 ///   message. The final edit replaces it with the complete answer.
 /// - **Progress**: shows only tool-call progress lines with per-tool emoji,
-///   label, and arg detail (e.g. `📖 Read /path`), rendered as HTML.
+///   label, and arg detail (e.g. `📖 Read /path`), rendered as rich markdown.
 ///   When the turn completes, the preview collapses to a one-line summary
 ///   (e.g. `🛠️ 4 tool calls · ⏱️ 21s`) and the final answer is sent as a
 ///   separate message via the normal `send_message` path.
@@ -2273,7 +2273,7 @@ impl TelegramTurnStream {
                 let mut test = lines.clone();
                 test.extend(self.tool_lines[s..].iter().cloned());
                 test.extend(tail.clone());
-                if test.join("\n").chars().count() <= STREAM_PREVIEW_LIMIT {
+                if test.join("\n\n").chars().count() <= STREAM_PREVIEW_LIMIT {
                     skip = s;
                     break;
                 }
@@ -2285,7 +2285,7 @@ impl TelegramTurnStream {
             lines.extend(self.tool_lines[skip..].iter().cloned());
             lines.extend(tail);
 
-            lines.join("\n")
+            lines.join("\n\n")
         } else {
             self.accumulated.chars().take(STREAM_PREVIEW_LIMIT).collect()
         }
