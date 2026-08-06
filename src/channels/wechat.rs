@@ -1959,26 +1959,29 @@ fn filter_markdown(text: &str) -> String {
             }
             break;
         }
-        // Escape bare '<' that is not a valid HTML tag start (e.g. "<3次")
-        // to prevent the markdown renderer from treating it as an HTML tag,
+        // Replace bare '<' (not a valid HTML tag start) with full-width '＜'
+        // to prevent WeChat markdown renderer from treating "<3次" as an HTML tag,
         // which would swallow the rest of the line and break **bold** rendering.
-        let mut escaped = String::with_capacity(filtered.len());
-        let chars: Vec<char> = filtered.chars().collect();
-        let mut i = 0;
-        while i < chars.len() {
-            if chars[i] == '<' {
-                let next = chars.get(i + 1).copied().unwrap_or(' ');
-                if next.is_ascii_alphabetic() || next == '/' {
-                    escaped.push('<');
+        // WeChat does not decode HTML entities, so &lt; would show literally.
+        {
+            let chars: Vec<char> = filtered.chars().collect();
+            let mut escaped = String::with_capacity(filtered.len());
+            let mut i = 0;
+            while i < chars.len() {
+                if chars[i] == '<' {
+                    let next = chars.get(i + 1).copied().unwrap_or(' ');
+                    if next.is_ascii_alphabetic() || next == '/' {
+                        escaped.push('<');
+                    } else {
+                        escaped.push('＜');
+                    }
                 } else {
-                    escaped.push_str("&lt;");
+                    escaped.push(chars[i]);
                 }
-            } else {
-                escaped.push(chars[i]);
+                i += 1;
             }
-            i += 1;
+            filtered = escaped;
         }
-        filtered = escaped;
         // Convert H5/H6 to bold
         let trimmed = filtered.trim_start();
         let leading_hashes = filtered.len() - trimmed.len();
