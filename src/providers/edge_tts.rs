@@ -69,7 +69,7 @@ impl TtsProvider for EdgeTtsProvider {
         if let Some(speed) = req.speed {
             if speed > 0.0 {
                 let pct = ((speed - 1.0) * 100.0).round() as i32;
-                let rate = format!("{pct:+d}%");
+                let rate = format!("{pct:+}%");
                 cmd.args(["--rate", &rate]);
             }
         }
