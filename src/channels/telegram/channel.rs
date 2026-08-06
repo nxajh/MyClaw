@@ -2219,7 +2219,7 @@ struct TelegramTurnStream {
     thinking_steps: usize,
     /// Commentary notes count (progress mode, for collapse summary).
     commentary_notes: usize,
-    /// Estimated thinking token count (progress mode, for live thinking line).
+    /// Estimated thinking token count for the current round (progress mode).
     thinking_tokens: usize,
     /// Whether thinking is currently active (progress mode).
     thinking_active: bool,
@@ -2239,30 +2239,46 @@ impl TelegramTurnStream {
         self.mode == crate::config::channel::StreamingMode::Progress
     }
 
+    /// Flush the current thinking round into the step list as a retained line.
+    fn flush_completed_thinking(&mut self) {
+        if self.thinking_active {
+            self.thinking_active = false;
+            if self.thinking_tokens > 0 {
+                self.tool_lines.push(format!(
+                    "🧠 Thinking… (~{} tokens)",
+                    self.thinking_tokens
+                ));
+            }
+            self.thinking_tokens = 0;
+        }
+    }
+
     /// Build the preview text for the current mode.
     fn preview_text(&self) -> String {
         if self.is_progress() {
             let mut lines = Vec::new();
 
-            // Live thinking line at top (while reasoning is active).
-            if self.thinking_active && self.thinking_tokens > 0 {
-                lines.push(format!(
-                    "🧠 Thinking… (~{} tokens)",
-                    self.thinking_tokens
-                ));
-            }
-
-            // Headline: pending commentary shown as bold when no tool calls yet.
-            if !self.pending_commentary.trim().is_empty() && self.tool_lines.is_empty() {
+            // Headline: pending commentary shown as bold when no steps yet.
+            if !self.pending_commentary.trim().is_empty()
+                && self.tool_lines.is_empty()
+                && !self.thinking_active
+            {
                 let text = clip_detail(self.pending_commentary.trim());
                 lines.push(format!("**{}**", text));
             }
 
-            // Pending commentary shown as 💬 when there are already tool calls.
+            // Tail: pending commentary (💬) and live thinking (🧠).
             let mut tail = Vec::new();
             if !self.pending_commentary.trim().is_empty() && !self.tool_lines.is_empty() {
                 let text = clip_detail(self.pending_commentary.trim());
                 tail.push(format!("💬 {}", text));
+            }
+            // Live thinking line at end (most recent activity).
+            if self.thinking_active && self.thinking_tokens > 0 {
+                tail.push(format!(
+                    "🧠 Thinking… (~{} tokens)",
+                    self.thinking_tokens
+                ));
             }
 
             // Truncate oldest tool lines so total preview stays under
@@ -2392,8 +2408,8 @@ impl TurnStream for TelegramTurnStream {
             // ── Progress mode ───────────────────────────────────────────────
             match event {
                 TurnEvent::Chunk { delta } => {
-                    // Thinking ends when text starts.
-                    self.thinking_active = false;
+                    // Thinking ends when text starts; retain completed round.
+                    self.flush_completed_thinking();
                     // Accumulate text chunks. If a tool call follows, this
                     // text was commentary (intermediate explanation); if Done
                     // follows, it was the final answer streaming (discarded).
@@ -2403,8 +2419,8 @@ impl TurnStream for TelegramTurnStream {
                     }
                 }
                 TurnEvent::ToolCall { name, args, .. } => {
-                    // Thinking ends when a tool call starts.
-                    self.thinking_active = false;
+                    // Thinking ends when a tool call starts; retain completed round.
+                    self.flush_completed_thinking();
                     // Flush pending commentary as a 💬 line before the tool call.
                     if !self.pending_commentary.trim().is_empty() {
                         self.commentary_notes += 1;
@@ -2424,7 +2440,16 @@ impl TurnStream for TelegramTurnStream {
                     // Count bursts (thinking rounds), not individual deltas.
                     // Each transition from non-thinking to thinking is one round.
                     if !self.thinking_active {
+                        // Flush pending commentary before new thinking round
+                        // (preserves chronological ordering in step list).
+                        if !self.pending_commentary.trim().is_empty() {
+                            self.commentary_notes += 1;
+                            let text = clip_detail(self.pending_commentary.trim());
+                            self.tool_lines.push(format!("💬 {}", text));
+                            self.pending_commentary.clear();
+                        }
                         self.thinking_steps += 1;
+                        self.thinking_tokens = 0;
                     }
                     self.thinking_active = true;
                     // Rough token estimate: ~1 token per 4 chars, minimum 1 per event.
