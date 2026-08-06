@@ -5,6 +5,8 @@
 
 use std::process::Command;
 
+use async_trait::async_trait;
+
 use crate::providers::tts::{AudioData, AudioResponse, TtsProvider, TtsRequest, TtsVoice};
 
 const DEFAULT_VOICE: &str = "zh-CN-XiaoxiaoNeural";
@@ -32,6 +34,7 @@ impl Default for EdgeTtsProvider {
     }
 }
 
+#[async_trait]
 impl TtsProvider for EdgeTtsProvider {
     fn synthesize(&self, req: TtsRequest) -> anyhow::Result<AudioResponse> {
         let voice = match &req.voice {
