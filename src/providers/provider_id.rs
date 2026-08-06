@@ -38,6 +38,7 @@ pub mod well_known {
     pub const GOOGLE: &str = "google";
     pub const DEEPSEEK: &str = "deepseek";
     pub const QWEN: &str = "qwen";
+    pub const EDGE_TTS: &str = "edge_tts";
 }
 
 // ── URL host detection ───────────────────────────────────────────────────────

@@ -13,6 +13,7 @@ pub mod provider_registry;
 pub mod search; // SearchProvider
 pub mod stt; // SttProvider
 pub mod tts; // TtsProvider
+pub mod edge_tts; // EdgeTtsProvider (free Microsoft Edge TTS via subprocess)
 pub mod video; // VideoGenerationProvider // ProviderRegistry trait
 
 // Re-export traits at crate level for external consumers
@@ -82,7 +83,7 @@ pub use provider_factory::{
     BuildSearchProviderRequest, BuildSttProviderRequest, BuildTtsProviderRequest,
     BuildVideoProviderRequest, ProviderFactory,
 };
-pub use provider_id::{ProviderId, detect_from_url};
+pub use provider_id::{ProviderId, detect_from_url, well_known};
 pub use shared::AuthStyle;
 
 pub use reqwest::Client;

@@ -419,6 +419,102 @@ impl SessionContext {
                         }
                     }
                 }
+
+                // ── Auto TTS ──────────────────────────────────────────────
+                // If auto_tts is enabled and a TTS provider is available,
+                // synthesize the reply text to audio and send as a voice message.
+                if runtime.defaults.auto_tts && !turn_result.text.trim().is_empty() {
+                    if let Some(ref ch) = channel_for_send {
+                        if let Ok((tts_provider, tts_model)) =
+                            runtime.providers.get_tts_provider()
+                        {
+                            let text_for_tts = turn_result.text.trim();
+                            // Skip very long texts to avoid TTS timeout.
+                            if text_for_tts.chars().count() <= 2000 {
+                                let req = crate::providers::TtsRequest {
+                                    model: tts_model,
+                                    input: text_for_tts.to_string(),
+                                    voice: crate::providers::TtsVoice::Id(String::new()),
+                                    response_format: None,
+                                    speed: None,
+                                };
+                                match tts_provider.synthesize(req) {
+                                    Ok(audio_resp) => {
+                                        let temp_path = std::env::temp_dir().join(format!(
+                                            "myclaw-tts-{}.mp3",
+                                            uuid::Uuid::new_v4()
+                                        ));
+                                        if std::fs::write(&temp_path, &audio_resp.audio.bytes)
+                                            .is_ok()
+                                        {
+                                            let receiver = {
+                                                let mut r = crate::channels::MessageReceiver::new(
+                                                    reply_target.clone(),
+                                                );
+                                                if let Some(ref last_msg) = session.last_message {
+                                                    r.reply_to_message_id = Some(
+                                                        last_msg
+                                                            .receiver
+                                                            .reply_to_message_id
+                                                            .clone()
+                                                            .unwrap_or_else(|| last_msg.id.clone()),
+                                                    );
+                                                    r.thread_id =
+                                                        last_msg.receiver.thread_id.clone();
+                                                }
+                                                r
+                                            };
+                                            let voice_file = crate::channels::ChannelFile {
+                                                meta: crate::channels::ChannelFileMeta {
+                                                    file_name: format!(
+                                                        "voice-{}.mp3",
+                                                        uuid::Uuid::new_v4()
+                                                    ),
+                                                    mime_type: Some(
+                                                        audio_resp.audio.mime_type.clone(),
+                                                    ),
+                                                    size_bytes: Some(
+                                                        audio_resp.audio.bytes.len() as u64,
+                                                    ),
+                                                    source_url: None,
+                                                },
+                                                body: std::sync::Arc::new(
+                                                    crate::channels::LocalFileBody::new(
+                                                        temp_path.to_string_lossy().to_string(),
+                                                    ),
+                                                ),
+                                            };
+                                            let message =
+                                                crate::channels::ChannelOutboundMessage {
+                                                    receiver,
+                                                    content: crate::channels::ChannelMessageContent {
+                                                        text: String::new(),
+                                                        files: vec![voice_file],
+                                                        buttons: vec![],
+                                                    },
+                                                    options: Default::default(),
+                                                };
+                                            if let Err(e) = ch.send_message(&message).await {
+                                                tracing::warn!(
+                                                    session = %session.id,
+                                                    err = %e,
+                                                    "auto_tts: voice send failed"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            session = %session.id,
+                                            err = %e,
+                                            "auto_tts: synthesis failed"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 Ok(turn_result)
             }
             (Err(e), stream) => {

@@ -37,6 +37,8 @@ pub struct RuntimeDefaults {
     /// by SystemPromptBuilder + file-tool path resolution), identity
     /// header, native_tools, …
     pub prompt: SystemPromptConfig,
+    /// Enable automatic TTS for replies.
+    pub auto_tts: bool,
 }
 
 impl Default for RuntimeDefaults {
@@ -44,6 +46,7 @@ impl Default for RuntimeDefaults {
         Self {
             permission_mode: PermissionMode::Default,
             prompt: SystemPromptConfig::default(),
+            auto_tts: false,
         }
     }
 }

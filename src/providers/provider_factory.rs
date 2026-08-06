@@ -312,6 +312,10 @@ impl ProviderFactory {
                 }
                 Some(Box::new(p))
             }
+            // Edge TTS: free Microsoft TTS via subprocess. No API key needed.
+            well_known::EDGE_TTS => Some(Box::new(
+                crate::providers::edge_tts::EdgeTtsProvider::new(),
+            )),
             _ => None,
         }
     }

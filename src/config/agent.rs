@@ -94,6 +94,12 @@ pub struct AgentConfig {
     /// Permission mode — controls tool approval requirements.
     #[serde(default)]
     pub permission_mode: PermissionMode,
+
+    /// Enable automatic text-to-speech for replies.
+    /// When true, each text reply is also synthesized to audio and sent
+    /// as a voice message alongside the text.
+    #[serde(default)]
+    pub auto_tts: bool,
 }
 
 // ── PromptConfig — `[prompt]` ─────────────────────────────────────────────────

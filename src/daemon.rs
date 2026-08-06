@@ -189,7 +189,7 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
         BuildVideoProviderRequest, CredentialPool, ProviderFactory, SharedApiKey,
         SharedCredentialPool,
     };
-    use crate::providers::{ProviderId, detect_from_url};
+    use crate::providers::{ProviderId, detect_from_url, well_known};
 
     let factory = ProviderFactory::new();
     let mut registry =
@@ -353,9 +353,14 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
 
         // ── TTS ───────────────────────────────────────────────────────
         if let Some(ref sec) = provider_cfg.tts {
+            let is_edge_tts = provider_id.as_str() == well_known::EDGE_TTS;
             let api_key = provider_cfg.effective_api_key(sec.api_key.as_deref());
-            let api_key =
-                api_key.with_context(|| format!("no API key for '{}' tts", provider_key))?;
+            let api_key = if is_edge_tts {
+                // Edge TTS is free and needs no authentication.
+                api_key.unwrap_or_default()
+            } else {
+                api_key.with_context(|| format!("no API key for '{}' tts", provider_key))?
+            };
             let auth_style = provider_cfg.effective_auth_style(sec.auth_style);
             let user_agent = sec.user_agent.clone();
 
@@ -1185,6 +1190,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         let defaults = crate::agents::runtime::RuntimeDefaults {
             permission_mode: config.agent.permission_mode,
             prompt: prompt_config,
+            auto_tts: config.agent.auto_tts,
         };
 
         crate::agents::AgentRuntime::new(
