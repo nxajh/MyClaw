@@ -571,6 +571,7 @@ fn strip_markdown_for_tts(input: &str) -> String {
     let re_hr_under = Regex::new(r"^\s*_{3,}\s*$").unwrap();
     let re_link = Regex::new(r"\[([^\]]*)\]\([^)]*\)").unwrap();
     let re_image = Regex::new(r"!\[[^\]]*\]\([^)]*\)").unwrap();
+    let re_bold = Regex::new(r"\*\*|__").unwrap();
 
     for line in input.lines() {
         let mut l = line.to_string();
@@ -609,7 +610,7 @@ fn strip_markdown_for_tts(input: &str) -> String {
 
         // Remove emphasis markers: **bold**, __bold__, *italic*, _italic_
         // Do bold first (longer pattern), then italic
-        l = l.replace(["**", "__"], "");
+        l = re_bold.replace_all(&l, "").to_string();
         l = l.replace(['*', '_'], "");
 
         out.push_str(&l);
