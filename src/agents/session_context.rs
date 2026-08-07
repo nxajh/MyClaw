@@ -113,7 +113,7 @@ impl SessionContext {
         let _turn_guard = self.turn_lock.lock().await;
         let mut session = self.session.lock().await;
 
-        let content = inbound_msg.content.text.clone();
+        let content = crate::str_utils::neutralize_spoofing(&inbound_msg.content.text);
         let reply_target = inbound_msg.receiver.id.clone();
 
         // Persist inbound files to session-local storage so their lifetime

@@ -75,7 +75,9 @@ pub use session::{detect_incomplete_turn, identify_breakpoint};
 pub use session_context::SessionContext;
 pub use tool_registry::ToolRegistry;
 pub use turn::{TurnContext, TurnResult};
-pub use turn_event::TurnEvent;
+pub use turn_event::{
+    RunSummary, TokenUsage, TtsSummary, TurnEvent, VersionedEvent,
+};
 pub use user_profile::{UserProfile, UserResolver};
 pub use workspace::skill_loader::SkillDefinition;
 pub use workspace::skills::{Skill, SkillManager};

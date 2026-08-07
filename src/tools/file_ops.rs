@@ -527,6 +527,9 @@ impl Tool for FileWriteTool {
             .ok_or_else(|| anyhow::anyhow!("'content' is required"))?;
 
         let resolved = validate_path(path)?;
+        if crate::config::is_path_protected(&resolved) {
+            anyhow::bail!("path '{}' is protected and cannot be modified", path);
+        }
         let path = resolved.to_str().unwrap_or(path);
 
         // Create parent directories if needed.
@@ -624,6 +627,9 @@ impl Tool for FileEditTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'path' is required"))?;
         let resolved = validate_path(path)?;
+        if crate::config::is_path_protected(&resolved) {
+            anyhow::bail!("path '{}' is protected and cannot be modified", path);
+        }
         let path = resolved.to_str().unwrap_or(path);
 
         let content = tokio::fs::read_to_string(path)

@@ -37,6 +37,53 @@ pub fn truncate_line(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// Neutralize Unicode spoofing characters by replacing them with visible
+/// `[U+XXXX]` markers. Defends against "Trojan Source" attacks where
+/// bidirectional override / isolate controls, zero-width characters, or
+/// variation selectors visually reorder or disguise text.
+///
+/// **Replaced ranges:**
+/// - `U+202A..=U+202E` — bidirectional overrides (LRE, RLE, PDF, LRO, RLO)
+/// - `U+2066..=U+2069` — bidirectional isolates (LRI, RLI, FSI, PDI)
+/// - `U+200B..=U+200D` — zero-width spaces (ZWSP, ZWNJ, ZWJ)
+/// - `U+FEFF`           — BOM / zero-width no-break space
+/// - `U+2060`           — word joiner
+///
+/// Normal text is unaffected. Returns the cleaned string plus the count of
+/// characters replaced (useful for logging).
+pub fn neutralize_spoofing(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        let cp = c as u32;
+        if matches!(cp,
+            0x202A..=0x202E   // bidi overrides
+            | 0x2066..=0x2069 // bidi isolates
+            | 0x200B..=0x200D // zero-width
+            | 0xFEFF           // BOM
+            | 0x2060           // word joiner
+        ) {
+            out.push_str(&format!("[U+{:04X}]", cp));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Return `true` if the string contains any spoofing character.
+pub fn has_spoofing_chars(s: &str) -> bool {
+    s.chars().any(|c| {
+        let cp = c as u32;
+        matches!(cp,
+            0x202A..=0x202E
+            | 0x2066..=0x2069
+            | 0x200B..=0x200D
+            | 0xFEFF
+            | 0x2060
+        )
+    })
+}
+
 // ── YAML Front-matter parsing (shared by skill_loader & agent_loader) ──────────
 
 /// Separate YAML front matter from Markdown body.
@@ -182,6 +229,45 @@ mod tests {
         let yaml = "tools:\n  - shell\n  - file_read\n  - file_write";
         let items = extract_yaml_list(yaml, "tools");
         assert_eq!(items, vec!["shell", "file_read", "file_write"]);
+    }
+
+    #[test]
+    fn test_neutralize_spoofing_rtl_override() {
+        // U+202E (RLO) reverses display order — classic Trojan Source
+        let malicious = "src/\u{202E}txt.js";
+        let cleaned = super::neutralize_spoofing(malicious);
+        assert_eq!(cleaned, "src/[U+202E]txt.js");
+        assert!(!super::has_spoofing_chars(&cleaned));
+        assert!(super::has_spoofing_chars(malicious));
+    }
+
+    #[test]
+    fn test_neutralize_spoofing_zero_width() {
+        let malicious = "pass\u{200B}word"; // ZWSP inserted
+        let cleaned = super::neutralize_spoofing(malicious);
+        assert_eq!(cleaned, "pass[U+200B]word");
+    }
+
+    #[test]
+    fn test_neutralize_spoofing_bom() {
+        let with_bom = "\u{FEFF}hello";
+        let cleaned = super::neutralize_spoofing(with_bom);
+        assert_eq!(cleaned, "[U+FEFF]hello");
+    }
+
+    #[test]
+    fn test_neutralize_spoofing_preserves_normal_text() {
+        let normal = "Hello 世界 🌍 'path/to/file.rs'";
+        let cleaned = super::neutralize_spoofing(normal);
+        assert_eq!(cleaned, normal);
+        assert!(!super::has_spoofing_chars(normal));
+    }
+
+    #[test]
+    fn test_neutralize_spoofing_isolates() {
+        let with_isolate = "safe\u{2066}evil\u{2069}end";
+        let cleaned = super::neutralize_spoofing(with_isolate);
+        assert_eq!(cleaned, "safe[U+2066]evil[U+2069]end");
     }
 
     #[test]

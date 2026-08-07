@@ -752,6 +752,9 @@ fn build_prompt_config(
 
 /// Run the MyClaw daemon, blocking until shutdown.
 pub async fn run(config: crate::config::AppConfig) -> Result<()> {
+    // Initialize global safety config from the loaded config.
+    crate::config::init_safety_config(config.safety.clone());
+
     // 让进程 cwd 与 workspace_dir 一致，保证 file_read 等工具的相对路径解析
     // 和 system prompt 告诉 LLM 的 "Working directory" 一致
     std::env::set_current_dir(&config.workspace_dir).with_context(|| {

@@ -126,6 +126,10 @@ struct RawConfig {
     /// Logging configuration.
     #[serde(default)]
     logging: LoggingConfig,
+
+    /// Safety configuration (`[safety]` — protected paths).
+    #[serde(default)]
+    safety: SafetyConfig,
 }
 
 // ── LoggingConfig ─────────────────────────────────────────────────────────────
@@ -140,6 +144,118 @@ pub struct LoggingConfig {
     /// Per-module log levels.
     #[serde(default)]
     pub modules: HashMap<String, String>,
+}
+
+// ── SafetyConfig ──────────────────────────────────────────────────────────────
+
+/// Safety configuration for protecting critical paths from agent modification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SafetyConfig {
+    /// Glob patterns for paths the agent cannot modify (write/edit/delete).
+    /// Supports `~` expansion. Default includes critical system paths.
+    #[serde(default = "default_protected_paths")]
+    pub protected_paths: Vec<String>,
+}
+
+impl Default for SafetyConfig {
+    fn default() -> Self {
+        Self {
+            protected_paths: default_protected_paths(),
+        }
+    }
+}
+
+/// Default protected paths that the agent cannot modify.
+fn default_protected_paths() -> Vec<String> {
+    vec![
+        "~/.ssh/**".to_string(),
+        "~/.myclaw/myclaw.toml".to_string(),
+        "**/.env".to_string(),
+        "**/.env.*".to_string(),
+    ]
+}
+
+impl SafetyConfig {
+    /// Check if a path matches any protected pattern.
+    pub fn is_protected(&self, path: &Path) -> bool {
+        let path_str = path.to_string_lossy();
+        let expanded_path = shellexpand::tilde(&path_str).to_string();
+        let expanded_path = Path::new(&expanded_path);
+
+        for pattern in &self.protected_paths {
+            let expanded_pattern = shellexpand::tilde(pattern).to_string();
+            if glob_match(&expanded_pattern, &expanded_path.to_string_lossy()) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Simple glob matching supporting `*` (any chars except `/`) and `**` (any chars including `/`).
+fn glob_match(pattern: &str, path: &str) -> bool {
+    let pattern_parts: Vec<&str> = pattern.split('/').collect();
+    let path_parts: Vec<&str> = path.split('/').collect();
+
+    glob_match_parts(&pattern_parts, &path_parts)
+}
+
+fn glob_match_parts(pattern: &[&str], path: &[&str]) -> bool {
+    if pattern.is_empty() && path.is_empty() {
+        return true;
+    }
+    if pattern.is_empty() {
+        return false;
+    }
+
+    let pat = pattern[0];
+    let rest_pat = &pattern[1..];
+
+    if pat == "**" {
+        // ** matches zero or more path segments
+        for i in 0..=path.len() {
+            if glob_match_parts(rest_pat, &path[i..]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    if path.is_empty() {
+        return false;
+    }
+
+    let p = path[0];
+    let rest_path = &path[1..];
+
+    if glob_match_segment(pat, p) {
+        return glob_match_parts(rest_pat, rest_path);
+    }
+
+    false
+}
+
+fn glob_match_segment(pattern: &str, segment: &str) -> bool {
+    // Simple wildcard matching within a single path segment.
+    // Supports `*` (any chars) and `?` (single char).
+    let p: Vec<char> = pattern.chars().collect();
+    let s: Vec<char> = segment.chars().collect();
+    glob_match_chars(&p, &s)
+}
+
+fn glob_match_chars(pat: &[char], seg: &[char]) -> bool {
+    match (pat.first(), seg.first()) {
+        (None, None) => true,
+        (None, Some(_)) => false,
+        (Some('*'), _) => {
+            // * matches zero or more characters
+            glob_match_chars(&pat[1..], seg)
+                || (seg.first().is_some() && glob_match_chars(pat, &seg[1..]))
+        }
+        (Some('?'), Some(_)) => glob_match_chars(&pat[1..], &seg[1..]),
+        (Some(p), Some(s)) if p == s => glob_match_chars(&pat[1..], &seg[1..]),
+        _ => false,
+    }
 }
 
 // ── AppConfig (public, resolved) ──────────────────────────────────────────────
@@ -177,6 +293,30 @@ pub struct AppConfig {
     pub mcp_servers: Vec<McpServerConfig>,
     /// Logging configuration.
     pub logging: LoggingConfig,
+    /// Safety configuration (`[safety]` — protected paths).
+    pub safety: SafetyConfig,
+}
+
+use std::sync::OnceLock;
+
+static SAFETY_CONFIG: OnceLock<SafetyConfig> = OnceLock::new();
+
+/// Initialize the global safety config. Called once at daemon startup.
+/// Subsequent calls are no-ops (the first config wins).
+pub fn init_safety_config(config: SafetyConfig) {
+    let _ = SAFETY_CONFIG.set(config);
+}
+
+/// Check if a path is protected against agent modification (write/edit/delete).
+/// Returns `true` when the global safety config has not been initialized
+/// **and** the path is within the default protected set, or when the path
+/// matches any pattern in the configured `protected_paths`.
+pub fn is_path_protected(path: &Path) -> bool {
+    let config = SAFETY_CONFIG.get();
+    match config {
+        Some(c) => c.is_protected(path),
+        None => SafetyConfig::default().is_protected(path),
+    }
 }
 
 // ── ConfigLoader ──────────────────────────────────────────────────────────────
@@ -241,6 +381,7 @@ impl ConfigLoader {
             scheduler: raw.scheduler,
             mcp_servers: raw.mcp_servers,
             logging: raw.logging,
+            safety: raw.safety,
         })
     }
 
@@ -491,5 +632,35 @@ output = ["text"]
         unsafe {
             std::env::remove_var("TEST_MYCLAW_KEY");
         }
+    }
+
+    #[test]
+    fn test_safety_default_protected_paths() {
+        let safety = SafetyConfig::default();
+        assert!(!safety.protected_paths.is_empty());
+        assert!(safety.protected_paths.contains(&"~/.ssh/**".to_string()));
+    }
+
+    #[test]
+    fn test_safety_protected_check() {
+        let safety = SafetyConfig::default();
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/test".to_string());
+        // SSH key path should be protected
+        assert!(safety.is_protected(std::path::Path::new(&format!("{}/.ssh/id_rsa", home))));
+        // Regular workspace file should not be protected
+        assert!(!safety.is_protected(std::path::Path::new(&format!("{}/.myclaw/workspace/test.rs", home))));
+    }
+
+    #[test]
+    fn test_glob_match() {
+        assert!(glob_match("/home/user/.ssh/id_rsa", "/home/user/.ssh/id_rsa"));
+        assert!(glob_match("/home/user/.ssh/*", "/home/user/.ssh/id_rsa"));
+        assert!(!glob_match("/home/user/.ssh/*", "/home/user/.ssh/sub/id_rsa"));
+        assert!(glob_match("/home/user/.ssh/**", "/home/user/.ssh/sub/id_rsa"));
+        assert!(glob_match("**/.env", "/any/path/.env"));
+        assert!(glob_match("**/.env", "/home/user/project/.env"));
+        assert!(!glob_match("**/.env", "/home/user/project/.env.local"));
+        assert!(glob_match("**/.env.*", "/home/user/project/.env.local"));
+        assert!(glob_match("~/.myclaw/myclaw.toml", "~/.myclaw/myclaw.toml"));
     }
 }

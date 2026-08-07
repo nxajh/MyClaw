@@ -592,6 +592,7 @@ impl ShellTool {
         let stdout = stdout_buf.lock().await.clone();
         let stderr = stderr_buf.lock().await.clone();
         let output_text = format_shell_output(state, exit_code, timeout_secs, &stdout, &stderr);
+        let output_text = crate::str_utils::neutralize_spoofing(&output_text);
         let truncated = truncate_large_output(&output_text).await;
         let output = add_truncation_metadata(truncated);
 
@@ -822,7 +823,9 @@ impl ShellTool {
             success = final_code == 0;
         }
 
-        let truncated = truncate_large_output(&formatted).await;
+        let truncated = truncate_large_output(
+            &crate::str_utils::neutralize_spoofing(&formatted)
+        ).await;
         
         Ok(ToolResult {
             success,

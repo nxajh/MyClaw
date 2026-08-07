@@ -103,7 +103,8 @@ impl SessionOutputBus {
     fn push_event(&mut self, event: TurnEvent) {
         if self.ws_sender.is_some() {
             if let Some(ref tx) = self.ws_sender {
-                let mut json_val = match serde_json::to_value(&event) {
+                let versioned = event.versioned();
+                let mut json_val = match serde_json::to_value(&versioned) {
                     Ok(v) => v,
                     Err(_) => return,
                 };
@@ -579,8 +580,9 @@ impl ClientChannel {
                                                             let _ = ws_sender.send(msg_json).await;
                                                         }
                                                         for event in replay_events {
+                                                            let versioned = event.versioned();
                                                             let mut jv =
-                                                                serde_json::to_value(&event)
+                                                                serde_json::to_value(&versioned)
                                                                     .unwrap_or_default();
                                                             if let serde_json::Value::Object(
                                                                 ref mut map,
@@ -794,7 +796,8 @@ impl ClientChannel {
                                                     let _ = ws_sender.send(msg_json).await;
                                                 }
                                                 for event in events {
-                                                    let mut jv = serde_json::to_value(&event)
+                                                    let versioned = event.versioned();
+                                                    let mut jv = serde_json::to_value(&versioned)
                                                         .unwrap_or_default();
                                                     if let serde_json::Value::Object(ref mut map) =
                                                         jv
