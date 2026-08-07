@@ -428,9 +428,9 @@ impl SessionContext {
                         if let Ok((tts_provider, tts_model)) =
                             runtime.providers.get_tts_provider()
                         {
-                            let text_for_tts = turn_result.text.trim();
-                            // Skip very long texts to avoid TTS timeout.
-                            if text_for_tts.chars().count() <= 2000 {
+                            let text_for_tts = strip_markdown_for_tts(turn_result.text.trim());
+                            // Skip very long texts or texts that became empty after stripping.
+                            if !text_for_tts.is_empty() && text_for_tts.chars().count() <= 2000 {
                                 let req = crate::providers::TtsRequest {
                                     model: tts_model,
                                     input: text_for_tts.to_string(),
@@ -549,6 +549,99 @@ impl SessionContext {
                 Err(e)
             }
         }
+    }
+}
+
+/// Strip markdown formatting characters before sending text to TTS.
+///
+/// Removes heading markers, emphasis markers, code fences/inline code,
+/// link URLs (keeping link text), list bullets, blockquote markers,
+/// horizontal rules, and table pipe characters. Collapses multiple
+/// blank lines into one so the speech flows naturally.
+fn strip_markdown_for_tts(input: &str) -> String {
+    use regex::Regex;
+    let mut out = String::with_capacity(input.len());
+
+    let re_heading = Regex::new(r"^#{1,6}\s*").unwrap();
+    let re_quote = Regex::new(r"^\s*>\s?").unwrap();
+    let re_bullet = Regex::new(r"^\s*[-*+•]\s+").unwrap();
+    let re_number = Regex::new(r"^\s*\d+\.\s+").unwrap();
+    let re_hr = Regex::new(r"^\s*([-*_])\1{2,}\s*$").unwrap();
+    let re_link = Regex::new(r"\[([^\]]*)\]\([^)]*\)").unwrap();
+    let re_image = Regex::new(r"!\[[^\]]*\]\([^)]*\)").unwrap();
+
+    for line in input.lines() {
+        let mut l = line.to_string();
+
+        // Remove code fence lines entirely (``` or ~~~)
+        if l.trim_start().starts_with("```") || l.trim_start().starts_with("~~~") {
+            continue;
+        }
+
+        // Remove heading markers (# ## ### ...)
+        l = re_heading.replace_all(&l, "").to_string();
+
+        // Remove blockquote markers
+        l = re_quote.replace_all(&l, "").to_string();
+
+        // Remove list markers (- * + • at start, or numbered 1. )
+        l = re_bullet.replace_all(&l, "").to_string();
+        l = re_number.replace_all(&l, "").to_string();
+
+        // Remove horizontal rules (--- or *** or ___ on their own line)
+        if re_hr.is_match(&l) {
+            continue;
+        }
+
+        // Remove table pipe characters
+        l = l.replace('|', " ");
+
+        // Remove link URLs but keep the link text: [text](url) → text
+        l = re_link.replace_all(&l, "$1").to_string();
+
+        // Remove image markdown: ![alt](url) → (nothing)
+        l = re_image.replace_all(&l, "").to_string();
+
+        // Remove inline code backticks
+        l = l.replace('`', "");
+
+        // Remove emphasis markers: **bold**, __bold__, *italic*, _italic_
+        // Do bold first (longer pattern), then italic
+        l = l.replace("**", "").replace("__", "");
+        l = l.replace('*', "").replace('_', "");
+
+        out.push_str(&l);
+        out.push('\n');
+    }
+
+    // Collapse 3+ newlines to 2
+    let re_newlines = Regex::new(r"\n{3,}").unwrap();
+    let result = re_newlines.replace_all(&out, "\n\n");
+    result.trim().to_string()
+}
+
+#[cfg(test)]
+mod test_strip_markdown {
+    use super::*;
+
+    #[test]
+    fn test_basic_stripping() {
+        assert_eq!(strip_markdown_for_tts("**hello**"), "hello");
+        assert_eq!(strip_markdown_for_tts("# 标题"), "标题");
+        assert_eq!(strip_markdown_for_tts("- 列表项"), "列表项");
+        assert_eq!(strip_markdown_for_tts("`代码`"), "代码");
+        assert_eq!(strip_markdown_for_tts("[链接文字](https://example.com)"), "链接文字");
+    }
+
+    #[test]
+    fn test_complex() {
+        let input = "## 标题\n\n**重点**和*斜体*文字。\n\n- 第一项\n- 第二项\n\n```\ncode block\n```\n";
+        let result = strip_markdown_for_tts(input);
+        assert!(!result.contains("```"));
+        assert!(!result.contains("**"));
+        assert!(!result.contains("##"));
+        assert!(result.contains("重点"));
+        assert!(result.contains("第一项"));
     }
 }
 
