@@ -197,19 +197,19 @@ pub fn validate_config_write(old_content: &str, new_content: &str) -> Result<(),
     let new_cred_lines = extract_credential_lines(new_content);
 
     if old_cred_lines != new_cred_lines {
-        let changed: Vec<_> = old_cred_lines
+        let changed = old_cred_lines
             .iter()
-            .filter(|(k, _)| !new_cred_lines.iter().any(|(nk, nv)| nk == *k && nv == *k))
-            .collect();
-        let added: Vec<_> = new_cred_lines
+            .filter(|line| !new_cred_lines.contains(line))
+            .count();
+        let added = new_cred_lines
             .iter()
-            .filter(|(k, _)| !old_cred_lines.iter().any(|(ok, ov)| ok == *k && ov == *k))
-            .collect();
+            .filter(|line| !old_cred_lines.contains(line))
+            .count();
         return Err(format!(
             "blocked modification to credential lines in config file (changed: {}, added: {}); \
              agent may modify non-credential sections only",
-            changed.len(),
-            added.len(),
+            changed,
+            added,
         ));
     }
 
