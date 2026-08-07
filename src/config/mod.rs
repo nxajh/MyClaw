@@ -250,7 +250,7 @@ fn glob_match_chars(pat: &[char], seg: &[char]) -> bool {
         (Some('*'), _) => {
             // * matches zero or more characters
             glob_match_chars(&pat[1..], seg)
-                || (seg.first().is_some() && glob_match_chars(pat, &seg[1..]))
+                || (!seg.is_empty() && glob_match_chars(pat, &seg[1..]))
         }
         (Some('?'), Some(_)) => glob_match_chars(&pat[1..], &seg[1..]),
         (Some(p), Some(s)) if p == s => glob_match_chars(&pat[1..], &seg[1..]),
