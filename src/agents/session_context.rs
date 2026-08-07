@@ -566,7 +566,9 @@ fn strip_markdown_for_tts(input: &str) -> String {
     let re_quote = Regex::new(r"^\s*>\s?").unwrap();
     let re_bullet = Regex::new(r"^\s*[-*+•]\s+").unwrap();
     let re_number = Regex::new(r"^\s*\d+\.\s+").unwrap();
-    let re_hr = Regex::new(r"^\s*([-*_])\1{2,}\s*$").unwrap();
+    let re_hr_dash = Regex::new(r"^\s*-{3,}\s*$").unwrap();
+    let re_hr_star = Regex::new(r"^\s*\*{3,}\s*$").unwrap();
+    let re_hr_under = Regex::new(r"^\s*_{3,}\s*$").unwrap();
     let re_link = Regex::new(r"\[([^\]]*)\]\([^)]*\)").unwrap();
     let re_image = Regex::new(r"!\[[^\]]*\]\([^)]*\)").unwrap();
 
@@ -589,7 +591,7 @@ fn strip_markdown_for_tts(input: &str) -> String {
         l = re_number.replace_all(&l, "").to_string();
 
         // Remove horizontal rules (--- or *** or ___ on their own line)
-        if re_hr.is_match(&l) {
+        if re_hr_dash.is_match(&l) || re_hr_star.is_match(&l) || re_hr_under.is_match(&l) {
             continue;
         }
 
@@ -607,8 +609,8 @@ fn strip_markdown_for_tts(input: &str) -> String {
 
         // Remove emphasis markers: **bold**, __bold__, *italic*, _italic_
         // Do bold first (longer pattern), then italic
-        l = l.replace("**", "").replace("__", "");
-        l = l.replace('*', "").replace('_', "");
+        l = l.replace(["**", "__"], "");
+        l = l.replace(['*', '_'], "");
 
         out.push_str(&l);
         out.push('\n');
