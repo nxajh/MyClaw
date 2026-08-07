@@ -169,10 +169,70 @@ impl Default for SafetyConfig {
 fn default_protected_paths() -> Vec<String> {
     vec![
         "~/.ssh/**".to_string(),
-        "~/.myclaw/myclaw.toml".to_string(),
         "**/.env".to_string(),
         "**/.env.*".to_string(),
     ]
+}
+
+/// Keys whose values are credentials. If the agent tries to modify a line
+/// containing one of these keys inside myclaw.toml, the write is blocked.
+/// The agent CAN still read these values and CAN modify other parts of the file.
+const CREDENTIAL_KEYS: &[&str] = &[
+    "api_key",
+    "api_keys",
+    "bot_token",
+    "client_secret",
+    "secret",
+];
+
+/// Check if new content for myclaw.toml is safe to write.
+/// Returns Ok if no credential lines are being modified, Err with a message otherwise.
+///
+/// "Modified" means: a line matching a credential key pattern exists in either
+/// old or new content, AND the set of credential-bearing lines differs between them.
+/// This lets the agent freely edit [prompt], [agent], [loop_breaker], etc.
+/// while blocking any change to credential values.
+pub fn validate_config_write(old_content: &str, new_content: &str) -> Result<(), String> {
+    let old_cred_lines = extract_credential_lines(old_content);
+    let new_cred_lines = extract_credential_lines(new_content);
+
+    if old_cred_lines != new_cred_lines {
+        let changed: Vec<_> = old_cred_lines
+            .iter()
+            .filter(|(k, _)| !new_cred_lines.iter().any(|(nk, nv)| nk == *k && nv == *k))
+            .collect();
+        let added: Vec<_> = new_cred_lines
+            .iter()
+            .filter(|(k, _)| !old_cred_lines.iter().any(|(ok, ov)| ok == *k && ov == *k))
+            .collect();
+        return Err(format!(
+            "blocked modification to credential lines in config file (changed: {}, added: {}); \
+             agent may modify non-credential sections only",
+            changed.len(),
+            added.len(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Extract lines that contain credential keys, returning (key, full_line) pairs.
+fn extract_credential_lines(content: &str) -> Vec<(String, String)> {
+    content
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            for key in CREDENTIAL_KEYS {
+                // Match `key =` or `key=` at the start of the trimmed line.
+                if trimmed.starts_with(&format!("{} =", key))
+                    || trimmed.starts_with(&format!("{}=", key))
+                {
+                    return Some((key.to_string(), trimmed.to_string()));
+                }
+            }
+            None
+        })
+        .collect()
 }
 
 impl SafetyConfig {
@@ -300,11 +360,17 @@ pub struct AppConfig {
 use std::sync::OnceLock;
 
 static SAFETY_CONFIG: OnceLock<SafetyConfig> = OnceLock::new();
+static CONFIG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 /// Initialize the global safety config. Called once at daemon startup.
 /// Subsequent calls are no-ops (the first config wins).
 pub fn init_safety_config(config: SafetyConfig) {
     let _ = SAFETY_CONFIG.set(config);
+}
+
+/// Record the path to myclaw.toml for content-level config protection.
+pub fn init_config_path(path: PathBuf) {
+    let _ = CONFIG_PATH.set(path);
 }
 
 /// Check if a path is protected against agent modification (write/edit/delete).
@@ -317,6 +383,34 @@ pub fn is_path_protected(path: &Path) -> bool {
         Some(c) => c.is_protected(path),
         None => SafetyConfig::default().is_protected(path),
     }
+}
+
+/// Check if writing `new_content` to `path` is allowed.
+/// For the config file (myclaw.toml), this performs content-level protection:
+/// the agent may modify non-credential sections but cannot change credential lines.
+/// For other protected paths, the write is always blocked.
+pub fn validate_write(path: &Path, new_content: &str) -> Result<(), String> {
+    // First check if the path is in the hard-blocked list.
+    if is_path_protected(path) {
+        return Err(format!(
+            "path '{}' is protected and cannot be modified",
+            path.display()
+        ));
+    }
+
+    // Check if this is the config file — content-level protection applies.
+    if let Some(config_path) = CONFIG_PATH.get() {
+        // Canonicalize both for comparison (best-effort).
+        let target_canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let config_canonical = std::fs::canonicalize(config_path).unwrap_or_else(|_| config_path.clone());
+        if target_canonical == config_canonical {
+            // Read the current content and validate.
+            let old_content = std::fs::read_to_string(config_path).unwrap_or_default();
+            return validate_config_write(&old_content, new_content);
+        }
+    }
+
+    Ok(())
 }
 
 // ── ConfigLoader ──────────────────────────────────────────────────────────────
@@ -639,6 +733,8 @@ output = ["text"]
         let safety = SafetyConfig::default();
         assert!(!safety.protected_paths.is_empty());
         assert!(safety.protected_paths.contains(&"~/.ssh/**".to_string()));
+        // myclaw.toml is NOT in the default list — it's protected at content level.
+        assert!(!safety.protected_paths.iter().any(|p| p.contains("myclaw.toml")));
     }
 
     #[test]
@@ -649,6 +745,70 @@ output = ["text"]
         assert!(safety.is_protected(std::path::Path::new(&format!("{}/.ssh/id_rsa", home))));
         // Regular workspace file should not be protected
         assert!(!safety.is_protected(std::path::Path::new(&format!("{}/.myclaw/workspace/test.rs", home))));
+    }
+
+    #[test]
+    fn test_validate_config_write_allows_non_credential_change() {
+        let old = r#"
+api_key = "sk-secret123"
+
+[prompt]
+max_chars = 4000
+"#;
+        let new = r#"
+api_key = "sk-secret123"
+
+[prompt]
+max_chars = 8000
+"#;
+        assert!(validate_config_write(old, new).is_ok());
+    }
+
+    #[test]
+    fn test_validate_config_write_blocks_credential_change() {
+        let old = r#"
+api_key = "sk-secret123"
+
+[prompt]
+max_chars = 4000
+"#;
+        let new = r#"
+api_key = "sk-different456"
+
+[prompt]
+max_chars = 4000
+"#;
+        assert!(validate_config_write(old, new).is_err());
+    }
+
+    #[test]
+    fn test_validate_config_write_blocks_credential_removal() {
+        let old = r#"
+api_key = "sk-secret123"
+max_chars = 4000
+"#;
+        let new = r#"
+max_chars = 4000
+"#;
+        assert!(validate_config_write(old, new).is_err());
+    }
+
+    #[test]
+    fn test_validate_config_write_allows_adding_non_credential_sections() {
+        let old = r#"api_key = "sk-secret""#;
+        let new = r#"api_key = "sk-secret"
+
+[loop_breaker]
+max_tool_calls = 300
+"#;
+        assert!(validate_config_write(old, new).is_ok());
+    }
+
+    #[test]
+    fn test_validate_config_write_blocks_bot_token_change() {
+        let old = r#"bot_token = "abc123""#;
+        let new = r#"bot_token = "xyz789""#;
+        assert!(validate_config_write(old, new).is_err());
     }
 
     #[test]
