@@ -819,6 +819,52 @@ impl TelegramChannel {
         Ok(file_resp.bytes().await?.to_vec())
     }
 
+    /// Convert audio bytes (MP3/WAV/any) to Ogg/Opus for Telegram voice bubbles.
+    /// Uses ffmpeg as a subprocess. Returns the Ogg/Opus bytes.
+    async fn convert_to_opus_ogg(&self, audio_bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+        use tokio::io::AsyncWriteExt;
+
+        let temp_dir = tempfile::tempdir()?;
+        let input_path = temp_dir.path().join("input_audio");
+        let output_path = temp_dir.path().join("voice.ogg");
+
+        // Write input bytes to temp file
+        let mut input_file = tokio::fs::File::create(&input_path).await?;
+        input_file.write_all(audio_bytes).await?;
+        input_file.flush().await?;
+        drop(input_file);
+
+        // Run ffmpeg to convert to Ogg/Opus
+        let output = tokio::process::Command::new("ffmpeg")
+            .arg("-i")
+            .arg(&input_path)
+            .args([
+                "-acodec", "libopus",
+                "-ac", "1",
+                "-b:a", "48k",
+                "-vbr", "on",
+                "-application", "voip",
+                "-compression_level", "10",
+                "-f", "ogg",
+            ])
+            .arg(&output_path)
+            .arg("-y")
+            .output()
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to spawn ffmpeg: {e}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("ffmpeg conversion failed: {}", &stderr[..stderr.len().min(200)]);
+        }
+
+        let result = tokio::fs::read(&output_path).await?;
+        if result.is_empty() {
+            anyhow::bail!("ffmpeg produced empty output");
+        }
+        Ok(result)
+    }
+
     /// Send an acknowledgement reaction (👀) to a message.
     async fn ack_message(&self, chat_id: i64, message_id: i64) {
         if !self.ack_reactions {
@@ -1850,6 +1896,90 @@ impl Channel for TelegramChannel {
                 file.meta.mime_type.as_deref(),
                 &file.meta.file_name,
             );
+
+            // For audio files, convert to Ogg/Opus and send as a voice message
+            // (Telegram voice bubble) instead of an audio player attachment.
+            // Falls back to sendAudio if ffmpeg is unavailable or conversion fails.
+            if modality == crate::providers::media::FileModality::Audio {
+                use tokio::io::AsyncReadExt;
+                let reader = file.body.open().await?;
+                let mut reader = reader;
+                let mut audio_bytes = Vec::new();
+                reader.read_to_end(&mut audio_bytes).await?;
+
+                match self.convert_to_opus_ogg(&audio_bytes).await {
+                    Ok(ogg_bytes) => {
+                        let part = reqwest::multipart::Part::stream(ogg_bytes)
+                            .file_name("voice.ogg");
+                        let mut form = reqwest::multipart::Form::new()
+                            .text("chat_id", chat_id.clone())
+                            .part("voice", part);
+                        if let Some(thread_id) = thread_id.clone() {
+                            form = form.text("message_thread_id", thread_id);
+                        }
+                        let resp = self
+                            .http
+                            .post(self.api_url("sendVoice"))
+                            .multipart(form)
+                            .send()
+                            .await
+                            .map_err(|e| anyhow::anyhow!("Telegram sendVoice failed: {e}"))?;
+                        if !resp.status().is_success() {
+                            let status = resp.status();
+                            let text = resp.text().await.unwrap_or_default();
+                            anyhow::bail!("Telegram sendVoice returned {status}: {text}");
+                        }
+                        let resp_json: serde_json::Value = resp.json().await?;
+                        if let Some(id) = resp_json
+                            .get("result")
+                            .and_then(|r| r.get("message_id"))
+                            .and_then(|m| m.as_i64())
+                        {
+                            ids.push(crate::channels::MessageId::new(id.to_string()));
+                        }
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Telegram: Opus conversion failed ({e}), falling back to sendAudio"
+                        );
+                        // Fall through to the generic path below with the original bytes
+                        let part = reqwest::multipart::Part::stream(audio_bytes)
+                            .file_name(file.meta.file_name.clone());
+                        let mut form = reqwest::multipart::Form::new()
+                            .text("chat_id", chat_id.clone())
+                            .part("audio", part);
+                        if let Some(thread_id) = thread_id.clone() {
+                            form = form.text("message_thread_id", thread_id);
+                        }
+                        if let Some(caption) = caption.filter(|c| !c.is_empty()) {
+                            form = form.text("caption", caption.to_string());
+                        }
+                        let resp = self
+                            .http
+                            .post(self.api_url("sendAudio"))
+                            .multipart(form)
+                            .send()
+                            .await
+                            .map_err(|e| anyhow::anyhow!("Telegram sendAudio failed: {e}"))?;
+                        if !resp.status().is_success() {
+                            let status = resp.status();
+                            let text = resp.text().await.unwrap_or_default();
+                            anyhow::bail!("Telegram sendAudio returned {status}: {text}");
+                        }
+                        let resp_json: serde_json::Value = resp.json().await?;
+                        if let Some(id) = resp_json
+                            .get("result")
+                            .and_then(|r| r.get("message_id"))
+                            .and_then(|m| m.as_i64())
+                        {
+                            ids.push(crate::channels::MessageId::new(id.to_string()));
+                        }
+                        continue;
+                    }
+                }
+            }
+
             let (method, part_name) = match modality {
                 crate::providers::media::FileModality::Image => ("sendPhoto", "photo"),
                 crate::providers::media::FileModality::Audio => ("sendAudio", "audio"),
