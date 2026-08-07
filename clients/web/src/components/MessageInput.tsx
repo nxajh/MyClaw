@@ -3,6 +3,7 @@ import { ArrowUp, Square, Paperclip, X, FileText, Image as ImageIcon, Film, Musi
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
+import { useFileUpload } from '../hooks/useFileUpload'
 import type { SendOptions, FileAttachment } from '../hooks/useWebSocket'
 
 interface Props {
@@ -13,13 +14,7 @@ interface Props {
 }
 
 interface Command { name: string; description: string }
-interface PickedImage { name: string; dataUrl: string }
-interface PickedText { name: string; content: string }
-interface PickedBinary { name: string; mime: string; dataUrl: string }
 
-const IMAGE_MAX = 10 * 1024 * 1024
-const TEXT_MAX = 256 * 1024
-const BINARY_MAX = 150 * 1024 * 1024
 // After base64 encoding, a file grows ~33%. WS server limit is 200MiB.
 // Keep raw file under 140MiB so base64 payload stays under ~186MiB.
 const BINARY_SEND_MAX = 140 * 1024 * 1024
@@ -29,9 +24,7 @@ const INPUT_HISTORY_KEY = 'myclaw_input_history'
 export default function MessageInput({ onSend, onCancel, disabled, isGenerating }: Props) {
   const { status, request, clearInputToken } = useWebSocketContext()
   const [text, setText] = useState('')
-  const [images, setImages] = useState<PickedImage[]>([])
-  const [texts, setTexts] = useState<PickedText[]>([])
-  const [binaries, setBinaries] = useState<PickedBinary[]>([])
+  const { images, texts, binaries, setImages, setTexts, setBinaries, handleFiles: handleFilesBase, clearFiles } = useFileUpload()
   const [note, setNote] = useState<string | null>(null)
   const [previewMode, setPreviewMode] = useState(false)
   const [history, setHistory] = useState<string[]>(() => {
@@ -59,14 +52,12 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
     if (clearInputToken !== prevClearTokenRef.current) {
       prevClearTokenRef.current = clearInputToken
       setText('')
-      setImages([])
-      setTexts([])
-      setBinaries([])
+      clearFiles()
       setNote(null)
       setPreviewMode(false)
       if (textareaRef.current) textareaRef.current.style.height = 'auto'
     }
-  }, [clearInputToken])
+  }, [clearInputToken, clearFiles])
 
   // Focus input on '/' when not in an input field
   useEffect(() => {
@@ -129,36 +120,10 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
     textareaRef.current?.focus()
   }, [])
 
-  // ── File handling ─────────────────────────────────────────────────────────
-  const isTextMime = (t: string) => t.startsWith('text/') || ['application/json', 'application/xml', 'application/javascript', 'application/x-sh'].includes(t)
-  const isTextExt = (name: string) => /\.(txt|md|json|js|ts|tsx|jsx|py|rs|go|java|c|cpp|h|hpp|css|html|yml|yaml|toml|sh|log|csv|xml|sql|rb|php|swift|kt|scala|lua|r|jl|m|mm|vue|svelte|astro|mdx|conf|cfg|ini|env|dockerfile|makefile)$/i.test(name)
-
+  // ── File handling (delegated to useFileUpload) ─────────────────────────────
   const handleFiles = useCallback((files: FileList | null) => {
-    if (!files) return
-    setNote(null)
-    let hasNote = false
-    Array.from(files).forEach((file) => {
-      const isImage = file.type.startsWith('image/')
-      const isText = isTextMime(file.type) || isTextExt(file.name)
-      if (isImage) {
-        if (file.size > IMAGE_MAX) { setNote(`${file.name} skipped (image > 10MB)`); hasNote = true; return }
-        const reader = new FileReader()
-        reader.onload = () => setImages((p) => [...p, { name: file.name, dataUrl: reader.result as string }])
-        reader.readAsDataURL(file)
-      } else if (isText) {
-        if (file.size > TEXT_MAX) { setNote(`${file.name} skipped (file > 256KB)`); hasNote = true; return }
-        const reader = new FileReader()
-        reader.onload = () => setTexts((p) => [...p, { name: file.name, content: reader.result as string }])
-        reader.readAsText(file)
-      } else {
-        if (file.size > BINARY_MAX) { setNote(`${file.name} skipped (file > ${Math.round(BINARY_MAX / 1024 / 1024)}MB)`); hasNote = true; return }
-        const reader = new FileReader()
-        reader.onload = () => setBinaries((p) => [...p, { name: file.name, mime: file.type || 'application/octet-stream', dataUrl: reader.result as string }])
-        reader.readAsDataURL(file)
-      }
-    })
-    if (hasNote) clearNote()
-  }, [clearNote])
+    handleFilesBase(files, setNote, clearNote)
+  }, [handleFilesBase, clearNote])
 
   // ── Send ──────────────────────────────────────────────────────────────────
   const handleSend = () => {
@@ -188,9 +153,7 @@ export default function MessageInput({ onSend, onCancel, disabled, isGenerating 
       files: fileAttachments,
     })
     setText('')
-    setImages([])
-    setTexts([])
-    setBinaries([])
+    clearFiles()
     setNote(null)
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
   }

@@ -1,4 +1,13 @@
 import { useRef, useState, useCallback, useEffect } from 'react'
+import {
+  finalizeAssistantMessage,
+  handleAuthOk,
+  handleToolCall,
+  handleToolResult,
+  handleError,
+  handleMessage,
+  handleFile,
+} from './messageHandlers'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -318,12 +327,7 @@ export function useWebSocket() {
 
     switch (type) {
       case 'auth_ok': {
-        authPending.current = false
-        setAuthFailed(false)
-        setAuthValidating(false)
-        setStatus('connected')
-        setLastCloseInfo(null)
-        reconnectAttempts.current = 0
+        handleAuthOk(authPending, setAuthFailed, setAuthValidating, setStatus, setLastCloseInfo, reconnectAttempts)
         break
       }
 
@@ -343,104 +347,36 @@ export function useWebSocket() {
       }
 
       case 'tool_call': {
-        const callId = (data.id as string) || uid()
-        const name = (data.name as string) || 'unknown'
-        const args = (data.args as Record<string, unknown>) || {}
-        setMessages((prev) => {
-          const last = prev[prev.length - 1]
-          if (last && last.role === 'assistant' && !last.done) {
-            const blocks: MessageBlock[] = [...last.blocks, { type: 'tool_call', id: callId, name, args, startedAt: Date.now() }]
-            return [...prev.slice(0, -1), { ...last, blocks }]
-          }
-          const id = uid()
-          currentAssistantId.current = id
-          return [...prev, { role: 'assistant', blocks: [{ type: 'tool_call', id: callId, name, args, startedAt: Date.now() }], id, done: false }]
-        })
+        handleToolCall(data, uid, setMessages, currentAssistantId)
         break
       }
 
       case 'tool_result': {
-        const callId = (data.id as string) || ''
-        const name = (data.name as string) || 'unknown'
-        const output = (data.output as string) || ''
-        const isError = !!(data.error as boolean)
-        const now = Date.now()
-        setMessages((prev) => {
-          const last = prev[prev.length - 1]
-          if (last && last.role === 'assistant' && !last.done) {
-            const blocks = last.blocks.map((b): MessageBlock => {
-              if (b.type !== 'tool_call') return b
-              const matches = callId ? b.id === callId : (b.name === name && b.output === undefined)
-              return matches ? { ...b, output, error: isError, completedAt: now } : b
-            })
-            return [...prev.slice(0, -1), { ...last, blocks }]
-          }
-          return prev
-        })
+        handleToolResult(data, setMessages)
         break
       }
 
       case 'done': {
         flushPendingDelta()
-        setMessages((prev) => {
-          const last = prev[prev.length - 1]
-          if (last && last.role === 'assistant' && !last.done) {
-            return [...prev.slice(0, -1), { ...last, done: true }]
-          }
-          return prev
-        })
-        setIsGenerating(false)
-        currentAssistantId.current = null
+        finalizeAssistantMessage(setMessages, setIsGenerating, currentAssistantId)
         break
       }
 
       case 'error': {
         flushPendingDelta()
-        const message = (data.message as string) || 'Unknown error'
-        if (authPending.current) {
-          // Auth was rejected — show login overlay, stop reconnecting.
-          authPending.current = false
-          suppressReconnect.current = true
-          setAuthFailed(true)
-          setAuthValidating(false)
-          // Clear the bad token so reload shows login instead of silent retry.
-          try { localStorage.removeItem(AUTH_TOKEN_KEY) } catch { /* ignore */ }
-          break
-        }
-        setMessages((prev) => [
-          ...prev,
-          { role: 'assistant', blocks: [{ type: 'content', text: `⚠️ Error: ${message}` }], id: uid(), done: true },
-        ])
-        setIsGenerating(false)
-        currentAssistantId.current = null
+        handleError(data, authPending, suppressReconnect, setAuthFailed, setAuthValidating, setMessages, setIsGenerating, currentAssistantId, uid, AUTH_TOKEN_KEY)
         break
       }
 
       case 'cancelled': {
         flushPendingDelta()
-        setMessages((prev) => {
-          const last = prev[prev.length - 1]
-          if (last && last.role === 'assistant' && !last.done) {
-            return [...prev.slice(0, -1), { ...last, done: true }]
-          }
-          return prev
-        })
-        setIsGenerating(false)
-        currentAssistantId.current = null
+        finalizeAssistantMessage(setMessages, setIsGenerating, currentAssistantId)
         break
       }
 
       case 'empty_response': {
         flushPendingDelta()
-        setMessages((prev) => {
-          const last = prev[prev.length - 1]
-          if (last && last.role === 'assistant' && !last.done) {
-            return [...prev.slice(0, -1), { ...last, done: true }]
-          }
-          return prev
-        })
-        setIsGenerating(false)
-        currentAssistantId.current = null
+        finalizeAssistantMessage(setMessages, setIsGenerating, currentAssistantId)
         break
       }
 
@@ -448,60 +384,13 @@ export function useWebSocket() {
       // acks). Fills the pending assistant placeholder, or appends a new one.
       case 'message': {
         flushPendingDelta()
-        const content = (data.content as string) || ''
-        if (!content) break
-        setMessages((prev) => {
-          const last = prev[prev.length - 1]
-          if (last && last.role === 'assistant' && !last.done) {
-            const blocks = [...last.blocks]
-            const lb = blocks[blocks.length - 1]
-            if (lb?.type === 'content') {
-              blocks[blocks.length - 1] = { type: 'content', text: lb.text ? `${lb.text}\n\n${content}` : content }
-            } else {
-              blocks.push({ type: 'content', text: content })
-            }
-            return [...prev.slice(0, -1), { ...last, blocks, done: true }]
-          }
-          return [...prev, { role: 'assistant', blocks: [{ type: 'content', text: content }], id: uid(), done: true }]
-        })
-        setIsGenerating(false)
-        currentAssistantId.current = null
+        handleMessage(data, uid, setMessages, setIsGenerating, currentAssistantId)
         break
       }
 
       // Inbound file from server (e.g. tool-generated files, channel forwards).
       case 'file': {
-        const fileName = (data.file_name as string) || 'file'
-        const fileMime = (data.mime_type as string) || 'application/octet-stream'
-        const fileData = (data.data as string) || ''
-        const caption = (data.caption as string) || ''
-        if (fileData) {
-          // Convert base64 to blob URL for display
-          const bin = atob(fileData)
-          const bytes = new Uint8Array(bin.length)
-          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-          const blob = new Blob([bytes], { type: fileMime })
-          const blobUrl = URL.createObjectURL(blob)
-          const isImage = fileMime.startsWith('image/')
-          const marker = isImage
-            ? `[image: ${fileName}](${blobUrl})`
-            : `[file: ${fileName}](${blobUrl})`
-          const text = caption ? `${caption}\n${marker}` : marker
-          setMessages((prev) => {
-            const last = prev[prev.length - 1]
-            if (last && last.role === 'assistant' && !last.done) {
-              const blocks = [...last.blocks]
-              const lb = blocks[blocks.length - 1]
-              if (lb?.type === 'content') {
-                blocks[blocks.length - 1] = { type: 'content', text: lb.text ? `${lb.text}\n${text}` : text }
-              } else {
-                blocks.push({ type: 'content', text })
-              }
-              return [...prev.slice(0, -1), { ...last, blocks }]
-            }
-            return [...prev, { role: 'assistant', blocks: [{ type: 'content', text }], id: uid(), done: false }]
-          })
-        }
+        handleFile(data, uid, setMessages)
         break
       }
 

@@ -8,7 +8,7 @@ import { splitSystemReminders, SystemReminderCard, renderBlock } from './Message
 
 // ── Generating dots ──────────────────────────────────────────────────────
 
-function GeneratingDots() {
+export const GeneratingDots = memo(function GeneratingDots() {
   return (
     <div className="space-y-2 py-1">
       <div className="skeleton-line w-full" />
@@ -16,7 +16,7 @@ function GeneratingDots() {
       <div className="skeleton-line w-3/5" />
     </div>
   )
-}
+})
 
 // ── Message actions ──────────────────────────────────────────────────────
 
@@ -24,7 +24,7 @@ export function extractText(blocks: MessageBlock[]): string {
   return blocks.filter((b): b is { type: 'content'; text: string } => b.type === 'content').map((b) => b.text).join('\n\n')
 }
 
-function MessageActions({ blocks, isLast, isGenerating, onRetry, onDelete, onPin, pinned }: { blocks: MessageBlock[]; isLast: boolean; isGenerating: boolean; onRetry?: () => void; onDelete?: () => void; onPin?: () => void; pinned?: boolean }) {
+export const MessageActions = memo(function MessageActions({ blocks, isLast, isGenerating, onRetry, onDelete, onPin, pinned }: { blocks: MessageBlock[]; isLast: boolean; isGenerating: boolean; onRetry?: () => void; onDelete?: () => void; onPin?: () => void; pinned?: boolean }) {
   const [copied, setCopied] = useState(false)
   const handleCopy = async () => {
     const text = extractText(blocks)
@@ -53,7 +53,7 @@ function MessageActions({ blocks, isLast, isGenerating, onRetry, onDelete, onPin
       )}
     </div>
   )
-}
+})
 
 // ── Editable user bubble ───────────────────────────────────────────────
 

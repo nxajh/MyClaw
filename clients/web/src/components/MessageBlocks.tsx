@@ -12,7 +12,7 @@ import { SearchContext } from './MessageList'
 
 // ── PreCodeBlock with syntax highlighting + language label ────────────────
 
-function PreCodeBlock({ children, className }: { children: ReactNode; className?: string }) {
+export const PreCodeBlock = memo(function PreCodeBlock({ children, className }: { children: ReactNode; className?: string }) {
   const [copied, setCopied] = useState(false)
   const preRef = useRef<HTMLPreElement>(null)
   const classes = (className || '').split(/\s+/)
@@ -39,7 +39,7 @@ function PreCodeBlock({ children, className }: { children: ReactNode; className?
       <pre ref={preRef} className="p-2 sm:p-3 lg:p-4 overflow-x-auto text-[11px] sm:text-xs leading-5 sm:leading-6 text-zinc-400 focus:outline-none !my-0 !bg-transparent !border-none">{children}</pre>
     </div>
   )
-}
+})
 
 // ── Thinking block with throttled updates ────────────────────────────────
 
