@@ -980,6 +980,10 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         &known_users,
     )
     .await;
+    // P1 cross-user delivery (RFC §3.5): give send_message access to the
+    // known-users registry so `recipient=@nick` can resolve contacts and
+    // deliver to the peer's user-level mailbox.
+    send_message_tool.set_known_users(Arc::clone(&known_users));
 
     // Build sub-agent configs (AGENT.md files from workspace/agents/).
     let sub_agent_configs = build_sub_agents(&config.workspace_dir);

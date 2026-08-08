@@ -422,8 +422,32 @@ pub(super) async fn dispatch_turn(
     let inbound_thread_id = msg.receiver.thread_id.clone();
 
     let turn_tracker = ctx.turn_tracker.clone();
+    let known_users = ctx.known_users.clone();
     tokio::spawn(async move {
         let _guard = turn_tracker.track();
+        // RFC §3.5/§4.3: render per-turn injections — user-level mailbox
+        // (cross-user messages; drained = 注入即消费, shown once) and pending
+        // friend requests (re-rendered every turn while requests remain).
+        // Stashed on the session; Agent::run injects them into the first
+        // LLM request as <system-reminder> user messages (never persisted
+        // to history).
+        let mut injections = Vec::new();
+        let mails = known_users.drain_user_mail(&sk);
+        if !mails.is_empty() {
+            injections.push(crate::agents::KnownUsersRegistry::render_user_mail_reminder(
+                &mails,
+            ));
+        }
+        let pending = known_users.pending_requests(&sk);
+        if !pending.is_empty() {
+            injections
+                .push(crate::agents::KnownUsersRegistry::render_pending_requests_reminder(
+                    &pending,
+                ));
+        }
+        if !injections.is_empty() {
+            session_ctx.stash_turn_injections(injections).await;
+        }
         // Successful turns: process_turn does the final `channel.send_message(text)`
         // fallback internally. We only handle the error notice here.
         let result = session_ctx

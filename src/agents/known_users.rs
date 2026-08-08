@@ -740,6 +740,43 @@ impl KnownUsersRegistry {
             .and_then(|map| map.get(peer).cloned())
     }
 
+    // ── Per-turn injection rendering (RFC §3.5 / §4.3) ───────────────────
+
+    /// Render a drained user-mailbox batch as one `<system-reminder>` user
+    /// message (RFC §3.5: `来自 @{nick} 的消息:{text}`, 注入即消费 — the
+    /// caller drains from the registry, so this text is shown exactly once).
+    pub(crate) fn render_user_mail_reminder(mails: &[UserMail]) -> String {
+        let mut lines = Vec::new();
+        for mail in mails {
+            lines.push(format!(
+                "- [来自 {} 的消息] {}",
+                mail.sender_nickname, mail.text
+            ));
+        }
+        format!(
+            "<system-reminder>\n[收到 {} 条来自好友的消息，请阅读并处理。]\n{}\n</system-reminder>",
+            mails.len(),
+            lines.join("\n\n")
+        )
+    }
+
+    /// Render pending **inbound** friend requests as one `<system-reminder>`
+    /// user message (RFC §4.3 每轮注入 — re-rendered every turn while
+    /// requests remain, so the agent always has context when the user says
+    /// "接受"/"拒绝"). `pending` comes from [`Self::pending_requests`].
+    pub(crate) fn render_pending_requests_reminder(pending: &[(String, ContactEntry)]) -> String {
+        let mut lines = Vec::new();
+        for (_, entry) in pending {
+            let when = crate::agents::commands::info::format_ts(entry.requested_at);
+            lines.push(format!("你有 1 条待处理好友请求:{}，发送于 {}", entry.nickname, when));
+        }
+        format!(
+            "<system-reminder>\n[共有 {} 条待处理好友请求，用户可能直接回复“接受/拒绝”。]\n{}\n</system-reminder>",
+            pending.len(),
+            lines.join("\n")
+        )
+    }
+
     // ── Persistence ─────────────────────────────────────────────────────────
 
     /// Flush to disk if dirty. No-op for in-memory registries.
@@ -1017,6 +1054,47 @@ mod tests {
         assert_eq!(drained[0].text, "hello");
         // Inject-once: second drain is empty.
         assert!(reg.drain_user_mail(bob()).is_empty());
+    }
+
+    #[test]
+    fn render_user_mail_reminder_lists_all_mails() {
+        let mails = vec![
+            UserMail {
+                msg_id: "m1".into(),
+                sender_user_id: alice().into(),
+                sender_nickname: "@alice".into(),
+                text: "你好".into(),
+                sent_at: 1,
+            },
+            UserMail {
+                msg_id: "m2".into(),
+                sender_user_id: alice().into(),
+                sender_nickname: "@alice".into(),
+                text: "在吗".into(),
+                sent_at: 2,
+            },
+        ];
+        let rendered = KnownUsersRegistry::render_user_mail_reminder(&mails);
+        assert!(rendered.contains("<system-reminder>"), "{rendered}");
+        assert!(rendered.contains("2 条来自好友的消息"), "{rendered}");
+        assert!(rendered.contains("来自 @alice 的消息"), "{rendered}");
+        assert!(rendered.contains("你好"), "{rendered}");
+        assert!(rendered.contains("在吗"), "{rendered}");
+    }
+
+    #[test]
+    fn render_pending_requests_reminder_lists_each_request() {
+        let reg = KnownUsersRegistry::in_memory();
+        reg.request_friend(alice(), bob());
+        let pending = reg.pending_requests(bob());
+        assert_eq!(pending.len(), 1);
+        let rendered = KnownUsersRegistry::render_pending_requests_reminder(&pending);
+        assert!(rendered.contains("<system-reminder>"), "{rendered}");
+        assert!(rendered.contains("待处理好友请求"), "{rendered}");
+        assert!(rendered.contains("@alice"), "{rendered}");
+        // No pending → empty render list, no reminder text.
+        let rendered_empty = KnownUsersRegistry::render_pending_requests_reminder(&[]);
+        assert!(rendered_empty.contains("共有 0 条"), "{rendered_empty}");
     }
 
     #[test]

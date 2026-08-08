@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use crate::agents::session::Session;
-use crate::agents::{AgentMail, AgentMessage, AgentMessenger};
+use crate::agents::{AgentMail, AgentMessage, AgentMessenger, KnownUsersRegistry};
 use crate::channels::{
     ChannelFile, ChannelFileMeta, ChannelMessageContent, ChannelOutboundMessage, LocalFileBody,
     MessageReceiver, SendOptions,
@@ -25,6 +25,11 @@ pub struct SendMessageTool {
     /// Agent-to-agent message bus. Set by the daemon in multi-agent mode;
     /// never set (and unused) in single-agent deployments.
     messenger: Arc<OnceLock<Arc<dyn AgentMessenger>>>,
+    /// Known-users registry for cross-user delivery (RFC §3.5: recipient
+    /// `@nick` → contacts check → recipient's user-level mailbox). Set by
+    /// the daemon; `None` in tests/single-agent mode makes `@nick` targets
+    /// error out clearly.
+    known_users: Arc<OnceLock<Arc<KnownUsersRegistry>>>,
 }
 
 impl Default for SendMessageTool {
@@ -37,6 +42,7 @@ impl SendMessageTool {
     pub fn new() -> Self {
         Self {
             messenger: Arc::new(OnceLock::new()),
+            known_users: Arc::new(OnceLock::new()),
         }
     }
 
@@ -44,6 +50,13 @@ impl SendMessageTool {
     /// the `DelegationCoordinator` exists; set-once).
     pub fn set_messenger(&self, messenger: Arc<dyn AgentMessenger>) {
         let _ = self.messenger.set(messenger);
+    }
+
+    /// Install the known-users registry (called by the daemon after the
+    /// registry is loaded; set-once). Enables `recipient=@nick` cross-user
+    /// delivery (RFC §3.5).
+    pub fn set_known_users(&self, known_users: Arc<KnownUsersRegistry>) {
+        let _ = self.known_users.set(known_users);
     }
 
     /// Agent-to-agent delivery (RFC agent-messaging §3).
@@ -172,6 +185,106 @@ impl SendMessageTool {
             }),
         }
     }
+
+    /// Cross-user delivery (RFC §3.5): `recipient=@nick` from the main agent
+    /// context. Resolves the nick (own contacts first, then known users,
+    /// with explicit disambiguation on duplicates), checks the delivery
+    /// verdict against the recipient's contacts table (§4.1), and on
+    /// `Allowed` writes into the recipient's **user-level mailbox** —
+    /// delivered on the recipient's next user interaction (注入即消费), not
+    /// a wake-up. Text-only (P1 scope — no file transfer). Returns an Ack
+    /// to the sender, mirroring §3.5's "已投递(Ack)".
+    async fn execute_cross_user(
+        &self,
+        args: &SendMessageArgs,
+        text: &str,
+        recipient: &str,
+        session: &Session,
+    ) -> anyhow::Result<ToolResult> {
+        if !args.files.is_empty() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(
+                    "cross-user messages support text only (file transfer is not yet supported)"
+                        .to_string(),
+                ),
+            });
+        }
+        if text.trim().is_empty() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("cross-user message requires text".to_string()),
+            });
+        }
+        let Some(known_users) = self.known_users.get() else {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(
+                    "cross-user messaging is not available in this deployment".to_string(),
+                ),
+            });
+        };
+
+        let owner = session.owner.clone();
+        let nick = recipient.trim_start_matches('@');
+        let peer =
+            match crate::agents::commands::friends::resolve_nick_for(known_users, &owner, nick) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(e),
+                    });
+                }
+            };
+        if peer == owner {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("cannot message yourself".to_string()),
+            });
+        }
+        match known_users.delivery_verdict(&owner, &peer) {
+            crate::agents::DeliveryVerdict::Allowed => {
+                known_users.push_user_mail(
+                    &peer,
+                    crate::agents::UserMail {
+                        msg_id: uuid::Uuid::new_v4().to_string(),
+                        sender_user_id: owner.clone(),
+                        sender_nickname: KnownUsersRegistry::nick_of(&owner),
+                        text: text.to_string(),
+                        sent_at: chrono::Utc::now().timestamp_millis() as u64,
+                    },
+                );
+                Ok(ToolResult {
+                    success: true,
+                    output: format!(
+                        "message delivered to {} — shown on their next interaction",
+                        KnownUsersRegistry::nick_of(&peer)
+                    ),
+                    error: None,
+                })
+            }
+            crate::agents::DeliveryVerdict::Blocked => Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!("the recipient {} has blocked you", recipient)),
+            }),
+            // RFC §4.2 工具通道: 未建立关系 → 返回"发送好友请求?"引导,由 bot
+            // 确认后调 friend_request 工具;框架不自动发请求。
+            crate::agents::DeliveryVerdict::NotFriends => Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!(
+                    "you are not friends with {recipient} yet — ask the user whether to send a friend request (use the friend_request tool)"
+                )),
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -293,6 +406,16 @@ impl Tool for SendMessageTool {
         // only legal target is its parent ("parent" or omitted); the main
         // agent targets a running async sub-agent by task_id.
         let is_sub_agent = session.parent_session_id.is_some();
+        // RFC §3.5: cross-user path first — `recipient=@nick` in the main
+        // agent context targets another user through the friend contacts
+        // table (delivered to their user-level mailbox, not to a session).
+        if !is_sub_agent {
+            if let Some(r) = args.recipient.as_deref() {
+                if r.trim_start().starts_with('@') {
+                    return self.execute_cross_user(&args, &text, r, session).await;
+                }
+            }
+        }
         if is_sub_agent || args.recipient.is_some() {
             return self
                 .execute_agent_message(&args, &text, is_sub_agent, session)
@@ -599,5 +722,96 @@ mod tests {
         let tool = SendMessageTool::new();
         let schema = tool.parameters_schema();
         assert!(schema["properties"]["recipient"].is_object());
+    }
+
+    // ── P1 cross-user delivery (RFC §3.5) ────────────────────────────────────
+
+    const ALICE: &str = "qqbot:xiaoer:alice";
+    const BOB: &str = "qqbot:xiaoer:bob";
+
+    fn registered_friends() -> Arc<KnownUsersRegistry> {
+        let reg = Arc::new(KnownUsersRegistry::in_memory());
+        reg.record("qqbot", "xiaoer", "alice", "default");
+        reg.record("qqbot", "xiaoer", "bob", "default");
+        reg.request_friend(ALICE, BOB);
+        assert!(reg.accept_friend(BOB, ALICE));
+        reg
+    }
+
+    fn alice_session() -> Session {
+        let mut session = Session::new("s_alice".into());
+        session.owner = ALICE.to_string();
+        session
+    }
+
+    #[tokio::test]
+    async fn cross_user_delivers_to_friend_mailbox() {
+        let reg = registered_friends();
+        let tool = SendMessageTool::new();
+        tool.set_known_users(Arc::clone(&reg));
+        let session = alice_session();
+
+        let r = tool
+            .execute(
+                serde_json::json!({"text": "你好 bob", "recipient": "@bob"}),
+                &session,
+            )
+            .await
+            .unwrap();
+        assert!(r.success, "{}", err_of(&r));
+        assert!(r.output.contains("delivered"), "{}", r.output);
+
+        // Recipient's user-level mailbox got the mail; drain is once-only.
+        let mails = reg.drain_user_mail(BOB);
+        assert_eq!(mails.len(), 1);
+        assert_eq!(mails[0].text, "你好 bob");
+        assert_eq!(mails[0].sender_user_id, ALICE);
+        assert_eq!(mails[0].sender_nickname, "@alice");
+        assert!(reg.drain_user_mail(BOB).is_empty());
+    }
+
+    #[tokio::test]
+    async fn cross_user_rejected_when_not_friends() {
+        // Registered users but no relationship → NotFriends → guidance error
+        // (RFC §4.2: 引导发送好友请求, 框架不自动发)。
+        let reg = Arc::new(KnownUsersRegistry::in_memory());
+        reg.record("qqbot", "xiaoer", "alice", "default");
+        reg.record("qqbot", "xiaoer", "bob", "default");
+        let tool = SendMessageTool::new();
+        tool.set_known_users(Arc::clone(&reg));
+        let session = alice_session();
+
+        let r = tool
+            .execute(
+                serde_json::json!({"text": "hi", "recipient": "@bob"}),
+                &session,
+            )
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(err_of(&r).contains("not friends"), "{}", err_of(&r));
+        assert!(err_of(&r).contains("friend_request"), "{}", err_of(&r));
+        assert!(reg.drain_user_mail(BOB).is_empty());
+    }
+
+    #[tokio::test]
+    async fn cross_user_rejected_when_blocked() {
+        // Friends first, then bob blocks alice → delivery blocked both ways.
+        let reg = registered_friends();
+        reg.block_friend(BOB, ALICE);
+        let tool = SendMessageTool::new();
+        tool.set_known_users(Arc::clone(&reg));
+        let session = alice_session();
+
+        let r = tool
+            .execute(
+                serde_json::json!({"text": "hi", "recipient": "@bob"}),
+                &session,
+            )
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(err_of(&r).contains("blocked"), "{}", err_of(&r));
+        assert!(reg.drain_user_mail(BOB).is_empty());
     }
 }

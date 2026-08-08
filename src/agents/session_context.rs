@@ -79,6 +79,18 @@ impl SessionContext {
         self.session.lock().await.clone()
     }
 
+    /// Stash rendered per-turn injections (RFC §3.5/§4.3: user-level mailbox
+    /// messages + pending friend requests). Called by `dispatch_turn` right
+    /// before `process_turn`; `Agent::run` injects them into the first LLM
+    /// request and clears the field.
+    pub async fn stash_turn_injections(&self, texts: Vec<String>) {
+        if texts.is_empty() {
+            return;
+        }
+        let mut session = self.session.lock().await;
+        session.turn_injections.extend(texts);
+    }
+
     /// Run one turn end-to-end: acquire the turn lock, replay the
     /// inbound message, resolve `TurnContext` from the session override,
     /// invoke `Agent.run`, and return the result. The caller is

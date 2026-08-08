@@ -254,6 +254,18 @@ impl Agent {
                 }
             }
 
+            // RFC §3.5/§4.3: per-turn injections (user-level mailbox +
+            // pending friend requests), rendered by `dispatch_turn` and
+            // stashed on the session. 注入即消费 — injected into this first
+            // LLM request then cleared; pending requests are re-rendered
+            // every turn by `dispatch_turn` while they remain.
+            if !session.turn_injections.is_empty() {
+                let injections = std::mem::take(&mut session.turn_injections);
+                for text in injections {
+                    messages.push(ChatMessage::user_text(text));
+                }
+            }
+
             let response = {
                 tracing::info!(
                     session = %session.id,

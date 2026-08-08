@@ -102,6 +102,13 @@ pub struct Session {
     /// `None` for top-level sessions only — both sync and async sub-agents
     /// carry it (async ones additionally get an inbox).
     pub sub_agent_task_id: Option<String>,
+    /// Per-turn injected context (RFC §3.5/§4.3): rendered reminders for
+    /// the user-level mailbox (cross-user messages, 注入即消费) and pending
+    /// friend requests. Stashed by `dispatch_turn` (the only place with the
+    /// `KnownUsersRegistry` at hand), injected once by `Agent::run` before
+    /// the first LLM request, then cleared. Pending-request reminders are
+    /// re-stashed every turn while requests remain. Never persisted.
+    pub turn_injections: Vec<String>,
 }
 
 // `Session` cannot derive `Clone` because `Box<dyn TurnStream>` is not
@@ -128,6 +135,7 @@ impl Clone for Session {
             turn_stream: None,
             sub_agent_inbox: self.sub_agent_inbox.clone(),
             sub_agent_task_id: self.sub_agent_task_id.clone(),
+            turn_injections: self.turn_injections.clone(),
         }
     }
 }
@@ -175,6 +183,7 @@ impl Session {
             turn_stream: None,
             sub_agent_inbox: None,
             sub_agent_task_id: None,
+            turn_injections: Vec::new(),
         }
     }
 
