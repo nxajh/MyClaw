@@ -51,7 +51,10 @@ pub use crate::storage::SessionBackend;
 pub use agent::Agent;
 pub use agent_registry::AgentRegistry;
 pub use ask_router::AskRouter;
-pub use known_users::{KnownUser, KnownUsersRegistry};
+pub use known_users::{
+    ContactDirection, ContactEntry, ContactStatus, DeliveryVerdict, KnownUser,
+    KnownUsersRegistry, RequestOutcome, UserMail,
+};
 pub use attachment::AttachmentManager;
 pub use delegation::{AgentMail, AgentMessage, DelegationEvent, render_agent_mail_reminder};
 pub use delegation_coordinator::DelegationCoordinator;
