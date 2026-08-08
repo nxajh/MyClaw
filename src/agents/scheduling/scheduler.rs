@@ -32,7 +32,7 @@ pub type SharedScheduler = Arc<Scheduler>;
 /// A single cron job stored in `jobs.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobEntry {
-    /// Unique ID (12-char hex).
+    /// Unique ID — FQID `<ns>/job/<uuidv7>`; legacy 12-hex ids remain readable.
     pub id: String,
     /// Cron expression (6-field: sec min hour day month weekday).
     /// e.g. "0 0 9 * * *" = every day at 09:00.
@@ -171,6 +171,8 @@ pub struct Scheduler {
     jobs: RwLock<JobsFile>,
     /// Path to jobs.json on disk.
     path: PathBuf,
+    /// Identity namespace for job FQIDs (`<ns>/job/<uuidv7>`).
+    namespace: String,
     /// Last known mtime (for hot-reload detection).
     last_mtime: ParkMutex<Option<SystemTime>>,
     /// Global IANA timezone.
@@ -200,6 +202,7 @@ impl Scheduler {
     /// Loads existing jobs from disk if the file exists.
     pub fn new(
         path: PathBuf,
+        namespace: &str,
         timezone: String,
         heartbeat_config: Option<HeartbeatConfig>,
         distill_config: Option<DistillConfig>,
@@ -239,6 +242,7 @@ impl Scheduler {
         Arc::new(Self {
             jobs: RwLock::new(data),
             path,
+            namespace: namespace.to_string(),
             last_mtime: ParkMutex::new(last_mtime),
             timezone,
             heartbeat_config,
@@ -448,7 +452,7 @@ impl Scheduler {
     /// Add a new job. Returns the generated ID.
     pub fn add_job(&self, mut entry: JobEntry) -> anyhow::Result<String> {
         if entry.id.is_empty() {
-            entry.id = generate_id();
+            entry.id = self.generate_id();
         }
         if entry.created_at.is_none() {
             entry.created_at = Some(chrono::Utc::now().to_rfc3339());
@@ -719,7 +723,7 @@ impl Scheduler {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("run_logs")
-            .join(format!("{}.jsonl", job_id))
+            .join(format!("{}.jsonl", crate::ids::dir_name(job_id)))
     }
 
     /// Append a run record to the job's JSONL log file.
@@ -824,7 +828,7 @@ impl Scheduler {
             }
 
             let entry = JobEntry {
-                id: generate_id(),
+                id: self.generate_id(),
                 schedule,
                 prompt,
                 target,
@@ -1135,15 +1139,10 @@ fn compute_next_run_inner(
     }
 }
 
-/// Generate a random 12-char hex ID.
-fn generate_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("{:012x}", nanos & 0xfffffffffff)
-}
+    /// Generate a new job FQID (`<ns>/job/<uuidv7>`).
+    fn generate_id(&self) -> String {
+        crate::ids::Fqid::new(&self.namespace, crate::ids::TYPE_JOB).to_string()
+    }
 
 // ── Webhook app state ──────────────────────────────────────────────────────
 

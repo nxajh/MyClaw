@@ -920,6 +920,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         let (dummy_tx, _) = tokio::sync::mpsc::channel(1);
         let migrator = crate::agents::scheduling::scheduler::Scheduler::new(
             jobs_json_path.clone(),
+            &config.messaging.namespace,
             tz_name.clone(),
             None,
             None,
@@ -952,6 +953,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
     let shared_scheduler = crate::agents::scheduling::scheduler::Scheduler::new(
         jobs_json_path.clone(),
+        &config.messaging.namespace,
         tz_name.clone(),
         heartbeat_config,
         distill_config,
