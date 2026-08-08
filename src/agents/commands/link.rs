@@ -17,7 +17,7 @@
 //! `/link`.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::agents::commands::friends::{notify_peer, resolve_nick_for};
@@ -46,7 +46,10 @@ struct PendingLink {
 }
 
 /// In-process pending link attempts, keyed by the initiator's routing_key.
-static PENDING_LINKS: Mutex<HashMap<String, PendingLink>> = Mutex::new(HashMap::new());
+/// `LazyLock` because `HashMap::new` is not const (cannot live in a plain
+/// `static Mutex` initializer).
+static PENDING_LINKS: LazyLock<Mutex<HashMap<String, PendingLink>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn now_ms() -> u64 {
     SystemTime::now()
