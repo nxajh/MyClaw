@@ -32,6 +32,7 @@ const LINK_MAX_ATTEMPTS: u32 = 3;
 /// What a successful confirm resolves to: the folded identity the current
 /// routing_key merges into, plus the claimed account's routing key (for
 /// the confirmation notification back on the old channel).
+#[derive(Debug)]
 struct LinkTarget {
     uid: String,
     rk: String,

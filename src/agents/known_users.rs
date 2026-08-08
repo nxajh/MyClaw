@@ -171,6 +171,7 @@ struct LegacyUserEntry {
 
 // ── Registry ────────────────────────────────────────────────────────────────
 
+#[derive(Debug)]
 pub struct KnownUsersRegistry {
     /// routing_key → KnownUser
     users: DashMap<String, KnownUser>,

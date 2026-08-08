@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 /// P3 身份绑定: `set` is also the write path for the `/link` flow (user
 /// proves control of both channels with a one-time code). `persistent()`
 /// snapshots overrides to `{data_dir}/user_resolver.json` on every `set`.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct UserResolver {
     overrides: RwLock<std::collections::HashMap<String, String>>,
     /// Persistence path for overrides (empty = in-memory only, no save).
