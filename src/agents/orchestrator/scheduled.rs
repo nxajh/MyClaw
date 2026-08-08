@@ -289,3 +289,89 @@ async fn send_to_target_internal(
         tracing::warn!(channel = %ch_type, account = %acc_id, err = %e, "failed to send scheduled response");
     }
 }
+
+/// Execute an idle-time memory distillation pass as an independent spawned
+/// task. Pre-flight checks (pending memories, backoff) run inline; the LLM
+/// pass itself runs inside `run_memory_distill`.
+pub(crate) async fn run_distill_task(orch: Arc<OrchestratorCtx>) {
+    use crate::agents::memory_distill::{DistillState, has_pending_user_memories, run_memory_distill};
+
+    let workspace_dir = orch.runtime.defaults.prompt.workspace_dir.clone();
+    if workspace_dir.is_empty() {
+        tracing::warn!("memory_distill: workspace_dir not configured, skipped");
+        return;
+    }
+
+    // Backoff: after 3 consecutive failures, pause for 2 hours.
+    let mut state = DistillState::load(&workspace_dir);
+    if state.in_backoff() {
+        tracing::warn!(
+            failures = state.consecutive_failures,
+            "memory_distill: in backoff, skipped"
+        );
+        return;
+    }
+
+    // Only distill when at least one user memory changed since the last pass.
+    if !has_pending_user_memories(&workspace_dir, state.last_distill_ts.as_deref()) {
+        tracing::debug!("memory_distill: no new user memories, skipped");
+        return;
+    }
+
+    // Resolve the chat provider + default model (same routing as agent turns).
+    let (provider, model_id) = match orch
+        .runtime
+        .providers
+        .get_chat_provider(crate::providers::Capability::Chat)
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::warn!(err = %e, "memory_distill: no chat provider available");
+            return;
+        }
+    };
+
+    // Tool specs for the restricted memory tool set.
+    let tool_specs: Vec<crate::providers::capability_chat::ToolSpec> = [
+        "memory_list",
+        "memory_view",
+        "memory_search",
+        "memory_manage",
+    ]
+    .iter()
+    .filter_map(|name| orch.runtime.tools.get(name))
+    .map(|t| {
+        let s = t.spec();
+        crate::providers::capability_chat::ToolSpec {
+            name: s.name,
+            description: Some(s.description),
+            input_schema: s.parameters,
+        }
+    })
+    .collect();
+    if tool_specs.len() != 4 {
+        tracing::warn!(
+            specs = tool_specs.len(),
+            "memory_distill: memory tools incomplete, skipped"
+        );
+        return;
+    }
+
+    let input = crate::agents::memory_distill::DistillInput {
+        model_id,
+        provider,
+        tool_specs,
+        tool_registry: Arc::clone(&orch.runtime.tools),
+        workspace_dir,
+        registry: Arc::clone(&orch.runtime.providers) as Arc<dyn crate::providers::ProviderRegistry>,
+    };
+
+    let result = run_memory_distill(input).await;
+    let success = result.is_ok();
+    state.record_attempt(success, &orch.runtime.defaults.prompt.workspace_dir);
+    if success {
+        tracing::info!(files_written = result.unwrap_or(0), "memory_distill: pass recorded");
+    } else {
+        tracing::warn!(failures = state.consecutive_failures, "memory_distill: pass failed");
+    }
+}

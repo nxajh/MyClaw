@@ -40,6 +40,7 @@ fn redact_audit_reason(reason: Option<&str>) -> Option<String> {
 
 struct MemoryAudit<'a> {
     user_id: &'a str,
+    scope: &'a str,
     action: &'a str,
     name: &'a str,
     old_hash: Option<String>,
@@ -61,6 +62,7 @@ fn append_memory_audit(workspace_dir: &Path, session: &Session, audit: MemoryAud
         "session_id": session.id,
         "session_owner": session.owner,
         "user_id": audit.user_id,
+        "scope": audit.scope,
         "action": audit.action,
         "memory_name": audit.name,
         "old_hash": audit.old_hash,
@@ -291,6 +293,81 @@ fn best_snippet(mf: &crate::memory::MemoryFile, query: &str, tokens: &[String]) 
 /// Common helper: resolve the user_id from a session via the resolver.
 fn user_id_for(session: &Session, resolver: &UserResolver) -> String {
     resolver.resolve(&session.owner)
+}
+
+/// Resolve the target scope: "user" (default) or "agent".
+fn resolve_scope(args: &serde_json::Value) -> &'static str {
+    match args["scope"].as_str() {
+        Some("agent") => "agent",
+        _ => "user",
+    }
+}
+
+/// Directory for a scope's memory files.
+fn scope_memory_dir(workspace_dir: &Path, scope: &str, user_id: &str) -> PathBuf {
+    if scope == "agent" {
+        workspace_dir.join(crate::memory::MEMORY_DIR_NAME)
+    } else {
+        workspace_dir
+            .join("users")
+            .join(user_id)
+            .join(crate::memory::MEMORY_DIR_NAME)
+    }
+}
+
+/// Scan memory files from a single scope (not merged).
+fn scan_scope(workspace_dir: &Path, scope: &str, user_id: &str) -> Vec<crate::memory::MemoryFile> {
+    crate::memory::scan_memory_files(&scope_memory_dir(workspace_dir, scope, user_id))
+}
+
+// ── PII guard for agent-scope writes ─────────────────────────────────────
+
+/// Check content for user-identifying patterns before an agent-scope write.
+/// This is a conservative bottom-line guard; the distillation prompt is the
+/// primary de-identification mechanism.
+fn scan_agent_pii(content: &str) -> Option<String> {
+    use regex::Regex;
+
+    let patterns: &[(&str, &str)] = &[
+        // Known channel-prefixed routing keys: telegram:myclaw:6270938644,
+        // qqbot:xiaoer:E8CAAE..., client:default:web:0f53a6e9-...
+        (
+            r"\b(?:telegram|qqbot|wechat|whatsapp|slack|discord|client|web|webuser):[a-z0-9_]+:[A-Za-z0-9_:\-]+",
+            "routing_key",
+        ),
+        // Long digit runs (user ids, phone numbers).
+        (r"\b\d{8,}\b", "numeric_identifier"),
+        // Email addresses.
+        (
+            r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}",
+            "email",
+        ),
+        // Chinese mobile numbers (11 digits starting with 1[3-9]).
+        (r"\b1[3-9]\d{9}\b", "phone"),
+    ];
+
+    // Compile once per call; the set is tiny and this path is low-frequency.
+    for (pattern, label) in patterns {
+        if let Ok(re) = Regex::new(pattern) {
+            if re.is_match(content) {
+                return Some(format!(
+                    "Blocked: agent-scope memory contains a user-identifying pattern '{}'. \
+                     Agent memories are shared across users and must be de-identified. \
+                     Remove routing keys, user ids, emails, and phone numbers before writing, \
+                     or use scope='user'.",
+                    label
+                ));
+            }
+        }
+    }
+    None
+}
+
+fn scan_agent_pii_opt(content: &str) -> Result<(), String> {
+    match scan_agent_pii(content) {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
 // ── Threat patterns for memory content scanning ──────────────────────────
@@ -866,7 +943,11 @@ impl Tool for MemoryManageTool {
         "Manage persistent memories. Actions: add (create new entry), replace (update existing), \
          remove (delete entry).\n\nUse add when: user asks to remember something, you discover a \
          stable preference or fact.\nUse replace when: existing memory needs updating.\n\
-         Use remove when: memory is stale or wrong.\n\nConfirm with user before removing memories."
+         Use remove when: memory is stale or wrong.\n\nConfirm with user before removing memories.\n\n\
+         Scopes: 'user' (default) stores the memory in the current user's private layer; 'agent' \
+         stores it in the shared agent layer (cross-user methodology/processes/rules, must be \
+         de-identified). Use 'agent' only for generalizable knowledge without user-specific \
+         identifiers."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -877,6 +958,12 @@ impl Tool for MemoryManageTool {
                     "type": "string",
                     "enum": ["add", "replace", "remove"],
                     "description": "Action to perform."
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["user", "agent"],
+                    "description": "Target layer: 'user' (default) = this user's private memory; \
+                     'agent' = shared cross-user layer (de-identified only)."
                 },
                 "name": {
                     "type": "string",
@@ -971,6 +1058,7 @@ impl MemoryManageTool {
         session: &Session,
     ) -> Result<serde_json::Value, String> {
         validate_name(name)?;
+        let scope = resolve_scope(args);
 
         let content = args["content"]
             .as_str()
@@ -987,12 +1075,15 @@ impl MemoryManageTool {
 
         validate_body_only(content)?;
         scan_memory_content_opt(content)?;
+        if scope == "agent" {
+            scan_agent_pii_opt(content)?;
+        }
 
-        let files = scan_merged(&self.workspace_dir, user_id);
+        let files = scan_scope(&self.workspace_dir, scope, user_id);
         if files.iter().any(|f| f.name == name) {
             return Err(format!(
-                "Memory '{}' already exists. Use 'replace' to update it.",
-                name
+                "Memory '{}' already exists in the {} scope. Use 'replace' to update it.",
+                name, scope
             ));
         }
 
@@ -1007,11 +1098,8 @@ impl MemoryManageTool {
         let frontmatter = build_frontmatter(name, &description, &tags, &mem_type, &inject, &now, None);
         let file_content = format!("{}{}", frontmatter, content);
 
-        let target = self
-            .workspace_dir
-            .join(crate::memory::MEMORY_DIR_NAME)
-            .join(&filename);
-        // Ensure the global memory dir exists
+        let target = scope_memory_dir(&self.workspace_dir, scope, user_id).join(&filename);
+        // Ensure the memory dir exists
         let _ = std::fs::create_dir_all(target.parent().unwrap_or(&target));
         atomic_write(&target, &file_content)
             .map_err(|e| format!("Failed to write memory file: {}", e))?;
@@ -1020,6 +1108,7 @@ impl MemoryManageTool {
             session,
             MemoryAudit {
                 user_id,
+                scope,
                 action: "add",
                 name,
                 old_hash: None,
@@ -1047,12 +1136,13 @@ impl MemoryManageTool {
         session: &Session,
     ) -> Result<serde_json::Value, String> {
         validate_name(name)?;
+        let scope = resolve_scope(args);
 
-        let files = scan_merged(&self.workspace_dir, user_id);
+        let files = scan_scope(&self.workspace_dir, scope, user_id);
         let existing = files
             .iter()
             .find(|f| f.name == name)
-            .ok_or_else(|| format!("Memory '{}' not found.", name))?;
+            .ok_or_else(|| format!("Memory '{}' not found in the {} scope.", name, scope))?;
         let old_hash = std::fs::read_to_string(&existing.path)
             .ok()
             .map(|content| short_sha256(&content));
@@ -1072,6 +1162,9 @@ impl MemoryManageTool {
 
         validate_body_only(content)?;
         scan_memory_content_opt(content)?;
+        if scope == "agent" {
+            scan_agent_pii_opt(content)?;
+        }
 
         // Preserve existing metadata unless overridden
         let mem_type = normalize_optional_filter(args["memory_type"].as_str())
@@ -1118,14 +1211,8 @@ impl MemoryManageTool {
         );
         let file_content = format!("{}{}", frontmatter, content);
 
-        // Write to the same location as the existing file, or global dir if new
-        let target = if existing.path.exists() {
-            existing.path.clone()
-        } else {
-            let dir = self.workspace_dir.join(crate::memory::MEMORY_DIR_NAME);
-            let _ = std::fs::create_dir_all(&dir);
-            dir.join(filename)
-        };
+        // Write to the same location as the existing file.
+        let target = existing.path.clone();
         atomic_write(&target, &file_content)
             .map_err(|e| format!("Failed to write memory file: {}", e))?;
         append_memory_audit(
@@ -1133,6 +1220,7 @@ impl MemoryManageTool {
             session,
             MemoryAudit {
                 user_id,
+                scope,
                 action: "replace",
                 name,
                 old_hash,
@@ -1157,6 +1245,7 @@ impl MemoryManageTool {
         session: &Session,
     ) -> Result<serde_json::Value, String> {
         validate_name(name)?;
+        let scope = resolve_scope(args);
         if args["confirm"].as_bool() != Some(true) {
             return Err(
                 "Removing memory requires confirm=true after explicit user confirmation."
@@ -1164,11 +1253,11 @@ impl MemoryManageTool {
             );
         }
 
-        let files = scan_merged(&self.workspace_dir, user_id);
+        let files = scan_scope(&self.workspace_dir, scope, user_id);
         let existing = files
             .iter()
             .find(|f| f.name == name)
-            .ok_or_else(|| format!("Memory '{}' not found.", name))?;
+            .ok_or_else(|| format!("Memory '{}' not found in the {} scope.", name, scope))?;
         let old_hash = std::fs::read_to_string(&existing.path)
             .ok()
             .map(|content| short_sha256(&content));
@@ -1180,6 +1269,7 @@ impl MemoryManageTool {
             session,
             MemoryAudit {
                 user_id,
+                scope,
                 action: "remove",
                 name,
                 old_hash,

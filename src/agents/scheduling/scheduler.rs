@@ -10,6 +10,7 @@
 //! External code interacts through `SharedScheduler` (Arc<Scheduler>).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -154,6 +155,15 @@ pub struct JobsFile {
 
 // ── Scheduler ───────────────────────────────────────────────────────────────
 
+/// Idle-time memory distillation scheduling config.
+#[derive(Debug, Clone)]
+pub struct DistillConfig {
+    /// No inbound user message for this many seconds before a pass may run.
+    pub idle_secs: u64,
+    /// How often the scheduler fires a distill check (seconds).
+    pub interval_secs: u64,
+}
+
 /// Manages cron job scheduling, storage, and event dispatch.
 /// All data access is through interior mutability (RwLock).
 pub struct Scheduler {
@@ -167,6 +177,10 @@ pub struct Scheduler {
     timezone: String,
     /// Heartbeat config.
     heartbeat_config: Option<HeartbeatConfig>,
+    /// Idle-time distillation config (None = disabled).
+    distill_config: Option<DistillConfig>,
+    /// Unix seconds of the last inbound user message. 0 = never.
+    last_inbound: AtomicU64,
     /// Event channel to orchestrator.
     event_tx: tokio::sync::mpsc::Sender<SchedulerEvent>,
     /// Last channel that received a user message (format
@@ -188,6 +202,7 @@ impl Scheduler {
         path: PathBuf,
         timezone: String,
         heartbeat_config: Option<HeartbeatConfig>,
+        distill_config: Option<DistillConfig>,
         event_tx: tokio::sync::mpsc::Sender<SchedulerEvent>,
         last_channel_file: PathBuf,
         last_recipient_file: PathBuf,
@@ -227,6 +242,8 @@ impl Scheduler {
             last_mtime: ParkMutex::new(last_mtime),
             timezone,
             heartbeat_config,
+            distill_config,
+            last_inbound: AtomicU64::new(0),
             event_tx,
             last_channel: Arc::new(tokio::sync::Mutex::new(last_channel_value)),
             last_channel_file,
@@ -238,7 +255,8 @@ impl Scheduler {
     /// Record the most recent (channel_type, account_id, reply_target)
     /// the orchestrator routed to. Called once per inbound UserMessage
     /// so heartbeat / cron jobs configured with `target = "last"` know
-    /// where to send their output.
+    /// where to send their output. Also stamps `last_inbound` — the idle
+    /// clock for memory distillation.
     pub async fn record_user_message(&self, channel_key: &str, reply_target: &str) {
         {
             let mut lc = self.last_channel.lock().await;
@@ -252,11 +270,46 @@ impl Scheduler {
             *lr = Some(reply_target.to_string());
             let _ = std::fs::write(&self.last_recipient_file, reply_target);
         }
+        let now = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.last_inbound.store(now, Ordering::Relaxed);
     }
 
-    /// Whether the scheduler should run (has heartbeat or cron jobs).
+    /// Whether the scheduler should run (has heartbeat, distill, or cron jobs).
     pub fn should_run(&self) -> bool {
-        self.heartbeat_config.is_some() || !self.jobs.read().jobs.is_empty()
+        self.heartbeat_config.is_some()
+            || self.distill_config.is_some()
+            || !self.jobs.read().jobs.is_empty()
+    }
+
+    /// Distill tick: fire a `Distill` event when the system has been idle
+    /// (no inbound user message) for `idle_secs`. The orchestrator decides
+    /// whether there is actually anything new to distill.
+    async fn maybe_fire_distill(&self) {
+        let Some(cfg) = self.distill_config.as_ref() else {
+            return;
+        };
+        let last_inbound = self.last_inbound.load(Ordering::Relaxed);
+        if last_inbound > 0 {
+            let now = SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if now.saturating_sub(last_inbound) < cfg.idle_secs {
+                tracing::debug!(
+                    idle_secs = cfg.idle_secs,
+                    elapsed_secs = now.saturating_sub(last_inbound),
+                    "memory_distill: skipped, system not idle"
+                );
+                return;
+            }
+        }
+        match self.event_tx.send(SchedulerEvent::Distill).await {
+            Ok(()) => tracing::debug!("memory_distill: distill event sent to orchestrator"),
+            Err(e) => tracing::warn!(err = %e, "failed to send distill event"),
+        }
     }
 
     /// Run the scheduler loop — sends events via mpsc.
@@ -275,14 +328,27 @@ impl Scheduler {
             t
         };
 
+        let mut distill_ticker = self.distill_config.as_ref().map(|cfg| {
+            let mut t = tokio::time::interval(Duration::from_secs(cfg.interval_secs.max(60)));
+            t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            t
+        });
+
         tracing::info!(
             heartbeat = heartbeat_ticker.is_some(),
+            distill = distill_ticker.is_some(),
             cron_jobs = self.jobs.read().jobs.len(),
             "scheduler started (JSON store mode)"
         );
 
         loop {
             tokio::select! {
+                _ = async {
+                    if let Some(t) = distill_ticker.as_mut() { t.tick().await; }
+                    else { std::future::pending::<()>().await; }
+                }, if distill_ticker.is_some() => {
+                    self.maybe_fire_distill().await;
+                }
                 _ = async {
                     if let Some(t) = heartbeat_ticker.as_mut() { t.tick().await; }
                     else { std::future::pending::<()>().await; }

@@ -23,7 +23,7 @@ mod turn;
 
 pub use ctx::{ChannelRegistry, OrchestratorCtx};
 pub use event::OrchestratorEvent;
-pub(crate) use scheduled::run_scheduled_turn;
+pub(crate) use scheduled::{run_cron_task, run_distill_task, run_heartbeat_task, run_scheduled_turn};
 
 use crate::agents::DelegationCoordinator;
 use crate::agents::delegation::DelegationEvent;
@@ -36,7 +36,6 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::agents::session::SessionManager;
-use scheduled::{run_cron_task, run_heartbeat_task};
 
 /// Buffer size for the unified `OrchestratorEvent` channel. Fixed (not
 /// config-exposed) on purpose: this is an internal backpressure bound, not
@@ -71,6 +70,9 @@ pub enum SchedulerEvent {
     },
     /// Cron job matched — run agent with specific prompt.
     Cron(CronTrigger),
+    /// Idle-time memory distillation check (system idle + maybe new
+    /// user memories — the orchestrator verifies before running).
+    Distill,
 }
 
 /// Type alias for the channel message sender.
@@ -611,6 +613,15 @@ impl Orchestrator {
                 tokio::spawn(async move {
                     let _guard = turn_tracker.track();
                     run_cron_task(self_ctx, trigger).await;
+                });
+            }
+            SchedulerEvent::Distill => {
+                tracing::debug!("memory_distill: check triggered (from scheduler)");
+                let self_ctx = self.ctx.clone();
+                let turn_tracker = self.ctx.turn_tracker.clone();
+                tokio::spawn(async move {
+                    let _guard = turn_tracker.track();
+                    run_distill_task(self_ctx).await;
                 });
             }
         }

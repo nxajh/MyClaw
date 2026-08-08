@@ -51,6 +51,7 @@ pub mod agent;
 pub mod channel;
 pub mod filters;
 pub mod mcp;
+pub mod memory;
 pub mod provider;
 pub mod routing;
 pub mod scheduler;
@@ -118,6 +119,10 @@ struct RawConfig {
     /// Scheduler configuration (`[scheduler]`).
     #[serde(default)]
     scheduler: SchedulerConfig,
+
+    /// Memory configuration (`[memory]` — idle-time distillation).
+    #[serde(default)]
+    memory: MemoryConfig,
 
     /// MCP server configurations.
     #[serde(default)]
@@ -288,6 +293,8 @@ pub struct AppConfig {
     pub prompt: PromptConfig,
     /// Scheduler configuration (`[scheduler]`).
     pub scheduler: SchedulerConfig,
+    /// Memory configuration (`[memory]` — idle-time distillation).
+    pub memory: MemoryConfig,
     /// MCP server configurations.
     pub mcp_servers: Vec<McpServerConfig>,
     /// Logging configuration.
@@ -378,6 +385,7 @@ impl ConfigLoader {
             loop_breaker: raw.loop_breaker,
             prompt: raw.prompt,
             scheduler: raw.scheduler,
+            memory: raw.memory,
             mcp_servers: raw.mcp_servers,
             logging: raw.logging,
             safety: raw.safety,

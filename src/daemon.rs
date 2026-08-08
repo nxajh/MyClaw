@@ -888,6 +888,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             jobs_json_path.clone(),
             tz_name.clone(),
             None,
+            None,
             dummy_tx,
             config.workspace_dir.join(".last_channel"),
             config.workspace_dir.join(".last_recipient"),
@@ -905,10 +906,21 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         None
     };
 
+    // Idle-time memory distillation config (None disables the distill tick).
+    let distill_config = if config.memory.distill_enabled {
+        Some(crate::agents::scheduling::scheduler::DistillConfig {
+            idle_secs: config.memory.distill_idle_secs,
+            interval_secs: config.memory.distill_interval_secs,
+        })
+    } else {
+        None
+    };
+
     let shared_scheduler = crate::agents::scheduling::scheduler::Scheduler::new(
         jobs_json_path.clone(),
         tz_name.clone(),
         heartbeat_config,
+        distill_config,
         scheduler_tx.clone(),
         config.workspace_dir.join(".last_channel"),
         config.workspace_dir.join(".last_recipient"),

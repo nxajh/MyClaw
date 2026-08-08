@@ -288,6 +288,12 @@ async fn run_memory_fork_inner(input: ForkInput) -> Result<usize> {
                 if let Some(obj) = args.as_object_mut() {
                     obj.entry("model".to_string())
                         .or_insert_with(|| serde_json::Value::String(input.model_id.clone()));
+                    // Fork memory always lands in the user's private layer. The
+                    // agent layer is populated only by the idle distillation pass.
+                    obj.insert(
+                        "scope".to_string(),
+                        serde_json::Value::String("user".to_string()),
+                    );
                 }
             }
             if call.name == "memory_manage" && args["action"].as_str() == Some("remove") {
@@ -514,6 +520,10 @@ fn build_extraction_prompt(knowledge_dir: &str) -> String {
          \n\
          ## How to save\n\
          Use the `memory_manage` tool with action `add` (new) or `replace` (update). Do not use `remove` from this background fork.\n\
+         All memory_manage calls are forced to `scope='user'` — extracted memories live in THIS user's\n\
+         private layer. Do not judge whether a fact is cross-user generalizable; just record the durable\n\
+         facts of this conversation. The shared agent layer is maintained by a separate distillation\n\
+         process, not by you.\n\
          \n\
          The tool auto-generates YAML frontmatter for you. Pass metadata as tool parameters:\n\
          - name: short_snake_case_name\n\

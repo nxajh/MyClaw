@@ -16,6 +16,7 @@ pub mod loop_breaker;
 mod mcp_manager;
 #[cfg(test)]
 mod media_e2e_test;
+pub mod memory_distill;
 pub mod memory_fork;
 mod orchestrator;
 mod prompt;
