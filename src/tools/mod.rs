@@ -58,7 +58,7 @@ pub use skill_manage_tool::SkillManageTool;
 pub use skill_tool::SkillTool;
 pub use skills_list_tool::SkillsListTool;
 pub use symbol_check::SymbolCheckTool;
-pub use task::{TaskCreateTool, TaskDeleteTool, TaskListTool, TaskState, TaskUpdateTool, SharedTaskState, new_tools as new_task_tools, shared_state as shared_task_state};
+pub use task::{TaskCreateTool, TaskDeleteTool, TaskListTool, TaskState, TaskUpdateTool, SharedTaskState, new_tools as new_task_tools, shared_state as shared_task_state, shared_state_persisted as shared_task_state_persisted};
 pub use tool_search::ToolSearchTool;
 pub use truncation::{truncate_output, truncate_tool_result};
 pub use view_image::ViewImageTool;

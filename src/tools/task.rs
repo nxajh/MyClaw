@@ -22,13 +22,44 @@ pub struct Task {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TaskState {
     pub tasks: Vec<Task>,
     pub next_id: u32,
+    /// Optional JSON persistence target; every mutation is saved to this file.
+    /// Skipped in serialized form — bound at load time, not stored inside it.
+    #[serde(skip)]
+    pub save_path: Option<std::path::PathBuf>,
 }
 
 impl TaskState {
+    /// Load persisted state from disk; returns defaults when missing or unparsable.
+    pub fn load(path: &std::path::Path) -> TaskState {
+        let mut state = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<TaskState>(&content).ok())
+            .unwrap_or_default();
+        state.save_path = Some(path.to_path_buf());
+        state
+    }
+
+    /// Persist to `save_path` when configured; failures are logged, not fatal
+    /// (the in-memory state remains authoritative for the current process).
+    pub fn save(&self) {
+        let Some(path) = self.save_path.as_deref() else { return };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match serde_json::to_string_pretty(self) {
+            Ok(content) => {
+                if let Err(e) = std::fs::write(path, content) {
+                    tracing::warn!(err = %e, path = %path.display(), "task_state: failed to save");
+                }
+            }
+            Err(e) => tracing::warn!(err = %e, "task_state: failed to serialize"),
+        }
+    }
+
     fn next_id(&mut self) -> String {
         self.next_id += 1;
         format!("task_{}", self.next_id)
@@ -102,6 +133,12 @@ pub type SharedTaskState = Arc<RwLock<TaskState>>;
 
 pub fn shared_state() -> SharedTaskState {
     Arc::new(RwLock::new(TaskState::default()))
+}
+
+/// Create shared task state persisted to `path` (loaded at startup, saved on
+/// every mutation) — used by the daemon so tasks survive restarts/hot-switches.
+pub fn shared_state_persisted(path: std::path::PathBuf) -> SharedTaskState {
+    Arc::new(RwLock::new(TaskState::load(&path)))
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +256,7 @@ impl Tool for TaskCreateTool {
             }));
             state.tasks.push(task);
         }
+        state.save();
 
         let result = if created.len() == 1 {
             json!({
@@ -385,12 +423,14 @@ impl Tool for TaskUpdateTool {
         match state.find_task_mut(task_id) {
             Some(task) => {
                 task.status = status.to_string();
+                let subject = task.subject.clone();
+                state.save();
                 Ok(ToolResult {
                     success: true,
                     output: serde_json::to_string(&json!({
                         "ok": true,
                         "task_id": task_id,
-                        "subject": task.subject,
+                        "subject": subject,
                         "new_status": status
                     }))?,
                     error: None,
@@ -464,6 +504,7 @@ impl Tool for TaskDeleteTool {
         let count = ids_to_remove.len();
 
         state.tasks.retain(|t| !ids_to_remove.contains(&t.id));
+        state.save();
 
         Ok(ToolResult {
             success: true,
@@ -569,5 +610,78 @@ mod tests {
             .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_persist_survives_daemon_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.json");
+
+        // "Daemon A": create a goal and a child task — both must hit disk.
+        let state = shared_state_persisted(path.clone());
+        let create = TaskCreateTool { state: Arc::clone(&state) };
+        let goal = create
+            .execute(json!({"subject": "Persisted Goal"}), &make_session())
+            .await
+            .unwrap();
+        assert!(goal.success);
+        let goal_output: Value = serde_json::from_str(&goal.output).unwrap();
+        let goal_id = goal_output["task_id"].as_str().unwrap().to_string();
+
+        let child = create
+            .execute(
+                json!({"subject": "Persisted Child", "parent": goal_id}),
+                &make_session(),
+            )
+            .await
+            .unwrap();
+        assert!(child.success);
+
+        // "Daemon B" (restart): fresh state loaded from disk.
+        let reloaded = TaskState::load(&path);
+        assert_eq!(reloaded.tasks.len(), 2);
+        assert_eq!(reloaded.tasks[0].subject, "Persisted Goal");
+        assert_eq!(reloaded.tasks[0].status, "pending");
+        assert!(
+            reloaded.next_id >= 2,
+            "next_id must survive restart so ids don't collide"
+        );
+
+        // Update through a fresh tool instance persists as well.
+        let updater = TaskUpdateTool { state: Arc::clone(&state) };
+        let updated = updater
+            .execute(
+                json!({"task_id": goal_id, "status": "completed"}),
+                &make_session(),
+            )
+            .await
+            .unwrap();
+        assert!(updated.success);
+        let reloaded_after_update = TaskState::load(&path);
+        assert_eq!(reloaded_after_update.tasks[0].status, "completed");
+
+        // Delete persists too (goal + descendant child).
+        let deleter = TaskDeleteTool { state: Arc::clone(&state) };
+        let deleted = deleter
+            .execute(json!({"task_id": goal_id}), &make_session())
+            .await
+            .unwrap();
+        assert!(deleted.success);
+        assert!(TaskState::load(&path).tasks.is_empty());
+    }
+
+    #[test]
+    fn test_load_defaults_when_file_missing_or_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        // Missing file → defaults.
+        let state = TaskState::load(&dir.path().join("nope.json"));
+        assert!(state.tasks.is_empty());
+        assert_eq!(state.next_id, 0);
+
+        // Corrupt content → defaults.
+        let bad = dir.path().join("bad.json");
+        std::fs::write(&bad, "{not json").unwrap();
+        let state = TaskState::load(&bad);
+        assert!(state.tasks.is_empty());
     }
 }
