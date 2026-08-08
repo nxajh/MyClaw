@@ -464,6 +464,8 @@ fn read_mem_available_kb() -> Option<u64> {
 }
 
 
+#[cfg(test)]
+mod danger_tests {
     use super::shell_has_dangerous_command;
 
     #[test]
