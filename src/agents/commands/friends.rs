@@ -161,7 +161,7 @@ pub async fn cmd_friend_accept(args: &str, ctx: CommandContext<'_>) -> String {
         KnownUsersRegistry::nick_of(ctx.user_id)
     );
     let _ = notify_peer(&ctx, &peer, &ack).await;
-    let _ = ctx.known_users.push_user_mail(
+    ctx.known_users.push_user_mail(
         &peer,
         crate::agents::UserMail {
             msg_id: uuid::Uuid::new_v4().to_string(),
@@ -190,7 +190,7 @@ pub async fn cmd_friend_decline(args: &str, ctx: CommandContext<'_>) -> String {
         KnownUsersRegistry::nick_of(ctx.user_id)
     );
     let _ = notify_peer(&ctx, &peer, &ack).await;
-    let _ = ctx.known_users.push_user_mail(
+    ctx.known_users.push_user_mail(
         &peer,
         crate::agents::UserMail {
             msg_id: uuid::Uuid::new_v4().to_string(),
