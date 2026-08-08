@@ -1041,6 +1041,7 @@ impl ContextEngine {
                         anyhow::bail!("summarizer stream error: {}", message)
                     }
                     StreamEvent::Error(e) => anyhow::bail!("summarizer stream error: {}", e),
+                    StreamEvent::ModelUsed { .. } => {} // informational; summarizer keeps its model_id
                 },
                 Ok(None) => {
                     tracing::warn!("summarizer stream ended without Done event");

@@ -673,6 +673,7 @@ async fn collect_distill_stream(mut stream: BoxStream<StreamEvent>) -> Result<Di
                     anyhow::bail!("memory_distill stream error: {}", message)
                 }
                 StreamEvent::Error(e) => anyhow::bail!("memory_distill stream error: {}", e),
+                StreamEvent::ModelUsed { .. } => {} // informational; distill keeps its model_id
             },
             Ok(None) => {
                 tracing::warn!("memory_distill stream ended without Done event");

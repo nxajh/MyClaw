@@ -456,6 +456,7 @@ async fn collect_fork_stream(mut stream: BoxStream<StreamEvent>) -> Result<ForkR
                     anyhow::bail!("memory_fork stream error: {}", message)
                 }
                 StreamEvent::Error(e) => anyhow::bail!("memory_fork stream error: {}", e),
+                StreamEvent::ModelUsed { .. } => {} // informational; fork keeps its model_id
             },
             Ok(None) => {
                 tracing::warn!("memory_fork stream ended without Done event");

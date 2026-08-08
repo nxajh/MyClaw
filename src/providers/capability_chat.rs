@@ -409,6 +409,10 @@ impl ChatResponse {
                     }
                 }
                 StreamEvent::Usage(u) => usage = Some(u),
+                StreamEvent::ModelUsed { .. } => {
+                    // Non-streaming callers attribute usage to their own
+                    // model_id; the announcement is informational only.
+                }
                 StreamEvent::Done { reason } => {
                     stop_reason = reason;
                     break;
