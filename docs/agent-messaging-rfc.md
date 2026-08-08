@@ -81,14 +81,14 @@ routing_key ──UserRegistry──→ User{ id: u/<uid>, email(唯一,可更�
 
 - **无 pending/匿名状态**:User 只在注册或绑定成功时创建(active)。新 rk 未注册 = 无 User = 被拦截引导,不占位。
 - **新 rk 拦截(gate)**:入站消息登记后,若 rk 无 User 且非白名单命令,直接返回引导文案(框架模板,零 LLM token),不进 agent。白名单:`/register`、`/email`、`/link`、`/link_confirm`、`/help`、`/whoami`。好友通知等框架模板不受影响(不走 agent);群聊中不涉及 agent 的消息不拦。
-- **邮箱验证(混合)**:SMTP 配置存在 → `/register` 发验证码到邮箱,验证后生效;无 SMTP → 声明即生效 + 提示「建议配置 SMTP 加强验证」。
+- **邮箱验证(混合)**:SMTP 配置存在 → `/register` 发验证码到邮箱,验证后生效;无 SMTP → 声明即生效 + 提示「建议配置 SMTP 加强验证」。**实现标注(P4 第二波)**:配置项 `[messaging.smtp]`(host/port/username/password/from,全可选)已解析并支持 `${ENV}` 展开;**发送验证码流程后续波**——当前无 SMTP 配置 → 声明即生效,行为不变。
 - **唯一性**:email 小写归一化,全局唯一,占用即拒绝;`/email set` 可更换(旧 email 释放)。**两个 User 不允许同一 email**。
 - **昵称**:User 属性,用户自设,可重复;解析/消歧仍限已建立关系内(沿用 §2「可重名」安全模型)。
 
 **内部一律 user.id(键与标识分离,硬原则)**:
 
 - **分层**:昵称只存在于用户输入(@提及)与显示(用户可见文本)。agent 上下文、工具参数、API、存储全部只见 user.id。**用户可见的身份引用统一格式 `@昵称(u/uid)`**,如 `@alice(u/alice)`——**@ 为 myclaw 统一实体提及符(当前实体仅用户;未来频道/群组/机器人同用 @,类型由 `u/`、`c/` 等类型段前缀区分)**,显示 `u/uid`(类型段+用户自选句柄),不暴露保留域前缀 `myclaw/`(昵称可重复,带 `u/uid` 才能区分同名;`u/uid` 可直接复制用于命令/工具入参,见「建关系定位」);完整 FQID 只存在于 agent 上下文/工具参数/API/存储层;**用户可见的一切(显示层、命令输出 /whoami、模板提示、错误消息)只到 `u/uid` 为止,myclaw 保留域前缀对用户完全不可见**;**agent 上下文中的身份引用统一格式 `<ref id="myclaw/u/alice"/>`**(标准 XML 风格;防冲突靠 id 全限定前缀 + 标签白名单,见「输出渲染」)。
-- **id 命名空间(全限定 FQID,`保留域/类型/实例` 三段式)**:id 采用 `<namespace>/<类型>/<实例>` 全限定斜杠格式——`<namespace>` 为本系统保留域,取**配置项 `messaging.namespace`(默认 `myclaw`,可改为实例名/品牌;下文示例一律按默认值写作 `myclaw/u/…`)**,可验前缀:不以 `<namespace>/` 开头的 id 一律不认(防注入/防外部系统 id 混入)。类型注册表可扩展:`myclaw/u/<uid>` 用户、`myclaw/c/<cid>` 频道、`myclaw/g/<gid>` 群组(预留)、`myclaw/b/<bid>` 机器人(预留)。**uid 为用户自选句柄**(注册时设定,先到先得):字符规则 `[a-z0-9_]+`(3–32 位),保留字 `root`(及未来系统保留);**不可变**——user.id 是内部键,uid 变则断历史关联,变更功能记后续;类型由 `u/` 前缀表达,无需实例段词缀。前缀即类型,字符串自包含;存储/解析剥保留域后按类型路由到对应 registry(UserRegistry/ChannelRegistry/…)。**适用范围:FQID + `<ref>` 标签 + `@显示名(<类型>/<句柄>)` 为 myclaw 统一实体引用体系**,所有可对话引用实体(用户/频道/群组/机器人,未来含消息)接入时套同一套——各自 registry + 显示名解析 + 渲染,零标签改动;纯内部实现 id(session handle、进程、后台任务)不进入对话空间,不适用。legacy User 固定 id 用合规格式 `myclaw/u/root`(系统首个用户、存量身份锚点,不破坏「user id 均 `<ns>/u/` 开头」约定)。
+- **id 命名空间(全限定 FQID,`保留域/类型/实例` 三段式)**:id 采用 `<namespace>/<类型>/<实例>` 全限定斜杠格式——`<namespace>` 为本系统保留域,取**配置项 `messaging.namespace`(默认 `myclaw`,可改为实例名/品牌;下文示例一律按默认值写作 `myclaw/u/…`)**,可验前缀:不以 `<namespace>/` 开头的 id 一律不认(防注入/防外部系统 id 混入)。**实现标注(P4 第二波)**:`[messaging] namespace` 配置项已实现(默认 `myclaw`),UserRegistry 经 `with_namespace(&data_dir, ns)` 读取;默认值下存量 users.json/resolver 绑定零影响;改 namespace 的存量迁移不做(需重写 users.json 内 id 与 resolver 绑定,记后续波)。类型注册表可扩展:`myclaw/u/<uid>` 用户、`myclaw/c/<cid>` 频道、`myclaw/g/<gid>` 群组(预留)、`myclaw/b/<bid>` 机器人(预留)。**uid 为用户自选句柄**(注册时设定,先到先得):字符规则 `[a-z0-9_]+`(3–32 位),保留字 `root`(及未来系统保留);**不可变**——user.id 是内部键,uid 变则断历史关联,变更功能记后续;类型由 `u/` 前缀表达,无需实例段词缀。前缀即类型,字符串自包含;存储/解析剥保留域后按类型路由到对应 registry(UserRegistry/ChannelRegistry/…)。**适用范围:FQID + `<ref>` 标签 + `@显示名(<类型>/<句柄>)` 为 myclaw 统一实体引用体系**,所有可对话引用实体(用户/频道/群组/机器人,未来含消息)接入时套同一套——各自 registry + 显示名解析 + 渲染,零标签改动;纯内部实现 id(session handle、进程、后台任务)不进入对话空间,不适用。legacy User 固定 id 用合规格式 `myclaw/u/root`(系统首个用户、存量身份锚点,不破坏「user id 均 `<ns>/u/` 开头」约定)。
 - email / nickname 均为**可变属性**,不参与任何内部关联键——改昵称/改邮箱绝不影响历史关联。contacts 表键、mailbox 键、`sender_user_id`、G44 会话发现、UserProfile 路径全部只用 user.id。
 - **建关系入口仅唯一标识(昵称禁用)**:`request_friend` / `accept_friend` / `decline_friend` / `block_friend` 的目标**只能是 user.id 或 email**(两者均全局唯一)。**user.id 入参接受 `u/uid`(类型段+句柄,如 `u/alice`)或完整 FQID(`myclaw/u/alice`)或 email**——`u/uid` 在 UserRegistry 全局唯一;**用户界面(命令输入提示、错误消息)只展示 `u/uid`/email,完整 FQID 为内部形态不展示**(用户复制显示层的 `u/alice` 即可直接用)。昵称不唯一——用它定位陌生人 = 可能加错人 = 把陌生人拉进好友圈,隐私风险,直接拒绝并提示「昵称不唯一,请用 ID 或邮箱」。入参语义全部为唯一标识(`owner_user_id`, `target_user_id`),内部不再做 rk/昵称解析。
 - **agent 工具层只见 id**:`send_message.recipient`、`friend_request.target`、`friend_accept`/`friend_decline` 的 target 参数全部为 user.id 或 email,不再有 @昵称 入参;agent 上下文注入中**不出现任何昵称**,身份仅 `myclaw/u/alice`。P1/P3 时代「工具用 @昵称」的语义废止。
@@ -96,12 +96,12 @@ routing_key ──UserRegistry──→ User{ id: u/<uid>, email(唯一,可更�
   - **建关系定位**(/friend_request、/friend_accept、/friend_decline、/block):只接受 user.id(`u/uid` 或完整 FQID,用户界面只展示 `u/uid`)或 email(唯一),昵称直接拒绝。
   - **消息 @提及**(自由文本引用,统一带 @ 触发):**两种形态,结构判定,无需试探**——① `@昵称`(自然语言,如「通知 @alice 下午3点开会」):**仅限已建立关系内**解析,实时取每个好友当前昵称(`nickname_of(id)`,未设置回退派生昵称)比对,**多命中(重名好友)由框架拦截询问,绝不猜测**;② `@u/uid`(@+类型段+句柄,如 `@u/alice`):UserRegistry 精确解析,不限关系、不做昵称比对。**判定规则:`@` 后以 `u/` 开头 → 按 id 处理;否则 → 按昵称处理**——配合「昵称不允许 `/`」注册校验,结构上无二义,不需要试探匹配或防御规则(以 `u/` 开头查不到即提示未找到,不回退昵称)。**裸 id/email 仅用于命令参数**(见「建关系定位」),自由文本不扫描裸 id。**昵称注册校验:不允许包含 `/`**(唯一约束)。**删除 `ContactEntry.nickname` 快照**——改昵称后 `@新昵称` 立即可匹配、`@旧昵称` 自动失效。
 - 显示层实时取 `nickname_of(user.id)`;**用户可见身份引用统一 `@昵称(u/uid)`**:alice 收到的消息为「@bob(u/bob) 通知你下午3点开会」(@bob 实时取发送方当前昵称,改昵称后历史消息随之显示新名;**不暴露保留域前缀**——昵称可重复,`u/bob`(类型段+句柄)用于区分同名,且可直接复制用于命令/工具入参);`UserMail.sender_nickname` 降级为纯显示字段。
-- **输出渲染(标准 XML 风格标记)**:agent 输出中提及用户一律用**自闭合标签 `<ref id="myclaw/u/alice"/>`**(标准标记语言 + 自定义标签名;约束写死在系统提示与工具描述)。选型理由:(1) XML/HTML 是 LLM 训练语料中出现频率最高的结构化标记,语法熟练度最高;(2) 标签为**通用实体引用** `<ref>`,类型由 id 前缀(`myclaw/u/`、`myclaw/c/`…)表达、不在标签上重复声明——未来新实体类型零标签改动;防冲突为**双层白名单**:标签层只认 `<ref>`(不依赖任何命名空间语法,天然兼容 XML/HTML 文本流),id 层再验 `<namespace>/` 保留域前缀——标签漏写/伪造、外部系统 id 混入都无法通过(LLM 语料中 `[[…]]` 语义混杂,易无意识误用,弃用);(3) 自闭合规避成对闭合风险;(4) 属性天然支持未来扩展。**输出渲染层**解析 `<ref id="…"/>`:先验 id 的 `<namespace>/` 保留域前缀,再按类型前缀路由查对应 registry → 替换为 `@当前昵称(u/alice)`(实时取昵称+类型段+句柄);查不到 → 显示 `@u/alice`(@ 兜底表达用户语义,可复制)。**白名单解析**:只处理 `<ref id="…"/>`(标签白名单),其余 `<…>` 一律原样保留——正文中出现的 wiki 链接、HTML 引用不受影响。属性必须双引号,裸写不匹配即当普通文本(不炸)。聊天回复与 send_message 正文都过渲染层。**不做正则扫描裸 id**(免误伤昵称),标签漏写 = 原样显示 id,属 agent 失误由提示约束。
+- **输出渲染(标准 XML 风格标记)**:agent 输出中提及用户一律用**自闭合标签 `<ref id="myclaw/u/alice"/>`**(标准标记语言 + 自定义标签名;约束写死在系统提示与工具描述)。选型理由:(1) XML/HTML 是 LLM 训练语料中出现频率最高的结构化标记,语法熟练度最高;(2) 标签为**通用实体引用** `<ref>`,类型由 id 前缀(`myclaw/u/`、`myclaw/c/`…)表达、不在标签上重复声明——未来新实体类型零标签改动;防冲突为**双层白名单**:标签层只认 `<ref>`(不依赖任何命名空间语法,天然兼容 XML/HTML 文本流),id 层再验 `<namespace>/` 保留域前缀——标签漏写/伪造、外部系统 id 混入都无法通过(LLM 语料中 `[[…]]` 语义混杂,易无意识误用,弃用);(3) 自闭合规避成对闭合风险;(4) 属性天然支持未来扩展。**输出渲染层**解析 `<ref id="…"/>`:先验 id 的 `<namespace>/` 保留域前缀,再按类型前缀路由查对应 registry → 替换为 `@当前昵称(u/alice)`(实时取昵称+类型段+句柄);查不到 → 显示 `@u/alice`(@ 兜底表达用户语义,可复制)。**白名单解析**:只处理 `<ref id="…"/>`(标签白名单),其余 `<…>` 一律原样保留——正文中出现的 wiki 链接、HTML 引用不受影响。属性必须双引号,裸写不匹配即当普通文本(不炸)。聊天回复与 send_message 正文都过渲染层。**实现标注(P4 第二波)**:已实现 `agents/mention.rs` `render_refs` + `RefRenderer`(流式缓冲防跨 chunk 切标签);接线 agent 回复三处——流式 chunk(RefRenderer 逐段)、Done push 与 fallback send(collect_stream 返回 text 整段渲染,同源);send_message 正文(UserMail.text)保持 `<ref>` 内部形态进对方 agent 上下文(仅其回复时渲染,符合「agent 上下文只见 id 标记」)。**不做正则扫描裸 id**(免误伤昵称),标签漏写 = 原样显示 id,属 agent 失误由提示约束。
 - P3 `migrate_identity` 的「昵称跟随折叠身份」补丁删除——peer 键重指 user.id 后,显示/匹配自然实时取新身份的昵称。
 
 **入站 @提及 预解析(自然语言场景,框架层负责)**:
 
-- 场景:「通知 @alice 下午3点开会」——@alice 出现在**自由文本**里,不是结构化命令;用户也可写 `@u/alice` 精确指定。**由框架在 gate 之后、消息进 agent 上下文之前统一解析**,agent 永远接触不到未解析的 @提及(LLM 猜 id = 发错人风险,禁止)。
+- 场景:「通知 @alice 下午3点开会」——@alice 出现在**自由文本**里,不是结构化命令;用户也可写 `@u/alice` 精确指定。**由框架在 gate 之后、消息进 agent 上下文之前统一解析**,agent 永远接触不到未解析的 @提及(LLM 猜 id = 发错人风险,禁止)。**实现标注(P4 第二波)**:`MentionPreParse` 拦截器挂 chain 第 6 位(SlashCommand 之后、DispatchTurn 之前),chain 6→7 元素。
 - 机制:对入站用户消息文本扫描 @提及,逐个按「消息 @提及」规则解析(**`@` 后以 `u/` 开头 → UserRegistry 精确解析(@u/alice),不限关系;否则 → 关系内实时昵称比对,多命中拦截询问**);命中则**原位替换为 `<ref id="myclaw/u/alice"/>` 标签**进 agent 上下文——agent 只见 id 标记、不见昵称;标记渲染见「输出渲染」。
 - **解析失败不进 agent**(框架模板回复,零 token):(1) 多命中重名 → 「@alice 有多个用户,请给出唯一标识」;(2) 未注册/未命中 → 「未找到 @alice,ta 尚未与本 bot 互动,无法通知;可让 ta 先发条消息或 /register」。
 - **好友校验不在这里做**:解析层单一职责(提及→id),「你们还不是好友」由 send_message 工具内 contacts 检查拦截,agent 收到拒绝后可主动发起 friend_request 引导——行为闭环。
@@ -364,7 +364,22 @@ bob 侧:   contacts["<bob_user_id>"]["<alice_user_id>"] = { "status": "accepted"
 - [x] 显示实时化:删 ContactEntry.nickname 快照,改昵称后提醒/列表实时显示 `@昵称(u/uid)`;`/whoami` 显示 u/uid + email/nickname + 统计与注册引导
 - [x] 全量测试 + clippy `-D warnings` 通过（run 31264854208 全绿,719 passed）
 
-第二波(未做,如实区分):**@提及 预解析**(入站 `@昵称`/`@u/uid` 自由文本解析 + 输出渲染层 `<ref id="myclaw/u/…"/>` → `@昵称(u/uid)`);**SMTP 邮箱验证**(当前无 SMTP 配置 → 声明即生效;配置项待加 myclaw.toml);**`messaging.namespace` 配置项**(暂用常量 `myclaw`);uid 变更(定不可变,不做);解绑/注销 User(不做)。
+改动(第二波,已实现):
+- `agents/mention.rs`(新):`render_refs`(整段输出渲染,白名单 `<ref id="…"/>` → `@昵称(u/uid)`,查不到/无昵称 → `@u/uid`,非本 namespace 或非白名单标签原样保留)+ `RefRenderer`(流式缓冲:尾部未闭合 `<ref…` 前缀暂存等补全,其余立即渲染流出,flush 原样)+ `resolve_mentions`(入站 `@昵称`/`@u/uid` 自由文本扫描:`u/` 前缀 → UserRegistry 精确解析不限关系;否则 → 关系内 Accepted 实时昵称比对,0 命中/多命中 → Failed 模板;邮箱防御 `a@b.com` 跳过;token 终止符空白/标点,`/` 保留支持 `u/uid`)
+- `agents/orchestrator/inbound.rs`:`MentionPreParse` 拦截器挂 chain 第 6 位(SlashCommand 之后、DispatchTurn 之前;chain 6→7 元素,chain_order_is_pinned 同步更新);解析成功原位替换 `<ref id="…"/>` 进 agent 上下文,失败框架模板回复(零 token)
+- `agents/runtime.rs`:`AgentRuntime.user_registry: Option<Arc<UserRegistry>>` + `with_user_registry`(不影响 new 调用点)
+- `agents/agent.rs`:`collect_stream` 加 `user_registry` 参数;chunk 过 RefRenderer、返回 text 整段 render_refs(Done push / fallback send / history 同源,已渲染)
+- `config/mod.rs`:`MessagingConfig`(`namespace` 默认 `myclaw`)+ `SmtpConfig`(host/port/username/password/from 全 Option,支持 `${ENV}` 展开);`AppConfig.messaging`
+- `daemon.rs`:UserRegistry 改 `with_namespace(&data_dir, &config.messaging.namespace)`(默认 myclaw 存量零影响)+ agent_runtime `.with_user_registry(...)`
+
+验收(第二波):
+- [x] 入站 `@u/uid` 精确解析不限关系;`@昵称` 仅关系内实时昵称比对;未找到/重名多命中 → 框架模板拦截(零 token);邮箱 `a@b.com` 不误伤(单测 `resolve_*` 9 项)
+- [x] 输出渲染:流式 chunk 跨 chunk 切割 `<ref id=…/>` 不残留标签(RefRenderer 缓冲);Done/fallback 整段渲染 `@昵称(u/uid)`;查不到 → `@u/uid`;非白名单标签/非本 namespace 原样保留(单测 `render_refs_*` / `ref_renderer_*` 6 项)
+- [x] chain 顺序测试同步更新(6→7 元素,mention_preparse 在 slash_command 与 dispatch_turn 之间)
+- [x] `[messaging] namespace` 配置项生效(默认 myclaw,存量 users.json/resolver 绑定零影响);`[messaging.smtp]` 仅解析(发送验证码流程后续,无 SMTP 声明即生效保持不变)
+- [x] 全量测试 + clippy `-D warnings` 通过(run 待补号)
+
+仍未做(如实区分):**SMTP 发送验证码流程**(配置项已解析,发送/验证后续波);**uid 变更**(定不可变,不做);**解绑/注销 User**(不做);**改 messaging.namespace 的存量迁移**(RFC §2.2 说明,默认值下零影响)。
 
 ## 7. 待决(不阻塞 P0)
 

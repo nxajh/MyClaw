@@ -19,6 +19,7 @@ use crate::agents::loop_breaker::LoopBreaker;
 use crate::agents::mcp_manager::McpManager;
 use crate::agents::prompt::SystemPromptConfig;
 use crate::agents::tool_executor::ToolExecutor;
+use crate::agents::user_registry::UserRegistry;
 use crate::agents::workspace::skills::SkillManager;
 use crate::config::agent::PermissionMode;
 use crate::providers::ProviderRegistry;
@@ -93,6 +94,11 @@ pub struct AgentRuntime {
     /// that were executing when the daemon was killed (e.g. `myclaw update`).
     /// `None` in tests / CLI mode — marker logic is skipped.
     pub sessions_dir: Option<PathBuf>,
+    /// P4 第二波：User registry for `<ref>` output rendering (streaming + Done +
+    /// fallback send). `None` in tests / CLI mode — rendering degrades to the
+    /// `@u/uid` fallback (render_refs accepts `Option`-less registry; callers
+    /// skip rendering entirely when this is `None`).
+    pub user_registry: Option<Arc<UserRegistry>>,
 }
 
 impl AgentRuntime {
@@ -120,6 +126,7 @@ impl AgentRuntime {
             search_cooldown: None,
             task_state: None,
             sessions_dir: None,
+            user_registry: None,
         }
     }
 
@@ -148,6 +155,13 @@ impl AgentRuntime {
 
     pub fn with_sessions_dir(mut self, dir: PathBuf) -> Self {
         self.sessions_dir = Some(dir);
+        self
+    }
+
+    /// P4 第二波：install the shared UserRegistry so agent replies can render
+    /// `<ref id="…"/>` → `@昵称(u/uid)` on streaming/Done/fallback paths.
+    pub fn with_user_registry(mut self, registry: Arc<UserRegistry>) -> Self {
+        self.user_registry = Some(registry);
         self
     }
 

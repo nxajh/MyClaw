@@ -983,7 +983,12 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
     // P4 用户实体注册表（uid/email/nickname，users.json）。存量 identity
     // 一次性迁移归 `myclaw/u/root`（幂等：root 已存在即跳过）。
-    let user_registry = Arc::new(crate::agents::UserRegistry::persistent(&data_dir));
+    // P4 第二波：namespace 取自 `[messaging] namespace`（默认 myclaw，存量
+    // users.json/resolver 绑定零影响；改 namespace 的迁移见 RFC §2.2，本波不做）。
+    let user_registry = Arc::new(crate::agents::UserRegistry::with_namespace(
+        &data_dir,
+        &config.messaging.namespace,
+    ));
     user_registry.migrate_legacy_to_root(&known_users, &user_resolver);
 
     // Build tool registry (all built-in + MCP + skill tools + ask_user).
@@ -1280,6 +1285,8 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         .with_search_cooldown(Arc::clone(&search_cooldown))
         .with_task_state(task_state)
         .with_sessions_dir(config.workspace_dir.join("sessions"))
+        // P4 第二波：注册表供输出渲染（`<ref>` → `@昵称(u/uid)`，流式/Done/fallback）。
+        .with_user_registry(Arc::clone(&user_registry))
     };
 
     // DelegationCoordinator was constructed before the runtime existed

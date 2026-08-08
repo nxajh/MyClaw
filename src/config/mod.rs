@@ -136,6 +136,10 @@ struct RawConfig {
     /// Safety configuration (`[safety]` — protected paths).
     #[serde(default)]
     safety: SafetyConfig,
+
+    /// Messaging configuration (`[messaging]` — @提及 namespace + SMTP).
+    #[serde(default)]
+    messaging: MessagingConfig,
 }
 
 // ── LoggingConfig ─────────────────────────────────────────────────────────────
@@ -182,8 +186,7 @@ fn default_protected_paths() -> Vec<String> {
 
 impl SafetyConfig {
     /// Check if a path matches any protected pattern.
-    pub fn is_protected(&self, path: &Path) -> bool {
-        let path_str = path.to_string_lossy();
+    pub fn is_protected(&self, path: &Path) -> bool {        let path_str = path.to_string_lossy();
         let expanded_path = shellexpand::tilde(&path_str).to_string();
         let expanded_path = Path::new(&expanded_path);
 
@@ -195,6 +198,56 @@ impl SafetyConfig {
         }
         false
     }
+}
+
+// ── MessagingConfig（P4 第二波：@提及 namespace + SMTP 配置项） ──────────────
+
+/// Messaging configuration (`[messaging]`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessagingConfig {
+    /// Identity namespace for user refs (`<ref id="{namespace}/u/…"/>`).
+    /// Defaults to `"myclaw"`. Changing it later requires migrating
+    /// persisted `users.json` / resolver bindings (see RFC §2.2).
+    #[serde(default = "default_messaging_namespace")]
+    pub namespace: String,
+    /// SMTP settings for verification-code email (RFC §2.2「混合验证」).
+    /// Parsed only — the send-verification-code flow is a later phase.
+    #[serde(default)]
+    pub smtp: SmtpConfig,
+}
+
+impl Default for MessagingConfig {
+    fn default() -> Self {
+        Self {
+            // 无 `[messaging]` 段时 serde 走 Default —— namespace 必须落
+            // 默认 "myclaw"（空串会让 `<ref id="/u/…"/>` 无效）。
+            namespace: "myclaw".to_string(),
+            smtp: SmtpConfig::default(),
+        }
+    }
+}
+
+/// Default `[messaging] namespace` — `"myclaw"`.
+fn default_messaging_namespace() -> String {
+    "myclaw".to_string()
+}
+
+/// SMTP configuration (`[messaging.smtp]`). All fields optional — without a
+/// host, identity binding falls back to the "declaration takes effect
+/// immediately" mode (RFC §2.2), which stays unchanged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SmtpConfig {
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+    /// From address for verification emails (e.g. `noreply@example.com`).
+    #[serde(default)]
+    pub from: Option<String>,
 }
 
 /// Simple glob matching supporting `*` (any chars except `/`) and `**` (any chars including `/`).
@@ -302,6 +355,8 @@ pub struct AppConfig {
     pub logging: LoggingConfig,
     /// Safety configuration (`[safety]` — protected paths).
     pub safety: SafetyConfig,
+    /// Messaging configuration (`[messaging]` — @提及 namespace + SMTP).
+    pub messaging: MessagingConfig,
 }
 
 use std::sync::OnceLock;
@@ -390,6 +445,7 @@ impl ConfigLoader {
             mcp_servers: raw.mcp_servers,
             logging: raw.logging,
             safety: raw.safety,
+            messaging: raw.messaging,
         })
     }
 
@@ -457,6 +513,20 @@ impl ConfigLoader {
             for (_, account) in tg.accounts.iter_mut() {
                 account.bot_token = Self::expand_string(&account.bot_token);
             }
+        }
+
+        // Expand messaging SMTP fields (passwords/usernames commonly come from env).
+        if let Some(ref mut host) = config.messaging.smtp.host {
+            *host = Self::expand_string(host);
+        }
+        if let Some(ref mut username) = config.messaging.smtp.username {
+            *username = Self::expand_string(username);
+        }
+        if let Some(ref mut password) = config.messaging.smtp.password {
+            *password = Self::expand_string(password);
+        }
+        if let Some(ref mut from) = config.messaging.smtp.from {
+            *from = Self::expand_string(from);
         }
     }
 
@@ -670,5 +740,44 @@ output = ["text"]
         assert!(!glob_match("**/.env", "/home/user/project/.env.local"));
         assert!(glob_match("**/.env.*", "/home/user/project/.env.local"));
         assert!(glob_match("~/.myclaw/myclaw.toml", "~/.myclaw/myclaw.toml"));
+    }
+
+    #[test]
+    fn test_messaging_namespace_defaults_to_myclaw() {
+        // 无 [messaging] 段 → namespace 默认 "myclaw"
+        let config = ConfigLoader::from_toml("").unwrap();
+        assert_eq!(config.messaging.namespace, "myclaw");
+        assert!(config.messaging.smtp.host.is_none());
+    }
+
+    #[test]
+    fn test_messaging_namespace_and_smtp_parse() {
+        unsafe {
+            std::env::set_var("TEST_SMTP_PASSWORD", "smtp-secret");
+        }
+        let toml_str = r#"
+[messaging]
+namespace = "brand"
+
+[messaging.smtp]
+host = "smtp.example.com"
+port = 587
+username = "noreply@example.com"
+password = "${TEST_SMTP_PASSWORD}"
+from = "noreply@example.com"
+"#;
+        let config = ConfigLoader::from_toml(toml_str).unwrap();
+        assert_eq!(config.messaging.namespace, "brand");
+        let smtp = &config.messaging.smtp;
+        assert_eq!(smtp.host.as_deref(), Some("smtp.example.com"));
+        assert_eq!(smtp.port, Some(587));
+        assert_eq!(smtp.username.as_deref(), Some("noreply@example.com"));
+        // ${ENV} 展开
+        assert_eq!(smtp.password.as_deref(), Some("smtp-secret"));
+        assert_eq!(smtp.from.as_deref(), Some("noreply@example.com"));
+
+        unsafe {
+            std::env::remove_var("TEST_SMTP_PASSWORD");
+        }
     }
 }

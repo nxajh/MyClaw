@@ -48,13 +48,14 @@ trait Interceptor: Send + Sync {
 }
 
 /// The ordered interceptor chain. Terminal stage (`DispatchTurn`) must be last.
-fn chain() -> [&'static dyn Interceptor; 6] {
+fn chain() -> [&'static dyn Interceptor; 7] {
     [
         &AskReply,
         &Callback,
         &CrashRecovery,
         &Gate,
         &SlashCommand,
+        &MentionPreParse,
         &DispatchTurn,
     ]
 }
@@ -428,6 +429,65 @@ impl Interceptor for SlashCommand {
     }
 }
 
+// ── MentionPreParse（P4 第二波：入站 @提及 预解析） ──────────────────────────
+
+/// RFC §2.2 入站 @提及 预解析：在 gate 之后、消息进 agent 上下文之前统一解析
+/// 自由文本中的 `@昵称` / `@u/uid`，原位替换为 `<ref id="…"/>` 标签——agent 只
+/// 见 id 标记、不见昵称（LLM 猜 id = 发错人风险，禁止）。
+/// 解析失败（未找到 / 重名多命中）→ 框架模板回复（零 token），不进 agent。
+/// 好友校验不在此层——「你们还不是好友」由 send_message 工具内 contacts 检查。
+struct MentionPreParse;
+
+#[async_trait]
+impl Interceptor for MentionPreParse {
+    fn name(&self) -> &'static str {
+        "mention_preparse"
+    }
+    async fn handle(
+        &self,
+        ctx: &OrchestratorCtx,
+        key: &SessionKey,
+        msg: ChannelInboundMessage,
+    ) -> Flow {
+        // Gate 已放行注册用户；防御性跳过未注册（避免解析层报「未找到」）。
+        let sk = key.to_string();
+        let owner = ctx.known_users.resolve_uid(&sk);
+        if !ctx.user_registry.is_user_id(&owner) {
+            return Flow::Next(msg);
+        }
+        if !msg.content.text.contains('@') {
+            return Flow::Next(msg);
+        }
+        let text = msg.content.text.clone();
+        match crate::agents::mention::resolve_mentions(
+            &text,
+            &owner,
+            &ctx.known_users,
+            &ctx.user_registry,
+        ) {
+            crate::agents::mention::MentionResolution::Resolved(new_text) => {
+                let mut msg = msg;
+                msg.content.text = new_text;
+                Flow::Next(msg)
+            }
+            crate::agents::mention::MentionResolution::Failed(reply) => {
+                if let Some(ch) = ctx.channel(&key.account_key()) {
+                    let out = ChannelOutboundMessage {
+                        receiver: MessageReceiver::new(msg.receiver.id.clone())
+                            .with_reply_to(msg.id.clone()),
+                        content: ChannelMessageContent::text(reply),
+                        options: Default::default(),
+                    };
+                    if let Err(e) = ch.send_message(&out).await {
+                        tracing::warn!(session = %key, err = %e, "mention: reply send failed");
+                    }
+                }
+                Flow::Stop
+            }
+        }
+    }
+}
+
 // ── DispatchTurn (terminal) ───────────────────────────────────────────────────
 
 /// Terminal interceptor: record the inbound message, persist it, and spawn the
@@ -600,6 +660,7 @@ mod tests {
                 "crash_recovery",
                 "gate",
                 "slash_command",
+                "mention_preparse",
                 "dispatch_turn",
             ]
         );

@@ -14,8 +14,10 @@ use crate::agents::{RegisterError, UserRegistry};
 
 /// 解析目标参数（`u/uid`、完整 user.id、或邮箱）为完整 user.id（FQID）。
 ///
-/// 好友命令、`/link`、工具层共用（P4 第一波：只支持 id/email；`@昵称`
-/// 解析属第二波，这里给出明确报错而不是静默误判）。目标必须已注册。
+/// 好友命令、`/link`、工具层共用（P4 第一波：只支持 id/email）。`@昵称`
+/// 仅存在于聊天自由文本（MentionPreParse 已实现），命令/工具参数禁用
+/// 昵称（昵称不唯一，用它定位陌生人可能加错人），这里给出明确报错。
+/// 目标必须已注册。
 pub(crate) fn parse_target(user_registry: &UserRegistry, arg: &str) -> Result<String, String> {
     let arg = arg.trim();
     if arg.is_empty() {
@@ -39,10 +41,12 @@ pub(crate) fn parse_target(user_registry: &UserRegistry, arg: &str) -> Result<St
             "未找到用户 u/{uid}（对方尚未注册身份，无法作为目标；让对方先 /register）"
         ));
     }
-    // `@` 前缀 = @提及 形态（`@昵称`/`@u/uid`），属 P4 第二波，明确报错。
+    // `@` 前缀 = @提及 形态（`@昵称`/`@u/uid`），只存在于自由文本（MentionPreParse
+    // 已实现），命令/工具层按「建关系定位」规则禁用昵称（RFC §2.2: 昵称不唯一，
+    // 用它定位陌生人可能加错人），明确报错引导 u/uid 或邮箱。
     if arg.starts_with('@') {
         return Err(
-            "暂不支持 @昵称 解析（P4 第二波接入），请用 u/uid 或邮箱，如 u/alice".to_string(),
+            "命令/工具参数不支持 @昵称（昵称不唯一），请用 u/uid 或邮箱，如 u/alice；@提及 仅用于聊天消息".to_string(),
         );
     }
     if arg.contains('@') {
@@ -194,8 +198,8 @@ mod tests {
         assert!(parse_target(&reg, "bob@example.com")
             .unwrap_err()
             .contains("未找到"));
-        // @昵称 = P4 第二波，明确报错。
-        assert!(parse_target(&reg, "@小艾").unwrap_err().contains("第二波"));
+        // @昵称 = 命令/工具层禁用（昵称不唯一，仅聊天自由文本支持），明确报错。
+        assert!(parse_target(&reg, "@小艾").unwrap_err().contains("不支持 @昵称"));
         assert!(parse_target(&reg, "bob").unwrap_err().contains("无法识别"));
         assert!(parse_target(&reg, "").unwrap_err().contains("不能为空"));
     }

@@ -22,6 +22,7 @@ use crate::agents::loop_breaker::{LoopBreak, LoopBreakReason};
 use crate::agents::session::Session;
 use crate::agents::turn::{TurnContext, TurnResult};
 use crate::agents::turn_event::TurnEvent;
+use crate::agents::user_registry::UserRegistry;
 use crate::config::sub_agent::SubAgentConfig;
 use crate::providers::capability_chat::{
     ChatMessage, ChatMessageUsage, ChatRequest, StopReason, ToolSpec,
@@ -294,7 +295,13 @@ impl Agent {
                         stream: true,
                     };
                     let stream = provider.chat(req)?;
-                    match collect_stream(stream, &mut session.turn_stream).await {
+                    match collect_stream(
+                        stream,
+                        &mut session.turn_stream,
+                        runtime.user_registry.as_ref(),
+                    )
+                    .await
+                    {
                         Ok(resp) => break Ok(resp),
                         Err(e) if attempt < MAX_LLM_RETRIES && is_transient_llm_error(&e) => {
                             attempt += 1;
@@ -1217,9 +1224,14 @@ async fn push_or_drop(
 /// `session.turn_stream.push(…)` as text streams in (RFC §7.6).
 /// Simplified compared to `AgentLoop::collect_stream_inner` — no
 /// max_output_bytes guard, no cancellation token.
+///
+/// `user_registry` (P4 第二波): when present, chunks are rendered through
+/// [`RefRenderer`] and the final text through [`render_refs`] so `<ref id="…"/>`
+/// tags surface as `@昵称(u/uid)`. `None` (tests/CLI) → passthrough.
 async fn collect_stream(
     stream: BoxStream<StreamEvent>,
     turn_stream: &mut Option<Box<dyn crate::channels::TurnStream>>,
+    user_registry: Option<&Arc<UserRegistry>>,
 ) -> anyhow::Result<CollectedResponse> {
     let mut stream = stream;
     let mut text = String::new();
@@ -1230,6 +1242,7 @@ async fn collect_stream(
     let mut usage: Option<crate::providers::ChatUsage> = None;
     let mut actual_model: Option<String> = None;
     let mut received_first_chunk = false;
+    let mut ref_renderer = crate::agents::mention::RefRenderer::new();
 
     let stop_reason = loop {
         let event_opt = if !received_first_chunk {
@@ -1280,10 +1293,15 @@ async fn collect_stream(
         match event {
             StreamEvent::Delta { text: delta } => {
                 text.push_str(&delta);
+                // P4 第二波：显示层渲染（跨 chunk 缓冲 `<ref …` 前缀）。
+                let out_delta = match user_registry {
+                    Some(r) => ref_renderer.push(&delta, r.as_ref()),
+                    None => delta.clone(),
+                };
                 push_or_drop(
                     turn_stream,
                     TurnEvent::Chunk {
-                        delta: delta.clone(),
+                        delta: out_delta,
                     },
                 )
                 .await;
@@ -1395,7 +1413,15 @@ async fn collect_stream(
     }
 
     Ok(CollectedResponse {
-        text,
+        text: match user_registry {
+            Some(r) => {
+                // P4 第二波：整段渲染（含 flush 未闭合前缀）——Done/fallback 同源。
+                let mut full = text;
+                full.push_str(&ref_renderer.flush());
+                crate::agents::mention::render_refs(&full, r.as_ref())
+            }
+            None => text,
+        },
         reasoning_content,
         thinking_signature,
         tool_calls,
@@ -1693,7 +1719,7 @@ mod tests {
             },
         ]);
         let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
-        let resp = match collect_stream(s, &mut turn_stream).await {
+        let resp = match collect_stream(s, &mut turn_stream, None).await {
             Ok(r) => r,
             Err(e) => panic!("should succeed without signature: {e}"),
         };
@@ -1720,7 +1746,7 @@ mod tests {
             },
         ]);
         let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
-        let resp = match collect_stream(s, &mut turn_stream).await {
+        let resp = match collect_stream(s, &mut turn_stream, None).await {
             Ok(r) => r,
             Err(e) => panic!("should succeed: {e}"),
         };
@@ -1741,7 +1767,7 @@ mod tests {
             },
         ]);
         let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
-        let resp = match collect_stream(s, &mut turn_stream).await {
+        let resp = match collect_stream(s, &mut turn_stream, None).await {
             Ok(r) => r,
             Err(e) => panic!("should succeed: {e}"),
         };
@@ -1768,7 +1794,7 @@ mod tests {
             },
         ]);
         let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
-        let resp = match collect_stream(s, &mut turn_stream).await {
+        let resp = match collect_stream(s, &mut turn_stream, None).await {
             Ok(r) => r,
             Err(e) => panic!("should succeed: {e}"),
         };
@@ -1789,7 +1815,7 @@ mod tests {
             },
         ]);
         let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
-        let resp = match collect_stream(s, &mut turn_stream).await {
+        let resp = match collect_stream(s, &mut turn_stream, None).await {
             Ok(r) => r,
             Err(e) => panic!("should succeed: {e}"),
         };
@@ -1808,7 +1834,7 @@ mod tests {
         }]);
         let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
         assert!(
-            collect_stream(s, &mut turn_stream).await.is_err(),
+            collect_stream(s, &mut turn_stream, None).await.is_err(),
             "truncated stream (no completion marker) must error"
         );
     }
@@ -1827,7 +1853,7 @@ mod tests {
         ]);
         let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
         assert!(
-            collect_stream(s, &mut turn_stream).await.is_err(),
+            collect_stream(s, &mut turn_stream, None).await.is_err(),
             "provider Error must fail the turn"
         );
     }

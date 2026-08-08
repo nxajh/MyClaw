@@ -13,6 +13,7 @@ pub mod known_users;
 pub mod error;
 pub mod llm_stream;
 pub mod loop_breaker;
+pub mod mention;
 mod mcp_manager;
 #[cfg(test)]
 mod media_e2e_test;
