@@ -455,6 +455,62 @@ impl ShellTool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Low-memory protection for heavy build commands
+// ---------------------------------------------------------------------------
+
+/// Available-memory threshold (in KB) below which heavy build commands are
+/// rejected. 512 MB = 524 288 KB.
+const HEAVY_BUILD_MEM_THRESHOLD_KB: u64 = 512 * 1024;
+
+/// Build-tool commands that can consume large amounts of memory. Their
+/// execution is blocked when available memory is below the threshold to
+/// avoid OOM situations that could crash the daemon — and, on a
+/// memory-starved host, trigger a hot-switch avalanche.
+const HEAVY_BUILD_COMMANDS: &[&str] = &["cargo", "rustc", "make", "cmake"];
+
+/// Check whether a shell command string contains a heavy build command
+/// (cargo / rustc / make / cmake). Returns the matched basename so the caller
+/// can include it in the error message.
+///
+/// Splits on shell control operators (`|`, `&`, `;`, newline) and checks the
+/// first token (command basename) of each segment — the same approach as
+/// `tool_executor::shell_has_dangerous_command`. This correctly handles
+/// pipelines: `echo foo && cargo test` is flagged (cargo starts a segment)
+/// while `echo cargo` is not.
+fn shell_has_heavy_build_command(command: &str) -> Option<&'static str> {
+    for segment in command.split(['|', '&', ';', '\n']) {
+        let segment = segment.trim();
+        let first_token = match segment.split_whitespace().next() {
+            Some(t) => t,
+            None => continue,
+        };
+        // Strip path prefix (e.g. /home/user/.cargo/bin/cargo → cargo)
+        let basename = first_token.rsplit('/').next().unwrap_or(first_token);
+        if let Some(matched) = HEAVY_BUILD_COMMANDS
+            .iter()
+            .copied()
+            .find(|c| basename == *c)
+        {
+            return Some(matched);
+        }
+    }
+    None
+}
+
+/// Read the `MemAvailable` value (in KB) from `/proc/meminfo`.
+///
+/// Returns `None` on non-Linux systems or if the file / field is unavailable,
+/// in which case the low-memory check is skipped (fail-open).
+fn available_memory_kb() -> Option<u64> {
+    let content = std::fs::read_to_string("/proc/meminfo").ok()?;
+    content
+        .lines()
+        .find_map(|line| line.strip_prefix("MemAvailable:"))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|n| n.parse::<u64>().ok())
+}
+
 #[async_trait]
 impl Tool for ShellTool {
     fn name(&self) -> &str {
@@ -499,6 +555,36 @@ impl Tool for ShellTool {
         let command = args["command"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'command' is required"))?;
+
+        // Low-memory protection: reject heavy build commands (cargo / rustc /
+        // make / cmake) when available memory is below the threshold. This
+        // guards against OOM situations that could crash the daemon — see the
+        // "no local build on micro" deployment rule. The check fails open: if
+        // /proc/meminfo is unreadable the command is allowed through. Placed
+        // before the background / foreground / checkpoint branches so all
+        // execution paths are covered.
+        if let Some(cmd_name) = shell_has_heavy_build_command(command) {
+            if let Some(avail_kb) = available_memory_kb() {
+                if avail_kb < HEAVY_BUILD_MEM_THRESHOLD_KB {
+                    tracing::warn!(
+                        cmd = %cmd_name,
+                        avail_kb,
+                        threshold_kb = HEAVY_BUILD_MEM_THRESHOLD_KB,
+                        "blocking heavy build command due to low memory"
+                    );
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!(
+                            "{} rejected: insufficient memory \
+                             (<512MB available) on this host. Use CI instead.",
+                            cmd_name
+                        )),
+                    });
+                }
+            }
+        }
+
         let background = args["background"].as_bool().unwrap_or(false);
         let workdir = args["workdir"].as_str();
 
@@ -1203,5 +1289,101 @@ mod tests {
         assert!(parsed[1].completed);
         assert_eq!(parsed[1].stdout, "world");
         assert_eq!(parsed[1].exit_code, Some(0));
+    }
+
+    // -- low-memory protection helpers -------------------------------------
+
+    #[test]
+    fn heavy_build_detects_cargo() {
+        assert_eq!(
+            shell_has_heavy_build_command("cargo build --release"),
+            Some("cargo")
+        );
+    }
+
+    #[test]
+    fn heavy_build_detects_rustc_make_cmake() {
+        assert_eq!(
+            shell_has_heavy_build_command("rustc --edition 2021 main.rs"),
+            Some("rustc")
+        );
+        assert_eq!(shell_has_heavy_build_command("make -j4"), Some("make"));
+        assert_eq!(
+            shell_has_heavy_build_command("cmake -B build -S ."),
+            Some("cmake")
+        );
+    }
+
+    #[test]
+    fn heavy_build_detects_in_pipeline() {
+        // `&&` continuation → cargo starts a segment.
+        assert_eq!(
+            shell_has_heavy_build_command("echo hi && cargo test"),
+            Some("cargo")
+        );
+        // Pipe → cargo starts a segment.
+        assert_eq!(
+            shell_has_heavy_build_command("ls | cargo fmt"),
+            Some("cargo")
+        );
+        // Newline separator.
+        assert_eq!(
+            shell_has_heavy_build_command("echo a\ncmake --build ."),
+            Some("cmake")
+        );
+    }
+
+    #[test]
+    fn heavy_build_detects_full_path() {
+        assert_eq!(
+            shell_has_heavy_build_command("/home/user/.cargo/bin/cargo build"),
+            Some("cargo")
+        );
+        assert_eq!(
+            shell_has_heavy_build_command("/usr/bin/make install"),
+            Some("make")
+        );
+    }
+
+    #[test]
+    fn heavy_build_no_match_for_substrings() {
+        // Exact basename match only.
+        assert_eq!(shell_has_heavy_build_command("cargocheck 1.2.3"), None);
+        assert_eq!(shell_has_heavy_build_command("makefile --foo"), None);
+        assert_eq!(shell_has_heavy_build_command("cmake-builder"), None);
+        assert_eq!(shell_has_heavy_build_command("rustc-analyzer check"), None);
+    }
+
+    #[test]
+    fn heavy_build_no_match_for_echo_grep() {
+        // cargo/rustc appear as arguments, not as the command basename.
+        assert_eq!(shell_has_heavy_build_command("echo cargo build"), None);
+        assert_eq!(shell_has_heavy_build_command("grep -r rustc src/"), None);
+        assert_eq!(shell_has_heavy_build_command("ls | grep cmake"), None);
+    }
+
+    #[test]
+    fn heavy_build_no_match_for_normal_commands() {
+        assert_eq!(shell_has_heavy_build_command("ls -la"), None);
+        assert_eq!(shell_has_heavy_build_command("git status"), None);
+        assert_eq!(shell_has_heavy_build_command("cat README.md"), None);
+    }
+
+    #[test]
+    fn heavy_build_empty_and_whitespace() {
+        assert_eq!(shell_has_heavy_build_command(""), None);
+        assert_eq!(shell_has_heavy_build_command("   "), None);
+        assert_eq!(shell_has_heavy_build_command("&&&&"), None);
+    }
+
+    #[test]
+    fn available_memory_readable_on_linux() {
+        // /proc/meminfo is always present on Linux (the only supported host).
+        // Assert Some(…) rather than a specific value.
+        if std::fs::metadata("/proc/meminfo").is_ok() {
+            let mem = available_memory_kb();
+            assert!(mem.is_some(), "MemAvailable should be parseable");
+            assert!(mem.unwrap() > 0, "available memory should be positive");
+        }
     }
 }
