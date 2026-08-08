@@ -743,6 +743,11 @@ impl Scheduler {
             }
         }
     }
+
+    /// Generate a new job FQID (`<ns>/job/<uuidv7>`).
+    fn generate_id(&self) -> String {
+        crate::ids::Fqid::new(&self.namespace, crate::ids::TYPE_JOB).to_string()
+    }
 }
 
 // ── Persistence ─────────────────────────────────────────────────────────────
@@ -1138,11 +1143,6 @@ fn compute_next_run_inner(
         }
     }
 }
-
-    /// Generate a new job FQID (`<ns>/job/<uuidv7>`).
-    fn generate_id(&self) -> String {
-        crate::ids::Fqid::new(&self.namespace, crate::ids::TYPE_JOB).to_string()
-    }
 
 // ── Webhook app state ──────────────────────────────────────────────────────
 

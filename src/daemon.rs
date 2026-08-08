@@ -500,6 +500,7 @@ async fn build_tools(
     ask_router: Arc<crate::agents::AskRouter>,
     known_users: &Arc<crate::agents::KnownUsersRegistry>,
     user_registry: &Arc<crate::agents::UserRegistry>,
+    namespace: &str,
 ) -> (
     ToolRegistry,
     Arc<tokio::sync::RwLock<crate::tools::TaskState>>,
@@ -521,13 +522,13 @@ async fn build_tools(
     // Keep the Arc to SendMessageTool: the daemon later wires the
     // agent-to-agent bus into it (multi-agent mode) via `set_messenger`.
     let send_message_tool = Arc::new(crate::tools::SendMessageTool::with_namespace(
-        &config.messaging.namespace,
+        namespace,
     ));
     tools.register(Arc::clone(&send_message_tool) as Arc<dyn crate::providers::Tool>);
     tools.register(Arc::new(crate::tools::ListDirTool::new()));
     let task_state = crate::tools::shared_task_state_persisted(
         workspace_dir.join(".state").join("tasks.json"),
-        &config.messaging.namespace,
+        namespace,
     );
     for tool in crate::tools::new_task_tools(Arc::clone(&task_state)) {
         tools.register(tool);
@@ -575,7 +576,7 @@ async fn build_tools(
     let friend_ctx = Arc::new(crate::tools::FriendToolsCtx::with_namespace(
         Arc::clone(known_users),
         Arc::clone(user_registry),
-        &config.messaging.namespace,
+        namespace,
     ));
     tools.register(Arc::new(crate::tools::FriendRequestTool::new(Arc::clone(
         &friend_ctx,
@@ -1011,6 +1012,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         Arc::clone(&ask_router),
         &known_users,
         &user_registry,
+        &config.messaging.namespace,
     )
     .await;
     // P1 cross-user delivery (RFC §3.5): give send_message access to the
