@@ -137,7 +137,11 @@ struct RawConfig {
     #[serde(default)]
     safety: SafetyConfig,
 
-    /// Messaging configuration (`[messaging]` — @提及 namespace + SMTP).
+    /// System configuration (`[system]` — identity namespace).
+    #[serde(default)]
+    system: SystemConfig,
+
+    /// Messaging configuration (`[messaging]` — SMTP).
     #[serde(default)]
     messaging: MessagingConfig,
 }
@@ -200,36 +204,42 @@ impl SafetyConfig {
     }
 }
 
-// ── MessagingConfig（P4 第二波：@提及 namespace + SMTP 配置项） ──────────────
+// ── SystemConfig（[system] — 实例级 namespace） ──────────────────────────────
 
-/// Messaging configuration (`[messaging]`).
+/// System configuration (`[system]`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessagingConfig {
+pub struct SystemConfig {
     /// Identity namespace for user refs (`<ref id="{namespace}/u/…"/>`).
     /// Defaults to `"myclaw"`. Changing it later requires migrating
     /// persisted `users.json` / resolver bindings (see RFC §2.2).
-    #[serde(default = "default_messaging_namespace")]
+    #[serde(default = "default_system_namespace")]
     pub namespace: String,
-    /// SMTP settings for verification-code email (RFC §2.2「混合验证」).
-    /// Parsed only — the send-verification-code flow is a later phase.
-    #[serde(default)]
-    pub smtp: SmtpConfig,
 }
 
-impl Default for MessagingConfig {
+impl Default for SystemConfig {
     fn default() -> Self {
         Self {
-            // 无 `[messaging]` 段时 serde 走 Default —— namespace 必须落
+            // 无 `[system]` 段时 serde 走 Default —— namespace 必须落
             // 默认 "myclaw"（空串会让 `<ref id="/u/…"/>` 无效）。
             namespace: "myclaw".to_string(),
-            smtp: SmtpConfig::default(),
         }
     }
 }
 
-/// Default `[messaging] namespace` — `"myclaw"`.
-fn default_messaging_namespace() -> String {
+/// Default `[system] namespace` — `"myclaw"`.
+fn default_system_namespace() -> String {
     "myclaw".to_string()
+}
+
+// ── MessagingConfig（[messaging] — SMTP 配置项） ─────────────────────────────
+
+/// Messaging configuration (`[messaging]`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MessagingConfig {
+    /// SMTP settings for verification-code email (RFC §2.2「混合验证」).
+    /// Parsed only — the send-verification-code flow is a later phase.
+    #[serde(default)]
+    pub smtp: SmtpConfig,
 }
 
 /// SMTP configuration (`[messaging.smtp]`). All fields optional — without a
@@ -355,7 +365,9 @@ pub struct AppConfig {
     pub logging: LoggingConfig,
     /// Safety configuration (`[safety]` — protected paths).
     pub safety: SafetyConfig,
-    /// Messaging configuration (`[messaging]` — @提及 namespace + SMTP).
+    /// System configuration (`[system]` — identity namespace).
+    pub system: SystemConfig,
+    /// Messaging configuration (`[messaging]` — SMTP).
     pub messaging: MessagingConfig,
 }
 
@@ -445,6 +457,7 @@ impl ConfigLoader {
             mcp_servers: raw.mcp_servers,
             logging: raw.logging,
             safety: raw.safety,
+            system: raw.system,
             messaging: raw.messaging,
         })
     }
@@ -743,20 +756,20 @@ output = ["text"]
     }
 
     #[test]
-    fn test_messaging_namespace_defaults_to_myclaw() {
-        // 无 [messaging] 段 → namespace 默认 "myclaw"
+    fn test_system_namespace_defaults_to_myclaw() {
+        // 无 [system] 段 → namespace 默认 "myclaw"
         let config = ConfigLoader::from_toml("").unwrap();
-        assert_eq!(config.messaging.namespace, "myclaw");
+        assert_eq!(config.system.namespace, "myclaw");
         assert!(config.messaging.smtp.host.is_none());
     }
 
     #[test]
-    fn test_messaging_namespace_and_smtp_parse() {
+    fn test_system_namespace_and_messaging_smtp_parse() {
         unsafe {
             std::env::set_var("TEST_SMTP_PASSWORD", "smtp-secret");
         }
         let toml_str = r#"
-[messaging]
+[system]
 namespace = "brand"
 
 [messaging.smtp]
@@ -767,7 +780,7 @@ password = "${TEST_SMTP_PASSWORD}"
 from = "noreply@example.com"
 "#;
         let config = ConfigLoader::from_toml(toml_str).unwrap();
-        assert_eq!(config.messaging.namespace, "brand");
+        assert_eq!(config.system.namespace, "brand");
         let smtp = &config.messaging.smtp;
         assert_eq!(smtp.host.as_deref(), Some("smtp.example.com"));
         assert_eq!(smtp.port, Some(587));

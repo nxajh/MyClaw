@@ -698,7 +698,7 @@ fn build_session_backend(
     let sessions_dir = config.workspace_dir.join("sessions");
     match crate::storage::JsonFileBackend::open_with_namespace(
         &sessions_dir,
-        &config.messaging.namespace,
+        &config.system.namespace,
     ) {
         Ok(backend) => {
             tracing::info!(path = %sessions_dir.display(), "session storage opened");
@@ -706,7 +706,7 @@ fn build_session_backend(
         }
         Err(e) => {
             tracing::warn!(err = %e, "failed to open session storage, falling back to in-memory");
-            Arc::new(InMemoryBackend::with_namespace(&config.messaging.namespace))
+            Arc::new(InMemoryBackend::with_namespace(&config.system.namespace))
         }
     }
 }
@@ -925,7 +925,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         let (dummy_tx, _) = tokio::sync::mpsc::channel(1);
         let migrator = crate::agents::scheduling::scheduler::Scheduler::new(
             jobs_json_path.clone(),
-            &config.messaging.namespace,
+            &config.system.namespace,
             tz_name.clone(),
             None,
             None,
@@ -958,7 +958,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
     let shared_scheduler = crate::agents::scheduling::scheduler::Scheduler::new(
         jobs_json_path.clone(),
-        &config.messaging.namespace,
+        &config.system.namespace,
         tz_name.clone(),
         heartbeat_config,
         distill_config,
@@ -993,11 +993,11 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
     // P4 用户实体注册表（uid/email/username，users.json）。存量 identity
     // 一次性迁移归 `myclaw/u/root`（幂等：root 已存在即跳过）。
-    // P4 第二波：namespace 取自 `[messaging] namespace`（默认 myclaw，存量
+    // P4 第二波：namespace 取自 `[system] namespace`（默认 myclaw，存量
     // users.json/resolver 绑定零影响；改 namespace 的迁移见 RFC §2.2，本波不做）。
     let user_registry = Arc::new(crate::agents::UserRegistry::with_namespace(
         &data_dir,
-        &config.messaging.namespace,
+        &config.system.namespace,
     ));
     user_registry.migrate_legacy_to_root(&known_users, &user_resolver);
 
@@ -1012,7 +1012,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         Arc::clone(&ask_router),
         &known_users,
         &user_registry,
-        &config.messaging.namespace,
+        &config.system.namespace,
     )
     .await;
     // P1 cross-user delivery (RFC §3.5): give send_message access to the
@@ -1092,7 +1092,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             sub_agent_registry.clone(),
             Arc::clone(&session_manager),
             config.workspace_dir.join("worktrees"),
-            &config.messaging.namespace,
+            &config.system.namespace,
         );
         let delegator_arc = Arc::new(delegator);
 
