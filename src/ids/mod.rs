@@ -93,14 +93,14 @@ impl Fqid {
     }
 
     /// 完整字符串形态 `<ns>/<type>/<uuid>`。
-    pub fn to_string(&self) -> String {
+    pub fn as_str(&self) -> String {
         format!("{}/{}/{}", self.namespace, self.type_seg, self.uuid)
     }
 }
 
 impl std::fmt::Display for Fqid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.to_string())
+        write!(f, "{}/{}/{}", self.namespace, self.type_seg, self.uuid)
     }
 }
 
