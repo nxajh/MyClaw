@@ -32,7 +32,7 @@ pub(crate) fn parse_target(user_registry: &UserRegistry, arg: &str) -> Result<St
         if uid.is_empty() {
             return Err("目标不能为空（用 u/uid 或邮箱，如 u/alice）".to_string());
         }
-        if let Some(user) = user_registry.find_by_uid(&uid) {
+        if let Some(user) = user_registry.find_by_uid(uid) {
             return Ok(user.user_id(user_registry.namespace()));
         }
         return Err(format!(
