@@ -211,29 +211,46 @@ impl Agent {
                 messages = compacted;
             }
 
-            // RFC agent-messaging §3.4: drain the sub-agent inbox before
+            // RFC agent-messaging §3.4/§3.7: drain the sub-agent inbox before
             // this LLM request so parent → sub messages are visible on the
             // next tool round. Injected as a `<system-reminder>` user message
             // (not persisted to history — the tool-loop alternation stays
             // clean and injection is consumption). Placement is deliberately
             // AFTER compaction so a compaction pass cannot drop the batch.
-            if let Some(inbox) = &session.sub_agent_inbox {
+            // §3.7: if the batch exceeds the per-round budget, only the
+            // newest complete messages are injected and the older remainder
+            // is re-queued for a later round (never dropped, never truncated).
+            if let Some(mailbox) = &session.sub_agent_inbox {
                 let mut pending = Vec::new();
                 {
-                    let mut rx = inbox.lock().await;
+                    let mut rx = mailbox.rx.lock().await;
                     while let Ok(mail) = rx.try_recv() {
                         pending.push(mail);
                     }
                 }
                 if !pending.is_empty() {
-                    tracing::info!(
-                        session = %session.id,
-                        count = pending.len(),
-                        "injecting sub-agent inbox messages before LLM request"
-                    );
-                    messages.push(ChatMessage::user_text(
-                        crate::agents::delegation::render_agent_mail_reminder(&pending),
-                    ));
+                    let (kept, deferred) =
+                        crate::agents::delegation::select_within_injection_budget(pending);
+                    if !deferred.is_empty() {
+                        tracing::warn!(
+                            session = %session.id,
+                            deferred = deferred.len(),
+                            "inbox batch over injection budget; deferring older messages to a later round"
+                        );
+                        for mail in deferred {
+                            let _ = mailbox.tx.send(mail).await;
+                        }
+                    }
+                    if !kept.is_empty() {
+                        tracing::info!(
+                            session = %session.id,
+                            count = kept.len(),
+                            "injecting sub-agent inbox messages before LLM request"
+                        );
+                        messages.push(ChatMessage::user_text(
+                            crate::agents::delegation::render_agent_mail_reminder(&kept),
+                        ));
+                    }
                 }
             }
 

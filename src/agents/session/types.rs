@@ -2,12 +2,10 @@
 
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
-
 use super::backend::PersistHook;
 use super::session_override::SessionOverride;
 use crate::agents::attachment::AttachmentManager;
-use crate::agents::delegation::AgentMail;
+use crate::agents::delegation::SubAgentMailbox;
 use crate::agents::tokens::TokenTracker;
 use crate::channels::{Channel, ChannelInboundMessage, PersistedChannelMessage, TurnStream};
 use crate::providers::capability_chat::ChatMessage;
@@ -95,9 +93,11 @@ pub struct Session {
     /// Inbox for parent → sub messages (RFC agent-messaging §3). Present
     /// only while an **async** sub-agent runs; `Agent::run` drains it before
     /// every LLM request and injects the batch as a `<system-reminder>`.
-    /// The mpsc receiver is wrapped so `Session` stays cheaply cloneable
+    /// The mailbox is wrapped in `Arc` so `Session` stays cheaply cloneable
     /// (snapshots share the same inbox handle — never drained by a clone).
-    pub sub_agent_inbox: Option<Arc<Mutex<tokio::sync::mpsc::Receiver<AgentMail>>>>,
+    /// §3.7: batches over the per-round budget keep only the newest
+    /// complete messages; the older remainder is re-queued via `tx`.
+    pub sub_agent_inbox: Option<Arc<SubAgentMailbox>>,
     /// The sub-agent's own task_id (identity for sub→parent messages).
     /// `None` for top-level sessions only — both sync and async sub-agents
     /// carry it (async ones additionally get an inbox).

@@ -29,7 +29,7 @@ use dashmap::DashMap;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::agents::delegation::{AgentMail, AgentMessage, DelegationEvent};
+use crate::agents::delegation::{AgentMail, AgentMessage, DelegationEvent, SubAgentMailbox};
 use crate::agents::session::{BackendPersistHook, PersistHook, SessionManager};
 use crate::config::sub_agent::AgentIsolation;
 
@@ -287,7 +287,7 @@ impl DelegationCoordinator {
         session_key: Option<&'a str>,
         reply_target: Option<&'a str>,
         timeout_secs: u64,
-        inbox: Option<mpsc::Receiver<AgentMail>>,
+        inbox: Option<SubAgentMailbox>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'a>>
     {
         Box::pin(async move {
@@ -423,8 +423,8 @@ impl DelegationCoordinator {
                 // for sub→parent messages is set for BOTH sync and async
                 // sub-agents (a sync sub-agent can message its parent, it
                 // just cannot receive messages — no inbox).
-                if let Some(rx) = inbox {
-                    session.sub_agent_inbox = Some(Arc::new(tokio::sync::Mutex::new(rx)));
+                if let Some(mailbox) = inbox {
+                    session.sub_agent_inbox = Some(Arc::new(mailbox));
                 }
                 session.sub_agent_task_id = Some(task_id.clone());
             }
@@ -590,8 +590,8 @@ impl DelegationCoordinator {
             let undelivered: Vec<String> = {
                 let session = sub_ctx.session.lock().await;
                 match &session.sub_agent_inbox {
-                    Some(inbox) => {
-                        let mut rx = inbox.lock().await;
+                    Some(mailbox) => {
+                        let mut rx = mailbox.rx.lock().await;
                         let mut out = Vec::new();
                         while let Ok(mail) = rx.try_recv() {
                             out.push(mail.text);
@@ -692,6 +692,10 @@ impl DelegationCoordinator {
         // parent's `send_message(recipient=task_id)` can reach it. The
         // sender is dropped when the map entry is removed at completion.
         let (mail_tx, mail_rx) = mpsc::channel(SUB_AGENT_INBOX_CAPACITY);
+        let mailbox = SubAgentMailbox {
+            tx: mail_tx.clone(),
+            rx: tokio::sync::Mutex::new(mail_rx),
+        };
         self.mailboxes.insert(task_id.clone(), mail_tx);
         let mailboxes = Arc::clone(&self.mailboxes);
 
@@ -707,7 +711,7 @@ impl DelegationCoordinator {
                     Some(&session_key_owned),
                     Some(&reply_target_owned),
                     timeout_secs,
-                    Some(mail_rx),
+                    Some(mailbox),
                 )
                 .await;
 
