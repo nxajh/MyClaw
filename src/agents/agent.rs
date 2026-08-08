@@ -1109,14 +1109,14 @@ fn exec_marker_write(sessions_dir: Option<&std::path::Path>, session_id: &str, c
     let Some(dir) = sessions_dir else {
         return;
     };
-    let path = dir.join(session_id).join(".exec_marker");
+    let path = dir.join(crate::ids::dir_name(session_id)).join(".exec_marker");
     let _ = std::fs::write(&path, call_id);
 }
 
 /// Read the call_id from `.exec_marker`, or `None` if absent.
 fn exec_marker_read(sessions_dir: Option<&std::path::Path>, session_id: &str) -> Option<String> {
     let dir = sessions_dir?;
-    let path = dir.join(session_id).join(".exec_marker");
+    let path = dir.join(crate::ids::dir_name(session_id)).join(".exec_marker");
     std::fs::read_to_string(&path).ok()
 }
 
@@ -1125,7 +1125,7 @@ fn exec_marker_clear(sessions_dir: Option<&std::path::Path>, session_id: &str) {
     let Some(dir) = sessions_dir else {
         return;
     };
-    let path = dir.join(session_id).join(".exec_marker");
+    let path = dir.join(crate::ids::dir_name(session_id)).join(".exec_marker");
     let _ = std::fs::remove_file(&path);
 }
 
@@ -1870,7 +1870,7 @@ mod tests {
         assert!(exec_marker_read(Some(sessions_dir), session_id).is_none());
 
         // Write a marker.
-        std::fs::create_dir_all(sessions_dir.join(session_id)).unwrap();
+        std::fs::create_dir_all(sessions_dir.join(crate::ids::dir_name(session_id))).unwrap();
         exec_marker_write(Some(sessions_dir), session_id, "call_xyz");
 
         // Read it back.
@@ -1899,7 +1899,7 @@ mod tests {
         let sessions_dir = tmp.path();
         let session_id = "test_guard_session";
 
-        std::fs::create_dir_all(sessions_dir.join(session_id)).unwrap();
+        std::fs::create_dir_all(sessions_dir.join(crate::ids::dir_name(session_id))).unwrap();
         exec_marker_write(Some(sessions_dir), session_id, "call_guard");
 
         {

@@ -123,7 +123,9 @@ pub fn write_session_file(
     bytes: &[u8],
     mime_type: Option<&str>,
 ) -> std::io::Result<SavedSessionFile> {
-    let dir = sessions_root.join(session_id).join("files");
+    let dir = sessions_root
+        .join(crate::ids::dir_name(session_id))
+        .join("files");
     std::fs::create_dir_all(&dir)?;
     let path = std::path::Path::new(preferred_name);
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
@@ -146,7 +148,10 @@ pub fn write_session_file(
     }
     std::fs::rename(&tmp, &final_path)?;
     Ok(SavedSessionFile {
-        path: format!("sessions/{session_id}/files/{candidate}"),
+        path: format!(
+            "sessions/{}/files/{candidate}",
+            crate::ids::dir_name(session_id)
+        ),
         file_name: candidate,
         mime_type: mime_type.map(str::to_string),
         size_bytes: bytes.len() as u64,

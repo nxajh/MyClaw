@@ -691,14 +691,17 @@ fn build_session_backend(
     config: &crate::config::AppConfig,
 ) -> Arc<dyn crate::storage::SessionBackend> {
     let sessions_dir = config.workspace_dir.join("sessions");
-    match crate::storage::JsonFileBackend::open(&sessions_dir) {
+    match crate::storage::JsonFileBackend::open_with_namespace(
+        &sessions_dir,
+        &config.messaging.namespace,
+    ) {
         Ok(backend) => {
             tracing::info!(path = %sessions_dir.display(), "session storage opened");
             Arc::new(backend)
         }
         Err(e) => {
             tracing::warn!(err = %e, "failed to open session storage, falling back to in-memory");
-            Arc::new(InMemoryBackend::new())
+            Arc::new(InMemoryBackend::with_namespace(&config.messaging.namespace))
         }
     }
 }

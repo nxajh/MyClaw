@@ -21,17 +21,22 @@ pub struct InMemoryBackend {
     messages: RwLock<HashMap<String, Vec<ChatMessage>>>,
     summaries: RwLock<HashMap<String, Vec<SummaryRecord>>>,
     active: RwLock<HashMap<String, String>>,
-    counter: std::sync::atomic::AtomicU32,
+    namespace: String,
 }
 
 impl InMemoryBackend {
     pub fn new() -> Self {
+        Self::with_namespace(crate::ids::DEFAULT_NAMESPACE)
+    }
+
+    /// In-memory backend generating session FQIDs under `namespace`.
+    pub fn with_namespace(namespace: &str) -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
             messages: RwLock::new(HashMap::new()),
             summaries: RwLock::new(HashMap::new()),
             active: RwLock::new(HashMap::new()),
-            counter: std::sync::atomic::AtomicU32::new(0),
+            namespace: namespace.to_string(),
         }
     }
 }
@@ -48,8 +53,7 @@ impl SessionBackend for InMemoryBackend {
         owner: &str,
         display_name: Option<&str>,
     ) -> std::io::Result<SessionInfo> {
-        use std::sync::atomic::Ordering;
-        let id = format!("{:08x}", self.counter.fetch_add(1, Ordering::Relaxed));
+        let id = crate::ids::Fqid::new(&self.namespace, crate::ids::TYPE_SESSION).to_string();
         let now = chrono::Utc::now();
         let info = SessionInfo {
             id: id.clone(),

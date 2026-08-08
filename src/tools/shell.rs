@@ -378,11 +378,11 @@ pub struct ShellJournal {
 
 impl ShellJournal {
     fn journal_path(dir: &Path, session_id: &str) -> PathBuf {
-        dir.join(session_id).join(".shell_journal")
+        dir.join(crate::ids::dir_name(session_id)).join(".shell_journal")
     }
 
     fn output_path(dir: &Path, session_id: &str) -> PathBuf {
-        dir.join(session_id).join(".shell_output")
+        dir.join(crate::ids::dir_name(session_id)).join(".shell_output")
     }
 
     /// Read journal + output file. Returns `None` if journal is absent or
@@ -707,8 +707,10 @@ impl ShellTool {
         let script = generate_checkpoint_script(segments, start_idx, prev_exit_code, &marker_id);
         
         // Ensure parent dir exists (session dir)
-        std::fs::create_dir_all(sessions_dir.join(session_id))?;
-        let script_path = sessions_dir.join(session_id).join(".shell_checkpoint.sh");
+        std::fs::create_dir_all(sessions_dir.join(crate::ids::dir_name(session_id)))?;
+        let script_path = sessions_dir
+            .join(crate::ids::dir_name(session_id))
+            .join(".shell_checkpoint.sh");
         let output_path = ShellJournal::output_path(sessions_dir, session_id);
         
         std::fs::write(&script_path, &script)?;
@@ -1159,7 +1161,7 @@ mod tests {
     fn journal_roundtrip() {
         let tmp = tempfile::tempdir().unwrap();
         let sid = "test_session";
-        std::fs::create_dir_all(tmp.path().join(sid)).unwrap();
+        std::fs::create_dir_all(tmp.path().join(crate::ids::dir_name(sid))).unwrap();
 
         let journal = ShellJournal {
             marker_id: "abc123".to_string(),

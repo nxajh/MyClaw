@@ -5,7 +5,7 @@
 //! ```text
 //! sessions/
 //!   active.json              # { "user_id": "session_id", ... }
-//!   {session_id}/
+//!   {dir_name(session_id)}/  # `/` → `_`、`_` → `__`（可逆，见 ids::dir_name）
 //!     meta.json              # all session metadata (identity, counters, compaction state)
 //!     history.jsonl          # active segment: one ChatMessage JSON per line, append-only
 //!     archive/
@@ -38,6 +38,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::ids::{dir_name, id_from_dir, Fqid, DEFAULT_NAMESPACE, TYPE_SESSION};
 use crate::storage::{ChatMessage, SavedSessionFile, SessionBackend, SessionInfo, SummaryRecord};
 
 // ── On-disk types ─────────────────────────────────────────────────────────────
@@ -92,20 +93,33 @@ struct ActiveMap {
 /// JSON-file-backed session persistence.
 pub struct JsonFileBackend {
     root: PathBuf,
+    namespace: String,
 }
 
 impl JsonFileBackend {
-    /// Open (or create) the sessions directory at `root`.
+    /// Open (or create) the sessions directory at `root` (default namespace).
     pub fn open(root: impl Into<PathBuf>) -> std::io::Result<Self> {
+        Self::open_with_namespace(root, DEFAULT_NAMESPACE)
+    }
+
+    /// Open (or create) the sessions directory at `root`, generating session
+    /// FQIDs (`<ns>/s/<uuidv7>`) under `namespace`.
+    pub fn open_with_namespace(
+        root: impl Into<PathBuf>,
+        namespace: &str,
+    ) -> std::io::Result<Self> {
         let root = root.into();
         fs::create_dir_all(&root)?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            namespace: namespace.to_string(),
+        })
     }
 
     // ── Paths ─────────────────────────────────────────────────────────────────
 
     fn session_dir(&self, session_id: &str) -> PathBuf {
-        self.root.join(session_id)
+        self.root.join(dir_name(session_id))
     }
 
     fn meta_path(&self, session_id: &str) -> PathBuf {
@@ -165,8 +179,8 @@ impl JsonFileBackend {
 
     // ── ID generation ─────────────────────────────────────────────────────────
 
-    fn generate_session_id() -> String {
-        format!("{:08x}", rand::random::<u32>())
+    fn generate_session_id(&self) -> String {
+        Fqid::new(&self.namespace, TYPE_SESSION).to_string()
     }
 
     // ── JSONL helpers ─────────────────────────────────────────────────────────
@@ -330,7 +344,7 @@ impl SessionBackend for JsonFileBackend {
         owner: &str,
         display_name: Option<&str>,
     ) -> std::io::Result<SessionInfo> {
-        let id = Self::generate_session_id();
+        let id = self.generate_session_id();
         let now = Utc::now();
         let meta = SessionMeta {
             id: id.clone(),
@@ -411,7 +425,7 @@ impl SessionBackend for JsonFileBackend {
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
             .filter_map(|e| {
-                let id = e.file_name().to_string_lossy().to_string();
+                let id = id_from_dir(&e.file_name().to_string_lossy());
                 self.read_meta(&id)
             })
             .filter(|m| m.owner == owner)
@@ -429,7 +443,7 @@ impl SessionBackend for JsonFileBackend {
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
             .filter_map(|e| {
-                let id = e.file_name().to_string_lossy().to_string();
+                let id = id_from_dir(&e.file_name().to_string_lossy());
                 self.read_meta(&id)
             })
             .map(|m| Self::meta_to_info(&m))
@@ -684,7 +698,7 @@ impl SessionBackend for JsonFileBackend {
             if !ft.is_dir() {
                 continue;
             }
-            let id = entry.file_name().to_string_lossy().to_string();
+            let id = id_from_dir(&entry.file_name().to_string_lossy());
             if let Some(meta) = self.read_meta(&id) {
                 if meta.last_activity < cutoff {
                     let _ = fs::remove_dir_all(entry.path());
