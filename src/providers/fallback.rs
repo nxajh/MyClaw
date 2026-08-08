@@ -275,6 +275,7 @@ impl ChatProvider for FallbackChatProvider {
 
                         // Drain the stream. Classify errors to decide whether to failover or rotate.
                         let mut saw_content = false;
+                        let mut model_announced = false;
                         let mut inner_stream = stream;
 
                         while let Some(event) = inner_stream.next().await {
@@ -384,6 +385,18 @@ impl ChatProvider for FallbackChatProvider {
                                     return;
                                 }
                                 _ => {
+                                    // Announce the entry that actually produced
+                                    // this stream before any content flows, so
+                                    // the caller can attribute usage/history to
+                                    // the real model (not just the chain head).
+                                    if !model_announced {
+                                        model_announced = true;
+                                        let _ = tx
+                                            .send(StreamEvent::ModelUsed {
+                                                model: entry.model_id.clone(),
+                                            })
+                                            .await;
+                                    }
                                     saw_content = true;
                                     let _ = tx.send(event).await;
                                 }
@@ -470,5 +483,162 @@ impl ChatProvider for FallbackChatProvider {
         });
 
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    enum MockResult {
+        FailHttp { status: u16, message: String },
+        Ok(Vec<StreamEvent>),
+    }
+
+    struct MockChatProvider {
+        result: MockResult,
+    }
+
+    impl ChatProvider for MockChatProvider {
+        fn chat(&self, _req: ChatRequest<'_>) -> anyhow::Result<BoxStream<StreamEvent>> {
+            match &self.result {
+                MockResult::FailHttp { status, message } => Ok(Box::pin(
+                    futures_util::stream::iter(vec![StreamEvent::HttpError {
+                        status: *status,
+                        message: message.clone(),
+                    }]),
+                )),
+                MockResult::Ok(events) => Ok(Box::pin(futures_util::stream::iter(
+                    events.clone(),
+                ))),
+            }
+        }
+    }
+
+    fn entry(
+        model_id: &str,
+        provider_id: &str,
+        result: MockResult,
+    ) -> FallbackEntry {
+        FallbackEntry {
+            provider: Arc::new(MockChatProvider { result }),
+            model_id: model_id.to_string(),
+            provider_id: provider_id.to_string(),
+            credential_pool: None,
+            shared_api_key: None,
+        }
+    }
+
+    fn request(model: &str) -> ChatRequest<'_> {
+        ChatRequest {
+            model,
+            messages: &[],
+            temperature: None,
+            max_tokens: None,
+            thinking: None,
+            stop: None,
+            seed: None,
+            tools: None,
+            stream: true,
+        }
+    }
+
+    /// Failover to the second chain entry must announce the actual model
+    /// (not the chain head the caller asked for) before any content flows.
+    #[tokio::test]
+    async fn failover_announces_actual_model() {
+        let fb = FallbackChatProvider::new(vec![
+            entry(
+                "glm-5.2",
+                "glm",
+                MockResult::FailHttp {
+                    status: 404,
+                    message: "model not found".into(),
+                },
+            ),
+            entry(
+                "qwen3.7-plus",
+                "qwen",
+                MockResult::Ok(vec![
+                    StreamEvent::Delta { text: "hi".into() },
+                    StreamEvent::Done {
+                        reason: crate::providers::StopReason::EndTurn,
+                    },
+                ]),
+            ),
+        ]);
+
+        let stream = fb.chat(request("glm-5.2")).unwrap();
+        let events: Vec<StreamEvent> = stream.collect().await;
+
+        assert!(
+            matches!(&events[0], StreamEvent::ModelUsed { model } if model == "qwen3.7-plus"),
+            "first event must announce the fallback model, got {:?}",
+            events.first()
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, StreamEvent::Done { .. })),
+            "stream must still terminate with Done"
+        );
+    }
+
+    /// Chain-head success also announces its model — the caller can then
+    /// attribute usage identically whether or not a failover happened.
+    #[tokio::test]
+    async fn primary_success_announces_chain_head() {
+        let fb = FallbackChatProvider::new(vec![entry(
+            "glm-5.2",
+            "glm",
+            MockResult::Ok(vec![
+                StreamEvent::Delta { text: "hi".into() },
+                StreamEvent::Done {
+                    reason: crate::providers::StopReason::EndTurn,
+                },
+            ]),
+        )]);
+
+        let stream = fb.chat(request("glm-5.2")).unwrap();
+        let events: Vec<StreamEvent> = stream.collect().await;
+
+        assert!(
+            matches!(&events[0], StreamEvent::ModelUsed { model } if model == "glm-5.2"),
+            "chain head success must announce itself, got {:?}",
+            events.first()
+        );
+    }
+
+    /// All entries failing must NOT emit a ModelUsed announcement.
+    #[tokio::test]
+    async fn all_failed_does_not_announce_model() {
+        let fb = FallbackChatProvider::new(vec![
+            entry(
+                "glm-5.2",
+                "glm",
+                MockResult::FailHttp {
+                    status: 404,
+                    message: "model not found".into(),
+                },
+            ),
+            entry(
+                "qwen3.7-plus",
+                "qwen",
+                MockResult::FailHttp {
+                    status: 404,
+                    message: "model not found".into(),
+                },
+            ),
+        ]);
+
+        let stream = fb.chat(request("glm-5.2")).unwrap();
+        let events: Vec<StreamEvent> = stream.collect().await;
+
+        assert!(
+            !events.iter().any(|e| matches!(e, StreamEvent::ModelUsed { .. })),
+            "no ModelUsed must be emitted when every entry failed"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, StreamEvent::Error(_))),
+            "expected an Error event"
+        );
     }
 }

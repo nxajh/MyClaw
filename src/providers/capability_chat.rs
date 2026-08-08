@@ -155,6 +155,13 @@ pub enum StreamEvent {
         arguments: String,
     },
     Usage(ChatUsage),
+    /// The model that actually produced this stream. Emitted by the fallback
+    /// chain when a non-primary entry completes a request (the caller's
+    /// `model_id` is then stale). Direct/provider paths never emit it — the
+    /// caller's model_id is authoritative in that case.
+    ModelUsed {
+        model: String,
+    },
     Done {
         reason: StopReason,
     },

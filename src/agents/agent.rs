@@ -407,11 +407,15 @@ impl Agent {
                 )
                 .await;
                 let mut msg = ChatMessage::assistant_text(response.text.clone());
-                msg.model = Some(model_id.clone());
+                let effective_model: &str =
+                    response.actual_model.as_deref().unwrap_or(&model_id);
+                msg.model = Some(effective_model.to_string());
                 msg.usage = llm_usage(
                     &response,
-                    runtime.providers.get_chat_provider_id_by_model(&model_id),
-                    &model_id,
+                    runtime
+                        .providers
+                        .get_chat_provider_id_by_model(effective_model),
+                    effective_model,
                 );
                 session.history.push(msg.clone());
                 session.message_ids.push(0);
@@ -459,10 +463,13 @@ impl Agent {
                     },
                 );
             }
+            let effective_model: &str = response.actual_model.as_deref().unwrap_or(&model_id);
             let usage = llm_usage(
                 &response,
-                runtime.providers.get_chat_provider_id_by_model(&model_id),
-                &model_id,
+                runtime
+                    .providers
+                    .get_chat_provider_id_by_model(effective_model),
+                effective_model,
             );
             messages.push(assistant_msg);
             session.add_assistant_with_tools(
@@ -470,7 +477,7 @@ impl Agent {
                 response.tool_calls.clone(),
                 response.reasoning_content.clone(),
                 response.thinking_signature.clone(),
-                Some(model_id.clone()),
+                Some(effective_model.to_string()),
                 usage,
             );
             persist_last(session);
@@ -1108,6 +1115,10 @@ struct CollectedResponse {
     tool_call_events: usize,
     stop_reason: StopReason,
     usage: Option<crate::providers::ChatUsage>,
+    /// Model that actually produced the stream (from the fallback chain's
+    /// `ModelUsed` announcement). `None` when the caller's `model_id` is
+    /// authoritative (direct provider, override, or no failover).
+    actual_model: Option<String>,
 }
 
 /// Push a `TurnEvent` to `session.turn_stream`, dropping the stream on
@@ -1150,6 +1161,7 @@ async fn collect_stream(
     let mut tool_calls: Vec<ToolCall> = Vec::new();
     let mut tool_call_events: usize = 0;
     let mut usage: Option<crate::providers::ChatUsage> = None;
+    let mut actual_model: Option<String> = None;
     let mut received_first_chunk = false;
 
     let stop_reason = loop {
@@ -1290,6 +1302,11 @@ async fn collect_stream(
                     usage = Some(u);
                 }
             }
+            StreamEvent::ModelUsed { model } => {
+                // Last announcement wins: a mid-stream failover re-announces
+                // with the entry that ultimately completed the request.
+                actual_model = Some(model);
+            }
             StreamEvent::Done { reason } => break reason,
             StreamEvent::HttpError { status, message } => {
                 return Err(crate::providers::ProviderHttpError { status, message }.into());
@@ -1318,6 +1335,7 @@ async fn collect_stream(
         tool_call_events,
         stop_reason,
         usage,
+        actual_model,
     })
 }
 
@@ -1644,6 +1662,53 @@ mod tests {
         };
         assert!(resp.reasoning_content.is_none());
         assert!(resp.thinking_signature.is_none());
+    }
+
+    #[tokio::test]
+    async fn collect_stream_captures_model_used() {
+        use crate::providers::StreamEvent;
+
+        // The fallback chain announces the actual model before content flows;
+        // a mid-stream failover re-announces, and the last one wins.
+        let s = events_to_stream(vec![
+            StreamEvent::ModelUsed {
+                model: "glm-5.2".into(),
+            },
+            StreamEvent::Delta { text: "hi".into() },
+            StreamEvent::ModelUsed {
+                model: "qwen3.7-plus".into(),
+            },
+            StreamEvent::Done {
+                reason: crate::providers::StopReason::EndTurn,
+            },
+        ]);
+        let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
+        let resp = match collect_stream(s, &mut turn_stream).await {
+            Ok(r) => r,
+            Err(e) => panic!("should succeed: {e}"),
+        };
+        assert_eq!(resp.actual_model.as_deref(), Some("qwen3.7-plus"));
+        assert_eq!(resp.text, "hi");
+    }
+
+    #[tokio::test]
+    async fn collect_stream_model_used_absent_when_direct() {
+        use crate::providers::StreamEvent;
+
+        // Direct/provider path (no fallback wrapper) emits no ModelUsed;
+        // actual_model must stay None so the caller keeps its model_id.
+        let s = events_to_stream(vec![
+            StreamEvent::Delta { text: "hi".into() },
+            StreamEvent::Done {
+                reason: crate::providers::StopReason::EndTurn,
+            },
+        ]);
+        let mut turn_stream: Option<Box<dyn crate::channels::TurnStream>> = None;
+        let resp = match collect_stream(s, &mut turn_stream).await {
+            Ok(r) => r,
+            Err(e) => panic!("should succeed: {e}"),
+        };
+        assert!(resp.actual_model.is_none());
     }
 
     #[tokio::test]
