@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::ids::{DEFAULT_NAMESPACE, Fqid, TYPE_TASK};
 use crate::providers::{Tool, ToolResult};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -22,24 +23,40 @@ pub struct Task {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TaskState {
     pub tasks: Vec<Task>,
-    pub next_id: u32,
+    /// Namespace for generated task FQIDs (`<ns>/t/<uuidv7>`).
+    /// Skipped in serialized form — bound at load time; `Default` (ephemeral
+    /// state) falls back to `DEFAULT_NAMESPACE`.
+    #[serde(skip)]
+    pub namespace: String,
     /// Optional JSON persistence target; every mutation is saved to this file.
     /// Skipped in serialized form — bound at load time, not stored inside it.
     #[serde(skip)]
     pub save_path: Option<std::path::PathBuf>,
 }
 
+impl Default for TaskState {
+    fn default() -> Self {
+        Self {
+            tasks: Vec::new(),
+            namespace: DEFAULT_NAMESPACE.to_string(),
+            save_path: None,
+        }
+    }
+}
+
 impl TaskState {
     /// Load persisted state from disk; returns defaults when missing or unparsable.
-    pub fn load(path: &std::path::Path) -> TaskState {
+    /// `namespace` is bound to the loaded state for subsequent task FQID generation.
+    pub fn load(path: &std::path::Path, namespace: &str) -> TaskState {
         let mut state = std::fs::read_to_string(path)
             .ok()
             .and_then(|content| serde_json::from_str::<TaskState>(&content).ok())
             .unwrap_or_default();
         state.save_path = Some(path.to_path_buf());
+        state.namespace = namespace.to_string();
         state
     }
 
@@ -60,9 +77,8 @@ impl TaskState {
         }
     }
 
-    fn next_id(&mut self) -> String {
-        self.next_id += 1;
-        format!("task_{}", self.next_id)
+    fn next_id(&self) -> String {
+        Fqid::new(&self.namespace, TYPE_TASK).to_string()
     }
 
     fn find_task(&self, id: &str) -> Option<&Task> {
@@ -137,8 +153,8 @@ pub fn shared_state() -> SharedTaskState {
 
 /// Create shared task state persisted to `path` (loaded at startup, saved on
 /// every mutation) — used by the daemon so tasks survive restarts/hot-switches.
-pub fn shared_state_persisted(path: std::path::PathBuf) -> SharedTaskState {
-    Arc::new(RwLock::new(TaskState::load(&path)))
+pub fn shared_state_persisted(path: std::path::PathBuf, namespace: &str) -> SharedTaskState {
+    Arc::new(RwLock::new(TaskState::load(&path, namespace)))
 }
 
 // ---------------------------------------------------------------------------
@@ -604,7 +620,7 @@ mod tests {
         let update = TaskUpdateTool { state: Arc::clone(&state) };
         let result = update
             .execute(
-                json!({"task_id": "task_1"}),
+                json!({"task_id": "myclaw/t/legacy"}),
                 &make_session(),
             )
             .await;
@@ -618,7 +634,7 @@ mod tests {
         let path = dir.path().join("tasks.json");
 
         // "Daemon A": create a goal and a child task — both must hit disk.
-        let state = shared_state_persisted(path.clone());
+        let state = shared_state_persisted(path.clone(), DEFAULT_NAMESPACE);
         let create = TaskCreateTool { state: Arc::clone(&state) };
         let goal = create
             .execute(json!({"subject": "Persisted Goal"}), &make_session())
@@ -638,13 +654,18 @@ mod tests {
         assert!(child.success);
 
         // "Daemon B" (restart): fresh state loaded from disk.
-        let reloaded = TaskState::load(&path);
+        let reloaded = TaskState::load(&path, DEFAULT_NAMESPACE);
         assert_eq!(reloaded.tasks.len(), 2);
         assert_eq!(reloaded.tasks[0].subject, "Persisted Goal");
         assert_eq!(reloaded.tasks[0].status, "pending");
         assert!(
-            reloaded.next_id >= 2,
-            "next_id must survive restart so ids don't collide"
+            reloaded.tasks.iter().all(|t| t.id.starts_with("myclaw/t/")),
+            "task ids must be FQIDs after restart: {:?}",
+            reloaded.tasks.iter().map(|t| &t.id).collect::<Vec<_>>()
+        );
+        assert_ne!(
+            reloaded.tasks[0].id, reloaded.tasks[1].id,
+            "fresh uuidv7 ids must not collide"
         );
 
         // Update through a fresh tool instance persists as well.
@@ -657,7 +678,7 @@ mod tests {
             .await
             .unwrap();
         assert!(updated.success);
-        let reloaded_after_update = TaskState::load(&path);
+        let reloaded_after_update = TaskState::load(&path, DEFAULT_NAMESPACE);
         assert_eq!(reloaded_after_update.tasks[0].status, "completed");
 
         // Delete persists too (goal + descendant child).
@@ -667,21 +688,22 @@ mod tests {
             .await
             .unwrap();
         assert!(deleted.success);
-        assert!(TaskState::load(&path).tasks.is_empty());
+        assert!(TaskState::load(&path, DEFAULT_NAMESPACE).tasks.is_empty());
     }
 
     #[test]
     fn test_load_defaults_when_file_missing_or_corrupt() {
         let dir = tempfile::tempdir().unwrap();
         // Missing file → defaults.
-        let state = TaskState::load(&dir.path().join("nope.json"));
+        let state = TaskState::load(&dir.path().join("nope.json"), DEFAULT_NAMESPACE);
         assert!(state.tasks.is_empty());
-        assert_eq!(state.next_id, 0);
+        assert_eq!(state.namespace, DEFAULT_NAMESPACE);
 
         // Corrupt content → defaults.
         let bad = dir.path().join("bad.json");
         std::fs::write(&bad, "{not json").unwrap();
-        let state = TaskState::load(&bad);
+        let state = TaskState::load(&bad, DEFAULT_NAMESPACE);
         assert!(state.tasks.is_empty());
+        assert_eq!(state.namespace, DEFAULT_NAMESPACE);
     }
 }

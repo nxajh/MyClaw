@@ -525,6 +525,7 @@ async fn build_tools(
     tools.register(Arc::new(crate::tools::ListDirTool::new()));
     let task_state = crate::tools::shared_task_state_persisted(
         workspace_dir.join(".state").join("tasks.json"),
+        &config.messaging.namespace,
     );
     for tool in crate::tools::new_task_tools(Arc::clone(&task_state)) {
         tools.register(tool);
