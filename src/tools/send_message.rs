@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use crate::agents::session::Session;
-use crate::agents::{AgentMail, AgentMessenger, DelegationEvent};
+use crate::agents::{AgentMail, AgentMessage, AgentMessenger};
 use crate::channels::{
     ChannelFile, ChannelFileMeta, ChannelMessageContent, ChannelOutboundMessage, LocalFileBody,
     MessageReceiver, SendOptions,
@@ -118,7 +118,7 @@ impl SendMessageTool {
                     error: Some("parent session missing — cannot message parent".to_string()),
                 });
             };
-            let event = DelegationEvent::Message {
+            let event = AgentMessage {
                 msg_id: uuid::Uuid::new_v4().to_string(),
                 sender_name: session.agent_name.clone(),
                 task_id,
@@ -266,7 +266,7 @@ impl Tool for SendMessageTool {
             }
         };
 
-        let text = args.text.unwrap_or_default();
+        let text = args.text.clone().unwrap_or_default();
         // RFC agent-messaging §3.7: hard 32K chars cap on a single message —
         // clear error on the sending side, never truncate or split. Longer
         // content goes through the `files` channel instead.
@@ -440,7 +440,7 @@ mod tests {
     #[derive(Default)]
     struct MockMessenger {
         to_sub: std::sync::Mutex<Vec<(String, AgentMail)>>,
-        to_parent: std::sync::Mutex<Vec<DelegationEvent::Message>>,
+        to_parent: std::sync::Mutex<Vec<AgentMessage>>,
     }
 
     #[async_trait]
@@ -450,7 +450,7 @@ mod tests {
             Ok(())
         }
 
-        async fn send_to_parent(&self, event: DelegationEvent::Message) -> bool {
+        async fn send_to_parent(&self, event: AgentMessage) -> bool {
             self.to_parent.lock().unwrap().push(event);
             true
         }

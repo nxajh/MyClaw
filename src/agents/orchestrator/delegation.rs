@@ -36,12 +36,8 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
                 "[系统通知] 子代理已完成后台任务 (task_id: {}, 耗时: {}s)，结果如下：\n{}",
                 task_id, duration_secs, summary
             );
-            (
-                task_id,
-                session_id,
-                content,
-                format!("delegation:{}", task_id),
-            )
+            let synthetic_id = format!("delegation:{}", task_id);
+            (task_id, session_id, content, synthetic_id)
         }
         DelegationEvent::Failed {
             task_id,
@@ -53,37 +49,23 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
                 "[系统通知] 子代理后台任务失败 (task_id: {})，错误：\n{}",
                 task_id, error
             );
-            (
-                task_id,
-                session_id,
-                content,
-                format!("delegation:{}", task_id),
-            )
+            let synthetic_id = format!("delegation:{}", task_id);
+            (task_id, session_id, content, synthetic_id)
         }
         // RFC agent-messaging §3.4: a sub-agent messaged its parent while
         // running in background. `task_id` is the sub-agent's own id
         // (identity — lets the parent reply via `recipient`), `session_id`
         // is the parent session to wake. Routed exactly like Completed /
         // Failed: queued behind the turn lock, never preempting.
-        DelegationEvent::Message {
-            msg_id,
-            sender_name,
-            task_id,
-            session_id,
-            text,
-        } => {
-            tracing::info!(task_id = %task_id, sender = %sender_name, "sub-agent message, waking main agent");
+        DelegationEvent::Message(msg) => {
+            tracing::info!(task_id = %msg.task_id, sender = %msg.sender_name, "sub-agent message, waking main agent");
             let content = format!(
                 "[子代理消息] 来自子代理 '{}' (task_id: {}):\n{}",
-                sender_name, task_id, text
+                msg.sender_name, msg.task_id, msg.text
             );
             // Unique synthetic id per message (a task may emit many messages).
-            (
-                task_id,
-                session_id,
-                content,
-                format!("delegation-msg:{}", msg_id),
-            )
+            let synthetic_id = format!("delegation-msg:{}", msg.msg_id);
+            (msg.task_id, msg.session_id, content, synthetic_id)
         }
     };
 

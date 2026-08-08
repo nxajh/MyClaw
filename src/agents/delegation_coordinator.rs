@@ -29,7 +29,7 @@ use dashmap::DashMap;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::agents::delegation::{AgentMail, DelegationEvent};
+use crate::agents::delegation::{AgentMail, AgentMessage, DelegationEvent};
 use crate::agents::session::{BackendPersistHook, PersistHook, SessionManager};
 use crate::config::sub_agent::AgentIsolation;
 
@@ -831,26 +831,9 @@ impl crate::agents::AgentMessenger for DelegationCoordinator {
         }
     }
 
-    async fn send_to_parent(&self, event: DelegationEvent::Message) -> bool {
+    async fn send_to_parent(&self, event: AgentMessage) -> bool {
         match self.event_sender() {
-            Some(tx) => {
-                let DelegationEvent::Message {
-                    msg_id,
-                    sender_name,
-                    task_id,
-                    session_id,
-                    text,
-                } = event;
-                tx.send(DelegationEvent::Message {
-                    msg_id,
-                    sender_name,
-                    task_id,
-                    session_id,
-                    text,
-                })
-                .await
-                .is_ok()
-            }
+            Some(tx) => tx.send(DelegationEvent::Message(event)).await.is_ok(),
             None => {
                 tracing::warn!(
                     task_id = %event.task_id,

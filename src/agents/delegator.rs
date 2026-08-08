@@ -10,7 +10,7 @@
 
 use async_trait::async_trait;
 
-use crate::agents::delegation::{AgentMail, DelegationEvent};
+use crate::agents::delegation::AgentMessage;
 use crate::agents::session::Session;
 
 /// Invokes sub-agents on demand.
@@ -67,5 +67,5 @@ pub trait AgentMessenger: Send + Sync {
 
     /// Sub → parent: emit a `DelegationEvent::Message` to wake the parent
     /// agent. Returns `false` when the event channel is not wired.
-    async fn send_to_parent(&self, event: DelegationEvent::Message) -> bool;
+    async fn send_to_parent(&self, event: AgentMessage) -> bool;
 }

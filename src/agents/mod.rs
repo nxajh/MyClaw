@@ -53,7 +53,7 @@ pub use agent_registry::AgentRegistry;
 pub use ask_router::AskRouter;
 pub use known_users::{KnownUser, KnownUsersRegistry};
 pub use attachment::AttachmentManager;
-pub use delegation::{AgentMail, DelegationEvent, render_agent_mail_reminder};
+pub use delegation::{AgentMail, AgentMessage, DelegationEvent, render_agent_mail_reminder};
 pub use delegation_coordinator::DelegationCoordinator;
 pub use delegator::{AgentDelegator, AgentMessenger};
 pub use error::AgentError;

@@ -517,7 +517,7 @@ async fn build_tools(
     // Keep the Arc to SendMessageTool: the daemon later wires the
     // agent-to-agent bus into it (multi-agent mode) via `set_messenger`.
     let send_message_tool = Arc::new(crate::tools::SendMessageTool::new());
-    tools.register(Arc::clone(&send_message_tool));
+    tools.register(Arc::clone(&send_message_tool) as Arc<dyn crate::providers::Tool>);
     tools.register(Arc::new(crate::tools::ListDirTool::new()));
     let task_state = crate::tools::shared_task_state_persisted(
         workspace_dir.join(".state").join("tasks.json"),

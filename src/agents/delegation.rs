@@ -44,20 +44,27 @@ pub enum DelegationEvent {
     },
     /// Sub-agent sent a message to the parent while running in background.
     ///
-    /// RFC agent-messaging §3.4/§3.6: `task_id` is the **sender's own**
-    /// task id (identity, so the parent can reply via `recipient`); the
-    /// `session_id` is the parent session the message must wake.
-    Message {
-        /// Unique message id (observability / dedup).
-        msg_id: String,
-        /// Display name of the sending sub-agent (its agent name).
-        sender_name: String,
-        /// The sub-agent's own task_id (identity — NOT the recipient).
-        task_id: String,
-        /// Hex session ID of the parent session (NOT a routing key).
-        session_id: String,
-        text: String,
-    },
+    /// RFC agent-messaging §3.4/§3.6: the payload's `task_id` is the
+    /// **sender's own** task id (identity, so the parent can reply via
+    /// `recipient`); its `session_id` is the parent session the message
+    /// must wake. Wrapped in a payload struct (not inline named fields) so
+    /// the message type is addressable as a type in the `AgentMessenger`
+    /// trait.
+    Message(AgentMessage),
+}
+
+/// A sub-agent → parent message (RFC agent-messaging §3.4/§3.6).
+#[derive(Debug, Clone)]
+pub struct AgentMessage {
+    /// Unique message id (observability / dedup).
+    pub msg_id: String,
+    /// Display name of the sending sub-agent (its agent name).
+    pub sender_name: String,
+    /// The sub-agent's own task_id (identity — NOT the recipient).
+    pub task_id: String,
+    /// Hex session ID of the parent session (NOT a routing key).
+    pub session_id: String,
+    pub text: String,
 }
 
 /// A parent → sub message sitting in a sub-agent's inbox.
