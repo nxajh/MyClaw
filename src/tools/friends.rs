@@ -470,7 +470,14 @@ impl Tool for FriendListTool {
                 ContactStatus::Declined => "declined",
                 ContactStatus::Blocked => "blocked",
             };
-            lines.push(format!("  {} {} ({})", entry.nickname, state, peer));
+            // RFC §6 P2 会话发现: accepted 好友附在线/活跃状态。
+            let mut line = format!("  {} {} ({})", entry.nickname, state, peer);
+            if entry.status == ContactStatus::Accepted {
+                if let Some(ts) = self.ctx.known_users.last_seen_ms_of(&peer) {
+                    line.push_str(&format!(" {}", KnownUsersRegistry::render_presence(ts)));
+                }
+            }
+            lines.push(line);
         }
         Ok(ToolResult {
             success: true,

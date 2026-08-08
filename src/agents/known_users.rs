@@ -742,6 +742,37 @@ impl KnownUsersRegistry {
 
     // ── Per-turn injection rendering (RFC §3.5 / §4.3) ───────────────────
 
+    /// Last-seen timestamp (unix ms) of a known user, if registered (RFC §6
+    /// P2 会话发现: presence of friends). Updated on every user interaction
+    /// via [`Self::record`]. `None` when the peer has never interacted.
+    pub fn last_seen_ms_of(&self, user_id: &str) -> Option<u64> {
+        self.users.get(user_id).map(|e| e.value().last_seen_ms)
+    }
+
+    /// Render a presence summary from a last-seen timestamp (RFC §6 P2 会话
+    /// 发现): status label + relative time. Thresholds: <5 min = 在线,
+    /// <24 h = 最近活跃, otherwise 离线.
+    pub(crate) fn render_presence(last_seen_ms: u64) -> String {
+        let ago_ms = now_ms().saturating_sub(last_seen_ms);
+        let label = if ago_ms < 5 * 60_000 {
+            "🟢 在线"
+        } else if ago_ms < 24 * 3_600_000 {
+            "🟡 最近活跃"
+        } else {
+            "⚪ 离线"
+        };
+        let rel = if ago_ms < 60_000 {
+            "刚刚".to_string()
+        } else if ago_ms < 3_600_000 {
+            format!("{} 分钟前", ago_ms / 60_000)
+        } else if ago_ms < 86_400_000 {
+            format!("{} 小时前", ago_ms / 3_600_000)
+        } else {
+            format!("{} 天前", ago_ms / 86_400_000)
+        };
+        format!("{label}（{rel}）")
+    }
+
     /// Render a drained user-mailbox batch as one `<system-reminder>` user
     /// message (RFC §3.5: `来自 @{nick} 的消息:{text}`, 注入即消费 — the
     /// caller drains from the registry, so this text is shown exactly once).
@@ -754,7 +785,7 @@ impl KnownUsersRegistry {
             ));
         }
         format!(
-            "<system-reminder>\n[收到 {} 条来自好友的消息，请阅读并处理。]\n{}\n</system-reminder>",
+            "<system-reminder>\n[收到 {} 条来自好友的消息，请阅读并处理。]\n{}\n如需回复，使用 send_message 工具（recipient=@昵称，如 recipient=@alice）。\n</system-reminder>",
             mails.len(),
             lines.join("\n\n")
         )
@@ -1095,6 +1126,47 @@ mod tests {
         // No pending → empty render list, no reminder text.
         let rendered_empty = KnownUsersRegistry::render_pending_requests_reminder(&[]);
         assert!(rendered_empty.contains("共有 0 条"), "{rendered_empty}");
+    }
+
+    #[test]
+    fn last_seen_ms_of_tracks_user_activity() {
+        // RFC §6 P2 会话发现: last_seen 数据源。
+        let reg = KnownUsersRegistry::in_memory();
+        assert!(reg.last_seen_ms_of(alice()).is_none());
+        reg.record("qqbot", "xiaoer", "alice", "c2c");
+        assert!(reg.last_seen_ms_of(alice()).unwrap() > 0);
+    }
+
+    #[test]
+    fn render_presence_labels_online_recent_offline() {
+        let now = now_ms();
+        // Fresh interaction → online.
+        let online = KnownUsersRegistry::render_presence(now);
+        assert!(online.contains("🟢"), "{online}");
+        assert!(online.contains("在线"), "{online}");
+        // ~10 minutes ago → recently active.
+        let recent = KnownUsersRegistry::render_presence(now - 10 * 60_000);
+        assert!(recent.contains("🟡"), "{recent}");
+        assert!(recent.contains("最近活跃"), "{recent}");
+        // 3 days ago → offline.
+        let offline = KnownUsersRegistry::render_presence(now - 3 * 86_400_000);
+        assert!(offline.contains("⚪"), "{offline}");
+        assert!(offline.contains("离线"), "{offline}");
+    }
+
+    #[test]
+    fn render_user_mail_reminder_includes_reply_guidance() {
+        // RFC §6 P2 回复转发闭环: 注入文本带回复引导, 接收方 agent 知道如何回。
+        let mails = vec![UserMail {
+            msg_id: "m1".into(),
+            sender_user_id: alice().into(),
+            sender_nickname: "@alice".into(),
+            text: "你好".into(),
+            sent_at: 1,
+        }];
+        let rendered = KnownUsersRegistry::render_user_mail_reminder(&mails);
+        assert!(rendered.contains("send_message"), "{rendered}");
+        assert!(rendered.contains("recipient=@昵称"), "{rendered}");
     }
 
     #[test]

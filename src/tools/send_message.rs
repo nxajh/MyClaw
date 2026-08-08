@@ -814,4 +814,42 @@ mod tests {
         assert!(err_of(&r).contains("blocked"), "{}", err_of(&r));
         assert!(reg.drain_user_mail(BOB).is_empty());
     }
+
+    #[tokio::test]
+    async fn cross_user_reply_loop_back_to_sender() {
+        // RFC §6 P2 回复转发闭环: bob 收到后回复 → 同链反向 → alice 的用户级
+        // mailbox → alice 下一条用户消息注入。双向各收 1 条。
+        let reg = registered_friends();
+        let tool = SendMessageTool::new();
+        tool.set_known_users(Arc::clone(&reg));
+        let alice_session = alice_session();
+        let mut bob_session = Session::new("s_bob".into());
+        bob_session.owner = BOB.to_string();
+
+        // alice → bob
+        let r = tool
+            .execute(
+                serde_json::json!({"text": "在吗", "recipient": "@bob"}),
+                &alice_session,
+            )
+            .await
+            .unwrap();
+        assert!(r.success, "{}", err_of(&r));
+        assert_eq!(reg.drain_user_mail(BOB).len(), 1);
+
+        // bob 回复 → alice
+        let r = tool
+            .execute(
+                serde_json::json!({"text": "在的，什么事", "recipient": "@alice"}),
+                &bob_session,
+            )
+            .await
+            .unwrap();
+        assert!(r.success, "{}", err_of(&r));
+        let mails = reg.drain_user_mail(ALICE);
+        assert_eq!(mails.len(), 1);
+        assert_eq!(mails[0].text, "在的，什么事");
+        assert_eq!(mails[0].sender_user_id, BOB);
+        assert_eq!(mails[0].sender_nickname, "@bob");
+    }
 }
