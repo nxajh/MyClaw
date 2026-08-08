@@ -100,6 +100,10 @@ fn consume_confirm(current_rk: &str, code: &str, now: u64) -> Result<LinkTarget,
     }
     if code != link.code {
         link.attempts += 1;
+        if link.attempts >= LINK_MAX_ATTEMPTS {
+            pending.remove(current_rk);
+            return Err("验证码错误次数过多，本次关联已作废，请重新 /link @昵称".to_string());
+        }
         let left = LINK_MAX_ATTEMPTS - link.attempts;
         return Err(format!("验证码错误（还剩 {left} 次机会），或重新 /link 获取新验证码"));
     }
