@@ -115,6 +115,7 @@ pub enum MentionResolution {
 /// - `@u/uid`：UserRegistry 精确解析，不限关系；未找到 → Failed。
 /// - `@昵称`：仅限已建立关系内（Accepted 好友）实时昵称比对；0 命中 → Failed；
 ///   多命中 → Failed（「有多个用户，请给出唯一标识」，绝不猜测）。
+///
 /// 命中 → 原位替换 `<ref id="{fqid}"/>`。
 /// 邮箱防御：`@` 前一字符为邮箱 local-part 合法字符（如 `a@b.com`）→ 跳过。
 pub fn resolve_mentions(
