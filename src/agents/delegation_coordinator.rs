@@ -268,6 +268,7 @@ impl DelegationCoordinator {
     /// Returns a boxed future to break the async recursion cycle:
     /// delegate_with_parent → AgentLoop::run → compact_impl → summarize_inline
     /// → execute_tool → delegate_with_parent (nested sub-agent).
+    #[allow(clippy::too_many_arguments)]
     pub fn delegate_with_parent<'a>(
         &'a self,
         agent_name: &'a str,

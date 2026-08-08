@@ -28,6 +28,7 @@ enum CompletionSink {
     Delegate {
         task_id: String,
         parent_session_id: String,
+        #[allow(dead_code)]
         reply_target: String,
         delegator: Option<Arc<DelegationCoordinator>>,
     },

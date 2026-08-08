@@ -169,7 +169,7 @@ pub(crate) async fn run_cron_task(orch: Arc<OrchestratorCtx>, trigger: super::Cr
             let should_send = if context_policy == crate::config::scheduler::ContextPolicy::Inject {
                 // Check if the user's session is currently active.
                 let routing_key = resolve_user_routing_key(&orch, target_channel.as_deref(), target_recipient.as_deref()).await;
-                let is_active = routing_key.as_ref().map_or(false, |key| {
+                let is_active = routing_key.as_ref().is_some_and(|key| {
                     orch.sessions.active_session_id(key).is_some()
                 });
                 // Only send to channel if session is not active (user won't see it otherwise).
