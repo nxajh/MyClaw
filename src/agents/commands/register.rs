@@ -39,6 +39,12 @@ pub(crate) fn parse_target(user_registry: &UserRegistry, arg: &str) -> Result<St
             "未找到用户 u/{uid}（对方尚未注册身份，无法作为目标；让对方先 /register）"
         ));
     }
+    // `@` 前缀 = @提及 形态（`@昵称`/`@u/uid`），属 P4 第二波，明确报错。
+    if arg.starts_with('@') {
+        return Err(
+            "暂不支持 @昵称 解析（P4 第二波接入），请用 u/uid 或邮箱，如 u/alice".to_string(),
+        );
+    }
     if arg.contains('@') {
         if let Some(user) = user_registry.find_by_email(arg) {
             return Ok(user.user_id(user_registry.namespace()));
@@ -46,11 +52,6 @@ pub(crate) fn parse_target(user_registry: &UserRegistry, arg: &str) -> Result<St
         return Err(format!(
             "未找到邮箱 {arg} 对应的用户（对方尚未注册身份，无法作为目标）"
         ));
-    }
-    if arg.starts_with('@') {
-        return Err(
-            "暂不支持 @昵称 解析（P4 第二波接入），请用 u/uid 或邮箱，如 u/alice".to_string(),
-        );
     }
     Err(format!(
         "无法识别的目标“{arg}”（用 u/uid 或邮箱，如 u/alice）"
