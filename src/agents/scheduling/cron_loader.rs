@@ -39,6 +39,7 @@ pub fn parse_cron_file(path: &Path) -> anyhow::Result<CronJob> {
         prompt,
         target,
         active_hours: extract_yaml_string(&front_matter, "active_hours"),
+        context_policy: crate::config::scheduler::ContextPolicy::Inject,
     })
 }
 

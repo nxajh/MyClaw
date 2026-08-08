@@ -83,6 +83,7 @@ pub fn parse_agent_file(path: &Path) -> Result<SubAgentConfig> {
         },
         model,
         isolation,
+        timeout: None,
     })
 }
 

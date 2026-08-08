@@ -784,6 +784,7 @@ impl Scheduler {
                 model: None,
                 provider: None,
                 last_failure_alert_at: None,
+                context_policy: crate::config::scheduler::ContextPolicy::Inject,
             };
 
             data.jobs.push(entry);
