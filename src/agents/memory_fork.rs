@@ -55,7 +55,10 @@ const ALLOWED: &[&str] = &[
 const MAX_ROUNDS: usize = 3;
 const OVERALL_TIMEOUT: Duration = Duration::from_secs(90);
 const SESSION_COOLDOWN: Duration = Duration::from_secs(5 * 60);
-const MAX_FORK_CONTEXT_MESSAGES: usize = 24;
+/// Cap on preserved user messages. User messages carry the durable facts /
+/// profile details — unlike assistant replies they are never dropped below
+/// this bound (profile fidelity, RFC P1).
+const MAX_FORK_USER_MESSAGES: usize = 40;
 const CONTEXT_TAIL_MESSAGES: usize = 12;
 
 static MEMORY_FORK_SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
@@ -126,31 +129,49 @@ async fn mark_session_cooldown(session_key: &str) {
     cooldowns.retain(|_, last| last.elapsed() < SESSION_COOLDOWN * 2);
 }
 
+/// Compact fork context while preserving user-authored detail.
+///
+/// Profile-fidelity strategy (RFC P1): user messages are the primary carrier
+/// of durable facts (preferences, habits, relationships, lifestyle). Older
+/// logic kept only the last 12 messages, silently dropping every early user
+/// statement. Now:
+/// - all system messages are kept (prompt prefix, cache-friendly),
+/// - every user message is kept, bounded by `MAX_FORK_USER_MESSAGES`,
+/// - only the most recent assistant replies are kept,
+/// - an explanatory note describes what was omitted.
 fn compact_fork_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
-    let selected = if messages.len() <= MAX_FORK_CONTEXT_MESSAGES {
-        messages
-    } else {
-        let head = messages
-            .iter()
-            .take(2)
-            .filter(|msg| msg.role == "system")
-            .cloned()
-            .collect::<Vec<_>>();
-        let tail_start = messages.len().saturating_sub(CONTEXT_TAIL_MESSAGES);
-        let omitted = messages
-            .len()
-            .saturating_sub(head.len() + CONTEXT_TAIL_MESSAGES);
-        let summary = ChatMessage::system_text(format!(
-            "Memory fork context was trimmed: {omitted} older messages omitted. Extract only durable memories evidenced by the recent messages below; do not infer task progress from omitted history."
-        ));
+    let mut system_msgs: Vec<ChatMessage> = Vec::new();
+    let mut user_msgs: Vec<ChatMessage> = Vec::new();
+    let mut assistant_msgs: Vec<ChatMessage> = Vec::new();
 
-        let mut compacted = head;
-        compacted.push(summary);
-        compacted.extend(messages.into_iter().skip(tail_start));
-        compacted
-    };
+    for msg in messages {
+        match msg.role.as_str() {
+            "system" => system_msgs.push(msg),
+            "user" => user_msgs.push(msg),
+            _ => assistant_msgs.push(msg),
+        }
+    }
 
-    sanitize_fork_context(selected)
+    let omitted_assistant = assistant_msgs.len().saturating_sub(CONTEXT_TAIL_MESSAGES);
+    let omitted_user = user_msgs.len().saturating_sub(MAX_FORK_USER_MESSAGES);
+
+    let mut compacted = system_msgs;
+    if omitted_user > 0 {
+        compacted.push(ChatMessage::system_text(format!(
+            "Memory fork context was trimmed: {omitted_assistant} assistant and {omitted_user} older user messages omitted. Extract only durable memories evidenced by the messages below; do not infer task progress from omitted history."
+        )));
+    } else if omitted_assistant > 0 {
+        compacted.push(ChatMessage::system_text(format!(
+            "Memory fork context was trimmed: {omitted_assistant} older assistant messages omitted; all user messages are preserved below. Extract only durable memories evidenced by the messages below; do not infer task progress from omitted history."
+        )));
+    }
+
+    let user_start = user_msgs.len().saturating_sub(MAX_FORK_USER_MESSAGES);
+    compacted.extend(user_msgs.into_iter().skip(user_start));
+    let assistant_start = assistant_msgs.len().saturating_sub(CONTEXT_TAIL_MESSAGES);
+    compacted.extend(assistant_msgs.into_iter().skip(assistant_start));
+
+    sanitize_fork_context(compacted)
 }
 
 fn sanitize_fork_context(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
@@ -495,6 +516,19 @@ fn build_extraction_prompt(knowledge_dir: &str) -> String {
          Only call memory_manage when durability is high or medium AND staleness_risk is low or medium.\n\
          Skip task progress, transient runtime status, temporary TODOs, current commit/PID/log state, and one-off observations.\n\
          \n\
+         ## User profile fidelity (CRITICAL)\n\
+         User identity, preferences, habits, relationships, family, lifestyle, and explicitly stated stable facts are ALWAYS\n\
+         high durability / low staleness — never gate them away, and never classify them as one-off observations.\n\
+         \"one-off observations\" means transient events (a single bug fixed today, a one-time request) — NOT stable personal facts.\n\
+         Record profile facts with FULL detail: keep names, times, places, numbers, exact wording, and specific context.\n\
+         Do NOT abbreviate, summarize, generalize, or drop specifics when saving user-level memories.\n\
+         \n\
+         ## Replace without data loss\n\
+         Before replacing an existing memory, call memory_view to read its full current content.\n\
+         Write back ALL still-valid old details PLUS the new facts. Never drop old details unless the\n\
+         user explicitly stated that the fact changed. A replace that only contains the new fact while\n\
+         silently discarding prior details is data loss.\n\
+         \n\
          ## Replace-first rule\n\
          Before creating a new memory, call memory_search with the key terms.\n\
          If an existing memory covers the same topic, use `memory_manage` action `replace` to merge the new durable fact.\n\
@@ -563,7 +597,7 @@ fn build_extraction_prompt(knowledge_dir: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::build_extraction_prompt;
+    use super::*;
 
     #[test]
     fn extraction_prompt_forces_user_scope() {
@@ -576,5 +610,94 @@ mod tests {
             prompt.contains("private layer"),
             "fork prompt must describe the user layer as private"
         );
+    }
+
+    #[test]
+    fn extraction_prompt_forces_profile_fidelity() {
+        let prompt = build_extraction_prompt("memory");
+        assert!(
+            prompt.contains("User profile fidelity"),
+            "prompt must mandate profile fidelity for user-level memories"
+        );
+        assert!(
+            prompt.contains("FULL detail"),
+            "prompt must demand full detail (no summarizing away specifics)"
+        );
+        assert!(
+            prompt.contains("Replace without data loss"),
+            "prompt must forbid lossy replaces"
+        );
+        assert!(
+            prompt.contains("memory_view"),
+            "prompt must require reading the old content before replacing"
+        );
+        assert!(
+            prompt.contains("high durability / low staleness"),
+            "profile facts must be exempt from the durability gate"
+        );
+    }
+
+    #[test]
+    fn compact_fork_messages_preserves_all_user_messages() {
+        let mut msgs: Vec<ChatMessage> = vec![ChatMessage::system_text("system prompt")];
+        for i in 0..14 {
+            msgs.push(ChatMessage::user_text(format!("user fact {}", i)));
+            msgs.push(ChatMessage::assistant_text(format!("reply {}", i)));
+        }
+
+        let compacted = compact_fork_messages(msgs);
+        let joined: String = compacted
+            .iter()
+            .map(|m| m.text_content())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Every user message survives — early profile details must not be
+        // dropped by context trimming (RFC P1).
+        for i in 0..14 {
+            assert!(
+                joined.contains(&format!("user fact {}", i)),
+                "user fact {} must be preserved",
+                i
+            );
+        }
+        assert!(joined.contains("system prompt"), "system messages must be preserved");
+        assert!(joined.contains("reply 13"), "final assistant reply must be preserved");
+        assert!(
+            !joined.contains("reply 0"),
+            "old assistant replies should be trimmed to bound tokens"
+        );
+        assert!(
+            joined.contains("Memory fork context was trimmed"),
+            "a trim note must explain what was omitted"
+        );
+    }
+
+    #[test]
+    fn compact_fork_messages_bounds_user_messages() {
+        let mut msgs: Vec<ChatMessage> = vec![ChatMessage::system_text("system prompt")];
+        for i in 0..60 {
+            msgs.push(ChatMessage::user_text(format!("user fact {}", i)));
+        }
+
+        let compacted = compact_fork_messages(msgs);
+        let user_count = compacted.iter().filter(|m| m.role == "user").count();
+        assert!(
+            user_count <= MAX_FORK_USER_MESSAGES,
+            "user messages must be bounded (got {})",
+            user_count
+        );
+
+        let joined: String = compacted
+            .iter()
+            .map(|m| m.text_content())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("user fact 59"), "newest user messages must be kept");
+        assert!(
+            !joined.contains("user fact 0"),
+            "oldest user messages beyond the bound may be dropped"
+        );
+        assert!(joined.contains("Memory fork context was trimmed"));
     }
 }
