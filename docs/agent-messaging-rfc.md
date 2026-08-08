@@ -377,7 +377,7 @@ bob 侧:   contacts["<bob_user_id>"]["<alice_user_id>"] = { "status": "accepted"
 - [x] 输出渲染:流式 chunk 跨 chunk 切割 `<ref id=…/>` 不残留标签(RefRenderer 缓冲);Done/fallback 整段渲染 `@昵称(u/uid)`;查不到 → `@u/uid`;非白名单标签/非本 namespace 原样保留(单测 `render_refs_*` / `ref_renderer_*` 6 项)
 - [x] chain 顺序测试同步更新(6→7 元素,mention_preparse 在 slash_command 与 dispatch_turn 之间)
 - [x] `[messaging] namespace` 配置项生效(默认 myclaw,存量 users.json/resolver 绑定零影响);`[messaging.smtp]` 仅解析(发送验证码流程后续,无 SMTP 声明即生效保持不变)
-- [x] 全量测试 + clippy `-D warnings` 通过(run 待补号)
+- [x] 全量测试 + clippy `-D warnings` 通过(run 31266339000 全绿,731 passed)
 
 仍未做(如实区分):**SMTP 发送验证码流程**(配置项已解析,发送/验证后续波);**uid 变更**(定不可变,不做);**解绑/注销 User**(不做);**改 messaging.namespace 的存量迁移**(RFC §2.2 说明,默认值下零影响)。
 
