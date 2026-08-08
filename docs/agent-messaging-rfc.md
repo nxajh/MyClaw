@@ -343,6 +343,29 @@ bob 侧:   contacts["<bob_user_id>"]["<alice_user_id>"] = { "status": "accepted"
 - [x] 绑定持久化:重启后 `resolve(rk)` 仍返回折叠身份(`user_resolver.json` roundtrip 单测)
 - [x] 全量测试 + clippy `-D warnings` 通过（run 31257540524 全绿,718 passed）
 
+### P4:用户实体层(邮箱 + uid 双标识 + 用户自助)
+
+改动(第一波):
+- `agents/user_registry.rs`(新):UserRegistry + `users.json`(version 1)持久化(`persistent(data_dir)`,每次变更写盘);`User{uid,email,nickname,active,created_ms}`;register / set_email(旧邮箱释放+唯一性回滚) / set_nickname / find_by_uid / find_by_email(大小写归一);validate_uid(`[a-z0-9_]+` 3–32 位 + 保留字 root/admin/system/bot/help/register)/ validate_email / validate_nickname(不允许 `/`);ensure_root
+- `agents/commands/register.rs`(新):`/register <邮箱> <uid>`(创建 User + 当前 rk 经 resolver 绑定 FQID + migrate_identity 折叠;已注册拒绝)/ `/email set <邮箱>` / `/nickname set <昵称>`;`pub(crate) parse_target`(u/uid / 完整 FQID / 邮箱;`@昵称` → 第二波明确报错)命令/工具层共用
+- `agents/orchestrator/inbound.rs`:Gate 拦截器挂 chain 第 4 位(AskReply→Callback→CrashRecovery→Gate→SlashCommand→DispatchTurn);白名单 register/email/link/link_confirm/help/whoami;未注册 rk 的其余入站直接框架模板回复(GATE_PROMPT,零 LLM token),注册判定 = `user_registry.is_user_id(resolve_uid(rk))`
+- `agents/known_users.rs`:删 ContactEntry.nickname 快照(显示实时化)+ `rk_keys`/`rekey_legacy_to`(迁移用);提醒文案 recipient 渲染为 u/uid 或邮箱
+- `tools/friends.rs` + `tools/send_message.rs`:入参 nick→target 全走 parse_target(只见 id/email);显示经 UserRegistry.display() 实时渲染 `@昵称(u/uid)`(无昵称 → `u/uid`);`UserMail.sender_nickname` 降级纯显示字段
+- `agents/commands/info.rs`:`/whoami` 重写(注册态判定;显示 u/uid + email/nickname(无则 —)+ Messages/First seen/Last seen/Scope;未注册附 /register、/link 引导)
+- `daemon.rs`:UserRegistry::persistent + `migrate_legacy_to_root`(启动一次性迁移:存量全部 rk + user_resolver 已有绑定归 root User `myclaw/u/root`;幂等,root 已存在即跳过)
+- `agents/commands/link.rs`:目标解析改 parse_target(绑同身份幂等/异身份拒绝);用户文案 `/link @昵称` → `/link u/uid`
+
+验收:
+- [x] 新 rk `/register <邮箱> <uid>` 创建身份并绑定当前渠道,`users.json` 持久化;uid 先到先得不可变(注册后改绑拒绝,防孤儿用户)
+- [x] uid/email/nickname 校验:uid `[a-z0-9_]+` 3–32 位 + 保留字拒绝;email 小写归一全局唯一、占用即拒绝;昵称可重复、不允许 `/`(可含空格)(单测 `parse_target_*` / `register_roundtrip_email_nickname_updates`)
+- [x] Gate 拦截:未注册 rk 白名单命令放行、其余返回框架引导文案(零 LLM token,不进 agent loop);注册后放行(chain 测试含 gate)
+- [x] 存量迁移幂等:启动时全部 known_users rk + resolver 绑定归 root(`myclaw/u/root`),存量渠道无需注册直接可用;迁移后新 rk 才走拦截引导
+- [x] 建关系/投递目标仅唯一标识:friend_*/link/send_message.recipient 接受 u/uid / 完整 FQID / 邮箱;`@昵称` 明确报错(第二波)
+- [x] 显示实时化:删 ContactEntry.nickname 快照,改昵称后提醒/列表实时显示 `@昵称(u/uid)`;`/whoami` 显示 u/uid + email/nickname + 统计与注册引导
+- [x] 全量测试 + clippy `-D warnings` 通过（run 31264854208 全绿,719 passed）
+
+第二波(未做,如实区分):**@提及 预解析**(入站 `@昵称`/`@u/uid` 自由文本解析 + 输出渲染层 `<ref id="myclaw/u/…"/>` → `@昵称(u/uid)`);**SMTP 邮箱验证**(当前无 SMTP 配置 → 声明即生效;配置项待加 myclaw.toml);**`messaging.namespace` 配置项**(暂用常量 `myclaw`);uid 变更(定不可变,不做);解绑/注销 User(不做)。
+
 ## 7. 待决(不阻塞 P0)
 
 **当前无待决项**,历史决策留痕:
