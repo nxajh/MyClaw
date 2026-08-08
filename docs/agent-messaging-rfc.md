@@ -236,6 +236,12 @@ bob 侧:   contacts["<bob_user_id>"]["<alice_user_id>"] = { "status": "accepted"
 - bob 回复好友消息 → 转发回 alice 的 agent(闭环)
 - 会话发现(已知好友的在线/活跃状态)
 
+验收:
+- [x] bob 回复 → 同链反向（send_message @alice → 用户级 mailbox）→ alice 下次交互注入,双向闭环（单测 `cross_user_reply_loop_back_to_sender`）
+- [x] 注入文本带回复引导（「如需回复，使用 send_message 工具（recipient=@昵称）」）
+- [x] 好友活跃状态可查:`/friends` 命令与 `friend_list` 工具显示 🟢 在线(<5min)/🟡 最近活跃(<24h)/⚪ 离线 + 相对时间（数据源 `KnownUser.last_seen_ms`,每次互动更新）
+- [x] 全量测试 + clippy `-D warnings` 通过（run 31256080368 全绿）
+
 ## 7. 待决(不阻塞 P0)
 
 **当前无待决项**,历史决策留痕:
