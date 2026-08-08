@@ -130,7 +130,6 @@ impl std::fmt::Debug for Session {
             .field("compact_version", &self.compact_version)
             .field("incomplete_turn", &self.incomplete_turn)
             .field("has_last_message", &self.last_message.is_some())
-            .field("has_snapshot", &self.attachments.last_full_snapshot.is_some())
             .field("has_persist", &self.persist.is_some())
             .field("has_channel", &self.channel.is_some())
             .field("has_turn_stream", &self.turn_stream.is_some())

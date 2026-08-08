@@ -211,31 +211,6 @@ impl Agent {
                 messages = compacted;
             }
 
-            // Post-compaction system-reminder injection: after compaction,
-            // old system-reminders are summarized away. Check if any
-            // system-reminder remains in messages; if not, inject the
-            // full snapshot from session.attachments.last_full_snapshot.
-            // This ensures the model always has complete context.
-            let has_system_reminder = messages.iter().any(|msg| {
-                msg.role == "user" && msg.text_content().contains("<system-reminder>")
-            });
-            if !has_system_reminder {
-                if let Some(ref snapshot) = session.attachments.last_full_snapshot {
-                    // Inject at index 1 (right after system prompt, before
-                    // compaction summary or first history message).
-                    let snapshot_msg = crate::providers::ChatMessage::user_text(snapshot.clone());
-                    if messages.len() > 1 {
-                        messages.insert(1, snapshot_msg);
-                    } else {
-                        messages.push(snapshot_msg);
-                    }
-                    tracing::debug!(
-                        session = %session.id,
-                        "injected system-reminder snapshot after compaction"
-                    );
-                }
-            }
-
             let response = {
                 tracing::info!(
                     session = %session.id,

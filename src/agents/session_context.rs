@@ -242,22 +242,6 @@ impl SessionContext {
             let text = session.attachments.build_text(&skills_snap);
             session.attachments.clear_pending();
 
-            // Generate full snapshot for post-compaction injection.
-            // This ensures the model always has complete context even after
-            // history compaction removes old system-reminders.
-            // Note: MCP is not currently diffed, so we pass an empty list.
-            let mcp_servers: Vec<(String, String)> = Vec::new();
-            session.attachments.last_full_snapshot = Some(
-                crate::agents::attachment::AttachmentManager::build_full_snapshot(
-                    &skills_snap,
-                    &agent_list,
-                    &mcp_servers,
-                    &memory_entries,
-                    runtime.context_engine.timezone_offset(),
-                    &prompt_config.permission_mode,
-                ),
-            );
-
             text
         };
 

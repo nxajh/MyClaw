@@ -47,10 +47,6 @@ struct AnnouncedState {
 /// 不维护内存中的 announced 状态。
 /// 每轮 turn 从 session history 中重建，然后与当前状态做 diff，
 /// 合并渲染为一条 `<system-reminder>` 消息。
-///
-/// `last_full_snapshot` 存储上一轮的完整 system-reminder 文本。
-/// 压缩后 history 中的旧 system-reminder 被移除，agent.rs 检测到此情况
-/// 后从 `last_full_snapshot` 注入完整快照，确保模型始终掌握全貌。
 #[derive(Default, Clone)]
 pub struct AttachmentManager {
     /// 本轮待发送增量
@@ -59,9 +55,6 @@ pub struct AttachmentManager {
     memory_index: Option<String>,
     /// 上次注入的日期 "YYYY-MM-DD"（用于区分首次 vs 日期变化）
     last_injected_date: Option<String>,
-    /// 上一轮生成的完整 system-reminder 文本（非 delta）。
-    /// 压缩后注入到 messages 中，确保模型看到完整 listing。
-    pub last_full_snapshot: Option<String>,
 }
 
 impl AttachmentManager {
@@ -490,102 +483,7 @@ impl AttachmentManager {
         self.pending.clear();
     }
 
-    /// 生成完整的 system-reminder 文本（非 delta）。
-    ///
-    /// 用于压缩后注入到 messages 中，确保模型看到完整的 skills/agents/MCP/memory/date/autonomy listing。
-    /// 调用方负责将返回值存储到 `last_full_snapshot`。
-    pub fn build_full_snapshot(
-        skills: &SkillManager,
-        agents: &[(String, String)],
-        mcp_servers: &[(String, String)],
-        memory_entries: &[crate::memory::IndexEntry],
-        timezone_offset: i32,
-        autonomy_level: &crate::config::agent::PermissionMode,
-    ) -> String {
-        let mut sections = Vec::new();
-
-        // Date
-        let now = chrono::Utc::now();
-        let offset = chrono::FixedOffset::east_opt(timezone_offset * 3600)
-            .unwrap_or_else(|| chrono::FixedOffset::east_opt(8 * 3600).unwrap());
-        let local_time = now.with_timezone(&offset);
-        let date_str = local_time.format("%Y-%m-%d").to_string();
-        sections.push(format!("## Current Date\n{}", date_str));
-
-        // Autonomy
-        let label = match autonomy_level {
-            crate::config::agent::PermissionMode::Full => "Full Autonomy",
-            crate::config::agent::PermissionMode::Default => "Default (safe tools auto-approved)",
-            crate::config::agent::PermissionMode::ReadOnly => "Read Only",
-        };
-        sections.push(format!("## Autonomy Level\n{}", label));
-
-        // Skills (full listing)
-        let mut skill_lines = vec!["## Skills".to_string()];
-        skill_lines.push(
-            "Skills provide behavioral instructions for specific tasks. \
-             Use the `skill_view` tool to load a skill's full instructions when needed."
-                .to_string(),
-        );
-        for (name, skill) in skills.agent_skills_iter() {
-            let mut parts = vec![format!("- **{}**", name)];
-            if !skill.description.is_empty() {
-                parts.push(format!(": {}", skill.description));
-            }
-            if let Some(trigger) = &skill.when_to_use {
-                parts.push(format!(" (trigger: {})", trigger));
-            }
-            skill_lines.push(parts.join(""));
-        }
-        sections.push(skill_lines.join("\n"));
-
-        // Agents (full listing)
-        let mut agent_lines = vec!["## Available Sub-Agents".to_string()];
-        agent_lines.push(
-            r#"Use `agent_delegate(agent="name", task="...", mode="sync"/"async")` to delegate."#.to_string(),
-        );
-        for (name, desc) in agents {
-            if desc.is_empty() {
-                agent_lines.push(format!("- **{}**", name));
-            } else {
-                agent_lines.push(format!("- **{}: {}**", name, desc));
-            }
-        }
-        sections.push(agent_lines.join("\n"));
-
-        // MCP (full listing)
-        if !mcp_servers.is_empty() {
-            let mut mcp_lines = vec!["## MCP Server Instructions".to_string()];
-            for (name, instructions) in mcp_servers {
-                if !instructions.is_empty() {
-                    mcp_lines.push(format!("### {}", name));
-                    mcp_lines.push(instructions.clone());
-                }
-            }
-            sections.push(mcp_lines.join("\n"));
-        }
-
-        // Memory (full listing)
-        if !memory_entries.is_empty() {
-            let mut mem_lines = vec!["## Memory".to_string()];
-            mem_lines.push(
-                "The following memories are loaded and must be obeyed. \
-                 For project context and reference docs, use memory_list() to browse, memory_search(query) to find."
-                    .to_string(),
-            );
-            for entry in memory_entries {
-                mem_lines.push(format!("- **{}**: {}", entry.name, entry.description));
-            }
-            sections.push(mem_lines.join("\n"));
-        }
-
-        format!(
-            "<system-reminder>\n{}\n</system-reminder>",
-            sections.join("\n\n")
-        )
-    }
-
-    /// Debug helper: pending delta kinds.
+    /// Debug helper: pending delta keys.
     pub fn pending_keys(&self) -> Vec<&'static str> {
         self.pending
             .keys()
