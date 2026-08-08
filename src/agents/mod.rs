@@ -63,7 +63,9 @@ pub use error::AgentError;
 pub use loop_breaker::{LoopBreak, LoopBreakReason, LoopBreaker, LoopBreakerConfig};
 pub use mcp_manager::McpManager;
 pub use orchestrator::OrchestratorEvent;
-pub use orchestrator::{Orchestrator, OrchestratorCtx, OrchestratorParts, SchedulerEvent};
+pub use orchestrator::{
+    ChannelRegistry, Orchestrator, OrchestratorCtx, OrchestratorParts, SchedulerEvent,
+};
 pub use prompt::{PermissionMode, RunMode, SystemPromptBuilder, SystemPromptConfig};
 pub use recovery::UnfinishedSubAgent;
 pub use runtime::AgentRuntime;

@@ -344,6 +344,7 @@ impl Interceptor for SlashCommand {
                 runtime: &runtime_cmd,
                 session_ctx: session_ctx_cmd.as_ref(),
                 known_users: &known_users_cmd,
+                channels: &ctx.channels,
                 channel: channel_cmd.as_ref(),
             };
             if let Some(response) = commands::dispatch(&cmd_owned, &cmd_args_owned, cmd_ctx).await {

@@ -902,6 +902,11 @@ fn filter_turn_scoped_tools(
                 }
             }
             "send_media" => false,
+            // RFC §4.2: friend tools are main-agent-only — contacts are
+            // user-level state and sub-agents never see them.
+            "friend_request" | "friend_accept" | "friend_decline" | "friend_list" => {
+                session.parent_session_id.is_none()
+            }
             _ => true,
         };
         if !keep {

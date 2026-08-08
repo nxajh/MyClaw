@@ -8,12 +8,17 @@ use crate::agents::session::{SessionManager, SessionOverride};
 use std::sync::Arc;
 
 mod config;
+pub(crate) mod friends;
 mod info;
 mod model;
 mod reload;
 mod session;
 
 pub use config::{cmd_autonomy, cmd_config, cmd_settings};
+pub use friends::{
+    cmd_friend_accept, cmd_friend_block, cmd_friend_decline, cmd_friend_request,
+    cmd_friend_remove, cmd_friend_unblock, cmd_friends,
+};
 pub use info::{
     cmd_btw, cmd_context, cmd_export, cmd_groups, cmd_help, cmd_mcp, cmd_ping, cmd_skill,
     cmd_status, cmd_tools, cmd_users, cmd_whoami,
@@ -43,6 +48,9 @@ pub struct CommandContext<'a> {
     pub session_ctx: Option<&'a Arc<crate::agents::SessionContext>>,
     /// Global user registry for `/users`, `/whoami`, `/ping` queries.
     pub known_users: &'a Arc<crate::agents::KnownUsersRegistry>,
+    /// Live channel registry — used by `/friend_*` to notify the peer
+    /// (framework template push, RFC §4.3; never routed through the LLM).
+    pub channels: &'a crate::agents::orchestrator::ChannelRegistry,
     /// The channel that received this command (for `/groups`, etc.).
     pub channel: Option<&'a Arc<dyn crate::channels::Channel>>,
 }
@@ -119,6 +127,13 @@ pub fn command_catalog() -> Vec<(&'static str, &'static str)> {
         ("rn", "Rename a session"),
         ("delete", "Delete a session"),
         ("del", "Delete a session"),
+        ("friends", "List friend requests and contacts"),
+        ("friend_request", "Send a friend request (@nick)"),
+        ("friend_accept", "Accept a friend request (@nick)"),
+        ("friend_decline", "Decline a friend request (@nick)"),
+        ("friend_block", "Block a user (@nick)"),
+        ("friend_unblock", "Unblock a user (@nick)"),
+        ("friend_remove", "Remove a friend relationship (@nick)"),
     ]
 }
 
@@ -164,6 +179,13 @@ pub fn is_known_command(cmd: &str) -> bool {
             | "rn"
             | "delete"
             | "del"
+            | "friends"
+            | "friend_request"
+            | "friend_accept"
+            | "friend_decline"
+            | "friend_block"
+            | "friend_unblock"
+            | "friend_remove"
     )
 }
 
@@ -201,6 +223,14 @@ pub async fn dispatch(cmd: &str, args: &str, ctx: CommandContext<'_>) -> Option<
         "switch" | "sw" => Some(session::cmd_switch(args, ctx).await),
         "rename" | "rn" => Some(session::cmd_rename(args, ctx)),
         "delete" | "del" => Some(session::cmd_delete(args, ctx).await),
+        // ── Batch 5: friends (RFC §4.2) ──
+        "friends" => Some(friends::cmd_friends(ctx)),
+        "friend_request" => Some(friends::cmd_friend_request(args, ctx).await),
+        "friend_accept" => Some(friends::cmd_friend_accept(args, ctx).await),
+        "friend_decline" => Some(friends::cmd_friend_decline(args, ctx).await),
+        "friend_block" => Some(friends::cmd_friend_block(args, ctx)),
+        "friend_unblock" => Some(friends::cmd_friend_unblock(args, ctx)),
+        "friend_remove" => Some(friends::cmd_friend_remove(args, ctx)),
         _ => None,
     }
 }

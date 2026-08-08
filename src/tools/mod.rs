@@ -16,6 +16,7 @@ mod calculator;
 mod cronjob_tool;
 mod delegate;
 mod file_ops;
+mod friends;
 mod hear_audio;
 mod http;
 mod list_dir;
@@ -46,6 +47,9 @@ pub use calculator::CalculatorTool;
 pub use cronjob_tool::CronJobTool;
 pub use delegate::AgentDelegateTool;
 pub use file_ops::{FileEditTool, FileReadTool, FileWriteTool};
+pub use friends::{
+    FriendAcceptTool, FriendDeclineTool, FriendListTool, FriendRequestTool, FriendToolsCtx,
+};
 pub use hear_audio::HearAudioTool;
 pub use http::HttpRequestTool;
 pub use list_dir::ListDirTool;

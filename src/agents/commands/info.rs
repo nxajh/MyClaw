@@ -598,7 +598,7 @@ pub fn cmd_groups(ctx: CommandContext<'_>) -> String {
 }
 
 /// Format a unix-ms timestamp as a readable date string.
-fn format_ts(ts_ms: u64) -> String {
+pub(crate) fn format_ts(ts_ms: u64) -> String {
     let secs = ts_ms / 1000;
     let days = secs / 86400;
     let year = 1970 + (days / 365);

@@ -489,6 +489,7 @@ fn build_registry(config: &crate::config::AppConfig) -> anyhow::Result<crate::re
 }
 
 /// Build ToolRegistry with all built-in + MCP + skill tools registered.
+#[allow(clippy::too_many_arguments)]
 async fn build_tools(
     mcp_manager: &McpManager,
     skills: &Arc<parking_lot::RwLock<SkillManager>>,
@@ -497,10 +498,12 @@ async fn build_tools(
     _knowledge_dir: &str,
     user_resolver: &Arc<crate::agents::UserResolver>,
     ask_router: Arc<crate::agents::AskRouter>,
+    known_users: &Arc<crate::agents::KnownUsersRegistry>,
 ) -> (
     ToolRegistry,
     Arc<tokio::sync::RwLock<crate::tools::TaskState>>,
     Arc<crate::tools::SendMessageTool>,
+    Arc<crate::tools::FriendToolsCtx>,
 ) {
     let mut tools = ToolRegistry::new();
     let builtin = crate::tools::builtin_tools(Some(workspace_dir.join("sessions")));
@@ -562,6 +565,22 @@ async fn build_tools(
     )));
     tools.register(Arc::new(crate::tools::MemoryManageTool::new(wd, r)));
 
+    // Friend tools (RFC §4.2) — main-agent only, share one ctx so the
+    // daemon can inject the live ChannelRegistry for §4.3 notifications.
+    let friend_ctx = Arc::new(crate::tools::FriendToolsCtx::new(Arc::clone(known_users)));
+    tools.register(Arc::new(crate::tools::FriendRequestTool::new(Arc::clone(
+        &friend_ctx,
+    ))));
+    tools.register(Arc::new(crate::tools::FriendAcceptTool::new(Arc::clone(
+        &friend_ctx,
+    ))));
+    tools.register(Arc::new(crate::tools::FriendDeclineTool::new(Arc::clone(
+        &friend_ctx,
+    ))));
+    tools.register(Arc::new(crate::tools::FriendListTool::new(Arc::clone(
+        &friend_ctx,
+    ))));
+
     // Inject MCP tools (if any servers are configured and connected).
     if mcp_manager.is_connected().await {
         let mcp_tools = mcp_manager.tools().await;
@@ -575,7 +594,7 @@ async fn build_tools(
     }
 
     tracing::info!(tool_count = tools.tool_count(), "tool registry built");
-    (tools, task_state, send_message_tool)
+    (tools, task_state, send_message_tool, friend_ctx)
 }
 
 /// Build SkillManager from SKILL.md files in workspace.
@@ -950,7 +969,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     known_users.migrate_legacy(&data_dir);
 
     // Build tool registry (all built-in + MCP + skill tools + ask_user).
-    let (mut tools, task_state, send_message_tool) = build_tools(
+    let (mut tools, task_state, send_message_tool, friend_ctx) = build_tools(
         &mcp_manager,
         &skills_arc,
         &shared_scheduler,
@@ -958,6 +977,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         config.knowledge_dir.to_str().unwrap_or("."),
         &user_resolver,
         Arc::clone(&ask_router),
+        &known_users,
     )
     .await;
 
@@ -1261,6 +1281,10 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // ── Launch ─────────────────────────────────────────────────────────────
 
     let (orchestrator, _msg_tx) = Orchestrator::new(parts);
+
+    // Friend tools need the live channel registry for §4.3 peer
+    // notifications (framework template push, zero LLM tokens).
+    friend_ctx.set_channels(orchestrator.ctx().channels.clone());
 
     // H57: AgentLoop is gone; the ClientChannel's previous loop_registry +
     // evict_loop dance to flush stale per-session AgentLoop instances on
