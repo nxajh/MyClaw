@@ -200,6 +200,7 @@ pub struct Scheduler {
 impl Scheduler {
     /// Create a new Scheduler. Returns a SharedScheduler (Arc<Self>).
     /// Loads existing jobs from disk if the file exists.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         path: PathBuf,
         namespace: &str,
