@@ -100,6 +100,7 @@ pub async fn run(
         model: model.map(|s| s.to_string()),
         max_tool_calls: None,
         isolation: Default::default(),
+        timeout: None,
     };
     let agent_obj = myclaw::Agent::new(main_config);
 
