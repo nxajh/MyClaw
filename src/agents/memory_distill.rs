@@ -600,3 +600,106 @@ async fn collect_distill_stream(mut stream: BoxStream<StreamEvent>) -> Result<Di
         usage,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn distill_state_backoff_after_three_failures_and_reset_on_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_str().unwrap();
+
+        let mut state = DistillState::default();
+        assert!(!state.in_backoff());
+
+        state.record_attempt(false, ws);
+        state.record_attempt(false, ws);
+        state.record_attempt(false, ws);
+        assert_eq!(state.consecutive_failures, 3);
+        assert!(state.in_backoff(), "3 consecutive failures must enter backoff");
+        assert!(state.last_distill_ts.is_none(), "failed passes must not advance last_distill_ts");
+
+        state.record_attempt(true, ws);
+        assert_eq!(state.consecutive_failures, 0);
+        assert!(!state.in_backoff());
+        assert!(state.last_distill_ts.is_some(), "success must advance last_distill_ts");
+    }
+
+    #[test]
+    fn distill_state_backoff_expires_after_two_hours() {
+        let mut state = DistillState {
+            consecutive_failures: 3,
+            last_attempt_ts: Some(
+                (chrono::Utc::now() - chrono::Duration::hours(3)).to_rfc3339(),
+            ),
+            last_distill_ts: None,
+        };
+        assert!(
+            !state.in_backoff(),
+            "backoff must expire once 2h has passed since the last attempt"
+        );
+
+        // Fresh attempt → still in backoff.
+        state.last_attempt_ts = Some(chrono::Utc::now().to_rfc3339());
+        assert!(state.in_backoff());
+    }
+
+    #[test]
+    fn distill_state_persists_across_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_str().unwrap();
+
+        let mut state = DistillState::default();
+        state.record_attempt(false, ws);
+        state.record_attempt(false, ws);
+        state.record_attempt(true, ws);
+
+        let loaded = DistillState::load(ws);
+        assert_eq!(loaded.consecutive_failures, 0);
+        assert!(loaded.last_distill_ts.is_some());
+        assert!(loaded.last_attempt_ts.is_some());
+        assert!(dir.path().join(".state/distill.json").exists());
+    }
+
+    #[test]
+    fn has_pending_user_memories_detects_new_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_str().unwrap();
+
+        // No users/ at all → nothing pending.
+        assert!(!has_pending_user_memories(ws, None));
+
+        // Write one user memory.
+        let mem_dir = dir.path().join("users/user-1/memory");
+        std::fs::create_dir_all(&mem_dir).unwrap();
+        let file = mem_dir.join("note.md");
+        std::fs::write(&file, "# note\n").unwrap();
+
+        // Never distilled → pending.
+        assert!(has_pending_user_memories(ws, None));
+
+        // Last distill AFTER the file mtime → not pending.
+        let future = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        assert!(!has_pending_user_memories(ws, Some(&future)));
+
+        // Last distill BEFORE the file mtime → pending.
+        let past = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        assert!(has_pending_user_memories(ws, Some(&past)));
+    }
+
+    #[test]
+    fn build_distill_prompt_contains_scope_and_sanitization_rules() {
+        let prompt = build_distill_prompt(2, 3, "anonymized input");
+        assert!(prompt.contains("scope='agent'"), "prompt must force agent scope");
+        assert!(
+            prompt.contains("De-identification is CRITICAL"),
+            "prompt must mandate de-identification"
+        );
+        assert!(
+            prompt.contains("no distillation needed"),
+            "prompt must allow a no-op response"
+        );
+        assert!(prompt.contains("anonymized"), "input must be described as anonymized");
+    }
+}

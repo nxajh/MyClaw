@@ -560,3 +560,21 @@ fn build_extraction_prompt(knowledge_dir: &str) -> String {
         existing_index = existing_index,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::build_extraction_prompt;
+
+    #[test]
+    fn extraction_prompt_forces_user_scope() {
+        let prompt = build_extraction_prompt("memory");
+        assert!(
+            prompt.contains("scope='user'"),
+            "fork prompt must force the user scope (agent layer is distillation-only)"
+        );
+        assert!(
+            prompt.contains("private layer"),
+            "fork prompt must describe the user layer as private"
+        );
+    }
+}

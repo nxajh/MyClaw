@@ -236,4 +236,213 @@ mod tests {
         .await;
         assert_eq!(output["count"], 1);
     }
+
+    // ── two-tier memory scope tests (P0) ──────────────────────────────────
+
+    async fn manage(tool: &MemoryManageTool, args: Value, session: &Session) -> Value {
+        let result = tool.execute(args, session).await.unwrap();
+        serde_json::from_str(&result.output).unwrap()
+    }
+
+    #[tokio::test]
+    async fn memory_manage_default_and_user_scope_write_user_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = MemoryManageTool::new(dir.path().to_path_buf(), Arc::new(UserResolver::new()));
+        let session = session();
+
+        // Explicit scope=user.
+        let out = manage(
+            &tool,
+            json!({
+                "action": "add",
+                "name": "scope-user-test",
+                "scope": "user",
+                "content": "private fact for test-user"
+            }),
+            &session,
+        )
+        .await;
+        assert!(out["success"].as_bool().unwrap_or(false));
+
+        // Default (no scope) also lands in the user layer.
+        let out = manage(
+            &tool,
+            json!({
+                "action": "add",
+                "name": "scope-default-test",
+                "content": "private fact for test-user"
+            }),
+            &session,
+        )
+        .await;
+        assert!(out["success"].as_bool().unwrap_or(false));
+
+        let user_mem = dir.path().join("users").join("test-user").join("memory");
+        assert!(user_mem.join("scope-user-test.md").exists());
+        assert!(user_mem.join("scope-default-test.md").exists());
+        // Nothing leaked into the global agent layer.
+        let global_mem = dir.path().join("memory");
+        assert!(!global_mem.join("scope-user-test.md").exists());
+        assert!(!global_mem.join("scope-default-test.md").exists());
+    }
+
+    #[tokio::test]
+    async fn memory_manage_agent_scope_writes_global_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = MemoryManageTool::new(dir.path().to_path_buf(), Arc::new(UserResolver::new()));
+        let session = session();
+
+        let out = manage(
+            &tool,
+            json!({
+                "action": "add",
+                "name": "scope-agent-test",
+                "scope": "agent",
+                "content": "shared methodology: verify deliverables against the spec"
+            }),
+            &session,
+        )
+        .await;
+        assert!(out["success"].as_bool().unwrap_or(false));
+
+        let global_mem = dir.path().join("memory");
+        assert!(global_mem.join("scope-agent-test.md").exists());
+        let user_mem = dir.path().join("users").join("test-user").join("memory");
+        assert!(!user_mem.join("scope-agent-test.md").exists());
+    }
+
+    #[tokio::test]
+    async fn memory_manage_agent_scope_rejects_pii() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = MemoryManageTool::new(dir.path().to_path_buf(), Arc::new(UserResolver::new()));
+        let session = session();
+
+        let pii_cases: &[(&str, &str)] = &[
+            ("routing key", "telegram:myclaw:6270938644 is the user's channel"),
+            ("numeric id", "the user id is 6270938644"),
+            ("email", "reach me at user@example.com"),
+            ("phone", "call 13812345678"),
+        ];
+        for (label, content) in pii_cases {
+            let out = manage(
+                &tool,
+                json!({
+                    "action": "add",
+                    "name": "pii-agent",
+                    "scope": "agent",
+                    "content": content
+                }),
+                &session,
+            )
+            .await;
+            assert!(
+                !out["success"].as_bool().unwrap_or(true),
+                "{label} should be blocked by the PII guard"
+            );
+            let err = out["error"].as_str().unwrap_or_default();
+            assert!(
+                err.contains("de-identified"),
+                "{label}: expected de-identification error, got: {err}"
+            );
+        }
+
+        // The same user-identifying content is fine in the user scope.
+        let out = manage(
+            &tool,
+            json!({
+                "action": "add",
+                "name": "pii-user",
+                "scope": "user",
+                "content": "telegram:myclaw:6270938644 is the user's channel"
+            }),
+            &session,
+        )
+        .await;
+        assert!(out["success"].as_bool().unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn memory_manage_replace_is_scope_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = MemoryManageTool::new(dir.path().to_path_buf(), Arc::new(UserResolver::new()));
+        let session = session();
+
+        // Same name in both layers: user scope has one, agent scope has another.
+        let out = manage(
+            &tool,
+            json!({
+                "action": "add",
+                "name": "same-name",
+                "scope": "user",
+                "content": "user-layer content"
+            }),
+            &session,
+        )
+        .await;
+        assert!(out["success"].as_bool().unwrap_or(false));
+        let out = manage(
+            &tool,
+            json!({
+                "action": "add",
+                "name": "same-name",
+                "scope": "agent",
+                "content": "agent-layer content"
+            }),
+            &session,
+        )
+        .await;
+        assert!(out["success"].as_bool().unwrap_or(false));
+
+        // replace without scope targets the user layer (default).
+        let out = manage(
+            &tool,
+            json!({
+                "action": "replace",
+                "name": "same-name",
+                "content": "user-layer updated"
+            }),
+            &session,
+        )
+        .await;
+        assert!(out["success"].as_bool().unwrap_or(false));
+        let user_file =
+            std::fs::read_to_string(dir.path().join("users/test-user/memory/same-name.md"))
+                .unwrap();
+        assert!(user_file.contains("user-layer updated"));
+
+        // replace with scope=agent targets the agent layer and leaves the user file intact.
+        let out = manage(
+            &tool,
+            json!({
+                "action": "replace",
+                "name": "same-name",
+                "scope": "agent",
+                "content": "agent-layer updated"
+            }),
+            &session,
+        )
+        .await;
+        assert!(out["success"].as_bool().unwrap_or(false));
+        let agent_file = std::fs::read_to_string(dir.path().join("memory/same-name.md")).unwrap();
+        assert!(agent_file.contains("agent-layer updated"));
+        let user_file =
+            std::fs::read_to_string(dir.path().join("users/test-user/memory/same-name.md"))
+                .unwrap();
+        assert!(user_file.contains("user-layer updated"));
+
+        // Missing entry reports the scope in the error.
+        let out = manage(
+            &tool,
+            json!({
+                "action": "replace",
+                "name": "no-such-memory",
+                "scope": "agent",
+                "content": "x"
+            }),
+            &session,
+        )
+        .await;
+        assert!(!out["success"].as_bool().unwrap_or(true));
+        assert!(out["error"].as_str().unwrap().contains("agent scope"));
+    }
 }
