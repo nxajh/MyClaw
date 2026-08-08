@@ -42,6 +42,26 @@ Claude Code v2.1.224 引入 cross-session messaging(SendMessage/ListAgents)。�
 - 别名消歧规则:只可能在**已建立关系的人**中消歧——你无法 @ 一个陌生人;昵称按关系存储,**不同好友可重名**,关系中记录对方完整 user_id,无歧义。
 - 附带收益:好友关系建立时双方 user_id 自然沉淀,身份折叠从"operator 手动配置"走向"用户行为驱动"。
 
+### 2.1 跨渠道身份绑定(P3,方案 B:用户主动)
+
+```
+新渠道 /link @昵称 ──→ 旧渠道推送一次性验证码(框架模板,零 LLM token)
+        │                                       │
+        │      ┌────────────────────────────────┘
+        ▼      ▼
+新渠道 /link_confirm 验证码 ──验证通过──→ resolver.set(rk, uid) + migrate_identity
+                                            │
+                                            ▼
+                         好友 / 消息 / 记忆按"人"共享(折叠身份)
+```
+
+- 绑定由**用户行为驱动**:在新渠道 `/link @昵称` 认领身份,框架向**被认领账号**推送 6 位一次性验证码(框架模板直发,零 LLM token),新渠道回 `/link_confirm 验证码` 证明同时掌握两渠道,验证通过后 `resolver.set(rk, uid)` + `migrate_identity`。
+- 验证码安全边界:6 位数字、10 分钟 TTL、3 次错误作废、不能绑自己、已绑定渠道拒绝重复绑定(暂无解绑,报错提示);目标渠道不可达时回滚 pending。
+- 绑定仅**命令通道**(同 block/unblock 哲学),不进工具集——安全敏感操作,防 LLM 误触发。
+- `UserResolver` 持久化(`{data_dir}/user_resolver.json`,version 1,`set()` 即写盘):绑定关系跨重启保留;待确认验证码状态仅内存(重启后重新 `/link` 即可)。
+- 折叠语义:contacts / mailbox / sender 身份 / last_seen 一律经 `resolve_uid()` 按"人"折叠;`users` 表保持 routing_key 键(登记簿语义,渠道级活跃度各自记录)。
+- `migrate_identity(old_rk, new_uid)`:绑定成功时把旧 rk 的 mailbox 并入新身份、owner 维度联系人合并、其他好友侧指向旧 rk 的关系重指新身份(昵称跟随折叠身份)。
+
 ## 3. 消息通道
 
 > **统一入口**:所有 agent 间消息(主↔子、跨用户)发送侧统一走 `send_message` 工具,不引入第二工具。§3.4 的 `DelegationEvent::Message` 与 AttachmentManager 队列是**接收侧框架内部机制**——它们把 `send_message` 投递的消息送入接收方 agent 的 turn,不是独立通信通道。
@@ -241,6 +261,22 @@ bob 侧:   contacts["<bob_user_id>"]["<alice_user_id>"] = { "status": "accepted"
 - [x] 注入文本带回复引导（「如需回复，使用 send_message 工具（recipient=@昵称）」）
 - [x] 好友活跃状态可查:`/friends` 命令与 `friend_list` 工具显示 🟢 在线(<5min)/🟡 最近活跃(<24h)/⚪ 离线 + 相对时间（数据源 `KnownUser.last_seen_ms`,每次互动更新）
 - [x] 全量测试 + clippy `-D warnings` 通过（run 31256080368 全绿）
+
+### P3:跨渠道身份绑定(方案 B:用户主动)
+
+改动:
+- `agents/user_profile.rs`:`UserResolver` 持久化(`persistent(data_dir)` + `user_resolver.json`,version 1,`set()` 即写盘)
+- `agents/known_users.rs`:`with_resolver()` / `resolve_uid()` 折叠接入 + `migrate_identity()`(mailbox 合并、owner 维度合并、peer 键重指)
+- `agents/commands/link.rs`(新):`/link` + `/link_confirm` 命令(验证码绑定流程,仅命令通道)
+- `tools/send_message.rs` + `commands/friends.rs`:sender 身份折叠(`resolve_uid`)
+- `daemon.rs`:user_resolver 与 known_users 共享 data_dir 接线
+
+验收:
+- [x] 新渠道 `/link @昵称` → 被认领账号所在渠道收到 6 位一次性验证码(框架模板直发,零 LLM token)
+- [x] `/link_confirm 验证码` 验证通过 → `resolver.set` + `migrate_identity`,两渠道共享好友/消息/记忆(单测 `migrate_identity_merges_mailbox_and_contacts` / `cross_user_folds_linked_identity`)
+- [x] 安全边界:10 分钟过期 / 3 次错误作废 / 不能绑自己 / 已绑定渠道拒绝重复绑定 / 目标渠道不可达回滚 pending
+- [x] 绑定持久化:重启后 `resolve(rk)` 仍返回折叠身份(`user_resolver.json` roundtrip 单测)
+- [x] 全量测试 + clippy `-D warnings` 通过（run 31257540524 全绿,718 passed）
 
 ## 7. 待决(不阻塞 P0)
 
