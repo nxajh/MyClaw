@@ -149,6 +149,8 @@ pub fn resolve_mentions(
             fail @ MentionResolution::Failed(_) => return fail,
         }
     }
+    // 循环只消费到最后一个提及；剩余尾部文本（提及后的内容）必须保留。
+    out.push_str(rest);
     MentionResolution::Resolved(out)
 }
 
