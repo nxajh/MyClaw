@@ -210,6 +210,61 @@ impl Agent {
             .await
             {
                 messages = compacted;
+
+                // Post-compaction re-injection: compaction summarizes away old
+                // <system-reminder> blocks (skills/memory/date/autonomy/agents).
+                // The agent loop bypasses process_turn, so the diff-based
+                // attachment injection in session_context.rs never runs. Re-run
+                // the diffs here against the freshly-compacted history; any
+                // missing reminders are injected as transient messages (not
+                // persisted to history, exactly like sub-agent inbox below).
+                let reminder = {
+                    let skills_snap = runtime.skills.read();
+                    let history_clone = session.history.clone();
+                    session.attachments.diff_skills(&skills_snap, &history_clone);
+                    let agent_list: Vec<(String, String)> = runtime
+                        .agents
+                        .values_cloned()
+                        .into_iter()
+                        .map(|a| {
+                            (
+                                a.config.name.clone(),
+                                a.config.description.clone().unwrap_or_default(),
+                            )
+                        })
+                        .collect();
+                    session.attachments.diff_agents(&agent_list, &history_clone);
+                    session.attachments.diff_date(
+                        runtime.context_engine.timezone_offset(),
+                        &history_clone,
+                    );
+                    session.attachments.diff_autonomy(&permission_mode, &history_clone);
+                    let knowledge_dir = &runtime.defaults.prompt.knowledge_dir;
+                    let memory_entries: Vec<crate::memory::IndexEntry> =
+                        if !knowledge_dir.is_empty() {
+                            let memory_dir = std::path::Path::new(knowledge_dir);
+                            let files = crate::memory::scan_memory_files(memory_dir);
+                            files.iter().map(crate::memory::IndexEntry::from).collect()
+                        } else {
+                            Vec::new()
+                        };
+                    session.attachments.diff_memory(&memory_entries, &history_clone);
+                    let text = session.attachments.build_text(&skills_snap);
+                    session.attachments.clear_pending();
+                    text
+                };
+                if let Some(reminder_text) = reminder {
+                    tracing::info!(
+                        session = %session.id,
+                        "injected system-reminder snapshot after compaction"
+                    );
+                    let snapshot_msg = ChatMessage::user_text(reminder_text);
+                    if messages.len() > 1 {
+                        messages.insert(1, snapshot_msg);
+                    } else {
+                        messages.push(snapshot_msg);
+                    }
+                }
             }
 
             // RFC agent-messaging §3.4/§3.7: drain the sub-agent inbox before
