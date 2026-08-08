@@ -29,7 +29,7 @@ use dashmap::DashMap;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::agents::delegation::DelegationEvent;
+use crate::agents::delegation::{AgentMail, DelegationEvent};
 use crate::agents::session::{BackendPersistHook, PersistHook, SessionManager};
 use crate::config::sub_agent::AgentIsolation;
 
@@ -40,6 +40,9 @@ const SUB_AGENT_TIMEOUT_DEFAULT_SECS: u64 = 600;
 /// Hard ceiling: no delegation may run longer than this regardless of what
 /// the tool caller or SubAgentConfig requests.
 const SUB_AGENT_TIMEOUT_MAX_SECS: u64 = 1800;
+
+/// Capacity of each running sub-agent's inbox (parent → sub messages).
+const SUB_AGENT_INBOX_CAPACITY: usize = 64;
 
 /// Resolve the effective timeout.
 ///
@@ -78,6 +81,11 @@ pub struct DelegationCoordinator {
     /// In-flight background delegations (task_id → JoinHandle). Powers
     /// `/agent_list` (read snapshot) and `/agent_kill` (abort by id).
     running: Arc<DashMap<String, JoinHandle<()>>>,
+    /// Parent → sub inboxes of running async sub-agents (task_id → sender).
+    /// Registered by `spawn_delegate_async`, removed when the sub-agent
+    /// finishes; powers the `send_message(recipient=task_id)` tool via
+    /// `AgentMessenger::send_to_sub_agent`.
+    mailboxes: Arc<DashMap<String, mpsc::Sender<AgentMail>>>,
     /// Sender for `DelegationEvent`s, set once by the daemon via
     /// `set_event_sender` when wiring the orchestrator's `delegation_rx`.
     event_tx_cell: Arc<OnceLock<mpsc::Sender<DelegationEvent>>>,
@@ -95,6 +103,7 @@ impl DelegationCoordinator {
             worktrees_root,
             runtime_cell: Arc::new(OnceLock::new()),
             running: Arc::new(DashMap::new()),
+            mailboxes: Arc::new(DashMap::new()),
             event_tx_cell: Arc::new(OnceLock::new()),
         }
     }
@@ -278,6 +287,7 @@ impl DelegationCoordinator {
         session_key: Option<&'a str>,
         reply_target: Option<&'a str>,
         timeout_secs: u64,
+        inbox: Option<mpsc::Receiver<AgentMail>>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'a>>
     {
         Box::pin(async move {
@@ -408,6 +418,15 @@ impl DelegationCoordinator {
                     session.session_override.model = Some(m.clone());
                 }
                 session.session_override.system_prompt_override = Some(identity.clone());
+                // RFC agent-messaging §3: async sub-agents receive an inbox
+                // (parent → sub messages) via `inbox`. The task_id identity
+                // for sub→parent messages is set for BOTH sync and async
+                // sub-agents (a sync sub-agent can message its parent, it
+                // just cannot receive messages — no inbox).
+                if let Some(rx) = inbox {
+                    session.sub_agent_inbox = Some(Arc::new(tokio::sync::Mutex::new(rx)));
+                }
+                session.sub_agent_task_id = Some(task_id.clone());
             }
 
             // Snapshot the runtime; for worktree isolation, overlay the
@@ -564,6 +583,56 @@ impl DelegationCoordinator {
             // `incomplete_turn` via the standard turn-end persistence path; the
             // session is then no longer flagged as needing recovery.
 
+            // RFC agent-messaging §3.4 (A5): messages that arrived after the
+            // sub-agent stopped consuming its inbox must not be silently lost.
+            // Drain whatever is left and attach it to the result — the async
+            // path then carries it back in `DelegationEvent::Completed`.
+            let undelivered: Vec<String> = {
+                let session = sub_ctx.session.lock().await;
+                match &session.sub_agent_inbox {
+                    Some(inbox) => {
+                        let mut rx = inbox.lock().await;
+                        let mut out = Vec::new();
+                        while let Ok(mail) = rx.try_recv() {
+                            out.push(mail.text);
+                        }
+                        out
+                    }
+                    None => Vec::new(),
+                }
+            };
+            let result = match result {
+                Ok(text) => {
+                    if undelivered.is_empty() {
+                        Ok(text)
+                    } else {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            count = undelivered.len(),
+                            "sub-agent finished with unread parent messages; attaching to result"
+                        );
+                        Ok(format!(
+                            "{}\n\n[主 agent 有 {} 条消息在任务结束后到达，未处理]：\n{}",
+                            text,
+                            undelivered.len(),
+                            undelivered.join("\n---\n")
+                        ))
+                    }
+                }
+                Err(e) => {
+                    if undelivered.is_empty() {
+                        Err(e)
+                    } else {
+                        Err(anyhow::anyhow!(
+                            "{} (另有 {} 条主 agent 消息在任务结束后到达，未处理：{})",
+                            e,
+                            undelivered.len(),
+                            undelivered.join(" | ")
+                        ))
+                    }
+                }
+            };
+
             // GC: delete the sub-session for sync delegations. The result is
             // already captured in `result` and returned to the parent's tool
             // call, so the sub-session history is no longer needed.
@@ -619,6 +688,13 @@ impl DelegationCoordinator {
         let running = Arc::clone(&self.running);
         let running_task_id = task_id.clone();
 
+        // RFC agent-messaging §3: register the sub-agent's inbox so the
+        // parent's `send_message(recipient=task_id)` can reach it. The
+        // sender is dropped when the map entry is removed at completion.
+        let (mail_tx, mail_rx) = mpsc::channel(SUB_AGENT_INBOX_CAPACITY);
+        self.mailboxes.insert(task_id.clone(), mail_tx);
+        let mailboxes = Arc::clone(&self.mailboxes);
+
         let handle = tokio::spawn(async move {
             let start_time = std::time::Instant::now();
 
@@ -631,6 +707,7 @@ impl DelegationCoordinator {
                     Some(&session_key_owned),
                     Some(&reply_target_owned),
                     timeout_secs,
+                    Some(mail_rx),
                 )
                 .await;
 
@@ -664,6 +741,10 @@ impl DelegationCoordinator {
 
             // Self-remove from the running table once the spawn finishes.
             running.remove(&running_task_id);
+            // Drop the mailbox sender: the sub-agent is gone, so
+            // `send_message(recipient=task_id)` will now report the task_id
+            // as unknown instead of queueing into a dead channel.
+            mailboxes.remove(&running_task_id);
         });
 
         self.running.insert(task_id.clone(), handle);
@@ -698,6 +779,7 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
             None,
             reply_target.as_deref(),
             timeout_secs,
+            None,
         )
         .await
     }
@@ -726,5 +808,56 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
             .into_iter()
             .map(|a| (a.config.name.clone(), a.config.description.clone()))
             .collect()
+    }
+}
+
+/// Agent-to-agent message bus (RFC agent-messaging §3).
+///
+/// `send_to_sub_agent` routes through the per-task inbox registered by
+/// `spawn_delegate_async`; `send_to_parent` reuses the `DelegationEvent`
+/// channel so the orchestrator wakes the parent session exactly like a
+/// completion event (queued behind the turn lock — never preempting).
+#[async_trait::async_trait]
+impl crate::agents::AgentMessenger for DelegationCoordinator {
+    fn send_to_sub_agent(&self, task_id: &str, mail: AgentMail) -> Result<(), String> {
+        match self.mailboxes.get(task_id) {
+            Some(tx) => tx
+                .try_send(mail)
+                .map_err(|e| format!("消息投递失败（子代理收件箱已满或已关闭）：{}", e)),
+            None => Err(format!(
+                "task_id '{}' 不存在或子代理已结束（仅 async 子代理可接收消息）",
+                task_id
+            )),
+        }
+    }
+
+    async fn send_to_parent(&self, event: DelegationEvent::Message) -> bool {
+        match self.event_sender() {
+            Some(tx) => {
+                let DelegationEvent::Message {
+                    msg_id,
+                    sender_name,
+                    task_id,
+                    session_id,
+                    text,
+                } = event;
+                tx.send(DelegationEvent::Message {
+                    msg_id,
+                    sender_name,
+                    task_id,
+                    session_id,
+                    text,
+                })
+                .await
+                .is_ok()
+            }
+            None => {
+                tracing::warn!(
+                    task_id = %event.task_id,
+                    "cannot deliver sub-agent message: delegation event channel not wired"
+                );
+                false
+            }
+        }
     }
 }

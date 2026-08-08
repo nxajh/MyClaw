@@ -2,9 +2,12 @@
 
 use std::sync::Arc;
 
+use tokio::sync::Mutex;
+
 use super::backend::PersistHook;
 use super::session_override::SessionOverride;
 use crate::agents::attachment::AttachmentManager;
+use crate::agents::delegation::AgentMail;
 use crate::agents::tokens::TokenTracker;
 use crate::channels::{Channel, ChannelInboundMessage, PersistedChannelMessage, TurnStream};
 use crate::providers::capability_chat::ChatMessage;
@@ -89,6 +92,16 @@ pub struct Session {
     /// `None` when the channel is non-streaming or no channel is wired.
     /// Never persisted; reset on clone.
     pub turn_stream: Option<Box<dyn TurnStream>>,
+    /// Inbox for parent → sub messages (RFC agent-messaging §3). Present
+    /// only while an **async** sub-agent runs; `Agent::run` drains it before
+    /// every LLM request and injects the batch as a `<system-reminder>`.
+    /// The mpsc receiver is wrapped so `Session` stays cheaply cloneable
+    /// (snapshots share the same inbox handle — never drained by a clone).
+    pub sub_agent_inbox: Option<Arc<Mutex<tokio::sync::mpsc::Receiver<AgentMail>>>>,
+    /// The sub-agent's own task_id (identity for sub→parent messages).
+    /// `None` for top-level sessions only — both sync and async sub-agents
+    /// carry it (async ones additionally get an inbox).
+    pub sub_agent_task_id: Option<String>,
 }
 
 // `Session` cannot derive `Clone` because `Box<dyn TurnStream>` is not
@@ -113,6 +126,8 @@ impl Clone for Session {
             persist: self.persist.clone(),
             channel: self.channel.clone(),
             turn_stream: None,
+            sub_agent_inbox: self.sub_agent_inbox.clone(),
+            sub_agent_task_id: self.sub_agent_task_id.clone(),
         }
     }
 }
@@ -133,6 +148,8 @@ impl std::fmt::Debug for Session {
             .field("has_persist", &self.persist.is_some())
             .field("has_channel", &self.channel.is_some())
             .field("has_turn_stream", &self.turn_stream.is_some())
+            .field("has_sub_agent_inbox", &self.sub_agent_inbox.is_some())
+            .field("sub_agent_task_id", &self.sub_agent_task_id)
             .finish()
     }
 }
@@ -156,6 +173,8 @@ impl Session {
             persist: None,
             channel: None,
             turn_stream: None,
+            sub_agent_inbox: None,
+            sub_agent_task_id: None,
         }
     }
 

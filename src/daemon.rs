@@ -11,8 +11,9 @@
 
 use crate::agents::AgentDelegator;
 use crate::agents::{
-    DelegationCoordinator, InMemoryBackend, McpManager, Orchestrator, OrchestratorParts, RunMode,
-    SessionManager, Skill, SkillManager, SystemPromptConfig, ToolRegistry,
+    AgentMessenger, DelegationCoordinator, InMemoryBackend, McpManager, Orchestrator,
+    OrchestratorParts, RunMode, SessionManager, Skill, SkillManager, SystemPromptConfig,
+    ToolRegistry,
 };
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -499,6 +500,7 @@ async fn build_tools(
 ) -> (
     ToolRegistry,
     Arc<tokio::sync::RwLock<crate::tools::TaskState>>,
+    Arc<crate::tools::SendMessageTool>,
 ) {
     let mut tools = ToolRegistry::new();
     let builtin = crate::tools::builtin_tools(Some(workspace_dir.join("sessions")));
@@ -512,7 +514,10 @@ async fn build_tools(
     tools.register(Arc::new(crate::tools::AskUserTool::new(ask_router)));
 
     // Register additional built-in tools.
-    tools.register(Arc::new(crate::tools::SendMessageTool::new()));
+    // Keep the Arc to SendMessageTool: the daemon later wires the
+    // agent-to-agent bus into it (multi-agent mode) via `set_messenger`.
+    let send_message_tool = Arc::new(crate::tools::SendMessageTool::new());
+    tools.register(Arc::clone(&send_message_tool));
     tools.register(Arc::new(crate::tools::ListDirTool::new()));
     let task_state = crate::tools::shared_task_state_persisted(
         workspace_dir.join(".state").join("tasks.json"),
@@ -570,7 +575,7 @@ async fn build_tools(
     }
 
     tracing::info!(tool_count = tools.tool_count(), "tool registry built");
-    (tools, task_state)
+    (tools, task_state, send_message_tool)
 }
 
 /// Build SkillManager from SKILL.md files in workspace.
@@ -945,7 +950,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     known_users.migrate_legacy(&data_dir);
 
     // Build tool registry (all built-in + MCP + skill tools + ask_user).
-    let (mut tools, task_state) = build_tools(
+    let (mut tools, task_state, send_message_tool) = build_tools(
         &mcp_manager,
         &skills_arc,
         &shared_scheduler,
@@ -1031,6 +1036,12 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
         // Clean up stale worktrees from crashed/timed-out sub-agent runs.
         delegator_arc.cleanup_stale_worktrees();
+
+        // RFC agent-messaging §3: wire the agent-to-agent bus into
+        // send_message (main → sub via task_id, sub → parent via the
+        // DelegationEvent channel). Set-once; single-agent mode never
+        // calls this, so `recipient` targeting errors there.
+        send_message_tool.set_messenger(Arc::clone(&delegator_arc) as Arc<dyn AgentMessenger>);
 
         // Build agent_delegate tool. H47: now wired through `AgentDelegator`
         // (the legacy `TaskDelegator` trait has been removed).

@@ -211,6 +211,32 @@ impl Agent {
                 messages = compacted;
             }
 
+            // RFC agent-messaging §3.4: drain the sub-agent inbox before
+            // this LLM request so parent → sub messages are visible on the
+            // next tool round. Injected as a `<system-reminder>` user message
+            // (not persisted to history — the tool-loop alternation stays
+            // clean and injection is consumption). Placement is deliberately
+            // AFTER compaction so a compaction pass cannot drop the batch.
+            if let Some(inbox) = &session.sub_agent_inbox {
+                let mut pending = Vec::new();
+                {
+                    let mut rx = inbox.lock().await;
+                    while let Ok(mail) = rx.try_recv() {
+                        pending.push(mail);
+                    }
+                }
+                if !pending.is_empty() {
+                    tracing::info!(
+                        session = %session.id,
+                        count = pending.len(),
+                        "injecting sub-agent inbox messages before LLM request"
+                    );
+                    messages.push(ChatMessage::user_text(
+                        crate::agents::delegation::render_agent_mail_reminder(&pending),
+                    ));
+                }
+            }
+
             let response = {
                 tracing::info!(
                     session = %session.id,
@@ -843,13 +869,20 @@ fn filter_turn_scoped_tools(
     allowed_tools.retain(|tool| {
         let keep = match tool.name() {
             "send_message" => {
-                let Some(channel) = session.channel.as_ref() else {
-                    return false;
-                };
-                let has_receiver = session.reply_target().is_some();
-                let has_text_send = has_receiver;
-                let has_file_send = channel.capabilities().supports_file_send;
-                has_text_send || has_file_send
+                // RFC agent-messaging §3: sub-agent sessions get the tool
+                // even without a channel — `recipient` targeting reaches the
+                // parent agent via the DelegationEvent channel.
+                if session.parent_session_id.is_some() {
+                    true
+                } else {
+                    let Some(channel) = session.channel.as_ref() else {
+                        return false;
+                    };
+                    let has_receiver = session.reply_target().is_some();
+                    let has_text_send = has_receiver;
+                    let has_file_send = channel.capabilities().supports_file_send;
+                    has_text_send || has_file_send
+                }
             }
             "send_media" => false,
             _ => true,
@@ -1523,6 +1556,24 @@ mod tests {
         filter_turn_scoped_tools(&mut tools, &session);
 
         assert_eq!(tool_names(&tools), vec!["calculator"]);
+    }
+
+    #[test]
+    fn filter_turn_scoped_tools_keeps_send_message_for_sub_agent() {
+        // RFC agent-messaging §3.3: a sub-agent gets send_message even with
+        // no channel — `recipient` targeting reaches the parent agent via
+        // the DelegationEvent channel.
+        let mut session = Session::new("s".into());
+        session.parent_session_id = Some("parent".into());
+        let mut tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(NamedTool("send_message")),
+            Arc::new(NamedTool("send_media")),
+            Arc::new(NamedTool("calculator")),
+        ];
+
+        filter_turn_scoped_tools(&mut tools, &session);
+
+        assert_eq!(tool_names(&tools), vec!["send_message", "calculator"]);
     }
 
     #[test]
