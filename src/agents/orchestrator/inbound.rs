@@ -459,12 +459,7 @@ impl Interceptor for MentionPreParse {
             return Flow::Next(msg);
         }
         let text = msg.content.text.clone();
-        match crate::agents::mention::resolve_mentions(
-            &text,
-            &owner,
-            &ctx.known_users,
-            &ctx.user_registry,
-        ) {
+        match crate::agents::mention::resolve_mentions(&text, &ctx.user_registry) {
             crate::agents::mention::MentionResolution::Resolved(new_text) => {
                 let mut msg = msg;
                 msg.content.text = new_text;

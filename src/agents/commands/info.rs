@@ -484,7 +484,7 @@ pub fn cmd_ping(ctx: CommandContext<'_>) -> String {
 }
 
 /// `/whoami` — show the caller's identity: 渠道信息 + P4 用户实体
-/// （u/uid、email、昵称）。
+/// （username、email）。
 pub fn cmd_whoami(ctx: CommandContext<'_>) -> String {
     let self_uid = ctx.known_users.resolve_uid(ctx.user_id);
     let sender_id = ctx.user_id.rsplit(':').next().unwrap_or(ctx.user_id);
@@ -493,26 +493,25 @@ pub fn cmd_whoami(ctx: CommandContext<'_>) -> String {
         .users_for(ctx.channel_type, ctx.account_id)
         .into_iter()
         .find(|u| u.user_id == sender_id);
-    // 已注册 → 用户可见形态 u/uid；未注册 → 渠道侧原始 sender id。
+    // 已注册 → 用户可见形态 username（未设置则 —）；未注册 → 渠道侧原始 sender id。
     let registered = ctx.user_registry.is_user_id(&self_uid);
-    let uid_visible = match ctx.user_registry.uid_of(&self_uid) {
-        Some(uid) => format!("u/{uid}"),
-        None => sender_id.to_string(),
+    let username_visible = if registered {
+        ctx.user_registry
+            .username_of(&self_uid)
+            .unwrap_or_else(|| "—".to_string())
+    } else {
+        sender_id.to_string()
     };
     let mut lines = vec![
         format!("Channel:    {}", ctx.channel_type),
         format!("Account:    {}", ctx.account_id),
-        format!("User ID:    {uid_visible}"),
+        format!("Username:   {username_visible}"),
     ];
     if let Some(uid) = ctx.user_registry.uid_of(&self_uid) {
         if let Some(user) = ctx.user_registry.find_by_uid(uid) {
             lines.push(format!(
                 "Email:      {}",
                 user.email.as_deref().unwrap_or("—")
-            ));
-            lines.push(format!(
-                "Nickname:   {}",
-                user.nickname.as_deref().unwrap_or("—")
             ));
         }
     }
@@ -528,7 +527,7 @@ pub fn cmd_whoami(ctx: CommandContext<'_>) -> String {
         format!("🪪 **Your identity**\n\n```text\n{body}\n```")
     } else {
         format!(
-            "🪪 **Your identity**\n\n```text\n{body}\n```\n\n_未注册身份。用 /register <邮箱> <uid> 创建，或 /link u/uid 绑定已有身份。_"
+            "🪪 **Your identity**\n\n```text\n{body}\n```\n\n_未注册身份。用 /register <邮箱> <username> 创建，或 /link u/username 绑定已有身份。_"
         )
     }
 }

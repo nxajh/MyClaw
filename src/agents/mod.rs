@@ -88,8 +88,7 @@ pub use turn_event::{
 };
 pub use user_profile::{UserProfile, UserResolver};
 pub use user_registry::{
-    RegisterError, ROOT_UID, User, UserRegistry, DEFAULT_NAMESPACE, validate_email, validate_nickname,
-    validate_uid,
+    RegisterError, User, UserRegistry, DEFAULT_NAMESPACE, validate_email, validate_username,
 };
 pub use workspace::skill_loader::SkillDefinition;
 pub use workspace::skills::{Skill, SkillManager};

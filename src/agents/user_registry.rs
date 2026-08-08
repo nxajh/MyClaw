@@ -1,14 +1,17 @@
-//! UserRegistry — P4 用户实体层（uid / email / nickname），与渠道登记簿分离。
+//! UserRegistry — P4 用户实体层（uid / username / email），与渠道登记簿分离。
 //!
-//! RFC §2.2: 每个用户是独立的 `User` 实体，由用户自选句柄 `uid` 标识
-//! （`[a-z0-9_]{3,32}`、保留字不可用、先到先得、不可变）。`email` 唯一且
-//! 可更换；`nickname` 可重复、不允许含 `/`。渠道侧 routing_key 到用户的
-//! 映射仍由 [`UserResolver`] 承担（值统一为 user.id，如 `myclaw/u/alice`）；
-//! 本注册表只存"人"的实体属性，不感知渠道。
+//! RFC §2.2（身份模型重构后）: 每个用户是独立的 `User` 实体。`uid` 是系统
+//! 分配的不可变内部键（`<ns>/u/<uuidv7>`，不可读、不可选、先到先得）；
+//! `username` 是唯一可改的对外标识（`[a-z0-9_]{3,32}`、保留字不可用、
+//! 先到先得），`@username` 全局解析与显示层都走它。`email` 唯一且可更换。
+//! 渠道侧 routing_key 到用户的映射仍由 [`UserResolver`] 承担（值统一为
+//! user.id，如 `myclaw/u/<uuidv7>`）；本注册表只存"人"的实体属性，不感知渠道。
 //!
-//! 持久化在 `{data_dir}/users.json`，每次变更写盘（数据量小，与
-//! `user_resolver.json` 同一策略）。命名空间默认 `myclaw`（RFC:
-//! `messaging.namespace` 配置项，后续接入）。
+//! 持久化在 `{data_dir}/users.json`（version 2：`uid`=uuidv7 +
+//! `username` 字段），每次变更写盘（数据量小，与 `user_resolver.json` 同一
+//! 策略）。读入兼容 version 1 旧文件（无 `username` 字段 → 空串；`uid` 为旧
+//! 语义句柄），语义错位由迁移（task: migrate）统一修正。命名空间默认
+//! `myclaw`（RFC: `[system] namespace` 配置项，后续接入）。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,21 +21,20 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::agents::{KnownUsersRegistry, UserResolver};
+use crate::ids::{Fqid, TYPE_USER};
 
 // ── 常量与规则 ───────────────────────────────────────────────────────────────
 
-/// 保留字（uid 不可用）：root 及系统级保留（RFC §2.2）。
-pub const RESERVED_UIDS: &[&str] = &["root", "admin", "system", "bot", "help", "register"];
-/// uid 长度下限。
-pub const UID_MIN: usize = 3;
-/// uid 长度上限。
-pub const UID_MAX: usize = 32;
-/// 昵称最大长度。
-pub const NICK_MAX: usize = 32;
-/// 默认命名空间（RFC: messaging.namespace，配置项后续接入）。
+/// 保留字（username 不可用）：root 及系统级保留（RFC §2.2）。
+pub const RESERVED_USERNAMES: &[&str] = &["root", "admin", "system", "bot", "help", "register"];
+/// username 长度下限。
+pub const USERNAME_MIN: usize = 3;
+/// username 长度上限。
+pub const USERNAME_MAX: usize = 32;
+/// 默认命名空间（RFC: [system] namespace，配置项后续接入）。
 pub const DEFAULT_NAMESPACE: &str = "myclaw";
-/// 存量用户归入的根 uid（RFC §2.2 迁移：存量 identity 全归 root）。
-pub const ROOT_UID: &str = "root";
+/// root 的固定 username（语义名保留字；uid 为系统分配 uuidv7）。
+pub const ROOT_USERNAME: &str = "root";
 
 /// 由 uid 构造完整 user.id（三段式 FQID：`<namespace>/u/<uid>`）。
 pub fn user_id(namespace: &str, uid: &str) -> String {
@@ -41,19 +43,22 @@ pub fn user_id(namespace: &str, uid: &str) -> String {
 
 // ── 用户实体 ─────────────────────────────────────────────────────────────────
 
-/// 一个用户（P4 用户实体层）。`uid` 是不可变自选句柄；`email` 唯一可更换；
-/// `nickname` 可重复、不允许含 `/`（RFC §2.2 结构判定: `@` 后以 `u/` 开头
-/// 按 id 精确解析，否则按昵称在关系内实时比对——昵称含 `/` 会破坏判定）。
+/// 一个用户（P4 用户实体层）。`uid` 是不可变系统内部键（uuidv7）；
+/// `username` 是唯一可改的对外标识（`[a-z0-9_]{3,32}`，先到先得）。
+///
+/// 旧数据兼容：version 1 的 users.json 没有 `username` 字段（解析为 ""，
+/// 显示层/解析层过滤空串；语义修正属迁移职责）；`uid` 缺失时同样兜底。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
-    /// 自选句柄（`[a-z0-9_]{3,32}`，不含 `u/` 前缀）。
+    /// 系统分配的内部键（`<ns>/u/<uuidv7>`，不可变、不可读、不可选）。
+    #[serde(default)]
     pub uid: String,
+    /// 唯一对外标识（`[a-z0-9_]{3,32}`，可改、先到先得；旧数据为空串）。
+    #[serde(default)]
+    pub username: String,
     /// 唯一邮箱（小写归一化；未验证状态下也先占位）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
-    /// 显示昵称（可重复；`None` = 未设置，显示层回退 `u/uid`）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nickname: Option<String>,
     /// 是否激活（D1：User 仅在 /register 或 /link 成功时创建为 active）。
     pub active: bool,
     /// 创建时间（unix ms）。
@@ -76,30 +81,31 @@ struct PersistedUsers {
 /// 注册/更新失败原因（用户可见文案）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegisterError {
-    /// uid 格式非法（字符/长度）。
-    InvalidUid(String),
-    /// uid 为保留字。
-    ReservedUid(String),
-    /// uid 已被占用（先到先得）。
-    UidTaken(String),
+    /// username 格式非法（字符/长度）。
+    InvalidUsername(String),
+    /// username 为保留字。
+    ReservedUsername(String),
+    /// username 已被占用（先到先得）。
+    UsernameTaken(String),
     /// email 格式非法。
     InvalidEmail(String),
     /// email 已被占用（唯一）。
     EmailTaken(String),
-    /// nickname 非法（为空/超长/含 `/`）。
-    InvalidNickname(String),
     /// 用户不存在（更新类操作）。
     NoSuchUser(String),
 }
 
 // ── 注册表 ───────────────────────────────────────────────────────────────────
 
-/// 用户实体注册表：`uid → User` + `email → uid` 索引，持久化 `users.json`。
+/// 用户实体注册表：`uid → User` + `email → uid` + `username → uid` 索引，
+/// 持久化 `users.json`。
 #[derive(Debug)]
 pub struct UserRegistry {
     users: RwLock<HashMap<String, User>>,
     /// email（小写）→ uid 唯一索引。
     email_index: RwLock<HashMap<String, String>>,
+    /// username（小写）→ uid 唯一索引（派生，不落盘，加载时重建）。
+    username_index: RwLock<HashMap<String, String>>,
     /// 持久化路径（空 = 内存态，不落盘）。
     data_path: PathBuf,
     /// 命名空间（user.id 前缀，默认 `myclaw`）。
@@ -112,6 +118,7 @@ impl UserRegistry {
         Self {
             users: RwLock::new(HashMap::new()),
             email_index: RwLock::new(HashMap::new()),
+            username_index: RwLock::new(HashMap::new()),
             data_path: PathBuf::new(),
             namespace: DEFAULT_NAMESPACE.to_string(),
         }
@@ -122,12 +129,13 @@ impl UserRegistry {
         Self::with_namespace(data_dir, DEFAULT_NAMESPACE)
     }
 
-    /// 持久化注册表 + 自定义命名空间（RFC: messaging.namespace 配置项接入点）。
+    /// 持久化注册表 + 自定义命名空间（RFC: [system] namespace 配置项接入点）。
     pub fn with_namespace(data_dir: &Path, namespace: &str) -> Self {
         let data_path = data_dir.join("users.json");
         let reg = Self {
             users: RwLock::new(HashMap::new()),
             email_index: RwLock::new(HashMap::new()),
+            username_index: RwLock::new(HashMap::new()),
             data_path: data_path.clone(),
             namespace: namespace.to_string(),
         };
@@ -151,35 +159,41 @@ impl UserRegistry {
             && s.len() > self.namespace.len() + 3
     }
 
-    /// 从 user.id 提取 uid 句柄（非本实例 id 返回 None）。
+    /// 从 user.id 提取 uid 内部键（非本实例 id 返回 None）。
     pub fn uid_of<'a>(&self, user_id_str: &'a str) -> Option<&'a str> {
         user_id_str.strip_prefix(&format!("{}/u/", self.namespace))
     }
 
     /// 用户可见显示形态（RFC §2.2 显示层）：
-    /// 有昵称 → `@昵称(u/uid)`；无昵称 → `u/uid`；非本实例 id 原样返回。
+    /// 有 username → `@username`；非本实例 id 或查不到（含旧数据空串）→ 原样返回。
     pub fn display(&self, user_id_str: &str) -> String {
-        let Some(uid) = self.uid_of(user_id_str) else {
-            return user_id_str.to_string();
-        };
-        let visible = format!("u/{uid}");
-        match self.users.read().get(uid).and_then(|u| u.nickname.clone()) {
-            Some(nick) => format!("@{nick}({visible})"),
-            None => visible,
+        match self.username_of(user_id_str) {
+            Some(username) => format!("@{username}"),
+            None => user_id_str.to_string(),
         }
     }
 
-    /// 实时昵称（RFC §2.2: 昵称不落快照，显示/比对一律实时取）。
-    pub fn nickname_of(&self, user_id_str: &str) -> Option<String> {
+    /// 实时 username（RFC §2.2: 标识不落快照，显示/比对一律实时取）。
+    /// 过滤空串（旧数据未设 username 视为无）。
+    pub fn username_of(&self, user_id_str: &str) -> Option<String> {
         let uid = self.uid_of(user_id_str)?;
-        self.users.read().get(uid).and_then(|u| u.nickname.clone())
+        let users = self.users.read();
+        let user = users.get(uid)?;
+        (!user.username.is_empty()).then(|| user.username.clone())
     }
 
     // ── 查询 ────────────────────────────────────────────────────────────────
 
-    /// 按 uid 查询（uid 不带 `u/` 前缀）。
+    /// 按 uid（内部键，不带 `u/` 前缀）查询。
     pub fn find_by_uid(&self, uid: &str) -> Option<User> {
         self.users.read().get(uid).cloned()
+    }
+
+    /// 按 username 查询（大小写不敏感——内部小写归一化）。
+    pub fn find_by_username(&self, username: &str) -> Option<User> {
+        let username = username.trim().to_lowercase();
+        let uid = self.username_index.read().get(&username)?.clone();
+        self.users.read().get(&uid).cloned()
     }
 
     /// 按邮箱查询（大小写不敏感——内部小写归一化）。
@@ -189,9 +203,10 @@ impl UserRegistry {
         self.users.read().get(&uid).cloned()
     }
 
-    /// uid 是否已被占用。
-    pub fn uid_taken(&self, uid: &str) -> bool {
-        self.users.read().contains_key(uid)
+    /// username 是否已被占用。
+    pub fn username_taken(&self, username: &str) -> bool {
+        let username = username.trim().to_lowercase();
+        self.username_index.read().contains_key(&username)
     }
 
     /// 用户总数。
@@ -207,38 +222,34 @@ impl UserRegistry {
     // ── 写入 ────────────────────────────────────────────────────────────────
 
     /// 注册新用户（D1: /register 或 /link 成功时创建 active）。
-    /// 校验 uid（格式+保留字+唯一）与 email（格式+唯一），全部通过才写入。
-    pub fn register(
-        &self,
-        email: &str,
-        uid: &str,
-        nickname: Option<&str>,
-    ) -> Result<User, RegisterError> {
-        let uid = uid.trim();
-        validate_uid(uid)?;
+    /// uid 由系统分配（uuidv7，不可选）；校验 username（格式+保留字+唯一）
+    /// 与 email（格式+唯一），全部通过才写入。
+    pub fn register(&self, email: &str, username: &str) -> Result<User, RegisterError> {
+        let username = validate_username(username)?;
         let email = validate_email(email)?;
-        if let Some(nick) = nickname {
-            validate_nickname(nick)?;
-        }
+        let uid = Fqid::new(&self.namespace, TYPE_USER).to_string();
         let mut users = self.users.write();
         let mut emails = self.email_index.write();
-        if users.contains_key(uid) {
-            return Err(RegisterError::UidTaken(uid.to_string()));
+        let mut usernames = self.username_index.write();
+        if usernames.contains_key(&username) {
+            return Err(RegisterError::UsernameTaken(username));
         }
         if emails.contains_key(&email) {
             return Err(RegisterError::EmailTaken(email));
         }
         let user = User {
-            uid: uid.to_string(),
+            uid: uid.clone(),
+            username: username.clone(),
             email: Some(email.clone()),
-            nickname: nickname.map(|n| n.to_string()),
             active: true,
             created_ms: now_ms(),
         };
-        users.insert(uid.to_string(), user.clone());
-        emails.insert(email, uid.to_string());
+        users.insert(uid.clone(), user.clone());
+        emails.insert(email, uid.clone());
+        usernames.insert(username, uid);
         drop(users);
         drop(emails);
+        drop(usernames);
         self.save();
         Ok(user)
     }
@@ -273,36 +284,54 @@ impl UserRegistry {
         Ok(())
     }
 
-    /// 设置昵称（可重复；不允许含 `/`，RFC §2.2 结构判定依赖此约束）。
-    pub fn set_nickname(&self, uid: &str, nick: &str) -> Result<(), RegisterError> {
-        let nick = validate_nickname(nick)?;
+    /// 设置 username（唯一、可改；旧值释放，`@username` 全局解析随之生效）。
+    pub fn set_username(&self, uid: &str, new_username: &str) -> Result<(), RegisterError> {
+        let new_username = validate_username(new_username)?;
         let mut users = self.users.write();
+        let mut usernames = self.username_index.write();
         let user = users
             .get_mut(uid)
             .ok_or_else(|| RegisterError::NoSuchUser(uid.to_string()))?;
-        user.nickname = Some(nick);
+        if user.username == new_username {
+            return Ok(()); // 无变化
+        }
+        if let Some(owner) = usernames.get(&new_username) {
+            if owner != uid {
+                return Err(RegisterError::UsernameTaken(new_username));
+            }
+        }
+        if !user.username.is_empty() {
+            usernames.remove(&user.username);
+        }
+        usernames.insert(new_username.clone(), uid.to_string());
+        user.username = new_username;
         drop(users);
+        drop(usernames);
         self.save();
         Ok(())
     }
 
-    /// 确保 root 用户存在（迁移时创建；幂等）。
+    /// 确保 root 用户存在（迁移时创建；幂等）。root 的 `username` 固定为
+    /// 保留字 `root`，uid 为系统分配 uuidv7。
     pub fn ensure_root(&self) {
         let mut users = self.users.write();
-        if !users.contains_key(ROOT_UID) {
-            users.insert(
-                ROOT_UID.to_string(),
-                User {
-                    uid: ROOT_UID.to_string(),
-                    email: None,
-                    nickname: None,
-                    active: true,
-                    created_ms: now_ms(),
-                },
-            );
-            drop(users);
-            self.save();
+        let mut usernames = self.username_index.write();
+        if usernames.contains_key(ROOT_USERNAME) {
+            return;
         }
+        let uid = Fqid::new(&self.namespace, TYPE_USER).to_string();
+        let user = User {
+            uid: uid.clone(),
+            username: ROOT_USERNAME.to_string(),
+            email: None,
+            active: true,
+            created_ms: now_ms(),
+        };
+        users.insert(uid.clone(), user.clone());
+        usernames.insert(ROOT_USERNAME.to_string(), uid);
+        drop(users);
+        drop(usernames);
+        self.save();
     }
 
     // ── 一次性迁移（RFC §2.2 / §2.3: 存量归 root）─────────────────────────
@@ -314,14 +343,19 @@ impl UserRegistry {
     /// 2. `user_resolver.json` 中已有绑定（P3 /link 的短 id 值）同样归 root；
     /// 3. contacts / user_mailbox 中非 routing_key 形态的键（P3 折叠短 id）
     ///    统一重指 root（P4 后折叠值一律 user.id，避免新旧混用导致关系分裂）；
-    /// 4. 创建 root User 实体。
+    /// 4. 创建 root User 实体（username=`root`，uid=uuidv7）。
     ///
     /// 调用时机：daemon 启动、`known_users.migrate_legacy` 之后。
     pub fn migrate_legacy_to_root(&self, known: &KnownUsersRegistry, resolver: &UserResolver) {
-        if self.find_by_uid(ROOT_UID).is_some() {
+        if self.find_by_username(ROOT_USERNAME).is_some() {
             return; // 已迁移
         }
-        let root_id = self.user_id_of(ROOT_UID);
+        // 先创建 root 实体，拿到其 uuidv7 user.id 作为折叠目标。
+        self.ensure_root();
+        let root_id = self
+            .find_by_username(ROOT_USERNAME)
+            .expect("root created above")
+            .user_id(&self.namespace);
         // 1. 登记簿存量 rk 全绑 root（migrate_identity 顺带把 rk 名下
         //    contacts/mailbox 并入 root）。
         for rk in known.rk_keys() {
@@ -335,11 +369,9 @@ impl UserRegistry {
         }
         // 3. 非 rk 形态的折叠键（P3 短 id）重指 root。
         known.rekey_legacy_to(&root_id);
-        // 4. 创建 root 实体。
-        self.ensure_root();
         info!(
             users = known.rk_keys().len(),
-            "user_registry: migrated legacy identities to myclaw/u/root"
+            "user_registry: migrated legacy identities to {root_id}"
         );
     }
 
@@ -357,9 +389,13 @@ impl UserRegistry {
             Ok(file) => {
                 let mut users = self.users.write();
                 let mut emails = self.email_index.write();
+                let mut usernames = self.username_index.write();
                 for (uid, user) in file.users {
                     if let Some(email) = &user.email {
                         emails.insert(email.clone(), uid.clone());
+                    }
+                    if !user.username.is_empty() {
+                        usernames.insert(user.username.clone(), uid.clone());
                     }
                     users.insert(uid, user);
                 }
@@ -384,7 +420,7 @@ impl UserRegistry {
             return;
         }
         let body = match serde_json::to_vec_pretty(&PersistedUsers {
-            version: 1,
+            version: 2,
             users: self.users.read().clone(),
         }) {
             Ok(b) => b,
@@ -420,26 +456,27 @@ pub fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
 }
 
-/// 校验 uid：`[a-z0-9_]{3,32}`、保留字不可用。
-pub fn validate_uid(uid: &str) -> Result<(), RegisterError> {
-    if uid.len() < UID_MIN || uid.len() > UID_MAX {
-        return Err(RegisterError::InvalidUid(format!(
-            "uid 长度须为 {UID_MIN}–{UID_MAX} 个字符（当前 {} 个）",
-            uid.len()
+/// 校验 username：`[a-z0-9_]{3,32}`（小写归一化）、保留字不可用；返回归一化结果。
+pub fn validate_username(username: &str) -> Result<String, RegisterError> {
+    let username = username.trim().to_lowercase();
+    if username.len() < USERNAME_MIN || username.len() > USERNAME_MAX {
+        return Err(RegisterError::InvalidUsername(format!(
+            "username 长度须为 {USERNAME_MIN}–{USERNAME_MAX} 个字符（当前 {} 个）",
+            username.len()
         )));
     }
-    if !uid
+    if !username
         .chars()
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
     {
-        return Err(RegisterError::InvalidUid(
-            "uid 只能包含小写字母、数字和下划线（[a-z0-9_]+）".to_string(),
+        return Err(RegisterError::InvalidUsername(
+            "username 只能包含小写字母、数字和下划线（[a-z0-9_]+）".to_string(),
         ));
     }
-    if RESERVED_UIDS.contains(&uid) {
-        return Err(RegisterError::ReservedUid(uid.to_string()));
+    if RESERVED_USERNAMES.contains(&username.as_str()) {
+        return Err(RegisterError::ReservedUsername(username));
     }
-    Ok(())
+    Ok(username)
 }
 
 /// 校验邮箱：非空、含单个 `@`、长度 ≤ 254；返回归一化结果。
@@ -457,27 +494,6 @@ pub fn validate_email(email: &str) -> Result<String, RegisterError> {
         ));
     }
     Ok(email)
-}
-
-/// 校验昵称：trim 后非空、≤ NICK_MAX、不允许含 `/`（RFC §2.2 结构判定）。
-pub fn validate_nickname(nick: &str) -> Result<String, RegisterError> {
-    let nick = nick.trim();
-    if nick.is_empty() {
-        return Err(RegisterError::InvalidNickname(
-            "昵称不能为空".to_string(),
-        ));
-    }
-    if nick.len() > NICK_MAX {
-        return Err(RegisterError::InvalidNickname(format!(
-            "昵称最长 {NICK_MAX} 个字符"
-        )));
-    }
-    if nick.contains('/') {
-        return Err(RegisterError::InvalidNickname(
-            "昵称不能包含 /（它用于区分 u/uid 形式的 id）".to_string(),
-        ));
-    }
-    Ok(nick.to_string())
 }
 
 fn now_ms() -> u64 {

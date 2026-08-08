@@ -768,21 +768,31 @@ mod tests {
 
     const ALICE: &str = "qqbot:xiaoer:alice";
     const BOB: &str = "qqbot:xiaoer:bob";
-    const ALICE_ID: &str = "myclaw/u/alice";
-    const BOB_ID: &str = "myclaw/u/bob";
+
+    /// 注册后取真实 user.id（uid 为系统分配 uuidv7，测试不假设具体值）。
+    fn user_id_of(users: &UserRegistry, username: &str) -> String {
+        users
+            .find_by_username(username)
+            .unwrap()
+            .user_id(users.namespace())
+    }
 
     /// 登记 alice/bob 两个 User（FQID）+ 绑定各自 rk（P4 前置：gate 依赖
     /// rk → FQID 绑定，联系人键折叠到 FQID）。
     fn registered_users() -> (Arc<KnownUsersRegistry>, Arc<UserRegistry>) {
         let resolver = Arc::new(crate::agents::UserResolver::new());
-        resolver.set(ALICE, ALICE_ID);
-        resolver.set(BOB, BOB_ID);
         let reg = Arc::new(KnownUsersRegistry::in_memory().with_resolver(resolver));
         reg.record("qqbot", "xiaoer", "alice", "default");
         reg.record("qqbot", "xiaoer", "bob", "default");
         let users = Arc::new(UserRegistry::in_memory());
-        users.register("alice@example.com", "alice", None).unwrap();
-        users.register("bob@example.com", "bob", None).unwrap();
+        let alice = users.register("alice@example.com", "alice").unwrap();
+        let bob = users.register("bob@example.com", "bob").unwrap();
+        reg.resolver()
+            .unwrap()
+            .set(ALICE, &alice.user_id(users.namespace()));
+        reg.resolver()
+            .unwrap()
+            .set(BOB, &bob.user_id(users.namespace()));
         (reg, users)
     }
 
@@ -826,8 +836,8 @@ mod tests {
         let mails = reg.drain_user_mail(BOB);
         assert_eq!(mails.len(), 1);
         assert_eq!(mails[0].text, "你好 bob");
-        assert_eq!(mails[0].sender_user_id, ALICE_ID);
-        assert_eq!(mails[0].sender_nickname, "u/alice");
+        assert_eq!(mails[0].sender_user_id, user_id_of(&users, "alice"));
+        assert_eq!(mails[0].sender_nickname, "@alice");
         assert!(reg.drain_user_mail(BOB).is_empty());
     }
 
@@ -905,8 +915,8 @@ mod tests {
         let mails = reg.drain_user_mail(ALICE);
         assert_eq!(mails.len(), 1);
         assert_eq!(mails[0].text, "在的，什么事");
-        assert_eq!(mails[0].sender_user_id, BOB_ID);
-        assert_eq!(mails[0].sender_nickname, "u/bob");
+        assert_eq!(mails[0].sender_user_id, user_id_of(&users, "bob"));
+        assert_eq!(mails[0].sender_nickname, "@bob");
     }
 
     #[tokio::test]
@@ -916,7 +926,7 @@ mod tests {
         let (reg, users) = registered_friends();
         reg.resolver()
             .unwrap()
-            .set("telegram:default:alice_tg", ALICE_ID);
+            .set("telegram:default:alice_tg", user_id_of(&users, "alice"));
         let tool = tool_for(&reg, &users);
         let mut session = Session::new("s_tg".into());
         session.owner = "telegram:default:alice_tg".to_string();
@@ -932,7 +942,7 @@ mod tests {
         let mails = reg.drain_user_mail(BOB);
         assert_eq!(mails.len(), 1);
         // 发送者身份折叠: 存 alice 身份而非 telegram rk。
-        assert_eq!(mails[0].sender_user_id, ALICE_ID);
-        assert_eq!(mails[0].sender_nickname, "u/alice");
+        assert_eq!(mails[0].sender_user_id, user_id_of(&users, "alice"));
+        assert_eq!(mails[0].sender_nickname, "@alice");
     }
 }
