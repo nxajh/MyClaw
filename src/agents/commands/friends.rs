@@ -197,7 +197,8 @@ pub async fn cmd_friend_accept(args: &str, ctx: CommandContext<'_>) -> String {
     ctx.known_users.push_user_mail(
         &peer,
         crate::agents::UserMail {
-            msg_id: uuid::Uuid::new_v4().to_string(),
+            msg_id: crate::ids::Fqid::new(ctx.user_registry.namespace(), crate::ids::TYPE_MSG)
+                .to_string(),
             sender_user_id: ctx.known_users.resolve_uid(ctx.user_id),
             sender_nickname: me,
             text: ack,
@@ -234,7 +235,8 @@ pub async fn cmd_friend_decline(args: &str, ctx: CommandContext<'_>) -> String {
     ctx.known_users.push_user_mail(
         &peer,
         crate::agents::UserMail {
-            msg_id: uuid::Uuid::new_v4().to_string(),
+            msg_id: crate::ids::Fqid::new(ctx.user_registry.namespace(), crate::ids::TYPE_MSG)
+                .to_string(),
             sender_user_id: ctx.known_users.resolve_uid(ctx.user_id),
             sender_nickname: me,
             text: ack,

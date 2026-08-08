@@ -23,6 +23,7 @@ use crate::agents::commands::register::parse_target;
 use crate::agents::session::Session;
 use crate::agents::{ContactStatus, KnownUsersRegistry, RequestOutcome, UserMail, UserRegistry};
 use crate::channels::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
+use crate::ids::{DEFAULT_NAMESPACE, Fqid, TYPE_MSG};
 use crate::providers::{Tool, ToolResult};
 
 /// Shared context for the four friend tools.
@@ -33,14 +34,29 @@ pub struct FriendToolsCtx {
     /// Live channel registry, injected by the daemon after the Orchestrator
     /// is assembled (peer notifications, RFC §4.3).
     channels: OnceLock<crate::agents::ChannelRegistry>,
+    /// Namespace for generated message FQIDs (`<ns>/msg/<uuidv7>`). Bound at
+    /// construction from `[system] namespace`; `new()` defaults to
+    /// `DEFAULT_NAMESPACE` (tests / single-agent).
+    namespace: String,
 }
 
 impl FriendToolsCtx {
     pub fn new(known_users: Arc<KnownUsersRegistry>, user_registry: Arc<UserRegistry>) -> Self {
+        Self::with_namespace(known_users, user_registry, DEFAULT_NAMESPACE)
+    }
+
+    /// Construct with an explicit namespace (daemon path — from `[system]
+    /// namespace`). Test helpers use [`Self::new`] (default namespace).
+    pub fn with_namespace(
+        known_users: Arc<KnownUsersRegistry>,
+        user_registry: Arc<UserRegistry>,
+        namespace: &str,
+    ) -> Self {
         Self {
             known_users,
             user_registry,
             channels: OnceLock::new(),
+            namespace: namespace.to_string(),
         }
     }
 
@@ -325,7 +341,7 @@ impl Tool for FriendAcceptTool {
         self.ctx.known_users.push_user_mail(
             &peer,
             UserMail {
-                msg_id: uuid::Uuid::new_v4().to_string(),
+                msg_id: Fqid::new(&self.ctx.namespace, TYPE_MSG).to_string(),
                 sender_user_id: self.ctx.known_users.resolve_uid(&owner),
                 sender_nickname: me,
                 text: ack,
@@ -439,7 +455,7 @@ impl Tool for FriendDeclineTool {
         self.ctx.known_users.push_user_mail(
             &peer,
             UserMail {
-                msg_id: uuid::Uuid::new_v4().to_string(),
+                msg_id: Fqid::new(&self.ctx.namespace, TYPE_MSG).to_string(),
                 sender_user_id: self.ctx.known_users.resolve_uid(&owner),
                 sender_nickname: me,
                 text: ack,

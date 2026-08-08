@@ -13,6 +13,7 @@ use crate::channels::{
     ChannelFile, ChannelFileMeta, ChannelMessageContent, ChannelOutboundMessage, LocalFileBody,
     MessageReceiver, SendOptions,
 };
+use crate::ids::{DEFAULT_NAMESPACE, Fqid, TYPE_MSG};
 use crate::providers::{Tool, ToolResult};
 
 const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB
@@ -33,6 +34,10 @@ pub struct SendMessageTool {
     /// P4 用户实体注册表（uid/email/nickname）——cross-user recipient 解析
     /// （`u/uid` / 邮箱 → FQID）与发送者显示名渲染共用。
     user_registry: Arc<OnceLock<Arc<UserRegistry>>>,
+    /// Namespace for generated message FQIDs (`<ns>/msg/<uuidv7>`). Bound at
+    /// construction from `[system] namespace`; `new()` defaults to
+    /// `DEFAULT_NAMESPACE` (tests / single-agent).
+    namespace: String,
 }
 
 impl Default for SendMessageTool {
@@ -43,10 +48,17 @@ impl Default for SendMessageTool {
 
 impl SendMessageTool {
     pub fn new() -> Self {
+        Self::with_namespace(DEFAULT_NAMESPACE)
+    }
+
+    /// Construct with an explicit namespace (daemon path — from `[system]
+    /// namespace`). Test helpers use [`Self::new`] (default namespace).
+    pub fn with_namespace(namespace: &str) -> Self {
         Self {
             messenger: Arc::new(OnceLock::new()),
             known_users: Arc::new(OnceLock::new()),
             user_registry: Arc::new(OnceLock::new()),
+            namespace: namespace.to_string(),
         }
     }
 
@@ -143,7 +155,7 @@ impl SendMessageTool {
                 });
             };
             let event = AgentMessage {
-                msg_id: uuid::Uuid::new_v4().to_string(),
+                msg_id: Fqid::new(&self.namespace, TYPE_MSG).to_string(),
                 sender_name: session.agent_name.clone(),
                 task_id,
                 session_id: parent_session_id,
@@ -178,7 +190,7 @@ impl SendMessageTool {
             }
         };
         let mail = AgentMail {
-            msg_id: uuid::Uuid::new_v4().to_string(),
+            msg_id: Fqid::new(&self.namespace, TYPE_MSG).to_string(),
             sender_name: "主 agent".to_string(),
             text: text.to_string(),
             timestamp: chrono::Utc::now().timestamp() as u64,
@@ -273,7 +285,7 @@ impl SendMessageTool {
                 known_users.push_user_mail(
                     &peer,
                     crate::agents::UserMail {
-                        msg_id: uuid::Uuid::new_v4().to_string(),
+                        msg_id: Fqid::new(&self.namespace, TYPE_MSG).to_string(),
                         sender_user_id: owner_uid.clone(),
                         sender_nickname: user_registry.display(&owner_uid),
                         text: text.to_string(),
@@ -620,7 +632,7 @@ mod tests {
     fn sub_agent_session() -> Session {
         let mut session = Session::new("sub_session".into());
         session.parent_session_id = Some("parent_session".into());
-        session.sub_agent_task_id = Some("del_1".into());
+        session.sub_agent_task_id = Some("myclaw/t/mock-1".into());
         session.agent_name = "coder".into();
         session
     }
@@ -633,7 +645,7 @@ mod tests {
 
         let r = tool
             .execute(
-                serde_json::json!({"text": "继续调研", "recipient": "del_123"}),
+                serde_json::json!({"text": "继续调研", "recipient": "myclaw/t/mock-123"}),
                 &session,
             )
             .await
@@ -642,7 +654,7 @@ mod tests {
 
         let delivered = mock.to_sub.lock().unwrap();
         assert_eq!(delivered.len(), 1);
-        assert_eq!(delivered[0].0, "del_123");
+        assert_eq!(delivered[0].0, "myclaw/t/mock-123");
         assert_eq!(delivered[0].1.text, "继续调研");
         assert_eq!(delivered[0].1.sender_name, "主 agent");
     }
@@ -670,7 +682,7 @@ mod tests {
         let sent = mock.to_parent.lock().unwrap();
         assert_eq!(sent.len(), 2);
         assert_eq!(sent[0].sender_name, "coder");
-        assert_eq!(sent[0].task_id, "del_1");
+        assert_eq!(sent[0].task_id, "myclaw/t/mock-1");
         assert_eq!(sent[0].session_id, "parent_session");
         assert_eq!(sent[0].text, "搞定了");
         assert_eq!(sent[1].text, "再问一下");
@@ -684,7 +696,7 @@ mod tests {
 
         let r = tool
             .execute(
-                serde_json::json!({"text": "hi", "recipient": "del_999"}),
+                serde_json::json!({"text": "hi", "recipient": "myclaw/t/mock-999"}),
                 &session,
             )
             .await
@@ -720,7 +732,7 @@ mod tests {
 
         let r = tool
             .execute(
-                serde_json::json!({"text": "hi", "recipient": "del_1"}),
+                serde_json::json!({"text": "hi", "recipient": "myclaw/t/mock-1"}),
                 &session,
             )
             .await

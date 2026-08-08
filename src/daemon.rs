@@ -520,7 +520,9 @@ async fn build_tools(
     // Register additional built-in tools.
     // Keep the Arc to SendMessageTool: the daemon later wires the
     // agent-to-agent bus into it (multi-agent mode) via `set_messenger`.
-    let send_message_tool = Arc::new(crate::tools::SendMessageTool::new());
+    let send_message_tool = Arc::new(crate::tools::SendMessageTool::with_namespace(
+        &config.messaging.namespace,
+    ));
     tools.register(Arc::clone(&send_message_tool) as Arc<dyn crate::providers::Tool>);
     tools.register(Arc::new(crate::tools::ListDirTool::new()));
     let task_state = crate::tools::shared_task_state_persisted(
@@ -570,9 +572,10 @@ async fn build_tools(
     // Friend tools (RFC §4.2) — main-agent only, share one ctx so the
     // daemon can inject the live ChannelRegistry for §4.3 notifications.
     // P4: UserRegistry 负责 `u/uid`/邮箱 → FQID 解析与显示名渲染。
-    let friend_ctx = Arc::new(crate::tools::FriendToolsCtx::new(
+    let friend_ctx = Arc::new(crate::tools::FriendToolsCtx::with_namespace(
         Arc::clone(known_users),
         Arc::clone(user_registry),
+        &config.messaging.namespace,
     ));
     tools.register(Arc::new(crate::tools::FriendRequestTool::new(Arc::clone(
         &friend_ctx,
@@ -1087,6 +1090,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             sub_agent_registry.clone(),
             Arc::clone(&session_manager),
             config.workspace_dir.join("worktrees"),
+            &config.messaging.namespace,
         );
         let delegator_arc = Arc::new(delegator);
 

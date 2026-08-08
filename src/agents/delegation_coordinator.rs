@@ -32,6 +32,7 @@ use tokio::task::JoinHandle;
 use crate::agents::delegation::{AgentMail, AgentMessage, DelegationEvent, SubAgentMailbox};
 use crate::agents::session::{BackendPersistHook, PersistHook, SessionManager};
 use crate::config::sub_agent::AgentIsolation;
+use crate::ids::{Fqid, TYPE_SESSION, TYPE_TASK};
 
 /// Default wall-clock timeout for a sub-agent when neither the tool caller
 /// nor the SubAgentConfig specifies one.
@@ -86,6 +87,10 @@ pub struct DelegationCoordinator {
     /// finishes; powers the `send_message(recipient=task_id)` tool via
     /// `AgentMessenger::send_to_sub_agent`.
     mailboxes: Arc<DashMap<String, mpsc::Sender<AgentMail>>>,
+    /// Namespace for generated FQIDs (`<ns>/t/<uuidv7>` task ids,
+    /// `<ns>/s/<uuidv7>` ephemeral sub-session ids). Bound at construction
+    /// from `[system] namespace`.
+    namespace: String,
     /// Sender for `DelegationEvent`s, set once by the daemon via
     /// `set_event_sender` when wiring the orchestrator's `delegation_rx`.
     event_tx_cell: Arc<OnceLock<mpsc::Sender<DelegationEvent>>>,
@@ -96,6 +101,7 @@ impl DelegationCoordinator {
         configs: Arc<super::AgentRegistry>,
         session_manager: Arc<SessionManager>,
         worktrees_root: PathBuf,
+        namespace: &str,
     ) -> Self {
         Self {
             configs,
@@ -104,6 +110,7 @@ impl DelegationCoordinator {
             runtime_cell: Arc::new(OnceLock::new()),
             running: Arc::new(DashMap::new()),
             mailboxes: Arc::new(DashMap::new()),
+            namespace: namespace.to_string(),
             event_tx_cell: Arc::new(OnceLock::new()),
         }
     }
@@ -254,7 +261,7 @@ impl DelegationCoordinator {
         agent_name: &str,
     ) -> (String, Option<Arc<dyn PersistHook>>) {
         if parent_session_id.is_empty() {
-            return (format!("{:016x}", rand::random::<u64>()), None);
+            return (Fqid::new(&self.namespace, TYPE_SESSION).to_string(), None);
         }
         match self
             .session_manager
@@ -267,7 +274,7 @@ impl DelegationCoordinator {
             Err(e) => {
                 tracing::warn!(parent = %parent_session_id, err = %e,
                     "failed to create sub-agent session, running ephemeral");
-                (format!("{:016x}", rand::random::<u64>()), None)
+                (Fqid::new(&self.namespace, TYPE_SESSION).to_string(), None)
             }
         }
     }
@@ -316,7 +323,7 @@ impl DelegationCoordinator {
             // see `agents::recovery::scan_unfinished_subagents`.
             let task_id = task_id_override
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("del_{}", uuid::Uuid::new_v4()));
+                .unwrap_or_else(|| Fqid::new(&self.namespace, TYPE_TASK).to_string());
 
             tracing::info!(
                 agent = %config.name,
@@ -667,7 +674,7 @@ impl DelegationCoordinator {
         })?;
         let config = &agent.config;
 
-        let task_id = format!("del_{}", uuid::Uuid::new_v4());
+        let task_id = Fqid::new(&self.namespace, TYPE_TASK).to_string();
 
         tracing::info!(
             agent = %config.name,
