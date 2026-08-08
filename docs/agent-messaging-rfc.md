@@ -124,7 +124,7 @@ bob 回复(需转发时)
 | 层 | 机制 | 参照 |
 |---|---|---|
 | 发送侧(send_message 调用) | 单条 text 硬上限 **32K chars**,超限返回明确错误(不截断、不分片;超长内容建议走 files 通道) | Claude Code `maxResultSizeChars: 100_000` 的"明确上限"思路;取 32K 因单条约 8K tokens,过大挤占接收方 context(用户拍板) |
-| 注入侧(接收方 context) | 每轮待收消息**总量预算**(≤2K tokens):超预算注入最近 N 条完整消息 + "还有 M 条未读"提示;不截断单条 | 与 §4.3"每轮注入保持极简"同一哲学 |
+| 注入侧(接收方 context) | 每轮待收消息**总量预算**(≤2K tokens):超预算注入最近 N 条完整消息 + "还有 M 条未读"提示;不截断单条 | **已实现**(P0):`INJECTION_BUDGET_TOKENS=2048`,`select_within_injection_budget` 保留最近预算内完整消息,旧消息经 `SubAgentMailbox.tx` 放回队列等下一轮 tool round(不丢不截断);超预算时 `Agent::run` 记 warn 日志。与 §4.3"每轮注入保持极简"同一哲学 |
 | 渲染侧(P2 转发到 channel) | 复用 `split_message_chunk`(B+ fence-aware,按目标 channel limit/unit,`src/channels/message.rs:676`) | 现有实现,不新设计 |
 
 原则:**单条消息内容永不静默截断**——agent 间消息是内容不是 tool 输出,`truncation.rs` 的 head/tail 策略不适用(截断=丢信息且接收方不知情)。明确错误优于静默降级(与 P0 验收"发给不存在 task_id 返回明确错误"同哲学)。
@@ -209,11 +209,11 @@ bob 侧:   contacts["<bob_user_id>"]["<alice_user_id>"] = { "status": "accepted"
 - `agents/attachment.rs`:子 agent 队列注入(日期 + 待收消息)
 
 验收:
-- [ ] 主 agent 可向运行中 async 子 agent 发消息,子 agent 下一轮 tool round 看到
-- [ ] 子 agent 可向 parent 发消息,主 agent 被唤醒且收到注入
-- [ ] 子 agent 上下文无任何其他 agent 地址(信息不可见,单测断言)
-- [ ] 发给不存在 task_id 返回明确错误(不静默丢)
-- [ ] 全量测试 + clippy `-D warnings` 通过
+- [x] 主 agent 可向运行中 async 子 agent 发消息,子 agent 下一轮 tool round 看到（`send_message recipient=task_id` → mailboxes → `Agent::run` 预算内注入）
+- [x] 子 agent 可向 parent 发消息,主 agent 被唤醒且收到注入（`DelegationEvent::Message` → orchestrator wake,不抢占 turn_lock）
+- [x] 子 agent 上下文无任何其他 agent 地址(信息不可见,单测断言 `sub_agent_rejects_foreign_recipient`)
+- [x] 发给不存在 task_id 返回明确错误(不静默丢)
+- [x] 全量测试 + clippy `-D warnings` 通过（run 31252364288 全绿,688 passed）
 
 ### P1:好友机制 + 跨用户通信
 
