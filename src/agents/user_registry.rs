@@ -152,7 +152,7 @@ impl UserRegistry {
     }
 
     /// 从 user.id 提取 uid 句柄（非本实例 id 返回 None）。
-    pub fn uid_of(&self, user_id_str: &str) -> Option<&str> {
+    pub fn uid_of<'a>(&self, user_id_str: &'a str) -> Option<&'a str> {
         user_id_str.strip_prefix(&format!("{}/u/", self.namespace))
     }
 

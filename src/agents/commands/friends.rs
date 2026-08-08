@@ -121,7 +121,7 @@ pub fn cmd_friends(ctx: CommandContext<'_>) -> String {
     }
     if !accepted.is_empty() {
         lines.push("\n✅ **已建立**".to_string());
-        for (peer, entry) in &accepted {
+        for (peer, _entry) in &accepted {
             // RFC §6 P2 会话发现: 好友的在线/活跃状态（last_seen）。
             let presence = match ctx.known_users.last_seen_ms_of(peer) {
                 Some(ts) => crate::agents::KnownUsersRegistry::render_presence(ts),
@@ -132,7 +132,7 @@ pub fn cmd_friends(ctx: CommandContext<'_>) -> String {
     }
     if !blocked.is_empty() {
         lines.push("\n🚫 **已拉黑**".to_string());
-        for (peer, entry) in &blocked {
+        for (peer, _entry) in &blocked {
             lines.push(format!("  {}（{}）", ctx.user_registry.display(peer), peer));
         }
     }

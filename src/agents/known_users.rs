@@ -890,7 +890,7 @@ impl KnownUsersRegistry {
                 };
                 map.remove(old_rk)
             };
-            if let Some(mut entry) = removed {
+            if let Some(entry) = removed {
                 moved_peer = true;
                 // The relationship key follows the folded identity.
                 let mut map = self.contacts.get_mut(&owner).unwrap();
