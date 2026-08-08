@@ -268,7 +268,67 @@ fn collect_user_memories(workspace_dir: &str) -> (usize, usize, String) {
     (user_idx, total_files, doc)
 }
 
-fn build_distill_prompt(user_count: usize, file_count: usize, input_doc: &str) -> String {
+fn name_tokens(name: &str) -> std::collections::HashSet<String> {
+    name.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| t.len() >= 3)
+        .map(|t| t.to_ascii_lowercase())
+        .collect()
+}
+
+/// Find an existing agent-layer memory whose name is a near-duplicate of the
+/// candidate (Jaccard >= 0.4 with >= 3 shared tokens). Returns the existing
+/// memory name. Runtime backstop for the prompt rule: distill must merge into
+/// an existing memory instead of adding a duplicate topic.
+fn find_duplicate_agent_memory(workspace_dir: &str, candidate_name: &str) -> Option<String> {
+    let memory_dir = std::path::Path::new(workspace_dir).join(crate::memory::MEMORY_DIR_NAME);
+    let files = crate::memory::scan_memory_files(&memory_dir);
+    let cand = name_tokens(candidate_name);
+    if cand.is_empty() {
+        return None;
+    }
+    files
+        .iter()
+        .filter_map(|f| {
+            let existing = name_tokens(&f.name);
+            if existing.is_empty() {
+                return None;
+            }
+            let inter = cand.intersection(&existing).count();
+            let union = cand.union(&existing).count();
+            if union == 0 {
+                return None;
+            }
+            let jaccard = inter as f64 / union as f64;
+            if inter >= 3 && jaccard >= 0.4 {
+                Some((jaccard, f.name.clone()))
+            } else {
+                None
+            }
+        })
+        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap())
+        .map(|(_, name)| name)
+}
+
+/// Build an index of existing agent-level memories (`workspace/memory/`) for
+/// prompt injection — mirrors `memory_fork::build_extraction_prompt` so the
+/// model can spot covered topics without guessing.
+fn build_existing_agent_index(workspace_dir: &str) -> String {
+    let memory_dir = std::path::Path::new(workspace_dir).join(crate::memory::MEMORY_DIR_NAME);
+    let files = crate::memory::scan_memory_files(&memory_dir);
+    if files.is_empty() {
+        return "(empty — no agent-level memories yet)".to_string();
+    }
+    let entries: Vec<crate::memory::IndexEntry> =
+        files.iter().map(crate::memory::IndexEntry::from).collect();
+    crate::memory::format_full_memory_index(&entries)
+}
+
+fn build_distill_prompt(
+    user_count: usize,
+    file_count: usize,
+    input_doc: &str,
+    existing_index: &str,
+) -> String {
     format!(
         "\n\n---\n\
          You are the agent-level memory distillation subagent. Below are memory files \
@@ -278,6 +338,9 @@ fn build_distill_prompt(user_count: usize, file_count: usize, input_doc: &str) -
          \n\
          ## Input (anonymized user memories)\n\
          {input_doc}\n\
+         \n\
+         ## Existing agent-level memories\n\
+         {existing_index}\n\
          \n\
          ## What qualifies\n\
          - Methodology, processes, workflows, and rules that apply beyond a single user\n\
@@ -290,9 +353,10 @@ fn build_distill_prompt(user_count: usize, file_count: usize, input_doc: &str) -
          - Anything tied to a specific user's identity\n\
          \n\
          ## Rules\n\
-         1. Before writing, call memory_search to check existing agent-level memories. \
-         If the topic is covered, use `memory_manage` action `replace` to merge. \
-         Use `add` only for genuinely new topics.\n\
+         1. The index above lists ALL existing agent-level memories. Before any add, check the \
+         candidate against it. If the topic is already covered (same or overlapping topic), use \
+         `memory_manage` action `replace` to merge into the most relevant existing memory — \
+         never `add` a new memory for a covered topic. Use `add` only for genuinely new topics.\n\
          2. All memory_manage calls are forced to `scope='agent'` by the runtime — do not omit it.\n\
          3. De-identification is CRITICAL: the output must NOT contain routing keys, user ids, \
          emails, phone numbers, real names, or organization names. Use generic terms \
@@ -311,6 +375,7 @@ fn build_distill_prompt(user_count: usize, file_count: usize, input_doc: &str) -
         user_count = user_count,
         file_count = file_count,
         input_doc = input_doc,
+        existing_index = existing_index,
     )
 }
 
@@ -341,7 +406,8 @@ async fn run_memory_distill_inner(input: DistillInput) -> Result<usize> {
             }
         });
 
-    let distill_prompt = build_distill_prompt(user_count, file_count, &input_doc);
+    let existing_index = build_existing_agent_index(&input.workspace_dir);
+    let distill_prompt = build_distill_prompt(user_count, file_count, &input_doc, &existing_index);
     let mut messages = vec![ChatMessage::user_text(distill_prompt)];
 
     let provider = input.provider;
@@ -440,6 +506,33 @@ async fn run_memory_distill_inner(input: DistillInput) -> Result<usize> {
                         "scope".to_string(),
                         serde_json::Value::String("agent".to_string()),
                     );
+                    // Dedup backstop: block `add` when a near-duplicate agent
+                    // memory already exists — steer the model to `replace`.
+                    if obj.get("action").and_then(|a| a.as_str()) == Some("add") {
+                        if let Some(name) = obj.get("name").and_then(|n| n.as_str()) {
+                            if let Some(existing) =
+                                find_duplicate_agent_memory(&input.workspace_dir, name)
+                            {
+                                tracing::warn!(
+                                    candidate = name,
+                                    existing,
+                                    "memory_distill: duplicate add blocked"
+                                );
+                                let mut tool_msg = ChatMessage::text(
+                                    "tool",
+                                    format!(
+                                        "add blocked: agent memory '{existing}' already covers this \
+                                         topic (near-duplicate name). Use memory_manage action='replace' \
+                                         to merge into '{existing}' instead of adding a duplicate."
+                                    ),
+                                );
+                                tool_msg.tool_call_id = Some(call.id.clone());
+                                tool_msg.is_error = Some(true);
+                                messages.push(tool_msg);
+                                continue;
+                            }
+                        }
+                    }
                 }
             }
             if call.name == "memory_manage" && args["action"].as_str() == Some("remove") {
@@ -690,7 +783,7 @@ mod tests {
 
     #[test]
     fn build_distill_prompt_contains_scope_and_sanitization_rules() {
-        let prompt = build_distill_prompt(2, 3, "anonymized input");
+        let prompt = build_distill_prompt(2, 3, "anonymized input", "(empty — no agent-level memories yet)");
         assert!(prompt.contains("scope='agent'"), "prompt must force agent scope");
         assert!(
             prompt.contains("De-identification is CRITICAL"),
@@ -701,5 +794,128 @@ mod tests {
             "prompt must allow a no-op response"
         );
         assert!(prompt.contains("anonymized"), "input must be described as anonymized");
+        assert!(
+            prompt.contains("## Existing agent-level memories"),
+            "prompt must include the existing agent memory index section"
+        );
+        assert!(
+            prompt.contains("never `add` a new memory for a covered topic"),
+            "prompt must forbid adding memories for covered topics"
+        );
+    }
+
+    #[test]
+    fn build_existing_agent_index_lists_agent_memories() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_str().unwrap();
+        let mem_dir = dir.path().join("memory");
+        std::fs::create_dir_all(&mem_dir).unwrap();
+        std::fs::write(
+            mem_dir.join("spec-verification-before-delivery.md"),
+            "---\n\
+             name: \"spec-verification-before-delivery\"\n\
+             description: \"verify deliverables against spec\"\n\
+             type: \"rule\"\n\
+             inject: search\n\
+             ---\n\
+             body\n",
+        )
+        .unwrap();
+
+        let index = build_existing_agent_index(ws);
+        assert!(
+            index.contains("spec-verification-before-delivery"),
+            "index must list existing agent memory names"
+        );
+        assert!(index.contains("verify deliverables against spec"));
+    }
+
+    #[test]
+    fn build_existing_agent_index_empty_when_no_memories() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_str().unwrap();
+        let index = build_existing_agent_index(ws);
+        assert!(
+            index.contains("empty"),
+            "index must report empty when no agent memories exist"
+        );
+    }
+
+    #[test]
+    fn dedup_blocks_near_duplicate_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_str().unwrap();
+        let mem_dir = dir.path().join("memory");
+        std::fs::create_dir_all(&mem_dir).unwrap();
+        std::fs::write(
+            mem_dir.join("spec-verification-before-delivery.md"),
+            "---\n\
+             name: \"spec-verification-before-delivery\"\n\
+             description: \"verify deliverables against spec\"\n\
+             type: \"rule\"\n\
+             inject: search\n\
+             ---\n\
+             body\n",
+        )
+        .unwrap();
+
+        // B 演练实测案例：conformance-check vs verification — 3 个共享 token。
+        let dup = find_duplicate_agent_memory(ws, "spec-conformance-check-before-delivery");
+        assert_eq!(
+            dup.as_deref(),
+            Some("spec-verification-before-delivery"),
+            "near-duplicate name must resolve to the existing memory"
+        );
+    }
+
+    #[test]
+    fn dedup_allows_distinct_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_str().unwrap();
+        let mem_dir = dir.path().join("memory");
+        std::fs::create_dir_all(&mem_dir).unwrap();
+        std::fs::write(
+            mem_dir.join("spec-verification-before-delivery.md"),
+            "---\n\
+             name: \"spec-verification-before-delivery\"\n\
+             description: \"verify deliverables against spec\"\n\
+             type: \"rule\"\n\
+             inject: search\n\
+             ---\n\
+             body\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            find_duplicate_agent_memory(ws, "release-confirmation-gate"),
+            None,
+            "distinct topic must not be flagged"
+        );
+    }
+
+    #[test]
+    fn dedup_requires_min_overlap() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_str().unwrap();
+        let mem_dir = dir.path().join("memory");
+        std::fs::create_dir_all(&mem_dir).unwrap();
+        std::fs::write(
+            mem_dir.join("after-delivery-checks.md"),
+            "---\n\
+             name: \"after-delivery-checks\"\n\
+             description: \"post-delivery verification\"\n\
+             type: \"rule\"\n\
+             inject: search\n\
+             ---\n\
+             body\n",
+        )
+        .unwrap();
+
+        // Shares only {delivery, checks} — below the >=3 token threshold.
+        assert_eq!(
+            find_duplicate_agent_memory(ws, "before-delivery-checks"),
+            None,
+            "names sharing fewer than 3 tokens must not be flagged"
+        );
     }
 }
