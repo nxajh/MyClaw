@@ -48,11 +48,12 @@ trait Interceptor: Send + Sync {
 }
 
 /// The ordered interceptor chain. Terminal stage (`DispatchTurn`) must be last.
-fn chain() -> [&'static dyn Interceptor; 5] {
+fn chain() -> [&'static dyn Interceptor; 6] {
     [
         &AskReply,
         &Callback,
         &CrashRecovery,
+        &Gate,
         &SlashCommand,
         &DispatchTurn,
     ]
@@ -289,6 +290,66 @@ impl Interceptor for CrashRecovery {
     }
 }
 
+// ── Gate（P4 调度层白名单）──────────────────────────────────────────────────
+
+/// 未注册用户（routing_key 未绑定 User）可用的命令（RFC §2.3）。
+const GATE_WHITELIST: &[&str] = &[
+    "register",
+    "email",
+    "link",
+    "link_confirm",
+    "help",
+    "whoami",
+];
+
+/// 未注册用户的引导文案（框架模板，零 LLM token）。
+const GATE_PROMPT: &str = "👋 欢迎！首次使用请先创建身份：/register <邮箱> <uid>（uid 为 3–32 位小写字母/数字/下划线，如 alice）。已有身份可 /link u/uid 绑定当前渠道。用 /help 查看全部命令。";
+
+/// P4 gate：未绑定 User 的 routing_key 只能使用白名单命令；其余入站消息
+/// 拦截并回复引导文案（不进 agent loop，零 LLM 开销）。
+struct Gate;
+
+#[async_trait]
+impl Interceptor for Gate {
+    fn name(&self) -> &'static str {
+        "gate"
+    }
+    async fn handle(
+        &self,
+        ctx: &OrchestratorCtx,
+        key: &SessionKey,
+        msg: ChannelInboundMessage,
+    ) -> Flow {
+        let registered = {
+            let resolved = ctx.known_users.resolve_uid(&key.to_string());
+            ctx.user_registry.is_user_id(&resolved)
+        };
+        if registered {
+            return Flow::Next(msg);
+        }
+        // 未注册：白名单命令放行（SlashCommand 处理）。
+        let content = msg.content.text.clone();
+        if let Some((cmd, _)) = commands::parse_command(&content) {
+            if GATE_WHITELIST.contains(&cmd) {
+                return Flow::Next(msg);
+            }
+        }
+        // 拦截：框架模板回复（零 token）。
+        if let Some(ch) = ctx.channel(&key.account_key()) {
+            let reply = ChannelOutboundMessage {
+                receiver: MessageReceiver::new(msg.receiver.id.clone())
+                    .with_reply_to(msg.id.clone()),
+                content: ChannelMessageContent::text(GATE_PROMPT.to_string()),
+                options: Default::default(),
+            };
+            if let Err(e) = ch.send_message(&reply).await {
+                tracing::warn!(session = %key, err = %e, "gate: reply send failed");
+            }
+        }
+        Flow::Stop
+    }
+}
+
 // ── SlashCommand ──────────────────────────────────────────────────────────────
 
 /// Intercept slash commands before they reach the agent loop. The dispatch runs
@@ -331,6 +392,7 @@ impl Interceptor for SlashCommand {
 
         let turn_tracker = ctx.turn_tracker.clone();
         let known_users_cmd = Arc::clone(&ctx.known_users);
+        let user_registry_cmd = Arc::clone(&ctx.user_registry);
         let channels_cmd = ctx.channels.clone();
         let key_channel = key.channel.clone();
         let key_account = key.account.clone();
@@ -345,6 +407,7 @@ impl Interceptor for SlashCommand {
                 runtime: &runtime_cmd,
                 session_ctx: session_ctx_cmd.as_ref(),
                 known_users: &known_users_cmd,
+                user_registry: &user_registry_cmd,
                 channels: &channels_cmd,
                 channel: channel_cmd.as_ref(),
             };
@@ -424,6 +487,7 @@ pub(super) async fn dispatch_turn(
 
     let turn_tracker = ctx.turn_tracker.clone();
     let known_users = ctx.known_users.clone();
+    let user_registry = ctx.user_registry.clone();
     tokio::spawn(async move {
         let _guard = turn_tracker.track();
         // RFC §3.5/§4.3: render per-turn injections — user-level mailbox
@@ -441,9 +505,12 @@ pub(super) async fn dispatch_turn(
         }
         let pending = known_users.pending_requests(&sk);
         if !pending.is_empty() {
+            // P4 显示层: 对方显示名实时渲染（昵称不落快照）。
+            let display = |peer: &str| user_registry.display(peer);
             injections
                 .push(crate::agents::KnownUsersRegistry::render_pending_requests_reminder(
                     &pending,
+                    display,
                 ));
         }
         if !injections.is_empty() {
@@ -531,6 +598,7 @@ mod tests {
                 "ask_reply",
                 "callback",
                 "crash_recovery",
+                "gate",
                 "slash_command",
                 "dispatch_turn",
             ]

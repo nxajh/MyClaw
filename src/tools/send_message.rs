@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use crate::agents::session::Session;
-use crate::agents::{AgentMail, AgentMessage, AgentMessenger, KnownUsersRegistry};
+use crate::agents::{AgentMail, AgentMessage, AgentMessenger, KnownUsersRegistry, UserRegistry};
 use crate::channels::{
     ChannelFile, ChannelFileMeta, ChannelMessageContent, ChannelOutboundMessage, LocalFileBody,
     MessageReceiver, SendOptions,
@@ -26,10 +26,13 @@ pub struct SendMessageTool {
     /// never set (and unused) in single-agent deployments.
     messenger: Arc<OnceLock<Arc<dyn AgentMessenger>>>,
     /// Known-users registry for cross-user delivery (RFC §3.5: recipient
-    /// `@nick` → contacts check → recipient's user-level mailbox). Set by
-    /// the daemon; `None` in tests/single-agent mode makes `@nick` targets
+    /// `u/uid`/邮箱 → contacts check → recipient's user-level mailbox). Set by
+    /// the daemon; `None` in tests/single-agent mode makes cross-user targets
     /// error out clearly.
     known_users: Arc<OnceLock<Arc<KnownUsersRegistry>>>,
+    /// P4 用户实体注册表（uid/email/nickname）——cross-user recipient 解析
+    /// （`u/uid` / 邮箱 → FQID）与发送者显示名渲染共用。
+    user_registry: Arc<OnceLock<Arc<UserRegistry>>>,
 }
 
 impl Default for SendMessageTool {
@@ -43,6 +46,7 @@ impl SendMessageTool {
         Self {
             messenger: Arc::new(OnceLock::new()),
             known_users: Arc::new(OnceLock::new()),
+            user_registry: Arc::new(OnceLock::new()),
         }
     }
 
@@ -53,10 +57,17 @@ impl SendMessageTool {
     }
 
     /// Install the known-users registry (called by the daemon after the
-    /// registry is loaded; set-once). Enables `recipient=@nick` cross-user
+    /// registry is loaded; set-once). Enables `recipient=u/uid`/邮箱 cross-user
     /// delivery (RFC §3.5).
     pub fn set_known_users(&self, known_users: Arc<KnownUsersRegistry>) {
         let _ = self.known_users.set(known_users);
+    }
+
+    /// Install the P4 user registry (called by the daemon after it is
+    /// assembled; set-once). Enables `u/uid` / 邮箱 → FQID resolution for
+    /// cross-user recipients and real-time sender display names.
+    pub fn set_user_registry(&self, user_registry: Arc<UserRegistry>) {
+        let _ = self.user_registry.set(user_registry);
     }
 
     /// Agent-to-agent delivery (RFC agent-messaging §3).
@@ -186,14 +197,13 @@ impl SendMessageTool {
         }
     }
 
-    /// Cross-user delivery (RFC §3.5): `recipient=@nick` from the main agent
-    /// context. Resolves the nick (own contacts first, then known users,
-    /// with explicit disambiguation on duplicates), checks the delivery
-    /// verdict against the recipient's contacts table (§4.1), and on
-    /// `Allowed` writes into the recipient's **user-level mailbox** —
-    /// delivered on the recipient's next user interaction (注入即消费), not
-    /// a wake-up. Text-only (P1 scope — no file transfer). Returns an Ack
-    /// to the sender, mirroring §3.5's "已投递(Ack)".
+    /// Cross-user delivery (RFC §3.5): `recipient=u/uid` 或邮箱 from the main
+    /// agent context. Resolves the target to a FQID user.id via the P4 user
+    /// registry, checks the delivery verdict against the recipient's contacts
+    /// table (§4.1), and on `Allowed` writes into the recipient's **user-level
+    /// mailbox** — delivered on the recipient's next user interaction
+    /// (注入即消费), not a wake-up. Text-only (P1 scope — no file transfer).
+    /// Returns an Ack to the sender, mirroring §3.5's "已投递(Ack)".
     async fn execute_cross_user(
         &self,
         args: &SendMessageArgs,
@@ -227,23 +237,30 @@ impl SendMessageTool {
                 ),
             });
         };
+        let Some(user_registry) = self.user_registry.get() else {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(
+                    "cross-user messaging is not available in this deployment".to_string(),
+                ),
+            });
+        };
 
         let owner = session.owner.clone();
-        // P3 身份绑定: fold the sender through the shared resolver so the
-        // stored sender_user_id is the human identity, not the routing_key.
+        // P3/P4 身份折叠: 发送者经 resolver 归一到 FQID user.id。
         let owner_uid = known_users.resolve_uid(&owner);
-        let nick = recipient.trim_start_matches('@');
-        let peer =
-            match crate::agents::commands::friends::resolve_nick_for(known_users, &owner, nick) {
-                Ok(p) => p,
-                Err(e) => {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some(e),
-                    });
-                }
-            };
+        let peer = match crate::agents::commands::register::parse_target(&user_registry, recipient)
+        {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(e),
+                });
+            }
+        };
         if peer == owner_uid {
             return Ok(ToolResult {
                 success: false,
@@ -258,7 +275,7 @@ impl SendMessageTool {
                     crate::agents::UserMail {
                         msg_id: uuid::Uuid::new_v4().to_string(),
                         sender_user_id: owner_uid.clone(),
-                        sender_nickname: KnownUsersRegistry::nick_of(&owner_uid),
+                        sender_nickname: user_registry.display(&owner_uid),
                         text: text.to_string(),
                         sent_at: chrono::Utc::now().timestamp_millis() as u64,
                     },
@@ -267,7 +284,7 @@ impl SendMessageTool {
                     success: true,
                     output: format!(
                         "message delivered to {} — shown on their next interaction",
-                        KnownUsersRegistry::nick_of(&peer)
+                        user_registry.display(&peer)
                     ),
                     error: None,
                 })
@@ -288,6 +305,13 @@ impl SendMessageTool {
             }),
         }
     }
+}
+
+/// 判断 recipient 是否走跨用户路径（P4 第一波: `u/uid` 或邮箱；`@昵称`
+/// 也归此路径并在解析层给出明确的"第二波"报错）。
+fn is_cross_user_target(r: &str) -> bool {
+    let t = r.trim_start();
+    t.starts_with('@') || t.starts_with("u/") || t.contains('@')
 }
 
 #[derive(Debug, Deserialize)]
@@ -318,10 +342,10 @@ impl Tool for SendMessageTool {
     }
 
     fn description(&self) -> &str {
-        "Send a message to the current user or to another agent. Supports plain text, text with local files, or multiple local files. \
+        "Send a message to the current user, to a friend, or to another agent. Supports plain text, text with local files, or multiple local files. \
          File parameters only accept local paths (not URLs); paths are resolved by the tool and not exposed to the channel. \
-         Optional `recipient`: in the main agent context, pass a sub-agent task_id (from agent_delegate mode=async) to message that sub-agent; \
-         in a sub-agent context, omit it or use \"parent\" to message the main agent. Agent-to-agent messages are text-only (32K chars max)."
+         Optional `recipient`: a friend's user id (u/uid) or email to send a cross-user message; in the main agent context also a sub-agent task_id (from agent_delegate mode=async) to message that sub-agent; \
+         in a sub-agent context, omit it or use \"parent\" to message the main agent. Agent-to-agent and cross-user messages are text-only (32K chars max)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -356,7 +380,7 @@ impl Tool for SendMessageTool {
                 },
                 "recipient": {
                     "type": "string",
-                    "description": "Optional agent-to-agent target. Main agent context: a sub-agent's task_id (from agent_delegate mode=async). Sub-agent context: omit or \"parent\" to send to the main agent."
+                    "description": "Optional target. Cross-user (main agent context): a friend's user id (u/uid) or email. Agent-to-agent: main agent context passes a sub-agent task_id (from agent_delegate mode=async); sub-agent context omits it or uses \"parent\" to send to the main agent."
                 }
             }
         })
@@ -409,12 +433,13 @@ impl Tool for SendMessageTool {
         // only legal target is its parent ("parent" or omitted); the main
         // agent targets a running async sub-agent by task_id.
         let is_sub_agent = session.parent_session_id.is_some();
-        // RFC §3.5: cross-user path first — `recipient=@nick` in the main
-        // agent context targets another user through the friend contacts
-        // table (delivered to their user-level mailbox, not to a session).
+        // RFC §3.5: cross-user path first — `recipient=u/uid`/邮箱（`@昵称`
+        // 第二波）in the main agent context targets another user through the
+        // friend contacts table (delivered to their user-level mailbox, not
+        // to a session).
         if !is_sub_agent {
             if let Some(r) = args.recipient.as_deref() {
-                if r.trim_start().starts_with('@') {
+                if is_cross_user_target(r) {
                     return self.execute_cross_user(&args, &text, r, session).await;
                 }
             }
@@ -727,18 +752,40 @@ mod tests {
         assert!(schema["properties"]["recipient"].is_object());
     }
 
-    // ── P1 cross-user delivery (RFC §3.5) ────────────────────────────────────
+    // ── P1/P4 cross-user delivery (RFC §3.5) ───────────────────────────────
 
     const ALICE: &str = "qqbot:xiaoer:alice";
     const BOB: &str = "qqbot:xiaoer:bob";
+    const ALICE_ID: &str = "myclaw/u/alice";
+    const BOB_ID: &str = "myclaw/u/bob";
 
-    fn registered_friends() -> Arc<KnownUsersRegistry> {
-        let reg = Arc::new(KnownUsersRegistry::in_memory());
+    /// 登记 alice/bob 两个 User（FQID）+ 绑定各自 rk（P4 前置：gate 依赖
+    /// rk → FQID 绑定，联系人键折叠到 FQID）。
+    fn registered_users() -> (Arc<KnownUsersRegistry>, Arc<UserRegistry>) {
+        let resolver = Arc::new(crate::agents::UserResolver::new());
+        resolver.set(ALICE, ALICE_ID);
+        resolver.set(BOB, BOB_ID);
+        let reg = Arc::new(KnownUsersRegistry::in_memory().with_resolver(resolver));
         reg.record("qqbot", "xiaoer", "alice", "default");
         reg.record("qqbot", "xiaoer", "bob", "default");
+        let users = Arc::new(UserRegistry::in_memory());
+        users.register("alice@example.com", "alice", None).unwrap();
+        users.register("bob@example.com", "bob", None).unwrap();
+        (reg, users)
+    }
+
+    fn registered_friends() -> (Arc<KnownUsersRegistry>, Arc<UserRegistry>) {
+        let (reg, users) = registered_users();
         reg.request_friend(ALICE, BOB);
         assert!(reg.accept_friend(BOB, ALICE));
-        reg
+        (reg, users)
+    }
+
+    fn tool_for(reg: &Arc<KnownUsersRegistry>, users: &Arc<UserRegistry>) -> SendMessageTool {
+        let tool = SendMessageTool::new();
+        tool.set_known_users(Arc::clone(reg));
+        tool.set_user_registry(Arc::clone(users));
+        tool
     }
 
     fn alice_session() -> Session {
@@ -749,14 +796,13 @@ mod tests {
 
     #[tokio::test]
     async fn cross_user_delivers_to_friend_mailbox() {
-        let reg = registered_friends();
-        let tool = SendMessageTool::new();
-        tool.set_known_users(Arc::clone(&reg));
+        let (reg, users) = registered_friends();
+        let tool = tool_for(&reg, &users);
         let session = alice_session();
 
         let r = tool
             .execute(
-                serde_json::json!({"text": "你好 bob", "recipient": "@bob"}),
+                serde_json::json!({"text": "你好 bob", "recipient": "u/bob"}),
                 &session,
             )
             .await
@@ -768,8 +814,8 @@ mod tests {
         let mails = reg.drain_user_mail(BOB);
         assert_eq!(mails.len(), 1);
         assert_eq!(mails[0].text, "你好 bob");
-        assert_eq!(mails[0].sender_user_id, ALICE);
-        assert_eq!(mails[0].sender_nickname, "@alice");
+        assert_eq!(mails[0].sender_user_id, ALICE_ID);
+        assert_eq!(mails[0].sender_nickname, "u/alice");
         assert!(reg.drain_user_mail(BOB).is_empty());
     }
 
@@ -777,16 +823,13 @@ mod tests {
     async fn cross_user_rejected_when_not_friends() {
         // Registered users but no relationship → NotFriends → guidance error
         // (RFC §4.2: 引导发送好友请求, 框架不自动发)。
-        let reg = Arc::new(KnownUsersRegistry::in_memory());
-        reg.record("qqbot", "xiaoer", "alice", "default");
-        reg.record("qqbot", "xiaoer", "bob", "default");
-        let tool = SendMessageTool::new();
-        tool.set_known_users(Arc::clone(&reg));
+        let (reg, users) = registered_users();
+        let tool = tool_for(&reg, &users);
         let session = alice_session();
 
         let r = tool
             .execute(
-                serde_json::json!({"text": "hi", "recipient": "@bob"}),
+                serde_json::json!({"text": "hi", "recipient": "u/bob"}),
                 &session,
             )
             .await
@@ -800,15 +843,14 @@ mod tests {
     #[tokio::test]
     async fn cross_user_rejected_when_blocked() {
         // Friends first, then bob blocks alice → delivery blocked both ways.
-        let reg = registered_friends();
+        let (reg, users) = registered_friends();
         reg.block_friend(BOB, ALICE);
-        let tool = SendMessageTool::new();
-        tool.set_known_users(Arc::clone(&reg));
+        let tool = tool_for(&reg, &users);
         let session = alice_session();
 
         let r = tool
             .execute(
-                serde_json::json!({"text": "hi", "recipient": "@bob"}),
+                serde_json::json!({"text": "hi", "recipient": "u/bob"}),
                 &session,
             )
             .await
@@ -822,9 +864,8 @@ mod tests {
     async fn cross_user_reply_loop_back_to_sender() {
         // RFC §6 P2 回复转发闭环: bob 收到后回复 → 同链反向 → alice 的用户级
         // mailbox → alice 下一条用户消息注入。双向各收 1 条。
-        let reg = registered_friends();
-        let tool = SendMessageTool::new();
-        tool.set_known_users(Arc::clone(&reg));
+        let (reg, users) = registered_friends();
+        let tool = tool_for(&reg, &users);
         let alice_session = alice_session();
         let mut bob_session = Session::new("s_bob".into());
         bob_session.owner = BOB.to_string();
@@ -832,7 +873,7 @@ mod tests {
         // alice → bob
         let r = tool
             .execute(
-                serde_json::json!({"text": "在吗", "recipient": "@bob"}),
+                serde_json::json!({"text": "在吗", "recipient": "u/bob"}),
                 &alice_session,
             )
             .await
@@ -843,7 +884,7 @@ mod tests {
         // bob 回复 → alice
         let r = tool
             .execute(
-                serde_json::json!({"text": "在的，什么事", "recipient": "@alice"}),
+                serde_json::json!({"text": "在的，什么事", "recipient": "u/alice"}),
                 &bob_session,
             )
             .await
@@ -852,29 +893,25 @@ mod tests {
         let mails = reg.drain_user_mail(ALICE);
         assert_eq!(mails.len(), 1);
         assert_eq!(mails[0].text, "在的，什么事");
-        assert_eq!(mails[0].sender_user_id, BOB);
-        assert_eq!(mails[0].sender_nickname, "@bob");
+        assert_eq!(mails[0].sender_user_id, BOB_ID);
+        assert_eq!(mails[0].sender_nickname, "u/bob");
     }
 
     #[tokio::test]
     async fn cross_user_folds_linked_identity() {
-        // P3 身份绑定: alice 把 telegram 渠道绑定到 qqbot 身份后，从新渠道
+        // P3/P4 身份绑定: alice 把 telegram 渠道绑定到 FQID 后，从新渠道
         // 发消息走同一好友关系；sender 与 mailbox 都按"人"折叠。
-        let resolver = Arc::new(crate::agents::UserResolver::new());
-        resolver.set("telegram:default:alice_tg", ALICE);
-        let reg = Arc::new(
-            Arc::try_unwrap(registered_friends())
-                .unwrap()
-                .with_resolver(resolver),
-        );
-        let tool = SendMessageTool::new();
-        tool.set_known_users(Arc::clone(&reg));
+        let (reg, users) = registered_friends();
+        reg.resolver()
+            .unwrap()
+            .set("telegram:default:alice_tg", ALICE_ID);
+        let tool = tool_for(&reg, &users);
         let mut session = Session::new("s_tg".into());
         session.owner = "telegram:default:alice_tg".to_string();
 
         let r = tool
             .execute(
-                serde_json::json!({"text": "hi from tg", "recipient": "@bob"}),
+                serde_json::json!({"text": "hi from tg", "recipient": "u/bob"}),
                 &session,
             )
             .await
@@ -883,7 +920,7 @@ mod tests {
         let mails = reg.drain_user_mail(BOB);
         assert_eq!(mails.len(), 1);
         // 发送者身份折叠: 存 alice 身份而非 telegram rk。
-        assert_eq!(mails[0].sender_user_id, ALICE);
-        assert_eq!(mails[0].sender_nickname, "@alice");
+        assert_eq!(mails[0].sender_user_id, ALICE_ID);
+        assert_eq!(mails[0].sender_nickname, "u/alice");
     }
 }

@@ -499,6 +499,7 @@ async fn build_tools(
     user_resolver: &Arc<crate::agents::UserResolver>,
     ask_router: Arc<crate::agents::AskRouter>,
     known_users: &Arc<crate::agents::KnownUsersRegistry>,
+    user_registry: &Arc<crate::agents::UserRegistry>,
 ) -> (
     ToolRegistry,
     Arc<tokio::sync::RwLock<crate::tools::TaskState>>,
@@ -567,7 +568,11 @@ async fn build_tools(
 
     // Friend tools (RFC §4.2) — main-agent only, share one ctx so the
     // daemon can inject the live ChannelRegistry for §4.3 notifications.
-    let friend_ctx = Arc::new(crate::tools::FriendToolsCtx::new(Arc::clone(known_users)));
+    // P4: UserRegistry 负责 `u/uid`/邮箱 → FQID 解析与显示名渲染。
+    let friend_ctx = Arc::new(crate::tools::FriendToolsCtx::new(
+        Arc::clone(known_users),
+        Arc::clone(user_registry),
+    ));
     tools.register(Arc::new(crate::tools::FriendRequestTool::new(Arc::clone(
         &friend_ctx,
     ))));
@@ -976,6 +981,11 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     );
     known_users.migrate_legacy(&data_dir);
 
+    // P4 用户实体注册表（uid/email/nickname，users.json）。存量 identity
+    // 一次性迁移归 `myclaw/u/root`（幂等：root 已存在即跳过）。
+    let user_registry = Arc::new(crate::agents::UserRegistry::persistent(&data_dir));
+    user_registry.migrate_legacy_to_root(&known_users, &user_resolver);
+
     // Build tool registry (all built-in + MCP + skill tools + ask_user).
     let (mut tools, task_state, send_message_tool, friend_ctx) = build_tools(
         &mcp_manager,
@@ -986,12 +996,15 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         &user_resolver,
         Arc::clone(&ask_router),
         &known_users,
+        &user_registry,
     )
     .await;
     // P1 cross-user delivery (RFC §3.5): give send_message access to the
     // known-users registry so `recipient=@nick` can resolve contacts and
     // deliver to the peer's user-level mailbox.
     send_message_tool.set_known_users(Arc::clone(&known_users));
+    // P4: cross-user recipient 解析（u/uid / 邮箱 → FQID）与发送者显示名。
+    send_message_tool.set_user_registry(Arc::clone(&user_registry));
 
     // Build sub-agent configs (AGENT.md files from workspace/agents/).
     let sub_agent_configs = build_sub_agents(&config.workspace_dir);
@@ -1287,6 +1300,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         scheduler: Some(shared_scheduler.clone()),
         ask_router: Arc::clone(&ask_router),
         known_users: Arc::clone(&known_users),
+        user_registry: Arc::clone(&user_registry),
         agent_runtime,
     };
 

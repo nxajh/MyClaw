@@ -74,8 +74,7 @@ pub enum ContactStatus {
 pub struct ContactEntry {
     pub status: ContactStatus,
     pub direction: ContactDirection,
-    /// Peer's nickname as recorded on this side, e.g. "@alice".
-    pub nickname: String,
+    /// RFC §2.2: 昵称不落快照——显示/比对一律实时取（UserRegistry）。
     pub requested_at: u64,
     #[serde(default)]
     pub accepted_at: u64,
@@ -498,8 +497,6 @@ impl KnownUsersRegistry {
         let now = now_ms();
         let owner = self.resolve_uid(owner);
         let peer = self.resolve_uid(peer);
-        let owner_nick = Self::nick_of(&owner);
-        let peer_nick = Self::nick_of(&peer);
 
         // Peer-side view decides (RFC §4.1: "发送校验查接收方名下条目").
         if let Some(peer_entry) = self.contact_entry(&peer, &owner) {
@@ -534,7 +531,6 @@ impl KnownUsersRegistry {
                 ContactEntry {
                     status: ContactStatus::Pending,
                     direction: ContactDirection::Out,
-                    nickname: peer_nick,
                     requested_at: now,
                     accepted_at: 0,
                     last_declined_at: 0,
@@ -548,7 +544,6 @@ impl KnownUsersRegistry {
                 ContactEntry {
                     status: ContactStatus::Pending,
                     direction: ContactDirection::In,
-                    nickname: owner_nick,
                     requested_at: now,
                     accepted_at: 0,
                     last_declined_at: 0,
@@ -627,7 +622,6 @@ impl KnownUsersRegistry {
         let entry = map.entry(peer.clone()).or_insert_with(|| ContactEntry {
             status: ContactStatus::Pending,
             direction: ContactDirection::In,
-            nickname: Self::nick_of(&peer),
             requested_at: now,
             accepted_at: 0,
             last_declined_at: 0,
@@ -711,40 +705,73 @@ impl KnownUsersRegistry {
             .unwrap_or_default()
     }
 
-    /// Look up a contact by nickname (RFC §2: disambiguation only within
-    /// existing relationships — you cannot @ a stranger). `nick` is compared
-    /// without the leading `@`.
-    pub fn resolve_contact_by_nick(
-        &self,
-        owner: &str,
-        nick: &str,
-    ) -> Option<(String, ContactEntry)> {
-        let nick = nick.trim_start_matches('@');
-        self.contacts.get(&self.resolve_uid(owner)).and_then(|map| {
-            map.iter()
-                .find(|(_, e)| e.nickname.trim_start_matches('@') == nick)
-                .map(|(peer, entry)| (peer.clone(), entry.clone()))
-        })
+    /// 全部登记簿 routing_key（P4 迁移遍历用）。
+    pub fn rk_keys(&self) -> Vec<String> {
+        self.users.iter().map(|e| e.key().clone()).collect()
     }
 
-    /// Find known users whose platform user id (last routing-key segment)
-    /// matches `nick`. Used by `/friend_request @alice` and the send_message
-    /// resolution chain before a relationship exists. Multiple matches =
-    /// ambiguous — the caller must ask for disambiguation (RFC P1 acceptance:
-    /// "同名不同 user_id 解析正确").
-    pub fn find_users_by_nick(&self, nick: &str) -> Vec<KnownUser> {
-        let nick = nick.trim_start_matches('@');
-        self.users
-            .iter()
-            .filter(|e| {
-                e.value()
-                    .user_id
-                    .rsplit(':')
-                    .next()
-                    .is_some_and(|seg| seg == nick)
-            })
-            .map(|e| e.value().clone())
-            .collect()
+    /// P4 迁移收尾：把 contacts / user_mailbox 中非 routing_key 形态的键
+    /// （P3 /link 折叠产生的短 id 键，如 "alice"）统一重指 `target`
+    /// （= root 的 user.id）。含 `:` 的键是 routing_key，保持原样（调用方
+    /// 已通过 `migrate_identity` 并入折叠身份）。自环条目丢弃。
+    pub fn rekey_legacy_to(&self, target: &str) {
+        let mut changed = false;
+        // contacts: 收集 (owner, peer, entry) 后重写。
+        let mut rekeyed_contacts: Vec<(String, String, ContactEntry)> = Vec::new();
+        for entry in self.contacts.iter() {
+            let owner = entry.key();
+            for (peer, contact) in entry.value() {
+                let new_owner = if owner.contains(':') {
+                    owner.clone()
+                } else {
+                    target.to_string()
+                };
+                let new_peer = if peer.contains(':') {
+                    peer.clone()
+                } else {
+                    target.to_string()
+                };
+                if new_owner == new_peer {
+                    continue; // 自环（同一存量用户在旧数据中互为联系人）
+                }
+                rekeyed_contacts.push((new_owner, new_peer, contact.clone()));
+            }
+        }
+        if !rekeyed_contacts.is_empty() {
+            self.contacts.clear();
+            for (owner, peer, contact) in rekeyed_contacts {
+                self.contacts
+                    .entry(owner)
+                    .or_default()
+                    .entry(peer)
+                    .or_insert(contact);
+            }
+            changed = true;
+        }
+        // user_mailbox: 非 rk 键 → target。
+        let mut rekeyed_mail: Vec<(String, Vec<UserMail>)> = Vec::new();
+        for entry in self.user_mailbox.iter() {
+            let owner = entry.key();
+            let new_owner = if owner.contains(':') {
+                owner.clone()
+            } else {
+                target.to_string()
+            };
+            rekeyed_mail.push((new_owner, entry.value().clone()));
+        }
+        if !rekeyed_mail.is_empty() {
+            self.user_mailbox.clear();
+            for (owner, mails) in rekeyed_mail {
+                self.user_mailbox
+                    .entry(owner)
+                    .or_default()
+                    .extend(mails);
+            }
+            changed = true;
+        }
+        if changed {
+            self.dirty.store(true, Ordering::Relaxed);
+        }
     }
 
     /// Delivery check for cross-user messages (RFC §3.5). `from` may deliver
@@ -865,8 +892,7 @@ impl KnownUsersRegistry {
             };
             if let Some(mut entry) = removed {
                 moved_peer = true;
-                // The relationship's display nickname follows the folded identity.
-                entry.nickname = Self::nick_of(new_uid);
+                // The relationship key follows the folded identity.
                 let mut map = self.contacts.get_mut(&owner).unwrap();
                 map.entry(new_uid.to_string()).or_insert(entry);
             }
@@ -912,7 +938,7 @@ impl KnownUsersRegistry {
             ));
         }
         format!(
-            "<system-reminder>\n[收到 {} 条来自好友的消息，请阅读并处理。]\n{}\n如需回复，使用 send_message 工具（recipient=@昵称，如 recipient=@alice）。\n</system-reminder>",
+            "<system-reminder>\n[收到 {} 条来自好友的消息，请阅读并处理。]\n{}\n如需回复，使用 send_message 工具（recipient=u/uid 或邮箱，如 recipient=u/alice）。\n</system-reminder>",
             mails.len(),
             lines.join("\n\n")
         )
@@ -921,12 +947,16 @@ impl KnownUsersRegistry {
     /// Render pending **inbound** friend requests as one `<system-reminder>`
     /// user message (RFC §4.3 每轮注入 — re-rendered every turn while
     /// requests remain, so the agent always has context when the user says
-    /// "接受"/"拒绝"). `pending` comes from [`Self::pending_requests`].
-    pub(crate) fn render_pending_requests_reminder(pending: &[(String, ContactEntry)]) -> String {
+    /// "接受"/"拒绝"). `pending` comes from [`Self::pending_requests`];
+    /// `display` 实时渲染对方显示名（RFC §2.2: 昵称不落快照）。
+    pub(crate) fn render_pending_requests_reminder(
+        pending: &[(String, ContactEntry)],
+        display: impl Fn(&str) -> String,
+    ) -> String {
         let mut lines = Vec::new();
-        for (_, entry) in pending {
+        for (peer, entry) in pending {
             let when = crate::agents::commands::info::format_ts(entry.requested_at);
-            lines.push(format!("你有 1 条待处理好友请求:{}，发送于 {}", entry.nickname, when));
+            lines.push(format!("你有 1 条待处理好友请求:{}，发送于 {}", display(peer), when));
         }
         format!(
             "<system-reminder>\n[共有 {} 条待处理好友请求，用户可能直接回复“接受/拒绝”。]\n{}\n</system-reminder>",
@@ -1246,12 +1276,14 @@ mod tests {
         reg.request_friend(alice(), bob());
         let pending = reg.pending_requests(bob());
         assert_eq!(pending.len(), 1);
-        let rendered = KnownUsersRegistry::render_pending_requests_reminder(&pending);
+        // display 闭包由调用方注入（P4: 实时昵称渲染）。
+        let rendered =
+            KnownUsersRegistry::render_pending_requests_reminder(&pending, |_| "alice".to_string());
         assert!(rendered.contains("<system-reminder>"), "{rendered}");
         assert!(rendered.contains("待处理好友请求"), "{rendered}");
-        assert!(rendered.contains("@alice"), "{rendered}");
+        assert!(rendered.contains("alice"), "{rendered}");
         // No pending → empty render list, no reminder text.
-        let rendered_empty = KnownUsersRegistry::render_pending_requests_reminder(&[]);
+        let rendered_empty = KnownUsersRegistry::render_pending_requests_reminder(&[], |_| String::new());
         assert!(rendered_empty.contains("共有 0 条"), "{rendered_empty}");
     }
 
@@ -1293,32 +1325,7 @@ mod tests {
         }];
         let rendered = KnownUsersRegistry::render_user_mail_reminder(&mails);
         assert!(rendered.contains("send_message"), "{rendered}");
-        assert!(rendered.contains("recipient=@昵称"), "{rendered}");
-    }
-
-    #[test]
-    fn resolve_contact_by_nick_within_relationship() {
-        let reg = KnownUsersRegistry::in_memory();
-        reg.request_friend(alice(), bob());
-        reg.accept_friend(bob(), alice());
-
-        let (peer, entry) = reg.resolve_contact_by_nick(alice(), "bob").unwrap();
-        assert_eq!(peer, bob());
-        assert_eq!(entry.status, ContactStatus::Accepted);
-        assert!(reg.resolve_contact_by_nick(alice(), "stranger").is_none());
-    }
-
-    #[test]
-    fn find_users_by_nick_disambiguates_duplicates() {
-        let reg = KnownUsersRegistry::in_memory();
-        reg.record("qqbot", "xiaoer", "alice", "c2c");
-        reg.record("telegram", "default", "alice", "c2c"); // same nick, other channel
-
-        let matches = reg.find_users_by_nick("alice");
-        assert_eq!(matches.len(), 2, "same nick on two accounts is ambiguous");
-
-        // No match → empty.
-        assert!(reg.find_users_by_nick("nobody").is_empty());
+        assert!(rendered.contains("recipient=u/"), "{rendered}");
     }
 
     #[test]
@@ -1433,9 +1440,10 @@ mod tests {
                 .any(|(p, e)| p == carol() && e.status == ContactStatus::Pending)
         );
         assert!(reg.list_contacts(old_rk).is_empty());
-        // carol 侧 peer 键 → alice（显示昵称跟随折叠身份）。
-        assert!(reg.resolve_contact_by_nick(carol(), "alice").is_some());
-        assert!(reg.resolve_contact_by_nick(carol(), "alice_tg").is_none());
+        // carol 侧 peer 键 → alice（折叠身份作为联系人键，实时显示名）。
+        let carol_contacts = reg.list_contacts(carol());
+        assert!(carol_contacts.iter().any(|(p, _)| p == alice()));
+        assert!(!carol_contacts.iter().any(|(p, _)| p == old_rk));
         // mailbox 合并。
         assert_eq!(reg.drain_user_mail(alice()).len(), 1);
         // 幂等 no-op（不 panic）。

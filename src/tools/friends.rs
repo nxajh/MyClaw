@@ -1,7 +1,11 @@
 //! Friend-management tools — RFC §4.2 (tool channel: the bot acts for the
 //! user after understanding intent). Four tools share one `FriendToolsCtx`
-//! bound to the `KnownUsersRegistry`; the daemon injects the live
-//! `ChannelRegistry` for §4.3 framework-template notifications.
+//! bound to the `KnownUsersRegistry` + P4 `UserRegistry`; the daemon injects
+//! the live `ChannelRegistry` for §4.3 framework-template notifications.
+//!
+//! P4 目标解析：`target` 入参为 `u/uid` 或邮箱（经 [`register::parse_target`]
+//! 解析为 FQID user.id），`@昵称` 解析属第二波。显示一律实时渲染（昵称
+//! 不落联系人快照）。
 //!
 //! These are **main-agent-only** tools: contacts are user-level state and
 //! sub-agents never see them (`filter_turn_scoped_tools` drops the names in
@@ -14,23 +18,28 @@ use serde::Deserialize;
 use serde_json::json;
 use tracing::warn;
 
+use crate::agents::commands::friends::rk_for;
+use crate::agents::commands::register::parse_target;
 use crate::agents::session::Session;
-use crate::agents::{ContactStatus, KnownUsersRegistry, RequestOutcome, UserMail};
+use crate::agents::{ContactStatus, KnownUsersRegistry, RequestOutcome, UserMail, UserRegistry};
 use crate::channels::{ChannelMessageContent, ChannelOutboundMessage, MessageReceiver};
 use crate::providers::{Tool, ToolResult};
 
 /// Shared context for the four friend tools.
 pub struct FriendToolsCtx {
     known_users: Arc<KnownUsersRegistry>,
+    /// P4 用户实体注册表（`u/uid` / 邮箱 → FQID 解析 + 显示名渲染）。
+    user_registry: Arc<UserRegistry>,
     /// Live channel registry, injected by the daemon after the Orchestrator
     /// is assembled (peer notifications, RFC §4.3).
     channels: OnceLock<crate::agents::ChannelRegistry>,
 }
 
 impl FriendToolsCtx {
-    pub fn new(known_users: Arc<KnownUsersRegistry>) -> Self {
+    pub fn new(known_users: Arc<KnownUsersRegistry>, user_registry: Arc<UserRegistry>) -> Self {
         Self {
             known_users,
+            user_registry,
             channels: OnceLock::new(),
         }
     }
@@ -68,14 +77,28 @@ impl FriendToolsCtx {
             warn!(peer = %peer_rk, err = %e, "friend tool: peer channel send failed");
         }
     }
+
+    /// 当前用户的显示名（实时昵称）。
+    fn self_display(&self, session: &Session) -> String {
+        let uid = self.known_users.resolve_uid(&session.owner);
+        self.user_registry.display(&uid)
+    }
+}
+
+/// 在联系人表里按 FQID 精确查找 peer 键（P4: 联系人键一律是 user.id）。
+fn find_peer<'a>(contacts: &'a [(String, crate::agents::ContactEntry)], target: &str) -> Option<&'a str> {
+    contacts
+        .iter()
+        .find(|(peer, _)| peer == target)
+        .map(|(peer, _)| peer.as_str())
 }
 
 // ── friend_request ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct FriendRequestArgs {
-    /// Target nickname, with or without the leading '@'.
-    nick: String,
+    /// Target user id (`u/uid`) or email (P4 第一波; @昵称 属第二波).
+    target: String,
 }
 
 pub struct FriendRequestTool {
@@ -95,21 +118,22 @@ impl Tool for FriendRequestTool {
     }
 
     fn description(&self) -> &str {
-        "Send a friend request to a user by nickname (e.g. @alice). The framework notifies \
-         the recipient once; you can only request users who have interacted with this bot. \
-         If the request is already pending or accepted, this is idempotent."
+        "Send a friend request to a registered user by user id (u/uid) or email \
+         (e.g. u/alice or alice@example.com). The framework notifies the \
+         recipient once; you can only request registered users. If the \
+         request is already pending or accepted, this is idempotent."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "nick": {
+                "target": {
                     "type": "string",
-                    "description": "Target nickname, with or without the leading '@'."
+                    "description": "Target user id (u/uid) or email, e.g. u/alice or alice@example.com."
                 }
             },
-            "required": ["nick"]
+            "required": ["target"]
         })
     }
 
@@ -132,20 +156,7 @@ impl Tool for FriendRequestTool {
                 });
             }
         };
-        let nick = args.nick.trim().trim_start_matches('@');
-        if nick.is_empty() {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("friend_request requires a nick".to_string()),
-            });
-        }
-        let owner = session.owner.clone();
-        let peer = match crate::agents::commands::friends::resolve_nick_for(
-            &self.ctx.known_users,
-            &owner,
-            nick,
-        ) {
+        let peer = match parse_target(&self.ctx.user_registry, &args.target) {
             Ok(p) => p,
             Err(e) => {
                 return Ok(ToolResult {
@@ -155,7 +166,8 @@ impl Tool for FriendRequestTool {
                 });
             }
         };
-        if peer == owner {
+        let owner = session.owner.clone();
+        if peer == self.ctx.known_users.resolve_uid(&owner) {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -164,20 +176,20 @@ impl Tool for FriendRequestTool {
         }
         match self.ctx.known_users.request_friend(&owner, &peer) {
             RequestOutcome::New => {
-                self.ctx
-                    .notify_peer(
-                        &peer,
-                        &format!(
-                            "📩 {} 请求与你建立联系。用 /friends 查看，或直接告诉我处理。",
-                            KnownUsersRegistry::nick_of(&owner)
-                        ),
-                    )
-                    .await;
+                let me = self.ctx.self_display(session);
+                if let Some(peer_rk) = rk_for(&self.ctx.known_users, &peer) {
+                    self.ctx
+                        .notify_peer(
+                            &peer_rk,
+                            &format!("📩 {me} 请求与你建立联系。用 /friends 查看，或直接告诉我处理。"),
+                        )
+                        .await;
+                }
                 Ok(ToolResult {
                     success: true,
                     output: format!(
                         "friend request sent to {}",
-                        KnownUsersRegistry::nick_of(&peer)
+                        self.ctx.user_registry.display(&peer)
                     ),
                     error: None,
                 })
@@ -214,8 +226,9 @@ impl Tool for FriendRequestTool {
 // ── friend_accept ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-struct FriendNickArgs {
-    nick: String,
+struct FriendTargetArgs {
+    /// Target user id (`u/uid`) or email.
+    target: String,
 }
 
 pub struct FriendAcceptTool {
@@ -235,20 +248,21 @@ impl Tool for FriendAcceptTool {
     }
 
     fn description(&self) -> &str {
-        "Accept a pending friend request from a user by nickname (e.g. @alice). \
-         The requester is notified and both sides can then exchange messages."
+        "Accept a pending friend request from a user by user id (u/uid) or email \
+         (e.g. u/alice or alice@example.com). The requester is notified and \
+         both sides can then exchange messages."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "nick": {
+                "target": {
                     "type": "string",
-                    "description": "Requester nickname, with or without the leading '@'."
+                    "description": "Requester user id (u/uid) or email, e.g. u/alice or alice@example.com."
                 }
             },
-            "required": ["nick"]
+            "required": ["target"]
         })
     }
 
@@ -261,7 +275,7 @@ impl Tool for FriendAcceptTool {
         args: serde_json::Value,
         session: &Session,
     ) -> anyhow::Result<ToolResult> {
-        let args: FriendNickArgs = match serde_json::from_value(args) {
+        let args: FriendTargetArgs = match serde_json::from_value(args) {
             Ok(a) => a,
             Err(e) => {
                 return Ok(ToolResult {
@@ -271,13 +285,26 @@ impl Tool for FriendAcceptTool {
                 });
             }
         };
-        let nick = args.nick.trim().trim_start_matches('@');
+        let target = match parse_target(&self.ctx.user_registry, &args.target) {
+            Ok(t) => t,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(e),
+                });
+            }
+        };
         let owner = session.owner.clone();
-        let Some((peer, _)) = self.ctx.known_users.resolve_contact_by_nick(&owner, nick) else {
+        let contacts = self.ctx.known_users.list_contacts(&owner);
+        let Some(peer) = find_peer(&contacts, &target).map(str::to_string) else {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some(format!("no pending request from @{nick}")),
+                error: Some(format!(
+                    "no pending request from {}",
+                    self.ctx.user_registry.display(&target)
+                )),
             });
         };
         if !self.ctx.known_users.accept_friend(&owner, &peer) {
@@ -285,21 +312,22 @@ impl Tool for FriendAcceptTool {
                 success: false,
                 output: String::new(),
                 error: Some(format!(
-                    "request from @{nick} is not in an acceptable state"
+                    "request from {} is not in an acceptable state",
+                    self.ctx.user_registry.display(&peer)
                 )),
             });
         }
-        let ack = format!(
-            "{} 已接受你的好友请求，现在可以互发消息了",
-            KnownUsersRegistry::nick_of(&owner)
-        );
-        self.ctx.notify_peer(&peer, &ack).await;
+        let me = self.ctx.self_display(session);
+        let ack = format!("{me} 已接受你的好友请求，现在可以互发消息了");
+        if let Some(peer_rk) = rk_for(&self.ctx.known_users, &peer) {
+            self.ctx.notify_peer(&peer_rk, &ack).await;
+        }
         self.ctx.known_users.push_user_mail(
             &peer,
             UserMail {
                 msg_id: uuid::Uuid::new_v4().to_string(),
-                sender_user_id: owner.clone(),
-                sender_nickname: KnownUsersRegistry::nick_of(&owner),
+                sender_user_id: self.ctx.known_users.resolve_uid(&owner),
+                sender_nickname: me,
                 text: ack,
                 sent_at: chrono::Utc::now().timestamp_millis() as u64,
             },
@@ -308,7 +336,7 @@ impl Tool for FriendAcceptTool {
             success: true,
             output: format!(
                 "accepted friend request from {}",
-                KnownUsersRegistry::nick_of(&peer)
+                self.ctx.user_registry.display(&peer)
             ),
             error: None,
         })
@@ -334,20 +362,21 @@ impl Tool for FriendDeclineTool {
     }
 
     fn description(&self) -> &str {
-        "Decline a pending friend request from a user by nickname (e.g. @alice). \
-         The requester is notified; re-requests from the same pair are refused for 24h."
+        "Decline a pending friend request from a user by user id (u/uid) or email \
+         (e.g. u/alice or alice@example.com). The requester is notified; \
+         re-requests from the same pair are refused for 24h."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "nick": {
+                "target": {
                     "type": "string",
-                    "description": "Requester nickname, with or without the leading '@'."
+                    "description": "Requester user id (u/uid) or email, e.g. u/alice or alice@example.com."
                 }
             },
-            "required": ["nick"]
+            "required": ["target"]
         })
     }
 
@@ -360,7 +389,7 @@ impl Tool for FriendDeclineTool {
         args: serde_json::Value,
         session: &Session,
     ) -> anyhow::Result<ToolResult> {
-        let args: FriendNickArgs = match serde_json::from_value(args) {
+        let args: FriendTargetArgs = match serde_json::from_value(args) {
             Ok(a) => a,
             Err(e) => {
                 return Ok(ToolResult {
@@ -370,33 +399,49 @@ impl Tool for FriendDeclineTool {
                 });
             }
         };
-        let nick = args.nick.trim().trim_start_matches('@');
+        let target = match parse_target(&self.ctx.user_registry, &args.target) {
+            Ok(t) => t,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(e),
+                });
+            }
+        };
         let owner = session.owner.clone();
-        let Some((peer, _)) = self.ctx.known_users.resolve_contact_by_nick(&owner, nick) else {
+        let contacts = self.ctx.known_users.list_contacts(&owner);
+        let Some(peer) = find_peer(&contacts, &target).map(str::to_string) else {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some(format!("no pending request from @{nick}")),
+                error: Some(format!(
+                    "no pending request from {}",
+                    self.ctx.user_registry.display(&target)
+                )),
             });
         };
         if !self.ctx.known_users.decline_friend(&owner, &peer) {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some(format!("request from @{nick} is not in a declinable state")),
+                error: Some(format!(
+                    "request from {} is not in a declinable state",
+                    self.ctx.user_registry.display(&peer)
+                )),
             });
         }
-        let ack = format!(
-            "{} 拒绝了你的好友请求（24 小时内请勿重复发送）",
-            KnownUsersRegistry::nick_of(&owner)
-        );
-        self.ctx.notify_peer(&peer, &ack).await;
+        let me = self.ctx.self_display(session);
+        let ack = format!("{me} 拒绝了你的好友请求（24 小时内请勿重复发送）");
+        if let Some(peer_rk) = rk_for(&self.ctx.known_users, &peer) {
+            self.ctx.notify_peer(&peer_rk, &ack).await;
+        }
         self.ctx.known_users.push_user_mail(
             &peer,
             UserMail {
                 msg_id: uuid::Uuid::new_v4().to_string(),
-                sender_user_id: owner.clone(),
-                sender_nickname: KnownUsersRegistry::nick_of(&owner),
+                sender_user_id: self.ctx.known_users.resolve_uid(&owner),
+                sender_nickname: me,
                 text: ack,
                 sent_at: chrono::Utc::now().timestamp_millis() as u64,
             },
@@ -405,7 +450,7 @@ impl Tool for FriendDeclineTool {
             success: true,
             output: format!(
                 "declined friend request from {}",
-                KnownUsersRegistry::nick_of(&peer)
+                self.ctx.user_registry.display(&peer)
             ),
             error: None,
         })
@@ -432,7 +477,7 @@ impl Tool for FriendListTool {
 
     fn description(&self) -> &str {
         "List the current user's friend relationships: pending inbound requests \
-         and established contacts with their nicknames and statuses."
+         and established contacts with their display names and statuses."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -470,8 +515,9 @@ impl Tool for FriendListTool {
                 ContactStatus::Declined => "declined",
                 ContactStatus::Blocked => "blocked",
             };
+            // P4 显示层: 实时渲染对方显示名（昵称不落快照）。
             // RFC §6 P2 会话发现: accepted 好友附在线/活跃状态。
-            let mut line = format!("  {} {} ({})", entry.nickname, state, peer);
+            let mut line = format!("  {} ({})", self.ctx.user_registry.display(&peer), state);
             if entry.status == ContactStatus::Accepted {
                 if let Some(ts) = self.ctx.known_users.last_seen_ms_of(&peer) {
                     line.push_str(&format!(" {}", KnownUsersRegistry::render_presence(ts)));

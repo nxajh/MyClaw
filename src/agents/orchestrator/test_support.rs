@@ -137,6 +137,7 @@ pub(crate) fn test_ctx(channels: Vec<((String, String), Arc<dyn Channel>)>) -> O
         sessions: Arc::new(SessionManager::default()),
         ask: Arc::new(AskRouter::new()),
         known_users: Arc::new(crate::agents::KnownUsersRegistry::in_memory()),
+        user_registry: Arc::new(crate::agents::UserRegistry::in_memory()),
         runtime: test_runtime(),
         delegator: None,
         scheduler: None,

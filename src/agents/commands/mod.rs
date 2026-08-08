@@ -12,6 +12,7 @@ pub(crate) mod friends;
 pub(crate) mod info;
 mod link;
 mod model;
+pub(crate) mod register;
 mod reload;
 mod session;
 
@@ -26,6 +27,7 @@ pub use info::{
 };
 pub use link::{cmd_link, cmd_link_confirm};
 pub use model::{cmd_model, cmd_models, cmd_think};
+pub use register::{cmd_email, cmd_nickname, cmd_register};
 pub use reload::{cmd_reload, cmd_stop};
 pub use session::{
     cmd_compact, cmd_delete, cmd_history, cmd_new, cmd_rename, cmd_sessions, cmd_switch,
@@ -50,6 +52,9 @@ pub struct CommandContext<'a> {
     pub session_ctx: Option<&'a Arc<crate::agents::SessionContext>>,
     /// Global user registry for `/users`, `/whoami`, `/ping` queries.
     pub known_users: &'a Arc<crate::agents::KnownUsersRegistry>,
+    /// P4 用户实体注册表（uid/email/nickname）——`/register`、`/email`、
+    /// `/nickname` 与好友命令的 user.id / email 解析共用。
+    pub user_registry: &'a Arc<crate::agents::UserRegistry>,
     /// Live channel registry — used by `/friend_*` to notify the peer
     /// (framework template push, RFC §4.3; never routed through the LLM).
     pub channels: &'a crate::agents::orchestrator::ChannelRegistry,
@@ -130,14 +135,17 @@ pub fn command_catalog() -> Vec<(&'static str, &'static str)> {
         ("delete", "Delete a session"),
         ("del", "Delete a session"),
         ("friends", "List friend requests and contacts"),
-        ("friend_request", "Send a friend request (@nick)"),
-        ("friend_accept", "Accept a friend request (@nick)"),
-        ("friend_decline", "Decline a friend request (@nick)"),
-        ("friend_block", "Block a user (@nick)"),
-        ("friend_unblock", "Unblock a user (@nick)"),
-        ("friend_remove", "Remove a friend relationship (@nick)"),
-        ("link", "Link this account to an existing user (@nick)"),
+        ("friend_request", "Send a friend request (u/uid or email)"),
+        ("friend_accept", "Accept a friend request (u/uid or email)"),
+        ("friend_decline", "Decline a friend request (u/uid or email)"),
+        ("friend_block", "Block a user (u/uid or email)"),
+        ("friend_unblock", "Unblock a user (u/uid or email)"),
+        ("friend_remove", "Remove a friend relationship (u/uid or email)"),
+        ("link", "Link this account to an existing user (u/uid)"),
         ("link_confirm", "Confirm an identity link with the 6-digit code"),
+        ("register", "Create your identity: /register <email> <uid>"),
+        ("email", "Set your email: /email set <email>"),
+        ("nickname", "Set your nickname: /nickname set <昵称> (no / allowed)"),
     ]
 }
 
@@ -192,6 +200,9 @@ pub fn is_known_command(cmd: &str) -> bool {
             | "friend_remove"
             | "link"
             | "link_confirm"
+            | "register"
+            | "email"
+            | "nickname"
     )
 }
 
@@ -240,6 +251,10 @@ pub async fn dispatch(cmd: &str, args: &str, ctx: CommandContext<'_>) -> Option<
         // ── Batch 6: identity linking (RFC §2/P3) ──
         "link" => Some(link::cmd_link(args, ctx).await),
         "link_confirm" => Some(link::cmd_link_confirm(args, ctx).await),
+        // ── Batch 7: user self-service (RFC §2.2/P4) ──
+        "register" => Some(register::cmd_register(args, ctx)),
+        "email" => Some(register::cmd_email(args, ctx)),
+        "nickname" => Some(register::cmd_nickname(args, ctx)),
         _ => None,
     }
 }

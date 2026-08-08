@@ -154,6 +154,9 @@ pub struct OrchestratorCtx {
     /// Global user registry — replaces per-channel KnownSenders/RateLimiter.
     /// `inbound::dispatch` records every inbound message; slash commands query.
     pub known_users: Arc<crate::agents::KnownUsersRegistry>,
+    /// P4 用户实体注册表（uid/email/nickname）——gate 判定、命令与工具
+    /// 解析 user.id / email 共用。
+    pub user_registry: Arc<crate::agents::UserRegistry>,
     /// AgentRuntime for the per-turn `Agent::run` path. Cloned into each turn.
     pub runtime: AgentRuntime,
     /// Delegation manager (shared with DelegateTaskTool via handler).

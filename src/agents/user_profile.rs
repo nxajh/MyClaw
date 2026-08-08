@@ -87,6 +87,11 @@ impl UserResolver {
             .collect()
     }
 
+    /// All routing_keys with an explicit override (P4 迁移遍历用)。
+    pub fn all_routing_keys(&self) -> Vec<String> {
+        self.overrides.read().keys().cloned().collect()
+    }
+
     fn load_from_disk(&self) {
         if self.data_path.as_os_str().is_empty() {
             return;

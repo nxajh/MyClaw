@@ -483,47 +483,52 @@ pub fn cmd_ping(ctx: CommandContext<'_>) -> String {
     )
 }
 
-/// `/whoami` — show the caller's routing identity.
+/// `/whoami` — show the caller's identity: 渠道信息 + P4 用户实体
+/// （u/uid、email、昵称）。
 pub fn cmd_whoami(ctx: CommandContext<'_>) -> String {
-    // user_id is the routing key "channel:account:sender";
-    // extract the sender portion for KnownUser lookup.
+    let self_uid = ctx.known_users.resolve_uid(ctx.user_id);
     let sender_id = ctx.user_id.rsplit(':').next().unwrap_or(ctx.user_id);
-    let users = ctx.known_users.users_for(ctx.channel_type, ctx.account_id);
-    let me: Vec<_> = users.iter().filter(|u| u.user_id == sender_id).collect();
-    if let Some(u) = me.first() {
-        format!(
-            "🪪 **Your identity**\n\n\
-             ```text\n\
-             Channel:    {}\n\
-             Account:    {}\n\
-             User ID:    {}\n\
-             Routing:    {}:{}:{}\n\
-             Messages:   {}\n\
-             First seen: {}\n\
-             Last seen:  {}\n\
-             Scope:      {}\n\
-             ```",
-            u.channel,
-            u.account,
-            u.user_id,
-            u.channel,
-            u.account,
-            u.user_id,
-            u.message_count,
-            format_ts(u.first_seen_ms),
-            format_ts(u.last_seen_ms),
-            u.scope,
-        )
+    let u = ctx
+        .known_users
+        .users_for(ctx.channel_type, ctx.account_id)
+        .into_iter()
+        .find(|u| u.user_id == sender_id);
+    // 已注册 → 用户可见形态 u/uid；未注册 → 渠道侧原始 sender id。
+    let registered = ctx.user_registry.is_user_id(&self_uid);
+    let uid_visible = match ctx.user_registry.uid_of(&self_uid) {
+        Some(uid) => format!("u/{uid}"),
+        None => sender_id.to_string(),
+    };
+    let mut lines = vec![
+        format!("Channel:    {}", ctx.channel_type),
+        format!("Account:    {}", ctx.account_id),
+        format!("User ID:    {uid_visible}"),
+    ];
+    if let Some(uid) = ctx.user_registry.uid_of(&self_uid) {
+        if let Some(user) = ctx.user_registry.find_by_uid(uid) {
+            lines.push(format!(
+                "Email:      {}",
+                user.email.as_deref().unwrap_or("—")
+            ));
+            lines.push(format!(
+                "Nickname:   {}",
+                user.nickname.as_deref().unwrap_or("—")
+            ));
+        }
+    }
+    lines.push(format!("Routing:    {}", ctx.user_id));
+    if let Some(u) = u {
+        lines.push(format!("Messages:   {}", u.message_count));
+        lines.push(format!("First seen: {}", format_ts(u.first_seen_ms)));
+        lines.push(format!("Last seen:  {}", format_ts(u.last_seen_ms)));
+        lines.push(format!("Scope:      {}", u.scope));
+    }
+    let body = lines.join("\n");
+    if registered {
+        format!("🪪 **Your identity**\n\n```text\n{body}\n```")
     } else {
         format!(
-            "🪪 **Your identity**\n\n\
-             ```text\n\
-             Channel: {}\n\
-             Account: {}\n\
-             User ID: {}\n\
-             ```\n\n\
-             _Not yet recorded in the global registry._",
-            ctx.channel_type, ctx.account_id, sender_id
+            "🪪 **Your identity**\n\n```text\n{body}\n```\n\n_未注册身份。用 /register <邮箱> <uid> 创建，或 /link u/uid 绑定已有身份。_"
         )
     }
 }

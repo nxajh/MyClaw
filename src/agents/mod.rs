@@ -32,6 +32,7 @@ pub mod turn;
 pub mod turn_event;
 mod user_messages;
 pub mod user_profile;
+pub mod user_registry;
 
 /// Scheduling: cron jobs, webhooks, heartbeat scheduler.
 pub mod scheduling;
@@ -85,6 +86,10 @@ pub use turn_event::{
     RunSummary, TokenUsage, TtsSummary, TurnEvent, VersionedEvent,
 };
 pub use user_profile::{UserProfile, UserResolver};
+pub use user_registry::{
+    RegisterError, ROOT_UID, User, UserRegistry, DEFAULT_NAMESPACE, validate_email, validate_nickname,
+    validate_uid,
+};
 pub use workspace::skill_loader::SkillDefinition;
 pub use workspace::skills::{Skill, SkillManager};
 pub use workspace::watcher::{ChangeSet, WorkspaceWatcher};

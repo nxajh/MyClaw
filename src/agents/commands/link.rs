@@ -1,8 +1,8 @@
 //! `/link` + `/link_confirm` slash commands — P3 身份绑定 (user channel,
 //! deterministic, bypasses the LLM).
 //!
-//! Flow: a user on a new channel claims to be an existing known user
-//! (`/link @nick`). The framework pushes a one-time verification code to
+//! Flow: a user on a new channel claims to be an existing registered user
+//! (`/link u/uid` 或邮箱). The framework pushes a one-time verification code to
 //! the *claimed* account as a framework template (zero LLM tokens). Only
 //! the holder of that account can see the code; replying
 //! `/link_confirm <code>` from the new channel proves control of both
@@ -20,9 +20,9 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::agents::commands::friends::{notify_peer, resolve_nick_for};
+use crate::agents::commands::friends::{notify_peer, rk_for};
+use crate::agents::commands::register::parse_target;
 use crate::agents::commands::CommandContext;
-use crate::agents::KnownUsersRegistry;
 
 /// 6-digit one-time code lifetime.
 const LINK_TTL_MS: u64 = 10 * 60 * 1000;
@@ -88,21 +88,21 @@ fn start_link(current_rk: &str, target_rk: &str, target_uid: &str, now: u64) -> 
 fn consume_confirm(current_rk: &str, code: &str, now: u64) -> Result<LinkTarget, String> {
     let mut pending = PENDING_LINKS.lock().unwrap();
     let Some(link) = pending.get_mut(current_rk) else {
-        return Err("没有待确认的关联请求，请先 /link @昵称 发起".to_string());
+        return Err("没有待确认的关联请求，请先 /link u/uid 发起".to_string());
     };
     if now > link.expires_ms {
         pending.remove(current_rk);
-        return Err("验证码已过期，请重新 /link @昵称".to_string());
+        return Err("验证码已过期，请重新 /link u/uid".to_string());
     }
     if link.attempts >= LINK_MAX_ATTEMPTS {
         pending.remove(current_rk);
-        return Err("错误次数过多，本次关联已作废，请重新 /link @昵称".to_string());
+        return Err("错误次数过多，本次关联已作废，请重新 /link u/uid".to_string());
     }
     if code != link.code {
         link.attempts += 1;
         if link.attempts >= LINK_MAX_ATTEMPTS {
             pending.remove(current_rk);
-            return Err("验证码错误次数过多，本次关联已作废，请重新 /link @昵称".to_string());
+            return Err("验证码错误次数过多，本次关联已作废，请重新 /link u/uid".to_string());
         }
         let left = LINK_MAX_ATTEMPTS - link.attempts;
         return Err(format!("验证码错误（还剩 {left} 次机会），或重新 /link 获取新验证码"));
@@ -115,49 +115,46 @@ fn consume_confirm(current_rk: &str, code: &str, now: u64) -> Result<LinkTarget,
     Ok(target)
 }
 
-/// Parse a `@nick` argument into the bare nick (strip the leading `@`).
-fn parse_nick(args: &str) -> Option<&str> {
-    let nick = args.trim().trim_start_matches('@');
-    if nick.is_empty() {
-        None
-    } else {
-        Some(nick)
-    }
-}
-
-/// `/link @昵称` — claim to be an existing known user from a new channel.
+/// `/link u/uid 或邮箱` — claim to be an existing registered user from a new
+/// channel. The verification code is pushed to one of the target user's live
+/// channels; confirming proves control of both channels.
 pub async fn cmd_link(args: &str, ctx: CommandContext<'_>) -> String {
-    let Some(nick) = parse_nick(args) else {
-        return "用法: /link @昵称（把当前渠道关联到该用户的身份）".to_string();
-    };
-    let peer = match resolve_nick_for(ctx.known_users, ctx.user_id, nick) {
-        Ok(p) => p,
+    let target = match parse_target(ctx.user_registry, args) {
+        Ok(t) => t,
         Err(e) => return e,
     };
-    if peer == ctx.user_id {
-        return "不能把自己关联到自己".to_string();
-    }
     let Some(resolver) = ctx.known_users.resolver() else {
         return "当前部署未启用身份绑定".to_string();
     };
-    // 当前渠道已绑定 → 拒绝（暂无解绑）。
-    if resolver.resolve(ctx.user_id) != ctx.user_id {
+    // 当前渠道已绑定 → 同身份幂等成功，异身份拒绝（暂无解绑）。
+    let bound = resolver.resolve(ctx.user_id);
+    if bound != ctx.user_id {
+        if bound == target {
+            return format!(
+                "当前账号已关联到 {}，无需重复关联",
+                ctx.user_registry.display(&target)
+            );
+        }
         return "当前账号已绑定到其他身份，暂不支持重复绑定或解绑".to_string();
     }
-    // 目标折叠身份：目标若已绑定，则绑到其主身份。
-    let target_uid = resolver.resolve(&peer);
-    // 防自环：目标主身份 == 当前 rk（peer 已绑定到当前渠道）。
-    if target_uid == ctx.user_id {
-        return "目标用户已关联到当前账号，无法再绑定".to_string();
-    }
-    let code = start_link(ctx.user_id, &peer, &target_uid, now_ms());
+    // 目标的可投递渠道：resolver 绑定渠道优先，其次登记簿。
+    let Some(target_rk) = rk_for(ctx.known_users, &target) else {
+        return format!(
+            "目标 {} 当前没有可投递的渠道，无法发送验证码，请稍后再试",
+            ctx.user_registry.display(&target)
+        );
+    };
+    let code = start_link(ctx.user_id, &target_rk, &target, now_ms());
+    let me = {
+        let uid = ctx.known_users.resolve_uid(ctx.user_id);
+        ctx.user_registry.display(&uid)
+    };
     // 验证码走框架模板直达目标渠道（零 LLM token）；失败 = 目标不可达。
     let sent = notify_peer(
         &ctx,
-        &peer,
+        &target_rk,
         &format!(
-            "🔐 {} 正在尝试把新渠道关联到你的账号。验证码：{code}（10 分钟内有效）。若不是你本人操作，请忽略。",
-            KnownUsersRegistry::nick_of(ctx.user_id)
+            "🔐 {me} 正在尝试把新渠道关联到你的账号。验证码：{code}（10 分钟内有效）。若不是你本人操作，请忽略。"
         ),
     )
     .await;
@@ -166,8 +163,9 @@ pub async fn cmd_link(args: &str, ctx: CommandContext<'_>) -> String {
         return "目标用户所在渠道当前不可达，无法发送验证码，请稍后再试".to_string();
     }
     format!(
-        "验证码已发送到 {}，请查看后回复 /link_confirm 验证码",
-        KnownUsersRegistry::nick_of(&peer)
+        "验证码已发送到 {}（{}），请查看后回复 /link_confirm 验证码",
+        ctx.user_registry.display(&target),
+        target_rk
     )
 }
 
@@ -200,7 +198,7 @@ pub async fn cmd_link_confirm(args: &str, ctx: CommandContext<'_>) -> String {
     .await;
     format!(
         "✅ 关联成功：当前渠道与 {} 已合并为同一身份（{}）。好友、消息与记忆将在两个渠道间共享。",
-        KnownUsersRegistry::nick_of(&target.rk),
+        ctx.user_registry.display(&target.uid),
         target.uid
     )
 }
