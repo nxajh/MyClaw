@@ -1473,6 +1473,7 @@ mod tests {
             description: None,
             model: None,
             isolation: Default::default(),
+            timeout: None,
         }
     }
 

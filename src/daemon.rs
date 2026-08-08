@@ -1581,6 +1581,7 @@ mod tests {
             description: None,
             model: None,
             isolation: AgentIsolation::default(),
+            timeout: None,
         };
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(NamedTool("shell")));

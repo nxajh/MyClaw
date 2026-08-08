@@ -121,6 +121,7 @@ mod tests {
             model: None,
             max_tool_calls: None,
             isolation: Default::default(),
+            timeout: None,
         }
     }
 

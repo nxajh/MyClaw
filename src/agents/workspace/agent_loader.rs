@@ -319,6 +319,7 @@ You are an expert programmer. Write clean, idiomatic code.
                 description: None,
                 model: None,
                 isolation: AgentIsolation::default(),
+                timeout: None,
             },
             SubAgentConfig {
                 name: "coder".into(),
@@ -330,6 +331,7 @@ You are an expert programmer. Write clean, idiomatic code.
                 description: None,
                 model: None,
                 isolation: AgentIsolation::default(),
+                timeout: None,
             },
         ];
         let warnings = validate_agents(&agents, &[]);
@@ -351,6 +353,7 @@ You are an expert programmer. Write clean, idiomatic code.
             description: None,
             model: None,
             isolation: AgentIsolation::default(),
+            timeout: None,
         }];
         let warnings = validate_agents(&agents, &["shell"]);
         assert!(warnings.iter().any(|w| w.contains("nonexistent_tool")));
