@@ -2,7 +2,7 @@
 //! deterministic, bypasses the LLM).
 //!
 //! Flow: a user on a new channel claims to be an existing registered user
-//! (`/link u/uid` 或邮箱). The framework pushes a one-time verification code to
+//! (`/link u/username` 或邮箱). The framework pushes a one-time verification code to
 //! the *claimed* account as a framework template (zero LLM tokens). Only
 //! the holder of that account can see the code; replying
 //! `/link_confirm <code>` from the new channel proves control of both

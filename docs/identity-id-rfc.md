@@ -97,7 +97,7 @@ routing_key ──UserRegistry──→ User{ uid: <uuidv7>(系统分配,不可�
 
 ### 3.3 删除 nickname
 
-- User 结构删 `nickname` 字段;`/nickname set` 命令移除(由 `/username set` 取代);UserMail.sender_nickname 改 sender_username(纯显示字段)。
+- User 结构删 `nickname` 字段;`/nickname set` 命令移除(由 `/username set` 取代);UserMail.sender_nickname 字段名保留(纯显示字段,值随 display 为 `@username` 形态)。
 - 显示回退:无 username 时回退派生名(如渠道名/`u/<uuid 短尾>`),不回退 nickname。
 - mention 昵称分支(`@昵称` 关系内比对)删除——`@username` 全局解析替代。
 
@@ -170,12 +170,12 @@ routing_key ──UserRegistry──→ User{ uid: <uuidv7>(系统分配,不可�
 
 ## 8. 验收清单
 
-- [ ] uuidv7 系统 uid:注册不再接受自选 uid;User.uid 恒为 `myclaw/u/<uuidv7>`
-- [ ] username 唯一:占用即拒绝;`/username set` 可更换;保留字 root
-- [ ] nickname 全删:字段、命令、mention 昵称分支、render 回退、UserMail.sender_nickname
-- [ ] `@username` 全局解析;`u/` 仅内部(`<ref>`/存储)
-- [ ] FQID parser 通吃 u/t/msg/s/job;裸 uuid 不出现在类型不明确接口
-- [ ] session/task/msg/cron id 全部 `<ns>/<type>/<uuidv7>`
+- [x] uuidv7 系统 uid:注册不再接受自选 uid;User.uid 恒为 `myclaw/u/<uuidv7>`
+- [x] username 唯一:占用即拒绝;`/username set` 可更换;保留字 root
+- [x] nickname 全删:字段、命令、mention 昵称分支、render 回退(UserMail.sender_nickname 字段名保留,值随 display 为 `@username` 形态)
+- [x] `@username` 全局解析;`u/` 输入形态保留(命令/工具参数按 uid 内部键优先、username 回退)
+- [x] FQID parser 通吃 u/t/msg/s/job;裸 uuid 不出现在类型不明确接口
+- [x] session/task/msg/cron id 全部 `<ns>/<type>/<uuidv7>`
 - [ ] `[system] namespace` 配置生效;`[messaging]` 只剩 smtp
 - [ ] 启动自动迁移 5 项 + 可选清理,全部留 .bak;`migrate-namespace` 干跑/确认/执行
 - [ ] 全量测试 + clippy -D warnings 通过(CI)

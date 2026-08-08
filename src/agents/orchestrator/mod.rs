@@ -245,7 +245,7 @@ pub struct OrchestratorParts {
     pub ask_router: Arc<crate::agents::AskRouter>,
     /// Global user registry — shared with slash commands.
     pub known_users: Arc<crate::agents::KnownUsersRegistry>,
-    /// P4 用户实体注册表（uid/email/nickname）——gate 判定、命令与工具
+    /// P4 用户实体注册表（uid/email/username）——gate 判定、命令与工具
     /// 解析 user.id / email 共用。
     pub user_registry: Arc<crate::agents::UserRegistry>,
     /// AgentRuntime for the `Agent::run` per-turn path.

@@ -31,7 +31,7 @@ pub struct SendMessageTool {
     /// the daemon; `None` in tests/single-agent mode makes cross-user targets
     /// error out clearly.
     known_users: Arc<OnceLock<Arc<KnownUsersRegistry>>>,
-    /// P4 用户实体注册表（uid/email/nickname）——cross-user recipient 解析
+    /// P4 用户实体注册表（uid/email/username）——cross-user recipient 解析
     /// （`u/uid` / 邮箱 → FQID）与发送者显示名渲染共用。
     user_registry: Arc<OnceLock<Arc<UserRegistry>>>,
     /// Namespace for generated message FQIDs (`<ns>/msg/<uuidv7>`). Bound at

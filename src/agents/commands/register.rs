@@ -1,11 +1,10 @@
-//! `/register` / `/email` / `/nickname` slash commands — P4 用户自服务
+//! `/register` / `/email` / `/username` slash commands — P4 用户自服务
 //! (RFC §2.2; deterministic, bypasses the LLM).
 //!
 //! `/register <邮箱> <username>` 创建用户实体（uid 由系统分配 uuidv7）并绑定
-//! 当前渠道；`/email set <邮箱>` 更换邮箱（唯一、可更换）；`/nickname set
-//! <昵称>` 设置对外标识（本波已收敛为唯一 username，命令名/文案收尾在后续
-//! 提交）。标识不落联系人快照——好友列表、待处理请求、消息回执一律经
-//! [`UserRegistry::display`] 实时取。
+//! 当前渠道；`/email set <邮箱>` 更换邮箱（唯一、可更换）；`/username set
+//! <username>` 设置对外标识（唯一、可更换）。标识不落联系人快照——好友列表、
+//! 待处理请求、消息回执一律经 [`UserRegistry::display`] 实时取。
 //!
 //! [`parse_target`] 是好友命令、`/link`、工具层共用的目标解析：把用户输入
 //! （`u/uid`、完整 user.id、或邮箱）解析为内部统一键 user.id（FQID）。
@@ -84,7 +83,7 @@ pub fn cmd_register(args: &str, ctx: CommandContext<'_>) -> String {
     let self_uid = ctx.known_users.resolve_uid(ctx.user_id);
     if ctx.user_registry.is_user_id(&self_uid) {
         return format!(
-            "当前账号已注册为 {}。修改邮箱用 /email set，昵称用 /nickname set。",
+            "当前账号已注册为 {}。修改邮箱用 /email set，用户名用 /username set。",
             ctx.user_registry.display(&self_uid)
         );
     }
@@ -97,7 +96,7 @@ pub fn cmd_register(args: &str, ctx: CommandContext<'_>) -> String {
             }
             ctx.known_users.migrate_identity(ctx.user_id, &fqid);
             format!(
-                "✅ 身份创建成功：{}。好友将用此用户名找到你；可用 /email set 换邮箱、/nickname set 设置昵称。",
+                "✅ 身份创建成功：{}。好友将用此用户名找到你；可用 /email set 换邮箱、/username set 换用户名。",
                 ctx.user_registry.display(&fqid)
             )
         }
@@ -126,26 +125,26 @@ pub fn cmd_email(args: &str, ctx: CommandContext<'_>) -> String {
     }
 }
 
-/// `/nickname set <昵称>`（或直接 `/nickname <昵称>`）— 设置对外标识。
-/// 本波已收敛为唯一 username（校验/索引/显示均按 username 语义；命令名与
-/// 文案收尾在后续提交）。
-pub fn cmd_nickname(args: &str, ctx: CommandContext<'_>) -> String {
-    let trimmed = args.trim();
-    // "set " 前缀形式优先；裸昵称直接整体作为昵称（允许含空格）。
-    let nick = match trimmed.strip_prefix("set ") {
-        Some(rest) => rest.trim(),
-        None => trimmed,
+/// `/username set <username>`（或直接 `/username <username>`）— 设置对外标识
+/// （唯一、可更换；username 为 3–32 位小写字母/数字/下划线）。
+pub fn cmd_username(args: &str, ctx: CommandContext<'_>) -> String {
+    let mut it = args.split_whitespace();
+    let first = it.next().unwrap_or("");
+    let username = if first.eq_ignore_ascii_case("set") {
+        it.next().unwrap_or("")
+    } else {
+        first
     };
-    if nick.is_empty() {
-        return "用法: /nickname set <昵称>（不允许含 /）".to_string();
+    if username.is_empty() {
+        return "用法: /username set <username>（3–32 位小写字母/数字/下划线）".to_string();
     }
     let Some(uid) = current_uid(&ctx) else {
         return "当前账号尚未注册身份，请先 /register <邮箱> <username>".to_string();
     };
-    match ctx.user_registry.set_username(&uid, nick) {
+    match ctx.user_registry.set_username(&uid, username) {
         Ok(()) => format!(
-            "✅ 昵称已设为 {}（显示为 {}）",
-            nick,
+            "✅ 用户名已设为 {}（显示为 {}）",
+            username,
             ctx.user_registry.display(&ctx.user_registry.user_id_of(&uid))
         ),
         Err(e) => err_text(&e),
