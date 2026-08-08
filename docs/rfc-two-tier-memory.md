@@ -181,7 +181,7 @@ workspace/
 
 ### P1（后续）
 
-- 用户画像保真：fork 的 durability gate 目前会丢细节，提炼/画像需保留 per-user 完整细节
+- ~~用户画像保真：fork 的 durability gate 目前会丢细节，提炼/画像需保留 per-user 完整细节~~ **已完成（2026-08-08，commit b974371）**：`compact_fork_messages` 保留全部 user 消息（细节载体）+ 全部 system，仅裁剪 assistant 尾部（上限 40 条 user）；fork prompt 新增「User profile fidelity」（画像类事实豁免 durability gate、完整细节保真）+「Replace without data loss」（replace 前 `memory_view` 读旧全文，保留仍有效旧细节）。CI 663 tests 全绿。
 
 ### 验证方案
 
@@ -198,3 +198,5 @@ workspace/
 ## 九、实施记录
 
 - 2026-08-08：RFC v1 定稿，P0 开工。
+- 2026-08-08：P0 完成（P0-1~P0-5，commit 3f08895/29fb127/068741b，CI 660 tests，手动演练通过）。
+- 2026-08-08：P1 完成（commit b974371，CI 663 tests）：fork 保真——compact 保留全部 user 消息、prompt 画像保真 + replace view-then-merge。
