@@ -1185,18 +1185,6 @@ impl MemoryManageTool {
         } else {
             existing.tags.clone()
         };
-        let filename = existing
-            .path
-            .file_name()
-            .unwrap_or_default()
-            .to_str()
-            .unwrap_or(name);
-        let fallback_filename = format!("{}.md", name);
-        let filename = if filename == name {
-            &fallback_filename
-        } else {
-            filename
-        };
         let now = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
         let warnings = lint_memory_content(name, content, &files);

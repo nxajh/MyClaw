@@ -68,6 +68,7 @@ use crate::config::scheduler::SchedulerConfig;
 use agent::{AgentConfig, ContextConfig, PromptConfig, ToolExecutorConfig};
 use channel::ChannelConfigs;
 use mcp::McpServerConfig;
+use memory::MemoryConfig;
 use provider::ProviderConfig;
 use routing::RoutingConfig;
 

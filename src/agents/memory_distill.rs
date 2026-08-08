@@ -19,6 +19,7 @@ use tokio::sync::Semaphore;
 use crate::agents::session::Session;
 use crate::agents::tool_registry::ToolRegistry;
 use crate::providers::capability_chat::{ChatMessage, ChatProvider, ChatRequest, ToolSpec};
+use crate::providers::capability_tool::ToolResult;
 use crate::providers::{
     BoxStream, ChatUsage, ProviderRegistry, StreamEvent, ThinkingConfig, ToolCall,
 };
