@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 mod config;
 pub(crate) mod friends;
-mod info;
+pub(crate) mod info;
 mod model;
 mod reload;
 mod session;
