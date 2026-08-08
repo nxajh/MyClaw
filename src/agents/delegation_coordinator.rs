@@ -33,10 +33,22 @@ use crate::agents::delegation::DelegationEvent;
 use crate::agents::session::{BackendPersistHook, PersistHook, SessionManager};
 use crate::config::sub_agent::AgentIsolation;
 
-/// Maximum wall-clock time a sub-agent may run before being killed.
-/// Prevents runaway loops or stuck provider calls from blocking the
-/// parent agent indefinitely.
-const SUB_AGENT_TIMEOUT_SECS: u64 = 300;
+/// Default wall-clock timeout for a sub-agent when neither the tool caller
+/// nor the SubAgentConfig specifies one.
+const SUB_AGENT_TIMEOUT_DEFAULT_SECS: u64 = 600;
+
+/// Hard ceiling: no delegation may run longer than this regardless of what
+/// the tool caller or SubAgentConfig requests.
+const SUB_AGENT_TIMEOUT_MAX_SECS: u64 = 1800;
+
+/// Resolve the effective timeout.
+///
+/// Priority: `tool_timeout` > `config_timeout` > `SUB_AGENT_TIMEOUT_DEFAULT_SECS`,
+/// clamped to `SUB_AGENT_TIMEOUT_MAX_SECS`.
+fn resolve_timeout(tool_timeout: Option<u64>, config_timeout: Option<u64>) -> u64 {
+    let secs = tool_timeout.or(config_timeout).unwrap_or(SUB_AGENT_TIMEOUT_DEFAULT_SECS);
+    secs.min(SUB_AGENT_TIMEOUT_MAX_SECS)
+}
 
 /// Holds sub-agent configs and creates temporary `Agent::run` invocations
 /// for delegation.
@@ -264,6 +276,7 @@ impl DelegationCoordinator {
         task_id_override: Option<&'a str>,
         session_key: Option<&'a str>,
         reply_target: Option<&'a str>,
+        timeout_secs: u64,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'a>>
     {
         Box::pin(async move {
@@ -418,7 +431,7 @@ impl DelegationCoordinator {
             tracing::debug!(agent = %config.name, "sub-agent started");
             let turn_future = sub_ctx.process_turn(synthetic, None, runtime);
             let result = match tokio::time::timeout(
-                std::time::Duration::from_secs(SUB_AGENT_TIMEOUT_SECS),
+                std::time::Duration::from_secs(timeout_secs),
                 turn_future,
             )
             .await
@@ -427,13 +440,13 @@ impl DelegationCoordinator {
                 Err(_) => {
                     tracing::warn!(
                         agent = %config.name,
-                        timeout_secs = SUB_AGENT_TIMEOUT_SECS,
+                        timeout_secs,
                         "sub-agent timed out"
                     );
                     Err(anyhow::anyhow!(
                         "sub-agent '{}' timed out after {}s",
                         config.name,
-                        SUB_AGENT_TIMEOUT_SECS
+                        timeout_secs
                     ))
                 }
             };
@@ -572,6 +585,7 @@ impl DelegationCoordinator {
         task: &str,
         parent_session_id: &str,
         reply_target: &str,
+        timeout_secs: u64,
     ) -> anyhow::Result<String> {
         let agent = self.find_agent(agent_name).ok_or_else(|| {
             let available = self.configs.names();
@@ -589,6 +603,7 @@ impl DelegationCoordinator {
             agent = %config.name,
             task_id = %task_id,
             task_len = task.len(),
+            timeout_secs,
             "spawning sub-agent in background"
         );
 
@@ -614,6 +629,7 @@ impl DelegationCoordinator {
                     Some(&task_id_clone),
                     Some(&session_key_owned),
                     Some(&reply_target_owned),
+                    timeout_secs,
                 )
                 .await;
 
@@ -626,8 +642,7 @@ impl DelegationCoordinator {
                         let _ = tx
                             .send(DelegationEvent::Completed {
                                 task_id: task_id_clone.clone(),
-                                parent_session_id: parent_session_id_owned,
-                                reply_target: reply_target_owned,
+                                session_id: parent_session_id_owned,
                                 summary,
                                 duration_secs,
                             })
@@ -638,8 +653,7 @@ impl DelegationCoordinator {
                         let _ = tx
                             .send(DelegationEvent::Failed {
                                 task_id: task_id_clone.clone(),
-                                parent_session_id: parent_session_id_owned,
-                                reply_target: reply_target_owned,
+                                session_id: parent_session_id_owned,
                                 error: e.to_string(),
                             })
                             .await;
@@ -668,8 +682,13 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
         agent_name: &str,
         task: &str,
         parent_session: &super::session::Session,
+        timeout: Option<u64>,
     ) -> anyhow::Result<String> {
         let reply_target = parent_session.reply_target().map(|s| s.to_string());
+        let config_timeout = self
+            .find_agent(agent_name)
+            .and_then(|a| a.config.timeout);
+        let timeout_secs = resolve_timeout(timeout, config_timeout);
         self.delegate_with_parent(
             agent_name,
             task,
@@ -677,6 +696,7 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
             None,
             None,
             reply_target.as_deref(),
+            timeout_secs,
         )
         .await
     }
@@ -686,12 +706,17 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
         agent_name: &str,
         task: &str,
         parent_session: &super::session::Session,
+        timeout: Option<u64>,
     ) -> anyhow::Result<String> {
         let reply_target = parent_session
             .reply_target()
             .map(|s| s.to_string())
             .unwrap_or_default();
-        self.spawn_delegate_async(agent_name, task, &parent_session.id, &reply_target)
+        let config_timeout = self
+            .find_agent(agent_name)
+            .and_then(|a| a.config.timeout);
+        let timeout_secs = resolve_timeout(timeout, config_timeout);
+        self.spawn_delegate_async(agent_name, task, &parent_session.id, &reply_target, timeout_secs)
     }
 
     fn list_available(&self) -> Vec<(String, Option<String>)> {

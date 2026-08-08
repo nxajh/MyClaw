@@ -232,6 +232,7 @@ impl SessionManager {
             incomplete_turn: false,
             last_message: self.backend.load_last_message(&session_id),
             token_tracker,
+            attachments: crate::agents::attachment::AttachmentManager::new(),
             persist: None,
             channel: None,
             turn_stream: None,
@@ -432,6 +433,21 @@ impl SessionManager {
     pub fn get_by_id(&self, session_id: &str) -> Option<Session> {
         let info = self.backend.get_session(session_id)?;
         Some(self.load_session(info.id, info.owner))
+    }
+
+    /// Build a SessionContext for a **non-active** session without registering
+    /// it in the `contexts` table.
+    ///
+    /// Used by delegation wake to process a sub-agent completion for a session
+    /// that the user has switched away from. The caller holds the only `Arc`
+    /// and drops it after processing; the session is NOT made active.
+    ///
+    /// Returns `None` if the session doesn't exist in the backend.
+    pub fn load_context_by_session_id(&self, session_id: &str) -> Option<Arc<SessionContext>> {
+        let mut session = self.get_by_id(session_id)?;
+        session.persist = Some(self.build_persist_hook());
+        let agent = self.build_agent_for_session(&session);
+        Some(Arc::new(SessionContext::new(session, agent)))
     }
 
     /// Per RFC §三.A line 412: build a sub-session SessionContext that
@@ -672,5 +688,6 @@ fn permissive_main_default(agent_name: &str) -> SubAgentConfig {
         model: None,
         max_tool_calls: None,
         isolation: Default::default(),
+        timeout: None,
     }
 }

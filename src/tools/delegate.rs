@@ -82,6 +82,10 @@ impl Tool for AgentDelegateTool {
                     "type": "string",
                     "enum": ["sync", "async"],
                     "description": "Execution mode. 'sync' (default) blocks until completion. 'async' runs in the background and returns a task_id."
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Maximum wall-clock seconds for the sub-agent. Overrides the agent config default (600s). Hard ceiling is 1800s."
                 }
             },
             "required": ["agent", "task"]
@@ -110,11 +114,12 @@ impl Tool for AgentDelegateTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'task' is required"))?;
         let mode = args["mode"].as_str().unwrap_or("sync");
+        let timeout = args["timeout"].as_u64();
 
-        tracing::info!(agent = %agent_name, task_len = task.len(), mode = %mode, "delegating task to sub-agent");
+        tracing::info!(agent = %agent_name, task_len = task.len(), mode = %mode, timeout = ?timeout, "delegating task to sub-agent");
 
         if mode == "async" {
-            match self.delegator.delegate_async(agent_name, task, session) {
+            match self.delegator.delegate_async(agent_name, task, session, timeout) {
                 Ok(task_id) => Ok(ToolResult {
                     success: true,
                     output: json!({
@@ -133,7 +138,7 @@ impl Tool for AgentDelegateTool {
                 }),
             }
         } else {
-            match self.delegator.delegate(agent_name, task, session).await {
+            match self.delegator.delegate(agent_name, task, session, timeout).await {
                 Ok(result) => Ok(ToolResult {
                     success: true,
                     output: result,

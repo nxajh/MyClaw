@@ -11,7 +11,6 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::agents::attachment::AttachmentManager;
 use crate::agents::session::Session;
 use crate::agents::turn::TurnResult;
 use crate::agents::{Agent, AgentRuntime, TurnContext, UserProfile};
@@ -23,7 +22,6 @@ use crate::channels::{Channel, ChannelInboundMessage};
 /// - `agent`: Agent bound to this session (resolved from `Session.agent_name`
 ///   at construction time; reused across every turn so per-session
 ///   dispatch doesn't re-look-up the SubAgentConfig)
-/// - `attachments`: per-session AttachmentManager (file uploads pending injection)
 /// - `pending_retry`: user message saved when last turn ended abnormally;
 ///   surfaced as a "retry?" prompt next time the user types
 /// - `turn_lock`: tokio Mutex held for the duration of `process_turn`,
@@ -39,11 +37,6 @@ pub struct SessionContext {
     /// Agent bound to this session at creation time. Built from
     /// `Session.agent_name` via `SessionManager.build_agent_for_session`.
     pub agent: Arc<Agent>,
-    /// Attachments awaiting injection on the next user turn. Mutex
-    /// because `AttachmentManager.diff_*` mutate pending state; the
-    /// outer Arc lives on the SessionContext itself, so a plain
-    /// `Mutex<AttachmentManager>` here is sufficient.
-    pub attachments: Mutex<AttachmentManager>,
     /// User message saved when the previous turn ended with an empty LLM
     /// response or interrupted streaming. Cleared once retried.
     pub pending_retry: Arc<Mutex<Option<String>>>,
@@ -63,7 +56,6 @@ impl SessionContext {
         Self {
             session: Arc::new(Mutex::new(session)),
             agent,
-            attachments: Mutex::new(AttachmentManager::new()),
             pending_retry: Arc::new(Mutex::new(None)),
             turn_lock: Arc::new(Mutex::new(())),
             user_profile: Arc::new(UserProfile::default()),
@@ -76,7 +68,6 @@ impl SessionContext {
         Self {
             session: Arc::new(Mutex::new(session)),
             agent,
-            attachments: Mutex::new(AttachmentManager::new()),
             pending_retry: Arc::new(Mutex::new(None)),
             turn_lock: Arc::new(Mutex::new(())),
             user_profile: profile,
@@ -218,9 +209,8 @@ impl SessionContext {
         // history's announced state and prepends a <system-reminder> to
         // the user content before recording the turn.
         let reminder = {
-            let mut attachments = self.attachments.lock().await;
             let skills_snap = runtime.skills.read();
-            attachments.diff_skills(&skills_snap, &session.history);
+            session.attachments.diff_skills(&skills_snap, &session.history);
             let agent_list: Vec<(String, String)> = runtime
                 .agents
                 .values_cloned()
@@ -232,22 +222,40 @@ impl SessionContext {
                     )
                 })
                 .collect();
-            attachments.diff_agents(&agent_list, &session.history);
+            session.attachments.diff_agents(&agent_list, &session.history);
             // Date injection respects the configured [prompt] timezone_offset
             // (sourced from the shared ResourceProvider via ContextEngine).
-            attachments.diff_date(runtime.context_engine.timezone_offset(), &session.history);
-            attachments.diff_autonomy(&prompt_config.permission_mode, &session.history);
+            session.attachments.diff_date(runtime.context_engine.timezone_offset(), &session.history);
+            session.attachments.diff_autonomy(&prompt_config.permission_mode, &session.history);
             // Inject user/feedback memory index as system-reminder.
             let knowledge_dir = &runtime.defaults.prompt.knowledge_dir;
-            if !knowledge_dir.is_empty() {
+            let memory_entries: Vec<crate::memory::IndexEntry> = if !knowledge_dir.is_empty() {
                 let memory_dir = std::path::Path::new(knowledge_dir);
                 let files = crate::memory::scan_memory_files(memory_dir);
-                let entries: Vec<crate::memory::IndexEntry> =
-                    files.iter().map(crate::memory::IndexEntry::from).collect();
-                attachments.diff_memory(&entries, &session.history);
-            }
-            let text = attachments.build_text(&skills_snap);
-            attachments.clear_pending();
+                files.iter().map(crate::memory::IndexEntry::from).collect()
+            } else {
+                Vec::new()
+            };
+            session.attachments.diff_memory(&memory_entries, &session.history);
+            let text = session.attachments.build_text(&skills_snap);
+            session.attachments.clear_pending();
+
+            // Generate full snapshot for post-compaction injection.
+            // This ensures the model always has complete context even after
+            // history compaction removes old system-reminders.
+            // Note: MCP is not currently diffed, so we pass an empty list.
+            let mcp_servers: Vec<(String, String)> = Vec::new();
+            session.attachments.last_full_snapshot = Some(
+                crate::agents::attachment::AttachmentManager::build_full_snapshot(
+                    &skills_snap,
+                    &agent_list,
+                    &mcp_servers,
+                    &memory_entries,
+                    runtime.context_engine.timezone_offset(),
+                    &prompt_config.permission_mode,
+                ),
+            );
+
             text
         };
 

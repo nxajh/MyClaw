@@ -293,6 +293,7 @@ impl CronJobTool {
             model: model.clone(),
             provider: provider.clone(),
             last_failure_alert_at: None,
+            context_policy: crate::config::scheduler::ContextPolicy::Inject,
         };
 
         match self.scheduler.add_job(entry) {

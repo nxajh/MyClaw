@@ -86,6 +86,12 @@ pub struct SubAgentConfig {
     /// File system isolation level. Defaults to "shared".
     #[serde(default)]
     pub isolation: AgentIsolation,
+
+    /// Maximum wall-clock seconds a delegation may run before being killed.
+    /// If unset, falls back to the system default (600s); the hard ceiling
+    /// is 1800s regardless of what the tool caller or this config requests.
+    #[serde(default)]
+    pub timeout: Option<u64>,
 }
 
 impl SubAgentConfig {
@@ -163,6 +169,7 @@ mod tests {
             description: None,
             model: None,
             isolation: AgentIsolation::default(),
+            timeout: None,
         };
         assert_eq!(config.isolation, AgentIsolation::Shared);
     }
@@ -179,6 +186,7 @@ mod tests {
             description: None,
             model: None,
             isolation: AgentIsolation::default(),
+            timeout: None,
         };
         assert!(config.allows_skill("anything"));
         assert!(config.allows_mcp("anything"));
@@ -199,6 +207,7 @@ mod tests {
             description: None,
             model: None,
             isolation: AgentIsolation::default(),
+            timeout: None,
         };
         assert!(config.allows_tool("shell"));
         assert!(config.allows_tool("file_read"));

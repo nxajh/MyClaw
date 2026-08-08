@@ -1,11 +1,21 @@
 //! Delegation wakes.
 //!
 //! A sub-agent completing (or failing) a background task is a *system* event,
-//! not a user message. We synthesize a system-note `ChannelInboundMessage` and drive
-//! it straight into the parent session via [`inbound::dispatch_turn`], skipping
-//! the user-message interceptors (ask-reply / callback / crash-recovery /
-//! slash-command) that could never apply to a system note — and, deliberately,
-//! the scheduler "last user message" bookkeeping that a real inbound would do.
+//! not a user message. We synthesize a system-note `ChannelInboundMessage` and
+//! drive it into the parent session.
+//!
+//! ## Routing
+//!
+//! The `DelegationEvent.session_id` is a hex session ID, NOT a routing key.
+//! We look up the session to find its `owner` (the routing key
+//! `channel:account:sender`), then:
+//!
+//! - **Active session** — route through `inbound::dispatch_turn` so the turn
+//!   streams to the user's UI in real time.
+//! - **Non-active session** — load a temporary `SessionContext` (not
+//!   registered in the table) and call `process_turn` directly with
+//!   `channel=None`. The LLM processes the result and the response is
+//!   persisted to history; the user sees it when they switch back.
 
 use super::ctx::OrchestratorCtx;
 use super::key::SessionKey;
@@ -14,11 +24,10 @@ use crate::channels::ChannelInboundMessage;
 
 /// Wake the parent agent on a `DelegationEvent` (sub-agent completion/failure).
 pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
-    let (task_id, parent_session_id, reply_target, content) = match event {
+    let (task_id, session_id, content) = match event {
         DelegationEvent::Completed {
             task_id,
-            parent_session_id,
-            reply_target,
+            session_id,
             summary,
             duration_secs,
         } => {
@@ -27,12 +36,11 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
                 "[系统通知] 子代理已完成后台任务 (task_id: {}, 耗时: {}s)，结果如下：\n{}",
                 task_id, duration_secs, summary
             );
-            (task_id, parent_session_id, reply_target, content)
+            (task_id, session_id, content)
         }
         DelegationEvent::Failed {
             task_id,
-            parent_session_id,
-            reply_target,
+            session_id,
             error,
         } => {
             tracing::warn!(task_id = %task_id, "delegation failed, waking main agent");
@@ -40,31 +48,100 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
                 "[系统通知] 子代理后台任务失败 (task_id: {})，错误：\n{}",
                 task_id, error
             );
-            (task_id, parent_session_id, reply_target, content)
+            (task_id, session_id, content)
         }
     };
 
-    // The parent session key is `channel:account:sender`; routing the turn uses
-    // it directly (no re-parsing out of a faked message field).
-    let key = match SessionKey::parse(&parent_session_id) {
-        Some(k) => k,
+    // Resolve the session to get its routing key (owner).
+    let session = match ctx.sessions.get_by_id(&session_id) {
+        Some(s) => s,
         None => {
-            tracing::warn!(parent = %parent_session_id, "invalid session key in delegation event");
+            tracing::warn!(session_id = %session_id, "session not found for delegation event");
             return;
         }
     };
-    if ctx.channel(&key.account_key()).is_none() {
-        tracing::warn!(parent = %parent_session_id, "channel for delegation event not found");
-        return;
-    }
 
-    let synthetic = ChannelInboundMessage {
-        id: format!("delegation:{}", task_id),
-        sender: crate::channels::MessageSender::new(key.sender.clone()),
-        receiver: crate::channels::MessageReceiver::new(reply_target),
-        content: crate::channels::ChannelMessageContent::text(content),
-        timestamp: chrono::Utc::now().timestamp() as u64,
-        interruption_scope_id: None,
+    let routing_key = &session.owner;
+    let is_active = ctx
+        .sessions
+        .active_session_id(routing_key)
+        .is_some_and(|id| id == session_id);
+
+    if is_active {
+        // Active session — route through dispatch_turn so output streams live.
+        let key = match SessionKey::parse(routing_key) {
+            Some(k) => k,
+            None => {
+                tracing::warn!(routing_key = %routing_key, "invalid routing key in delegation event");
+                return;
+            }
+        };
+        if ctx.channel(&key.account_key()).is_none() {
+            tracing::warn!(routing_key = %routing_key, "channel for delegation event not found, falling back to non-active path");
+            process_non_active(ctx, &session_id, &content).await;
+            return;
+        }
+
+        let synthetic = ChannelInboundMessage {
+            id: format!("delegation:{}", task_id),
+            sender: crate::channels::MessageSender::new(key.sender.clone()),
+            receiver: crate::channels::MessageReceiver::new(
+                session
+                    .last_message
+                    .as_ref()
+                    .map(|m| m.receiver.id.clone())
+                    .unwrap_or_default(),
+            ),
+            content: crate::channels::ChannelMessageContent::text(content),
+            timestamp: chrono::Utc::now().timestamp() as u64,
+            interruption_scope_id: None,
+        };
+        super::inbound::dispatch_turn(ctx, &key, synthetic).await;
+    } else {
+        // Non-active session — load a temporary context, process the turn,
+        // persist the result. The user sees it when they switch back.
+        process_non_active(ctx, &session_id, &content).await;
+    }
+}
+
+/// Process a delegation event for a non-active session.
+///
+/// Loads a temporary `SessionContext` (not registered in the table), runs
+/// `process_turn` with `channel=None`, and drops the context when done.
+/// The LLM's response is persisted to history so the user sees it on
+/// `/switch` return.
+async fn process_non_active(ctx: &OrchestratorCtx, session_id: &str, content: &str) {
+    let session_ctx = match ctx.sessions.load_context_by_session_id(session_id) {
+        Some(c) => c,
+        None => {
+            tracing::warn!(session_id = %session_id, "cannot load context for non-active delegation event");
+            return;
+        }
     };
-    super::inbound::dispatch_turn(ctx, &key, synthetic).await;
+
+    let runtime = ctx.runtime.clone();
+    let session_id_owned = session_id.to_string();
+    let content_owned = content.to_string();
+    let turn_tracker = ctx.turn_tracker.clone();
+
+    tokio::spawn(async move {
+        let _guard = turn_tracker.track();
+        let synthetic = ChannelInboundMessage {
+            id: format!("delegation:{}", uuid::Uuid::new_v4()),
+            sender: crate::channels::MessageSender::new("system".to_string()),
+            receiver: crate::channels::MessageReceiver::new(String::new()),
+            content: crate::channels::ChannelMessageContent::text(content_owned),
+            timestamp: chrono::Utc::now().timestamp() as u64,
+            interruption_scope_id: None,
+        };
+
+        match session_ctx.process_turn(synthetic, None, runtime).await {
+            Ok(_) => {
+                tracing::info!(session_id = %session_id_owned, "non-active delegation turn completed");
+            }
+            Err(e) => {
+                tracing::warn!(session_id = %session_id_owned, err = %e, "non-active delegation turn failed");
+            }
+        }
+    });
 }

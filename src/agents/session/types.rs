@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use super::backend::PersistHook;
 use super::session_override::SessionOverride;
+use crate::agents::attachment::AttachmentManager;
 use crate::agents::tokens::TokenTracker;
 use crate::channels::{Channel, ChannelInboundMessage, PersistedChannelMessage, TurnStream};
 use crate::providers::capability_chat::ChatMessage;
@@ -67,6 +68,12 @@ pub struct Session {
     /// Seeded by `SessionManager` from `backend.load_token_count` on
     /// session reload; updated from API `Usage` events thereafter.
     pub token_tracker: TokenTracker,
+    /// Attachment manager — tracks incremental system-reminder injection
+    /// (skills, agents, MCP, memory, date, autonomy). Moved from
+    /// SessionContext to Session because it's session-level state.
+    /// Not behind a Mutex because Session is already behind a Mutex in
+    /// SessionContext.
+    pub attachments: AttachmentManager,
     /// Transient persistence hook installed by the Orchestrator at session
     /// load time. `None` for tests and the in-memory CLI mode. C18's
     /// `Agent.run` reaches through this to persist per-turn state.
@@ -102,6 +109,7 @@ impl Clone for Session {
             incomplete_turn: self.incomplete_turn,
             last_message: self.last_message.clone(),
             token_tracker: self.token_tracker.clone(),
+            attachments: self.attachments.clone(),
             persist: self.persist.clone(),
             channel: self.channel.clone(),
             turn_stream: None,
@@ -122,6 +130,7 @@ impl std::fmt::Debug for Session {
             .field("compact_version", &self.compact_version)
             .field("incomplete_turn", &self.incomplete_turn)
             .field("has_last_message", &self.last_message.is_some())
+            .field("has_snapshot", &self.attachments.last_full_snapshot.is_some())
             .field("has_persist", &self.persist.is_some())
             .field("has_channel", &self.channel.is_some())
             .field("has_turn_stream", &self.turn_stream.is_some())
@@ -144,6 +153,7 @@ impl Session {
             incomplete_turn: false,
             last_message: None,
             token_tracker: TokenTracker::new(),
+            attachments: AttachmentManager::new(),
             persist: None,
             channel: None,
             turn_stream: None,

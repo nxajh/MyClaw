@@ -108,6 +108,14 @@ pub struct JobEntry {
     /// ISO 8601 timestamp of last failure alert sent.
     #[serde(default)]
     pub last_failure_alert_at: Option<String>,
+    /// Context policy: inject into user session or run isolated.
+    /// Defaults to Inject for cron jobs.
+    #[serde(default = "default_context_policy")]
+    pub context_policy: crate::config::scheduler::ContextPolicy,
+}
+
+fn default_context_policy() -> crate::config::scheduler::ContextPolicy {
+    crate::config::scheduler::ContextPolicy::Inject
 }
 
 fn default_target() -> String {
@@ -331,6 +339,7 @@ impl Scheduler {
                             target_recipient: j.delivery.as_ref().and_then(|d| d.to.clone()),
                             job_id: j.id.clone(),
                             model: j.model.clone(),
+                            context_policy: j.context_policy,
                         })).await;
                         due_job_ids.push(j.id.clone());
                     }

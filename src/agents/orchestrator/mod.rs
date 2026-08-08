@@ -56,6 +56,8 @@ pub struct CronTrigger {
     pub target_recipient: Option<String>,
     pub job_id: String,
     pub model: Option<String>,
+    /// Context policy: inject into user session or run isolated.
+    pub context_policy: crate::config::scheduler::ContextPolicy,
 }
 
 /// Events from the Scheduler (heartbeat ticks, cron triggers).

@@ -8,17 +8,17 @@
 
 /// Events sent from background sub-agents to the Orchestrator.
 ///
-/// RFC v2 §三.C: `parent_session_id` (previously `session_key`) identifies
-/// the parent session that spawned the sub-agent — orchestrator routes the
-/// completion message back into this session's `process_turn` so the LLM
-/// can react to the sub-agent's result.
+/// RFC v2 §三.C: `session_id` identifies the parent session that spawned
+/// the sub-agent — orchestrator routes the completion message back into
+/// this session's `process_turn` so the LLM can react to the sub-agent's
+/// result.
 #[derive(Debug, Clone)]
 pub enum DelegationEvent {
     /// Sub-agent completed successfully.
     Completed {
         task_id: String,
-        parent_session_id: String,
-        reply_target: String,
+        /// Hex session ID of the parent session (NOT a routing key).
+        session_id: String,
         summary: String,
         /// How long the sub-agent ran (in seconds).
         duration_secs: u64,
@@ -26,8 +26,8 @@ pub enum DelegationEvent {
     /// Sub-agent failed.
     Failed {
         task_id: String,
-        parent_session_id: String,
-        reply_target: String,
+        /// Hex session ID of the parent session (NOT a routing key).
+        session_id: String,
         error: String,
     },
 }

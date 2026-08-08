@@ -106,10 +106,33 @@ pub(crate) async fn run_cron_task(orch: Arc<OrchestratorCtx>, trigger: super::Cr
         target_recipient,
         job_id,
         model,
+        context_policy,
     } = trigger;
 
     let start = std::time::Instant::now();
-    let result = run_scheduled_turn(&orch, &session_key, &prompt, model.clone()).await;
+
+    // Choose session key based on context policy.
+    // Inject: resolve the user's active session routing key and inject into it.
+    // Isolated: use the cron job's session key (each job has its own session).
+    let effective_session_key = if context_policy == crate::config::scheduler::ContextPolicy::Inject {
+        // Resolve the user's routing key from last_channel + last_recipient.
+        let routing_key = resolve_user_routing_key(&orch, target_channel.as_deref(), target_recipient.as_deref()).await;
+        match routing_key {
+            Some(key) => {
+                tracing::debug!(job_id = %job_id, routing_key = %key, "cron job injecting into user session");
+                key
+            }
+            None => {
+                tracing::warn!(job_id = %job_id, "cron job Inject mode but no user routing key found, falling back to Isolated");
+                session_key
+            }
+        }
+    } else {
+        tracing::debug!(job_id = %job_id, session_key = %session_key, "cron job running in Isolated mode");
+        session_key
+    };
+
+    let result = run_scheduled_turn(&orch, &effective_session_key, &prompt, model.clone()).await;
     let duration_ms = start.elapsed().as_millis() as u64;
 
     // Build run record and mark result in scheduler.
@@ -121,7 +144,7 @@ pub(crate) async fn run_cron_task(orch: Arc<OrchestratorCtx>, trigger: super::Cr
         .with_output_preview(response),
         Err(e) => {
             let err_str = e.to_string();
-            tracing::warn!(session_key = %session_key, err = %err_str, "cron job failed");
+            tracing::warn!(session_key = %effective_session_key, err = %err_str, "cron job failed");
             crate::agents::scheduling::cron_types::RunRecord::now(
                 crate::agents::scheduling::cron_types::RunStatus::Error,
             )
@@ -138,16 +161,33 @@ pub(crate) async fn run_cron_task(orch: Arc<OrchestratorCtx>, trigger: super::Cr
     };
 
     // Send output to target channel (on success with non-empty output).
+    // For Inject mode, the output is already in the user's session, so we
+    // only send if the session is not active (user will see it on /switch).
+    // For Isolated mode, always send to channel.
     if let Ok(ref response) = result {
         if !response.trim().is_empty() {
-            send_to_target_internal(
-                &orch,
-                target_channel.clone(),
-                target_account.clone(),
-                target_recipient.clone(),
-                response,
-            )
-            .await;
+            let should_send = if context_policy == crate::config::scheduler::ContextPolicy::Inject {
+                // Check if the user's session is currently active.
+                let routing_key = resolve_user_routing_key(&orch, target_channel.as_deref(), target_recipient.as_deref()).await;
+                let is_active = routing_key.as_ref().map_or(false, |key| {
+                    orch.sessions.active_session_id(key).is_some()
+                });
+                // Only send to channel if session is not active (user won't see it otherwise).
+                !is_active
+            } else {
+                true
+            };
+
+            if should_send {
+                send_to_target_internal(
+                    &orch,
+                    target_channel.clone(),
+                    target_account.clone(),
+                    target_recipient.clone(),
+                    response,
+                )
+                .await;
+            }
         }
     }
 
@@ -156,6 +196,37 @@ pub(crate) async fn run_cron_task(orch: Arc<OrchestratorCtx>, trigger: super::Cr
         tracing::warn!(job_id = %job_id, alert = %alert_msg, "sending failure alert");
         send_to_target_internal(&orch, target_channel, target_account, target_recipient, &alert_msg).await;
     }
+}
+
+/// Resolve the user's routing key from target channel and recipient.
+/// Returns a routing key in the format "channel:account:sender".
+async fn resolve_user_routing_key(
+    orch: &OrchestratorCtx,
+    target_channel: Option<&str>,
+    target_recipient: Option<&str>,
+) -> Option<String> {
+    // Resolve channel:account from target or last_channel.
+    let (ch_type, acc_id) = match target_channel {
+        Some(ch) => {
+            // If target_channel is specified, use "default" as account.
+            (ch.to_string(), "default".to_string())
+        }
+        None => {
+            let last = orch.scheduler.as_ref()?.last_channel.lock().await.clone()?;
+            match last.split_once(':') {
+                Some((ch, acc)) => (ch.to_string(), acc.to_string()),
+                None => return None,
+            }
+        }
+    };
+
+    // Resolve recipient from target or last_recipient.
+    let recipient = match target_recipient {
+        Some(r) => r.to_string(),
+        None => orch.scheduler.as_ref()?.last_recipient.lock().await.clone()?,
+    };
+
+    Some(format!("{}:{}:{}", ch_type, acc_id, recipient))
 }
 
 /// Send a response to the configured target channel (used by heartbeat/cron).

@@ -47,6 +47,25 @@ impl Default for HeartbeatConfig {
     }
 }
 
+/// Context policy for scheduled turns — determines whether the turn
+/// is injected into the user's active session or run in isolation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ContextPolicy {
+    /// Inject into the user's active session via routing key.
+    /// The turn's result appears in the user's conversation history.
+    Inject,
+    /// Run in an isolated session. The result is sent to the target
+    /// channel but NOT written to the user's session history.
+    Isolated,
+}
+
+impl Default for ContextPolicy {
+    fn default() -> Self {
+        Self::Isolated
+    }
+}
+
 /// A single cron job (loaded from `cron/*.md`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CronJob {
@@ -61,6 +80,14 @@ pub struct CronJob {
     /// Active hours restriction, e.g. "08:00-24:00". None = always active.
     #[serde(default)]
     pub active_hours: Option<String>,
+    /// Context policy: inject into user session or run isolated.
+    /// Defaults to Inject for cron jobs.
+    #[serde(default = "default_cron_context_policy")]
+    pub context_policy: ContextPolicy,
+}
+
+fn default_cron_context_policy() -> ContextPolicy {
+    ContextPolicy::Inject
 }
 
 /// Cron scheduler configuration (global settings only).

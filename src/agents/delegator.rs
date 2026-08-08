@@ -25,6 +25,7 @@ pub trait AgentDelegator: Send + Sync {
         agent_name: &str,
         task: &str,
         parent_session: &Session,
+        timeout: Option<u64>,
     ) -> anyhow::Result<String>;
 
     /// Spawn the sub-agent in the background and return a `task_id` immediately.
@@ -36,6 +37,7 @@ pub trait AgentDelegator: Send + Sync {
         _agent_name: &str,
         _task: &str,
         _parent_session: &Session,
+        _timeout: Option<u64>,
     ) -> anyhow::Result<String> {
         Err(anyhow::anyhow!("async delegation not supported"))
     }
