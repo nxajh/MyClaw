@@ -44,23 +44,28 @@ fn resolve_peer(ctx: &CommandContext<'_>, nick: &str) -> Result<String, String> 
 }
 
 /// Best-effort framework-template push to the peer's channel (RFC §4.3:
-/// notification goes straight to the user, zero LLM tokens). Silently
-/// skipped when the peer's channel is not live.
-async fn notify_peer(ctx: &CommandContext<'_>, peer_rk: &str, text: &str) {
+/// notification goes straight to the user, zero LLM tokens). Returns
+/// `true` when the peer's channel was live and the send succeeded — used
+/// by `/link` to detect "target channel unreachable, code not delivered".
+pub(crate) async fn notify_peer(ctx: &CommandContext<'_>, peer_rk: &str, text: &str) -> bool {
     let (channel, account, user_id) = split_rk(peer_rk);
     let Some(ch) = ctx
         .channels
         .get(&(channel.to_string(), account.to_string()))
     else {
-        return;
+        return false;
     };
     let message = ChannelOutboundMessage {
         receiver: MessageReceiver::new(user_id),
         content: ChannelMessageContent::text(text.to_string()),
         options: Default::default(),
     };
-    if let Err(e) = ch.send_message(&message).await {
-        warn!(peer = %peer_rk, err = %e, "friend notify: peer channel send failed");
+    match ch.send_message(&message).await {
+        Ok(_) => true,
+        Err(e) => {
+            warn!(peer = %peer_rk, err = %e, "notify: peer channel send failed");
+            false
+        }
     }
 }
 
@@ -170,7 +175,7 @@ pub async fn cmd_friend_accept(args: &str, ctx: CommandContext<'_>) -> String {
         &peer,
         crate::agents::UserMail {
             msg_id: uuid::Uuid::new_v4().to_string(),
-            sender_user_id: ctx.user_id.to_string(),
+            sender_user_id: ctx.known_users.resolve_uid(ctx.user_id),
             sender_nickname: KnownUsersRegistry::nick_of(ctx.user_id),
             text: ack,
             sent_at: chrono::Utc::now().timestamp_millis() as u64,
@@ -199,7 +204,7 @@ pub async fn cmd_friend_decline(args: &str, ctx: CommandContext<'_>) -> String {
         &peer,
         crate::agents::UserMail {
             msg_id: uuid::Uuid::new_v4().to_string(),
-            sender_user_id: ctx.user_id.to_string(),
+            sender_user_id: ctx.known_users.resolve_uid(ctx.user_id),
             sender_nickname: KnownUsersRegistry::nick_of(ctx.user_id),
             text: ack,
             sent_at: chrono::Utc::now().timestamp_millis() as u64,

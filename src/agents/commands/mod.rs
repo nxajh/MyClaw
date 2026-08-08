@@ -10,6 +10,7 @@ use std::sync::Arc;
 mod config;
 pub(crate) mod friends;
 pub(crate) mod info;
+mod link;
 mod model;
 mod reload;
 mod session;
@@ -23,6 +24,7 @@ pub use info::{
     cmd_btw, cmd_context, cmd_export, cmd_groups, cmd_help, cmd_mcp, cmd_ping, cmd_skill,
     cmd_status, cmd_tools, cmd_users, cmd_whoami,
 };
+pub use link::{cmd_link, cmd_link_confirm};
 pub use model::{cmd_model, cmd_models, cmd_think};
 pub use reload::{cmd_reload, cmd_stop};
 pub use session::{
@@ -134,6 +136,8 @@ pub fn command_catalog() -> Vec<(&'static str, &'static str)> {
         ("friend_block", "Block a user (@nick)"),
         ("friend_unblock", "Unblock a user (@nick)"),
         ("friend_remove", "Remove a friend relationship (@nick)"),
+        ("link", "Link this account to an existing user (@nick)"),
+        ("link_confirm", "Confirm an identity link with the 6-digit code"),
     ]
 }
 
@@ -186,6 +190,8 @@ pub fn is_known_command(cmd: &str) -> bool {
             | "friend_block"
             | "friend_unblock"
             | "friend_remove"
+            | "link"
+            | "link_confirm"
     )
 }
 
@@ -231,6 +237,9 @@ pub async fn dispatch(cmd: &str, args: &str, ctx: CommandContext<'_>) -> Option<
         "friend_block" => Some(friends::cmd_friend_block(args, ctx)),
         "friend_unblock" => Some(friends::cmd_friend_unblock(args, ctx)),
         "friend_remove" => Some(friends::cmd_friend_remove(args, ctx)),
+        // ── Batch 6: identity linking (RFC §2/P3) ──
+        "link" => Some(link::cmd_link(args, ctx).await),
+        "link_confirm" => Some(link::cmd_link_confirm(args, ctx).await),
         _ => None,
     }
 }

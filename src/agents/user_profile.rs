@@ -22,14 +22,39 @@ use serde::{Deserialize, Serialize};
 /// Operator-supplied overrides via `set(routing_key, user_id)` collapse multiple
 /// routing_keys to one user — e.g. a person who reaches the bot from two
 /// Telegram accounts.
+///
+/// P3 身份绑定: `set` is also the write path for the `/link` flow (user
+/// proves control of both channels with a one-time code). `persistent()`
+/// snapshots overrides to `{data_dir}/user_resolver.json` on every `set`.
 #[derive(Default)]
 pub struct UserResolver {
     overrides: RwLock<std::collections::HashMap<String, String>>,
+    /// Persistence path for overrides (empty = in-memory only, no save).
+    data_path: PathBuf,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedResolver {
+    version: u32,
+    overrides: std::collections::HashMap<String, String>,
 }
 
 impl UserResolver {
+    /// In-memory resolver (tests / CLI mode). Nothing is persisted.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Persistent resolver backed by `{data_dir}/user_resolver.json`.
+    /// Loads existing overrides at startup; every `set` writes through.
+    pub fn persistent(data_dir: &Path) -> Self {
+        let data_path = data_dir.join("user_resolver.json");
+        let resolver = Self {
+            overrides: RwLock::new(std::collections::HashMap::new()),
+            data_path: data_path.clone(),
+        };
+        resolver.load_from_disk();
+        resolver
     }
 
     /// Resolve a routing_key to a user_id.
@@ -41,15 +66,18 @@ impl UserResolver {
             .unwrap_or_else(|| routing_key.to_string())
     }
 
-    /// Pin a routing_key to a specific user_id.
+    /// Pin a routing_key to a specific user_id. Persists immediately when
+    /// backed by a data dir (identity links must survive restarts).
     pub fn set(&self, routing_key: impl Into<String>, user_id: impl Into<String>) {
         self.overrides
             .write()
             .insert(routing_key.into(), user_id.into());
+        self.save();
     }
 
     /// Reverse-map: list all routing_keys that resolve to `user_id`. Used
-    /// for `list_sessions_for_user` (G44). Linear in override map size.
+    /// for `list_sessions_for_user` (G44) and folded last-seen lookups.
+    /// Linear in override map size.
     pub fn routing_keys_for(&self, user_id: &str) -> Vec<String> {
         self.overrides
             .read()
@@ -57,6 +85,68 @@ impl UserResolver {
             .filter(|(_, v)| v.as_str() == user_id)
             .map(|(k, _)| k.clone())
             .collect()
+    }
+
+    fn load_from_disk(&self) {
+        if self.data_path.as_os_str().is_empty() {
+            return;
+        }
+        let contents = match std::fs::read_to_string(&self.data_path) {
+            Ok(c) => c,
+            Err(_) => return, // file doesn't exist yet — normal on first run
+        };
+        match serde_json::from_str::<PersistedResolver>(&contents) {
+            Ok(file) => {
+                for (k, v) in file.overrides {
+                    self.overrides.write().insert(k, v);
+                }
+                tracing::info!(
+                    path = %self.data_path.display(),
+                    count = self.overrides.read().len(),
+                    "user_resolver: loaded from disk"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %self.data_path.display(),
+                    err = %e,
+                    "user_resolver: failed to parse, starting empty"
+                );
+            }
+        }
+    }
+
+    fn save(&self) {
+        if self.data_path.as_os_str().is_empty() {
+            return;
+        }
+        let body = match serde_json::to_vec_pretty(&PersistedResolver {
+            version: 1,
+            overrides: self.overrides.read().clone(),
+        }) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(err = %e, "user_resolver: serialization failed");
+                return;
+            }
+        };
+        if let Some(parent) = self.data_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::warn!(
+                    path = %parent.display(),
+                    err = %e,
+                    "user_resolver: failed to create data dir"
+                );
+                return;
+            }
+        }
+        if let Err(e) = std::fs::write(&self.data_path, body) {
+            tracing::warn!(
+                path = %self.data_path.display(),
+                err = %e,
+                "user_resolver: failed to persist overrides"
+            );
+        }
     }
 }
 
@@ -196,6 +286,30 @@ mod tests {
             keys,
             vec!["telegram:default:42", "wechat:default:wxid_alice"]
         );
+    }
+
+    #[test]
+    fn resolver_persists_overrides_across_instances() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        let r = UserResolver::persistent(path);
+        r.set("telegram:default:42", "alice");
+        assert!(path.join("user_resolver.json").exists());
+
+        // A fresh instance (simulating a restart) reloads the override.
+        let r2 = UserResolver::persistent(path);
+        assert_eq!(r2.resolve("telegram:default:42"), "alice");
+        assert_eq!(r2.routing_keys_for("alice"), vec!["telegram:default:42"]);
+    }
+
+    #[test]
+    fn resolver_persistent_ignores_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = UserResolver::persistent(dir.path());
+        // No file yet — resolves to identity, and the data dir isn't created
+        // until the first set.
+        assert_eq!(r.resolve("telegram:default:42"), "telegram:default:42");
+        assert!(!dir.path().join("user_resolver.json").exists());
     }
 
     #[test]

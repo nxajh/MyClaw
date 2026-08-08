@@ -15,11 +15,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
+
+use crate::agents::UserResolver;
 
 // ── Rate limit constants ────────────────────────────────────────────────────
 
@@ -184,6 +187,12 @@ pub struct KnownUsersRegistry {
     data_path: PathBuf,
     /// Set when users map changes; cleared on successful flush
     dirty: AtomicBool,
+    /// RFC §2/P3: shared identity resolver (routing_key → user_id). When
+    /// installed, contacts and mailbox keys are resolved through it so a
+    /// linked user (one human on several channels) shares friends and
+    /// messages across channels. `users` stays keyed by routing_key (the
+    /// per-channel registry); only relationship/mailbox keys are folded.
+    resolver: Option<Arc<UserResolver>>,
 }
 
 impl KnownUsersRegistry {
@@ -199,6 +208,7 @@ impl KnownUsersRegistry {
             user_mailbox: DashMap::new(),
             data_path: data_path.clone(),
             dirty: AtomicBool::new(false),
+            resolver: None,
         };
         reg.load_from_disk();
         reg
@@ -215,6 +225,30 @@ impl KnownUsersRegistry {
             user_mailbox: DashMap::new(),
             data_path: PathBuf::new(),
             dirty: AtomicBool::new(false),
+            resolver: None,
+        }
+    }
+
+    /// Install the shared identity resolver (P3 身份绑定). Contacts and
+    /// mailbox keys are then resolved through it: a linked user sees the
+    /// same friends and messages from every channel.
+    pub fn with_resolver(mut self, resolver: Arc<UserResolver>) -> Self {
+        self.resolver = Some(resolver);
+        self
+    }
+
+    /// The shared identity resolver, when installed (used by `/link`).
+    pub fn resolver(&self) -> Option<&Arc<UserResolver>> {
+        self.resolver.as_ref()
+    }
+
+    /// Resolve a key through the identity resolver; identity when unset.
+    /// Public so callers (send_message, friend commands) fold sender ids
+    /// the same way the registry folds mailbox/contact keys.
+    pub fn resolve_uid(&self, key: &str) -> String {
+        match &self.resolver {
+            Some(r) => r.resolve(key),
+            None => key.to_string(),
         }
     }
 
@@ -461,11 +495,13 @@ impl KnownUsersRegistry {
     /// - already accepted → `AlreadyAccepted`.
     pub fn request_friend(&self, owner: &str, peer: &str) -> RequestOutcome {
         let now = now_ms();
-        let owner_nick = Self::nick_of(owner);
-        let peer_nick = Self::nick_of(peer);
+        let owner = self.resolve_uid(owner);
+        let peer = self.resolve_uid(peer);
+        let owner_nick = Self::nick_of(&owner);
+        let peer_nick = Self::nick_of(&peer);
 
         // Peer-side view decides (RFC §4.1: "发送校验查接收方名下条目").
-        if let Some(peer_entry) = self.contact_entry(peer, owner) {
+        if let Some(peer_entry) = self.contact_entry(&peer, &owner) {
             match peer_entry.status {
                 ContactStatus::Blocked => return RequestOutcome::BlockedByPeer,
                 ContactStatus::Accepted => return RequestOutcome::AlreadyAccepted,
@@ -480,7 +516,7 @@ impl KnownUsersRegistry {
             }
         }
         // Owner-side view: an existing pending/accepted request is idempotent.
-        if let Some(entry) = self.contact_entry(owner, peer) {
+        if let Some(entry) = self.contact_entry(&owner, &peer) {
             match entry.status {
                 ContactStatus::Accepted => return RequestOutcome::AlreadyAccepted,
                 ContactStatus::Pending => return RequestOutcome::AlreadyPending,
@@ -490,10 +526,10 @@ impl KnownUsersRegistry {
 
         self.dirty.store(true, Ordering::Relaxed);
         self.contacts
-            .entry(owner.to_string())
+            .entry(owner.clone())
             .or_default()
             .insert(
-                peer.to_string(),
+                peer.clone(),
                 ContactEntry {
                     status: ContactStatus::Pending,
                     direction: ContactDirection::Out,
@@ -504,10 +540,10 @@ impl KnownUsersRegistry {
                 },
             );
         self.contacts
-            .entry(peer.to_string())
+            .entry(peer.clone())
             .or_default()
             .insert(
-                owner.to_string(),
+                owner.clone(),
                 ContactEntry {
                     status: ContactStatus::Pending,
                     direction: ContactDirection::In,
@@ -524,9 +560,11 @@ impl KnownUsersRegistry {
     /// Returns `false` if there is no pending inbound request from the peer.
     pub fn accept_friend(&self, owner: &str, peer: &str) -> bool {
         let now = now_ms();
+        let owner = self.resolve_uid(owner);
+        let peer = self.resolve_uid(peer);
         let mut updated = false;
-        if let Some(mut map) = self.contacts.get_mut(owner) {
-            if let Some(entry) = map.get_mut(peer) {
+        if let Some(mut map) = self.contacts.get_mut(&owner) {
+            if let Some(entry) = map.get_mut(&peer) {
                 if entry.status == ContactStatus::Pending
                     && entry.direction == ContactDirection::In
                 {
@@ -538,8 +576,8 @@ impl KnownUsersRegistry {
         }
         if updated {
             // Mirror to the requester's side.
-            if let Some(mut map) = self.contacts.get_mut(peer) {
-                if let Some(entry) = map.get_mut(owner) {
+            if let Some(mut map) = self.contacts.get_mut(&peer) {
+                if let Some(entry) = map.get_mut(&owner) {
                     entry.status = ContactStatus::Accepted;
                     entry.accepted_at = now;
                 }
@@ -553,9 +591,11 @@ impl KnownUsersRegistry {
     /// both sides — this is what enforces the 24h re-request cooldown.
     pub fn decline_friend(&self, owner: &str, peer: &str) -> bool {
         let now = now_ms();
+        let owner = self.resolve_uid(owner);
+        let peer = self.resolve_uid(peer);
         let mut updated = false;
-        if let Some(mut map) = self.contacts.get_mut(owner) {
-            if let Some(entry) = map.get_mut(peer) {
+        if let Some(mut map) = self.contacts.get_mut(&owner) {
+            if let Some(entry) = map.get_mut(&peer) {
                 if entry.status == ContactStatus::Pending {
                     entry.status = ContactStatus::Declined;
                     entry.last_declined_at = now;
@@ -564,8 +604,8 @@ impl KnownUsersRegistry {
             }
         }
         if updated {
-            if let Some(mut map) = self.contacts.get_mut(peer) {
-                if let Some(entry) = map.get_mut(owner) {
+            if let Some(mut map) = self.contacts.get_mut(&peer) {
+                if let Some(entry) = map.get_mut(&owner) {
                     entry.status = ContactStatus::Declined;
                     entry.last_declined_at = now;
                 }
@@ -579,12 +619,14 @@ impl KnownUsersRegistry {
     /// all delivery in both directions immediately (RFC §4.1).
     pub fn block_friend(&self, owner: &str, peer: &str) {
         let now = now_ms();
+        let owner = self.resolve_uid(owner);
+        let peer = self.resolve_uid(peer);
         self.dirty.store(true, Ordering::Relaxed);
-        let mut map = self.contacts.entry(owner.to_string()).or_default();
-        let entry = map.entry(peer.to_string()).or_insert_with(|| ContactEntry {
+        let mut map = self.contacts.entry(owner.clone()).or_default();
+        let entry = map.entry(peer.clone()).or_insert_with(|| ContactEntry {
             status: ContactStatus::Pending,
             direction: ContactDirection::In,
-            nickname: Self::nick_of(peer),
+            nickname: Self::nick_of(&peer),
             requested_at: now,
             accepted_at: 0,
             last_declined_at: 0,
@@ -595,11 +637,13 @@ impl KnownUsersRegistry {
     /// Unblock a user — returns to no-relationship (a fresh request is
     /// required to re-establish, RFC §4.1 state machine).
     pub fn unblock_friend(&self, owner: &str, peer: &str) -> bool {
+        let owner = self.resolve_uid(owner);
+        let peer = self.resolve_uid(peer);
         let mut removed = false;
-        if let Some(mut map) = self.contacts.get_mut(owner) {
-            if let Some(entry) = map.get(peer) {
+        if let Some(mut map) = self.contacts.get_mut(&owner) {
+            if let Some(entry) = map.get(&peer) {
                 if entry.status == ContactStatus::Blocked {
-                    map.remove(peer);
+                    map.remove(&peer);
                     removed = true;
                 }
             }
@@ -614,20 +658,22 @@ impl KnownUsersRegistry {
     /// entry (re-request required to re-establish). Returns `false` if the
     /// pair was not established.
     pub fn remove_friend(&self, owner: &str, peer: &str) -> bool {
+        let owner = self.resolve_uid(owner);
+        let peer = self.resolve_uid(peer);
         let mut removed = false;
-        if let Some(mut map) = self.contacts.get_mut(owner) {
-            if let Some(entry) = map.get(peer) {
+        if let Some(mut map) = self.contacts.get_mut(&owner) {
+            if let Some(entry) = map.get(&peer) {
                 if entry.status == ContactStatus::Accepted {
-                    map.remove(peer);
+                    map.remove(&peer);
                     removed = true;
                 }
             }
         }
         if removed {
-            if let Some(mut map) = self.contacts.get_mut(peer) {
-                if let Some(entry) = map.get(owner) {
+            if let Some(mut map) = self.contacts.get_mut(&peer) {
+                if let Some(entry) = map.get(&owner) {
                     if entry.status == ContactStatus::Accepted {
-                        map.remove(owner);
+                        map.remove(&owner);
                     }
                 }
             }
@@ -639,7 +685,7 @@ impl KnownUsersRegistry {
     /// List this user's contacts as `(peer_user_id, entry)` pairs.
     pub fn list_contacts(&self, owner: &str) -> Vec<(String, ContactEntry)> {
         self.contacts
-            .get(owner)
+            .get(&self.resolve_uid(owner))
             .map(|map| {
                 map.iter()
                     .map(|(peer, entry)| (peer.clone(), entry.clone()))
@@ -651,7 +697,7 @@ impl KnownUsersRegistry {
     /// Pending **inbound** requests for the per-turn injection (RFC §4.3).
     pub fn pending_requests(&self, owner: &str) -> Vec<(String, ContactEntry)> {
         self.contacts
-            .get(owner)
+            .get(&self.resolve_uid(owner))
             .map(|map| {
                 map.iter()
                     .filter(|(_, e)| {
@@ -673,7 +719,7 @@ impl KnownUsersRegistry {
         nick: &str,
     ) -> Option<(String, ContactEntry)> {
         let nick = nick.trim_start_matches('@');
-        self.contacts.get(owner).and_then(|map| {
+        self.contacts.get(&self.resolve_uid(owner)).and_then(|map| {
             map.iter()
                 .find(|(_, e)| e.nickname.trim_start_matches('@') == nick)
                 .map(|(peer, entry)| (peer.clone(), entry.clone()))
@@ -715,7 +761,7 @@ impl KnownUsersRegistry {
     pub fn push_user_mail(&self, to: &str, mail: UserMail) {
         self.dirty.store(true, Ordering::Relaxed);
         self.user_mailbox
-            .entry(to.to_string())
+            .entry(self.resolve_uid(to))
             .or_default()
             .push(mail);
     }
@@ -723,7 +769,7 @@ impl KnownUsersRegistry {
     /// Drain the user-level mailbox (inject-once semantics — the caller
     /// renders the mails into the current turn, then they are gone).
     pub fn drain_user_mail(&self, user_id: &str) -> Vec<UserMail> {
-        match self.user_mailbox.remove(user_id) {
+        match self.user_mailbox.remove(&self.resolve_uid(user_id)) {
             Some((_, mails)) => {
                 if !mails.is_empty() {
                     self.dirty.store(true, Ordering::Relaxed);
@@ -736,8 +782,8 @@ impl KnownUsersRegistry {
 
     fn contact_entry(&self, owner: &str, peer: &str) -> Option<ContactEntry> {
         self.contacts
-            .get(owner)
-            .and_then(|map| map.get(peer).cloned())
+            .get(&self.resolve_uid(owner))
+            .and_then(|map| map.get(&self.resolve_uid(peer)).cloned())
     }
 
     // ── Per-turn injection rendering (RFC §3.5 / §4.3) ───────────────────
@@ -745,8 +791,88 @@ impl KnownUsersRegistry {
     /// Last-seen timestamp (unix ms) of a known user, if registered (RFC §6
     /// P2 会话发现: presence of friends). Updated on every user interaction
     /// via [`Self::record`]. `None` when the peer has never interacted.
+    ///
+    /// P3 身份绑定: for a folded user_id the most recent activity across all
+    /// its routing_keys wins (a linked user is "online" if any channel is).
     pub fn last_seen_ms_of(&self, user_id: &str) -> Option<u64> {
-        self.users.get(user_id).map(|e| e.value().last_seen_ms)
+        let uid = self.resolve_uid(user_id);
+        let mut keys: Vec<String> = match &self.resolver {
+            Some(r) => r.routing_keys_for(&uid),
+            None => Vec::new(),
+        };
+        if keys.is_empty() {
+            keys.push(uid);
+        }
+        keys.into_iter()
+            .filter_map(|k| self.users.get(&k).map(|e| e.value().last_seen_ms))
+            .max()
+    }
+
+    /// P3 身份绑定: fold `old_rk`'s relationship data into `new_uid` after a
+    /// successful `/link_confirm`. Moves:
+    /// - the user-level mailbox under `old_rk` → appended under `new_uid`;
+    /// - `old_rk`'s own contacts (as owner) → merged under `new_uid`
+    ///   (peer conflicts keep the existing entry);
+    /// - other owners' entries pointing at `old_rk` → re-pointed to `new_uid`
+    ///   (conflicts keep the existing entry).
+    ///
+    /// No-op when `old_rk == new_uid` (unlinked identity). The `users` table
+    /// is untouched — per-routing-key activity stays per-channel.
+    pub fn migrate_identity(&self, old_rk: &str, new_uid: &str) {
+        if old_rk == new_uid {
+            return;
+        }
+        // Mailbox: move the queue under the folded identity.
+        let mut moved_mailbox = false;
+        if let Some((_, mut mails)) = self.user_mailbox.remove(old_rk) {
+            if !mails.is_empty() {
+                moved_mailbox = true;
+            }
+            self.user_mailbox
+                .entry(new_uid.to_string())
+                .or_default()
+                .append(&mut mails);
+        }
+        // Contacts: old_rk as owner → merge under new_uid.
+        let mut moved_owner = false;
+        if let Some((_, own_contacts)) = self.contacts.remove(old_rk) {
+            if !own_contacts.is_empty() {
+                moved_owner = true;
+            }
+            let mut target = self.contacts.entry(new_uid.to_string()).or_default();
+            for (peer, entry) in own_contacts {
+                target.entry(peer).or_insert(entry);
+            }
+        }
+        // Contacts: other owners' entries pointing at old_rk → re-point.
+        // (Collect keys first — DashMap `iter_mut` holds the global write
+        // lock, so we must not mutate inside the iteration.)
+        let mut affected: Vec<String> = Vec::new();
+        for entry in self.contacts.iter() {
+            if entry.value().contains_key(old_rk) {
+                affected.push(entry.key().clone());
+            }
+        }
+        let mut moved_peer = false;
+        for owner in affected {
+            let removed = {
+                let mut map = match self.contacts.get_mut(&owner) {
+                    Some(m) => m,
+                    None => continue,
+                };
+                map.remove(old_rk)
+            };
+            if let Some(mut entry) = removed {
+                moved_peer = true;
+                // The relationship's display nickname follows the folded identity.
+                entry.nickname = Self::nick_of(new_uid);
+                let mut map = self.contacts.get_mut(&owner).unwrap();
+                map.entry(new_uid.to_string()).or_insert(entry);
+            }
+        }
+        if moved_mailbox || moved_owner || moved_peer {
+            self.dirty.store(true, Ordering::Relaxed);
+        }
     }
 
     /// Render a presence summary from a last-seen timestamp (RFC §6 P2 会话
@@ -1225,5 +1351,137 @@ mod tests {
         assert!(file.user_mailbox.contains_key(bob()));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── P3 identity folding ──────────────────────────────────────────────────
+
+    fn carol() -> &'static str {
+        "qqbot:xiaoer:carol"
+    }
+
+    #[test]
+    fn with_resolver_folds_contacts_and_mailbox() {
+        let reg = KnownUsersRegistry::in_memory();
+        let resolver = Arc::new(UserResolver::new());
+        resolver.set("telegram:default:alice_tg", alice());
+        let reg = reg.with_resolver(resolver);
+
+        // 从新渠道（telegram rk）发起好友请求 → 关系折叠到 alice 身份。
+        assert_eq!(
+            reg.request_friend("telegram:default:alice_tg", bob()),
+            RequestOutcome::New
+        );
+        assert_eq!(reg.list_contacts(alice()).len(), 1);
+        // bob 侧回执也折叠: 接受来自折叠身份的请求。
+        assert!(reg.accept_friend(bob(), "telegram:default:alice_tg"));
+        assert_eq!(
+            reg.delivery_verdict("telegram:default:alice_tg", bob()),
+            DeliveryVerdict::Allowed
+        );
+        assert_eq!(
+            reg.delivery_verdict(bob(), "telegram:default:alice_tg"),
+            DeliveryVerdict::Allowed
+        );
+        // mailbox 键折叠: 投递到 bob 任意渠道都命中。
+        reg.push_user_mail(
+            bob(),
+            UserMail {
+                msg_id: "m1".into(),
+                sender_user_id: "telegram:default:alice_tg".into(),
+                sender_nickname: "@alice_tg".into(),
+                text: "hi".into(),
+                sent_at: 1,
+            },
+        );
+        assert_eq!(reg.drain_user_mail(bob()).len(), 1);
+    }
+
+    #[test]
+    fn migrate_identity_merges_mailbox_and_contacts() {
+        let reg = KnownUsersRegistry::in_memory();
+        let old_rk = "telegram:default:alice_tg";
+        // 绑定前: old_rk 与 bob 已是好友；carol 对 old_rk 有 pending 请求；
+        // mailbox 里有一条投递给 old_rk 的消息。
+        assert_eq!(reg.request_friend(old_rk, bob()), RequestOutcome::New);
+        assert!(reg.accept_friend(bob(), old_rk));
+        assert_eq!(reg.request_friend(carol(), old_rk), RequestOutcome::New);
+        reg.push_user_mail(
+            old_rk,
+            UserMail {
+                msg_id: "m1".into(),
+                sender_user_id: bob().into(),
+                sender_nickname: "@bob".into(),
+                text: "hello".into(),
+                sent_at: 1,
+            },
+        );
+
+        reg.migrate_identity(old_rk, alice());
+
+        // old_rk 的 owner 维度 → alice（bob accepted + carol pending in）。
+        let contacts = reg.list_contacts(alice());
+        assert_eq!(contacts.len(), 2);
+        assert!(
+            contacts
+                .iter()
+                .any(|(p, e)| p == bob() && e.status == ContactStatus::Accepted)
+        );
+        assert!(
+            contacts
+                .iter()
+                .any(|(p, e)| p == carol() && e.status == ContactStatus::Pending)
+        );
+        assert!(reg.list_contacts(old_rk).is_empty());
+        // carol 侧 peer 键 → alice（显示昵称跟随折叠身份）。
+        assert!(reg.resolve_contact_by_nick(carol(), "alice").is_some());
+        assert!(reg.resolve_contact_by_nick(carol(), "alice_tg").is_none());
+        // mailbox 合并。
+        assert_eq!(reg.drain_user_mail(alice()).len(), 1);
+        // 幂等 no-op（不 panic）。
+        reg.migrate_identity(old_rk, alice());
+    }
+
+    #[test]
+    fn migrate_identity_noop_when_same() {
+        let reg = KnownUsersRegistry::in_memory();
+        reg.migrate_identity(alice(), alice());
+        assert!(reg.list_contacts(alice()).is_empty());
+    }
+
+    #[test]
+    fn last_seen_ms_of_folds_across_channels() {
+        let reg = KnownUsersRegistry::in_memory();
+        let resolver = Arc::new(UserResolver::new());
+        resolver.set("telegram:default:alice_tg", alice());
+        let reg = reg.with_resolver(resolver);
+        reg.users.insert(
+            "telegram:default:alice_tg".to_string(),
+            KnownUser {
+                channel: "telegram".into(),
+                account: "default".into(),
+                user_id: "alice_tg".into(),
+                message_count: 1,
+                first_seen_ms: 1,
+                last_seen_ms: 2000,
+                scope: "c2c".into(),
+            },
+        );
+        reg.users.insert(
+            alice().to_string(),
+            KnownUser {
+                channel: "qqbot".into(),
+                account: "xiaoer".into(),
+                user_id: "alice".into(),
+                message_count: 1,
+                first_seen_ms: 1,
+                last_seen_ms: 1000,
+                scope: "c2c".into(),
+            },
+        );
+        // 折叠身份取所有渠道最新；未绑定 rk 直接查自身。
+        assert_eq!(reg.last_seen_ms_of(alice()), Some(2000));
+        assert_eq!(reg.last_seen_ms_of("telegram:default:alice_tg"), Some(2000));
+        // 未注册用户 → None。
+        assert_eq!(reg.last_seen_ms_of(bob()), None);
     }
 }

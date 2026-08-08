@@ -229,6 +229,9 @@ impl SendMessageTool {
         };
 
         let owner = session.owner.clone();
+        // P3 身份绑定: fold the sender through the shared resolver so the
+        // stored sender_user_id is the human identity, not the routing_key.
+        let owner_uid = known_users.resolve_uid(&owner);
         let nick = recipient.trim_start_matches('@');
         let peer =
             match crate::agents::commands::friends::resolve_nick_for(known_users, &owner, nick) {
@@ -241,21 +244,21 @@ impl SendMessageTool {
                     });
                 }
             };
-        if peer == owner {
+        if peer == owner_uid {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some("cannot message yourself".to_string()),
             });
         }
-        match known_users.delivery_verdict(&owner, &peer) {
+        match known_users.delivery_verdict(&owner_uid, &peer) {
             crate::agents::DeliveryVerdict::Allowed => {
                 known_users.push_user_mail(
                     &peer,
                     crate::agents::UserMail {
                         msg_id: uuid::Uuid::new_v4().to_string(),
-                        sender_user_id: owner.clone(),
-                        sender_nickname: KnownUsersRegistry::nick_of(&owner),
+                        sender_user_id: owner_uid.clone(),
+                        sender_nickname: KnownUsersRegistry::nick_of(&owner_uid),
                         text: text.to_string(),
                         sent_at: chrono::Utc::now().timestamp_millis() as u64,
                     },
@@ -851,5 +854,36 @@ mod tests {
         assert_eq!(mails[0].text, "在的，什么事");
         assert_eq!(mails[0].sender_user_id, BOB);
         assert_eq!(mails[0].sender_nickname, "@bob");
+    }
+
+    #[tokio::test]
+    async fn cross_user_folds_linked_identity() {
+        // P3 身份绑定: alice 把 telegram 渠道绑定到 qqbot 身份后，从新渠道
+        // 发消息走同一好友关系；sender 与 mailbox 都按"人"折叠。
+        let resolver = Arc::new(crate::agents::UserResolver::new());
+        resolver.set("telegram:default:alice_tg", ALICE);
+        let reg = Arc::new(
+            Arc::try_unwrap(registered_friends())
+                .unwrap()
+                .with_resolver(resolver),
+        );
+        let tool = SendMessageTool::new();
+        tool.set_known_users(Arc::clone(&reg));
+        let mut session = Session::new("s_tg".into());
+        session.owner = "telegram:default:alice_tg".to_string();
+
+        let r = tool
+            .execute(
+                serde_json::json!({"text": "hi from tg", "recipient": "@bob"}),
+                &session,
+            )
+            .await
+            .unwrap();
+        assert!(r.success, "{}", err_of(&r));
+        let mails = reg.drain_user_mail(BOB);
+        assert_eq!(mails.len(), 1);
+        // 发送者身份折叠: 存 alice 身份而非 telegram rk。
+        assert_eq!(mails[0].sender_user_id, ALICE);
+        assert_eq!(mails[0].sender_nickname, "@alice");
     }
 }

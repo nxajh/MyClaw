@@ -952,8 +952,15 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         config.workspace_dir.join(".last_recipient"),
     );
 
+    // Global data dir (known_users.json, user_resolver.json). Computed here
+    // so both the registry and the identity resolver share one location.
+    let data_dir = directories::ProjectDirs::from("", "", "myclaw")
+        .map(|d| d.data_dir().to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
     // G39: shared user resolver — defaults to identity (user_id == routing_key).
-    let user_resolver = Arc::new(crate::agents::UserResolver::new());
+    // P3: persisted; `/link` folds routing_keys into one user_id via `set`.
+    let user_resolver = Arc::new(crate::agents::UserResolver::persistent(&data_dir));
 
     // Shared AskRouter — wired into both AskUserTool (register side, inside
     // build_tools) and the Orchestrator (fulfill side, set on OrchestratorParts
@@ -962,10 +969,11 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
 
     // Global user registry — replaces per-channel KnownSenders/RateLimiter.
     // Orchestrator records every inbound message; slash commands query.
-    let data_dir = directories::ProjectDirs::from("", "", "myclaw")
-        .map(|d| d.data_dir().to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let known_users = Arc::new(crate::agents::KnownUsersRegistry::new(&data_dir));
+    // P3: with_resolver folds contacts/mailbox keys for linked identities.
+    let known_users = Arc::new(
+        crate::agents::KnownUsersRegistry::new(&data_dir)
+            .with_resolver(Arc::clone(&user_resolver)),
+    );
     known_users.migrate_legacy(&data_dir);
 
     // Build tool registry (all built-in + MCP + skill tools + ask_user).
