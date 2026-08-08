@@ -210,7 +210,9 @@ impl SessionContext {
         // the user content before recording the turn.
         let reminder = {
             let skills_snap = runtime.skills.read();
-            session.attachments.diff_skills(&skills_snap, &session.history);
+            // Clone history to avoid borrow conflict with attachments.
+            let history_clone = session.history.clone();
+            session.attachments.diff_skills(&skills_snap, &history_clone);
             let agent_list: Vec<(String, String)> = runtime
                 .agents
                 .values_cloned()
@@ -222,11 +224,11 @@ impl SessionContext {
                     )
                 })
                 .collect();
-            session.attachments.diff_agents(&agent_list, &session.history);
+            session.attachments.diff_agents(&agent_list, &history_clone);
             // Date injection respects the configured [prompt] timezone_offset
             // (sourced from the shared ResourceProvider via ContextEngine).
-            session.attachments.diff_date(runtime.context_engine.timezone_offset(), &session.history);
-            session.attachments.diff_autonomy(&prompt_config.permission_mode, &session.history);
+            session.attachments.diff_date(runtime.context_engine.timezone_offset(), &history_clone);
+            session.attachments.diff_autonomy(&prompt_config.permission_mode, &history_clone);
             // Inject user/feedback memory index as system-reminder.
             let knowledge_dir = &runtime.defaults.prompt.knowledge_dir;
             let memory_entries: Vec<crate::memory::IndexEntry> = if !knowledge_dir.is_empty() {
@@ -236,7 +238,7 @@ impl SessionContext {
             } else {
                 Vec::new()
             };
-            session.attachments.diff_memory(&memory_entries, &session.history);
+            session.attachments.diff_memory(&memory_entries, &history_clone);
             let text = session.attachments.build_text(&skills_snap);
             session.attachments.clear_pending();
 

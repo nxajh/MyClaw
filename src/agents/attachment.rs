@@ -515,8 +515,8 @@ impl AttachmentManager {
         // Autonomy
         let label = match autonomy_level {
             crate::config::agent::PermissionMode::Full => "Full Autonomy",
-            crate::config::agent::PermissionMode::ApproveWrite => "Approve Write Operations",
-            crate::config::agent::PermissionMode::ApproveAll => "Approve All Operations",
+            crate::config::agent::PermissionMode::Default => "Default (safe tools auto-approved)",
+            crate::config::agent::PermissionMode::ReadOnly => "Read Only",
         };
         sections.push(format!("## Autonomy Level\n{}", label));
 
@@ -529,8 +529,8 @@ impl AttachmentManager {
         );
         for (name, skill) in skills.agent_skills_iter() {
             let mut parts = vec![format!("- **{}**", name)];
-            if let Some(desc) = &skill.description {
-                parts.push(format!(": {}", desc));
+            if !skill.description.is_empty() {
+                parts.push(format!(": {}", skill.description));
             }
             if let Some(trigger) = &skill.when_to_use {
                 parts.push(format!(" (trigger: {})", trigger));

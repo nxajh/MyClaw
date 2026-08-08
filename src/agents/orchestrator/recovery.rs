@@ -67,7 +67,7 @@ impl CompletionSink {
             CompletionSink::Delegate {
                 task_id,
                 parent_session_id,
-                reply_target,
+                reply_target: _,
                 delegator,
             } => {
                 if let Some(dm) = delegator {
@@ -75,8 +75,7 @@ impl CompletionSink {
                         let _ = tx
                             .send(DelegationEvent::Completed {
                                 task_id,
-                                parent_session_id,
-                                reply_target,
+                                session_id: parent_session_id,
                                 summary: text,
                                 duration_secs: 0,
                             })
