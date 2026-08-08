@@ -111,6 +111,16 @@ impl ToolExecutor {
             }
         }
 
+        // Low-memory guard: reject heavy build commands (cargo, rustc, make,
+        // cmake) on hosts with <512MB available RAM to prevent OOM-killing
+        // the daemon. Agents should use CI instead of local builds here.
+        if call.name == "shell" {
+            if let Some(rejection) = Self::check_memory_guard(&call.arguments) {
+                tracing::warn!(tool = %call.name, "rejected by low-memory guard");
+                return Ok(rejection);
+            }
+        }
+
         // Generic tool dispatch against the filtered slice. `ask_user` /
         // `agent_delegate` are real Tool impls in `allowed` (no
         // special-casing).
@@ -243,6 +253,35 @@ impl ToolExecutor {
         } else {
             format!("{}…", &args[..max_chars])
         }
+    }
+
+    /// Low-memory guard: returns `Some(ToolResult)` (error) if the shell
+    /// command contains heavy build tools (cargo, rustc, make, cmake) and
+    /// the system has <512MB available RAM. Returns `None` to allow.
+    fn check_memory_guard(arguments: &str) -> Option<ToolResult> {
+        let command = serde_json::from_str::<serde_json::Value>(arguments)
+            .ok()
+            .and_then(|v| v.get("command")?.as_str().map(String::from))
+            .unwrap_or_default();
+        if !shell_has_heavy_build(&command) {
+            return None;
+        }
+        let avail_kb = read_mem_available_kb()?;
+        const MIN_AVAIL_KB: u64 = 512 * 1024; // 512MB
+        if avail_kb >= MIN_AVAIL_KB {
+            return None;
+        }
+        let avail_mb = avail_kb / 1024;
+        tracing::warn!(avail_mb, "low-memory guard triggered for build command");
+        Some(ToolResult {
+            success: false,
+            output: format!(
+                "cargo/rustc rejected: insufficient memory ({}MB available, need 512MB) \
+                 on this host. Use CI instead: commit, push, and let GitHub Actions build.",
+                avail_mb
+            ),
+            error: Some("low_memory_guard".to_string()),
+        })
     }
 
     /// Execute a tool with timeout and framework-level output truncation.
@@ -385,8 +424,46 @@ fn shell_has_dangerous_command(command: &str) -> bool {
     false
 }
 
-#[cfg(test)]
-mod danger_tests {
+/// Check whether a shell command string contains heavy build commands
+/// (cargo, rustc, make, cmake) that consume large amounts of RAM.
+///
+/// Uses the same segment-splitting logic as `shell_has_dangerous_command`.
+fn shell_has_heavy_build(command: &str) -> bool {
+    for segment in command.split(['|', '&', ';', '\n']) {
+        let segment = segment.trim();
+        let first_token = match segment.split_whitespace().next() {
+            Some(t) => t,
+            None => continue,
+        };
+        let basename = first_token.rsplit('/').next().unwrap_or(first_token);
+        if matches!(basename, "cargo" | "rustc" | "make" | "cmake") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Read MemAvailable from `/proc/meminfo` (Linux). Returns `None` on any
+/// error or on non-Linux systems.
+fn read_mem_available_kb() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let content = std::fs::read_to_string("/proc/meminfo").ok()?;
+        for line in content.lines() {
+            if let Some(rest) = line.strip_prefix("MemAvailable:") {
+                let kb: u64 = rest.trim().split_whitespace().next()?.parse().ok()?;
+                return Some(kb);
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+
     use super::shell_has_dangerous_command;
 
     #[test]
@@ -436,5 +513,44 @@ mod danger_tests {
         assert!(!shell_has_dangerous_command(
             "cargo build --release 2>&1 | head -20"
         ));
+    }
+}
+
+#[cfg(test)]
+mod heavy_build_tests {
+    use super::shell_has_heavy_build;
+
+    #[test]
+    fn detects_cargo_build() {
+        assert!(shell_has_heavy_build("cargo build --release"));
+        assert!(shell_has_heavy_build("cargo check"));
+    }
+
+    #[test]
+    fn detects_rustc() {
+        assert!(shell_has_heavy_build("rustc --edition 2021 main.rs"));
+    }
+
+    #[test]
+    fn detects_make_cmake() {
+        assert!(shell_has_heavy_build("make -j4"));
+        assert!(shell_has_heavy_build("cmake .. && make"));
+    }
+
+    #[test]
+    fn detects_in_pipeline() {
+        assert!(shell_has_heavy_build("echo hi | cargo build 2>&1"));
+    }
+
+    #[test]
+    fn detects_full_path() {
+        assert!(shell_has_heavy_build("/home/ubuntu/.cargo/bin/cargo check"));
+    }
+
+    #[test]
+    fn does_not_trigger_on_other_commands() {
+        assert!(!shell_has_heavy_build("ls -la"));
+        assert!(!shell_has_heavy_build("echo cargo"));
+        assert!(!shell_has_heavy_build("git commit -m 'cargo'"));
     }
 }
