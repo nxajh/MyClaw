@@ -331,6 +331,7 @@ impl Interceptor for SlashCommand {
 
         let turn_tracker = ctx.turn_tracker.clone();
         let known_users_cmd = Arc::clone(&ctx.known_users);
+        let channels_cmd = ctx.channels.clone();
         let key_channel = key.channel.clone();
         let key_account = key.account.clone();
         tokio::spawn(async move {
@@ -344,7 +345,7 @@ impl Interceptor for SlashCommand {
                 runtime: &runtime_cmd,
                 session_ctx: session_ctx_cmd.as_ref(),
                 known_users: &known_users_cmd,
-                channels: &ctx.channels,
+                channels: &channels_cmd,
                 channel: channel_cmd.as_ref(),
             };
             if let Some(response) = commands::dispatch(&cmd_owned, &cmd_args_owned, cmd_ctx).await {
