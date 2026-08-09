@@ -117,12 +117,25 @@ impl MigrationPlan {
             match s {
                 Step::WriteJson { path, body, label } => {
                     if let Some(parent) = path.parent() {
-                        std::fs::create_dir_all(parent).with_context(|| {
-                            format!("migration: 创建目录 {}", parent.display())
-                        })?;
+                        if let Err(e) = std::fs::create_dir_all(parent) {
+                            tracing::warn!(
+                                err = %e,
+                                "migration: 创建目录 {} 失败，跳过步骤：{label}",
+                                parent.display()
+                            );
+                            continue;
+                        }
                     }
-                    std::fs::write(path, body)
-                        .with_context(|| format!("migration: 写 {label}（{}）失败", path.display()))?;
+                    if let Err(e) = std::fs::write(path, body) {
+                        // 单步失败不阻塞全局（如个别目录 owner 异常/只读）：
+                        // warn + 跳过，其余步骤继续。
+                        tracing::warn!(
+                            err = %e,
+                            "migration: 写 {label}（{}）失败，跳过该步骤",
+                            path.display()
+                        );
+                        continue;
+                    }
                 }
                 Step::RenameDir { from, to, label }
                 | Step::MoveDir { from, to, label } => {
@@ -130,13 +143,24 @@ impl MigrationPlan {
                         continue; // 目标已存在（重跑）→ 跳过
                     }
                     if let Some(parent) = to.parent() {
-                        std::fs::create_dir_all(parent).with_context(|| {
-                            format!("migration: 创建目录 {}", parent.display())
-                        })?;
+                        if let Err(e) = std::fs::create_dir_all(parent) {
+                            tracing::warn!(
+                                err = %e,
+                                "migration: 创建目录 {} 失败，跳过步骤：{label}",
+                                parent.display()
+                            );
+                            continue;
+                        }
                     }
-                    std::fs::rename(from, to).with_context(|| {
-                        format!("migration: {label}（{} → {}）失败", from.display(), to.display())
-                    })?;
+                    if let Err(e) = std::fs::rename(from, to) {
+                        tracing::warn!(
+                            err = %e,
+                            "migration: {label}（{} → {}）失败，跳过该步骤",
+                            from.display(),
+                            to.display()
+                        );
+                        continue;
+                    }
                 }
                 Step::RenameFile { from, to, label } => {
                     if !from.exists() {
@@ -146,13 +170,24 @@ impl MigrationPlan {
                         continue;
                     }
                     if let Some(parent) = to.parent() {
-                        std::fs::create_dir_all(parent).with_context(|| {
-                            format!("migration: 创建目录 {}", parent.display())
-                        })?;
+                        if let Err(e) = std::fs::create_dir_all(parent) {
+                            tracing::warn!(
+                                err = %e,
+                                "migration: 创建目录 {} 失败，跳过步骤：{label}",
+                                parent.display()
+                            );
+                            continue;
+                        }
                     }
-                    std::fs::rename(from, to).with_context(|| {
-                        format!("migration: {label}（{} → {}）失败", from.display(), to.display())
-                    })?;
+                    if let Err(e) = std::fs::rename(from, to) {
+                        tracing::warn!(
+                            err = %e,
+                            "migration: {label}（{} → {}）失败，跳过该步骤",
+                            from.display(),
+                            to.display()
+                        );
+                        continue;
+                    }
                 }
             }
         }
@@ -425,7 +460,9 @@ fn migrate_jobs(
         }
     }
     if !changed {
-        return Ok(job_map);
+        // jobs.json 已迁移（全 FQID）：active.json 的 `_cron_<old>` 键仍需
+        // old→new 映射——从备份恢复（按 name 配对），不重复写 jobs.json。
+        return Ok(restore_job_map_from_bak(&cron_dir, &root));
     }
     let body = serde_json::to_string_pretty(&root)?;
     plan.backups.push(Backup {
@@ -450,6 +487,51 @@ fn migrate_jobs(
         label: format!("cron/jobs.json：{} 条 job id → {to_ns}/job/<uuidv7>", job_map.len()),
     });
     Ok(job_map)
+}
+
+/// 按 `name` 收集 jobs 的 id（配对用）。
+fn job_id_by_name(root: &serde_json::Value) -> HashMap<String, String> {
+    root.get("jobs")
+        .and_then(|v| v.as_array())
+        .map(|jobs| {
+            jobs.iter()
+                .filter_map(|j| {
+                    Some((
+                        j.get("name")?.as_str()?.to_owned(),
+                        j.get("id")?.as_str()?.to_owned(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// jobs.json 已迁移（全 FQID）时，从 `jobs.json.bak`（首次备份的原始数据）
+/// 恢复 old id → new id 映射（按 job `name` 配对），供 `active.json` 的
+/// `_cron_<jobid>` 键改名。备份缺失或无法配对 → 空 map。
+fn restore_job_map_from_bak(
+    cron_dir: &Path,
+    current: &serde_json::Value,
+) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let bak_path = cron_dir.join("jobs.json.bak");
+    let Ok(raw) = std::fs::read_to_string(&bak_path) else {
+        tracing::warn!("migration: jobs.json 已迁移但 {} 不存在，无法恢复 _cron_ 键映射", bak_path.display());
+        return map;
+    };
+    let Ok(bak) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return map;
+    };
+    let old_by_name = job_id_by_name(&bak);
+    let new_by_name = job_id_by_name(current);
+    for (name, old_id) in old_by_name {
+        if let Some(new_id) = new_by_name.get(&name) {
+            if new_id != &old_id {
+                map.insert(old_id, new_id.clone());
+            }
+        }
+    }
+    map
 }
 
 // ── 6.3 sessions/ ────────────────────────────────────────────────────────────
@@ -486,16 +568,37 @@ fn migrate_sessions(
         return Ok(());
     }
 
-    // old 8-hex → new FQID（一次生成，同批一致）。
+    // old 8-hex → new FQID（一次生成，同批一致）。若 meta.id 已是 FQID
+    // （上次运行写过 meta 但 rename 未发生的半途状态）→ 复用，不重新生成。
     let mut session_map: HashMap<String, String> = HashMap::new();
-    for (_, old) in &hex_dirs {
-        session_map.insert(old.clone(), Fqid::new(to_ns, TYPE_SESSION).to_string());
+    for (dir, old) in &hex_dirs {
+        let reuse = std::fs::read_to_string(dir.join("meta.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|v| v.get("id").and_then(|i| i.as_str()).map(str::to_owned))
+            .filter(|id| is_fqid_any_ns(id));
+        session_map.insert(
+            old.clone(),
+            reuse.unwrap_or_else(|| Fqid::new(to_ns, TYPE_SESSION).to_string()),
+        );
     }
 
     for (dir, old) in &hex_dirs {
         let new = &session_map[old];
         let meta_path = dir.join("meta.json");
         if meta_path.exists() {
+            // 可写探测：owner 异常/只读目录（如 nobody 遗留）无法重写 meta →
+            // warn + 跳过该目录（保持原样 8-hex，数据不丢，等有权限时重跑收敛）。
+            if std::fs::OpenOptions::new()
+                .write(true)
+                .open(&meta_path)
+                .is_err()
+            {
+                tracing::warn!(
+                    "migration: {old}/meta.json 不可写（owner/权限异常），跳过该会话目录的迁移"
+                );
+                continue;
+            }
             // 备份到独立目录（不放在将被 RenameDir 的 hex 目录内——否则备份
             // 文件会随目录移动，且重跑时 from 路径已不存在导致 copy 失败）。
             let backup_to = sessions_root
@@ -551,16 +654,31 @@ fn migrate_sessions(
                     nk = format!("_cron_{new_job}");
                 }
             }
-            let remapped: Option<String> =
-                v.as_str().and_then(|sid| session_map.get(sid)).cloned();
-            let nv = remapped
-                .clone()
-                .map(serde_json::Value::String)
-                .unwrap_or_else(|| v.clone());
-            if nk != k || remapped.is_some() {
+            let mut drop = false;
+            let nv = match v.as_str().and_then(|sid| session_map.get(sid)) {
+                // 本次映射内的 8-hex 旧 id → 新 FQID。
+                Some(new_sid) => {
+                    changed = true;
+                    serde_json::Value::String(new_sid.clone())
+                }
+                None => {
+                    // 不在本次映射：8-hex 值且目录已不存在（已迁/已删/历史残留）
+                    // → 死键丢弃；目录仍在（未迁/跳过的目录）→ 保留原值。
+                    if let Some(sid) = v.as_str() {
+                        if is_8hex(sid) && !sessions_root.join(sid).exists() {
+                            drop = true;
+                            changed = true;
+                        }
+                    }
+                    v.clone()
+                }
+            };
+            if nk != k {
                 changed = true;
             }
-            next.insert(nk, nv);
+            if !drop {
+                next.insert(nk, nv);
+            }
         }
         *map = next;
         if changed {
@@ -1222,5 +1340,122 @@ mod tests {
         )
         .unwrap();
         assert_eq!(tasks["tasks"][0]["id"], "brand/t/019fe342-6a03-7561-86de-0c2327a8c3de");
+    }
+
+    // ── 部署回归（真实故障修复）────────────────────────────────────────────
+
+    /// jobs.json 已迁移（全 FQID）时，仍须从 jobs.json.bak 恢复 old→new 映射
+    /// （供 active.json 的 `_cron_<jobid>` 键改名），且不重复写 jobs.json。
+    #[test]
+    fn jobs_restores_map_from_bak_when_already_migrated() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_json(
+            &tmp.path().join("cron/jobs.json"),
+            r#"{"jobs":[{"id":"myclaw/job/019fe342-6a03-7561-86de-0c2327a8c3de","name":"weekly","schedule":"0 0 10 * * 5","prompt":"p","target":"wechat"}]}"#,
+        );
+        write_json(
+            &tmp.path().join("cron/jobs.json.bak"),
+            r#"{"jobs":[{"id":"07fcb1d780eb","name":"weekly","schedule":"0 0 10 * * 5","prompt":"p","target":"wechat"}]}"#,
+        );
+        let mut plan = MigrationPlan::default();
+        let job_map = migrate_jobs(&mut plan, tmp.path(), "myclaw").unwrap();
+        assert_eq!(
+            job_map.get("07fcb1d780eb").map(String::as_str),
+            Some("myclaw/job/019fe342-6a03-7561-86de-0c2327a8c3de")
+        );
+        // 已迁移 → 无 jobs 写步骤（不重复写）。
+        assert!(
+            plan.steps.iter().all(|s| !s.label().contains("jobs.json")),
+            "已迁移不应再写 jobs.json，实际步骤: {:?}",
+            plan.steps.iter().map(|s| s.label()).collect::<Vec<_>>()
+        );
+    }
+
+    /// active.json：映射外的 8-hex 值且目录已不存在（已迁/已删）→ 死键丢弃；
+    /// 目录仍在的保留原值；FQID 值原样保留。
+    #[test]
+    fn sessions_drops_dead_active_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions = tmp.path().join("sessions");
+        fs::create_dir_all(sessions.join("aabbccdd")).unwrap();
+        write_json(
+            &sessions.join("aabbccdd/meta.json"),
+            r#"{"id":"aabbccdd","owner":"wechat:default:x@im.wechat","created_at":"2026-05-14T17:38:06Z","message_count":1}"#,
+        );
+        write_json(
+            &sessions.join("active.json"),
+            r#"{
+                "wechat:default:x@im.wechat":"aabbccdd",
+                "dead:key:deadbeef":"deadbeef",
+                "alive:key:alive":"myclaw/s/019fe342-6a03-7561-86de-0c2327a8c3de"
+            }"#,
+        );
+        let mut plan = MigrationPlan::default();
+        migrate_sessions(&mut plan, tmp.path(), "myclaw", &HashMap::new()).unwrap();
+        plan.apply().unwrap();
+        let active: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(sessions.join("active.json")).unwrap(),
+        )
+        .unwrap();
+        let map = active.as_object().unwrap();
+        assert!(!map.contains_key("dead:key:deadbeef"), "死键应被丢弃");
+        assert!(map.contains_key("alive:key:alive"));
+        assert_eq!(
+            map["alive:key:alive"],
+            "myclaw/s/019fe342-6a03-7561-86de-0c2327a8c3de"
+        );
+        // aabbccdd 目录存在 → 本次映射内 → 重写为 FQID。
+        let v = map["wechat:default:x@im.wechat"].as_str().unwrap();
+        assert!(v.starts_with("myclaw/s/"), "value={v}");
+    }
+
+    /// 不可写目录（owner 异常/只读）→ 跳过该会话目录迁移（不阻塞全局），
+    /// 其余目录照迁。root 下权限位无效 → 跳过测试。
+    #[test]
+    fn sessions_skips_unwritable_dir() {
+        fn running_as_root() -> bool {
+            std::fs::read_to_string("/proc/self/status")
+                .map(|s| {
+                    s.lines()
+                        .find(|l| l.starts_with("Uid:"))
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        == Some("0")
+                })
+                .unwrap_or(false)
+        }
+        if running_as_root() {
+            eprintln!("skip: root 无视权限位，无法构造不可写目录");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions = tmp.path().join("sessions");
+        fs::create_dir_all(sessions.join("aabbccdd")).unwrap();
+        fs::create_dir_all(sessions.join("00112233")).unwrap();
+        write_json(
+            &sessions.join("aabbccdd/meta.json"),
+            r#"{"id":"aabbccdd","owner":"wechat:default:x@im.wechat","created_at":"2026-05-14T17:38:06Z","message_count":1}"#,
+        );
+        write_json(
+            &sessions.join("00112233/meta.json"),
+            r#"{"id":"00112233","owner":"qqbot:xiaoer:ABC","created_at":"2026-05-14T17:38:06Z","message_count":2}"#,
+        );
+        // aabbccdd 只读（nobody 遗留模拟）。
+        let mut perms = fs::metadata(sessions.join("aabbccdd/meta.json")).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o444);
+        fs::set_permissions(sessions.join("aabbccdd/meta.json"), perms).unwrap();
+
+        let mut plan = MigrationPlan::default();
+        migrate_sessions(&mut plan, tmp.path(), "myclaw", &HashMap::new()).unwrap();
+        plan.apply().unwrap();
+        // 只读目录未被迁移（原样保留 8-hex，无 rename 步骤）。
+        assert!(sessions.join("aabbccdd").exists(), "只读目录应原样保留");
+        assert!(
+            !plan.steps.iter().any(|s| s.label().starts_with("sessions/aabbccdd")),
+            "只读目录不应有迁移步骤: {:?}",
+            plan.steps.iter().map(|s| s.label()).collect::<Vec<_>>()
+        );
+        // 可写目录正常迁移。
+        assert!(!sessions.join("00112233").exists(), "可写目录应已 rename");
     }
 }
