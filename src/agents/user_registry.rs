@@ -537,3 +537,82 @@ fn now_ms() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
+
+// ── 测试 ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reg() -> UserRegistry {
+        UserRegistry::in_memory()
+    }
+
+    /// user_id() 幂等：FQID uid 不再二次加前缀（旧 bug 产生双重前缀污染）。
+    #[test]
+    fn user_id_is_idempotent_for_fqid() {
+        let bare = "019fe342-6a03-7561-86de-0c2327a8c3de";
+        assert_eq!(
+            user_id("myclaw", bare),
+            "myclaw/u/019fe342-6a03-7561-86de-0c2327a8c3de"
+        );
+        let fqid = "myclaw/u/019fe342-6a03-7561-86de-0c2327a8c3de";
+        assert_eq!(user_id("myclaw", fqid), fqid);
+        // 双重前缀输入不再继续叠加。
+        let double = "myclaw/u/myclaw/u/019fe342-6a03-7561-86de-0c2327a8c3de";
+        assert_eq!(user_id("myclaw", double), double);
+    }
+
+    /// uid_of() 返回规范 FQID（users.json map key 形态）；双重前缀剥到单层。
+    #[test]
+    fn uid_of_returns_canonical_fqid_and_strips_double_prefix() {
+        let r = reg();
+        let u = r.register("alice@example.com", "alice").unwrap();
+        let fqid = u.uid.clone();
+        assert!(fqid.starts_with("myclaw/u/"));
+        assert_eq!(r.uid_of(&fqid), Some(fqid.as_str()));
+        let double = format!("myclaw/u/{fqid}");
+        assert_eq!(r.uid_of(&double), Some(fqid.as_str()));
+        assert_eq!(r.uid_of("brand/u/019fe342-6a03-7561-86de-0c2327a8c3de"), None);
+    }
+
+    /// username_of() 用 FQID 直接命中 map（旧 bug：裸 uuid 落空）。
+    #[test]
+    fn username_of_hits_map_with_fqid() {
+        let r = reg();
+        let u = r.register("alice@example.com", "alice").unwrap();
+        assert_eq!(r.username_of(&u.uid), Some("alice".to_string()));
+        assert_eq!(r.username_of("myclaw/u/019fe342-6a03-7561-86de-0c2327a8c3de"), None);
+    }
+
+    /// find_by_uid() 双形态可查：FQID / 裸 uuid / `u/<uuid>`（parse_target 形态）。
+    #[test]
+    fn find_by_uid_accepts_fqid_bare_and_u_prefix() {
+        let r = reg();
+        let u = r.register("alice@example.com", "alice").unwrap();
+        let fqid = u.uid.clone();
+        let bare = fqid.strip_prefix("myclaw/u/").unwrap();
+        assert_eq!(r.find_by_uid(&fqid).unwrap().uid, fqid);
+        assert_eq!(r.find_by_uid(bare).unwrap().uid, fqid);
+        assert_eq!(r.find_by_uid(&format!("u/{bare}")).unwrap().uid, fqid);
+        assert!(r.find_by_uid("deadbeef-0000-0000-0000-000000000000").is_none());
+    }
+
+    /// set_email / set_username 用 FQID 命中（current_uid() 经 uid_of 返回规范
+    /// FQID 后的生产路径）。
+    #[test]
+    fn set_email_and_username_work_with_fqid() {
+        let r = reg();
+        let u = r.register("alice@example.com", "alice").unwrap();
+        let fqid = u.uid.clone();
+        r.set_email(&fqid, "new@example.com").unwrap();
+        assert_eq!(
+            r.find_by_uid(&fqid).unwrap().email.as_deref(),
+            Some("new@example.com")
+        );
+        r.set_username(&fqid, "bob").unwrap();
+        assert_eq!(r.username_of(&fqid), Some("bob".to_string()));
+        // username 变更后 @username 解析生效。
+        assert_eq!(r.find_by_username("bob").unwrap().uid, fqid);
+    }
+}
