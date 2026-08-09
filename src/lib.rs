@@ -19,6 +19,7 @@ pub mod hot_switch;
 pub mod ids;
 pub mod mcp;
 pub mod memory;
+pub mod migration;
 pub mod providers;
 pub mod registry;
 pub mod signal;

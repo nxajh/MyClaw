@@ -880,6 +880,20 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         tracing::warn!(err = %e, "failed to create knowledge directory");
     }
 
+    // ── RFC §6 数据迁移（启动自动）──────────────────────────────────────────
+    // users.json / user_resolver.json / sessions/ / tasks.json / cron/jobs.json
+    // 与 users/ 遗留目录。必须在 Scheduler（jobs.json）、UserResolver、
+    // UserRegistry、JsonFileBackend（sessions/）等组件加载之前执行，否则迁移
+    // 后的 FQID 与组件内存态不一致。失败不阻断启动（注册表对旧数据降级兼容，
+    // .bak 备份保留可手动恢复）。
+    let data_dir = directories::ProjectDirs::from("", "", "myclaw")
+        .map(|d| d.data_dir().to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    if let Err(e) = crate::migration::run_auto(&config.workspace_dir, &data_dir, &config.system.namespace)
+    {
+        tracing::warn!(err = %e, "migration: 自动迁移失败（继续以原数据启动）");
+    }
+
     // ── Composition Root: assemble all components ──────────────────────────
 
     let registry = build_registry(&config)?;
@@ -967,11 +981,9 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         config.workspace_dir.join(".last_recipient"),
     );
 
-    // Global data dir (known_users.json, user_resolver.json). Computed here
-    // so both the registry and the identity resolver share one location.
-    let data_dir = directories::ProjectDirs::from("", "", "myclaw")
-        .map(|d| d.data_dir().to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    // Global data dir (known_users.json, user_resolver.json) — computed early
+    // (before the RFC §6 auto-migration) so the migration, the registry and the
+    // identity resolver share one location.
 
     // G39: shared user resolver — defaults to identity (user_id == routing_key).
     // P3: persisted; `/link` folds routing_keys into one user_id via `set`.

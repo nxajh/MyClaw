@@ -96,6 +96,11 @@ async fn main() -> Result<()> {
             cli::cmd_stop::run(&cli_args).await?;
         }
 
+        // `myclaw migrate-namespace <new>` — RFC §6.7 手动 namespace 迁移
+        Some(cli::Commands::MigrateNamespace { ref namespace, yes }) => {
+            cli::cmd_migrate::run(&cli_args, namespace, yes)?;
+        }
+
         // `myclaw version` — detailed version info
         Some(cli::Commands::Version) => {
             println!("MyClaw {}", env!("MYCLAW_VERSION"));

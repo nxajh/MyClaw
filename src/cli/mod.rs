@@ -5,6 +5,7 @@ pub mod cmd_completion;
 pub mod cmd_config;
 pub mod cmd_doctor;
 pub mod cmd_exec;
+pub mod cmd_migrate;
 pub mod cmd_reload;
 pub mod cmd_restart;
 pub mod cmd_status;
@@ -130,6 +131,19 @@ pub enum Commands {
 
     /// Stop the daemon gracefully (sends SIGTERM).
     Stop,
+
+    /// Migrate persisted IDs to a new namespace (RFC §6.7).
+    ///
+    /// Requires the daemon to be stopped; backs up, dry-runs, confirms, then
+    /// rewrites users.json / resolver / sessions / tasks / cron IDs.
+    MigrateNamespace {
+        /// Target namespace (e.g. a brand name).
+        namespace: String,
+
+        /// Skip the interactive confirmation (non-interactive execution).
+        #[arg(long)]
+        yes: bool,
+    },
 
     /// Show version and build information.
     Version,

@@ -37,8 +37,16 @@ pub const DEFAULT_NAMESPACE: &str = "myclaw";
 pub const ROOT_USERNAME: &str = "root";
 
 /// 由 uid 构造完整 user.id（三段式 FQID：`<namespace>/u/<uid>`）。
+///
+/// 幂等：uid 已以 `<namespace>/u/` 开头（本身已是完整 FQID——注册/迁移后的
+/// 规范形态）→ 原样返回，避免双重前缀污染（旧 bug：对 FQID uid 二次加前缀
+/// 产生 `ns/u/ns/u/<uuid>`，曾污染 user_resolver.json）。
 pub fn user_id(namespace: &str, uid: &str) -> String {
-    format!("{namespace}/u/{uid}")
+    if uid.starts_with(&format!("{namespace}/u/")) {
+        uid.to_string()
+    } else {
+        format!("{namespace}/u/{uid}")
+    }
 }
 
 // ── 用户实体 ─────────────────────────────────────────────────────────────────
@@ -159,9 +167,21 @@ impl UserRegistry {
             && s.len() > self.namespace.len() + 3
     }
 
-    /// 从 user.id 提取 uid 内部键（非本实例 id 返回 None）。
+    /// 从 user.id 提取规范 uid 内部键（= 完整 FQID `<ns>/u/<uuid>`，users.json
+    /// 的 map key 即此形态；非本实例 id 返回 None）。
+    ///
+    /// 兼治双重前缀输入（`ns/u/ns/u/<uuid>`，旧 user_id() bug 污染值）→ 剥到
+    /// 单层 FQID。旧语义（返回裸 uuid）与 map key 不匹配，导致 username_of /
+    /// set_email / set_username / info 展示全部落空——本实现返回 FQID 后
+    /// `users.get(uid)` 直接命中。
     pub fn uid_of<'a>(&self, user_id_str: &'a str) -> Option<&'a str> {
-        user_id_str.strip_prefix(&format!("{}/u/", self.namespace))
+        let prefix = format!("{}/u/", self.namespace);
+        let rest = user_id_str.strip_prefix(&prefix)?;
+        if rest.starts_with(&prefix) {
+            Some(rest) // 双重前缀：rest 已是规范 FQID
+        } else {
+            Some(user_id_str) // 规范 FQID → 原样
+        }
     }
 
     /// 用户可见显示形态（RFC §2.2 显示层）：
@@ -184,9 +204,24 @@ impl UserRegistry {
 
     // ── 查询 ────────────────────────────────────────────────────────────────
 
-    /// 按 uid（内部键，不带 `u/` 前缀）查询。
+    /// 按 uid 查询：完整 FQID、裸 uuid 双形态可查（兼容 `parse_target` 的
+    /// `u/<uuid>` 剥离形态与旧数据键）。
     pub fn find_by_uid(&self, uid: &str) -> Option<User> {
-        self.users.read().get(uid).cloned()
+        let users = self.users.read();
+        if let Some(u) = users.get(uid) {
+            return Some(u.clone());
+        }
+        let prefix = format!("{}/u/", self.namespace);
+        let bare = uid.strip_prefix(&prefix).unwrap_or(uid);
+        if let Some(u) = users.get(bare) {
+            return Some(u.clone());
+        }
+        // 裸 uuid 输入 → 按 FQID 后缀匹配（规范键 = `<ns>/u/<uuid>`）。
+        let suffix = format!("/{bare}");
+        users
+            .iter()
+            .find(|(k, _)| k.ends_with(&suffix))
+            .map(|(_, u)| u.clone())
     }
 
     /// 按 username 查询（大小写不敏感——内部小写归一化）。
