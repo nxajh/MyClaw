@@ -746,7 +746,6 @@ impl Agent {
                     let remaining = response.tool_calls.len() - i - 1;
                     if remaining > 0 {
                         session.strip_trailing_tool_calls(remaining);
-                        persist_last(session);
                     }
                     tracing::warn!(
                         session = %session.id,
