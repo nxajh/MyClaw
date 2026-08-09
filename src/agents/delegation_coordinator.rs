@@ -29,7 +29,9 @@ use dashmap::DashMap;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::agents::delegation::{AgentMail, AgentMessage, DelegationEvent, SubAgentMailbox};
+use crate::agents::delegation::{
+    AgentMail, AgentMessage, DelegationEvent, DelegationStatus, DelegationTimeout, SubAgentMailbox,
+};
 use crate::agents::session::{BackendPersistHook, PersistHook, SessionManager};
 use crate::config::sub_agent::AgentIsolation;
 use crate::ids::{Fqid, TYPE_SESSION, TYPE_TASK};
@@ -52,6 +54,33 @@ const SUB_AGENT_INBOX_CAPACITY: usize = 64;
 fn resolve_timeout(tool_timeout: Option<u64>, config_timeout: Option<u64>) -> u64 {
     let secs = tool_timeout.or(config_timeout).unwrap_or(SUB_AGENT_TIMEOUT_DEFAULT_SECS);
     secs.min(SUB_AGENT_TIMEOUT_MAX_SECS)
+}
+
+/// One entry in the coordinator's running table.
+///
+/// Status transitions:
+/// - spawn: `Running`
+/// - wrapper exit: `Completed` / `Failed` / `TimedOut` (marked just before
+///   the entry is removed so the terminal state is observable)
+/// - `cancel` (agent_kill): `Cancelled` before abort
+///
+/// `Idle` is reserved (see [`DelegationStatus`]) — no live entry takes it
+/// today.
+pub struct RunningEntry {
+    pub handle: JoinHandle<()>,
+    pub status: std::sync::RwLock<DelegationStatus>,
+    pub agent_name: String,
+    pub spawned_at: std::time::Instant,
+}
+
+/// Snapshot view of a running-table entry for `agent_list` / logging.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RunningAgentInfo {
+    pub task_id: String,
+    pub agent_name: String,
+    pub status: DelegationStatus,
+    /// Seconds since the sub-agent was spawned.
+    pub elapsed_secs: u64,
 }
 
 /// Holds sub-agent configs and creates temporary `Agent::run` invocations
@@ -79,9 +108,10 @@ pub struct DelegationCoordinator {
     /// `SessionContext::process_turn`. `OnceLock` encodes the set-once
     /// contract and gives lock-free reads on the hot delegate path.
     runtime_cell: Arc<OnceLock<crate::agents::AgentRuntime>>,
-    /// In-flight background delegations (task_id → JoinHandle). Powers
-    /// `/agent_list` (read snapshot) and `/agent_kill` (abort by id).
-    running: Arc<DashMap<String, JoinHandle<()>>>,
+    /// In-flight background delegations (task_id → entry). Powers
+    /// `/agent_list` (read snapshot with live status) and `/agent_kill`
+    /// (abort by id).
+    running: Arc<DashMap<String, RunningEntry>>,
     /// Parent → sub inboxes of running async sub-agents (task_id → sender).
     /// Registered by `spawn_delegate_async`, removed when the sub-agent
     /// finishes; powers the `send_message(recipient=task_id)` tool via
@@ -144,6 +174,26 @@ impl DelegationCoordinator {
         self.running.iter().map(|e| e.key().clone()).collect()
     }
 
+    /// Snapshot of running-table entries with live status, agent name and
+    /// elapsed time. Backs `/agent_list`.
+    pub fn running_records(&self) -> Vec<RunningAgentInfo> {
+        self.running
+            .iter()
+            .map(|e| {
+                let entry = e.value();
+                RunningAgentInfo {
+                    task_id: e.key().clone(),
+                    agent_name: entry.agent_name.clone(),
+                    status: match entry.status.read() {
+                        Ok(guard) => *guard,
+                        Err(_) => DelegationStatus::Running,
+                    },
+                    elapsed_secs: entry.spawned_at.elapsed().as_secs(),
+                }
+            })
+            .collect()
+    }
+
     /// Number of currently-running background sub-agents.
     pub fn running_count(&self) -> usize {
         self.running.len()
@@ -168,7 +218,11 @@ impl DelegationCoordinator {
                 .map(|e| e.key().clone())
                 .collect::<Vec<_>>()
                 .into_iter()
-                .filter_map(|id| self.running.remove(&id).map(|(_, h)| (id, h)))
+                .filter_map(|id| {
+                    self.running
+                        .remove(&id)
+                        .map(|(_, entry)| (id, entry.handle))
+                })
                 .collect();
             if handles.is_empty() {
                 tracing::debug!("sub-agent drain: no running sub-agents");
@@ -231,9 +285,16 @@ impl DelegationCoordinator {
     }
 
     /// Cancel a running background task by id.
+    ///
+    /// Marks the entry `Cancelled` before aborting so `agent_list` (or a
+    /// concurrent snapshot) can observe the terminal state.
     pub fn cancel(&self, task_id: &str) -> bool {
-        if let Some((_, handle)) = self.running.remove(task_id) {
-            handle.abort();
+        if let Some(entry) = self.running.get(task_id) {
+            if let Ok(mut status) = entry.status.write() {
+                *status = DelegationStatus::Cancelled;
+            }
+            entry.handle.abort();
+            self.running.remove(task_id);
             true
         } else {
             false
@@ -465,16 +526,20 @@ impl DelegationCoordinator {
             {
                 Ok(r) => r.map(|tr| tr.text),
                 Err(_) => {
+                    // Structured timeout error: the async wrapper downcasts
+                    // this to emit `DelegationEvent::TimedOut` (distinct
+                    // from a generic `Failed`). Dropping `turn_future` here
+                    // cancels the sub-agent turn — the same cancellation
+                    // semantics as aborting a spawned task.
                     tracing::warn!(
                         agent = %config.name,
                         timeout_secs,
-                        "sub-agent timed out"
+                        "sub-agent timed out, cancelling turn"
                     );
-                    Err(anyhow::anyhow!(
-                        "sub-agent '{}' timed out after {}s",
-                        config.name,
-                        timeout_secs
-                    ))
+                    Err(anyhow::Error::new(DelegationTimeout {
+                        agent: config.name.clone(),
+                        secs: timeout_secs,
+                    }))
                 }
             };
 
@@ -724,25 +789,46 @@ impl DelegationCoordinator {
 
             let duration_secs = start_time.elapsed().as_secs();
 
+            // Classify the outcome: a wall-clock timeout is distinct from a
+            // generic failure — the parent must know the task was abandoned
+            // mid-flight, not finished-with-error.
+            let timed_out_secs = result
+                .as_ref()
+                .err()
+                .and_then(|e| e.downcast_ref::<DelegationTimeout>())
+                .map(|t| t.secs);
+
+            let session_id = parent_session_id_owned.clone();
             if let Some(tx) = event_tx {
-                match result {
-                    Ok(summary) => {
+                match (&result, timed_out_secs) {
+                    (Ok(summary), _) => {
                         tracing::info!(task_id = %task_id_clone, duration_secs, "sub-agent completed successfully");
                         let _ = tx
                             .send(DelegationEvent::Completed {
                                 task_id: task_id_clone.clone(),
-                                session_id: parent_session_id_owned,
-                                summary,
+                                session_id,
+                                summary: summary.clone(),
                                 duration_secs,
                             })
                             .await;
                     }
-                    Err(e) => {
+                    (Err(_), Some(secs)) => {
+                        tracing::warn!(task_id = %task_id_clone, timeout_secs = secs, duration_secs, "sub-agent timed out");
+                        let _ = tx
+                            .send(DelegationEvent::TimedOut {
+                                task_id: task_id_clone.clone(),
+                                session_id,
+                                timeout_secs: secs,
+                                duration_secs,
+                            })
+                            .await;
+                    }
+                    (Err(e), None) => {
                         tracing::warn!(task_id = %task_id_clone, duration_secs, err = %e, "sub-agent failed");
                         let _ = tx
                             .send(DelegationEvent::Failed {
                                 task_id: task_id_clone.clone(),
-                                session_id: parent_session_id_owned,
+                                session_id,
                                 error: e.to_string(),
                             })
                             .await;
@@ -750,7 +836,20 @@ impl DelegationCoordinator {
                 }
             }
 
-            // Self-remove from the running table once the spawn finishes.
+            // Mark the terminal status on the running-table entry (briefly
+            // observable by a concurrent `agent_list`), then self-remove.
+            let terminal = if timed_out_secs.is_some() {
+                DelegationStatus::TimedOut
+            } else if result.is_ok() {
+                DelegationStatus::Completed
+            } else {
+                DelegationStatus::Failed
+            };
+            if let Some(entry) = running.get(&running_task_id) {
+                if let Ok(mut status) = entry.status.write() {
+                    *status = terminal;
+                }
+            }
             running.remove(&running_task_id);
             // Drop the mailbox sender: the sub-agent is gone, so
             // `send_message(recipient=task_id)` will now report the task_id
@@ -758,7 +857,15 @@ impl DelegationCoordinator {
             mailboxes.remove(&running_task_id);
         });
 
-        self.running.insert(task_id.clone(), handle);
+        self.running.insert(
+            task_id.clone(),
+            RunningEntry {
+                handle,
+                status: std::sync::RwLock::new(DelegationStatus::Running),
+                agent_name: agent_name.to_string(),
+                spawned_at: std::time::Instant::now(),
+            },
+        );
         Ok(task_id)
     }
 }

@@ -22,6 +22,61 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::agents::tokens::estimate_tokens;
 
+/// Delegation lifecycle status for a sub-agent task.
+///
+/// Consumed by the coordinator's running table and surfaced through
+/// `agent_list` so the parent agent can distinguish a healthy in-flight
+/// task from one killed by the wall-clock timeout or `agent_kill`.
+///
+/// `Idle` is reserved for the future "parked waiting for parent message"
+/// mode (RFC agent-messaging §3): async sub-agents currently run to
+/// completion without parking, so no live entry ever transitions to
+/// `Idle` today. The variant exists so the state machine is complete and
+/// callers (`agent_list`) can render it once the parked mode lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationStatus {
+    /// Spawned into the background and processing (the only live state
+    /// today — entries are removed from the running table on exit).
+    Running,
+    /// Parked waiting for a parent message (reserved; see enum doc).
+    Idle,
+    /// Finished successfully (transient — recorded in the event, the
+    /// entry is removed from the running table immediately after).
+    Completed,
+    /// Finished with an error (transient).
+    Failed,
+    /// Killed by the wall-clock timeout (transient).
+    TimedOut,
+    /// Cancelled by the parent via `agent_kill` (transient).
+    Cancelled,
+}
+
+impl DelegationStatus {
+    /// Whether this status means the task is no longer executing.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            DelegationStatus::Completed
+                | DelegationStatus::Failed
+                | DelegationStatus::TimedOut
+                | DelegationStatus::Cancelled
+        )
+    }
+}
+
+/// Structured error for a sub-agent killed by its wall-clock timeout.
+///
+/// `delegate_with_parent` returns this (wrapped in `anyhow::Error`) from
+/// the timeout branch; the async wrapper downcasts it to emit
+/// `DelegationEvent::TimedOut` instead of a generic `Failed`.
+#[derive(Debug, thiserror::Error)]
+#[error("sub-agent '{agent}' timed out after {secs}s")]
+pub struct DelegationTimeout {
+    pub agent: String,
+    pub secs: u64,
+}
+
 /// Events sent from background sub-agents to the Orchestrator.
 ///
 /// RFC v2 §三.C: `session_id` identifies the parent session that spawned
@@ -45,6 +100,19 @@ pub enum DelegationEvent {
         /// Hex session ID of the parent session (NOT a routing key).
         session_id: String,
         error: String,
+    },
+    /// Sub-agent was killed by its wall-clock timeout.
+    ///
+    /// Distinct from `Failed`: the parent should treat the task as
+    /// abandoned (possibly mid-flight) rather than finished-with-error.
+    TimedOut {
+        task_id: String,
+        /// Hex session ID of the parent session (NOT a routing key).
+        session_id: String,
+        /// The effective timeout that killed the sub-agent (seconds).
+        timeout_secs: u64,
+        /// How long the sub-agent ran before the timeout fired (seconds).
+        duration_secs: u64,
     },
     /// Sub-agent sent a message to the parent while running in background.
     ///

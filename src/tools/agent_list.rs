@@ -45,14 +45,16 @@ impl Tool for AgentListTool {
         _args: serde_json::Value,
         _session: &crate::agents::session::Session,
     ) -> anyhow::Result<ToolResult> {
-        let running = self.delegator.running_snapshot();
+        let records = self.delegator.running_records();
 
-        let items: Vec<serde_json::Value> = running
+        let items: Vec<serde_json::Value> = records
             .into_iter()
-            .map(|task_id| {
+            .map(|r| {
                 json!({
-                    "task_id": task_id,
-                    "status": "running"
+                    "task_id": r.task_id,
+                    "agent_name": r.agent_name,
+                    "status": r.status,
+                    "elapsed_secs": r.elapsed_secs
                 })
             })
             .collect();

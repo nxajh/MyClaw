@@ -52,6 +52,26 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
             let synthetic_id = format!("delegation:{}", task_id);
             (task_id, session_id, content, synthetic_id)
         }
+        DelegationEvent::TimedOut {
+            task_id,
+            session_id,
+            timeout_secs,
+            duration_secs,
+        } => {
+            tracing::warn!(
+                task_id = %task_id,
+                timeout_secs,
+                duration_secs,
+                "delegation timed out, waking main agent"
+            );
+            let content = format!(
+                "[系统通知] 子代理后台任务超时 (task_id: {}, 超时上限: {}s, 已运行: {}s)，任务已中止。\
+                 如需重试请重新委托，或先用 agent_list 确认无残留任务。",
+                task_id, timeout_secs, duration_secs
+            );
+            let synthetic_id = format!("delegation:{}", task_id);
+            (task_id, session_id, content, synthetic_id)
+        }
         // RFC agent-messaging §3.4: a sub-agent messaged its parent while
         // running in background. `task_id` is the sub-agent's own id
         // (identity — lets the parent reply via `recipient`), `session_id`

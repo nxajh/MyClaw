@@ -59,7 +59,10 @@ impl Tool for AgentKillTool {
         if cancelled {
             Ok(ToolResult {
                 success: true,
-                output: format!(r#"{{"status": "terminated", "task_id": "{}"}}"#, task_id),
+                output: format!(
+                    r#"{{"status": "cancelled", "task_id": "{}"}}"#,
+                    task_id
+                ),
                 error: None,
             })
         } else {
