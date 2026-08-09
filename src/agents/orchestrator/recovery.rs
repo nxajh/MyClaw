@@ -14,6 +14,7 @@ use crate::agents::session::SessionManager;
 use crate::agents::{
     AgentRuntime, DelegationCoordinator, DelegationEvent, SessionContext, UnfinishedSubAgent,
 };
+use crate::channels::Channel;
 use crate::storage::SessionBackend;
 
 /// Where a recovered turn's output goes.
@@ -90,6 +91,11 @@ impl CompletionSink {
 
 /// Spawn the recovery turn for one session. The LLM work runs in the
 /// background so the event loop starts without blocking.
+///
+/// `channel` (when present) is re-attached to the session before the resumed
+/// turn runs: startup recovery bypasses `process_turn` (which is the only
+/// place that normally installs `session.channel`), so without this the
+/// recovered turn would lose channel-scoped tools such as `send_message`.
 fn spawn_recovery(
     turn_tracker: super::ctx::SharedTurnTracker,
     session_ctx: Arc<SessionContext>,
@@ -97,11 +103,15 @@ fn spawn_recovery(
     label: &'static str,
     id: String,
     sink: CompletionSink,
+    channel: Option<Arc<dyn Channel>>,
 ) {
     tokio::spawn(async move {
         let _guard = turn_tracker.track();
         let _turn_guard = session_ctx.turn_lock.lock().await;
         let mut session = session_ctx.session.lock().await;
+        if let Some(ch) = channel {
+            session.channel = Some(ch);
+        }
 
         let resolved = ResolvedTurn::resolve(&session, &runtime);
         let turn_ctx = resolved.turn_context();
@@ -153,8 +163,18 @@ pub(super) fn run_startup(
         if snap.history.is_empty() || !super::history_has_incomplete_turn(&snap.history) {
             continue;
         }
+        // `get_or_create(&key)` resolves the owner's *active* session, so only
+        // that session is ever resumed here. Inactive sessions are left for the
+        // normal message path: when the user switches back and sends a message,
+        // `dispatch_turn` → `process_turn` re-installs the channel and
+        // `Agent::run` continues the interrupted turn naturally.
         tracing::info!(session = %key, "startup recovery: found incomplete turn, spawning background task");
         let session_ctx = sessions.get_or_create_context(&key);
+        // Startup recovery bypasses `process_turn` (the only place that
+        // normally installs `session.channel`); re-attach the channel here so
+        // channel-scoped tools such as `send_message` stay available during the
+        // resumed turn.
+        let channel = SessionKey::parse(&key).and_then(|k| channels.get(&k.account_key()));
         spawn_recovery(
             turn_tracker.clone(),
             session_ctx,
@@ -166,6 +186,7 @@ pub(super) fn run_startup(
                 backend: Arc::clone(sessions.backend()),
                 channels: channels.clone(),
             },
+            channel,
         );
     }
 
@@ -193,6 +214,7 @@ pub(super) fn run_startup(
                 reply_target: sa.reply_target.clone(),
                 delegator: delegator.clone(),
             },
+            None,
         );
     }
 }
