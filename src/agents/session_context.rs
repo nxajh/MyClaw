@@ -1100,3 +1100,193 @@ mod p3_helpers_tests {
         assert!(history_looks_incomplete(&[asst]));
     }
 }
+
+/// P1-4: turn-suspension (方案 C, RFC §3/§5) behavior tests. All state is
+/// exercised through the public `SessionContext` API; persistence round-trips
+/// go through the manager path so the in-memory backend + `BackendPersistHook`
+/// are the same wiring production uses.
+#[cfg(test)]
+mod suspension_tests {
+    use super::*;
+    use crate::agents::SessionManager;
+
+    fn make_ctx() -> (Arc<SessionContext>, Arc<SessionManager>) {
+        let manager = Arc::new(SessionManager::in_memory());
+        let ctx = manager.get_or_create_context("mock:default:u1");
+        (ctx, manager)
+    }
+
+    /// A suspended context with one pending task "t1".
+    fn suspended() -> Arc<SessionContext> {
+        let (ctx, _m) = make_ctx();
+        ctx.add_pending_task("t1".to_string());
+        ctx
+    }
+
+    #[test]
+    fn pending_flips_with_registration_and_collection() {
+        let ctx = suspended();
+        assert!(ctx.has_pending_delegations());
+        assert_eq!(ctx.suspension_snapshot().unwrap().pending, vec!["t1"]);
+        ctx.record_terminal("t1".into(), SubStatus::Completed, "ok".into(), 0);
+        assert!(!ctx.has_pending_delegations());
+        assert!(ctx.suspension_snapshot().is_some(), "collected result keeps the suspension until clear");
+    }
+
+    #[test]
+    fn add_pending_is_idempotent() {
+        let (ctx, _m) = make_ctx();
+        ctx.add_pending_task("t1".to_string());
+        ctx.add_pending_task("t1".to_string());
+        ctx.add_pending_task("t2".to_string());
+        assert_eq!(
+            ctx.suspension_snapshot().unwrap().pending,
+            vec!["t1", "t2"]
+        );
+    }
+
+    #[test]
+    fn progress_folds_into_terminal_result() {
+        let ctx = suspended();
+        ctx.add_progress("t1", "working on it");
+        ctx.add_progress("t1", "still going");
+        let snap = ctx
+            .record_terminal("t1".into(), SubStatus::Completed, "summary text".into(), 0)
+            .unwrap();
+        assert_eq!(snap.results.len(), 1);
+        let r = &snap.results[0];
+        assert_eq!(r.task_id, "t1");
+        assert_eq!(r.status, SubStatus::Completed);
+        assert_eq!(r.content, "summary text");
+        assert_eq!(r.sent_message_count, 0);
+        assert_eq!(r.progress, vec!["working on it", "still going"]);
+        assert!(snap.pending.is_empty());
+        assert!(snap.progress_by_task.is_empty());
+    }
+
+    #[test]
+    fn out_of_order_completion_collects_in_completion_order() {
+        let (ctx, _m) = make_ctx();
+        ctx.add_pending_task("t1".to_string());
+        ctx.add_pending_task("t2".to_string());
+        ctx.add_pending_task("t3".to_string());
+        ctx.record_terminal("t3".into(), SubStatus::Failed, "e3".into(), 0);
+        ctx.record_terminal("t1".into(), SubStatus::Completed, "c1".into(), 0);
+        ctx.record_terminal("t2".into(), SubStatus::TimedOut, "t2".into(), 0);
+        let snap = ctx.suspension_snapshot().unwrap();
+        let order: Vec<&str> = snap.results.iter().map(|r| r.task_id.as_str()).collect();
+        assert_eq!(order, vec!["t3", "t1", "t2"]);
+        assert_eq!(snap.results[1].status, SubStatus::Completed);
+        assert_eq!(snap.results[2].status, SubStatus::TimedOut);
+        assert!(snap.pending.is_empty());
+    }
+
+    #[test]
+    fn record_terminal_without_suspension_returns_none() {
+        let (ctx, _m) = make_ctx();
+        assert!(ctx.suspension_snapshot().is_none());
+        assert!(!ctx.has_pending_delegations());
+        let snap = ctx.record_terminal("t9".into(), SubStatus::Completed, "x".into(), 0);
+        assert!(snap.is_none());
+        assert!(ctx.suspension_snapshot().is_none());
+    }
+
+    #[test]
+    fn clear_semantics_pending_kept_empty_removed_idempotent() {
+        let (ctx, _m) = make_ctx();
+        ctx.add_pending_task("t1".to_string());
+        ctx.add_pending_task("t2".to_string());
+        // pending non-empty → suspension retained
+        ctx.record_terminal("t1".into(), SubStatus::Completed, "c1".into(), 0);
+        ctx.clear_suspension_if_collected();
+        let snap = ctx.suspension_snapshot().unwrap();
+        assert_eq!(snap.pending, vec!["t2"]);
+        // pending empty → suspension cleared
+        ctx.record_terminal("t2".into(), SubStatus::Completed, "c2".into(), 0);
+        ctx.clear_suspension_if_collected();
+        assert!(ctx.suspension_snapshot().is_none());
+        // idempotent
+        ctx.clear_suspension_if_collected();
+        assert!(ctx.suspension_snapshot().is_none());
+    }
+
+    #[test]
+    fn eight_threads_concurrent_collection_loses_nothing() {
+        let (ctx, _m) = make_ctx();
+        for i in 0..8 {
+            ctx.add_pending_task(format!("t{}", i));
+        }
+        let mut handles = Vec::new();
+        for i in 0..8u32 {
+            let ctx = Arc::clone(&ctx);
+            handles.push(std::thread::spawn(move || {
+                ctx.record_terminal(
+                    format!("t{}", i),
+                    SubStatus::Completed,
+                    format!("r{}", i),
+                    i as u64,
+                );
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let snap = ctx.suspension_snapshot().unwrap();
+        assert_eq!(snap.results.len(), 8);
+        assert!(snap.pending.is_empty());
+        let mut by_task: Vec<&SubResult> = snap.results.iter().collect();
+        by_task.sort_by_key(|r| r.task_id.clone());
+        for (i, r) in by_task.iter().enumerate() {
+            assert_eq!(r.task_id, format!("t{}", i));
+            assert_eq!(r.content, format!("r{}", i));
+            assert_eq!(r.sent_message_count, i as u64);
+        }
+    }
+
+    #[test]
+    fn persist_restore_roundtrip_preserves_results() {
+        let manager = Arc::new(SessionManager::in_memory());
+        let ctx = manager.get_or_create_context("mock:default:u1");
+        ctx.add_pending_task("t1".to_string());
+        ctx.add_progress("t1", "halfway");
+        ctx.record_terminal("t1".into(), SubStatus::Completed, "final summary".into(), 2);
+        let sid = ctx.session_id.clone();
+        assert_eq!(ctx.suspension_snapshot().unwrap().results.len(), 1);
+
+        // Drop the context — a fresh one must restore from the backend.
+        manager.drop_context("mock:default:u1");
+        let ctx2 = manager.get_or_create_context("mock:default:u1");
+        assert_eq!(ctx2.session_id, sid);
+        let snap2 = ctx2.suspension_snapshot().unwrap();
+        assert_eq!(snap2.results.len(), 1);
+        let r = &snap2.results[0];
+        assert_eq!(r.task_id, "t1");
+        assert_eq!(r.status, SubStatus::Completed);
+        assert_eq!(r.content, "final summary");
+        assert_eq!(r.sent_message_count, 2);
+        assert_eq!(r.progress, vec!["halfway"]);
+
+        // Clearing persists a None → next rebuild is unsuspended.
+        ctx2.clear_suspension_if_collected();
+        manager.drop_context("mock:default:u1");
+        let ctx3 = manager.get_or_create_context("mock:default:u1");
+        assert!(ctx3.suspension_snapshot().is_none());
+    }
+
+    #[test]
+    fn corrupt_and_empty_json_are_ignored_on_restore() {
+        let manager = Arc::new(SessionManager::in_memory());
+        let ctx = manager.get_or_create_context("mock:default:u1");
+        let sid = ctx.session_id.clone();
+        // Corrupt JSON → restore warns and ignores.
+        manager.backend().save_suspension(&sid, "{ not json").unwrap();
+        manager.drop_context("mock:default:u1");
+        let ctx2 = manager.get_or_create_context("mock:default:u1");
+        assert!(ctx2.suspension_snapshot().is_none());
+        // Empty JSON → treated as no suspension.
+        manager.backend().save_suspension(&sid, "").unwrap();
+        manager.drop_context("mock:default:u1");
+        let ctx3 = manager.get_or_create_context("mock:default:u1");
+        assert!(ctx3.suspension_snapshot().is_none());
+    }
+}

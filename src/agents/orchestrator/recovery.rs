@@ -398,3 +398,136 @@ async fn recover_suspension(
     )
     .await;
 }
+
+/// P1-4: recovery unit tests — CompletionSink terminal-event delivery
+/// (session_id must be the parent SESSION id, E29) and `recover_suspension`
+/// semantics (fail uncovered tasks, leave covered ones for the natural wake
+/// path, all-covered no-op).
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::test_ctx;
+    use super::*;
+    use crate::agents::session::SessionManager;
+    use crate::agents::{AgentRegistry, DelegationCoordinator};
+    use crate::config::sub_agent::{AgentIsolation, SubAgentConfig};
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+    use tokio::sync::mpsc;
+
+    fn delegator() -> Arc<DelegationCoordinator> {
+        let registry = Arc::new(AgentRegistry::from_vec(vec![SubAgentConfig {
+            name: "coder".to_string(),
+            system_prompt: "coding specialist".to_string(),
+            tools: crate::config::filters::ToolFilter::all(),
+            skills: crate::config::filters::SkillFilter::all(),
+            mcp: crate::config::filters::McpFilter::all(),
+            max_tool_calls: None,
+            description: None,
+            model: None,
+            isolation: AgentIsolation::Shared,
+            timeout: None,
+        }]));
+        let manager = Arc::new(SessionManager::in_memory());
+        Arc::new(DelegationCoordinator::new(
+            registry,
+            manager,
+            PathBuf::new(),
+            "test",
+            3,
+        ))
+    }
+
+    #[tokio::test]
+    async fn delegate_sink_delivers_completed_to_parent_session() {
+        let dm = delegator();
+        let (tx, mut rx) = mpsc::channel(8);
+        dm.set_event_sender(tx);
+        let sink = CompletionSink::Delegate {
+            task_id: "task-1".to_string(),
+            // E29: the event's session_id must be the parent SESSION id so
+            // wake / route_notice can index it.
+            parent_session_id: "parent-session-1".to_string(),
+            reply_target: String::new(),
+            delegator: Some(dm),
+        };
+        sink.deliver("recovered text".to_string()).await;
+        let ev = rx.recv().await.unwrap();
+        match ev {
+            DelegationEvent::Completed {
+                task_id,
+                session_id,
+                summary,
+                duration_secs,
+                sent_message_count,
+            } => {
+                assert_eq!(task_id, "task-1");
+                assert_eq!(session_id, "parent-session-1");
+                assert_eq!(summary, "recovered text");
+                assert_eq!(duration_secs, 0);
+                assert_eq!(sent_message_count, 0);
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delegate_sink_fail_emits_failed_to_parent_session() {
+        let dm = delegator();
+        let (tx, mut rx) = mpsc::channel(8);
+        dm.set_event_sender(tx);
+        let sink = CompletionSink::Delegate {
+            task_id: "task-1".to_string(),
+            parent_session_id: "parent-session-1".to_string(),
+            reply_target: String::new(),
+            delegator: Some(dm),
+        };
+        sink.fail("recovery turn failed".to_string()).await;
+        let ev = rx.recv().await.unwrap();
+        match ev {
+            DelegationEvent::Failed {
+                task_id,
+                session_id,
+                error,
+            } => {
+                assert_eq!(task_id, "task-1");
+                assert_eq!(session_id, "parent-session-1");
+                assert_eq!(error, "recovery turn failed");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn recover_suspension_fails_uncovered_tasks() {
+        let ctx = Arc::new(test_ctx(vec![]));
+        let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
+        sctx.add_pending_task("t1".to_string());
+        sctx.add_pending_task("t2".to_string());
+        sctx.add_progress("t1", "halfway report");
+        let covered: HashSet<String> = ["t2".to_string()].into_iter().collect();
+        recover_suspension(&ctx, sctx.clone(), &covered).await;
+
+        let snap = sctx.suspension_snapshot().unwrap();
+        assert_eq!(snap.results.len(), 1);
+        let r = &snap.results[0];
+        assert_eq!(r.task_id, "t1");
+        assert_eq!(r.status, SubStatus::Failed);
+        assert!(r.content.contains("daemon 重启"), "content: {}", r.content);
+        assert!(r.content.contains("halfway report"));
+        // the covered task is untouched — its terminal event arrives via wake
+        assert_eq!(snap.pending, vec!["t2".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn recover_suspension_all_covered_is_noop() {
+        let ctx = Arc::new(test_ctx(vec![]));
+        let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
+        sctx.add_pending_task("t1".to_string());
+        sctx.add_pending_task("t2".to_string());
+        let covered: HashSet<String> = ["t1".to_string(), "t2".to_string()].into_iter().collect();
+        recover_suspension(&ctx, sctx.clone(), &covered).await;
+        let snap = sctx.suspension_snapshot().unwrap();
+        assert!(snap.results.is_empty());
+        assert_eq!(snap.pending.len(), 2);
+    }
+}

@@ -1,6 +1,6 @@
 # Turn 挂起延续 RFC（Turn Suspension & Continuation）
 
-> 状态:草案(2026-08-10 讨论收敛 + 审查修正,待实现)
+> 状态:已实现(2026-08-10 讨论收敛 + 审查修正;P0-1/P0-2/P0-3/P1-1/P1-2/P1-3 已合入 master,P1-4 测试补齐 + RFC 定稿,本提交)
 > 范围:`agents/agent.rs`(EndTurn 挂起标记) + `agents/delegation_coordinator.rs`(终态事件) + `agents/orchestrator/delegation.rs`(wake) + `agents/orchestrator/inbound.rs`(dispatch 判定 + 恢复锁) + `agents/session_context.rs`(挂起状态挂载) + `storage/session.rs`(持久化)
 > 原则:**主 agent 派发 async 子 agent 后 turn 不结束**;每个子 agent 终态事件各自唤醒主 agent 处理(不聚合等待);全部收尾后主 agent 汇总输出,完整 turn 才结束。
 > 实现机制(审查修正):**方案 X**——`Agent::run` 不改内部循环,照常返回 `TurnResult`;挂起是**语义概念**(history 连续),恢复 = 事件到达时 `process_turn` 一次(复用现有 wake → dispatch 路径),新增的只是挂起状态管理 + 输出静默 + turn 边界判定。
@@ -159,23 +159,34 @@ pub struct SubResult {
 
 ## 6. 递归嵌套
 
-- 深度上限可配置:`config` 新增 `delegation.max_depth`(默认 3,含主 agent 层)。
-- 超限时 `agent_delegate` 返回错误(工具层拒绝,深度计数器挂 SessionContext),不产生挂起。
+✅ **已实现(P1-2, `8a97219`)**。配置项 `delegation.max_depth`(默认 3,含主 agent 层,`config/mod.rs` `[delegation]`)。
+
+- 深度计算(实现机制与初稿不同):以 `parent_session_id` 链向上 walk(`delegation_coordinator.rs::session_depth`,最多 64 层防御上限;不可解析/不存在的 session 回退 1),子代理深度 = 父深度 + 1 —— 而非初稿的"深度计数器挂 SessionContext"。
+- 超限时 `agent_delegate` 返回错误(工具层 `check_depth` bail "maximum delegation depth exceeded"),不产生挂起、不登记 pending。
 - 子 agent 内部再派发同样受限于自身深度(每层 +1)。
 
 ## 7. 已知缺口(随本 RFC 一并修复)
 
 | 缺口 | 现状 | 修复 |
 |---|---|---|
-| `agent_kill`(cancel → abort)无事件通知 | `delegation_coordinator.rs` L296-307 `handle.abort()`,父 agent 收不到 kill 通知 | kill 后广播 `Failed{error:"cancelled"}`(不新增变体,保持四类事件) |
-| `recovery.rs` `run_recovery` Err 分支无 Failed 广播 | L136-138 仅日志 | 补 Failed 事件广播,挂起主 agent 可感知子 agent 恢复失败 |
+| `agent_kill`(cancel → abort)无事件通知 | `delegation_coordinator.rs` L296-307 `handle.abort()`,父 agent 收不到 kill 通知 | ✅ **已修复(P1-3, `40c7e16`)**:kill 后广播 `Failed{error:"cancelled"}`(不新增变体,保持四类事件) |
+| `recovery.rs` `run_recovery` Err 分支无 Failed 广播 | L136-138 仅日志 | ✅ **已修复(P1-3, `40c7e16`)**:补 Failed 事件广播,挂起主 agent 可感知子 agent 恢复失败 |
 
 ## 8. 实施任务拆分
 
-- **P0-1** `TurnSuspension` 结构 + `SessionContext` 挂载 + `Agent::run` EndTurn 挂起标记(`TurnResult` 加 `has_pending`,§2.2/§3.1)
-- **P0-2** 终态事件 → 挂起恢复驱动(`dispatch_turn` 复用 + 恢复锁 turn_tracker 串行化 + 非挂起会话维持现状;`AgentMessage` 加 `kind` 字段,Progress 统一不注入,§2.3/§3.2)
-- **P0-3** 中间输出静默 + ask_user 挂起轮次禁用 + 最终汇总结束语义(§3.3/§3.4)
-- **P1-1** 挂起状态持久化 `suspension.json` + 重启恢复(遗留 pending 按 Failed,§5)
-- **P1-2** 递归嵌套上限 config(`delegation.max_depth` 默认 3,§6)
-- **P1-3** 缺口修复:agent_kill 广播 Failed{cancelled} + recovery Err 补 Failed 广播(§7)
-- **P1-4** 测试(挂起/恢复/逐事件注入/并发终态/超时/重启恢复/深度上限)+ 本 RFC 更新 + CI
+- ✅ **P0-1** `TurnSuspension` 结构 + `SessionContext` 挂载 + `Agent::run` EndTurn 挂起标记(`TurnResult` 加 `has_pending`,§2.2/§3.1)—— `712fa93`
+- ✅ **P0-2** 终态事件 → 挂起恢复驱动(`dispatch_turn` 复用 + 恢复锁 turn_tracker 串行化 + 非挂起会话维持现状;`AgentMessage` 加 `kind` 字段,Progress 统一不注入,§2.3/§3.2)—— `0eb24e0`
+- ✅ **P0-3** 中间输出静默 + ask_user 挂起轮次禁用 + 最终汇总结束语义(§3.3/§3.4)—— `0fafc85`
+- ✅ **P1-1** 挂起状态持久化 `suspension.json` + 重启恢复(遗留 pending 按 Failed,§5)—— `f76f201` + `211270c`
+- ✅ **P1-2** 递归嵌套上限 config(`delegation.max_depth` 默认 3,§6)—— `8a97219`
+- ✅ **P1-3** 缺口修复:agent_kill 广播 Failed{cancelled} + recovery Err 补 Failed 广播(§7)—— `40c7e16`
+- ✅ **P1-4** 测试(挂起/恢复/逐事件注入/并发终态/超时/重启恢复/深度上限)+ 本 RFC 更新 + CI——本提交
+
+### P1-4 测试覆盖
+
+| 模块(全部 `#[cfg(test)]`,模块内) | 覆盖点 |
+|---|---|
+| `session_context.rs` `mod suspension_tests` | 登记/has_pending 翻转、add_pending 幂等、progress 折叠进终态结果(含 sent_message_count)、3 任务乱序完成按完成顺序收集、未挂起 record_terminal→None、clear 语义(保留/清除/幂等)、8 线程并发不丢结果、persist-restore 往返(重建后结果保留、清空后 None)、corrupt/空 JSON 忽略 |
+| `delegation_coordinator.rs` `mod tests` | resolve_timeout(默认/tool>config/钳 1800/0 值)、session_depth 未知回退 1、三层链边界(max_depth=3: main Ok/sub1 Ok/sub2 Err)、max_depth=1 全拒、spawn_async 登记 pending+running(task_id 含 `/t/`)、深度超限不登记、未知 agent 拒绝、cancel 广播 Failed{cancelled}(session_id=父会话)+running 移除、cancel 未知 false |
+| `orchestrator/delegation.rs` `mod tests` | wake 四类终态注入(Completed/Failed/TimedOut)、Completed sent_message_count>0 降噪、Progress 抑制不唤醒、progress 先到再 Completed 折叠进 r.progress、未知 session no-op |
+| `orchestrator/recovery.rs` `mod tests` | CompletionSink::Delegate deliver→Completed(session_id=parent_session_id,E29 固化)、fail→Failed、recover_suspension 未覆盖按 Failed+covered 保留、全 covered no-op |

@@ -1090,3 +1090,176 @@ impl crate::agents::AgentMessenger for DelegationCoordinator {
         }
     }
 }
+
+/// P1-4: DelegationCoordinator unit tests — depth gating, async spawn
+/// registration, timeout resolution, and cancel-broadcast semantics. Tests
+/// reach private internals (`running` table, `check_depth`, `session_depth`,
+/// `resolve_timeout`) as descendants of this module.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::session::SessionManager;
+    use crate::agents::AgentRegistry;
+    use crate::config::sub_agent::SubAgentConfig;
+
+    fn coder_config() -> SubAgentConfig {
+        SubAgentConfig {
+            name: "coder".to_string(),
+            system_prompt: "You are a coding specialist.".to_string(),
+            tools: crate::config::filters::ToolFilter::all(),
+            skills: crate::config::filters::SkillFilter::all(),
+            mcp: crate::config::filters::McpFilter::all(),
+            max_tool_calls: None,
+            description: None,
+            model: None,
+            isolation: AgentIsolation::Shared,
+            timeout: None,
+        }
+    }
+
+    fn coordinator(max_depth: u32) -> (DelegationCoordinator, Arc<SessionManager>) {
+        let registry = Arc::new(AgentRegistry::from_vec(vec![coder_config()]));
+        let manager = Arc::new(SessionManager::in_memory());
+        let dc = DelegationCoordinator::new(
+            registry,
+            Arc::clone(&manager),
+            PathBuf::new(),
+            "test",
+            max_depth,
+        );
+        (dc, manager)
+    }
+
+    #[test]
+    fn resolve_timeout_priority_fallback_and_clamp() {
+        // default: system fallback 600s
+        assert_eq!(resolve_timeout(None, None), 600);
+        // tool value wins over config regardless of ordering
+        assert_eq!(resolve_timeout(Some(100), Some(50)), 100);
+        assert_eq!(resolve_timeout(Some(100), Some(200)), 100);
+        // config used when tool doesn't specify
+        assert_eq!(resolve_timeout(None, Some(300)), 300);
+        // hard ceiling 1800s
+        assert_eq!(resolve_timeout(Some(5000), None), 1800);
+        assert_eq!(resolve_timeout(Some(5000), Some(9000)), 1800);
+        // 0 passes through (no lower clamp)
+        assert_eq!(resolve_timeout(Some(0), None), 0);
+    }
+
+    #[test]
+    fn unknown_session_depth_falls_back_to_one() {
+        let (dc, _m) = coordinator(3);
+        assert_eq!(dc.session_depth("no-such-session"), 1);
+        assert!(dc.check_depth("no-such-session").is_ok());
+    }
+
+    #[test]
+    fn check_depth_three_level_chain_boundary() {
+        let (dc, manager) = coordinator(3);
+        let main = manager.get_or_create_context("mock:default:u1");
+        let main_id = main.session_id.clone();
+        assert!(dc.check_depth(&main_id).is_ok());
+        let sub1 = manager.create_sub_session(&main_id, "coder").unwrap();
+        assert!(dc.check_depth(&sub1.id).is_ok());
+        let sub2 = manager.create_sub_session(&sub1.id, "coder").unwrap();
+        let err = dc.check_depth(&sub2.id).unwrap_err();
+        assert!(
+            err.to_string().contains("maximum delegation depth exceeded"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn max_depth_one_rejects_all() {
+        let (dc, manager) = coordinator(1);
+        let main = manager.get_or_create_context("mock:default:u1");
+        let err = dc.check_depth(&main.session_id).unwrap_err();
+        assert!(err.to_string().contains("maximum delegation depth exceeded"));
+    }
+
+    #[tokio::test]
+    async fn spawn_async_registers_pending_and_running() {
+        let (dc, manager) = coordinator(3);
+        let parent = manager.get_or_create_context("mock:default:u1");
+        let parent_id = parent.session_id.clone();
+        let task_id = dc
+            .spawn_delegate_async("coder", "do the thing", &parent_id, "", 60)
+            .unwrap();
+        assert!(task_id.contains("/t/"), "task_id should be an FQID: {task_id}");
+        // current_thread runtime: the spawned body has not been polled yet, so
+        // both tables are deterministically populated. The test body never
+        // awaits, so the background task is cancelled at runtime drop.
+        assert_eq!(dc.running_snapshot(), vec![task_id.clone()]);
+        assert_eq!(dc.running_count(), 1);
+        let snap = parent.suspension_snapshot().unwrap();
+        assert_eq!(snap.pending, vec![task_id]);
+    }
+
+    #[tokio::test]
+    async fn spawn_async_depth_rejected_without_pending_or_running() {
+        let (dc, manager) = coordinator(1);
+        let parent = manager.get_or_create_context("mock:default:u1");
+        let err = dc
+            .spawn_delegate_async("coder", "task", &parent.session_id, "", 60)
+            .unwrap_err();
+        assert!(err.to_string().contains("maximum delegation depth exceeded"));
+        assert!(parent.suspension_snapshot().is_none());
+        assert!(dc.running_snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn spawn_async_unknown_agent_is_rejected() {
+        let (dc, manager) = coordinator(3);
+        let parent = manager.get_or_create_context("mock:default:u1");
+        let err = dc
+            .spawn_delegate_async("nope", "task", &parent.session_id, "", 60)
+            .unwrap_err();
+        assert!(err.to_string().contains("Unknown sub-agent"));
+        assert!(dc.running_snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_broadcasts_failed_cancelled_to_parent_session() {
+        let (dc, manager) = coordinator(3);
+        let parent = manager.get_or_create_context("mock:default:u1");
+        let (tx, mut rx) = mpsc::channel(8);
+        dc.set_event_sender(tx);
+
+        // Hand-instrument a running entry so the test doesn't depend on the
+        // background spawn path.
+        let task_id = Fqid::new("test", TYPE_TASK).to_string();
+        dc.running.insert(
+            task_id.clone(),
+            RunningEntry {
+                handle: tokio::spawn(async {}),
+                status: std::sync::RwLock::new(DelegationStatus::Running),
+                agent_name: "coder".to_string(),
+                session_id: parent.session_id.clone(),
+                spawned_at: std::time::Instant::now(),
+                messages_sent: std::sync::atomic::AtomicU64::new(0),
+            },
+        );
+
+        assert!(dc.cancel(&task_id).await);
+        let ev = rx.recv().await.unwrap();
+        match ev {
+            DelegationEvent::Failed {
+                task_id: t,
+                session_id: s,
+                error,
+            } => {
+                assert_eq!(t, task_id);
+                assert_eq!(s, parent.session_id);
+                assert_eq!(error, "cancelled");
+            }
+            other => panic!("expected Failed(cancelled), got {other:?}"),
+        }
+        assert!(dc.running_snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_unknown_task_returns_false() {
+        let (dc, _m) = coordinator(3);
+        assert!(!dc.cancel("no-such-task").await);
+    }
+}

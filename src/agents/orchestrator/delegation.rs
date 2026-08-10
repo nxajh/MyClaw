@@ -315,3 +315,199 @@ async fn process_non_active(ctx: &OrchestratorCtx, session_id: &str, content: &s
         }
     });
 }
+
+/// P1-4: `wake` routing tests — terminal events collect into the parent's
+/// suspension (progress folding, degraded summary), Progress messages are
+/// suppressed, and unknown sessions are a no-op. `test_ctx` has no channels,
+/// so `route_notice` falls back to the spawned non-active path (NullRegistry
+/// fails fast) and never blocks the assertions.
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::test_ctx;
+    use super::*;
+    use crate::agents::{AgentMessage, SessionContext};
+    use std::sync::Arc;
+
+    /// A session registered in `ctx` with one pending task "t1".
+    fn suspended_session(ctx: &OrchestratorCtx) -> Arc<SessionContext> {
+        let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
+        sctx.add_pending_task("t1".to_string());
+        sctx
+    }
+
+    #[tokio::test]
+    async fn completed_collects_result_with_summary() {
+        let ctx = test_ctx(vec![]);
+        let sctx = suspended_session(&ctx);
+        let sid = sctx.session_id.clone();
+        wake(
+            &ctx,
+            DelegationEvent::Completed {
+                task_id: "t1".to_string(),
+                session_id: sid,
+                summary: "the final summary".to_string(),
+                duration_secs: 7,
+                sent_message_count: 0,
+            },
+        )
+        .await;
+        let snap = sctx.suspension_snapshot().unwrap();
+        assert_eq!(snap.results.len(), 1);
+        let r = &snap.results[0];
+        assert_eq!(r.status, SubStatus::Completed);
+        assert!(r.content.contains("the final summary"));
+        assert_eq!(r.sent_message_count, 0);
+        assert!(snap.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn completed_with_messages_degrades_summary() {
+        let ctx = test_ctx(vec![]);
+        let sctx = suspended_session(&ctx);
+        let sid = sctx.session_id.clone();
+        wake(
+            &ctx,
+            DelegationEvent::Completed {
+                task_id: "t1".to_string(),
+                session_id: sid,
+                summary: "duplicate summary".to_string(),
+                duration_secs: 3,
+                sent_message_count: 3,
+            },
+        )
+        .await;
+        let snap = sctx.suspension_snapshot().unwrap();
+        let r = &snap.results[0];
+        assert!(!r.content.contains("duplicate summary"));
+        assert!(r.content.contains("已实时同步"));
+        assert_eq!(r.sent_message_count, 3);
+    }
+
+    #[tokio::test]
+    async fn failed_collects_error() {
+        let ctx = test_ctx(vec![]);
+        let sctx = suspended_session(&ctx);
+        let sid = sctx.session_id.clone();
+        wake(
+            &ctx,
+            DelegationEvent::Failed {
+                task_id: "t1".to_string(),
+                session_id: sid,
+                error: "provider exploded".to_string(),
+            },
+        )
+        .await;
+        let snap = sctx.suspension_snapshot().unwrap();
+        let r = &snap.results[0];
+        assert_eq!(r.status, SubStatus::Failed);
+        assert!(r.content.contains("provider exploded"));
+    }
+
+    #[tokio::test]
+    async fn timed_out_collects_timeout_note() {
+        let ctx = test_ctx(vec![]);
+        let sctx = suspended_session(&ctx);
+        let sid = sctx.session_id.clone();
+        wake(
+            &ctx,
+            DelegationEvent::TimedOut {
+                task_id: "t1".to_string(),
+                session_id: sid,
+                timeout_secs: 600,
+                duration_secs: 600,
+            },
+        )
+        .await;
+        let snap = sctx.suspension_snapshot().unwrap();
+        let r = &snap.results[0];
+        assert_eq!(r.status, SubStatus::TimedOut);
+        assert!(r.content.contains("超时"));
+    }
+
+    #[tokio::test]
+    async fn progress_message_is_suppressed_not_waking() {
+        let ctx = test_ctx(vec![]);
+        let sctx = suspended_session(&ctx);
+        let sid = sctx.session_id.clone();
+        wake(
+            &ctx,
+            DelegationEvent::Message(AgentMessage {
+                msg_id: "m1".to_string(),
+                sender_name: "coder".to_string(),
+                task_id: "t1".to_string(),
+                session_id: sid,
+                text: "working on it".to_string(),
+                kind: MessageKind::Progress,
+            }),
+        )
+        .await;
+        let snap = sctx.suspension_snapshot().unwrap();
+        assert!(snap.results.is_empty());
+        assert_eq!(snap.pending, vec!["t1".to_string()]);
+        assert_eq!(
+            snap.progress_by_task.get("t1").unwrap(),
+            &vec!["working on it".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn progress_folds_into_terminal_result() {
+        let ctx = test_ctx(vec![]);
+        let sctx = suspended_session(&ctx);
+        let sid = sctx.session_id.clone();
+        wake(
+            &ctx,
+            DelegationEvent::Message(AgentMessage {
+                msg_id: "m1".to_string(),
+                sender_name: "coder".to_string(),
+                task_id: "t1".to_string(),
+                session_id: sid.clone(),
+                text: "working on it".to_string(),
+                kind: MessageKind::Progress,
+            }),
+        )
+        .await;
+        wake(
+            &ctx,
+            DelegationEvent::Completed {
+                task_id: "t1".to_string(),
+                session_id: sid,
+                summary: "done".to_string(),
+                duration_secs: 5,
+                sent_message_count: 0,
+            },
+        )
+        .await;
+        let snap = sctx.suspension_snapshot().unwrap();
+        let r = &snap.results[0];
+        assert_eq!(r.progress, vec!["working on it".to_string()]);
+        assert!(r.content.contains("done"));
+        assert!(snap.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unknown_session_event_is_a_noop() {
+        let ctx = test_ctx(vec![]);
+        wake(
+            &ctx,
+            DelegationEvent::Completed {
+                task_id: "ghost".to_string(),
+                session_id: "no-such-session".to_string(),
+                summary: "x".to_string(),
+                duration_secs: 0,
+                sent_message_count: 0,
+            },
+        )
+        .await;
+        wake(
+            &ctx,
+            DelegationEvent::Failed {
+                task_id: "ghost".to_string(),
+                session_id: "no-such-session".to_string(),
+                error: "x".to_string(),
+            },
+        )
+        .await;
+        // no panic; nothing further to assert
+    }
+}
