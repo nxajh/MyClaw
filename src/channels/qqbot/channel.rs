@@ -366,6 +366,8 @@ pub struct QQBotChannel {
     pub(super) group_history: Arc<Mutex<GroupHistory>>,
     /// Passive reply limiter (QQ allows ~4 replies per msg_id per hour).
     pub(super) reply_limiter: Arc<Mutex<ReplyLimiter>>,
+    /// Per-sender + global rate limiter.
+    pub(super) rate_limiter: Arc<Mutex<RateLimiter>>,
     /// Outbound debounce merge (disabled when window_ms == 0).
     pub(super) debouncer: Arc<DeliverDebouncer>,
 }
@@ -398,6 +400,7 @@ impl QQBotChannel {
             started_at: std::time::Instant::now(),
             group_history: Arc::new(Mutex::new(std::collections::HashMap::new())),
             reply_limiter: Arc::new(Mutex::new(ReplyLimiter::new())),
+            rate_limiter: Arc::new(Mutex::new(RateLimiter::new())),
             debouncer: Arc::new(DeliverDebouncer::new(
                 debounce_window_ms,
                 debounce_separator,
@@ -589,6 +592,10 @@ impl QQBotChannel {
                     debug!(msg_id = %msg.id, "duplicate C2C message, skipping");
                     return None;
                 }
+                if !self.rate_limiter.lock().check(&msg.sender.id) {
+                    warn!(sender = %msg.sender.id, "qqbot: rate limited");
+                    return None;
+                }
                 if !apply_auth(self, &msg.sender.id, crate::channels::MessageScope::Direct) {
                     return None;
                 }
@@ -615,6 +622,10 @@ impl QQBotChannel {
                 };
                 if self.dedup.check_and_record(&msg.id) {
                     debug!(msg_id = %msg.id, "duplicate group message, skipping");
+                    return None;
+                }
+                if !self.rate_limiter.lock().check(&msg.sender.id) {
+                    warn!(sender = %msg.sender.id, "qqbot: rate limited");
                     return None;
                 }
                 let group_id = msg
@@ -1897,9 +1908,11 @@ impl Channel for QQBotChannel {
         };
 
         let count = chunks.len();
+        let base_seq = self.next_msg_seq();
         for (i, chunk) in chunks.iter().enumerate() {
-            // msg_seq must be unique and monotonic globally across the session.
-            let msg_seq = self.next_msg_seq();
+            // msg_seq must be unique per chunk. Use the monotonic counter so
+            // repeated sends to the same msg_id are not deduplicated by QQ.
+            let msg_seq = base_seq + i as u32;
             let is_last = i == count - 1;
 
             let result = if is_last {
@@ -2266,6 +2279,65 @@ impl ReplyLimiter {
 }
 
 
+// ── Rate limiter ──────────────────────────────────────────────────────────────
+
+/// Simple token-bucket rate limiter with per-sender and global tracking.
+struct RateLimiter {
+    sender_buckets: std::collections::HashMap<String, (u32, u128)>,
+    global_count: u32,
+    global_window_start: u128,
+    sender_limit: u32,
+    global_limit: u32,
+}
+
+impl RateLimiter {
+    fn new() -> Self {
+        Self {
+            sender_buckets: std::collections::HashMap::new(),
+            global_count: 0,
+            global_window_start: 0,
+            sender_limit: 30,
+            global_limit: 300,
+        }
+    }
+
+    fn check(&mut self, sender_id: &str) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let window_ms: u128 = 60_000;
+        if now - self.global_window_start > window_ms {
+            self.global_count = 0;
+            self.global_window_start = now;
+        }
+        if self.global_count >= self.global_limit {
+            return false;
+        }
+        let sender_key = sender_id.to_string();
+        match self.sender_buckets.get_mut(&sender_key) {
+            Some((count, window_start)) => {
+                if now - *window_start > window_ms {
+                    *count = 0;
+                    *window_start = now;
+                }
+                if *count >= self.sender_limit {
+                    return false;
+                }
+                *count += 1;
+            }
+            None => {
+                if self.sender_buckets.len() > 5000 {
+                    self.sender_buckets.retain(|_, (_, ws)| now - *ws < window_ms);
+                }
+                self.sender_buckets.insert(sender_key, (1, now));
+            }
+        }
+        self.global_count += 1;
+        true
+    }
+}
+
 // ── Deliver debouncer ─────────────────────────────────────────────────────────
 
 /// A pending debounced delivery for one recipient.
@@ -2337,9 +2409,7 @@ impl DeliverDebouncer {
         self.pending.lock().remove(recipient)
     }
 }
-
 // ── WebSocket loop ────────────────────────────────────────────────────────────
-
 impl QQBotChannel {
     /// Main WebSocket loop with auto-reconnect and incremental delay.
     ///
