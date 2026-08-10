@@ -24,7 +24,14 @@ use crate::channels::{Channel, ChannelInboundMessage};
 fn format_progress_message(text: &str) -> String {
     const PROGRESS_PREFIX: &str = "[进度] ";
     const MAX_CHARS: usize = 500;
-    let trimmed = text.trim();
+    // 方案 C (fix v2): strip a leading prefix the model may have written
+    // itself — with the system-generated body this is near-impossible, but
+    // the fallback path (model output) can still double-prefix otherwise.
+    let trimmed = text
+        .trim()
+        .strip_prefix(PROGRESS_PREFIX)
+        .map(str::trim)
+        .unwrap_or_else(|| text.trim());
     if trimmed.chars().count() <= MAX_CHARS {
         format!("{}{}", PROGRESS_PREFIX, trimmed)
     } else {
@@ -44,6 +51,23 @@ fn format_progress_message(text: &str) -> String {
 /// `pub(crate)` so orchestrator tests can pin the wake-time semantics.
 pub(crate) fn decide_silenced(intent: Option<bool>, live: Option<TurnSuspension>) -> bool {
     intent.unwrap_or_else(|| live.is_some_and(|s| !s.pending.is_empty()))
+}
+
+/// 方案 C (fix v2): semantic stop-reason for observability — a silenced
+/// resume turn with pending delegations whose model output ended with
+/// `EndTurn` is reported as `Continue` (the turn does NOT end; later
+/// terminal events keep resuming it until the final loud summary). Pure
+/// so unit tests can pin the mapping without a full turn pipeline.
+fn semantic_stop_reason(
+    silenced: bool,
+    has_pending: bool,
+    stop_reason: crate::providers::StopReason,
+) -> crate::providers::StopReason {
+    if silenced && has_pending && stop_reason == crate::providers::StopReason::EndTurn {
+        crate::providers::StopReason::Continue
+    } else {
+        stop_reason
+    }
 }
 
 /// Per-session bundle held by the SessionManager's session-context table.
@@ -343,6 +367,13 @@ impl SessionContext {
         // silence intent; capture before `inbound_msg` is moved. User-message
         // turns leave it None → live snapshot decides below.
         let silenced_intent = inbound_msg.silenced_override;
+        // 方案 C (fix v2): delegation notices may carry a SYSTEM-generated
+        // progress body (terminal-event summary from `wake`). When this turn
+        // is silenced it becomes the user-visible `[进度]` message — the
+        // model's output is persisted to history only. None for user
+        // messages / sub-agent messages / recovery notices → fall back to the
+        // model output (existing behavior).
+        let progress_text = inbound_msg.progress_text.clone();
 
         // Persist inbound files to session-local storage so their lifetime
         // matches the session.  Read the body stream (via
@@ -610,6 +641,31 @@ impl SessionContext {
                 // 清除之(下一轮恢复响亮)。级联轮(本 turn 再次派发)pending
                 // 非空 → 保留,继续挂起。
                 self.clear_suspension_if_collected();
+                // 方案 C (fix v2): a silenced resume turn whose model output
+                // ended with EndTurn is semantically converted to Continue —
+                // pending delegations remain, the turn must NOT end (only the
+                // final loud summary does). Also patch the persisted history
+                // entry: `llm_usage` writes `format!("{:?}", stop_reason)` so
+                // history.jsonl would show "EndTurn" even though the turn
+                // continues — rewrite the last assistant message's
+                // usage.stop_reason to "Continue" so the observable record
+                // matches the semantics.
+                let semantic =
+                    semantic_stop_reason(silenced, turn_result.has_pending, turn_result.stop_reason);
+                if semantic != turn_result.stop_reason {
+                    turn_result.stop_reason = semantic;
+                    if let Some(last) = session.history.last_mut() {
+                        if last.role == "assistant" {
+                            if let Some(usage) = last.usage.as_mut() {
+                                usage.stop_reason = Some("Continue".to_string());
+                            }
+                        }
+                    }
+                    tracing::info!(
+                        session = %session.id,
+                        "silenced resume turn mapped EndTurn → Continue (pending delegations remain)"
+                    );
+                }
                 // Notify channel that processing completed successfully
                 // — suppressed on silenced resume turns (RFC §3.3).
                 if !silenced {
@@ -685,14 +741,17 @@ impl SessionContext {
                         }
                     }
                 }
-                // 方案 C (RFC §3.3, 2026-08-10): a silenced resume turn's
-                // output is NOT dropped — it is transformed and delivered as
-                // a *progress* message (interim status, not a turn end).
-                // turn_stream is None for silenced turns, so no final-reply
-                // semantics ran above (`finish()` reported Pending and the
-                // fallback block skipped it); the accumulated text reaches
-                // the user here as feedback while the turn stays suspended.
-                if silenced && !turn_result.text.trim().is_empty() {
+                // 方案 C (RFC §3.3, fix v2 2026-08-10): a silenced resume
+                // turn's output is NOT dropped — the user gets a *progress*
+                // message (interim status, not a turn end). The text is
+                // SYSTEM-generated when `wake` supplied a `progress_text`
+                // (terminal-event summary, e.g. "子代理任务 t1 已完成
+                // （耗时 13s）…"): the model's output is persisted to history
+                // only and NOT forwarded — it may contain a premature final
+                // summary (the pre-v2 E2E bug). The model output remains the
+                // fallback for silenced turns without a system body (user
+                // message while suspended, sub-agent message, recovery).
+                if silenced && (progress_text.is_some() || !turn_result.text.trim().is_empty()) {
                     if let Some(ref ch) = channel_for_send {
                         let receiver = {
                             let mut r = crate::channels::MessageReceiver::new(reply_target.clone());
@@ -708,10 +767,13 @@ impl SessionContext {
                             }
                             r
                         };
+                        let body = progress_text
+                            .clone()
+                            .unwrap_or_else(|| turn_result.text.clone());
                         let message = crate::channels::ChannelOutboundMessage {
                             receiver,
                             content: crate::channels::ChannelMessageContent::text(
-                                format_progress_message(&turn_result.text),
+                                format_progress_message(&body),
                             ),
                             options: Default::default(),
                         };
@@ -1421,5 +1483,50 @@ mod suspension_tests {
         // Suspended but fully collected → loud (final resume turn).
         ctx.record_terminal("t1".into(), SubStatus::Completed, "ok".into(), 0);
         assert!(!decide_silenced(None, ctx.suspension_snapshot()));
+    }
+
+    /// 方案 C (fix v2): a model-written `[进度]` prefix must not double up
+    /// (fallback path: silenced turns without a system body).
+    #[test]
+    fn progress_message_dedups_existing_prefix() {
+        let msg = format_progress_message("[进度] 已收到 t1 结果，继续等待 t2。");
+        assert_eq!(msg, "[进度] 已收到 t1 结果，继续等待 t2。");
+        let msg = format_progress_message("  [进度] 已收到 t1 结果。  ");
+        assert_eq!(msg, "[进度] 已收到 t1 结果。");
+    }
+
+    /// 方案 C (fix v2): a silenced resume turn with pending delegations whose
+    /// model output ended with `EndTurn` is semantically `Continue` — the
+    /// turn does NOT end; the final loud summary is the only EndTurn.
+    #[test]
+    fn semantic_stop_reason_maps_silenced_endturn_to_continue() {
+        use crate::providers::StopReason;
+        assert_eq!(
+            semantic_stop_reason(true, true, StopReason::EndTurn),
+            StopReason::Continue
+        );
+        // Loud final resume / non-pending turns keep EndTurn.
+        assert_eq!(
+            semantic_stop_reason(false, true, StopReason::EndTurn),
+            StopReason::EndTurn
+        );
+        assert_eq!(
+            semantic_stop_reason(true, false, StopReason::EndTurn),
+            StopReason::EndTurn
+        );
+        // Non-EndTurn reasons pass through untouched.
+        assert_eq!(
+            semantic_stop_reason(true, true, StopReason::MaxTokens),
+            StopReason::MaxTokens
+        );
+        assert_eq!(
+            semantic_stop_reason(true, true, StopReason::ToolUse),
+            StopReason::ToolUse
+        );
+        // A provider never produces Continue; the function is idempotent.
+        assert_eq!(
+            semantic_stop_reason(true, true, StopReason::Continue),
+            StopReason::Continue
+        );
     }
 }

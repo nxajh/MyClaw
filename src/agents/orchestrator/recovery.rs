@@ -395,6 +395,9 @@ async fn recover_suspension(
         &session_ctx.session_id,
         notice,
         format!("recovery:{}", session_ctx.session_id),
+        // 方案 C (fix v2): recovery notices never carry a system progress
+        // body — process_turn falls back to the model output.
+        None,
     )
     .await;
 }

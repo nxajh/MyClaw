@@ -1402,6 +1402,7 @@ impl WechatChannel {
                     timestamp: entry.first_ts,
                     interruption_scope_id: None,
                     silenced_override: None,
+                    progress_text: None,
                 };
                 let _ = tx_clone.send(merged).await;
             }
@@ -1880,6 +1881,7 @@ impl Channel for WechatChannel {
                                 timestamp: event.raw_timestamp as u64,
                                 interruption_scope_id: None,
                                 silenced_override: None,
+                                progress_text: None,
                             };
                             this.debounce_send(channel_msg, tx.clone()).await;
                         }

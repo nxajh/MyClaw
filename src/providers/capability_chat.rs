@@ -211,6 +211,12 @@ pub enum StopReason {
     /// rather than completing). Distinct from `EndTurn` so the agent can force a
     /// compaction and retry instead of treating the empty body as a normal stop.
     ContextOverflow,
+    /// 方案 C (fix v2 2026-08-10): synthesized by `SessionContext.process_turn`
+    /// — a silenced resume turn whose model output ended with `EndTurn` is
+    /// semantically converted to `Continue` (pending delegations remain, the
+    /// turn does NOT end; later terminal events keep resuming it). Never
+    /// produced by a provider.
+    Continue,
 }
 
 /// True when a provider `finish_reason` string signals a context-window

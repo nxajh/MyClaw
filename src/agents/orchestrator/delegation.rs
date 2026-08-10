@@ -30,7 +30,7 @@ use crate::channels::ChannelInboundMessage;
 /// Code's fork-async pre-announcement ("results will arrive in a subsequent
 /// message"): telling the model the turn isn't final keeps it from
 /// committing to a conclusion before all results land.
-const SILENCE_GUIDANCE: &str = "[系统提示] 当前轮次输出将作为进度通知发送给用户(不终结本轮对话),请勿生成最终结论;子代理结果将以通知形式在后续轮次到达,届时请整合输出完整答复。";
+const SILENCE_GUIDANCE: &str = "[系统提示] 本轮为中间恢复轮:任务尚未全部完成,本轮对话不会终结,系统将自动生成进度消息发送给用户;你的本轮输出仅记入会话历史,不会被转发。请勿生成最终结论或收尾语,待全部子代理结果到达后,在最终轮输出完整汇总答复。";
 
 /// Append the silence guidance when the resume turn is not final — the
 /// session still has pending delegations, so this turn's output is delivered
@@ -39,6 +39,37 @@ fn maybe_append_silence_guidance(sctx: &SessionContext, content: &mut String) {
     if sctx.has_pending_delegations() {
         content.push_str("\n\n");
         content.push_str(SILENCE_GUIDANCE);
+    }
+}
+
+/// 方案 C (fix v2): the user-visible `[进度]` body for an intermediate
+/// silenced resume turn — SYSTEM-generated, never copied from the model's
+/// output. `Some(body)` only when the notice is silenced AND `wake` supplied
+/// a terminal-event summary; the remaining-task count comes from the
+/// post-`record_terminal` snapshot (`pending` already excludes the
+/// just-collected task). `None` for sub-agent messages / recovery notices →
+/// `process_turn` falls back to the model output. Pure so tests can pin the
+/// composition.
+fn build_progress_text(
+    silenced_override: Option<bool>,
+    progress_body: Option<String>,
+    sctx: Option<&SessionContext>,
+) -> Option<String> {
+    if silenced_override != Some(true) {
+        return None;
+    }
+    let body = progress_body?;
+    let remaining = sctx
+        .and_then(|s| s.suspension_snapshot())
+        .map(|snap| snap.pending.len())
+        .unwrap_or(0);
+    if remaining > 0 {
+        Some(format!(
+            "{}。仍等待 {} 个任务，全部完成后将统一汇总。",
+            body, remaining
+        ))
+    } else {
+        Some(body)
     }
 }
 
@@ -73,12 +104,21 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
     }
 
     // Resolve the event into (task, session, optional terminal status,
-    // sent_message_count, synthesized content, unique synthetic id).
+    // sent_message_count, synthesized content, unique synthetic id,
+    // system progress body — fix v2: the intermediate `[进度]` message is
+    // generated here, NOT copied from the model's output).
     // `status` is Some for terminal events (Completed/Failed/TimedOut) and
     // None for `Message{Final}` — only terminals enter the suspension's
     // `results` list.
-    let (task_id, session_id, status, sent_message_count, mut content, synthetic_id) =
-        match event {
+    let (
+        task_id,
+        session_id,
+        status,
+        sent_message_count,
+        mut content,
+        synthetic_id,
+        progress_body,
+    ) = match event {
         DelegationEvent::Completed {
             task_id,
             session_id,
@@ -109,6 +149,10 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
                 sent_message_count,
                 content,
                 synthetic_id,
+                Some(format!(
+                    "子代理任务 {} 已完成（耗时 {}s）",
+                    task_id, duration_secs
+                )),
             )
         }
         DelegationEvent::Failed {
@@ -129,6 +173,7 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
                 0,
                 content,
                 synthetic_id,
+                Some(format!("子代理任务 {} 失败", task_id)),
             )
         }
         DelegationEvent::TimedOut {
@@ -156,6 +201,10 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
                 0,
                 content,
                 synthetic_id,
+                Some(format!(
+                    "子代理任务 {} 超时（已运行 {}s，任务已中止）",
+                    task_id, duration_secs
+                )),
             )
         }
         // RFC agent-messaging §3.4: a sub-agent messaged its parent while
@@ -172,7 +221,17 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
             );
             // Unique synthetic id per message (a task may emit many messages).
             let synthetic_id = format!("delegation-msg:{}", msg.msg_id);
-            (msg.task_id, msg.session_id, None, 0, content, synthetic_id)
+            (
+                msg.task_id,
+                msg.session_id,
+                None,
+                0,
+                content,
+                synthetic_id,
+                // 非终态消息:模型对子代理消息的回复就是用户可见内容,
+                // 不生成系统进度(保持既有转发行为)。
+                None,
+            )
         }
     };
 
@@ -227,7 +286,7 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
     }
 
     // Route the synthesized notice (terminal or message) into the session.
-    route_notice(ctx, &session_id, content, synthetic_id).await;
+    route_notice(ctx, &session_id, content, synthetic_id, progress_body).await;
 }
 
 /// Route a synthesized system notice into the parent session:
@@ -235,11 +294,19 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
 /// `process_non_active` (temporary context, persisted to history). Shared by
 /// `wake` (delegation events) and `recover_suspension` (P1-1 startup
 /// recovery of persisted suspensions).
+///
+/// `progress_body` (fix v2): terminal-event summary generated by `wake`. When
+/// this notice turns out to be an *intermediate* resume (silenced, pending
+/// non-empty) the body becomes the user-visible `[进度]` message — the model's
+/// output is no longer forwarded for these turns (it is persisted to history
+/// only). `None` for sub-agent messages / recovery notices → `process_turn`
+/// falls back to the model output (existing behavior).
 pub(super) async fn route_notice(
     ctx: &OrchestratorCtx,
     session_id: &str,
     mut content: String,
     synthetic_id: String,
+    progress_body: Option<String>,
 ) {
     // Resolve the session to get its routing key (owner).
     let session = match ctx.sessions.get_by_id(session_id) {
@@ -271,6 +338,13 @@ pub(super) async fn route_notice(
     }
     let silenced_override = sctx_opt.as_ref().map(|s| s.has_pending_delegations());
 
+    // 方案 C (fix v2): the intermediate `[进度]` message is SYSTEM-GENERATED.
+    // Only silenced (intermediate) terminal notices carry one; the remaining
+    // task count comes from the post-`record_terminal` snapshot (`pending`
+    // already excludes the just-collected task). Model output for these turns
+    // is persisted to history but no longer delivered.
+    let progress_text = build_progress_text(silenced_override, progress_body, sctx_opt.as_deref());
+
     let routing_key = &session.owner;
     let is_active = ctx
         .sessions
@@ -288,7 +362,8 @@ pub(super) async fn route_notice(
         };
         if ctx.channel(&key.account_key()).is_none() {
             tracing::warn!(routing_key = %routing_key, "channel for delegation event not found, falling back to non-active path");
-            process_non_active(ctx, session_id, &content, silenced_override).await;
+            process_non_active(ctx, session_id, &content, silenced_override, progress_text)
+                .await;
             return;
         }
 
@@ -306,12 +381,13 @@ pub(super) async fn route_notice(
             timestamp: chrono::Utc::now().timestamp() as u64,
             interruption_scope_id: None,
             silenced_override,
+            progress_text,
         };
         super::inbound::dispatch_turn(ctx, &key, synthetic).await;
     } else {
         // Non-active session — load a temporary context, process the turn,
         // persist the result. The user sees it when they switch back.
-        process_non_active(ctx, session_id, &content, silenced_override).await;
+        process_non_active(ctx, session_id, &content, silenced_override, progress_text).await;
     }
 }
 
@@ -326,6 +402,7 @@ async fn process_non_active(
     session_id: &str,
     content: &str,
     silenced_override: Option<bool>,
+    progress_text: Option<String>,
 ) {
     let session_ctx = match ctx.sessions.load_context_by_session_id(session_id) {
         Some(c) => c,
@@ -350,6 +427,7 @@ async fn process_non_active(
             timestamp: chrono::Utc::now().timestamp() as u64,
             interruption_scope_id: None,
             silenced_override,
+            progress_text,
         };
 
         match session_ctx.process_turn(synthetic, None, runtime).await {
@@ -566,10 +644,12 @@ mod tests {
         sctx.add_pending_task("t2".to_string());
         let mut content = "[系统通知] 子代理已完成后台任务 (task_id: t1)".to_string();
         maybe_append_silence_guidance(&sctx, &mut content);
-        assert!(content.contains("进度通知"));
-        assert!(content.contains("不终结本轮对话"));
+        assert!(content.contains("中间恢复轮"));
+        assert!(content.contains("不会终结"));
+        assert!(content.contains("系统将自动生成进度消息"));
+        assert!(content.contains("仅记入会话历史"));
         assert!(content.contains("请勿生成最终结论"));
-        assert!(content.contains("整合输出完整答复"));
+        assert!(content.contains("完整汇总答复"));
     }
 
     #[tokio::test]
@@ -597,6 +677,53 @@ mod tests {
         let mut content = "[系统通知] 子代理已完成后台任务 (task_id: t1)".to_string();
         maybe_append_silence_guidance(&sctx, &mut content);
         assert_eq!(content, "[系统通知] 子代理已完成后台任务 (task_id: t1)");
+    }
+
+    /// 方案 C (fix v2): the intermediate `[进度]` body is composed by the
+    /// SYSTEM (`build_progress_text`) — only silenced terminal notices with a
+    /// wake-supplied body carry one, and the remaining-task count comes from
+    /// the post-`record_terminal` snapshot.
+    #[test]
+    fn progress_text_composed_for_silenced_terminal_with_remaining() {
+        let ctx = test_ctx(vec![]);
+        let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
+        sctx.add_pending_task("t1".to_string());
+        sctx.add_pending_task("t2".to_string());
+        // t1's terminal lands; t2 remains pending → silenced, remaining=1.
+        let _ = sctx.record_terminal("t1".into(), SubStatus::Completed, "t1 done".into(), 0);
+        let body = build_progress_text(
+            Some(true),
+            Some("子代理任务 t1 已完成（耗时 7s）".to_string()),
+            Some(&sctx),
+        );
+        assert_eq!(
+            body.unwrap(),
+            "子代理任务 t1 已完成（耗时 7s）。仍等待 1 个任务，全部完成后将统一汇总。"
+        );
+    }
+
+    #[test]
+    fn progress_text_none_for_loud_or_bodyless_notices() {
+        let ctx = test_ctx(vec![]);
+        let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
+        sctx.add_pending_task("t1".to_string());
+        // t1's terminal lands; pending empty → final loud resume, no progress.
+        let _ = sctx.record_terminal("t1".into(), SubStatus::Completed, "t1 done".into(), 0);
+        assert_eq!(
+            build_progress_text(
+                Some(false),
+                Some("子代理任务 t1 已完成（耗时 5s）".to_string()),
+                Some(&sctx)
+            ),
+            None
+        );
+        // Not silenced → None even with a body.
+        assert_eq!(
+            build_progress_text(Some(false), Some("x".to_string()), Some(&sctx)),
+            None
+        );
+        // No body (sub-agent message / recovery) → None.
+        assert_eq!(build_progress_text(Some(true), None, Some(&sctx)), None);
     }
 
     /// Race fix (E2E 恢复轮1): the silenced intent is captured at

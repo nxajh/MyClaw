@@ -311,6 +311,15 @@ pub struct ChannelInboundMessage {
     /// snapshot at turn start. Runtime-only; never persisted (see
     /// `to_persisted`).
     pub silenced_override: Option<bool>,
+    /// 方案 C (fix v2 2026-08-10): system-generated progress text for silenced
+    /// resume turns. `Some` → `process_turn` delivers THIS to the user as the
+    /// interim `[进度]` message instead of forwarding the model's accumulated
+    /// output (which is still persisted to history, but is not a turn end).
+    /// Set only by delegation wakes (`route_notice`) for terminal events;
+    /// `None` for real user messages / scheduled turns / sub-agent messages →
+    /// fall back to the model output (existing behavior). Runtime-only; never
+    /// persisted (see `to_persisted`).
+    pub progress_text: Option<String>,
 }
 
 impl ChannelInboundMessage {
