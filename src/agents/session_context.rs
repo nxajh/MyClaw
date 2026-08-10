@@ -877,7 +877,7 @@ impl SessionContext {
                 // summary has been delivered. The preview was taken right
                 // before `clear_suspension_if_collected` above; channels
                 // without delete capability skip (preview never existed).
-                if let (Some(ref ch), Some(pv)) = (&channel_for_send, &preview_cleanup) {
+                if let (Some(ch), Some(pv)) = (&channel_for_send, &preview_cleanup) {
                     let caps = ch.capabilities();
                     if caps.supports_edit && caps.supports_delete {
                         if let Some(mid) = &pv.msg_id {
