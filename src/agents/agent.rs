@@ -708,15 +708,23 @@ impl Agent {
                 tool_msg.is_error = Some(is_error);
                 messages.push(tool_msg);
 
-                // Emit ToolResult event after execution, before persisting,
-                // so the UI updates the call status without waiting for
-                // disk I/O.
+                // Persist the tool result to disk BEFORE any async
+                // notification. persist_last is synchronous (no await
+                // points), so once execute() returns we can write the
+                // result immediately without risk of task cancellation
+                // at a later await point (push_or_drop, on_tool_event).
+                // If the task is cancelled during a downstream await,
+                // the result is already safe on disk.
+                session.add_tool_result(call.id.clone(), &call.name, result_content.clone(), is_error);
+                persist_last(session);
+
+                // Emit ToolResult event after the result is persisted.
                 push_or_drop(
                     &mut session.turn_stream,
                     TurnEvent::ToolResult {
                         id: call.id.clone(),
                         name: call.name.clone(),
-                        output: result_content.clone(),
+                        output: result_content,
                     },
                 )
                 .await;
@@ -735,9 +743,6 @@ impl Agent {
                     )
                     .await;
                 }
-
-                session.add_tool_result(call.id.clone(), &call.name, result_content, is_error);
-                persist_last(session);
 
                 // After executing this call, check if we've hit the hard
                 // limit. If so, strip remaining unexecuted tool_calls and
