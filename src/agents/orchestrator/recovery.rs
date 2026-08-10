@@ -94,6 +94,38 @@ impl CompletionSink {
             }
         }
     }
+
+    /// Emit a `Failed` terminal event for a delegate sink. Called when the
+    /// recovery turn itself errors — the parent may be suspended on this
+    /// task (its pending entry is "covered" by the sub-agent recovery loop,
+    /// so `recover_suspension` skipped it); without a terminal event the
+    /// suspension would hang forever. Channel sinks have no delegation
+    /// event to emit — the recovered channel reply simply won't be sent.
+    async fn fail(self, error: String) {
+        match self {
+            CompletionSink::Delegate {
+                task_id,
+                parent_session_id,
+                delegator,
+                ..
+            } => {
+                if let Some(dm) = delegator {
+                    if let Some(tx) = dm.event_sender() {
+                        let _ = tx
+                            .send(DelegationEvent::Failed {
+                                task_id,
+                                session_id: parent_session_id,
+                                error,
+                            })
+                            .await;
+                    }
+                }
+            }
+            CompletionSink::Channel { .. } => {
+                tracing::warn!("recovery failed (channel sink): {error}");
+            }
+        }
+    }
 }
 
 /// Spawn the recovery turn for one session. The LLM work runs in the
@@ -137,6 +169,11 @@ fn spawn_recovery(
             }
             Err(e) => {
                 tracing::warn!(id = %id, err = %e, "{label} failed");
+                // P1-3: a failed sub-agent recovery must still emit a
+                // terminal event — `recover_suspension` skips pending tasks
+                // "covered" by this loop, so without this the parent
+                // suspension would never resolve (hang).
+                sink.fail(e.to_string()).await;
             }
         }
     });
@@ -230,8 +267,8 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
     }
 
     for sa in unfinished {
-        if sa.sub_session_id.is_empty() || sa.session_key.is_empty() {
-            tracing::debug!(task_id = %sa.task_id, "sub-agent recovery: skipping (no session_id or session_key)");
+        if sa.sub_session_id.is_empty() || sa.parent_session_id.is_empty() {
+            tracing::debug!(task_id = %sa.task_id, "sub-agent recovery: skipping (no sub_session_id or parent_session_id)");
             continue;
         }
         let sub_sk = SubAgentKey::new(&sa.agent_name, &sa.sub_session_id).to_string();
@@ -249,7 +286,14 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
             sa.task_id.clone(),
             CompletionSink::Delegate {
                 task_id: sa.task_id.clone(),
-                parent_session_id: sa.session_key.clone(),
+                // The event's `session_id` must be the parent's SESSION ID
+                // (wake / route_notice index by session id, not routing
+                // key). E29 switched the other senders to session ids but
+                // missed this one — it still passed the routing key
+                // (`sa.session_key`), so the recovered task's Completed
+                // event was unroutable and the covered pending entry in a
+                // persisted suspension would never resolve.
+                parent_session_id: sa.parent_session_id.clone(),
                 reply_target: sa.reply_target.clone(),
                 delegator: delegator.clone(),
             },

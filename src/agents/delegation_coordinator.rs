@@ -70,6 +70,11 @@ pub struct RunningEntry {
     pub handle: JoinHandle<()>,
     pub status: std::sync::RwLock<DelegationStatus>,
     pub agent_name: String,
+    /// Parent session id (FQID) this task was spawned from — kept so
+    /// `cancel` (agent_kill) can broadcast the terminal
+    /// `DelegationEvent::Failed { error: "cancelled" }` to the right
+    /// session (the parent may be suspended waiting on this task).
+    pub session_id: String,
     pub spawned_at: std::time::Instant,
     /// Sub → parent messages delivered while running (counted in
     /// `AgentMessenger::send_to_parent`). Read at completion to decide
@@ -299,18 +304,35 @@ impl DelegationCoordinator {
     /// Cancel a running background task by id.
     ///
     /// Marks the entry `Cancelled` before aborting so `agent_list` (or a
-    /// concurrent snapshot) can observe the terminal state.
-    pub fn cancel(&self, task_id: &str) -> bool {
-        if let Some(entry) = self.running.get(task_id) {
-            if let Ok(mut status) = entry.status.write() {
-                *status = DelegationStatus::Cancelled;
-            }
-            entry.handle.abort();
-            self.running.remove(task_id);
-            true
-        } else {
-            false
+    /// concurrent snapshot) can observe the terminal state, then broadcasts
+    /// `DelegationEvent::Failed { error: "cancelled" }` (no new variant —
+    /// P1-3 decision) so a parent turn suspended on this task's terminal
+    /// event resolves instead of hanging. The event send is awaited AFTER
+    /// the running-table guard is dropped so the future stays `Send`.
+    pub async fn cancel(&self, task_id: &str) -> bool {
+        let Some(entry) = self.running.get(task_id) else {
+            return false;
+        };
+        let session_id = entry.session_id.clone();
+        if let Ok(mut status) = entry.status.write() {
+            *status = DelegationStatus::Cancelled;
         }
+        entry.handle.abort();
+        self.running.remove(task_id);
+        if let Some(tx) = self.event_sender() {
+            if tx
+                .send(DelegationEvent::Failed {
+                    task_id: task_id.to_string(),
+                    session_id,
+                    error: "cancelled".to_string(),
+                })
+                .await
+                .is_err()
+            {
+                tracing::warn!(task_id, "agent_kill: event channel closed, cancelled event dropped");
+            }
+        }
+        true
     }
 
     fn runtime(&self) -> anyhow::Result<crate::agents::AgentRuntime> {
@@ -954,6 +976,7 @@ impl DelegationCoordinator {
                 handle,
                 status: std::sync::RwLock::new(DelegationStatus::Running),
                 agent_name: agent_name.to_string(),
+                session_id: parent_session_id.to_string(),
                 spawned_at: std::time::Instant::now(),
                 messages_sent: std::sync::atomic::AtomicU64::new(0),
             },

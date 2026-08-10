@@ -26,9 +26,9 @@ pub struct UnfinishedSubAgent {
     pub task_preview: String,
     pub parent_session_id: String,
     pub sub_session_id: String,
-    /// The parent session key (e.g. "telegram:default:12345") used to look up
-    /// the main agent's session and emit a `DelegationEvent` when recovery
-    /// completes. Resolved from the parent session's `owner` field.
+    /// The parent session key (e.g. "telegram:default:12345") — routing
+    /// context only. Startup recovery emits `DelegationEvent`s keyed by the
+    /// parent SESSION ID (`parent_session_id`), not this routing key.
     pub session_key: String,
     /// The reply_target stored on the parent session's last_message.
     pub reply_target: String,

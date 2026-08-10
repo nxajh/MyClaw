@@ -54,7 +54,7 @@ impl Tool for AgentKillTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'task_id' is required"))?;
 
-        let cancelled = self.delegator.cancel(task_id);
+        let cancelled = self.delegator.cancel(task_id).await;
 
         if cancelled {
             Ok(ToolResult {
