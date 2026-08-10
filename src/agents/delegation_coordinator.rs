@@ -310,14 +310,21 @@ impl DelegationCoordinator {
     /// event resolves instead of hanging. The event send is awaited AFTER
     /// the running-table guard is dropped so the future stays `Send`.
     pub async fn cancel(&self, task_id: &str) -> bool {
-        let Some(entry) = self.running.get(task_id) else {
-            return false;
+        // Scope the DashMap `Ref` (shard read guard) so it drops BEFORE the
+        // write-locking `remove` below — holding a `Ref` across `remove`
+        // deadlocks (parking_lot RwLock is not reentrant; the writer waits
+        // for the very read guard this task is still holding).
+        let session_id = {
+            let Some(entry) = self.running.get(task_id) else {
+                return false;
+            };
+            let session_id = entry.session_id.clone();
+            if let Ok(mut status) = entry.status.write() {
+                *status = DelegationStatus::Cancelled;
+            }
+            entry.handle.abort();
+            session_id
         };
-        let session_id = entry.session_id.clone();
-        if let Ok(mut status) = entry.status.write() {
-            *status = DelegationStatus::Cancelled;
-        }
-        entry.handle.abort();
         self.running.remove(task_id);
         if let Some(tx) = self.event_sender() {
             if tx
