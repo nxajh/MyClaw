@@ -654,10 +654,21 @@ impl SessionContext {
                     semantic_stop_reason(silenced, turn_result.has_pending, turn_result.stop_reason);
                 if semantic != turn_result.stop_reason {
                     turn_result.stop_reason = semantic;
+                    // Take the backend ID before borrowing `history` mutably.
+                    let persisted_id = session.message_ids.last().copied().unwrap_or(0);
                     if let Some(last) = session.history.last_mut() {
                         if last.role == "assistant" {
                             if let Some(usage) = last.usage.as_mut() {
                                 usage.stop_reason = Some("Continue".to_string());
+                            }
+                            // fix v2.1: rewrite the persisted history row too
+                            // — previously only the in-memory entry was patched,
+                            // so history.jsonl kept showing "EndTurn" even though
+                            // the turn continued (observable record mismatch).
+                            if persisted_id > 0 {
+                                if let Some(hook) = persist_hook.as_deref() {
+                                    hook.update_message(&session.id, persisted_id, last);
+                                }
                             }
                         }
                     }
