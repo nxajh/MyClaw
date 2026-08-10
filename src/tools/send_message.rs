@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use crate::agents::session::Session;
-use crate::agents::{AgentMail, AgentMessage, AgentMessenger, KnownUsersRegistry, UserRegistry};
+use crate::agents::{
+    AgentMail, AgentMessage, AgentMessenger, KnownUsersRegistry, MessageKind, UserRegistry,
+};
 use crate::channels::{
     ChannelFile, ChannelFileMeta, ChannelMessageContent, ChannelOutboundMessage, LocalFileBody,
     MessageReceiver, SendOptions,
@@ -160,6 +162,10 @@ impl SendMessageTool {
                 task_id,
                 session_id: parent_session_id,
                 text: text.to_string(),
+                kind: match args.kind.as_deref() {
+                    Some("progress") => MessageKind::Progress,
+                    _ => MessageKind::Final,
+                },
             };
             return match messenger.send_to_parent(event).await {
                 true => Ok(ToolResult {
@@ -336,6 +342,13 @@ struct SendMessageArgs {
     /// Sub-agent context: omitted or "parent".
     #[serde(default)]
     recipient: Option<String>,
+    /// Optional message kind for sub-agent → parent messages
+    /// (turn-suspension RFC §2.3). "progress" → `Progress` (mid-flight
+    /// report, never injected into the parent context); omitted or any
+    /// other value → `Final` (today's behavior — wakes/injects).
+    /// Ignored for user and cross-user delivery.
+    #[serde(default)]
+    kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -393,6 +406,10 @@ impl Tool for SendMessageTool {
                 "recipient": {
                     "type": "string",
                     "description": "Optional target. Cross-user (main agent context): a friend's user id (u/uid) or email. Agent-to-agent: main agent context passes a sub-agent task_id (from agent_delegate mode=async); sub-agent context omits it or uses \"parent\" to send to the main agent."
+                },
+                "kind": {
+                    "type": "string",
+                    "description": "Optional message kind for sub-agent → parent messages: \"progress\" (mid-flight report, never injected into the parent context) or omitted/\"final\" (default; wakes and injects). Ignored for user and cross-user delivery."
                 }
             }
         })

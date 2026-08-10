@@ -19,12 +19,46 @@
 
 use super::ctx::OrchestratorCtx;
 use super::key::SessionKey;
-use crate::agents::DelegationEvent;
+use crate::agents::turn::SubStatus;
+use crate::agents::{DelegationEvent, MessageKind};
 use crate::channels::ChannelInboundMessage;
 
 /// Wake the parent agent on a `DelegationEvent` (sub-agent completion/failure/message).
 pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
-    let (_task_id, session_id, content, synthetic_id) = match event {
+    // 方案 C (turn-suspension RFC §2.3): `Message{kind: Progress}` is never
+    // injected into the parent context — suspended sessions fold it into the
+    // task's `progress` list (surfaced with the terminal result); non-suspended
+    // sessions drop it. Either way we do NOT wake the parent.
+    if let DelegationEvent::Message(msg) = &event {
+        if msg.kind == MessageKind::Progress {
+            match ctx
+                .sessions
+                .registered_context_by_session_id(&msg.session_id)
+            {
+                Some(registered) => {
+                    registered.add_progress(&msg.task_id, &msg.text);
+                    tracing::debug!(
+                        task_id = %msg.task_id,
+                        "progress report suppressed into suspension"
+                    );
+                }
+                None => {
+                    tracing::debug!(
+                        task_id = %msg.task_id,
+                        "progress report dropped (parent session not suspended)"
+                    );
+                }
+            }
+            return;
+        }
+    }
+
+    // Resolve the event into (task, session, optional terminal status,
+    // sent_message_count, synthesized content, unique synthetic id).
+    // `status` is Some for terminal events (Completed/Failed/TimedOut) and
+    // None for `Message{Final}` — only terminals enter the suspension's
+    // `results` list.
+    let (task_id, session_id, status, sent_message_count, content, synthetic_id) = match event {
         DelegationEvent::Completed {
             task_id,
             session_id,
@@ -48,7 +82,14 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
                 )
             };
             let synthetic_id = format!("delegation:{}", task_id);
-            (task_id, session_id, content, synthetic_id)
+            (
+                task_id,
+                session_id,
+                Some(SubStatus::Completed),
+                sent_message_count,
+                content,
+                synthetic_id,
+            )
         }
         DelegationEvent::Failed {
             task_id,
@@ -61,7 +102,14 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
                 task_id, error
             );
             let synthetic_id = format!("delegation:{}", task_id);
-            (task_id, session_id, content, synthetic_id)
+            (
+                task_id,
+                session_id,
+                Some(SubStatus::Failed),
+                0,
+                content,
+                synthetic_id,
+            )
         }
         DelegationEvent::TimedOut {
             task_id,
@@ -81,13 +129,21 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
                 task_id, timeout_secs, duration_secs
             );
             let synthetic_id = format!("delegation:{}", task_id);
-            (task_id, session_id, content, synthetic_id)
+            (
+                task_id,
+                session_id,
+                Some(SubStatus::TimedOut),
+                0,
+                content,
+                synthetic_id,
+            )
         }
         // RFC agent-messaging §3.4: a sub-agent messaged its parent while
         // running in background. `task_id` is the sub-agent's own id
         // (identity — lets the parent reply via `recipient`), `session_id`
         // is the parent session to wake. Routed exactly like Completed /
-        // Failed: queued behind the turn lock, never preempting.
+        // Failed: queued behind the turn lock, never preempting. Not a
+        // terminal event — never enters the suspension's results.
         DelegationEvent::Message(msg) => {
             tracing::info!(task_id = %msg.task_id, sender = %msg.sender_name, "sub-agent message, waking main agent");
             let content = format!(
@@ -96,9 +152,35 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
             );
             // Unique synthetic id per message (a task may emit many messages).
             let synthetic_id = format!("delegation-msg:{}", msg.msg_id);
-            (msg.task_id, msg.session_id, content, synthetic_id)
+            (msg.task_id, msg.session_id, None, 0, content, synthetic_id)
         }
     };
+
+    // 方案 C (§3.2): terminal events update the suspension BEFORE routing —
+    // move the task out of `pending` and append its `SubResult` (with folded
+    // progress). Lookup by hex session id works for both active (registered
+    // context) and switched-away sessions; a session with no suspension
+    // (or no registered context) simply skips — behavior unchanged.
+    if let Some(status) = status {
+        if let Some(registered) = ctx
+            .sessions
+            .registered_context_by_session_id(&session_id)
+        {
+            if let Some(snap) = registered.record_terminal(
+                task_id.clone(),
+                status,
+                content.clone(),
+                sent_message_count,
+            ) {
+                tracing::info!(
+                    task_id = %task_id,
+                    pending = snap.pending.len(),
+                    collected = snap.results.len(),
+                    "suspension updated on terminal event"
+                );
+            }
+        }
+    }
 
     // Resolve the session to get its routing key (owner).
     let session = match ctx.sessions.get_by_id(&session_id) {

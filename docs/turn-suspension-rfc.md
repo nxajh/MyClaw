@@ -77,6 +77,7 @@ pub struct TurnSuspension {
     pub suspended_at: u64,                     // 挂起开始 unix 秒(重启恢复时长统计)
     pub pending: Vec<String>,                  // 未收尾子 agent task_id
     pub results: Vec<SubResult>,               // 已收尾结果,按完成顺序追加
+    pub progress_by_task: HashMap<String, Vec<String>>, // 每任务丢弃的 Progress 暂存(task_id → 文本列表)
 }
 
 pub struct SubResult {
@@ -87,6 +88,8 @@ pub struct SubResult {
     pub progress: Vec<String>,                 // 丢弃的 Progress 合并于此(永不注入上下文)
 }
 ```
+
+> ⚠️ **progress_by_task 暂存(P0-2 定稿)**:`Progress` 消息永不注入上下文(§2.3),在任务收尾前先按 `task_id` 暂存于 `progress_by_task`(serde,可随 §5 持久化);终态到达时 `record_terminal` 内 fold 进该任务 `SubResult.progress` 并从暂存移除。时序边界:挂起登记(§3.1 EndTurn)之前到达的 Progress 无暂存目标、直接丢弃(不可恢复,信息量小);登记之后到达的 Progress 全部暂存,恢复轮次终态注入时以结果条目呈现。
 
 ### 2.3 事件模型(四类保留,不聚合)
 

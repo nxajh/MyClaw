@@ -58,7 +58,9 @@ pub use known_users::{
     KnownUsersRegistry, RequestOutcome, UserMail,
 };
 pub use attachment::AttachmentManager;
-pub use delegation::{AgentMail, AgentMessage, DelegationEvent, render_agent_mail_reminder};
+pub use delegation::{
+    AgentMail, AgentMessage, DelegationEvent, MessageKind, render_agent_mail_reminder,
+};
 pub use delegation_coordinator::DelegationCoordinator;
 pub use delegator::{AgentDelegator, AgentMessenger};
 pub use error::AgentError;

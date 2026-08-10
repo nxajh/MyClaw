@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::agents::session::Session;
-use crate::agents::turn::{TurnResult, TurnSuspension};
+use crate::agents::turn::{SubResult, SubStatus, TurnResult, TurnSuspension};
 use crate::agents::{Agent, AgentRuntime, TurnContext, UserProfile};
 use crate::channels::{Channel, ChannelInboundMessage};
 /// Per-session bundle held by the SessionManager's session-context table.
@@ -132,6 +132,45 @@ impl SessionContext {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// 方案 C: accumulate a suppressed progress report (RFC §2.3 — never
+    /// injected into the parent context, suspended or not). No-op when the
+    /// session is not suspended.
+    pub fn add_progress(&self, task_id: &str, text: &str) {
+        let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = guard.as_mut() {
+            s.progress_by_task
+                .entry(task_id.to_string())
+                .or_default()
+                .push(text.to_string());
+        }
+    }
+
+    /// 方案 C: collect a terminal event into the suspension — move the task
+    /// out of `pending`, fold its suppressed progress reports into the new
+    /// `SubResult`, append to `results` in completion order. Returns the
+    /// updated snapshot when the session is suspended (`None` otherwise);
+    /// callers detect full collection via `snapshot.pending.is_empty()`.
+    pub fn record_terminal(
+        &self,
+        task_id: String,
+        status: SubStatus,
+        content: String,
+        sent_message_count: u64,
+    ) -> Option<TurnSuspension> {
+        let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
+        let s = guard.as_mut()?;
+        s.pending.retain(|t| t != &task_id);
+        let progress = s.progress_by_task.remove(&task_id).unwrap_or_default();
+        s.results.push(SubResult {
+            task_id,
+            status,
+            content,
+            sent_message_count,
+            progress,
+        });
+        guard.clone()
     }
 
     /// Run one turn end-to-end: acquire the turn lock, replay the

@@ -16,6 +16,8 @@
 //! every pending task has been collected. Suspension state is attached to
 //! `SessionContext` and serialized for restart recovery (P1-1).
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::config::agent::{PermissionMode, RunMode};
@@ -68,6 +70,10 @@ pub struct TurnSuspension {
     pub pending: Vec<String>,
     /// Collected outcomes, in completion order.
     pub results: Vec<SubResult>,
+    /// Suppressed progress reports (task_id → texts) accumulated while the
+    /// task runs; folded into `SubResult.progress` at terminal collection
+    /// (RFC §2.2/§2.3 — Progress never enters the parent context).
+    pub progress_by_task: HashMap<String, Vec<String>>,
 }
 
 impl TurnSuspension {
@@ -80,6 +86,7 @@ impl TurnSuspension {
                 .unwrap_or(0),
             pending: vec![task_id],
             results: Vec::new(),
+            progress_by_task: HashMap::new(),
         }
     }
 
