@@ -143,7 +143,7 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
             };
             let synthetic_id = format!("delegation:{}", task_id);
             (
-                task_id,
+                task_id.clone(),
                 session_id,
                 Some(SubStatus::Completed),
                 sent_message_count,
@@ -167,7 +167,7 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
             );
             let synthetic_id = format!("delegation:{}", task_id);
             (
-                task_id,
+                task_id.clone(),
                 session_id,
                 Some(SubStatus::Failed),
                 0,
@@ -195,7 +195,7 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
             );
             let synthetic_id = format!("delegation:{}", task_id);
             (
-                task_id,
+                task_id.clone(),
                 session_id,
                 Some(SubStatus::TimedOut),
                 0,
