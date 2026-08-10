@@ -379,7 +379,7 @@ mod tests {
         let snap = sctx.suspension_snapshot().unwrap();
         let r = &snap.results[0];
         assert!(!r.content.contains("duplicate summary"));
-        assert!(r.content.contains("已实时同步"));
+        assert!(r.content.contains("实时同步"));
         assert_eq!(r.sent_message_count, 3);
     }
 

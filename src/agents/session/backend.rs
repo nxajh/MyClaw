@@ -22,6 +22,7 @@ pub struct InMemoryBackend {
     summaries: RwLock<HashMap<String, Vec<SummaryRecord>>>,
     active: RwLock<HashMap<String, String>>,
     suspensions: RwLock<HashMap<String, String>>,
+    parents: RwLock<HashMap<String, String>>,
     namespace: String,
 }
 
@@ -38,6 +39,7 @@ impl InMemoryBackend {
             summaries: RwLock::new(HashMap::new()),
             active: RwLock::new(HashMap::new()),
             suspensions: RwLock::new(HashMap::new()),
+            parents: RwLock::new(HashMap::new()),
             namespace: namespace.to_string(),
         }
     }
@@ -82,6 +84,7 @@ impl SessionBackend for InMemoryBackend {
         self.sessions.write().remove(session_id);
         self.messages.write().remove(session_id);
         self.summaries.write().remove(session_id);
+        self.parents.write().remove(session_id);
         let mut active = self.active.write();
         active.retain(|_, v| v != session_id);
         Ok(())
@@ -263,6 +266,23 @@ impl SessionBackend for InMemoryBackend {
 
     fn load_suspension(&self, session_id: &str) -> Option<String> {
         self.suspensions.read().get(session_id).cloned()
+    }
+
+    // Round-trip `parent_session_id` like JsonFileBackend does via meta.json
+    // (required for the RFC §6 delegation depth guard to be testable with the
+    // in-memory backend).
+    fn save_parent_session_id(&self, session_id: &str, parent: &str) -> std::io::Result<()> {
+        let mut map = self.parents.write();
+        if parent.is_empty() {
+            map.remove(session_id);
+        } else {
+            map.insert(session_id.to_string(), parent.to_string());
+        }
+        Ok(())
+    }
+
+    fn load_parent_session_id(&self, session_id: &str) -> Option<String> {
+        self.parents.read().get(session_id).cloned()
     }
 }
 
