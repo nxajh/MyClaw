@@ -533,10 +533,12 @@ mod tests {
 
     #[test]
     fn should_recover_active_session_true_for_active_incomplete() {
-        // Session is active, history is incomplete, not suspended.
+        // Session is active, history is incomplete (trailing user, no assistant
+        // response yet), not suspended.
         let history = vec![
             crate::providers::capability_chat::ChatMessage::user_text("hi"),
-            crate::providers::capability_chat::ChatMessage::assistant_text("calling"),
+            crate::providers::capability_chat::ChatMessage::assistant_text("hello"),
+            crate::providers::capability_chat::ChatMessage::user_text("again"),
         ];
         assert!(should_recover_active_session(
             Some("sess-1"),
