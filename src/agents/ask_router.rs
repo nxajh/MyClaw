@@ -132,6 +132,7 @@ mod tests {
             content: crate::channels::ChannelMessageContent::text(content),
             timestamp: 0,
             interruption_scope_id: None,
+            silenced_override: None,
         }
     }
 

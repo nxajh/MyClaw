@@ -49,6 +49,7 @@ pub(crate) async fn run_scheduled_turn(
         content: crate::channels::ChannelMessageContent::text(prompt.to_string()),
         timestamp: chrono::Utc::now().timestamp() as u64,
         interruption_scope_id: None,
+        silenced_override: None,
     };
     let runtime = orch.runtime.clone();
     session_ctx

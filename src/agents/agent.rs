@@ -1670,6 +1670,7 @@ mod tests {
             content: crate::channels::ChannelMessageContent::text("hi"),
             timestamp: 0,
             interruption_scope_id: None,
+            silenced_override: None,
         });
         let mut tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(NamedTool("send_message")),

@@ -735,6 +735,7 @@ impl QQBotChannel {
                         .unwrap_or_default()
                         .as_secs(),
                     interruption_scope_id: None,
+                    silenced_override: None,
                 })
             }
             _ => {
@@ -767,6 +768,7 @@ impl QQBotChannel {
                 .unwrap_or_default()
                 .as_secs(),
             interruption_scope_id: None,
+            silenced_override: None,
         })
     }
 
@@ -793,6 +795,7 @@ impl QQBotChannel {
                 .unwrap_or_default()
                 .as_secs(),
             interruption_scope_id: None,
+            silenced_override: None,
         })
     }
 
@@ -2909,6 +2912,7 @@ mod tests {
             content: ChannelMessageContent::text("@bot what's up".to_string()),
             timestamp: 0,
             interruption_scope_id: None,
+            silenced_override: None,
         };
         ch.inject_group_history(&mut msg, "grp1");
 
@@ -2947,6 +2951,7 @@ mod tests {
             content: ChannelMessageContent::text("hello".to_string()),
             timestamp: 0,
             interruption_scope_id: None,
+            silenced_override: None,
         };
         let original = msg.content.text.clone();
         ch.inject_group_history(&mut msg, "grp1");

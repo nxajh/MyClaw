@@ -253,13 +253,23 @@ pub(super) async fn route_notice(
     // 方案 C (§3.3): a resume turn with pending delegations is *silenced* —
     // attach the guidance so the model never assumes the user has seen a
     // draft summary (Claude Code-style pre-announcement; no backfill).
-    if let Some(sctx) = ctx
+    //
+    // Race fix (2026-08-10, E2E 恢复轮1): the silence INTENT is captured HERE
+    // (wake/route time — same sync section right after `record_terminal`, so
+    // `has_pending_delegations()` equals `!snap.pending.is_empty()` of the
+    // just-collected terminal), NOT at turn start: a queued notice may run
+    // after later terminal events cleared `pending`, and the live snapshot
+    // would wrongly mark the intermediate notice loud (it streamed as a
+    // normal message instead of `[进度]`). The intent rides the synthetic
+    // `ChannelInboundMessage.silenced_override` into `process_turn`.
+    let sctx_opt = ctx
         .sessions
         .registered_context_by_session_id(session_id)
-        .or_else(|| ctx.sessions.load_context_by_session_id(session_id))
-    {
-        maybe_append_silence_guidance(&sctx, &mut content);
+        .or_else(|| ctx.sessions.load_context_by_session_id(session_id));
+    if let Some(sctx) = &sctx_opt {
+        maybe_append_silence_guidance(sctx, &mut content);
     }
+    let silenced_override = sctx_opt.as_ref().map(|s| s.has_pending_delegations());
 
     let routing_key = &session.owner;
     let is_active = ctx
@@ -278,7 +288,7 @@ pub(super) async fn route_notice(
         };
         if ctx.channel(&key.account_key()).is_none() {
             tracing::warn!(routing_key = %routing_key, "channel for delegation event not found, falling back to non-active path");
-            process_non_active(ctx, session_id, &content).await;
+            process_non_active(ctx, session_id, &content, silenced_override).await;
             return;
         }
 
@@ -295,12 +305,13 @@ pub(super) async fn route_notice(
             content: crate::channels::ChannelMessageContent::text(content),
             timestamp: chrono::Utc::now().timestamp() as u64,
             interruption_scope_id: None,
+            silenced_override,
         };
         super::inbound::dispatch_turn(ctx, &key, synthetic).await;
     } else {
         // Non-active session — load a temporary context, process the turn,
         // persist the result. The user sees it when they switch back.
-        process_non_active(ctx, session_id, &content).await;
+        process_non_active(ctx, session_id, &content, silenced_override).await;
     }
 }
 
@@ -310,7 +321,12 @@ pub(super) async fn route_notice(
 /// `process_turn` with `channel=None`, and drops the context when done.
 /// The LLM's response is persisted to history so the user sees it on
 /// `/switch` return.
-async fn process_non_active(ctx: &OrchestratorCtx, session_id: &str, content: &str) {
+async fn process_non_active(
+    ctx: &OrchestratorCtx,
+    session_id: &str,
+    content: &str,
+    silenced_override: Option<bool>,
+) {
     let session_ctx = match ctx.sessions.load_context_by_session_id(session_id) {
         Some(c) => c,
         None => {
@@ -333,6 +349,7 @@ async fn process_non_active(ctx: &OrchestratorCtx, session_id: &str, content: &s
             content: crate::channels::ChannelMessageContent::text(content_owned),
             timestamp: chrono::Utc::now().timestamp() as u64,
             interruption_scope_id: None,
+            silenced_override,
         };
 
         match session_ctx.process_turn(synthetic, None, runtime).await {
@@ -580,5 +597,39 @@ mod tests {
         let mut content = "[系统通知] 子代理已完成后台任务 (task_id: t1)".to_string();
         maybe_append_silence_guidance(&sctx, &mut content);
         assert_eq!(content, "[系统通知] 子代理已完成后台任务 (task_id: t1)");
+    }
+
+    /// Race fix (E2E 恢复轮1): the silenced intent is captured at
+    /// wake/route time (`record_terminal` → `route_notice`, same sync
+    /// section) — the value is what `route_notice` puts on the synthetic
+    /// `ChannelInboundMessage.silenced_override`. A queued notice may start
+    /// after later terminals cleared `pending`; the override keeps the
+    /// intermediate notice silenced even though the live snapshot at turn
+    /// start would be empty.
+    #[tokio::test]
+    async fn silence_intent_captured_at_wake_time_survives_late_collection() {
+        let ctx = test_ctx(vec![]);
+        let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
+        sctx.add_pending_task("t1".to_string());
+        sctx.add_pending_task("t2".to_string());
+
+        // wake-1 (t1 terminal): record_terminal runs first, then route_notice
+        // derives the intent from `has_pending_delegations()` — t2 remains →
+        // intermediate notice.
+        let _ = sctx.record_terminal("t1".into(), SubStatus::Completed, "t1 done".into(), 0);
+        let intent_t1 = Some(sctx.has_pending_delegations());
+        assert_eq!(intent_t1, Some(true));
+
+        // Race: t2's terminal lands BEFORE wake-1's turn runs — live pending
+        // is now empty, but wake-1's intent (Some(true)) keeps it silenced.
+        let _ = sctx.record_terminal("t2".into(), SubStatus::Completed, "t2 done".into(), 0);
+        let live = sctx.suspension_snapshot();
+        assert!(live.as_ref().unwrap().pending.is_empty());
+        assert!(crate::agents::session_context::decide_silenced(intent_t1, live.clone()));
+
+        // wake-2 (t2 terminal): final notice → loud summary.
+        let intent_t2 = Some(sctx.has_pending_delegations());
+        assert_eq!(intent_t2, Some(false));
+        assert!(!crate::agents::session_context::decide_silenced(intent_t2, live));
     }
 }

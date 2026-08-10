@@ -606,6 +606,7 @@ impl DelegationCoordinator {
                 content: crate::channels::ChannelMessageContent::text(task.to_string()),
                 timestamp: chrono::Utc::now().timestamp() as u64,
                 interruption_scope_id: None,
+                silenced_override: None,
             };
 
             tracing::debug!(agent = %config.name, "sub-agent started");

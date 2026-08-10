@@ -131,6 +131,8 @@ pub struct SubResult {
 
 约束不保证 100% 遵守:最坏情况是静默轮写了长内容——但内容不会丢:`[进度]` 转换会截断兜底(完整内容照常落盘 history §2.1,模型翻 history 仍可引用),且模型已被明确告知本轮不终结,不会误以为已给最终答复;恢复轮重新生成完整答复。信息不丢(history 落盘)、认知不错位(已告知不终结),故无需回填机制。
 
+**静默判定时机修正(2026-08-10, E2E 恢复轮1 竞态修复)**:静默与否的判定**不在 turn 开始时读活快照**,而在**唤醒/路由时捕获意图**(终态事件 `record_terminal` 收集后同一同步段: `pending` 非空 → 中间轮 → `silenced_override=Some(true)`;空 → 最终轮 → `Some(false)`),随合成 `ChannelInboundMessage.silenced_override` 传入 `process_turn`。原因:通知轮经 `dispatch_turn` 排队(turn_lock),排队期间后续终态事件可能已清空 `pending`——活快照会把**中间轮误判为最终轮**,以普通消息流式送达(无 `[进度]` 前缀),与 wake 时附加的约束语数据源不一致(E2E 恢复轮1 即此竞态:约束语说"进度通知",实际普通消息)。约束语与 silenced 意图同源(wake 时 `has_pending_delegations()`,与 `!snap.pending.is_empty()` 等价,record_terminal 与 route_notice 之间无 await 点)。用户消息轮无 override(`None`),仍用 turn 开始时活快照(§4 排队语义不变)。`recover_suspension`(重启恢复)同样经 route_notice 捕获意图(未覆盖任务按 Failed 收集后,covered 仍 pending → 中间轮;全收 → 最终轮)。
+
 **ask_user 在挂起恢复轮次禁用**(防死锁:用户回答走普通消息排队,而排队要等 turn 结束,turn 又在等回答):`ask_user` 工具检测当前为挂起恢复轮次 → 返回错误"当前 turn 挂起中,无法提问",引导主 agent 将问题写入最终汇总或改用 `/btw`。
 
 ### 3.4 全部收尾

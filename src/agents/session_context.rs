@@ -33,6 +33,19 @@ fn format_progress_message(text: &str) -> String {
     }
 }
 
+/// 方案 C (RFC §3.3, race fix 2026-08-10): decide whether a turn is silenced.
+///
+/// Delegation notices carry a **wake-time intent** (`intent`), captured when
+/// the terminal event was collected — a queued notice may start long after
+/// later terminals cleared `pending`, so the live snapshot at turn start is
+/// racy (the E2E 恢复轮1 bug: an intermediate notice streamed as a normal
+/// message because `pending` was already empty when its turn ran). User
+/// messages carry `None` → fall back to the live snapshot at turn start.
+/// `pub(crate)` so orchestrator tests can pin the wake-time semantics.
+pub(crate) fn decide_silenced(intent: Option<bool>, live: Option<TurnSuspension>) -> bool {
+    intent.unwrap_or_else(|| live.is_some_and(|s| !s.pending.is_empty()))
+}
+
 /// Per-session bundle held by the SessionManager's session-context table.
 ///
 /// Fields:
@@ -326,6 +339,10 @@ impl SessionContext {
 
         let content = crate::str_utils::neutralize_spoofing(&inbound_msg.content.text);
         let reply_target = inbound_msg.receiver.id.clone();
+        // 方案 C (§3.3, race fix): delegation notices carry the wake-time
+        // silence intent; capture before `inbound_msg` is moved. User-message
+        // turns leave it None → live snapshot decides below.
+        let silenced_intent = inbound_msg.silenced_override;
 
         // Persist inbound files to session-local storage so their lifetime
         // matches the session.  Read the body stream (via
@@ -399,14 +416,16 @@ impl SessionContext {
         }
         let channel_for_send = channel.clone();
         // 方案 C (RFC §3.3): silent iff the session is suspended with pending
-        // tasks at turn start. Origin turns (suspension created mid-run) and
-        // the final resume turn (last terminal already recorded → pending
-        // empty) are loud; intermediate resume turns are silent context
-        // updates — their output is history-only, the user sees the final
-        // summary. Also disables `ask_user` for this turn (session flag).
-        let silenced = self
-            .suspension_snapshot()
-            .is_some_and(|s| !s.pending.is_empty());
+        // tasks — for delegation notices the intent is captured at wake time
+        // (`silenced_intent`, see `decide_silenced`; a queued notice may run
+        // after later terminals cleared `pending`), for user messages from
+        // the live snapshot at turn start. Origin turns (suspension created
+        // mid-run) and the final resume turn (last terminal already recorded
+        // → pending empty) are loud; intermediate resume turns are silent
+        // context updates — their output becomes a `[进度]` message, the user
+        // sees the final summary. Also disables `ask_user` for this turn
+        // (session flag).
+        let silenced = decide_silenced(silenced_intent, self.suspension_snapshot());
         session.turn_silenced = silenced;
         // RFC §7.6: install per-turn streaming handle BEFORE Agent::run.
         // Channels that don't support streaming return None; the
@@ -1360,5 +1379,47 @@ mod suspension_tests {
         assert!(msg.starts_with("[进度] "));
         assert!(msg.contains("完整内容已记入会话历史"));
         assert!(msg.chars().count() < 600);
+    }
+
+    /// Race fix (E2E 恢复轮1): a delegation notice's silenced flag must come
+    /// from the WAKE-time intent, not the live snapshot at turn start — a
+    /// queued notice may run after later terminal events cleared `pending`.
+    #[test]
+    fn decide_silenced_uses_wake_time_intent_over_live_snapshot() {
+        let (ctx, _m) = make_ctx();
+        ctx.add_pending_task("t1".to_string());
+        ctx.add_pending_task("t2".to_string());
+
+        // wake-1 (t1 terminal): collected while t2 still pending → the
+        // route-time intent says "intermediate notice".
+        let _ = ctx.record_terminal("t1".into(), SubStatus::Completed, "t1 done".into(), 0);
+        let live_with_t2 = ctx.suspension_snapshot();
+        assert!(decide_silenced(Some(true), live_with_t2.clone()));
+
+        // Race: t2's terminal lands BEFORE wake-1's turn starts — the live
+        // snapshot is now empty (would mark the turn loud), but the
+        // wake-time intent keeps the intermediate notice silenced.
+        let _ = ctx.record_terminal("t2".into(), SubStatus::Completed, "t2 done".into(), 0);
+        let live_empty = ctx.suspension_snapshot();
+        assert!(live_empty.as_ref().unwrap().pending.is_empty());
+        assert!(decide_silenced(Some(true), live_empty.clone()));
+
+        // wake-2 (t2 terminal, final notice): intent false → loud summary
+        // regardless of the live snapshot.
+        assert!(!decide_silenced(Some(false), live_empty.clone()));
+        assert!(!decide_silenced(Some(false), live_with_t2));
+    }
+
+    #[test]
+    fn decide_silenced_defaults_to_live_snapshot_for_user_messages() {
+        let (ctx, _m) = make_ctx();
+        // Not suspended → loud.
+        assert!(!decide_silenced(None, ctx.suspension_snapshot()));
+        // Suspended with pending → silenced (user-message resume turn).
+        ctx.add_pending_task("t1".to_string());
+        assert!(decide_silenced(None, ctx.suspension_snapshot()));
+        // Suspended but fully collected → loud (final resume turn).
+        ctx.record_terminal("t1".into(), SubStatus::Completed, "ok".into(), 0);
+        assert!(!decide_silenced(None, ctx.suspension_snapshot()));
     }
 }

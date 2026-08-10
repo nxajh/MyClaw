@@ -302,6 +302,15 @@ pub struct ChannelInboundMessage {
     pub content: ChannelMessageContent,
     pub timestamp: u64,
     pub interruption_scope_id: Option<String>,
+    /// 方案 C (RFC §3.3, race fix 2026-08-10): wake-time silence intent for
+    /// synthesized delegation notices. `Some(true)` = intermediate notice
+    /// (pending tasks remained when the terminal event was collected →
+    /// silenced turn → output delivered as `[进度]`), `Some(false)` = final
+    /// notice (pending empty → loud summary). `None` for real user messages /
+    /// scheduled turns → `process_turn` falls back to the live suspension
+    /// snapshot at turn start. Runtime-only; never persisted (see
+    /// `to_persisted`).
+    pub silenced_override: Option<bool>,
 }
 
 impl ChannelInboundMessage {

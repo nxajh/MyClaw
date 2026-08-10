@@ -1098,6 +1098,7 @@ impl TelegramChannel {
                     },
                     timestamp: entry.first_ts,
                     interruption_scope_id: None,
+                    silenced_override: None,
                 };
                 let _ = tx.send(channel_msg).await;
             }
@@ -1364,6 +1365,7 @@ impl TelegramChannel {
                         content: ChannelMessageContent::text(data),
                         timestamp: chrono::Utc::now().timestamp_millis() as u64,
                         interruption_scope_id: None,
+                        silenced_override: None,
                     };
 
                     // Send ack reaction if enabled.
@@ -1671,6 +1673,7 @@ impl TelegramChannel {
                     },
                     timestamp: chrono::Utc::now().timestamp_millis() as u64,
                     interruption_scope_id: None,
+                    silenced_override: None,
                 };
 
                 if self.debounce_ms > 0 {
