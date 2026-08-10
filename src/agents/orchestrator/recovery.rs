@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use super::ctx::OrchestratorCtx;
 use super::delegation::route_notice;
-use super::key::{SessionKey, SubAgentKey};
+use super::key::SessionKey;
 use super::turn::ResolvedTurn;
 use crate::agents::turn::{SubStatus, TurnSuspension};
 use crate::agents::{
@@ -271,32 +271,74 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
             tracing::debug!(task_id = %sa.task_id, "sub-agent recovery: skipping (no sub_session_id or parent_session_id)");
             continue;
         }
-        let sub_sk = SubAgentKey::new(&sa.agent_name, &sa.sub_session_id).to_string();
-        let snap = sessions.get_or_create(&sub_sk);
-        if snap.history.is_empty() || !super::history_has_incomplete_turn(&snap.history) {
+
+        // Build the completion sink up front so both branches (recover /
+        // fail) can use it.
+        let sink = CompletionSink::Delegate {
+            task_id: sa.task_id.clone(),
+            // The event's `session_id` must be the parent's SESSION ID
+            // (wake / route_notice index by session id, not routing
+            // key). E29 switched the other senders to session ids but
+            // missed this one — it still passed the routing key
+            // (`sa.session_key`), so the recovered task's Completed
+            // event was unroutable and the covered pending entry in a
+            // persisted suspension would never resolve.
+            parent_session_id: sa.parent_session_id.clone(),
+            reply_target: sa.reply_target.clone(),
+            delegator: delegator.clone(),
+        };
+
+        // Load the sub-session by its ID — NOT via a SubAgentKey routing
+        // key. The session's `owner` field is the parent's routing key
+        // (e.g. "telegram:myclaw:…"), not the SubAgentKey format
+        // ("main:myclaw/s/…"), so get_or_create would create a brand-new
+        // empty session instead of loading the existing one. That caused
+        // the history-empty check below to skip the task WITHOUT emitting
+        // a terminal event, leaving the parent's suspension pending list
+        // permanently stuck (turn_lock deadlock).
+        let snap = sessions.get_by_id(&sa.sub_session_id);
+        let needs_recovery = snap
+            .as_ref()
+            .is_some_and(|s| !s.history.is_empty() && super::history_has_incomplete_turn(&s.history));
+
+        if !needs_recovery {
+            // The sub-agent session can't be recovered (not found, empty,
+            // or already complete). Emit a Failed terminal event so the
+            // parent's suspension clears — otherwise the pending entry
+            // stays forever and deadlocks the turn_lock.
+            let reason = match &snap {
+                None => "daemon 重启，子代理会话未找到".to_string(),
+                Some(s) if s.history.is_empty() => "daemon 重启，子代理会话历史为空".to_string(),
+                Some(_) => "daemon 重启，子代理任务已完成".to_string(),
+            };
+            tracing::info!(
+                task_id = %sa.task_id,
+                agent = %sa.agent_name,
+                reason = %reason,
+                "sub-agent startup recovery: no incomplete turn, emitting Failed terminal event"
+            );
+            tokio::spawn(async move {
+                sink.fail(reason).await;
+            });
             continue;
         }
+
         tracing::info!(task_id = %sa.task_id, agent = %sa.agent_name, "sub-agent startup recovery: found incomplete turn, spawning background task");
-        let session_ctx = sessions.get_or_create_context(&sub_sk);
+        let session_ctx = sessions
+            .load_context_by_session_id(&sa.sub_session_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "sub-agent session {} existed in get_by_id but not load_context_by_session_id",
+                    sa.sub_session_id
+                )
+            });
         spawn_recovery(
             turn_tracker.clone(),
             session_ctx,
             runtime.clone(),
             "sub-agent startup recovery",
             sa.task_id.clone(),
-            CompletionSink::Delegate {
-                task_id: sa.task_id.clone(),
-                // The event's `session_id` must be the parent's SESSION ID
-                // (wake / route_notice index by session id, not routing
-                // key). E29 switched the other senders to session ids but
-                // missed this one — it still passed the routing key
-                // (`sa.session_key`), so the recovered task's Completed
-                // event was unroutable and the covered pending entry in a
-                // persisted suspension would never resolve.
-                parent_session_id: sa.parent_session_id.clone(),
-                reply_target: sa.reply_target.clone(),
-                delegator: delegator.clone(),
-            },
+            sink,
             None,
         );
     }

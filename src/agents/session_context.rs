@@ -303,6 +303,16 @@ impl SessionContext {
         let snapshot = {
             let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
             let s = guard.as_mut()?;
+            // Idempotent: if the task was already collected (not in
+            // pending and already in results), return the current
+            // snapshot without adding a duplicate result entry. This
+            // guards against double-delivery when both recover_suspension
+            // and the sub-agent recovery loop handle the same task.
+            if !s.pending.iter().any(|t| t == &task_id)
+                && s.results.iter().any(|r| r.task_id == task_id)
+            {
+                return Some(guard.clone());
+            }
             s.pending.retain(|t| t != &task_id);
             let progress = s.progress_by_task.remove(&task_id).unwrap_or_default();
             s.results.push(SubResult {
