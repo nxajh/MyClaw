@@ -271,16 +271,11 @@ impl ToolExecutor {
         if avail_kb >= MIN_AVAIL_KB {
             return None;
         }
-        let avail_mb = avail_kb / 1024;
-        tracing::warn!(avail_mb, "low-memory guard triggered for build command");
+        tracing::warn!(avail_kb, "low-memory guard triggered for build command");
         Some(ToolResult {
             success: false,
-            output: format!(
-                "cargo/rustc rejected: insufficient memory ({}MB available, need 512MB) \
-                 on this host. Use CI instead: commit, push, and let GitHub Actions build.",
-                avail_mb
-            ),
-            error: Some("low_memory_guard".to_string()),
+            output: String::new(),
+            error: Some("cargo/rustc rejected: insufficient memory (<512MB available) on this host. Use CI instead.".to_string()),
         })
     }
 
