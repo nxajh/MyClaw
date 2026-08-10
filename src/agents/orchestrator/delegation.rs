@@ -20,8 +20,27 @@
 use super::ctx::OrchestratorCtx;
 use super::key::SessionKey;
 use crate::agents::turn::SubStatus;
-use crate::agents::{DelegationEvent, MessageKind};
+use crate::agents::{DelegationEvent, MessageKind, SessionContext};
 use crate::channels::ChannelInboundMessage;
+
+/// 方案 C (§3.3): appended to every resume-turn notice while the session
+/// still has pending delegations — that turn's output is *silenced* (not
+/// sent to the user), so the model must not draft a final summary yet.
+/// Borrowed from Claude Code's fork-async pre-announcement ("results will
+/// arrive in a subsequent message"): telling the model the silence exists
+/// keeps it from assuming the user has seen a draft; no silenced_outputs
+/// backfill is needed.
+const SILENCE_GUIDANCE: &str = "[系统提示] 当前轮次输出将不发送给用户(静默),请勿生成最终结论;子代理结果将以通知形式在后续轮次到达,届时请整合输出完整答复。";
+
+/// Append the silence guidance when the resume turn is silent — the session
+/// still has pending delegations, so this turn's output is persisted but not
+/// sent to the user.
+fn maybe_append_silence_guidance(sctx: &SessionContext, content: &mut String) {
+    if sctx.has_pending_delegations() {
+        content.push_str("\n\n");
+        content.push_str(SILENCE_GUIDANCE);
+    }
+}
 
 /// Wake the parent agent on a `DelegationEvent` (sub-agent completion/failure/message).
 pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
@@ -219,7 +238,7 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
 pub(super) async fn route_notice(
     ctx: &OrchestratorCtx,
     session_id: &str,
-    content: String,
+    mut content: String,
     synthetic_id: String,
 ) {
     // Resolve the session to get its routing key (owner).
@@ -230,6 +249,17 @@ pub(super) async fn route_notice(
             return;
         }
     };
+
+    // 方案 C (§3.3): a resume turn with pending delegations is *silenced* —
+    // attach the guidance so the model never assumes the user has seen a
+    // draft summary (Claude Code-style pre-announcement; no backfill).
+    if let Some(sctx) = ctx
+        .sessions
+        .registered_context_by_session_id(session_id)
+        .or_else(|| ctx.sessions.load_context_by_session_id(session_id))
+    {
+        maybe_append_silence_guidance(&sctx, &mut content);
+    }
 
     let routing_key = &session.owner;
     let is_active = ctx
@@ -509,5 +539,45 @@ mod tests {
         )
         .await;
         // no panic; nothing further to assert
+    }
+
+    #[tokio::test]
+    async fn silence_guidance_appended_while_pending_remains() {
+        let ctx = test_ctx(vec![]);
+        let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
+        sctx.add_pending_task("t1".to_string());
+        sctx.add_pending_task("t2".to_string());
+        let mut content = "[系统通知] 子代理已完成后台任务 (task_id: t1)".to_string();
+        maybe_append_silence_guidance(&sctx, &mut content);
+        assert!(content.contains("不发送给用户"));
+        assert!(content.contains("请勿生成最终结论"));
+        assert!(content.contains("整合输出完整答复"));
+    }
+
+    #[tokio::test]
+    async fn silence_guidance_omitted_when_last_terminal_lands() {
+        let ctx = test_ctx(vec![]);
+        let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
+        sctx.add_pending_task("t1".to_string());
+        // The terminal event already collected (pending empty) — this resume
+        // turn is the loud final summary, no guidance.
+        let _ = sctx.record_terminal(
+            "t1".to_string(),
+            SubStatus::Completed,
+            "done".to_string(),
+            0,
+        );
+        let mut content = "[系统通知] 子代理已完成后台任务 (task_id: t1)".to_string();
+        maybe_append_silence_guidance(&sctx, &mut content);
+        assert_eq!(content, "[系统通知] 子代理已完成后台任务 (task_id: t1)");
+    }
+
+    #[tokio::test]
+    async fn silence_guidance_omitted_when_not_suspended() {
+        let ctx = test_ctx(vec![]);
+        let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
+        let mut content = "[系统通知] 子代理已完成后台任务 (task_id: t1)".to_string();
+        maybe_append_silence_guidance(&sctx, &mut content);
+        assert_eq!(content, "[系统通知] 子代理已完成后台任务 (task_id: t1)");
     }
 }
