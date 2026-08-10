@@ -1,0 +1,178 @@
+# Turn 挂起延续 RFC（Turn Suspension & Continuation）
+
+> 状态:草案(2026-08-10 讨论收敛 + 审查修正,待实现)
+> 范围:`agents/agent.rs`(EndTurn 挂起标记) + `agents/delegation_coordinator.rs`(终态事件) + `agents/orchestrator/delegation.rs`(wake) + `agents/orchestrator/inbound.rs`(dispatch 判定 + 恢复锁) + `agents/session_context.rs`(挂起状态挂载) + `storage/session.rs`(持久化)
+> 原则:**主 agent 派发 async 子 agent 后 turn 不结束**;每个子 agent 终态事件各自唤醒主 agent 处理(不聚合等待);全部收尾后主 agent 汇总输出,完整 turn 才结束。
+> 实现机制(审查修正):**方案 X**——`Agent::run` 不改内部循环,照常返回 `TurnResult`;挂起是**语义概念**(history 连续),恢复 = 事件到达时 `process_turn` 一次(复用现有 wake → dispatch 路径),新增的只是挂起状态管理 + 输出静默 + turn 边界判定。
+
+## 0. 背景
+
+对比三家子代理机制源码(Codex / OpenClaw / Hermes)后,myclaw 现状是:
+
+- **sync** `agent_delegate`:同轮阻塞,主 agent 在同一个 tool call 里等结果(Codex `wait_agent` 同款)。
+- **async** `agent_delegate`:fire-and-forget,立即返回 task_id,子 agent 终态/消息通过 `DelegationEvent` → `orchestrator/delegation.rs::wake` → **新 turn**(事件驱动),主 agent 的原始 turn 早已在派发后 EndTurn 结束。
+
+用户定义的第三种模型(方案 C):**挂起延续**——主 agent 的 turn 从派发 async 子 agent 起挂起,子 agent 结果逐个到达、逐个唤醒处理(不聚合),全部收尾后主 agent 汇总输出,**这个 turn 才算结束**。本质 = Codex 同轮阻塞的自动版(免显式 wait)+ Hermes batch 聚合的分散版(按完成先后逐个注入)。
+
+与 A/B 的关键差异:
+
+| 维度 | A sync(现状) | B async(现状) | C 挂起延续(本 RFC) |
+|---|---|---|---|
+| 派发后主 agent | 阻塞等单个结果 | turn 结束,事件驱动新 turn | turn 挂起,等全部收尾 |
+| 多子 agent 并行 | 不支持(串行) | 支持 | 支持 |
+| 结果回传形态 | tool 返回值 | 逐事件新 turn,主 agent 上下文割裂 | 逐事件注入同一挂起 turn,上下文连续 |
+| 用户视角 | 派发即等 | 多次独立回复 | 一次输入 → 一个完整回复(中间静默) |
+| turn 边界 | 单次 | 每次事件一个新 turn | 完整 agentic run 一个 turn |
+
+## 1. 目标与非目标
+
+**目标**
+- async 派发后主 agent turn 挂起(不结束),全部子 agent 收尾后汇总输出才结束。
+- 每个子 agent 终态(Completed/Failed/TimedOut)到达 → **各自**唤醒恢复主 agent,注入该事件(带状态标签),不等待其他未完成子 agent。
+- 挂起期间用户插话:普通消息排队(现有 turn_lock 机制,零新增);`/btw` 旁路即时回答(现有 slash command,独立上下文,零新增)。
+- 挂起状态持久化,重启后恢复(遗留 pending 按 Failed 处理)。
+- 递归嵌套深度上限可配置。
+
+**非目标**
+- 不引入 `wait` 参数(验证:cron/定时走 `orchestrator/scheduled.rs` 独立调度路径,不经 `agent_delegate`;所有 delegate 调用来自主 agent LLM 决策,派发即为等结果,无 fire-and-forget 场景)。
+- 不聚合注入(用户明确:多个子 agent 完成时间不同步,先完成的空等最慢的不可接受)。
+- 不改 sync 语义(保持阻塞返回结果)。
+- 不新增"打断挂起"重机制(btw 已覆盖即时插话)。
+- 不做子 agent ↔ 子 agent 通信。
+
+## 2. 核心语义
+
+### 2.1 turn 定义与实现机制(方案 X)
+
+turn = 一次用户/系统输入触发的**完整 agentic run**(内含多轮 LLM API 调用与工具调用),以向用户输出最终回复为结束。
+
+**方案 X:挂起是语义概念,不是进程内协程挂起。** `Agent::run` 内部循环不改:每次 `process_turn` 都是完整的 run,到 `StopReason::EndTurn` 返回 `TurnResult`(附挂起标记 `has_pending`)。"同一 turn"由 **history 连续性**体现——挂起轮次的注入与输出照常落盘,模型在下次恢复时看到完整连续上下文,与用户视角的"一次输入一次完整回复"一致。
+
+```
+用户输入 ──→ process_turn(run) ──→ tool agent_delegate(async) ──┐
+                                     EndTurn: pending 非空 ──→ 挂起态(记录,返回)
+                                                              │
+              ┌────────────────────────────────────────────────┘
+              │ t1 终态(Completed) → wake → dispatch_turn(注入 t1,run)
+              │                       输出静默(仅落盘) → EndTurn: pending=[t2] → 挂起
+              │
+              ┌────────────────────────────────────────────────┘
+              │ t2 终态(TimedOut) → wake → dispatch_turn(注入 t2,run)
+              │                       pending 空 → 汇总输出给用户 → 完整 turn 结束
+```
+
+### 2.2 状态机与挂起状态
+
+```
+Running ──EndTurn 且 pending 非空──→ Suspended(仅记录,run 已返回)
+Suspended ──终态事件 t_i──→ Running(dispatch_turn 注入 t_i,run 一轮,输出静默)
+Running ──EndTurn 且 pending 空──→ Finished(汇总输出,完整 turn 结束)
+```
+
+挂起状态定义(挂 SessionContext,持久化见 §5):
+
+```rust
+pub struct TurnSuspension {
+    pub origin_turn_seq: u64,                  // 触发挂起的 turn 序号(无 TurnId 类型,用自增序号)
+    pub suspended_at: u64,                     // 挂起开始 unix 秒(重启恢复时长统计)
+    pub pending: Vec<String>,                  // 未收尾子 agent task_id
+    pub results: Vec<SubResult>,               // 已收尾结果,按完成顺序追加
+}
+
+pub struct SubResult {
+    pub task_id: String,
+    pub status: SubStatus,                     // Completed | Failed | TimedOut
+    pub content: String,                       // 终态消息内容(summary / 错误 / 超时)
+    pub sent_message_count: u64,               // 子 agent 中途主动发消息数(降噪判定)
+    pub progress: Vec<String>,                 // 丢弃的 Progress 合并于此(永不注入上下文)
+}
+```
+
+### 2.3 事件模型(四类保留,不聚合)
+
+`DelegationEvent` 保持四类独立,不并入 Message:
+
+| 事件 | 触发 | 恢复注入内容 |
+|---|---|---|
+| `Message{kind: Progress}` | 子 agent `send_message(recipient="parent")` 中途汇报 | **永不注入上下文**(挂起与非挂起场景统一):合并进该任务 `progress` 列表,终态注入时以结果条目呈现 |
+| `Message{kind: Final}` | 子 agent 主动发最终消息 | 注入 `[子代理消息]`(现有形态) |
+| `Completed{summary}` | wrapper 检测子 agent 正常结束 | 注入完成通知;`sent_message_count>0` 时 summary 降级为纯元数据(保留降噪) |
+| `Failed{error}` | wrapper 检测子 agent run 内部错误(provider 失败/工具 bail/panic) | 注入失败通知 |
+| `TimedOut` | 墙钟超时(downcast `DelegationTimeout`) | 注入超时通知 |
+
+> ⚠️ **新增字段**:现有 `DelegationEvent::Message(AgentMessage)` 无 kind 区分(`delegation.rs` L130),`Message{kind: Progress\|Final}` 为**本 RFC 新增**——`AgentMessage` 加 `kind: MessageKind` 字段,默认 `Final`(兼容既有发送方)。
+
+每个事件独立走恢复路径(各自 `tokio::spawn` + turn 判定),不攒批。
+
+## 3. 挂起生命周期
+
+### 3.1 派发挂起
+
+`agent_delegate(mode="async")` 返回 task_id 后,主 agent run 继续;到 `StopReason::EndTurn` 时检测挂起状态 `pending` 非空 → **记录挂起态并返回**(run 照常返回 `TurnResult`,附 `has_pending` 标记)。`agent.rs` 现有 EndTurn 返回点(`agent.rs` L445-566)为改造锚点(仅加标记,不动内部循环)。
+
+### 3.2 终态恢复(逐事件)
+
+子 agent 终态到达 → `delegation_coordinator.rs` 现有 L817-871 终态清理(无条件执行,不依赖事件)保留 → 事件沿现有链路(send_to_parent → mpsc → `orchestrator/mod.rs` L501-503 → `delegation.rs::wake`)到达:
+
+- **挂起会话**(`SessionContext.turn_suspension` 非空,active 或非 active 皆然):走 `inbound::dispatch_turn`(**复用现有路径**,非 active 维持 `process_non_active` 临时 SessionContext)→ 注入该事件 → run 一轮 → EndTurn 判定。
+- **非挂起会话**:维持现状(事件驱动新 turn),唯一变化是 Progress 不注入(§2.3)。
+- **恢复锁(新增)**:终态事件到达与用户消息共用 `turn_tracker.track()` 排队(`dispatch_turn` L512 现有机制)——t1、t2 同时终态时两个恢复串行执行,杜绝双 LLM 循环并发读同一 history。
+
+恢复注入形态:单事件注入(带状态标签 `[子代理 t1 已完成]` 或 `[子代理 t1 失败: ...]`),复用现有注入管线(`delegation.rs` L91-153 Message 变体合成),每条独立 msg_id 可寻址。
+
+### 3.3 中间输出静默 + ask_user 禁用
+
+挂起恢复轮次(`pending` 非空)的主 agent 输出**不发送给用户**(抑制 `channel.send`/流式 push_event),照常落盘 history;`pending` 归零后的最终轮次输出正常发送,作为完整 turn 的最终回复。
+
+**ask_user 在挂起恢复轮次禁用**(防死锁:用户回答走普通消息排队,而排队要等 turn 结束,turn 又在等回答):`ask_user` 工具检测当前为挂起恢复轮次 → 返回错误"当前 turn 挂起中,无法提问",引导主 agent 将问题写入最终汇总或改用 `/btw`。
+
+### 3.4 全部收尾
+
+`pending` 归零 → 当前事件注入 + run → 最终轮次输出正常发送(可带聚合引导头,如"所有子代理结果已收齐,请汇总并输出最终结论"——引导头可选,默认不加,依赖事件注入内容自然驱动)→ 完整 turn 结束,清除挂起状态。
+
+### 3.5 多轮派发(级联)
+
+挂起恢复轮次中主 agent 可再次 `agent_delegate(async)`(如处理 t1 结果后决定派发 t3):新 task_id 追加进 `pending`,状态机自然支持(该轮 EndTurn 时 pending 非空 → 继续挂起)。
+
+### 3.6 挂起最长等待
+
+挂起持续时间上限 ≈ max(pending 子 agent 墙钟超时),即子 agent 超时(默认 600s)并行计时,最慢者超时后终态事件必达。无需额外挂起超时机制;子 agent 超时配置即兜底。
+
+## 4. 用户插话(挂起期间)
+
+| 输入 | 行为 | 机制 |
+|---|---|---|
+| 普通消息 | 排队,等当前挂起 turn 结束 | 现有 `turn_lock`(`session_context.rs`),零新增 |
+| `/btw <问题>` | 即时旁路回答,独立上下文,不进历史 | 现有 `cmd_btw`(`commands/info.rs` L312),命令拦截器 `tokio::spawn` 独立执行,不拿 turn_lock,零新增 |
+
+验证:`/btw` 构造全新 messages(system + 问题),不 touch session history;`SlashCommand` 拦截器在 turn 分发前拦截(`inbound.rs` L367+),挂起期间可用。
+
+## 5. 持久化与恢复
+
+- `TurnSuspension`(§2.2)序列化落盘为**独立文件** `sessions/<sid>/suspension.json`(会话持久化为 `sessions/<sid>/` 目录 + 消息级 append/load,见 `storage/session.rs`;无 session.json 单体文件)。
+- **重启恢复语义(审查修正)**:子 agent 是 daemon 进程内 tokio task(`spawn_delegate_async`),**daemon 重启即全部中断,终态事件不会再到达**。恢复逻辑:daemon 启动扫描挂起文件 → 遗留 `pending` 全部按 `Failed{error:"daemon 重启,子代理中断"}` 处理 → 挂起 turn 恢复(注入失败通知)→ 主 agent 汇总,完整 turn 结束。
+- 已收尾 `results` 不丢;`suspended_at` 用于恢复时向主 agent 说明挂起时长。
+- `recovery.rs` 既有恢复路径同步改造:run_recovery 的 Delegate 分支(发 Completed)保留;Err 分支补 Failed 广播(见 §7)。
+
+## 6. 递归嵌套
+
+- 深度上限可配置:`config` 新增 `delegation.max_depth`(默认 3,含主 agent 层)。
+- 超限时 `agent_delegate` 返回错误(工具层拒绝,深度计数器挂 SessionContext),不产生挂起。
+- 子 agent 内部再派发同样受限于自身深度(每层 +1)。
+
+## 7. 已知缺口(随本 RFC 一并修复)
+
+| 缺口 | 现状 | 修复 |
+|---|---|---|
+| `agent_kill`(cancel → abort)无事件通知 | `delegation_coordinator.rs` L296-307 `handle.abort()`,父 agent 收不到 kill 通知 | kill 后广播 `Failed{error:"cancelled"}`(不新增变体,保持四类事件) |
+| `recovery.rs` `run_recovery` Err 分支无 Failed 广播 | L136-138 仅日志 | 补 Failed 事件广播,挂起主 agent 可感知子 agent 恢复失败 |
+
+## 8. 实施任务拆分
+
+- **P0-1** `TurnSuspension` 结构 + `SessionContext` 挂载 + `Agent::run` EndTurn 挂起标记(`TurnResult` 加 `has_pending`,§2.2/§3.1)
+- **P0-2** 终态事件 → 挂起恢复驱动(`dispatch_turn` 复用 + 恢复锁 turn_tracker 串行化 + 非挂起会话维持现状;`AgentMessage` 加 `kind` 字段,Progress 统一不注入,§2.3/§3.2)
+- **P0-3** 中间输出静默 + ask_user 挂起轮次禁用 + 最终汇总结束语义(§3.3/§3.4)
+- **P1-1** 挂起状态持久化 `suspension.json` + 重启恢复(遗留 pending 按 Failed,§5)
+- **P1-2** 递归嵌套上限 config(`delegation.max_depth` 默认 3,§6)
+- **P1-3** 缺口修复:agent_kill 广播 Failed{cancelled} + recovery Err 补 Failed 广播(§7)
+- **P1-4** 测试(挂起/恢复/逐事件注入/并发终态/超时/重启恢复/深度上限)+ 本 RFC 更新 + CI

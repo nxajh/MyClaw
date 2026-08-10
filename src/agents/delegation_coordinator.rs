@@ -746,6 +746,18 @@ impl DelegationCoordinator {
 
         let task_id = Fqid::new(&self.namespace, TYPE_TASK).to_string();
 
+        // 方案 C (docs/turn-suspension-rfc.md): register the task against the
+        // parent's registered SessionContext so the running turn knows to
+        // suspend when the LLM ends it. Only the orchestrator's active
+        // top-level sessions are registered; sub-agent sessions and
+        // switched-away sessions return None and simply don't suspend.
+        if let Some(parent_ctx) = self
+            .session_manager
+            .registered_context_by_session_id(parent_session_id)
+        {
+            parent_ctx.add_pending_task(task_id.clone());
+        }
+
         tracing::info!(
             agent = %config.name,
             task_id = %task_id,

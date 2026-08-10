@@ -587,6 +587,22 @@ impl SessionManager {
         self.contexts.read().get(routing_key).cloned()
     }
 
+    /// Find the registered (contexts-table) SessionContext wrapping the
+    /// session with this hex id. The coordinator uses it to register 方案 C
+    /// pending delegations from `spawn_delegate_async`, which only knows the
+    /// parent's hex session id. Comparison is lock-free on
+    /// `SessionContext.session_id` (snapshot taken at construction), so it
+    /// works even while `process_turn` holds the session's tokio Mutex.
+    /// Unregistered sessions (sub-sessions, switched-away sessions) return
+    /// `None` — 挂起只对 orchestrator 活跃主会话生效.
+    pub fn registered_context_by_session_id(&self, session_id: &str) -> Option<Arc<SessionContext>> {
+        self.contexts
+            .read()
+            .values()
+            .find(|ctx| ctx.session_id == session_id)
+            .cloned()
+    }
+
     /// Get-or-create the SessionContext for a routing_key. On miss,
     /// loads the active Session via `get_or_create` and wraps it with
     /// an Agent resolved from `Session.agent_name`. This is the

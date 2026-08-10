@@ -175,6 +175,7 @@ impl Agent {
                     text: String::new(),
                     stop_reason: StopReason::EndTurn,
                     pending_retry: None,
+                    has_pending: false,
                 });
             }
 
@@ -187,6 +188,7 @@ impl Agent {
                         text: String::new(),
                         stop_reason: StopReason::EndTurn,
                         pending_retry: None,
+                        has_pending: false,
                     });
                 }
             }
@@ -436,6 +438,7 @@ impl Agent {
                             text: msg,
                             stop_reason: StopReason::ContextOverflow,
                             pending_retry: None,
+                            has_pending: false,
                         });
                     }
                 }
@@ -495,6 +498,7 @@ impl Agent {
                             text: msg,
                             stop_reason: response.stop_reason,
                             pending_retry: Some(last_user_text(session)),
+                            has_pending: false,
                         });
                     }
                     if tool_use_without_calls {
@@ -563,6 +567,7 @@ impl Agent {
                     text: response.text,
                     stop_reason: response.stop_reason,
                     pending_retry: None,
+                    has_pending: false,
                 });
             }
 

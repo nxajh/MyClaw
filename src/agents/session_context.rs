@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::agents::session::Session;
-use crate::agents::turn::TurnResult;
+use crate::agents::turn::{TurnResult, TurnSuspension};
 use crate::agents::{Agent, AgentRuntime, TurnContext, UserProfile};
 use crate::channels::{Channel, ChannelInboundMessage};
 /// Per-session bundle held by the SessionManager's session-context table.
@@ -34,6 +34,10 @@ pub struct SessionContext {
     /// Mutable session state. Wrapped in Mutex so the turn lock and the
     /// Session itself share the same critical section.
     pub session: Arc<Mutex<Session>>,
+    /// Hex session id, copied at construction so the coordinator can locate
+    /// this context by session id without locking `session` (which is held
+    /// for the whole turn). Used by 方案 C pending registration.
+    pub session_id: String,
     /// Agent bound to this session at creation time. Built from
     /// `Session.agent_name` via `SessionManager.build_agent_for_session`.
     pub agent: Arc<Agent>,
@@ -44,6 +48,12 @@ pub struct SessionContext {
     /// Mutex because some readers want to peek at session state without
     /// blocking on an in-flight turn.
     pub turn_lock: Arc<Mutex<()>>,
+    /// 方案 C (docs/turn-suspension-rfc.md): non-None while the parent turn
+    /// is suspended on async delegations. `std::sync::Mutex` (no await in
+    /// the critical section): registration happens on the sync
+    /// `spawn_delegate_async` path inside `Agent::run`'s tool execution,
+    /// while `process_turn` holds `session`'s tokio Mutex.
+    pub turn_suspension: std::sync::Mutex<Option<TurnSuspension>>,
     /// Loaded UserProfile snapshot taken at SessionContext creation.
     /// Immutable for the lifetime of the context — per RFC §三.A reload
     /// semantics drop the SessionContext and let `SessionManager`
@@ -54,10 +64,12 @@ pub struct SessionContext {
 impl SessionContext {
     pub fn new(session: Session, agent: Arc<Agent>) -> Self {
         Self {
+            session_id: session.id.clone(),
             session: Arc::new(Mutex::new(session)),
             agent,
             pending_retry: Arc::new(Mutex::new(None)),
             turn_lock: Arc::new(Mutex::new(())),
+            turn_suspension: std::sync::Mutex::new(None),
             user_profile: Arc::new(UserProfile::default()),
         }
     }
@@ -66,10 +78,12 @@ impl SessionContext {
     /// `SessionManager::get_or_create_context_with` takes).
     pub fn with_profile(session: Session, agent: Arc<Agent>, profile: Arc<UserProfile>) -> Self {
         Self {
+            session_id: session.id.clone(),
             session: Arc::new(Mutex::new(session)),
             agent,
             pending_retry: Arc::new(Mutex::new(None)),
             turn_lock: Arc::new(Mutex::new(())),
+            turn_suspension: std::sync::Mutex::new(None),
             user_profile: profile,
         }
     }
@@ -89,6 +103,35 @@ impl SessionContext {
         }
         let mut session = self.session.lock().await;
         session.turn_injections.extend(texts);
+    }
+
+    /// 方案 C: register an async delegation against this session's suspension
+    /// (called from the sync `spawn_delegate_async` path; std Mutex, no await).
+    pub fn add_pending_task(&self, task_id: String) {
+        let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_mut() {
+            Some(s) => s.add_pending(task_id),
+            None => *guard = Some(TurnSuspension::new(task_id)),
+        }
+    }
+
+    /// 方案 C: true while the turn is suspended on uncollected delegations.
+    pub fn has_pending_delegations(&self) -> bool {
+        self.turn_suspension
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|s| !s.pending.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// 方案 C: snapshot of the suspension state (P0-2 consumes terminal
+    /// events against it; P1-1 persists it).
+    pub fn suspension_snapshot(&self) -> Option<TurnSuspension> {
+        self.turn_suspension
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Run one turn end-to-end: acquire the turn lock, replay the
@@ -299,6 +342,7 @@ impl SessionContext {
                     text: msg,
                     stop_reason: crate::providers::StopReason::EndTurn,
                     pending_retry: None,
+                    has_pending: false,
                 });
             }
         }
@@ -354,7 +398,11 @@ impl SessionContext {
         session.channel = None;
 
         match (result, turn_stream) {
-            (Ok(turn_result), stream) => {
+            (Ok(mut turn_result), stream) => {
+                // 方案 C: turn ended with async delegations still pending →
+                // mark the result so the dispatcher knows to suspend (no
+                // user-visible reply; terminal events resume the turn).
+                turn_result.has_pending = self.has_pending_delegations();
                 // Notify channel that processing completed successfully
                 if let Some(ref ch) = channel_for_send {
                     ch.on_status(&reply_target, crate::ProcessingStatus::Done)

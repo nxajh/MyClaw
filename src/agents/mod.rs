@@ -82,7 +82,7 @@ pub use session::{BackendPersistHook, BreakpointItem, InMemoryBackend, PersistHo
 pub use session::{detect_incomplete_turn, identify_breakpoint};
 pub use session_context::SessionContext;
 pub use tool_registry::ToolRegistry;
-pub use turn::{TurnContext, TurnResult};
+pub use turn::{SubResult, SubStatus, TurnContext, TurnResult, TurnSuspension};
 pub use turn_event::{
     RunSummary, TokenUsage, TtsSummary, TurnEvent, VersionedEvent,
 };
