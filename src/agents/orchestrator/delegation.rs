@@ -42,34 +42,20 @@ fn maybe_append_silence_guidance(sctx: &SessionContext, content: &mut String) {
     }
 }
 
-/// 方案 C (fix v2): the user-visible `[进度]` body for an intermediate
-/// silenced resume turn — SYSTEM-generated, never copied from the model's
-/// output. `Some(body)` only when the notice is silenced AND `wake` supplied
-/// a terminal-event summary; the remaining-task count comes from the
-/// post-`record_terminal` snapshot (`pending` already excludes the
-/// just-collected task). `None` for sub-agent messages / recovery notices →
-/// `process_turn` falls back to the model output. Pure so tests can pin the
-/// composition.
-fn build_progress_text(
+/// 方案 B (fix v2): the intermediate progress body passes through verbatim
+/// when the notice is silenced; `None` otherwise (loud final resume,
+/// bodyless sub-agent messages / recovery). Composition into the
+/// user-visible live preview lives in
+/// `SessionContext::render_progress_preview` — this layer no longer formats
+/// anything. Pure so tests can pin the gate.
+fn progress_text_for_notice(
     silenced_override: Option<bool>,
     progress_body: Option<String>,
-    sctx: Option<&SessionContext>,
 ) -> Option<String> {
-    if silenced_override != Some(true) {
-        return None;
-    }
-    let body = progress_body?;
-    let remaining = sctx
-        .and_then(|s| s.suspension_snapshot())
-        .map(|snap| snap.pending.len())
-        .unwrap_or(0);
-    if remaining > 0 {
-        Some(format!(
-            "{}。仍等待 {} 个任务，全部完成后将统一汇总。",
-            body, remaining
-        ))
+    if silenced_override == Some(true) {
+        progress_body
     } else {
-        Some(body)
+        None
     }
 }
 
@@ -327,8 +313,8 @@ pub(super) async fn route_notice(
     // just-collected terminal), NOT at turn start: a queued notice may run
     // after later terminal events cleared `pending`, and the live snapshot
     // would wrongly mark the intermediate notice loud (it streamed as a
-    // normal message instead of `[进度]`). The intent rides the synthetic
-    // `ChannelInboundMessage.silenced_override` into `process_turn`.
+    // normal message instead of the progress preview). The intent rides the
+    // synthetic `ChannelInboundMessage.silenced_override` into `process_turn`.
     let sctx_opt = ctx
         .sessions
         .registered_context_by_session_id(session_id)
@@ -338,12 +324,13 @@ pub(super) async fn route_notice(
     }
     let silenced_override = sctx_opt.as_ref().map(|s| s.has_pending_delegations());
 
-    // 方案 C (fix v2): the intermediate `[进度]` message is SYSTEM-GENERATED.
-    // Only silenced (intermediate) terminal notices carry one; the remaining
-    // task count comes from the post-`record_terminal` snapshot (`pending`
-    // already excludes the just-collected task). Model output for these turns
-    // is persisted to history but no longer delivered.
-    let progress_text = build_progress_text(silenced_override, progress_body, sctx_opt.as_deref());
+    // 方案 B (fix v2): the intermediate progress body is SYSTEM-GENERATED and
+    // passed through verbatim — the channel layer composes it into the live
+    // preview (`render_progress_preview`). Only silenced (intermediate)
+    // terminal notices carry one; the remaining-task count comes from the
+    // turn-start snapshot in `update_progress_preview`. Model output for
+    // these turns is persisted to history but never delivered.
+    let progress_text = progress_text_for_notice(silenced_override, progress_body);
 
     let routing_key = &session.owner;
     let is_active = ctx
@@ -679,51 +666,20 @@ mod tests {
         assert_eq!(content, "[系统通知] 子代理已完成后台任务 (task_id: t1)");
     }
 
-    /// 方案 C (fix v2): the intermediate `[进度]` body is composed by the
-    /// SYSTEM (`build_progress_text`) — only silenced terminal notices with a
-    /// wake-supplied body carry one, and the remaining-task count comes from
-    /// the post-`record_terminal` snapshot.
+    /// 方案 B (fix v2): the progress body passes through verbatim for
+    /// silenced terminal notices (composition moved to
+    /// `render_progress_preview`); loud / bodyless notices yield None.
     #[test]
-    fn progress_text_composed_for_silenced_terminal_with_remaining() {
-        let ctx = test_ctx(vec![]);
-        let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
-        sctx.add_pending_task("t1".to_string());
-        sctx.add_pending_task("t2".to_string());
-        // t1's terminal lands; t2 remains pending → silenced, remaining=1.
-        let _ = sctx.record_terminal("t1".into(), SubStatus::Completed, "t1 done".into(), 0);
-        let body = build_progress_text(
-            Some(true),
-            Some("子代理任务 t1 已完成（耗时 7s）".to_string()),
-            Some(&sctx),
-        );
+    fn progress_text_passthrough_for_silenced_terminal() {
+        let body = Some("子代理任务 t1 已完成（耗时 7s）".to_string());
         assert_eq!(
-            body.unwrap(),
-            "子代理任务 t1 已完成（耗时 7s）。仍等待 1 个任务，全部完成后将统一汇总。"
+            progress_text_for_notice(Some(true), body.clone()),
+            body
         );
-    }
-
-    #[test]
-    fn progress_text_none_for_loud_or_bodyless_notices() {
-        let ctx = test_ctx(vec![]);
-        let sctx = ctx.sessions.get_or_create_context("mock:default:u1");
-        sctx.add_pending_task("t1".to_string());
-        // t1's terminal lands; pending empty → final loud resume, no progress.
-        let _ = sctx.record_terminal("t1".into(), SubStatus::Completed, "t1 done".into(), 0);
-        assert_eq!(
-            build_progress_text(
-                Some(false),
-                Some("子代理任务 t1 已完成（耗时 5s）".to_string()),
-                Some(&sctx)
-            ),
-            None
-        );
-        // Not silenced → None even with a body.
-        assert_eq!(
-            build_progress_text(Some(false), Some("x".to_string()), Some(&sctx)),
-            None
-        );
+        // Not silenced → None even with a body (loud final resume).
+        assert_eq!(progress_text_for_notice(Some(false), body.clone()), None);
         // No body (sub-agent message / recovery) → None.
-        assert_eq!(build_progress_text(Some(true), None, Some(&sctx)), None);
+        assert_eq!(progress_text_for_notice(Some(true), None), None);
     }
 
     /// Race fix (E2E 恢复轮1): the silenced intent is captured at

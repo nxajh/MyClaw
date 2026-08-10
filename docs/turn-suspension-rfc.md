@@ -1,6 +1,6 @@
 # Turn 挂起延续 RFC（Turn Suspension & Continuation）
 
-> 状态:已实现(2026-08-10 讨论收敛 + 审查修正;P0-1/P0-2/P0-3/P1-1/P1-2/P1-3 已合入 master,P1-4 测试补齐 + RFC 定稿,本提交;2026-08-10 二次审查修正:输出静默保留,silenced_outputs 回填机制取消,改以 Claude Code 式事前约束保证连续性,§3.3;2026-08-10 三次修正:静默轮输出不屏蔽,转换压缩为 `[进度]` 消息发出,不终结 turn,§3.3;2026-08-10 四次修正 fix v2(E2E 双委托复测):`[进度]` 改由**系统生成**(wake 终态摘要,不转发模型 EndTurn 回复),silenced 轮 `EndTurn` 语义化为 `Continue`(含 history usage 同步补丁),约束语强化"输出不转发",§3.3)
+> 状态:已实现(2026-08-10 讨论收敛 + 审查修正;P0-1/P0-2/P0-3/P1-1/P1-2/P1-3 已合入 master,P1-4 测试补齐 + RFC 定稿,本提交;2026-08-10 二次审查修正:输出静默保留,silenced_outputs 回填机制取消,改以 Claude Code 式事前约束保证连续性,§3.3;2026-08-10 三次修正:静默轮输出不屏蔽,转换压缩为 `[进度]` 消息发出,不终结 turn,§3.3;2026-08-10 四次修正 fix v2(E2E 双委托复测):`[进度]` 改由**系统生成**(wake 终态摘要,不转发模型 EndTurn 回复),silenced 轮 `EndTurn` 语义化为 `Continue`(含 history usage 同步补丁),约束语强化"输出不转发",§3.3;2026-08-10 五次修正 fix v2 方案 B:挂起期间 telegram 仅显示**一条 live-edit 进度预览**(跨恢复轮原地编辑,最终轮删除),**绝不逐轮发独立消息**;挂起期间消息一律不发用户(模型输出只落盘);非 telegram 通道(无 edit+delete)挂起期间完全静默;`[进度]` 独立消息机制整体移除(`build_progress_text`/`format_progress_message` 删除),§3.3)
 > 范围:`agents/agent.rs`(EndTurn 挂起标记) + `agents/delegation_coordinator.rs`(终态事件) + `agents/orchestrator/delegation.rs`(wake) + `agents/orchestrator/inbound.rs`(dispatch 判定 + 恢复锁) + `agents/session_context.rs`(挂起状态挂载) + `storage/session.rs`(持久化)
 > 原则:**主 agent 派发 async 子 agent 后 turn 不结束**;每个子 agent 终态事件各自唤醒主 agent 处理(不聚合等待);全部收尾后主 agent 汇总输出,完整 turn 才结束。
 > 实现机制(审查修正):**方案 X**——`Agent::run` 不改内部循环,照常返回 `TurnResult`;挂起是**语义概念**(history 连续),恢复 = 事件到达时 `process_turn` 一次(复用现有 wake → dispatch 路径),新增的只是挂起状态管理 + 静默轮输出转换(不终结 turn,§3.3) + turn 边界判定。
@@ -123,17 +123,30 @@ pub struct SubResult {
 
 恢复注入形态:单事件注入(带状态标签 `[子代理 t1 已完成]` 或 `[子代理 t1 失败: ...]`),复用现有注入管线(`delegation.rs` L91-153 Message 变体合成),每条独立 msg_id 可寻址。
 
-### 3.3 静默轮输出转换(不终结 turn,事前约束保证连续性) + ask_user 禁用
+### 3.3 静默轮输出转换:单条 live-edit 进度预览(不终结 turn,事前约束保证连续性) + ask_user 禁用
 
-挂起恢复轮次(`pending` 非空)的主 agent 输出**不作为 turn 终结**:不流式推送(无打字机效果,`turn_stream=None`)、不作为最终回复。用户收到的中间反馈是 **`[进度]` 消息**——fix v2(2026-08-10)起由**系统生成**:`wake` 在终态事件收集时合成摘要(`build_progress_text`,如"子代理任务 t1 已完成(耗时 13s)。仍等待 1 个任务,全部完成后将统一汇总。",剩余数取 `record_terminal` 之后的快照),经 `ChannelInboundMessage.progress_text` 传入 `process_turn`;**模型本轮输出不再转发**(只落盘 history)——v1 把模型 EndTurn 回复原样转发出去了,模型可能提前写出"最终结论"(E2E 双委托 bug 根因)。模型输出仅作**兜底**:silenced 轮次无系统正文时(挂起中用户插话、子代理消息、重启恢复)仍按既有行为转换发送。`pending` 归零后的最终轮次输出完整汇总,作为完整 turn 的最终回复(用户视角:一次输入 → 一个完整回复,中间穿插系统进度通知)。
+**方案 B(2026-08-10 五次修正,fix v2)**:挂起期间 telegram 上只显示**一条** live-edit 的进度预览消息,跨恢复轮原地编辑,最终轮删除——**绝不按恢复轮逐条发独立消息**。中间恢复轮(`pending` 非空)的主 agent 输出**不作为 turn 终结**:不流式推送(无打字机效果,`turn_stream=None`)、**完全不发送给用户**(模型输出只落盘 history)。用户看到的唯一中间反馈是进度预览:
 
-**连续性由事前约束保证(2026-08-10 审查修正;约束语 fix v2 强化)**:静默制造**信息不对称**——模型以为已输出总结、实际被吞,恢复轮必割裂。原方案以 silenced_outputs **事后回填**(收集/注入/预算/幂等)补偿,机制复杂且不必要——**silenced_outputs 整体取消**。借鉴 Claude Code(fork 异步路径)的**事前约束**消除不对称:挂起轮随事件注入附带约束语——"本轮为中间恢复轮:任务尚未全部完成,本轮对话不会终结,系统将自动生成进度消息发送给用户;你的本轮输出仅记入会话历史,不会被转发。请勿生成最终结论或收尾语,待全部子代理结果到达后,在最终轮输出完整汇总答复"。模型知道本轮不终结、输出不会转发 → 不会提交最终结论 → 恢复轮自然重新汇总,无需任何回填。与 Claude Code 同构:其 fork 异步用 "results will arrive in a subsequent message" 预告恢复轮使模型不割裂,我们把同一手段用于静默语境。
+```
+⏳ 任务进行中…
+✅ 子代理任务 t1 已完成（耗时 13s）
+⏳ 等待 2 个任务…
+```
 
-约束不保证 100% 遵守:最坏情况是静默轮写了长内容——但内容不会丢:兜底路径的 `[进度]` 转换会截断(完整内容照常落盘 history §2.1,模型翻 history 仍可引用),且 `format_progress_message` 对模型自带的 `[进度]` 前缀去重(fix v2),不会双重前缀;模型已被明确告知本轮不终结、输出不转发,不会误以为已给最终答复;恢复轮重新生成完整答复。信息不丢(history 落盘)、认知不错位(已告知不终结),故无需回填机制。
+机制(方向 B,直接编辑路线——不碰流式机制,不加 `TurnEvent` 变体、不改 `create_stream` 签名):
+- **进度行送入预览**:`wake` 在终态事件收集时合成摘要 body(`progress_body`,如"子代理任务 t1 已完成(耗时 13s)"),经 `ChannelInboundMessage.progress_text` **直通**(`progress_text_for_notice`:仅 silenced 终态通知携带;不再格式化——`build_progress_text` 删除)传入 `process_turn`。silenced 块(gate = 通道 `capabilities().supports_edit && supports_delete`,能力表:仅 telegram 全 true;client streaming=true 但 edit=false 被排除;qqbot/wechat 全 false)调 `SessionContext::update_progress_preview`:body 追加为一行(超 4000 字符截断最旧行),首次 `send_message` 建预览并记 `msg_id`,后续 `edit_message` 原地编辑。
+- **跨轮复用**:预览状态存 `TurnSuspension.progress_preview`(`reply_target`/`msg_id`/`lines`, `#[serde(default)]` 兼容存量 suspension.json)——重启恢复后继续编辑同一条消息。
+- **最终轮清理**:挂起清除(`clear_suspension_if_collected`)前 `take_progress_preview_for_cleanup()` 取走预览(仅 `pending` 空时),最终汇总送达后 `delete_message` 删除;silenced-race 轮(wake 意图 `true` 但 `pending` 已空)`update_progress_preview` 内部守卫直接跳过,不重建陈旧预览。
+- **非 telegram 退化**:无 edit+delete 的通道(qqbot/wechat/client)**挂起期间完全静默**;挂起中用户插话/子代理消息轮次同样完全静默(预览不动)。
+- **边界(文档化)**:切换走的会话最终轮清理不到 → 遗留陈旧预览;用户手动删除预览后 `edit_message` 失败仅 warn,不再重建。
+
+**连续性由事前约束保证(2026-08-10 审查修正;约束语 fix v2 强化)**:静默制造**信息不对称**——模型以为已输出总结、实际被吞,恢复轮必割裂。原方案以 silenced_outputs **事后回填**(收集/注入/预算/幂等)补偿,机制复杂且不必要——**silenced_outputs 整体取消**。借鉴 Claude Code(fork 异步路径)的**事前约束**消除不对称:挂起轮随事件注入附带约束语——"本轮为中间恢复轮:任务尚未全部完成,本轮对话不会终结,系统将自动更新进度预览消息;你的本轮输出仅记入会话历史,不会被发送给用户。请勿生成最终结论或收尾语,待全部子代理结果到达后,在最终轮输出完整汇总答复"。模型知道本轮不终结、输出不会发送 → 不会提交最终结论 → 恢复轮自然重新汇总,无需任何回填。与 Claude Code 同构:其 fork 异步用 "results will arrive in a subsequent message" 预告恢复轮使模型不割裂,我们把同一手段用于静默语境。
+
+约束不保证 100% 遵守:最坏情况是静默轮写了长内容——但内容不会丢:本轮输出**绝不发送给用户**(方案 B 无兜底转发路径),完整内容照常落盘 history §2.1,模型翻 history 仍可引用;模型已被明确告知本轮不终结、输出不发送,不会误以为已给最终答复;恢复轮重新生成完整答复。信息不丢(history 落盘)、认知不错位(已告知不终结),故无需回填机制。
 
 **EndTurn → Continue 语义映射(fix v2,2026-08-10)**:silenced 轮次的 `TurnResult.stop_reason` 若为 `EndTurn`,在 `process_turn` 内被**语义化为 `StopReason::Continue`**(纯函数 `semantic_stop_reason(silenced, has_pending, stop_reason)`,`capability_chat.rs` 新增变体,provider 永不产生)——turn 不终结,后续终态事件继续恢复;同时**同步改写 history 最后一条 assistant 消息的 `usage.stop_reason` 为 "Continue"**(`llm_usage` 用 `format!("{:?}", …)` 落盘,否则 history.jsonl 仍显示 "EndTurn")。仅最终轮(loud)保留 EndTurn。用户可观测点(history usage 字符串)与实际语义一致。
 
-**静默判定时机修正(2026-08-10, E2E 恢复轮1 竞态修复)**:静默与否的判定**不在 turn 开始时读活快照**,而在**唤醒/路由时捕获意图**(终态事件 `record_terminal` 收集后同一同步段: `pending` 非空 → 中间轮 → `silenced_override=Some(true)`;空 → 最终轮 → `Some(false)`),随合成 `ChannelInboundMessage.silenced_override` 传入 `process_turn`。原因:通知轮经 `dispatch_turn` 排队(turn_lock),排队期间后续终态事件可能已清空 `pending`——活快照会把**中间轮误判为最终轮**,以普通消息流式送达(无 `[进度]` 前缀),与 wake 时附加的约束语数据源不一致(E2E 恢复轮1 即此竞态:约束语说"进度通知",实际普通消息)。约束语与 silenced 意图同源(wake 时 `has_pending_delegations()`,与 `!snap.pending.is_empty()` 等价,record_terminal 与 route_notice 之间无 await 点)。用户消息轮无 override(`None`),仍用 turn 开始时活快照(§4 排队语义不变)。`recover_suspension`(重启恢复)同样经 route_notice 捕获意图(未覆盖任务按 Failed 收集后,covered 仍 pending → 中间轮;全收 → 最终轮)。
+**静默判定时机修正(2026-08-10, E2E 恢复轮1 竞态修复)**:静默与否的判定**不在 turn 开始时读活快照**,而在**唤醒/路由时捕获意图**(终态事件 `record_terminal` 收集后同一同步段: `pending` 非空 → 中间轮 → `silenced_override=Some(true)`;空 → 最终轮 → `Some(false)`),随合成 `ChannelInboundMessage.silenced_override` 传入 `process_turn`。原因:通知轮经 `dispatch_turn` 排队(turn_lock),排队期间后续终态事件可能已清空 `pending`——活快照会把**中间轮误判为最终轮**,以普通消息流式送达(非进度预览,用户看到突兀的中间输出),与 wake 时附加的约束语数据源不一致(E2E 恢复轮1 即此竞态:约束语说"进度通知",实际普通消息)。约束语与 silenced 意图同源(wake 时 `has_pending_delegations()`,与 `!snap.pending.is_empty()` 等价,record_terminal 与 route_notice 之间无 await 点)。用户消息轮无 override(`None`),仍用 turn 开始时活快照(§4 排队语义不变)。`recover_suspension`(重启恢复)同样经 route_notice 捕获意图(未覆盖任务按 Failed 收集后,covered 仍 pending → 中间轮;全收 → 最终轮)。方案 B 在此之上加**预览守卫**:`update_progress_preview` 内部再查 `pending` 非空——即使意图为 true 的轮次在挂起已清空后运行(silenced-race),也**不重建**已被最终轮删除的陈旧预览。
 
 **ask_user 在挂起恢复轮次禁用**(防死锁:用户回答走普通消息排队,而排队要等 turn 结束,turn 又在等回答):`ask_user` 工具检测当前为挂起恢复轮次 → 返回错误"当前 turn 挂起中,无法提问",引导主 agent 将问题写入最终汇总或改用 `/btw`。
 
@@ -184,7 +197,7 @@ pub struct SubResult {
 
 - ✅ **P0-1** `TurnSuspension` 结构 + `SessionContext` 挂载 + `Agent::run` EndTurn 挂起标记(`TurnResult` 加 `has_pending`,§2.2/§3.1)—— `712fa93`
 - ✅ **P0-2** 终态事件 → 挂起恢复驱动(`dispatch_turn` 复用 + 恢复锁 turn_tracker 串行化 + 非挂起会话维持现状;`AgentMessage` 加 `kind` 字段,Progress 统一不注入,§2.3/§3.2)—— `0eb24e0`
-- ✅ **P0-3** 输出静默(2026-08-10 三次修正后:静默轮输出转换 `[进度]` 消息发出,不终结 turn)+ ask_user 挂起轮次禁用 + 最终汇总结束语义(§3.3/§3.4)—— `0fafc85`(审查修正:静默保留,加事前约束语保证连续性,silenced_outputs 回填取消;`355e68a` 注入约束语;本提交实现输出转换)
+- ✅ **P0-3** 输出静默(2026-08-10 三次修正后:静默轮输出转换 `[进度]` 消息发出,不终结 turn)+ ask_user 挂起轮次禁用 + 最终汇总结束语义(§3.3/§3.4)—— `0fafc85`(审查修正:静默保留,加事前约束语保证连续性,silenced_outputs 回填取消;`355e68a` 注入约束语;本提交实现输出转换)。**五次修正(方案 B)覆盖**:`[进度]` 独立消息机制移除,改为单条 live-edit 进度预览(§3.3)
 - ✅ **P1-1** 挂起状态持久化 `suspension.json` + 重启恢复(遗留 pending 按 Failed,§5)—— `f76f201` + `211270c`
 - ✅ **P1-2** 递归嵌套上限 config(`delegation.max_depth` 默认 3,§6)—— `8a97219`
 - ✅ **P1-3** 缺口修复:agent_kill 广播 Failed{cancelled} + recovery Err 补 Failed 广播(§7)—— `40c7e16`

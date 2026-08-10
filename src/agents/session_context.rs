@@ -12,32 +12,34 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::agents::session::{PersistHook, Session};
-use crate::agents::turn::{SubResult, SubStatus, TurnResult, TurnSuspension};
+use crate::agents::turn::{ProgressPreview, SubResult, SubStatus, TurnResult, TurnSuspension};
 use crate::agents::{Agent, AgentRuntime, TurnContext, UserProfile};
 use crate::channels::{Channel, ChannelInboundMessage};
 
-/// 方案 C (RFC §3.3, 2026-08-10): transform a silenced resume turn's
-/// accumulated output into a *progress* message — prefixed so the user reads
-/// it as interim status (not the final reply), truncated defensively since
-/// the model may not fully honor the silence guidance. The turn itself stays
-/// suspended; only the final loud summary ends it.
-fn format_progress_message(text: &str) -> String {
-    const PROGRESS_PREFIX: &str = "[进度] ";
-    const MAX_CHARS: usize = 500;
-    // 方案 C (fix v2): strip a leading prefix the model may have written
-    // itself — with the system-generated body this is near-impossible, but
-    // the fallback path (model output) can still double-prefix otherwise.
-    let trimmed = text
-        .trim()
-        .strip_prefix(PROGRESS_PREFIX)
-        .map(str::trim)
-        .unwrap_or_else(|| text.trim());
-    if trimmed.chars().count() <= MAX_CHARS {
-        format!("{}{}", PROGRESS_PREFIX, trimmed)
-    } else {
-        let cut: String = trimmed.chars().take(MAX_CHARS).collect();
-        format!("{} {}…（完整内容已记入会话历史）", PROGRESS_PREFIX, cut)
+/// 方案 B (RFC §3.3, 2026-08-10): render the live progress preview body —
+/// header + one ✅ line per collected task + trailing remaining count. The
+/// user sees exactly ONE message that is edited in place across silenced
+/// resume turns (telegram only); it never becomes a separate message per
+/// turn. `lines` hold the raw system bodies (already truncated by the
+/// caller, oldest dropped first); `remaining` is the turn-start snapshot's
+/// `pending.len()`. Pure so unit tests can pin the composition.
+fn render_progress_preview(lines: &[String], remaining: usize) -> String {
+    const HEADER: &str = "⏳ 任务进行中…";
+    const CHECK: &str = "✅ ";
+    let mut out = String::with_capacity(64 + lines.iter().map(|l| l.len()).sum::<usize>());
+    out.push_str(HEADER);
+    for line in lines {
+        out.push('\n');
+        out.push_str(CHECK);
+        out.push_str(line);
     }
+    out.push('\n');
+    if remaining > 0 {
+        out.push_str(&format!("⏳ 等待 {} 个任务…", remaining));
+    } else {
+        out.push_str("✅ 全部任务已完成，正在汇总…");
+    }
+    out
 }
 
 /// 方案 C (RFC §3.3, race fix 2026-08-10): decide whether a turn is silenced.
@@ -336,6 +338,118 @@ impl SessionContext {
         self.persist_suspension();
     }
 
+    /// 方案 B: append one progress line to the live preview and send (first
+    /// time) or edit (subsequent times) the single telegram message. Called
+    /// only for silenced turns with a system progress body on an
+    /// edit+delete-capable channel. Snapshot-guarded: a silenced-race turn
+    /// (wake intent `true` but `pending` already drained) never rebuilds a
+    /// stale preview after the final cleanup deleted it, and a bodyless
+    /// silenced turn (user / sub-agent message) leaves the preview untouched.
+    async fn update_progress_preview(
+        &self,
+        ch: &dyn Channel,
+        reply_target: String,
+        line: &str,
+    ) {
+        let Some(snap) = self.suspension_snapshot() else {
+            return;
+        };
+        if snap.pending.is_empty() {
+            return;
+        }
+        let mut pv = snap.progress_preview.unwrap_or(ProgressPreview {
+            reply_target: reply_target.clone(),
+            msg_id: None,
+            lines: Vec::new(),
+        });
+        pv.lines.push(line.to_string());
+        // Cap the preview: drop oldest lines first (newest stays visible).
+        const MAX_PREVIEW_CHARS: usize = 4000;
+        let mut total: usize = pv.lines.iter().map(|l| l.chars().count()).sum();
+        while total > MAX_PREVIEW_CHARS && pv.lines.len() > 1 {
+            total -= pv.lines.first().map(|l| l.chars().count()).unwrap_or(0);
+            pv.lines.remove(0);
+        }
+        let body = render_progress_preview(&pv.lines, snap.pending.len());
+        {
+            let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(s) = guard.as_mut() {
+                s.progress_preview = Some(pv.clone());
+            }
+        }
+        self.persist_suspension();
+        let receiver = crate::channels::MessageReceiver::new(reply_target);
+        match pv.msg_id {
+            // First preview message — create it, then remember the id so the
+            // next silenced turn edits (not re-sends) the same message.
+            None => {
+                let msg = crate::channels::ChannelOutboundMessage {
+                    receiver,
+                    content: crate::channels::ChannelMessageContent::text(body),
+                    options: Default::default(),
+                };
+                match ch.send_message(&msg).await {
+                    Ok(res) => {
+                        if let Some(mid) = res.message_ids.first() {
+                            let mut guard =
+                                self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(s) = guard.as_mut() {
+                                if let Some(p) = s.progress_preview.as_mut() {
+                                    p.msg_id = Some(mid.as_str().to_string());
+                                }
+                            }
+                            self.persist_suspension();
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            session = %self.session_id,
+                            err = %e,
+                            "progress preview send failed"
+                        );
+                    }
+                }
+            }
+            // Existing preview — edit in place. A failed edit (e.g. the user
+            // deleted the message) is logged only; the preview is NOT
+            // re-created (documented boundary: never rebuild after manual
+            // deletion).
+            Some(mid) => {
+                if let Err(e) = ch
+                    .edit_message(
+                        &receiver,
+                        &crate::channels::MessageId::new(mid),
+                        crate::channels::ChannelMessageContent::text(body),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        session = %self.session_id,
+                        err = %e,
+                        "progress preview edit failed"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 方案 B: when the suspension is about to clear (every pending task
+    /// collected) take the progress preview so the caller can delete the
+    /// live message. No-op when tasks remain or no preview exists; persists
+    /// the cleared field immediately (crash-safe).
+    pub fn take_progress_preview_for_cleanup(&self) -> Option<ProgressPreview> {
+        let taken = {
+            let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
+            let s = guard.as_mut()?;
+            if !s.pending.is_empty() {
+                return None;
+            }
+            s.progress_preview.take()
+        };
+        self.persist_suspension();
+        taken
+    }
+
     /// Run one turn end-to-end: acquire the turn lock, replay the
     /// inbound message, resolve `TurnContext` from the session override,
     /// invoke `Agent.run`, and return the result. The caller is
@@ -367,12 +481,13 @@ impl SessionContext {
         // silence intent; capture before `inbound_msg` is moved. User-message
         // turns leave it None → live snapshot decides below.
         let silenced_intent = inbound_msg.silenced_override;
-        // 方案 C (fix v2): delegation notices may carry a SYSTEM-generated
-        // progress body (terminal-event summary from `wake`). When this turn
-        // is silenced it becomes the user-visible `[进度]` message — the
-        // model's output is persisted to history only. None for user
-        // messages / sub-agent messages / recovery notices → fall back to the
-        // model output (existing behavior).
+        // 方案 B (fix v2): delegation notices may carry a SYSTEM-generated
+        // progress body (terminal-event summary from `wake`, passed through
+        // verbatim). When this turn is silenced it becomes one ✅ line in the
+        // live progress preview (telegram) — the model's output is persisted
+        // to history only and NEVER sent to the user during suspension.
+        // `None` for user messages / sub-agent messages / recovery notices →
+        // those silenced turns stay fully silent (preview untouched).
         let progress_text = inbound_msg.progress_text.clone();
 
         // Persist inbound files to session-local storage so their lifetime
@@ -453,9 +568,9 @@ impl SessionContext {
         // the live snapshot at turn start. Origin turns (suspension created
         // mid-run) and the final resume turn (last terminal already recorded
         // → pending empty) are loud; intermediate resume turns are silent
-        // context updates — their output becomes a `[进度]` message, the user
-        // sees the final summary. Also disables `ask_user` for this turn
-        // (session flag).
+        // context updates — 方案 B: their only user-visible output is the
+        // live progress preview (telegram), the user sees the final summary.
+        // Also disables `ask_user` for this turn (session flag).
         let silenced = decide_silenced(silenced_intent, self.suspension_snapshot());
         session.turn_silenced = silenced;
         // RFC §7.6: install per-turn streaming handle BEFORE Agent::run.
@@ -640,6 +755,10 @@ impl SessionContext {
                 // 方案 C (RFC §3.4): pending 归零 → 最终轮,挂起状态消费完毕,
                 // 清除之(下一轮恢复响亮)。级联轮(本 turn 再次派发)pending
                 // 非空 → 保留,继续挂起。
+                // 方案 B: before the suspension clears (final resume turn,
+                // pending empty) take the progress preview so the live
+                // telegram message can be deleted after this turn's delivery.
+                let preview_cleanup = self.take_progress_preview_for_cleanup();
                 self.clear_suspension_if_collected();
                 // 方案 C (fix v2): a silenced resume turn whose model output
                 // ended with EndTurn is semantically converted to Continue —
@@ -753,48 +872,52 @@ impl SessionContext {
                         }
                     }
                 }
-                // 方案 C (RFC §3.3, fix v2 2026-08-10): a silenced resume
-                // turn's output is NOT dropped — the user gets a *progress*
-                // message (interim status, not a turn end). The text is
-                // SYSTEM-generated when `wake` supplied a `progress_text`
-                // (terminal-event summary, e.g. "子代理任务 t1 已完成
-                // （耗时 13s）…"): the model's output is persisted to history
-                // only and NOT forwarded — it may contain a premature final
-                // summary (the pre-v2 E2E bug). The model output remains the
-                // fallback for silenced turns without a system body (user
-                // message while suspended, sub-agent message, recovery).
-                if silenced && (progress_text.is_some() || !turn_result.text.trim().is_empty()) {
-                    if let Some(ref ch) = channel_for_send {
-                        let receiver = {
-                            let mut r = crate::channels::MessageReceiver::new(reply_target.clone());
-                            if let Some(ref last_msg) = session.last_message {
-                                r.reply_to_message_id = Some(
-                                    last_msg
-                                        .receiver
-                                        .reply_to_message_id
-                                        .clone()
-                                        .unwrap_or_else(|| last_msg.id.clone()),
+                // 方案 B (RFC §3.3, 2026-08-10): delete the live progress
+                // preview now that the suspension cleared and the final
+                // summary has been delivered. The preview was taken right
+                // before `clear_suspension_if_collected` above; channels
+                // without delete capability skip (preview never existed).
+                if let (Some(ref ch), Some(pv)) = (&channel_for_send, &preview_cleanup) {
+                    let caps = ch.capabilities();
+                    if caps.supports_edit && caps.supports_delete {
+                        if let Some(mid) = &pv.msg_id {
+                            let receiver =
+                                crate::channels::MessageReceiver::new(pv.reply_target.clone());
+                            if let Err(e) = ch
+                                .delete_message(
+                                    &receiver,
+                                    &crate::channels::MessageId::new(mid.clone()),
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    session = %session.id,
+                                    err = %e,
+                                    "process_turn: progress preview delete failed"
                                 );
-                                r.thread_id = last_msg.receiver.thread_id.clone();
                             }
-                            r
-                        };
-                        let body = progress_text
-                            .clone()
-                            .unwrap_or_else(|| turn_result.text.clone());
-                        let message = crate::channels::ChannelOutboundMessage {
-                            receiver,
-                            content: crate::channels::ChannelMessageContent::text(
-                                format_progress_message(&body),
-                            ),
-                            options: Default::default(),
-                        };
-                        if let Err(e) = ch.send_message(&message).await {
-                            tracing::warn!(
-                                session = %session.id,
-                                err = %e,
-                                "process_turn: silenced progress send failed"
-                            );
+                        }
+                    }
+                }
+                // 方案 B (RFC §3.3, 2026-08-10): while suspended, the user
+                // gets ONE live-edited progress preview message (telegram
+                // only) — never a separate message per resume turn. The
+                // preview is created here on the first silenced turn with a
+                // system progress body, edited in place on later ones, and
+                // deleted by the cleanup hook once the suspension clears.
+                // The model's output is persisted to history only (silenced
+                // turns keep `turn_stream = None`); channels without
+                // edit+delete (qqbot/wechat/client) stay fully silent during
+                // suspension, and bodyless silenced turns (user / sub-agent
+                // messages) leave the preview untouched.
+                if silenced && progress_text.is_some() {
+                    if let Some(ref ch) = channel_for_send {
+                        let caps = ch.capabilities();
+                        if caps.supports_edit && caps.supports_delete {
+                            if let Some(body) = progress_text.as_deref() {
+                                self.update_progress_preview(ch.as_ref(), reply_target.clone(), body)
+                                    .await;
+                            }
                         }
                     }
                 }
@@ -1440,19 +1563,80 @@ mod suspension_tests {
         assert!(ctx3.suspension_snapshot().is_none());
     }
 
+    /// 方案 B: the live preview composes header + ✅ lines + trailing count.
     #[test]
-    fn progress_message_prefixed_and_passthrough() {
-        let msg = format_progress_message("已接收子代理 t1 的结果，继续等待 t2。");
-        assert_eq!(msg, "[进度] 已接收子代理 t1 的结果，继续等待 t2。");
+    fn render_progress_preview_composes_header_lines_and_remaining() {
+        let lines = vec!["子代理任务 t1 已完成（耗时 13s）".to_string()];
+        assert_eq!(
+            render_progress_preview(&lines, 2),
+            "⏳ 任务进行中…\n✅ 子代理任务 t1 已完成（耗时 13s）\n⏳ 等待 2 个任务…"
+        );
     }
 
     #[test]
-    fn progress_message_truncates_long_output() {
-        let long = "字".repeat(600);
-        let msg = format_progress_message(&long);
-        assert!(msg.starts_with("[进度] "));
-        assert!(msg.contains("完整内容已记入会话历史"));
-        assert!(msg.chars().count() < 600);
+    fn render_progress_preview_multiple_lines_and_final_state() {
+        let lines = vec![
+            "子代理任务 t1 已完成（耗时 13s）".to_string(),
+            "子代理任务 t2 已完成（耗时 9s）".to_string(),
+        ];
+        let body = render_progress_preview(&lines, 0);
+        assert!(body.starts_with("⏳ 任务进行中…"));
+        assert!(body.contains("✅ 子代理任务 t1 已完成（耗时 13s）"));
+        assert!(body.contains("✅ 子代理任务 t2 已完成（耗时 9s）"));
+        assert!(body.ends_with("✅ 全部任务已完成，正在汇总…"));
+        assert!(!body.contains("等待"));
+    }
+
+    /// 方案 B: pre-B `suspension.json` (no `progress_preview` field) must
+    /// still deserialize — `#[serde(default)]` backfills None; round-trips
+    /// keep the field.
+    #[test]
+    fn suspension_serde_backfills_progress_preview() {
+        let old = r#"{"origin_turn_seq":0,"suspended_at":1700000000,"pending":["t1"],"results":[],"progress_by_task":{}}"#;
+        let s: TurnSuspension = serde_json::from_str(old).unwrap();
+        assert!(s.progress_preview.is_none());
+        let json = serde_json::to_string(&s).unwrap();
+        let s2: TurnSuspension = serde_json::from_str(&json).unwrap();
+        assert!(s2.progress_preview.is_none());
+        let mut s3 = s;
+        s3.progress_preview = Some(ProgressPreview {
+            reply_target: "12345:678".to_string(),
+            msg_id: Some("42".to_string()),
+            lines: vec!["子代理任务 t1 已完成".to_string()],
+        });
+        let s4: TurnSuspension = serde_json::from_str(&serde_json::to_string(&s3).unwrap()).unwrap();
+        assert_eq!(s4.progress_preview.unwrap().msg_id.as_deref(), Some("42"));
+    }
+
+    /// 方案 B: cleanup takes the preview only once every pending task is
+    /// collected; the field is cleared + persisted immediately.
+    #[test]
+    fn take_progress_preview_only_when_collected() {
+        let (ctx, _m) = make_ctx();
+        ctx.add_pending_task("t1".to_string());
+        // Tasks remain → no-op.
+        assert!(ctx.take_progress_preview_for_cleanup().is_none());
+        // Collected but no preview → None (nothing to clean).
+        let _ = ctx.record_terminal("t1".into(), SubStatus::Completed, "ok".into(), 0);
+        assert!(ctx.take_progress_preview_for_cleanup().is_none());
+        // Preview present + pending empty → taken and cleared.
+        ctx.add_pending_task("t2".to_string());
+        {
+            let mut guard = ctx.turn_suspension.lock().unwrap();
+            guard.as_mut().unwrap().progress_preview = Some(ProgressPreview {
+                reply_target: "chat:1".to_string(),
+                msg_id: Some("9".to_string()),
+                lines: vec!["x".to_string()],
+            });
+        }
+        let _ = ctx.record_terminal("t2".into(), SubStatus::Completed, "ok".into(), 0);
+        let pv = ctx.take_progress_preview_for_cleanup().unwrap();
+        assert_eq!(pv.msg_id.as_deref(), Some("9"));
+        assert!(ctx
+            .suspension_snapshot()
+            .unwrap()
+            .progress_preview
+            .is_none());
     }
 
     /// Race fix (E2E 恢复轮1): a delegation notice's silenced flag must come
@@ -1495,16 +1679,6 @@ mod suspension_tests {
         // Suspended but fully collected → loud (final resume turn).
         ctx.record_terminal("t1".into(), SubStatus::Completed, "ok".into(), 0);
         assert!(!decide_silenced(None, ctx.suspension_snapshot()));
-    }
-
-    /// 方案 C (fix v2): a model-written `[进度]` prefix must not double up
-    /// (fallback path: silenced turns without a system body).
-    #[test]
-    fn progress_message_dedups_existing_prefix() {
-        let msg = format_progress_message("[进度] 已收到 t1 结果，继续等待 t2。");
-        assert_eq!(msg, "[进度] 已收到 t1 结果，继续等待 t2。");
-        let msg = format_progress_message("  [进度] 已收到 t1 结果。  ");
-        assert_eq!(msg, "[进度] 已收到 t1 结果。");
     }
 
     /// 方案 C (fix v2): a silenced resume turn with pending delegations whose
