@@ -126,6 +126,11 @@ pub struct DelegationCoordinator {
     /// `<ns>/s/<uuidv7>` ephemeral sub-session ids). Bound at construction
     /// from `[system] namespace`.
     namespace: String,
+    /// Maximum delegation depth, counting the main agent as depth 1
+    /// (RFC §6, `[delegation] max_depth`). A delegation whose child depth
+    /// would exceed this limit is rejected at the tool layer before any
+    /// pending task is registered or suspension created.
+    max_depth: u32,
     /// Sender for `DelegationEvent`s, set once by the daemon via
     /// `set_event_sender` when wiring the orchestrator's `delegation_rx`.
     event_tx_cell: Arc<OnceLock<mpsc::Sender<DelegationEvent>>>,
@@ -137,6 +142,7 @@ impl DelegationCoordinator {
         session_manager: Arc<SessionManager>,
         worktrees_root: PathBuf,
         namespace: &str,
+        max_depth: u32,
     ) -> Self {
         Self {
             configs,
@@ -146,6 +152,7 @@ impl DelegationCoordinator {
             running: Arc::new(DashMap::new()),
             mailboxes: Arc::new(DashMap::new()),
             namespace: namespace.to_string(),
+            max_depth,
             event_tx_cell: Arc::new(OnceLock::new()),
         }
     }
@@ -345,6 +352,49 @@ impl DelegationCoordinator {
         }
     }
 
+    /// Compute the delegation depth of a session by walking the
+    /// `parent_session_id` chain: the main agent session is depth 1, each
+    /// sub-session hop adds 1 (RFC §6). Sessions that cannot be resolved
+    /// (ephemeral, or a parent that no longer exists) are treated as depth
+    /// 1 — matching the legacy guard, which only rejected when the chain
+    /// was resolvable.
+    fn session_depth(&self, session_id: &str) -> u32 {
+        let mut depth = 1u32;
+        let mut current: Option<String> = Some(session_id.to_string());
+        // Defensive bound: a corrupted parent chain must not loop forever.
+        for _ in 0..64 {
+            let Some(id) = current else { break };
+            match self.session_manager.get_by_id(&id) {
+                Some(session) => match session.parent_session_id {
+                    Some(parent) => {
+                        depth += 1;
+                        current = Some(parent);
+                    }
+                    None => break,
+                },
+                None => break,
+            }
+        }
+        depth
+    }
+
+    /// Enforce `[delegation] max_depth` (RFC §6). The child depth of a
+    /// delegation is `session_depth(parent) + 1`; when that exceeds
+    /// `max_depth` the call is rejected at the tool layer — before any
+    /// pending task is registered and before any suspension is created.
+    fn check_depth(&self, parent_session_id: &str) -> anyhow::Result<()> {
+        let child_depth = self.session_depth(parent_session_id).saturating_add(1);
+        if child_depth > self.max_depth {
+            anyhow::bail!(
+                "maximum delegation depth exceeded: depth {} > max_depth {} \
+                 (main agent = depth 1; raise [delegation] max_depth to allow deeper nesting)",
+                child_depth,
+                self.max_depth
+            );
+        }
+        Ok(())
+    }
+
     /// Core delegation logic — shared by sync and async paths.
     ///
     /// Returns a boxed future to break the async recursion cycle:
@@ -364,15 +414,12 @@ impl DelegationCoordinator {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'a>>
     {
         Box::pin(async move {
-            // Recursion depth guard: if the parent session is itself a sub-session,
-            // this would be a level-2+ nesting.
-            if let Some(parent_session) = self.session_manager.get_by_id(parent_session_id) {
-                if parent_session.parent_session_id.is_some() {
-                    return Err(anyhow::anyhow!(
-                        "maximum delegation depth exceeded: sub-agents cannot spawn further sub-agents"
-                    ));
-                }
-            }
+            // Recursion depth guard (RFC §6): enforced via the
+            // `parent_session_id` chain against `[delegation] max_depth`
+            // (main agent = depth 1). Also a redundant backstop for the
+            // async path, which pre-checks in `spawn_delegate_async` so no
+            // pending task is registered for a rejected delegation.
+            self.check_depth(parent_session_id)?;
 
             let agent = self.find_agent(agent_name).ok_or_else(|| {
                 let available = self.configs.names();
@@ -756,6 +803,13 @@ impl DelegationCoordinator {
         let config = &agent.config;
 
         let task_id = Fqid::new(&self.namespace, TYPE_TASK).to_string();
+
+        // Recursion depth guard (RFC §6): reject synchronously at the tool
+        // layer BEFORE registering the pending task — a rejected delegation
+        // must not leave a hanging pending task / suspension behind. The
+        // same check inside `delegate_with_parent` (async task body) is a
+        // redundant backstop.
+        self.check_depth(parent_session_id)?;
 
         // 方案 C (docs/turn-suspension-rfc.md): register the task against the
         // parent's registered SessionContext so the running turn knows to

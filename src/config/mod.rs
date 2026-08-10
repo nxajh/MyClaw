@@ -144,6 +144,10 @@ struct RawConfig {
     /// Messaging configuration (`[messaging]` — SMTP).
     #[serde(default)]
     messaging: MessagingConfig,
+
+    /// Delegation configuration (`[delegation]` — recursive nesting limit).
+    #[serde(default)]
+    delegation: DelegationConfig,
 }
 
 // ── LoggingConfig ─────────────────────────────────────────────────────────────
@@ -260,6 +264,28 @@ pub struct SmtpConfig {
     pub from: Option<String>,
 }
 
+/// Delegation configuration (`[delegation]` — recursive nesting limit).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DelegationConfig {
+    /// Maximum delegation depth, counting the main agent as depth 1
+    /// (RFC §6). Default 3: main → sub → sub-sub allowed; deeper nesting is
+    /// rejected at the tool layer (`agent_delegate` returns an error, no
+    /// suspension is created).
+    #[serde(default = "default_delegation_max_depth")]
+    pub max_depth: u32,
+}
+
+impl Default for DelegationConfig {
+    fn default() -> Self {
+        Self { max_depth: 3 }
+    }
+}
+
+/// Default `[delegation] max_depth` — `3` (main agent = depth 1).
+fn default_delegation_max_depth() -> u32 {
+    3
+}
+
 /// Simple glob matching supporting `*` (any chars except `/`) and `**` (any chars including `/`).
 fn glob_match(pattern: &str, path: &str) -> bool {
     let pattern_parts: Vec<&str> = pattern.split('/').collect();
@@ -268,6 +294,7 @@ fn glob_match(pattern: &str, path: &str) -> bool {
     glob_match_parts(&pattern_parts, &path_parts)
 }
 
+/// Match a list of pattern segments against a list of path segments.
 fn glob_match_parts(pattern: &[&str], path: &[&str]) -> bool {
     if pattern.is_empty() && path.is_empty() {
         return true;
@@ -369,6 +396,8 @@ pub struct AppConfig {
     pub system: SystemConfig,
     /// Messaging configuration (`[messaging]` — SMTP).
     pub messaging: MessagingConfig,
+    /// Delegation configuration (`[delegation]` — recursive nesting limit).
+    pub delegation: DelegationConfig,
 }
 
 use std::sync::OnceLock;
@@ -459,6 +488,7 @@ impl ConfigLoader {
             safety: raw.safety,
             system: raw.system,
             messaging: raw.messaging,
+            delegation: raw.delegation,
         })
     }
 
@@ -761,6 +791,26 @@ output = ["text"]
         let config = ConfigLoader::from_toml("").unwrap();
         assert_eq!(config.system.namespace, "myclaw");
         assert!(config.messaging.smtp.host.is_none());
+    }
+
+    #[test]
+    fn test_delegation_max_depth_defaults_to_3() {
+        // 无 [delegation] 段 → max_depth 默认 3（主 agent 层=1）
+        let config = ConfigLoader::from_toml("").unwrap();
+        assert_eq!(config.delegation.max_depth, 3);
+    }
+
+    #[test]
+    fn test_delegation_max_depth_parse() {
+        // 显式 [delegation] max_depth → 覆盖默认值
+        let config = ConfigLoader::from_toml(
+            r#"
+[delegation]
+max_depth = 5
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.delegation.max_depth, 5);
     }
 
     #[test]

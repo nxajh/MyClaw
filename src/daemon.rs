@@ -1109,6 +1109,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             Arc::clone(&session_manager),
             config.workspace_dir.join("worktrees"),
             &config.system.namespace,
+            config.delegation.max_depth,
         );
         let delegator_arc = Arc::new(delegator);
 

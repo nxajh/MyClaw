@@ -234,3 +234,13 @@ consolidation_age_days = 30
 #   2. Add YAML front matter with name, description, tools, max_tool_calls
 #   3. Write the system prompt as Markdown body
 #   4. Restart MyClaw daemon (or reload if hot-reload is enabled)
+
+# ── 递归委托（Delegation）配置 ─────────────────────────────────────
+#
+# max_depth: 最大委托嵌套深度，主 agent 记为第 1 层。
+#   默认 3：允许 main → sub → sub-sub，拒绝第 4 层及更深。
+#   超限时 agent_delegate 在工具层直接返回错误，不产生挂起任务。
+#   设为 1 即完全禁止子 agent 委托。
+
+[delegation]
+max_depth = 3
