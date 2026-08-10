@@ -70,6 +70,23 @@ impl Tool for AskUserTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("'question' is required"))?;
 
+        // 方案 C (RFC §3.3): ask_user is disabled on silenced resume turns —
+        // the user's reply would queue behind the turn lock while the turn
+        // waits for it (deadlock). Guide the agent to fold the question into
+        // the final summary or use /btw (bypass question, independent of
+        // turn/context). Origin turns (suspension created mid-run) keep the
+        // tool available — `turn_silenced` is false there.
+        if session.turn_silenced {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(
+                    "当前 turn 挂起中，无法提问：请将问题写入最终汇总，或使用 /btw 即时插话"
+                        .to_string(),
+                ),
+            });
+        }
+
         let channel = match session.channel.as_ref() {
             Some(c) => c,
             None => {

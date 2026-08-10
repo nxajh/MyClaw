@@ -58,7 +58,8 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
     // `status` is Some for terminal events (Completed/Failed/TimedOut) and
     // None for `Message{Final}` — only terminals enter the suspension's
     // `results` list.
-    let (task_id, session_id, status, sent_message_count, content, synthetic_id) = match event {
+    let (task_id, session_id, status, sent_message_count, mut content, synthetic_id) =
+        match event {
         DelegationEvent::Completed {
             task_id,
             session_id,
@@ -172,6 +173,25 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
                 content.clone(),
                 sent_message_count,
             ) {
+                // RFC §2.3: suppressed progress reports surface as part of
+                // the result entry — append them to the injected content so
+                // the parent sees the task's interim reports together with
+                // its terminal note (they never enter the context otherwise).
+                if let Some(lines) = snap
+                    .results
+                    .iter()
+                    .rev()
+                    .find(|r| r.task_id == task_id)
+                    .map(|r| r.progress.as_slice())
+                    .filter(|p| !p.is_empty())
+                {
+                    let mut enriched = content;
+                    enriched.push_str("\n\n任务过程记录：\n");
+                    for line in lines {
+                        enriched.push_str(&format!("- {}\n", line));
+                    }
+                    content = enriched;
+                }
                 tracing::info!(
                     task_id = %task_id,
                     pending = snap.pending.len(),

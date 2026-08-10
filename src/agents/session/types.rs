@@ -109,6 +109,12 @@ pub struct Session {
     /// the first LLM request, then cleared. Pending-request reminders are
     /// re-stashed every turn while requests remain. Never persisted.
     pub turn_injections: Vec<String>,
+    /// 方案 C (RFC §3.3): true while the current turn is a silenced resume
+    /// turn — session was suspended with pending tasks at turn start, so the
+    /// parent's intermediate output is suppressed (history-only) and
+    /// `ask_user` is disabled. Set by `process_turn` before `Agent::run`;
+    /// never persisted, reset every turn.
+    pub turn_silenced: bool,
 }
 
 // `Session` cannot derive `Clone` because `Box<dyn TurnStream>` is not
@@ -136,6 +142,7 @@ impl Clone for Session {
             sub_agent_inbox: self.sub_agent_inbox.clone(),
             sub_agent_task_id: self.sub_agent_task_id.clone(),
             turn_injections: self.turn_injections.clone(),
+            turn_silenced: self.turn_silenced,
         }
     }
 }
@@ -158,6 +165,7 @@ impl std::fmt::Debug for Session {
             .field("has_turn_stream", &self.turn_stream.is_some())
             .field("has_sub_agent_inbox", &self.sub_agent_inbox.is_some())
             .field("sub_agent_task_id", &self.sub_agent_task_id)
+            .field("turn_silenced", &self.turn_silenced)
             .finish()
     }
 }
@@ -184,6 +192,7 @@ impl Session {
             sub_agent_inbox: None,
             sub_agent_task_id: None,
             turn_injections: Vec::new(),
+            turn_silenced: false,
         }
     }
 

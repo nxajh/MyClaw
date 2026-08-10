@@ -173,6 +173,21 @@ impl SessionContext {
         guard.clone()
     }
 
+    /// 方案 C (RFC §3.4): clear the suspension once every pending task has
+    /// been collected (no-op when there is no suspension or tasks remain).
+    /// Called after each turn's `has_pending` computation — a turn whose
+    /// run re-delegated keeps its (repopulated) suspension; the final
+    /// resume turn ends with `pending` empty and drops the state so the
+    /// next turn is loud again.
+    pub fn clear_suspension_if_collected(&self) {
+        let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = guard.as_ref() {
+            if s.pending.is_empty() {
+                *guard = None;
+            }
+        }
+    }
+
     /// Run one turn end-to-end: acquire the turn lock, replay the
     /// inbound message, resolve `TurnContext` from the session override,
     /// invoke `Agent.run`, and return the result. The caller is
@@ -272,12 +287,28 @@ impl SessionContext {
             }
         }
         let channel_for_send = channel.clone();
+        // 方案 C (RFC §3.3): silent iff the session is suspended with pending
+        // tasks at turn start. Origin turns (suspension created mid-run) and
+        // the final resume turn (last terminal already recorded → pending
+        // empty) are loud; intermediate resume turns are silent context
+        // updates — their output is history-only, the user sees the final
+        // summary. Also disables `ask_user` for this turn (session flag).
+        let silenced = self
+            .suspension_snapshot()
+            .is_some_and(|s| !s.pending.is_empty());
+        session.turn_silenced = silenced;
         // RFC §7.6: install per-turn streaming handle BEFORE Agent::run.
         // Channels that don't support streaming return None; the
-        // fallback send block below covers them.
-        session.turn_stream = channel
-            .as_ref()
-            .and_then(|ch| ch.create_stream(&reply_target));
+        // fallback send block below covers them. Silenced turns get no
+        // stream at all — `push_or_drop` no-ops and `finish()` reports
+        // Pending, so nothing reaches the user.
+        session.turn_stream = if silenced {
+            None
+        } else {
+            channel
+                .as_ref()
+                .and_then(|ch| ch.create_stream(&reply_target))
+        };
         session.channel = channel;
 
         let session_override = session.session_override.clone();
@@ -424,9 +455,12 @@ impl SessionContext {
         };
 
         // Notify channel that processing has started (typing indicator, etc.)
-        if let Some(ref ch) = channel_for_send {
-            ch.on_status(&reply_target, crate::ProcessingStatus::Thinking)
-                .await;
+        // — suppressed on silenced resume turns (RFC §3.3).
+        if !silenced {
+            if let Some(ref ch) = channel_for_send {
+                ch.on_status(&reply_target, crate::ProcessingStatus::Thinking)
+                    .await;
+            }
         }
 
         let result = self.agent.run(&mut session, turn_ctx, &runtime).await;
@@ -442,10 +476,17 @@ impl SessionContext {
                 // mark the result so the dispatcher knows to suspend (no
                 // user-visible reply; terminal events resume the turn).
                 turn_result.has_pending = self.has_pending_delegations();
+                // 方案 C (RFC §3.4): pending 归零 → 最终轮,挂起状态消费完毕,
+                // 清除之(下一轮恢复响亮)。级联轮(本 turn 再次派发)pending
+                // 非空 → 保留,继续挂起。
+                self.clear_suspension_if_collected();
                 // Notify channel that processing completed successfully
-                if let Some(ref ch) = channel_for_send {
-                    ch.on_status(&reply_target, crate::ProcessingStatus::Done)
-                        .await;
+                // — suppressed on silenced resume turns (RFC §3.3).
+                if !silenced {
+                    if let Some(ref ch) = channel_for_send {
+                        ch.on_status(&reply_target, crate::ProcessingStatus::Done)
+                            .await;
+                    }
                 }
                 // ── Media aging ────────────────────────────────────────────
                 // After the model has seen the media in this turn, replace
@@ -477,7 +518,9 @@ impl SessionContext {
                     Some(s) => s.finish().await,
                     None => crate::channels::StreamDelivery::Pending,
                 };
-                if delivery != crate::channels::StreamDelivery::FinalDelivered {
+                if !silenced
+                    && delivery != crate::channels::StreamDelivery::FinalDelivered
+                {
                     if let Some(ref ch) = channel_for_send {
                         if !turn_result.text.trim().is_empty() {
                             let receiver = {
@@ -516,7 +559,10 @@ impl SessionContext {
                 // ── Auto TTS ──────────────────────────────────────────────
                 // If auto_tts is enabled and a TTS provider is available,
                 // synthesize the reply text to audio and send as a voice message.
-                if runtime.defaults.auto_tts && !turn_result.text.trim().is_empty() {
+                if runtime.defaults.auto_tts
+                    && !silenced
+                    && !turn_result.text.trim().is_empty()
+                {
                     if let Some(ref ch) = channel_for_send {
                         if let Ok((tts_provider, tts_model)) =
                             runtime.providers.get_tts_provider()
