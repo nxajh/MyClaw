@@ -1,10 +1,13 @@
 //! Startup recovery: resume turns interrupted by a previous crash / SIGKILL.
 //!
-//! Both persisted user sessions and unfinished sub-agents are recovered the
-//! same way — lock the turn, replay via `Agent::run_recovery`, then deliver
-//! the result. The two used to be near-identical copy-pasted functions; the
-//! only real difference is *where the recovered output goes*, captured here by
-//! [`CompletionSink`].
+//! User sessions with incomplete turns are resumed through the normal turn
+//! path (`dispatch_turn` → `process_turn`) so `session.channel` is reinstalled
+//! and channel-scoped tools (e.g. `send_message`) stay available. Only the
+//! routing key's active session is recovered; inactive sessions resume when
+//! the user switches back.
+//!
+//! Unfinished sub-agents are recovered via `Agent::run_recovery` and the
+//! terminal event is delivered through [`CompletionSink`].
 
 use std::sync::Arc;
 
@@ -16,17 +19,9 @@ use crate::agents::turn::{SubStatus, TurnSuspension};
 use crate::agents::{
     AgentRuntime, DelegationCoordinator, DelegationEvent, SessionContext, UnfinishedSubAgent,
 };
-use crate::channels::Channel;
-use crate::storage::SessionBackend;
 
-/// Where a recovered turn's output goes.
+/// Where a recovered sub-agent turn's output goes.
 enum CompletionSink {
-    /// Persisted user session: deliver the recovered text back to its channel.
-    Channel {
-        key: String,
-        backend: Arc<dyn SessionBackend>,
-        channels: super::ctx::ChannelRegistry,
-    },
     /// Sub-agent session: emit `DelegationEvent::Completed` to wake the parent.
     Delegate {
         task_id: String,
@@ -39,90 +34,45 @@ enum CompletionSink {
 
 impl CompletionSink {
     async fn deliver(self, text: String) {
-        match self {
-            CompletionSink::Channel {
-                key,
-                backend,
-                channels,
-            } => {
-                let recipient = backend
-                    .load_last_message(&key)
-                    .map(|m| m.receiver.id)
-                    .unwrap_or_else(|| {
-                        SessionKey::parse(&key)
-                            .map(|k| k.sender)
-                            .unwrap_or_default()
-                    });
-                let Some(parsed) = SessionKey::parse(&key) else {
-                    return;
-                };
-                let Some(channel) = channels.get(&parsed.account_key()) else {
-                    return;
-                };
-                let message = crate::channels::ChannelOutboundMessage {
-                    receiver: crate::channels::MessageReceiver::new(&recipient),
-                    content: crate::channels::ChannelMessageContent::text(&text),
-                    options: Default::default(),
-                };
-                if let Err(e) = channel.send_message(&message).await {
-                    tracing::warn!(session = %key, err = %e, "startup recovery: failed to send response");
-                }
-            }
-            CompletionSink::Delegate {
-                task_id,
-                parent_session_id,
-                reply_target: _,
-                delegator,
-            } => {
-                if let Some(dm) = delegator {
-                    if let Some(tx) = dm.event_sender() {
-                        let _ = tx
-                            .send(DelegationEvent::Completed {
-                                task_id,
-                                session_id: parent_session_id,
-                                summary: text,
-                                duration_secs: 0,
-                                // Startup recovery resumes a dead sub-agent:
-                                // any messages it sent before the crash were
-                                // lost with the old process, so the summary
-                                // must be delivered in full.
-                                sent_message_count: 0,
-                            })
-                            .await;
-                    }
-                }
+        let CompletionSink::Delegate {
+            task_id,
+            parent_session_id,
+            reply_target: _,
+            delegator,
+        } = self;
+        if let Some(dm) = delegator {
+            if let Some(tx) = dm.event_sender() {
+                let _ = tx
+                    .send(DelegationEvent::Completed {
+                        task_id,
+                        session_id: parent_session_id,
+                        summary: text,
+                        duration_secs: 0,
+                        sent_message_count: 0,
+                    })
+                    .await;
             }
         }
     }
 
     /// Emit a `Failed` terminal event for a delegate sink. Called when the
-    /// recovery turn itself errors — the parent may be suspended on this
-    /// task (its pending entry is "covered" by the sub-agent recovery loop,
-    /// so `recover_suspension` skipped it); without a terminal event the
-    /// suspension would hang forever. Channel sinks have no delegation
-    /// event to emit — the recovered channel reply simply won't be sent.
+    /// recovery turn itself errors.
     async fn fail(self, error: String) {
-        match self {
-            CompletionSink::Delegate {
-                task_id,
-                parent_session_id,
-                delegator,
-                ..
-            } => {
-                if let Some(dm) = delegator {
-                    if let Some(tx) = dm.event_sender() {
-                        let _ = tx
-                            .send(DelegationEvent::Failed {
-                                task_id,
-                                session_id: parent_session_id,
-                                error,
-                            })
-                            .await;
-                    }
-                }
-            }
-            CompletionSink::Channel { .. } => {
-                tracing::warn!("recovery failed (channel sink): {error}");
+        let CompletionSink::Delegate {
+            task_id,
+            parent_session_id,
+            delegator,
+            ..
+        } = self;
+        if let Some(dm) = delegator {
+            if let Some(tx) = dm.event_sender() {
+                let _ = tx
+                    .send(DelegationEvent::Failed {
+                        task_id,
+                        session_id: parent_session_id,
+                        error,
+                    })
+                    .await;
             }
         }
     }
@@ -130,11 +80,6 @@ impl CompletionSink {
 
 /// Spawn the recovery turn for one session. The LLM work runs in the
 /// background so the event loop starts without blocking.
-///
-/// `channel` (when present) is re-attached to the session before the resumed
-/// turn runs: startup recovery bypasses `process_turn` (which is the only
-/// place that normally installs `session.channel`), so without this the
-/// recovered turn would lose channel-scoped tools such as `send_message`.
 fn spawn_recovery(
     turn_tracker: super::ctx::SharedTurnTracker,
     session_ctx: Arc<SessionContext>,
@@ -142,15 +87,11 @@ fn spawn_recovery(
     label: &'static str,
     id: String,
     sink: CompletionSink,
-    channel: Option<Arc<dyn Channel>>,
 ) {
     tokio::spawn(async move {
         let _guard = turn_tracker.track();
         let _turn_guard = session_ctx.turn_lock.lock().await;
         let mut session = session_ctx.session.lock().await;
-        if let Some(ch) = channel {
-            session.channel = Some(ch);
-        }
 
         let resolved = ResolvedTurn::resolve(&session, &runtime);
         let turn_ctx = resolved.turn_context();
@@ -179,13 +120,27 @@ fn spawn_recovery(
     });
 }
 
-/// Scan persisted user sessions and unfinished sub-agents for incomplete turns
-/// and resume them. SessionContexts are registered synchronously (so new
-/// messages can queue immediately); the LLM recovery work spawns in the
-/// background. P1-1 (RFC §5): persisted suspensions are also scanned and
-/// recovered — pending tasks the sub-agent loop will cover are left for the
-/// natural terminal event; the rest are failed with a "daemon restarted" note
-/// and one merged resume turn is routed.
+/// Return whether startup should dispatch recovery for this session.
+fn should_recover_active_session(
+    active_id: Option<&str>,
+    session_id: &str,
+    history: &[crate::providers::capability_chat::ChatMessage],
+    suspended: bool,
+) -> bool {
+    active_id == Some(session_id)
+        && !history.is_empty()
+        && super::history_has_incomplete_turn(history)
+        && !suspended
+}
+
+/// Resume all incomplete user sessions and sub-agents found on disk.
+///
+/// User sessions: dispatch active sessions through the normal turn path
+/// (`dispatch_turn` → `process_turn`) so `session.channel` is reinstalled and
+/// channel-scoped tools (e.g. `send_message`) remain available during the
+/// resumed turn. Inactive sessions are left for the normal message path.
+///
+/// Sub-agents: resume via `run_recovery` and emit the terminal event.
 pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSubAgent]) {
     let sessions = Arc::clone(&ctx.sessions);
     let runtime = ctx.runtime.clone();
@@ -218,52 +173,53 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
     let covered: std::collections::HashSet<String> =
         unfinished.iter().map(|sa| sa.task_id.clone()).collect();
 
-    // `list_all_sessions` returns one entry per persisted session *record*, but
-    // recovery is keyed by `owner` (the routing key) and always resumes that
-    // owner's *active* session. An owner with N historical sessions would
-    // otherwise spawn N identical recovery tasks for the same active session
-    // (they serialize on the shared turn_lock, so N-1 are wasted no-ops). Dedup
-    // on the owner key so each active session is recovered exactly once.
+    // Recover only the active session for each routing key. Inactive sessions
+    // resume when the user switches back and sends a normal message.
     let mut seen_owners = std::collections::HashSet::new();
     for info in sessions.list_all_sessions() {
         let key = info.owner;
         if !seen_owners.insert(key.clone()) {
             continue;
         }
+        let active_id = sessions.active_session_id(&key);
         let snap = sessions.get_or_create(&key);
-        if snap.history.is_empty() || !super::history_has_incomplete_turn(&snap.history) {
+        if !should_recover_active_session(
+            active_id.as_deref(),
+            &snap.id,
+            &snap.history,
+            suspended_ids.contains(&snap.id),
+        ) {
             continue;
         }
-        // P1-1: a suspended session resumes via `recover_suspension`; don't
-        // also replay its history here (double recovery / double reply).
-        if suspended_ids.contains(&snap.id) {
+        let Some(parsed) = SessionKey::parse(&key) else {
+            tracing::warn!(routing_key = %key, "startup recovery: invalid routing key");
+            continue;
+        };
+        if channels.get(&parsed.account_key()).is_none() {
+            tracing::warn!(routing_key = %key, "startup recovery: channel not found");
             continue;
         }
-        // `get_or_create(&key)` resolves the owner's *active* session, so only
-        // that session is ever resumed here. Inactive sessions are left for the
-        // normal message path: when the user switches back and sends a message,
-        // `dispatch_turn` → `process_turn` re-installs the channel and
-        // `Agent::run` continues the interrupted turn naturally.
-        tracing::info!(session = %key, "startup recovery: found incomplete turn, spawning background task");
-        let session_ctx = sessions.get_or_create_context(&key);
-        // Startup recovery bypasses `process_turn` (the only place that
-        // normally installs `session.channel`); re-attach the channel here so
-        // channel-scoped tools such as `send_message` stay available during the
-        // resumed turn.
-        let channel = SessionKey::parse(&key).and_then(|k| channels.get(&k.account_key()));
-        spawn_recovery(
-            turn_tracker.clone(),
-            session_ctx,
-            runtime.clone(),
-            "startup recovery",
-            key.clone(),
-            CompletionSink::Channel {
-                key,
-                backend: Arc::clone(sessions.backend()),
-                channels: channels.clone(),
-            },
-            channel,
-        );
+        let synthetic = crate::channels::ChannelInboundMessage {
+            id: format!("recovery:{}", snap.id),
+            sender: crate::channels::MessageSender::new(parsed.sender.clone()),
+            receiver: snap
+                .last_message
+                .as_ref()
+                .map(|m| m.receiver.clone())
+                .unwrap_or_else(|| crate::channels::MessageReceiver::new(parsed.sender.clone())),
+            content: crate::channels::ChannelMessageContent::text(
+                "[系统通知] daemon 重启，继续处理此前未完成的请求。",
+            ),
+            timestamp: chrono::Utc::now().timestamp() as u64,
+            interruption_scope_id: None,
+            silenced_override: None,
+            progress_text: None,
+        };
+        tracing::info!(session = %key, "startup recovery: found incomplete turn, dispatching through normal turn path");
+        let ctx = Arc::clone(ctx);
+        tokio::spawn(async move {
+            super::inbound::dispatch_turn(&ctx, &parsed, synthetic).await;
+        });
     }
 
     for sa in unfinished {
@@ -297,9 +253,9 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
         // a terminal event, leaving the parent's suspension pending list
         // permanently stuck (turn_lock deadlock).
         let snap = sessions.get_by_id(&sa.sub_session_id);
-        let needs_recovery = snap
-            .as_ref()
-            .is_some_and(|s| !s.history.is_empty() && super::history_has_incomplete_turn(&s.history));
+        let needs_recovery = snap.as_ref().is_some_and(|s| {
+            !s.history.is_empty() && super::history_has_incomplete_turn(&s.history)
+        });
 
         if !needs_recovery {
             // The sub-agent session can't be recovered (not found, empty,
@@ -339,7 +295,6 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
             "sub-agent startup recovery",
             sa.task_id.clone(),
             sink,
-            None,
         );
     }
 
@@ -574,5 +529,81 @@ mod tests {
         let snap = sctx.suspension_snapshot().unwrap();
         assert!(snap.results.is_empty());
         assert_eq!(snap.pending.len(), 2);
+    }
+
+    #[test]
+    fn should_recover_active_session_true_for_active_incomplete() {
+        // Session is active, history is incomplete, not suspended.
+        let history = vec![
+            crate::providers::capability_chat::ChatMessage::user_text("hi"),
+            crate::providers::capability_chat::ChatMessage::assistant_text("calling"),
+        ];
+        assert!(should_recover_active_session(
+            Some("sess-1"),
+            "sess-1",
+            &history,
+            false,
+        ));
+    }
+
+    #[test]
+    fn should_recover_false_when_no_active_session() {
+        let history = vec![crate::providers::capability_chat::ChatMessage::user_text(
+            "hi",
+        )];
+        assert!(!should_recover_active_session(
+            None, "sess-1", &history, false
+        ));
+    }
+
+    #[test]
+    fn should_recover_false_when_session_not_active() {
+        let history = vec![crate::providers::capability_chat::ChatMessage::user_text(
+            "hi",
+        )];
+        // active_id differs from this session's id.
+        assert!(!should_recover_active_session(
+            Some("other-session"),
+            "sess-1",
+            &history,
+            false,
+        ));
+    }
+
+    #[test]
+    fn should_recover_false_when_history_empty() {
+        assert!(!should_recover_active_session(
+            Some("sess-1"),
+            "sess-1",
+            &[],
+            false,
+        ));
+    }
+
+    #[test]
+    fn should_recover_false_when_history_complete() {
+        let history = vec![
+            crate::providers::capability_chat::ChatMessage::user_text("hi"),
+            crate::providers::capability_chat::ChatMessage::assistant_text("hello"),
+        ];
+        assert!(!should_recover_active_session(
+            Some("sess-1"),
+            "sess-1",
+            &history,
+            false,
+        ));
+    }
+
+    #[test]
+    fn should_recover_false_when_suspended() {
+        let history = vec![crate::providers::capability_chat::ChatMessage::user_text(
+            "hi",
+        )];
+        assert!(!should_recover_active_session(
+            Some("sess-1"),
+            "sess-1",
+            &history,
+            true,
+        ));
     }
 }
