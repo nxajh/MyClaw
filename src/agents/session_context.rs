@@ -656,6 +656,7 @@ impl SessionContext {
                     turn_result.stop_reason = semantic;
                     // Take the backend ID before borrowing `history` mutably.
                     let persisted_id = session.message_ids.last().copied().unwrap_or(0);
+                    let session_id = session.id.clone();
                     if let Some(last) = session.history.last_mut() {
                         if last.role == "assistant" {
                             if let Some(usage) = last.usage.as_mut() {
@@ -667,7 +668,7 @@ impl SessionContext {
                             // the turn continued (observable record mismatch).
                             if persisted_id > 0 {
                                 if let Some(hook) = persist_hook.as_deref() {
-                                    hook.update_message(&session.id, persisted_id, last);
+                                    hook.update_message(&session_id, persisted_id, last);
                                 }
                             }
                         }
