@@ -2281,7 +2281,7 @@ impl ReplyLimiter {
 // ── Rate limiter ──────────────────────────────────────────────────────────────
 
 /// Simple token-bucket rate limiter with per-sender and global tracking.
-struct RateLimiter {
+pub(super) struct RateLimiter {
     sender_buckets: std::collections::HashMap<String, (u32, u128)>,
     global_count: u32,
     global_window_start: u128,
