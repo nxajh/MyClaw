@@ -311,7 +311,7 @@ impl SessionContext {
             if !s.pending.iter().any(|t| t == &task_id)
                 && s.results.iter().any(|r| r.task_id == task_id)
             {
-                return Some(guard.clone());
+                return guard.clone();
             }
             s.pending.retain(|t| t != &task_id);
             let progress = s.progress_by_task.remove(&task_id).unwrap_or_default();
