@@ -237,7 +237,7 @@ impl SessionManager {
             channel: None,
             turn_stream: None,
             sub_agent_inbox: None,
-            sub_agent_task_id: None,
+            sub_agent_task_id: self.backend.load_task_id(&session_id),
             turn_injections: Vec::new(),
             turn_silenced: false,
         };

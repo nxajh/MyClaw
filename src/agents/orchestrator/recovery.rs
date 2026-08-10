@@ -8,9 +8,12 @@
 
 use std::sync::Arc;
 
+use super::ctx::OrchestratorCtx;
+use super::delegation::route_notice;
 use super::key::{SessionKey, SubAgentKey};
 use super::turn::ResolvedTurn;
 use crate::agents::session::SessionManager;
+use crate::agents::turn::{SubStatus, TurnSuspension};
 use crate::agents::{
     AgentRuntime, DelegationCoordinator, DelegationEvent, SessionContext, UnfinishedSubAgent,
 };
@@ -143,15 +146,42 @@ fn spawn_recovery(
 /// Scan persisted user sessions and unfinished sub-agents for incomplete turns
 /// and resume them. SessionContexts are registered synchronously (so new
 /// messages can queue immediately); the LLM recovery work spawns in the
-/// background.
-pub(super) fn run_startup(
-    sessions: &Arc<SessionManager>,
-    runtime: &AgentRuntime,
-    channels: &super::ctx::ChannelRegistry,
-    unfinished: &[UnfinishedSubAgent],
-    delegator: &Option<Arc<DelegationCoordinator>>,
-    turn_tracker: &super::ctx::SharedTurnTracker,
-) {
+/// background. P1-1 (RFC §5): persisted suspensions are also scanned and
+/// recovered — pending tasks the sub-agent loop will cover are left for the
+/// natural terminal event; the rest are failed with a "daemon restarted" note
+/// and one merged resume turn is routed.
+pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSubAgent]) {
+    let sessions = Arc::clone(&ctx.sessions);
+    let runtime = ctx.runtime.clone();
+    let channels = ctx.channels.clone();
+    let delegator = ctx.delegator.clone();
+    let turn_tracker = ctx.turn_tracker.clone();
+    let backend = Arc::clone(sessions.backend());
+
+    // P1-1: sessions with a persisted non-empty suspension (daemon died while
+    // a turn was suspended). These are excluded from the incomplete-turn
+    // recovery below — a suspended turn waits on delegation events, not an
+    // incomplete history — and recovered via `recover_suspension` instead.
+    // Corrupt/unparseable suspension files are ignored here; the session's
+    // own restore path warns about them.
+    let suspended_ids: std::collections::HashSet<String> = sessions
+        .list_all_sessions()
+        .into_iter()
+        .filter(|info| {
+            backend
+                .load_suspension(&info.id)
+                .and_then(|j| serde_json::from_str::<TurnSuspension>(&j).ok())
+                .is_some_and(|s| !s.pending.is_empty())
+        })
+        .map(|info| info.id)
+        .collect();
+
+    // Task ids (FQID) the sub-agent recovery loop below will complete: their
+    // terminal events arrive through the normal wake path, so
+    // `recover_suspension` must not fail them.
+    let covered: std::collections::HashSet<String> =
+        unfinished.iter().map(|sa| sa.task_id.clone()).collect();
+
     // `list_all_sessions` returns one entry per persisted session *record*, but
     // recovery is keyed by `owner` (the routing key) and always resumes that
     // owner's *active* session. An owner with N historical sessions would
@@ -166,6 +196,11 @@ pub(super) fn run_startup(
         }
         let snap = sessions.get_or_create(&key);
         if snap.history.is_empty() || !super::history_has_incomplete_turn(&snap.history) {
+            continue;
+        }
+        // P1-1: a suspended session resumes via `recover_suspension`; don't
+        // also replay its history here (double recovery / double reply).
+        if suspended_ids.contains(&snap.id) {
             continue;
         }
         // `get_or_create(&key)` resolves the owner's *active* session, so only
@@ -222,4 +257,101 @@ pub(super) fn run_startup(
             None,
         );
     }
+
+    // P1-1 (RFC §5): resume persisted suspensions. Prefer the registered
+    // context when the session is active (its in-memory suspension is
+    // authoritative); otherwise load a temporary one (restores the state from
+    // disk at construction). Each uncovered pending task is failed with a
+    // "daemon restarted" note; the merged notice then routes one resume turn.
+    for info in sessions.list_all_sessions() {
+        if !suspended_ids.contains(&info.id) {
+            continue;
+        }
+        let Some(session_ctx) = sessions
+            .registered_context_by_session_id(&info.id)
+            .or_else(|| sessions.load_context_by_session_id(&info.id))
+        else {
+            tracing::warn!(session = %info.id, "startup recovery: cannot load context for suspended session");
+            continue;
+        };
+        tracing::info!(session = %info.id, "startup recovery: found persisted suspension, spawning resume");
+        let ctx = Arc::clone(ctx);
+        let covered = covered.clone();
+        tokio::spawn(async move {
+            recover_suspension(&ctx, session_ctx, &covered).await;
+        });
+    }
+}
+
+/// P1-1 (RFC §5): recover one persisted suspension after a daemon restart.
+///
+/// Pending tasks NOT covered by the sub-agent recovery loop (whose terminal
+/// events arrive through the normal `wake` path) are failed with a
+/// "daemon 重启，子代理中断" note — mirroring wake's terminal-event handling
+/// (progress folding). The merged notice then routes one resume turn; once the
+/// covered tasks' terminal events land, `pending` is empty and the final
+/// resume turn is loud (RFC §3.4).
+async fn recover_suspension(
+    ctx: &Arc<OrchestratorCtx>,
+    session_ctx: Arc<SessionContext>,
+    covered: &std::collections::HashSet<String>,
+) {
+    let snapshot = match session_ctx.suspension_snapshot() {
+        Some(s) => s,
+        None => return,
+    };
+
+    // Fail every pending task the sub-agent recovery loop won't cover.
+    let mut failed: Vec<String> = Vec::new();
+    for task_id in snapshot.pending.iter() {
+        if covered.contains(task_id) {
+            continue;
+        }
+        let progress = snapshot
+            .progress_by_task
+            .get(task_id)
+            .cloned()
+            .unwrap_or_default();
+        let mut content = format!(
+            "[系统通知] 子代理后台任务中断 (task_id: {}): daemon 重启，子代理进程已终止。请重新委托该任务。",
+            task_id
+        );
+        if !progress.is_empty() {
+            content.push_str("\n\n任务过程记录：\n");
+            for line in &progress {
+                content.push_str(&format!("- {}\n", line));
+            }
+        }
+        session_ctx.record_terminal(task_id.clone(), SubStatus::Failed, content.clone(), 0);
+        failed.push(content);
+    }
+
+    // All pending tasks are covered by the sub-agent recovery loop — their
+    // terminal events arrive naturally; nothing to synthesize here.
+    if failed.is_empty() {
+        return;
+    }
+
+    // Merge the failure notices (with the suspension gap) into one resume
+    // turn. `pending` may still hold covered tasks, making this first resume
+    // turn silent; the final loud summary comes when the last covered
+    // terminal event lands.
+    let mut merged = String::new();
+    for content in &failed {
+        merged.push_str(&format!("- {}\n", content));
+    }
+    let suspended_secs = chrono::Utc::now()
+        .timestamp()
+        .saturating_sub(snapshot.suspended_at as i64);
+    let notice = format!(
+        "[系统通知] daemon 重启，以下后台任务已中断（挂起时长约 {}s）：\n{}",
+        suspended_secs, merged
+    );
+    route_notice(
+        ctx,
+        &session_ctx.session_id,
+        notice,
+        format!("recovery:{}", session_ctx.session_id),
+    )
+    .await;
 }

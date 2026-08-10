@@ -84,7 +84,13 @@ pub fn scan_unfinished_subagents(session_manager: &SessionManager) -> Vec<Unfini
 
         unfinished.push(UnfinishedSubAgent {
             agent_name: session.agent_name.clone(),
-            task_id: session.id.clone(),
+            // P1-1: prefer the persisted task FQID (matches the parent's
+            // suspension `pending` entry) over the opaque sub-session id.
+            // Legacy sub-sessions without the field fall back to the hex id.
+            task_id: session
+                .sub_agent_task_id
+                .clone()
+                .unwrap_or_else(|| session.id.clone()),
             task_preview,
             parent_session_id: parent_id,
             sub_session_id: session.id.clone(),

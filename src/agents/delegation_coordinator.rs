@@ -501,6 +501,17 @@ impl DelegationCoordinator {
                 }
                 session.sub_agent_task_id = Some(task_id.clone());
             }
+            // P1-1: persist the task FQID so restart recovery
+            // (`scan_unfinished_subagents`) can emit terminal events keyed by
+            // the same id the parent's suspension recorded — without this the
+            // sub-agent's hex session id can never match `pending` (FQID).
+            if let Err(e) = self
+                .session_manager
+                .backend()
+                .save_task_id(&sub_session_id, &task_id)
+            {
+                tracing::warn!(sub_session = %sub_session_id, task_id = %task_id, err = %e, "persist sub-agent task_id failed");
+            }
 
             // Snapshot the runtime; for worktree isolation, overlay the
             // working directory so file tools see the worktree path.

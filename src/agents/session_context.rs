@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::agents::session::Session;
+use crate::agents::session::{PersistHook, Session};
 use crate::agents::turn::{SubResult, SubStatus, TurnResult, TurnSuspension};
 use crate::agents::{Agent, AgentRuntime, TurnContext, UserProfile};
 use crate::channels::{Channel, ChannelInboundMessage};
@@ -54,6 +54,13 @@ pub struct SessionContext {
     /// `spawn_delegate_async` path inside `Agent::run`'s tool execution,
     /// while `process_turn` holds `session`'s tokio Mutex.
     pub turn_suspension: std::sync::Mutex<Option<TurnSuspension>>,
+    /// 方案 C (RFC §5): persist hook for `sessions/<sid>/suspension.json`,
+    /// cloned from `Session.persist` at construction. Suspension writes
+    /// (`add_pending_task` / `add_progress` / `record_terminal` /
+    /// `clear_suspension_if_collected`) happen while `session`'s tokio
+    /// Mutex is held, so they cannot reach `session.persist` — this copy
+    /// keeps the durable state writable on those paths.
+    pub suspension_persist: Option<Arc<dyn PersistHook>>,
     /// Loaded UserProfile snapshot taken at SessionContext creation.
     /// Immutable for the lifetime of the context — per RFC §三.A reload
     /// semantics drop the SessionContext and let `SessionManager`
@@ -63,29 +70,99 @@ pub struct SessionContext {
 
 impl SessionContext {
     pub fn new(session: Session, agent: Arc<Agent>) -> Self {
-        Self {
+        // Clone the persist hook BEFORE moving `session` into the Mutex —
+        // suspension writes happen while that tokio Mutex is held and cannot
+        // reach `session.persist` directly (RFC §5).
+        let suspension_persist = session.persist.clone();
+        let ctx = Self {
             session_id: session.id.clone(),
             session: Arc::new(Mutex::new(session)),
             agent,
             pending_retry: Arc::new(Mutex::new(None)),
             turn_lock: Arc::new(Mutex::new(())),
             turn_suspension: std::sync::Mutex::new(None),
+            suspension_persist,
             user_profile: Arc::new(UserProfile::default()),
-        }
+        };
+        ctx.restore_suspension();
+        ctx
     }
 
     /// Build with a pre-loaded user profile (the path
     /// `SessionManager::get_or_create_context_with` takes).
     pub fn with_profile(session: Session, agent: Arc<Agent>, profile: Arc<UserProfile>) -> Self {
-        Self {
+        let suspension_persist = session.persist.clone();
+        let ctx = Self {
             session_id: session.id.clone(),
             session: Arc::new(Mutex::new(session)),
             agent,
             pending_retry: Arc::new(Mutex::new(None)),
             turn_lock: Arc::new(Mutex::new(())),
             turn_suspension: std::sync::Mutex::new(None),
+            suspension_persist,
             user_profile: profile,
+        };
+        ctx.restore_suspension();
+        ctx
+    }
+
+    /// 方案 C (RFC §5): hydrate `turn_suspension` from
+    /// `sessions/<sid>/suspension.json` at construction (daemon-restart
+    /// recovery). Corrupt JSON is warned about and ignored — the session
+    /// just starts loud like an unsuspended one.
+    fn restore_suspension(&self) {
+        let Some(hook) = &self.suspension_persist else {
+            return;
+        };
+        let Some(json) = hook.load_suspension(&self.session_id) else {
+            return;
+        };
+        if json.trim().is_empty() {
+            return;
         }
+        match serde_json::from_str::<TurnSuspension>(&json) {
+            Ok(s) => {
+                *self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner()) = Some(s);
+                tracing::info!(
+                    session = %self.session_id,
+                    pending = s.pending.len(),
+                    "restored suspended turn from disk"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    session = %self.session_id,
+                    err = %e,
+                    "suspension.json corrupt; ignoring"
+                );
+            }
+        }
+    }
+
+    /// 方案 C (RFC §5): write the current `turn_suspension` to
+    /// `sessions/<sid>/suspension.json`; `None` → empty string (file
+    /// deleted). No-op without a persist hook. Called after every mutation
+    /// point so a crash/restart never loses collected progress.
+    fn persist_suspension(&self) {
+        let Some(hook) = &self.suspension_persist else {
+            return;
+        };
+        let json = match self
+            .turn_suspension
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            Some(s) => match serde_json::to_string(s) {
+                Ok(j) => j,
+                Err(e) => {
+                    tracing::warn!(session = %self.session_id, err = %e, "serialize suspension failed");
+                    return;
+                }
+            },
+            None => String::new(),
+        };
+        hook.save_suspension(&self.session_id, &json);
     }
 
     /// Snapshot the session for read-only consumers (e.g., /status commands).
@@ -108,11 +185,14 @@ impl SessionContext {
     /// 方案 C: register an async delegation against this session's suspension
     /// (called from the sync `spawn_delegate_async` path; std Mutex, no await).
     pub fn add_pending_task(&self, task_id: String) {
-        let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
-        match guard.as_mut() {
-            Some(s) => s.add_pending(task_id),
-            None => *guard = Some(TurnSuspension::new(task_id)),
+        {
+            let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
+            match guard.as_mut() {
+                Some(s) => s.add_pending(task_id),
+                None => *guard = Some(TurnSuspension::new(task_id)),
+            }
         }
+        self.persist_suspension();
     }
 
     /// 方案 C: true while the turn is suspended on uncollected delegations.
@@ -138,13 +218,16 @@ impl SessionContext {
     /// injected into the parent context, suspended or not). No-op when the
     /// session is not suspended.
     pub fn add_progress(&self, task_id: &str, text: &str) {
-        let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(s) = guard.as_mut() {
-            s.progress_by_task
-                .entry(task_id.to_string())
-                .or_default()
-                .push(text.to_string());
+        {
+            let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(s) = guard.as_mut() {
+                s.progress_by_task
+                    .entry(task_id.to_string())
+                    .or_default()
+                    .push(text.to_string());
+            }
         }
+        self.persist_suspension();
     }
 
     /// 方案 C: collect a terminal event into the suspension — move the task
@@ -159,18 +242,24 @@ impl SessionContext {
         content: String,
         sent_message_count: u64,
     ) -> Option<TurnSuspension> {
-        let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
-        let s = guard.as_mut()?;
-        s.pending.retain(|t| t != &task_id);
-        let progress = s.progress_by_task.remove(&task_id).unwrap_or_default();
-        s.results.push(SubResult {
-            task_id,
-            status,
-            content,
-            sent_message_count,
-            progress,
-        });
-        guard.clone()
+        let snapshot = {
+            let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
+            let s = guard.as_mut()?;
+            s.pending.retain(|t| t != &task_id);
+            let progress = s.progress_by_task.remove(&task_id).unwrap_or_default();
+            s.results.push(SubResult {
+                task_id,
+                status,
+                content,
+                sent_message_count,
+                progress,
+            });
+            guard.clone()
+        };
+        // Persist after the guard drops — persist_suspension re-locks the
+        // same std Mutex (not reentrant).
+        self.persist_suspension();
+        snapshot
     }
 
     /// 方案 C (RFC §3.4): clear the suspension once every pending task has
@@ -180,12 +269,15 @@ impl SessionContext {
     /// resume turn ends with `pending` empty and drops the state so the
     /// next turn is loud again.
     pub fn clear_suspension_if_collected(&self) {
-        let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(s) = guard.as_ref() {
-            if s.pending.is_empty() {
-                *guard = None;
+        {
+            let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(s) = guard.as_ref() {
+                if s.pending.is_empty() {
+                    *guard = None;
+                }
             }
         }
+        self.persist_suspension();
     }
 
     /// Run one turn end-to-end: acquire the turn lock, replay the

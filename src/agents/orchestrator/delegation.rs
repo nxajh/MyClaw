@@ -159,15 +159,20 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
 
     // 方案 C (§3.2): terminal events update the suspension BEFORE routing —
     // move the task out of `pending` and append its `SubResult` (with folded
-    // progress). Lookup by hex session id works for both active (registered
-    // context) and switched-away sessions; a session with no suspension
-    // (or no registered context) simply skips — behavior unchanged.
+    // progress). Lookup is TWO-tier (P1-1): the registered context first
+    // (active sessions), falling back to a temporary context for
+    // switched-away sessions. A switched-away suspended session leaves
+    // `suspension.json` on disk; the temp context restores it at load
+    // (`SessionContext::new` → `restore_suspension`), collects the terminal
+    // event and writes the updated state back — without this the pending
+    // task would linger forever (no registered context exists to collect on).
     if let Some(status) = status {
-        if let Some(registered) = ctx
+        let sctx = ctx
             .sessions
             .registered_context_by_session_id(&session_id)
-        {
-            if let Some(snap) = registered.record_terminal(
+            .or_else(|| ctx.sessions.load_context_by_session_id(&session_id));
+        if let Some(sctx) = sctx {
+            if let Some(snap) = sctx.record_terminal(
                 task_id.clone(),
                 status,
                 content.clone(),
@@ -202,8 +207,23 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
         }
     }
 
+    // Route the synthesized notice (terminal or message) into the session.
+    route_notice(ctx, &session_id, content, synthetic_id).await;
+}
+
+/// Route a synthesized system notice into the parent session:
+/// active → `dispatch_turn` (live streaming to the user's UI); non-active →
+/// `process_non_active` (temporary context, persisted to history). Shared by
+/// `wake` (delegation events) and `recover_suspension` (P1-1 startup
+/// recovery of persisted suspensions).
+pub(super) async fn route_notice(
+    ctx: &OrchestratorCtx,
+    session_id: &str,
+    content: String,
+    synthetic_id: String,
+) {
     // Resolve the session to get its routing key (owner).
-    let session = match ctx.sessions.get_by_id(&session_id) {
+    let session = match ctx.sessions.get_by_id(session_id) {
         Some(s) => s,
         None => {
             tracing::warn!(session_id = %session_id, "session not found for delegation event");
@@ -228,7 +248,7 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
         };
         if ctx.channel(&key.account_key()).is_none() {
             tracing::warn!(routing_key = %routing_key, "channel for delegation event not found, falling back to non-active path");
-            process_non_active(ctx, &session_id, &content).await;
+            process_non_active(ctx, session_id, &content).await;
             return;
         }
 
@@ -250,7 +270,7 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
     } else {
         // Non-active session — load a temporary context, process the turn,
         // persist the result. The user sees it when they switch back.
-        process_non_active(ctx, &session_id, &content).await;
+        process_non_active(ctx, session_id, &content).await;
     }
 }
 

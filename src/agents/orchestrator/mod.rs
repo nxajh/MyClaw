@@ -398,12 +398,8 @@ impl Orchestrator {
         // Light C: on hot-switch startups, defer recovery until the old
         // process has exited (or timeout) so incomplete tool results the
         // old process is still draining can persist before we re-exec.
-        let sessions = Arc::clone(&self.ctx.sessions);
-        let runtime = self.ctx.runtime.clone();
-        let channels = self.ctx.channels.clone();
+        let ctx = Arc::clone(&self.ctx);
         let unfinished = unfinished_subagents;
-        let delegator = self.ctx.delegator.clone();
-        let turn_tracker = Arc::clone(&self.ctx.turn_tracker);
         tokio::spawn(async move {
             #[cfg(unix)]
             if crate::hot_switch::is_hot_switch() {
@@ -415,14 +411,7 @@ impl Orchestrator {
                     .await;
                 }
             }
-            recovery::run_startup(
-                &sessions,
-                &runtime,
-                &channels,
-                &unfinished,
-                &delegator,
-                &turn_tracker,
-            );
+            recovery::run_startup(&ctx, &unfinished);
         });
 
         // Known-users persistence flush (every 60s).

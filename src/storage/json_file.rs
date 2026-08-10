@@ -80,6 +80,10 @@ struct SessionMeta {
     /// Parent session ID for sub-sessions. None for top-level user sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     parent_session_id: Option<String>,
+    /// Sub-agent task FQID (`<ns>/t/<uuidv7>`) for sub-sessions (P1-1:
+    /// restart recovery needs the same id the parent's suspension recorded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    task_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -136,6 +140,11 @@ impl JsonFileBackend {
 
     fn active_path(&self) -> PathBuf {
         self.root.join("active.json")
+    }
+
+    /// 方案 C (RFC §5): turn-suspension state, independent of meta.json.
+    fn suspension_path(&self, session_id: &str) -> PathBuf {
+        self.session_dir(session_id).join("suspension.json")
     }
 
     // ── Atomic write helpers ──────────────────────────────────────────────────
@@ -361,6 +370,7 @@ impl SessionBackend for JsonFileBackend {
             last_message: None,
             agent_name: None,
             parent_session_id: None,
+            task_id: None,
         };
         self.write_meta(&meta)?;
 
@@ -761,6 +771,27 @@ impl SessionBackend for JsonFileBackend {
         self.read_meta(session_id)?.last_message
     }
 
+    fn save_suspension(&self, session_id: &str, json: &str) -> std::io::Result<()> {
+        let path = self.suspension_path(session_id);
+        if json.is_empty() {
+            if path.exists() {
+                fs::remove_file(&path)?;
+            }
+            return Ok(());
+        }
+        let dir = self.session_dir(session_id);
+        fs::create_dir_all(&dir)?;
+        // Atomic write (temp + rename), mirroring write_json_atomic.
+        let tmp = path.with_extension("tmp");
+        fs::write(&tmp, json.as_bytes())?;
+        fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    fn load_suspension(&self, session_id: &str) -> Option<String> {
+        fs::read_to_string(self.suspension_path(session_id)).ok()
+    }
+
     fn save_agent_name(&self, session_id: &str, name: &str) -> std::io::Result<()> {
         if let Some(mut meta) = self.read_meta(session_id) {
             meta.agent_name = if name.is_empty() || name == "main" {
@@ -791,6 +822,22 @@ impl SessionBackend for JsonFileBackend {
 
     fn load_parent_session_id(&self, session_id: &str) -> Option<String> {
         self.read_meta(session_id)?.parent_session_id
+    }
+
+    fn save_task_id(&self, session_id: &str, task_id: &str) -> std::io::Result<()> {
+        if let Some(mut meta) = self.read_meta(session_id) {
+            meta.task_id = if task_id.is_empty() {
+                None
+            } else {
+                Some(task_id.to_string())
+            };
+            self.write_meta(&meta)?;
+        }
+        Ok(())
+    }
+
+    fn load_task_id(&self, session_id: &str) -> Option<String> {
+        self.read_meta(session_id)?.task_id
     }
 }
 

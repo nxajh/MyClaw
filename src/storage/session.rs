@@ -294,6 +294,18 @@ pub trait SessionBackend: Send + Sync {
         None
     }
 
+    /// 方案 C (RFC §5): persist the turn-suspension state to
+    /// `sessions/<sid>/suspension.json`; an empty `json` deletes the file.
+    /// Default no-op for backends without a per-session file layer.
+    fn save_suspension(&self, _session_id: &str, _json: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// 方案 C (RFC §5): load the persisted turn-suspension state.
+    fn load_suspension(&self, _session_id: &str) -> Option<String> {
+        None
+    }
+
     /// Persist the agent_name owning this session ("main" for top-level, or
     /// the sub-agent name for delegate-spawned sessions).
     fn save_agent_name(&self, _session_id: &str, _name: &str) -> std::io::Result<()> {
@@ -312,6 +324,20 @@ pub trait SessionBackend: Send + Sync {
 
     /// Load parent_session_id. None → top-level session.
     fn load_parent_session_id(&self, _session_id: &str) -> Option<String> {
+        None
+    }
+
+    /// Persist the sub-agent's task FQID (`<ns>/t/<uuidv7>`) for sub-sessions.
+    /// Needed for P1-1 restart recovery: `scan_unfinished_subagents` must
+    /// emit terminal events keyed by the same task id the parent's
+    /// suspension recorded (FQID), not the opaque sub-session id.
+    fn save_task_id(&self, _session_id: &str, _task_id: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Load the sub-agent's task FQID. None → top-level session or legacy
+    /// sub-session persisted before the field existed.
+    fn load_task_id(&self, _session_id: &str) -> Option<String> {
         None
     }
 

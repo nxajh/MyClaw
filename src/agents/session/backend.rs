@@ -21,6 +21,7 @@ pub struct InMemoryBackend {
     messages: RwLock<HashMap<String, Vec<ChatMessage>>>,
     summaries: RwLock<HashMap<String, Vec<SummaryRecord>>>,
     active: RwLock<HashMap<String, String>>,
+    suspensions: RwLock<HashMap<String, String>>,
     namespace: String,
 }
 
@@ -36,6 +37,7 @@ impl InMemoryBackend {
             messages: RwLock::new(HashMap::new()),
             summaries: RwLock::new(HashMap::new()),
             active: RwLock::new(HashMap::new()),
+            suspensions: RwLock::new(HashMap::new()),
             namespace: namespace.to_string(),
         }
     }
@@ -246,6 +248,22 @@ impl SessionBackend for InMemoryBackend {
             .join("sessions");
         crate::storage::write_session_file(&root, session_id, &file_name, bytes, mime_type)
     }
+
+    // 方案 C (RFC §5): keep the suspension state in-memory so tests can
+    // round-trip it like the file backend does on disk.
+    fn save_suspension(&self, session_id: &str, json: &str) -> std::io::Result<()> {
+        let mut map = self.suspensions.write();
+        if json.is_empty() {
+            map.remove(session_id);
+        } else {
+            map.insert(session_id.to_string(), json.to_string());
+        }
+        Ok(())
+    }
+
+    fn load_suspension(&self, session_id: &str) -> Option<String> {
+        self.suspensions.read().get(session_id).cloned()
+    }
 }
 
 /// Trait for hooks that persist session messages to the backend.
@@ -270,6 +288,14 @@ pub trait PersistHook: Send + Sync {
     /// Persist the last incoming message context (sender / receiver /
     /// text) so startup recovery can replay routing.
     fn save_last_message(&self, session_id: &str, msg: &crate::channels::PersistedChannelMessage);
+    /// 方案 C (RFC §5): persist the turn-suspension state to
+    /// `sessions/<sid>/suspension.json`; empty `json` deletes the file.
+    /// Default no-op (sessions without a persist hook).
+    fn save_suspension(&self, _session_id: &str, _json: &str) {}
+    /// 方案 C (RFC §5): load the persisted turn-suspension state.
+    fn load_suspension(&self, _session_id: &str) -> Option<String> {
+        None
+    }
     /// Truncate message history to keep only the first `keep_count` messages.
     /// Used for rollback when a turn fails completely.
     fn truncate_messages(&self, session_id: &str, keep_count: usize);
@@ -354,6 +380,16 @@ impl PersistHook for BackendPersistHook {
         if let Err(e) = self.backend.save_last_message(session_id, msg) {
             tracing::warn!(session = %session_id, err = %e, "save last message failed");
         }
+    }
+
+    fn save_suspension(&self, session_id: &str, json: &str) {
+        if let Err(e) = self.backend.save_suspension(session_id, json) {
+            tracing::warn!(session = %session_id, err = %e, "persist suspension failed");
+        }
+    }
+
+    fn load_suspension(&self, session_id: &str) -> Option<String> {
+        self.backend.load_suspension(session_id)
     }
 
     fn truncate_messages(&self, session_id: &str, keep_count: usize) {
