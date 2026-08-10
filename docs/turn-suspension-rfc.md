@@ -1,9 +1,9 @@
 # Turn 挂起延续 RFC（Turn Suspension & Continuation）
 
-> 状态:已实现(2026-08-10 讨论收敛 + 审查修正;P0-1/P0-2/P0-3/P1-1/P1-2/P1-3 已合入 master,P1-4 测试补齐 + RFC 定稿,本提交;2026-08-10 二次审查修正:输出静默保留,silenced_outputs 回填机制取消,改以 Claude Code 式事前约束保证连续性,§3.3)
+> 状态:已实现(2026-08-10 讨论收敛 + 审查修正;P0-1/P0-2/P0-3/P1-1/P1-2/P1-3 已合入 master,P1-4 测试补齐 + RFC 定稿,本提交;2026-08-10 二次审查修正:输出静默保留,silenced_outputs 回填机制取消,改以 Claude Code 式事前约束保证连续性,§3.3;2026-08-10 三次修正:静默轮输出不屏蔽,转换压缩为 `[进度]` 消息发出,不终结 turn,§3.3)
 > 范围:`agents/agent.rs`(EndTurn 挂起标记) + `agents/delegation_coordinator.rs`(终态事件) + `agents/orchestrator/delegation.rs`(wake) + `agents/orchestrator/inbound.rs`(dispatch 判定 + 恢复锁) + `agents/session_context.rs`(挂起状态挂载) + `storage/session.rs`(持久化)
 > 原则:**主 agent 派发 async 子 agent 后 turn 不结束**;每个子 agent 终态事件各自唤醒主 agent 处理(不聚合等待);全部收尾后主 agent 汇总输出,完整 turn 才结束。
-> 实现机制(审查修正):**方案 X**——`Agent::run` 不改内部循环,照常返回 `TurnResult`;挂起是**语义概念**(history 连续),恢复 = 事件到达时 `process_turn` 一次(复用现有 wake → dispatch 路径),新增的只是挂起状态管理 + 输出静默(辅以事前约束) + turn 边界判定。
+> 实现机制(审查修正):**方案 X**——`Agent::run` 不改内部循环,照常返回 `TurnResult`;挂起是**语义概念**(history 连续),恢复 = 事件到达时 `process_turn` 一次(复用现有 wake → dispatch 路径),新增的只是挂起状态管理 + 静默轮输出转换(不终结 turn,§3.3) + turn 边界判定。
 
 ## 0. 背景
 
@@ -21,7 +21,7 @@
 | 派发后主 agent | 阻塞等单个结果 | turn 结束,事件驱动新 turn | turn 挂起,等全部收尾 |
 | 多子 agent 并行 | 不支持(串行) | 支持 | 支持 |
 | 结果回传形态 | tool 返回值 | 逐事件新 turn,主 agent 上下文割裂 | 逐事件注入同一挂起 turn,上下文连续 |
-| 用户视角 | 派发即等 | 多次独立回复 | 一次输入 → 一个完整回复(中间静默) |
+| 用户视角 | 派发即等 | 多次独立回复 | 一次输入 → 一个完整回复(中间进度通知) |
 | turn 边界 | 单次 | 每次事件一个新 turn | 完整 agentic run 一个 turn |
 
 ## 1. 目标与非目标
@@ -54,7 +54,7 @@ turn = 一次用户/系统输入触发的**完整 agentic run**(内含多轮 LLM
                                                               │
               ┌────────────────────────────────────────────────┘
               │ t1 终态(Completed) → wake → dispatch_turn(注入 t1,run)
-              │                       输出静默(仅落盘;约束语告知模型) → EndTurn: pending=[t2] → 挂起
+              │                       输出以进度通知发出(不终结;约束语告知模型) → EndTurn: pending=[t2] → 挂起
               │
               ┌────────────────────────────────────────────────┘
               │ t2 终态(TimedOut) → wake → dispatch_turn(注入 t2,run)
@@ -65,7 +65,7 @@ turn = 一次用户/系统输入触发的**完整 agentic run**(内含多轮 LLM
 
 ```
 Running ──EndTurn 且 pending 非空──→ Suspended(仅记录,run 已返回)
-Suspended ──终态事件 t_i──→ Running(dispatch_turn 注入 t_i,run 一轮,输出静默+约束语)
+Suspended ──终态事件 t_i──→ Running(dispatch_turn 注入 t_i,run 一轮,输出进度通知+约束语)
 Running ──EndTurn 且 pending 空──→ Finished(汇总输出,完整 turn 结束)
 ```
 
@@ -123,13 +123,13 @@ pub struct SubResult {
 
 恢复注入形态:单事件注入(带状态标签 `[子代理 t1 已完成]` 或 `[子代理 t1 失败: ...]`),复用现有注入管线(`delegation.rs` L91-153 Message 变体合成),每条独立 msg_id 可寻址。
 
-### 3.3 输出静默(事前约束保证连续性) + ask_user 禁用
+### 3.3 静默轮输出转换(不终结 turn,事前约束保证连续性) + ask_user 禁用
 
-挂起恢复轮次(`pending` 非空)的主 agent 输出**不发送给用户**(抑制 `channel.send`/流式 push_event),照常落盘 history;`pending` 归零后的最终轮次输出完整汇总,作为完整 turn 的最终回复(用户视角:一次输入 → 一个完整回复)。
+挂起恢复轮次(`pending` 非空)的主 agent 输出**不作为 turn 终结**:不流式推送(无打字机效果,`turn_stream=None`)、不作为最终回复,但**不丢弃**——run 结束后累积文本被**转换压缩为 `[进度]` 消息**(前缀 + 超长截断兜底)发送给用户,作为中间状态反馈;输出照常落盘 history;`pending` 归零后的最终轮次输出完整汇总,作为完整 turn 的最终回复(用户视角:一次输入 → 一个完整回复,中间穿插进度通知)。
 
-**静默的前提是连续性,由事前约束保证(2026-08-10 审查修正)**:静默制造**信息不对称**——模型以为已输出总结、实际被吞,恢复轮必割裂。原方案以 silenced_outputs **事后回填**(收集/注入/预算/幂等)补偿,机制复杂且不必要——**silenced_outputs 整体取消**。借鉴 Claude Code(fork 异步路径)的**事前约束**消除不对称:挂起轮随事件注入附带约束语——"当前轮次输出将不发送给用户(静默),请勿生成最终结论;子代理结果将以通知形式在后续轮次到达,届时请整合输出完整答复"。模型知道静默存在 → 不会产生"用户已见"的误解 → 静默轮不产出实质内容 → 恢复轮自然重新汇总,无需任何回填。与 Claude Code 同构:其 fork 异步用 "results will arrive in a subsequent message" 预告恢复轮使模型不割裂,我们把同一手段用于静默语境。
+**连续性由事前约束保证(2026-08-10 审查修正)**:静默制造**信息不对称**——模型以为已输出总结、实际被吞,恢复轮必割裂。原方案以 silenced_outputs **事后回填**(收集/注入/预算/幂等)补偿,机制复杂且不必要——**silenced_outputs 整体取消**。借鉴 Claude Code(fork 异步路径)的**事前约束**消除不对称:挂起轮随事件注入附带约束语——"当前轮次输出将作为进度通知发送给用户(不终结本轮对话),请勿生成最终结论;子代理结果将以通知形式在后续轮次到达,届时请整合输出完整答复"。模型知道本轮不终结 → 不会提交最终结论 → 恢复轮自然重新汇总,无需任何回填。与 Claude Code 同构:其 fork 异步用 "results will arrive in a subsequent message" 预告恢复轮使模型不割裂,我们把同一手段用于静默语境。
 
-约束不保证 100% 遵守:最坏情况是静默轮写了长内容被吞——但模型已被明确告知静默,不会误以为用户看到;history 照常落盘(§2.1),模型翻 history 仍可引用;恢复轮重新生成完整答复。信息不丢(history 落盘)、认知不错位(已告知静默),故无需回填机制。
+约束不保证 100% 遵守:最坏情况是静默轮写了长内容——但内容不会丢:`[进度]` 转换会截断兜底(完整内容照常落盘 history §2.1,模型翻 history 仍可引用),且模型已被明确告知本轮不终结,不会误以为已给最终答复;恢复轮重新生成完整答复。信息不丢(history 落盘)、认知不错位(已告知不终结),故无需回填机制。
 
 **ask_user 在挂起恢复轮次禁用**(防死锁:用户回答走普通消息排队,而排队要等 turn 结束,turn 又在等回答):`ask_user` 工具检测当前为挂起恢复轮次 → 返回错误"当前 turn 挂起中,无法提问",引导主 agent 将问题写入最终汇总或改用 `/btw`。
 
@@ -180,7 +180,7 @@ pub struct SubResult {
 
 - ✅ **P0-1** `TurnSuspension` 结构 + `SessionContext` 挂载 + `Agent::run` EndTurn 挂起标记(`TurnResult` 加 `has_pending`,§2.2/§3.1)—— `712fa93`
 - ✅ **P0-2** 终态事件 → 挂起恢复驱动(`dispatch_turn` 复用 + 恢复锁 turn_tracker 串行化 + 非挂起会话维持现状;`AgentMessage` 加 `kind` 字段,Progress 统一不注入,§2.3/§3.2)—— `0eb24e0`
-- ✅ **P0-3** 输出静默 + ask_user 挂起轮次禁用 + 最终汇总结束语义(§3.3/§3.4)—— `0fafc85`(2026-08-10 审查修正:静默保留,加事前约束语保证连续性,silenced_outputs 回填取消,见 §3.3)
+- ✅ **P0-3** 输出静默(2026-08-10 三次修正后:静默轮输出转换 `[进度]` 消息发出,不终结 turn)+ ask_user 挂起轮次禁用 + 最终汇总结束语义(§3.3/§3.4)—— `0fafc85`(审查修正:静默保留,加事前约束语保证连续性,silenced_outputs 回填取消;`355e68a` 注入约束语;本提交实现输出转换)
 - ✅ **P1-1** 挂起状态持久化 `suspension.json` + 重启恢复(遗留 pending 按 Failed,§5)—— `f76f201` + `211270c`
 - ✅ **P1-2** 递归嵌套上限 config(`delegation.max_depth` 默认 3,§6)—— `8a97219`
 - ✅ **P1-3** 缺口修复:agent_kill 广播 Failed{cancelled} + recovery Err 补 Failed 广播(§7)—— `40c7e16`

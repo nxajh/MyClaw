@@ -15,6 +15,24 @@ use crate::agents::session::{PersistHook, Session};
 use crate::agents::turn::{SubResult, SubStatus, TurnResult, TurnSuspension};
 use crate::agents::{Agent, AgentRuntime, TurnContext, UserProfile};
 use crate::channels::{Channel, ChannelInboundMessage};
+
+/// 方案 C (RFC §3.3, 2026-08-10): transform a silenced resume turn's
+/// accumulated output into a *progress* message — prefixed so the user reads
+/// it as interim status (not the final reply), truncated defensively since
+/// the model may not fully honor the silence guidance. The turn itself stays
+/// suspended; only the final loud summary ends it.
+fn format_progress_message(text: &str) -> String {
+    const PROGRESS_PREFIX: &str = "[进度] ";
+    const MAX_CHARS: usize = 500;
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= MAX_CHARS {
+        format!("{}{}", PROGRESS_PREFIX, trimmed)
+    } else {
+        let cut: String = trimmed.chars().take(MAX_CHARS).collect();
+        format!("{} {}…（完整内容已记入会话历史）", PROGRESS_PREFIX, cut)
+    }
+}
+
 /// Per-session bundle held by the SessionManager's session-context table.
 ///
 /// Fields:
@@ -645,6 +663,45 @@ impl SessionContext {
                                     "process_turn: fallback send failed"
                                 );
                             }
+                        }
+                    }
+                }
+                // 方案 C (RFC §3.3, 2026-08-10): a silenced resume turn's
+                // output is NOT dropped — it is transformed and delivered as
+                // a *progress* message (interim status, not a turn end).
+                // turn_stream is None for silenced turns, so no final-reply
+                // semantics ran above (`finish()` reported Pending and the
+                // fallback block skipped it); the accumulated text reaches
+                // the user here as feedback while the turn stays suspended.
+                if silenced && !turn_result.text.trim().is_empty() {
+                    if let Some(ref ch) = channel_for_send {
+                        let receiver = {
+                            let mut r = crate::channels::MessageReceiver::new(reply_target.clone());
+                            if let Some(ref last_msg) = session.last_message {
+                                r.reply_to_message_id = Some(
+                                    last_msg
+                                        .receiver
+                                        .reply_to_message_id
+                                        .clone()
+                                        .unwrap_or_else(|| last_msg.id.clone()),
+                                );
+                                r.thread_id = last_msg.receiver.thread_id.clone();
+                            }
+                            r
+                        };
+                        let message = crate::channels::ChannelOutboundMessage {
+                            receiver,
+                            content: crate::channels::ChannelMessageContent::text(
+                                format_progress_message(&turn_result.text),
+                            ),
+                            options: Default::default(),
+                        };
+                        if let Err(e) = ch.send_message(&message).await {
+                            tracing::warn!(
+                                session = %session.id,
+                                err = %e,
+                                "process_turn: silenced progress send failed"
+                            );
                         }
                     }
                 }
@@ -1288,5 +1345,20 @@ mod suspension_tests {
         manager.drop_context("mock:default:u1");
         let ctx3 = manager.get_or_create_context("mock:default:u1");
         assert!(ctx3.suspension_snapshot().is_none());
+    }
+
+    #[test]
+    fn progress_message_prefixed_and_passthrough() {
+        let msg = format_progress_message("已接收子代理 t1 的结果，继续等待 t2。");
+        assert_eq!(msg, "[进度] 已接收子代理 t1 的结果，继续等待 t2。");
+    }
+
+    #[test]
+    fn progress_message_truncates_long_output() {
+        let long = "字".repeat(600);
+        let msg = format_progress_message(&long);
+        assert!(msg.starts_with("[进度] "));
+        assert!(msg.contains("完整内容已记入会话历史"));
+        assert!(msg.chars().count() < 600);
     }
 }

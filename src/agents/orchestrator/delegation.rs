@@ -23,18 +23,18 @@ use crate::agents::turn::SubStatus;
 use crate::agents::{DelegationEvent, MessageKind, SessionContext};
 use crate::channels::ChannelInboundMessage;
 
-/// 方案 C (§3.3): appended to every resume-turn notice while the session
-/// still has pending delegations — that turn's output is *silenced* (not
-/// sent to the user), so the model must not draft a final summary yet.
-/// Borrowed from Claude Code's fork-async pre-announcement ("results will
-/// arrive in a subsequent message"): telling the model the silence exists
-/// keeps it from assuming the user has seen a draft; no silenced_outputs
-/// backfill is needed.
-const SILENCE_GUIDANCE: &str = "[系统提示] 当前轮次输出将不发送给用户(静默),请勿生成最终结论;子代理结果将以通知形式在后续轮次到达,届时请整合输出完整答复。";
+/// 方案 C (§3.3, 2026-08-10): appended to every resume-turn notice while
+/// the session still has pending delegations — that turn's output is
+/// delivered as a *progress* message (interim status, not a turn end), so
+/// the model must not draft a final summary yet. Borrowed from Claude
+/// Code's fork-async pre-announcement ("results will arrive in a subsequent
+/// message"): telling the model the turn isn't final keeps it from
+/// committing to a conclusion before all results land.
+const SILENCE_GUIDANCE: &str = "[系统提示] 当前轮次输出将作为进度通知发送给用户(不终结本轮对话),请勿生成最终结论;子代理结果将以通知形式在后续轮次到达,届时请整合输出完整答复。";
 
-/// Append the silence guidance when the resume turn is silent — the session
-/// still has pending delegations, so this turn's output is persisted but not
-/// sent to the user.
+/// Append the silence guidance when the resume turn is not final — the
+/// session still has pending delegations, so this turn's output is delivered
+/// as a progress message, not the end of the turn.
 fn maybe_append_silence_guidance(sctx: &SessionContext, content: &mut String) {
     if sctx.has_pending_delegations() {
         content.push_str("\n\n");
@@ -549,7 +549,8 @@ mod tests {
         sctx.add_pending_task("t2".to_string());
         let mut content = "[系统通知] 子代理已完成后台任务 (task_id: t1)".to_string();
         maybe_append_silence_guidance(&sctx, &mut content);
-        assert!(content.contains("不发送给用户"));
+        assert!(content.contains("进度通知"));
+        assert!(content.contains("不终结本轮对话"));
         assert!(content.contains("请勿生成最终结论"));
         assert!(content.contains("整合输出完整答复"));
     }
