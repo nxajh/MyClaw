@@ -93,6 +93,11 @@ pub enum DelegationEvent {
         summary: String,
         /// How long the sub-agent ran (in seconds).
         duration_secs: u64,
+        /// Number of `Message` events the sub-agent delivered to its parent
+        /// while running. When > 0 the summary has effectively already been
+        /// streamed to the parent session, so the orchestrator can degrade
+        /// the completion note to pure metadata instead of duplicating it.
+        sent_message_count: u64,
     },
     /// Sub-agent failed.
     Failed {

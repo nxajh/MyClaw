@@ -30,12 +30,23 @@ pub(super) async fn wake(ctx: &OrchestratorCtx, event: DelegationEvent) {
             session_id,
             summary,
             duration_secs,
+            sent_message_count,
         } => {
-            tracing::info!(task_id = %task_id, duration_secs, "delegation completed, waking main agent");
-            let content = format!(
-                "[系统通知] 子代理已完成后台任务 (task_id: {}, 耗时: {}s)，结果如下：\n{}",
-                task_id, duration_secs, summary
-            );
+            tracing::info!(task_id = %task_id, duration_secs, sent_message_count, "delegation completed, waking main agent");
+            // If the sub-agent already streamed its result to the parent via
+            // `Message` events, the summary would duplicate what the parent
+            // has seen — degrade the note to pure metadata (④).
+            let content = if sent_message_count > 0 {
+                format!(
+                    "[系统通知] 子代理已完成后台任务 (task_id: {}, 耗时: {}s)。结果已通过子代理消息实时同步。",
+                    task_id, duration_secs
+                )
+            } else {
+                format!(
+                    "[系统通知] 子代理已完成后台任务 (task_id: {}, 耗时: {}s)，结果如下：\n{}",
+                    task_id, duration_secs, summary
+                )
+            };
             let synthetic_id = format!("delegation:{}", task_id);
             (task_id, session_id, content, synthetic_id)
         }

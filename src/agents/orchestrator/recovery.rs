@@ -80,6 +80,11 @@ impl CompletionSink {
                                 session_id: parent_session_id,
                                 summary: text,
                                 duration_secs: 0,
+                                // Startup recovery resumes a dead sub-agent:
+                                // any messages it sent before the crash were
+                                // lost with the old process, so the summary
+                                // must be delivered in full.
+                                sent_message_count: 0,
                             })
                             .await;
                     }

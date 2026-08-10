@@ -71,6 +71,11 @@ pub struct RunningEntry {
     pub status: std::sync::RwLock<DelegationStatus>,
     pub agent_name: String,
     pub spawned_at: std::time::Instant,
+    /// Sub → parent messages delivered while running (counted in
+    /// `AgentMessenger::send_to_parent`). Read at completion to decide
+    /// whether the `Completed` note can skip the summary (④ summary
+    /// de-duplication).
+    pub messages_sent: std::sync::atomic::AtomicU64,
 }
 
 /// Snapshot view of a running-table entry for `agent_list` / logging.
@@ -799,16 +804,25 @@ impl DelegationCoordinator {
                 .map(|t| t.secs);
 
             let session_id = parent_session_id_owned.clone();
+            // Count of sub → parent messages delivered while running. The
+            // parent session has already received them as `DelegationEvent::
+            // Message`, so a non-zero count lets `wake` skip the summary in
+            // the completion note (de-duplication, ④).
+            let sent_message_count = running
+                .get(&running_task_id)
+                .map(|e| e.messages_sent.load(std::sync::atomic::Ordering::Relaxed))
+                .unwrap_or(0);
             if let Some(tx) = event_tx {
                 match (&result, timed_out_secs) {
                     (Ok(summary), _) => {
-                        tracing::info!(task_id = %task_id_clone, duration_secs, "sub-agent completed successfully");
+                        tracing::info!(task_id = %task_id_clone, duration_secs, sent_message_count, "sub-agent completed successfully");
                         let _ = tx
                             .send(DelegationEvent::Completed {
                                 task_id: task_id_clone.clone(),
                                 session_id,
                                 summary: summary.clone(),
                                 duration_secs,
+                                sent_message_count,
                             })
                             .await;
                     }
@@ -864,6 +878,7 @@ impl DelegationCoordinator {
                 status: std::sync::RwLock::new(DelegationStatus::Running),
                 agent_name: agent_name.to_string(),
                 spawned_at: std::time::Instant::now(),
+                messages_sent: std::sync::atomic::AtomicU64::new(0),
             },
         );
         Ok(task_id)
@@ -951,7 +966,20 @@ impl crate::agents::AgentMessenger for DelegationCoordinator {
 
     async fn send_to_parent(&self, event: AgentMessage) -> bool {
         match self.event_sender() {
-            Some(tx) => tx.send(DelegationEvent::Message(event)).await.is_ok(),
+            Some(tx) => {
+                let task_id = event.task_id.clone();
+                let delivered = tx.send(DelegationEvent::Message(event)).await.is_ok();
+                if delivered {
+                    // Bump the per-task message counter so the completion
+                    // wrapper can de-duplicate the summary (④).
+                    if let Some(entry) = self.running.get(&task_id) {
+                        entry
+                            .messages_sent
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                delivered
+            }
             None => {
                 tracing::warn!(
                     task_id = %event.task_id,

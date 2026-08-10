@@ -1063,12 +1063,16 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
         &registry_arc,
     ))));
 
-    // WorkspaceWatcher for hot-reload.
-    let _watcher =
-        crate::agents::WorkspaceWatcher::new(&config.workspace_dir, &config.knowledge_dir)?;
-    // change_rx is no longer subscribed to — D25's WorkspaceWatcher::spawn_managed
-    // handles agent/skill reloads autonomously (the watcher publishes the
-    // ChangeSet but nothing now subscribes here).
+    // WorkspaceWatcher for hot-reload (self-maintaining mode): edits to
+    // `agents/` (AGENT.md) and `skills/` (SKILL.md) are picked up live via
+    // `AgentRegistry::reload_from_dir` / `SkillManager::reload` — no daemon
+    // restart needed.
+    let _watcher = crate::agents::WorkspaceWatcher::spawn_managed(
+        &config.workspace_dir,
+        &config.knowledge_dir,
+        sub_agent_registry.as_ref().clone(),
+        skills_arc.clone(),
+    )?;
 
     // Build session backend + manager early — B15: the DelegationCoordinator
     // needs SessionManager (shared backend) to create sub-sessions as
