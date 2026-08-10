@@ -423,7 +423,6 @@ impl QQBotChannel {
         recipient: &str,
         text: &str,
         msg_id: &str,
-        msg_seq: u32,
     ) -> anyhow::Result<crate::channels::OutboundSendResult> {
         let sanitized = sanitize_qq_markdown(&strip_internal_tags(text));
         let pre_chunks = split_by_visual_lines(&sanitized, QQ_MAX_VISUAL_LINES_PER_BUBBLE);
@@ -2381,7 +2380,6 @@ impl DeliverDebouncer {
         recipient: &str,
         text: String,
         msg_id: &str,
-        msg_seq: u32,
     ) -> (
         tokio::sync::oneshot::Receiver<anyhow::Result<crate::channels::OutboundSendResult>>,
         bool,

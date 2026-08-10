@@ -522,6 +522,80 @@ pub fn sanitize_qq_markdown(input: &str) -> String {
     pad_bold_markers_for_cjk(&sanitize_qq_markdown_dollars(input))
 }
 
+/// Convert Markdown tables to list format and compress consecutive empty lines.
+pub fn fallback_qq_markdown_layout(input: &str) -> String {
+    let lines: Vec<&str> = input.split('\n').collect();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+
+    while i < lines.len() {
+        if i + 1 < lines.len() && is_table_row(lines[i]) && is_delimiter_row(lines[i + 1]) {
+            let headers = parse_table_cells(lines[i]);
+            i += 2;
+            while i < lines.len() && is_table_row(lines[i]) {
+                let cells = parse_table_cells(lines[i]);
+                for (j, header) in headers.iter().enumerate() {
+                    let value = cells.get(j).map(|s| s.trim()).unwrap_or("");
+                    out.push_str("- **");
+                    out.push_str(header.trim());
+                    out.push_str("**: ");
+                    out.push_str(value);
+                    out.push('\n');
+                }
+                i += 1;
+            }
+        } else {
+            out.push_str(lines[i]);
+            if i + 1 < lines.len() {
+                out.push('\n');
+            }
+            i += 1;
+        }
+    }
+
+    compress_consecutive_newlines(&out)
+}
+
+fn is_table_row(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with('|') && trimmed.ends_with('|') && trimmed.len() >= 2
+}
+
+fn is_delimiter_row(line: &str) -> bool {
+    if !is_table_row(line) {
+        return false;
+    }
+    parse_table_cells(line).iter().all(|cell| {
+        let cell = cell.trim();
+        !cell.is_empty() && cell.chars().all(|ch| ch == '-' || ch == ':')
+    })
+}
+
+fn parse_table_cells(line: &str) -> Vec<&str> {
+    let trimmed = line.trim();
+    if trimmed.len() < 2 {
+        return Vec::new();
+    }
+    trimmed[1..trimmed.len() - 1].split('|').collect()
+}
+
+fn compress_consecutive_newlines(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut newline_count = 0;
+    for ch in input.chars() {
+        if ch == '\n' {
+            newline_count += 1;
+            if newline_count <= 2 {
+                result.push(ch);
+            }
+        } else {
+            newline_count = 0;
+            result.push(ch);
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
