@@ -15,7 +15,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
 use super::keyboard::*;
-use super::markdown_sanitize::sanitize_qq_markdown;
+use super::markdown_sanitize::{fallback_qq_markdown_layout, sanitize_qq_markdown};
 use super::message::split_message_chunk;
 use super::token::TokenManager;
 use super::types::*;
@@ -420,6 +420,7 @@ impl QQBotChannel {
         recipient: &str,
         text: &str,
         msg_id: &str,
+        msg_seq: u32,
     ) -> anyhow::Result<crate::channels::OutboundSendResult> {
         let sanitized = sanitize_qq_markdown(&strip_internal_tags(text));
         let pre_chunks = split_by_visual_lines(&sanitized, QQ_MAX_VISUAL_LINES_PER_BUBBLE);
@@ -1519,6 +1520,7 @@ impl QQBotChannel {
         content: &str,
         keyboard: &Keyboard,
         msg_id: &str,
+        msg_seq: u32,
     ) -> anyhow::Result<()> {
         let token = self.token_manager.get_token().await?;
         let url = format!("{}/v2/users/{}/messages", API_BASE, openid);
@@ -1535,7 +1537,7 @@ impl QQBotChannel {
         if !msg_id.is_empty() {
             body["msg_id"] = serde_json::Value::String(msg_id.to_string());
         }
-        body["msg_seq"] = serde_json::Value::Number(self.next_msg_seq().into());
+        body["msg_seq"] = serde_json::Value::Number(msg_seq.into());
 
         let ua = user_agent();
         let resp = self
@@ -1602,6 +1604,7 @@ impl QQBotChannel {
         content: &str,
         keyboard: &Keyboard,
         msg_id: &str,
+        msg_seq: u32,
     ) -> anyhow::Result<()> {
         let token = self.token_manager.get_token().await?;
         let url = format!("{}/v2/groups/{}/messages", API_BASE, group_openid);
@@ -1618,7 +1621,7 @@ impl QQBotChannel {
         if !msg_id.is_empty() {
             body["msg_id"] = serde_json::Value::String(msg_id.to_string());
         }
-        body["msg_seq"] = serde_json::Value::Number(self.next_msg_seq().into());
+        body["msg_seq"] = serde_json::Value::Number(msg_seq.into());
 
         let ua = user_agent();
         let resp = self
@@ -1745,25 +1748,14 @@ impl Channel for QQBotChannel {
 
     fn group_stats(&self) -> Vec<crate::channels::GroupStat> {
         let history = self.group_history.lock();
-        history
-            .iter()
-            .map(|(gid, deque)| crate::channels::GroupStat {
-                group_id: gid.chars().take(12).collect(),
-                name: self
-                    .config
-                    .group_config
-                    .get(gid)
-                    .and_then(|c| c.name.clone())
-                    .or_else(|| {
-                        self.config
-                            .group_config
-                            .get("*")
-                            .and_then(|c| c.name.clone())
-                    }),
+        history.iter().map(|(gid, deque)| {
+            crate::channels::GroupStat {
+                group_id: gid.clone(),
+                name: None,
                 buffered_messages: deque.len(),
-                history_limit: self.resolve_group_history_limit(gid),
-            })
-            .collect()
+                history_limit: 20,
+            }
+        }).collect()
     }
 
     fn security_policy(&self) -> crate::channels::ChannelSecurityPolicy {
@@ -1849,7 +1841,9 @@ impl Channel for QQBotChannel {
         // not as a separate text message (RFC §14.5).
         // QQ msg_type=2: escape `$` and pad `**` for CJK before split.
         let chunks = if msg.content.files.is_empty() {
-            let sanitized = sanitize_qq_markdown(&strip_internal_tags(&msg.content.text));
+            let sanitized = sanitize_qq_markdown(&fallback_qq_markdown_layout(
+                &strip_internal_tags(&msg.content.text),
+            ));
             // Pre-split by estimated visual lines to mitigate QQ client-side
             // layout bug, then apply character-limit splitting to each sub-text.
             let pre_chunks =
@@ -1914,9 +1908,9 @@ impl Channel for QQBotChannel {
                     // absent (active message), fall back to plain markdown.
                     if !msg_id.is_empty() {
                         if let Some(openid) = recipient.strip_prefix("c2c:") {
-                            self.send_c2c_keyboard(openid, chunk, kb, msg_id).await
+                            self.send_c2c_keyboard(openid, chunk, kb, msg_id, msg_seq).await
                         } else if let Some(group_openid) = recipient.strip_prefix("group:") {
-                            self.send_group_keyboard(group_openid, chunk, kb, msg_id)
+                            self.send_group_keyboard(group_openid, chunk, kb, msg_id, msg_seq)
                                 .await
                         } else {
                             Err(anyhow::anyhow!(
@@ -2315,6 +2309,7 @@ impl DeliverDebouncer {
         recipient: &str,
         text: String,
         msg_id: &str,
+        msg_seq: u32,
     ) -> (
         tokio::sync::oneshot::Receiver<anyhow::Result<crate::channels::OutboundSendResult>>,
         bool,
@@ -3075,5 +3070,44 @@ mod tests {
     fn debouncer_disabled_when_window_is_zero() {
         let d = DeliverDebouncer::new(0, "\n".to_string());
         assert!(!d.enabled());
+    }
+
+    #[test]
+    fn table_aware_split_doesnt_break_table() {
+        let max_lines = 10;
+        let mut table = String::from("| Name | Value |\n| --- | --- |");
+        for i in 0..20 {
+            if i == 10 {
+                table.push_str("\n\n");
+            } else {
+                table.push('\n');
+            }
+            table.push_str(&format!("| row {i} | data {i} |"));
+        }
+        let text = format!("Intro paragraph here.\n\n{table}");
+        let chunks = split_by_visual_lines(&text, max_lines);
+        let chunk_with_row10 = chunks.iter().find(|c| c.contains("row 10"));
+        assert!(chunk_with_row10.is_some(), "row 10 should appear in some chunk");
+        assert!(
+            chunk_with_row10.unwrap().contains("row 9"),
+            "table split across chunks: row 9 and row 10 are in different chunks"
+        );
+    }
+
+    #[test]
+    fn is_gfm_table_line_detects_pipe_rows() {
+        assert!(is_gfm_table_line("| col1 | col2 |"));
+        assert!(is_gfm_table_line("| col1 | col2"));
+        assert!(is_gfm_table_line("|---|---|"));
+        assert!(is_gfm_table_line("| --- | :---: |"));
+        assert!(is_gfm_table_line("  | padded | row |"));
+    }
+
+    #[test]
+    fn is_gfm_table_line_rejects_non_table() {
+        assert!(!is_gfm_table_line(""));
+        assert!(!is_gfm_table_line("just plain text"));
+        assert!(!is_gfm_table_line("> a blockquote"));
+        assert!(!is_gfm_table_line("# heading"));
     }
 }
