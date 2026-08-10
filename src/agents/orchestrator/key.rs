@@ -66,6 +66,7 @@ pub struct SubAgentKey {
 }
 
 impl SubAgentKey {
+    #[allow(dead_code)]
     pub fn new(agent: impl Into<String>, sub_session: impl Into<String>) -> Self {
         Self {
             agent: agent.into(),
