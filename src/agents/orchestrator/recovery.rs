@@ -12,7 +12,6 @@ use super::ctx::OrchestratorCtx;
 use super::delegation::route_notice;
 use super::key::{SessionKey, SubAgentKey};
 use super::turn::ResolvedTurn;
-use crate::agents::session::SessionManager;
 use crate::agents::turn::{SubStatus, TurnSuspension};
 use crate::agents::{
     AgentRuntime, DelegationCoordinator, DelegationEvent, SessionContext, UnfinishedSubAgent,

@@ -122,10 +122,11 @@ impl SessionContext {
         }
         match serde_json::from_str::<TurnSuspension>(&json) {
             Ok(s) => {
+                let pending = s.pending.len();
                 *self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner()) = Some(s);
                 tracing::info!(
                     session = %self.session_id,
-                    pending = s.pending.len(),
+                    pending = pending,
                     "restored suspended turn from disk"
                 );
             }
