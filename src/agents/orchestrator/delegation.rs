@@ -586,9 +586,10 @@ mod tests {
         maybe_append_silence_guidance(&sctx, &mut content);
         assert!(content.contains("中间恢复轮"));
         assert!(content.contains("不会终结"));
-        assert!(content.contains("系统将自动生成进度消息"));
-        assert!(content.contains("仅记入会话历史"));
-        assert!(content.contains("请勿生成最终结论"));
+        // 六次修正 (2026-08-12): 输出按普通轮次处理 — 作为进度说明正常发送给用户.
+        assert!(content.contains("将作为进度说明正常发送给用户"));
+        assert!(content.contains("输出简洁的中间进展"));
+        assert!(content.contains("不要生成最终结论"));
         assert!(content.contains("完整汇总答复"));
     }
 

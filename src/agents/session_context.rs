@@ -21,8 +21,10 @@ use crate::channels::{Channel, ChannelInboundMessage};
 /// Delegation notices carry a **wake-time intent** (`intent`), captured when
 /// the terminal event was collected — a queued notice may start long after
 /// later terminals cleared `pending`, so the live snapshot at turn start is
-/// racy (the E2E 恢复轮1 bug: an intermediate notice streamed as a normal
-/// message because `pending` was already empty when its turn ran). User
+/// racy (the E2E 恢复轮1 bug: an intermediate notice was misjudged as the
+/// final turn because `pending` was already empty when its turn ran, so the
+/// EndTurn→Continue mapping / ask_user disable / TTS+on_status suppression
+/// and the injected SILENCE_GUIDANCE disagreed with each other). User
 /// messages carry `None` → fall back to the live snapshot at turn start.
 /// `pub(crate)` so orchestrator tests can pin the wake-time semantics.
 pub(crate) fn decide_silenced(intent: Option<bool>, live: Option<TurnSuspension>) -> bool {
