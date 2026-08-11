@@ -30,7 +30,7 @@ use crate::channels::ChannelInboundMessage;
 /// from Claude Code's fork-async pre-announcement ("results will arrive in a
 /// subsequent message"): telling the model the turn isn't final keeps it
 /// from committing to a conclusion before all results land.
-const SILENCE_GUIDANCE: &str = "[系统提示] 本轮为中间恢复轮:任务尚未全部完成,本轮对话不会终结;你的本轮输出将作为进度说明正常发送给用户。请输出简洁的中间进展(如已完成哪些子任务、剩余哪些),不要生成最终结论或收尾语,待全部子代理结果到达后,在最终轮输出完整汇总答复。";
+const SILENCE_GUIDANCE: &str = "[系统提示] 本轮为中间恢复轮:任务尚未全部完成,本轮对话不会终结;你的本轮输出将作为进度说明展示给用户(流式通道以 💬 注释显示,无流式通道直接发送)。请输出简洁的中间进展(如已完成哪些子任务、剩余哪些),不要生成最终结论或收尾语,待全部子代理结果到达后,在最终轮输出完整汇总答复。";
 
 /// Append the silence guidance when the resume turn is not final — the
 /// session still has pending delegations, so this turn's output is delivered
@@ -586,8 +586,9 @@ mod tests {
         maybe_append_silence_guidance(&sctx, &mut content);
         assert!(content.contains("中间恢复轮"));
         assert!(content.contains("不会终结"));
-        // 六次修正 (2026-08-12): 输出按普通轮次处理 — 作为进度说明正常发送给用户.
-        assert!(content.contains("将作为进度说明正常发送给用户"));
+        // 七次修正 (2026-08-12): 挂起轮输出按「流式已显示与否」区分投递 —
+        // 流式通道以 💬 commentary 展示(不投递独立消息),无流式通道直接发送.
+        assert!(content.contains("将作为进度说明展示给用户"));
         assert!(content.contains("输出简洁的中间进展"));
         assert!(content.contains("不要生成最终结论"));
         assert!(content.contains("完整汇总答复"));

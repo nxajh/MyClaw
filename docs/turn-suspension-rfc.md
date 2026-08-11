@@ -137,7 +137,13 @@ pub struct SubResult {
 - `ChannelInboundMessage.progress_text` 字段与 `progress_text_for_notice` 直通链(`wake` 元组 7→6 项,去 `progress_body`)。
 - 最终轮删除预览块、预览清理钩子、origin 折叠块、`delivered_msg_id` 折叠变量。
 
-**投递路径(六次修正)**:silenced 轮 `turn_stream` 始终创建,模型输出流式显示(commentary 💬 由 telegram streaming 自动处理)、正常投递(`FinalDelivered` 或 fallback send)。fallback send 门放开:`if !silenced && delivery != FinalDelivered` → `if delivery != FinalDelivered`,qqbot/wechat/client 等无流式通道的挂起轮同样投递模型输出(与普通轮次一致)。保留:`silenced_override`(wake 时意图判定)、`semantic_stop_reason`(EndTurn→Continue)、`SILENCE_GUIDANCE`(文案改为"本轮输出将作为进度说明正常发送给用户,请输出简洁中间进展")、TTS 仍 `&& !silenced`(中间进度消息不转语音)、`on_status` Thinking/Done 仍 `if !silenced`。
+**投递路径(六次修正;2026-08-12 七次修正细化)**:silenced 轮 `turn_stream` 始终创建,模型输出流式显示(commentary 💬 由 telegram streaming 自动处理)。fallback send 门按「流式是否已实际显示」区分,而非一刀切放开:`if delivery != FinalDelivered && (delivery == Pending || !(silenced || has_pending))`——
+
+- `delivery == Pending`(无流式通道 qqbot/wechat/client):仍投递,无流式时这是用户看到中间进度的唯一途径(与普通轮次一致)。
+- `delivery == Visible`(流式已显示,如 Telegram)且为挂起轮(silenced 恢复轮或 origin 挂起轮 `has_pending`):**不投递**——挂起轮无工具后 final answer,`turn_result.text` 即工具前 commentary 全文,流式已以 💬 行显示,再投递独立消息即重复(origin turn 双消息现场:预览块 💬 行 + 独立裸文本 + TTS 语音,三份同文本)。
+- 最终轮(`!silenced && !has_pending`):与普通轮一致正常投递完整汇总。
+
+保留:`silenced_override`(wake 时意图判定)、`semantic_stop_reason`(EndTurn→Continue)、`SILENCE_GUIDANCE`(文案改为"本轮输出将作为进度说明正常发送给用户,请输出简洁中间进展")、TTS 扩为 `&& !silenced && !has_pending`(中间进度消息——含 origin 挂起轮——不转语音;最终轮恢复 TTS)、`on_status` Thinking/Done 仍 `if !silenced`。
 
 **连续性由事前约束保证(2026-08-10 审查修正;约束语 fix v2 强化;2026-08-12 六次修正文案更新)**:挂起轮输出**会真实发送给用户**(作为进度说明),约束语相应更新为——"本轮为中间恢复轮:任务尚未全部完成,本轮对话不会终结;你的本轮输出将作为进度说明正常发送给用户。请输出简洁的中间进展(如已完成哪些子任务、剩余哪些),不要生成最终结论或收尾语,待全部子代理结果到达后,在最终轮输出完整汇总答复"。模型知道本轮不终结 → 不会提交最终结论 → 恢复轮自然重新汇总,无需任何回填。与 Claude Code 同构:其 fork 异步用 "results will arrive in a subsequent message" 预告恢复轮使模型不割裂,我们把同一手段用于挂起语境。
 

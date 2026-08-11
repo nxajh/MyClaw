@@ -434,18 +434,20 @@ impl SessionContext {
         // the live snapshot at turn start. Origin turns (suspension created
         // mid-run) and the final resume turn (last terminal already recorded
         // → pending empty) are loud; intermediate resume turns are silenced:
-        // their model output is delivered as an ordinary intermediate message
-        // (progress commentary, streamed + sent like any turn) and the turn
-        // does NOT end. Also disables `ask_user` for this turn (session flag).
+        // their model output is streamed as commentary (💬) and, on suspended
+        // turns, NOT re-delivered as a standalone message (RFC §3.3 七次修正
+        // — no tool-trailing final answer exists, so fallback would duplicate
+        // the commentary; non-streaming channels still get the fallback send).
+        // The turn does NOT end. Also disables `ask_user` for this turn.
         let silenced = decide_silenced(silenced_intent, self.suspension_snapshot());
         session.turn_silenced = silenced;
         // RFC §7.6: install per-turn streaming handle BEFORE Agent::run.
         // Channels that don't support streaming return None; the
-        // fallback send block below covers them. Silenced (intermediate
-        // resume) turns stream exactly like ordinary turns — the model's
-        // output is delivered as a normal intermediate message (the turn
-        // does NOT end; later terminal events resume it until the final
-        // loud summary).
+        // fallback send block below covers them (delivery == Pending always
+        // delivers, even on suspended turns). Silenced (intermediate resume)
+        // turns stream exactly like ordinary turns — the model's output is
+        // shown as commentary and the turn does NOT end; later terminal
+        // events resume it until the final loud summary.
         session.turn_stream = channel
             .as_ref()
             .and_then(|ch| ch.create_stream(&reply_target));
@@ -692,13 +694,33 @@ impl SessionContext {
                 //   3. Stream existed and acked everything → FinalDelivered
                 //      → skip fallback (avoids the double-display bug)
                 // Silenced (intermediate resume) turns fall through the same
-                // path — their model output is delivered as an ordinary
-                // intermediate message (progress commentary, not a turn end).
+                // stream-consumption path — their model output is streamed as
+                // commentary (progress note, not a turn end).
+                //
+                // Suspended turns (silenced resume wheels OR the origin turn
+                // that spawned async delegations with `has_pending`) differ
+                // from ordinary turns: there is no tool-trailing final answer,
+                // so `turn_result.text` is just the tool-leading commentary —
+                // on streaming channels it was ALREADY shown as a 💬 line in
+                // the live preview. Re-sending it as a standalone message
+                // duplicates the commentary (double display). Gate the
+                // fallback by whether streaming actually displayed the output:
+                //   - delivery == Pending (non-streaming channel: qqbot/wechat/
+                //     client) → still deliver: that's the only way the user
+                //     sees intermediate progress (RFC §3.3 no-stream fallback).
+                //   - delivery == Visible (streaming displayed it, e.g.
+                //     Telegram) on a suspended turn → skip: commentary-only
+                //     output must not be re-sent as a plain text message.
+                //   - final wheel (!silenced && !has_pending) → deliver as an
+                //     ordinary turn (full summary).
                 let delivery = match stream {
                     Some(s) => s.finish().await,
                     None => crate::channels::StreamDelivery::Pending,
                 };
-                if delivery != crate::channels::StreamDelivery::FinalDelivered {
+                let suspended_turn = silenced || turn_result.has_pending;
+                if delivery != crate::channels::StreamDelivery::FinalDelivered
+                    && (delivery == crate::channels::StreamDelivery::Pending || !suspended_turn)
+                {
                     if let Some(ref ch) = channel_for_send {
                         if !turn_result.text.trim().is_empty() {
                             let receiver = {
@@ -741,6 +763,7 @@ impl SessionContext {
                 // synthesize the reply text to audio and send as a voice message.
                 if runtime.defaults.auto_tts
                     && !silenced
+                    && !turn_result.has_pending
                     && !turn_result.text.trim().is_empty()
                 {
                     if let Some(ref ch) = channel_for_send {
