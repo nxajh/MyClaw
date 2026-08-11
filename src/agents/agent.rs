@@ -879,7 +879,8 @@ impl Agent {
                 missing_count = pending_calls.len(),
                 "recovery: re-executing interrupted tool calls"
             );
-            let allowed_tools = self.allowed_tools(runtime);
+            let mut allowed_tools = self.allowed_tools(runtime);
+            filter_turn_scoped_tools(&mut allowed_tools, session);
             let tool_executor = &runtime.tool_executor;
 
             // Check the exec marker: if present, the call_id it contains was
@@ -1734,6 +1735,47 @@ mod tests {
         filter_turn_scoped_tools(&mut tools, &session);
 
         assert_eq!(tool_names(&tools), vec!["send_message", "calculator"]);
+    }
+
+    #[test]
+    fn turn_tool_allowlist_narrows_to_intersection() {
+        // Some(["shell"]) → only "shell" survives (intersection with
+        // whatever was already in the list).
+        let mut session = Session::new("s".into());
+        session.turn_tool_allowlist = Some(vec!["shell".into()]);
+        let mut tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(NamedTool("shell")),
+            Arc::new(NamedTool("file_read")),
+            Arc::new(NamedTool("calculator")),
+        ];
+        filter_turn_scoped_tools(&mut tools, &session);
+        assert_eq!(tool_names(&tools), vec!["shell"]);
+    }
+
+    #[test]
+    fn turn_tool_allowlist_empty_forbids_all() {
+        // Some([]) → explicitly disable all tools.
+        let mut session = Session::new("s".into());
+        session.turn_tool_allowlist = Some(vec![]);
+        let mut tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(NamedTool("shell")),
+            Arc::new(NamedTool("file_read")),
+        ];
+        filter_turn_scoped_tools(&mut tools, &session);
+        assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn turn_tool_allowlist_none_preserves_existing() {
+        // None → no extra filtering beyond the normal scoped filter.
+        let mut session = Session::new("s".into());
+        session.turn_tool_allowlist = None;
+        let mut tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(NamedTool("shell")),
+            Arc::new(NamedTool("calculator")),
+        ];
+        filter_turn_scoped_tools(&mut tools, &session);
+        assert_eq!(tool_names(&tools), vec!["shell", "calculator"]);
     }
 
     #[test]
