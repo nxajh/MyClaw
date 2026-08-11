@@ -84,6 +84,10 @@ struct SessionMeta {
     /// restart recovery needs the same id the parent's suspension recorded).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delegation_timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delegation_allowed_tools: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -838,6 +842,29 @@ impl SessionBackend for JsonFileBackend {
 
     fn load_task_id(&self, session_id: &str) -> Option<String> {
         self.read_meta(session_id)?.task_id
+    }
+
+    fn save_delegation_args(
+        &self,
+        session_id: &str,
+        timeout_secs: u64,
+        allowed_tools: Option<Vec<String>>,
+    ) -> std::io::Result<()> {
+        if let Some(mut meta) = self.read_meta(session_id) {
+            meta.delegation_timeout_secs = Some(timeout_secs);
+            meta.delegation_allowed_tools = allowed_tools;
+            self.write_meta(&meta)?;
+        }
+        Ok(())
+    }
+
+    fn load_delegation_args(
+        &self,
+        session_id: &str,
+    ) -> Option<(u64, Option<Vec<String>>)> {
+        let meta = self.read_meta(session_id)?;
+        let timeout = meta.delegation_timeout_secs?;
+        Some((timeout, meta.delegation_allowed_tools))
     }
 }
 

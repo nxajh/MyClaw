@@ -508,7 +508,7 @@ impl Orchestrator {
         //
         // Normal stop (SIGINT/SIGTERM without hot switch): drain before return
         // so tool results and sub-agents persist before process exit.
-        if crate::is_shutting_down() {
+        if crate::SHUTDOWN_FLAG.load(std::sync::atomic::Ordering::SeqCst) {
             info!(
                 active_turns = self.ctx.turn_tracker.active_count(),
                 "listeners stopped; deferring turn drain until after hot-switch fork"

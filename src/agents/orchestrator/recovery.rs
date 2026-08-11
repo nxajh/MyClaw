@@ -288,14 +288,20 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
                     sa.sub_session_id
                 )
             });
-        spawn_recovery(
-            turn_tracker.clone(),
-            session_ctx,
-            runtime.clone(),
-            "sub-agent startup recovery",
-            sa.task_id.clone(),
-            sink,
-        );
+        if let Some(ref delegator) = delegator {
+            delegator.recover_async(
+                sa.task_id.clone(),
+                sa.agent_name.clone(),
+                sa.parent_session_id.clone(),
+                session_ctx,
+                sa.timeout_secs,
+                sa.allowed_tools.clone(),
+            );
+        } else {
+            tokio::spawn(async move {
+                sink.fail("daemon restarts, sub-agents disabled".to_string()).await;
+            });
+        }
     }
 
     // P1-1 (RFC §5): resume persisted suspensions. Prefer the registered

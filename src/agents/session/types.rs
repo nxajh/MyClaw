@@ -115,6 +115,11 @@ pub struct Session {
     /// `ask_user` is disabled. Set by `process_turn` before `Agent::run`;
     /// never persisted, reset every turn.
     pub turn_silenced: bool,
+    /// Per-turn tool allowlist for sub-agents (RFC optional allowed_tools).
+    /// If Some, the agent is restricted to the intersection of this list and
+    /// its permanent config. If Some(empty), all tools are forbidden.
+    /// If None, uses permanent config. Never persisted; reset on session creation.
+    pub turn_tool_allowlist: Option<Vec<String>>,
 }
 
 // `Session` cannot derive `Clone` because `Box<dyn TurnStream>` is not
@@ -143,6 +148,7 @@ impl Clone for Session {
             sub_agent_task_id: self.sub_agent_task_id.clone(),
             turn_injections: self.turn_injections.clone(),
             turn_silenced: self.turn_silenced,
+            turn_tool_allowlist: self.turn_tool_allowlist.clone(),
         }
     }
 }
@@ -166,6 +172,7 @@ impl std::fmt::Debug for Session {
             .field("has_sub_agent_inbox", &self.sub_agent_inbox.is_some())
             .field("sub_agent_task_id", &self.sub_agent_task_id)
             .field("turn_silenced", &self.turn_silenced)
+            .field("turn_tool_allowlist", &self.turn_tool_allowlist)
             .finish()
     }
 }
@@ -193,6 +200,7 @@ impl Session {
             sub_agent_task_id: None,
             turn_injections: Vec::new(),
             turn_silenced: false,
+            turn_tool_allowlist: None,
         }
     }
 

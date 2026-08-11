@@ -163,6 +163,10 @@ impl Agent {
         // Track whether the main agent called memory_manage this turn —
         // if so, the forked extraction is redundant (mutual exclusion).
         let mut turn_called_memory = false;
+        // Async delegation is a turn boundary: after the entire provider batch
+        // has been executed and persisted, return to SessionContext so the
+        // origin turn releases its lock before the completion wake is queued.
+        let mut async_delegation_spawned = false;
         // Send tools are not always declared (loaded on demand), so fold any
         // prior references that would become orphan tool calls.
         fold_absent_tool(&mut messages, &tool_specs, "send_message", "消息发送结果");
@@ -749,6 +753,18 @@ impl Agent {
                     .await;
                 }
 
+                // Detect successful async delegation only after this result has
+                // been persisted. Continue executing the rest of the provider
+                // batch; the boundary is checked after the batch below.
+                if call.name == "agent_delegate" && !is_error {
+                    let mode = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                        .ok()
+                        .and_then(|v| v.get("mode").and_then(|m| m.as_str()).map(str::to_owned));
+                    if mode.as_deref() == Some("async") {
+                        async_delegation_spawned = true;
+                    }
+                }
+
                 // After executing this call, check if we've hit the hard
                 // limit. If so, strip remaining unexecuted tool_calls and
                 // abort — avoids orphan tool_calls in history.
@@ -770,6 +786,20 @@ impl Agent {
                         },
                     }
                     .into());
+                }
+            }
+
+            if async_delegation_spawned {
+                if runtime.session_manager.registered_context_by_session_id(&session.id).is_some() {
+                    tracing::info!(session = %session.id, "async delegation batch completed; suspending origin turn");
+                    return Ok(TurnResult {
+                        text: String::new(),
+                        stop_reason: StopReason::EndTurn,
+                        pending_retry: None,
+                        has_pending: true,
+                    });
+                } else {
+                    tracing::debug!(session = %session.id, "async delegation spawned from sub-agent; not suspending");
                 }
             }
 
@@ -966,6 +996,10 @@ fn filter_turn_scoped_tools(
     allowed_tools: &mut Vec<Arc<dyn crate::providers::Tool>>,
     session: &Session,
 ) {
+    if let Some(allowlist) = &session.turn_tool_allowlist {
+        allowed_tools.retain(|tool| allowlist.contains(&tool.name().to_string()));
+    }
+
     allowed_tools.retain(|tool| {
         let keep = match tool.name() {
             "send_message" => {

@@ -1546,7 +1546,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     //      update`) persist while the new process is already serving.
     //   4. Exit 0. New process deferred recovery until we die.
     #[cfg(unix)]
-    if crate::is_shutting_down() {
+    if crate::SHUTDOWN_FLAG.load(std::sync::atomic::Ordering::SeqCst) {
         let socket_fd = LISTEN_SOCKET_FD.load(Ordering::SeqCst);
         tracing::debug!(
             socket_fd,
@@ -1628,12 +1628,15 @@ async fn wait_for_signal() -> Result<()> {
     tokio::select! {
         _ = sigint.recv() => {
             tracing::debug!("received SIGINT");
+            crate::TERMINATING_FLAG.store(true, Ordering::SeqCst);
         }
         _ = sigterm.recv() => {
             tracing::debug!("received SIGTERM");
+            crate::TERMINATING_FLAG.store(true, Ordering::SeqCst);
         }
         _ = sigusr1.recv() => {
             tracing::debug!("received SIGUSR1 — hot switch triggered by `myclaw update`");
+            crate::SHUTDOWN_FLAG.store(true, Ordering::SeqCst);
         }
     }
     Ok(())

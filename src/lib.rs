@@ -6,9 +6,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// checkpoint (before next LLM call or before tool execution).
 pub static SHUTDOWN_FLAG: AtomicBool = AtomicBool::new(false);
 
-/// Convenience helper: check whether the shutdown flag is set.
+pub static TERMINATING_FLAG: AtomicBool = AtomicBool::new(false);
+
+/// Convenience helper: check whether the shutdown flag is set (either hot switch or termination).
 pub fn is_shutting_down() -> bool {
-    SHUTDOWN_FLAG.load(Ordering::SeqCst)
+    SHUTDOWN_FLAG.load(Ordering::SeqCst) || TERMINATING_FLAG.load(Ordering::SeqCst)
 }
 
 pub mod agents;

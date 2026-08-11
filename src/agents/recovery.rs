@@ -32,6 +32,8 @@ pub struct UnfinishedSubAgent {
     pub session_key: String,
     /// The reply_target stored on the parent session's last_message.
     pub reply_target: String,
+    pub timeout_secs: u64,
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 /// Walk `SessionManager` for sub-sessions (those with a `parent_session_id`)
@@ -82,6 +84,11 @@ pub fn scan_unfinished_subagents(session_manager: &SessionManager) -> Vec<Unfini
             .map(|s| s.chars().take(200).collect::<String>())
             .unwrap_or_default();
 
+        let (timeout_secs, allowed_tools) = session_manager
+            .backend()
+            .load_delegation_args(&session.id)
+            .unwrap_or((600, None));
+
         unfinished.push(UnfinishedSubAgent {
             agent_name: session.agent_name.clone(),
             // P1-1: prefer the persisted task FQID (matches the parent's
@@ -96,6 +103,8 @@ pub fn scan_unfinished_subagents(session_manager: &SessionManager) -> Vec<Unfini
             sub_session_id: session.id.clone(),
             session_key,
             reply_target,
+            timeout_secs,
+            allowed_tools,
         });
     }
     unfinished

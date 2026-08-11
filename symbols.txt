@@ -1,0 +1,251 @@
+src/cli/cmd_status.rs:5:use crate::cli::Cli;
+src/cli/cmd_status.rs:9:fn default_model(cfg: &myclaw::config::AppConfig) -> Option<&str> {
+src/cli/cmd_status.rs:15:pub async fn run(cli: &Cli, format: &str) -> Result<()> {
+src/cli/cmd_status.rs:25:fn print_text_status(cfg: &Option<myclaw::config::AppConfig>) {
+src/cli/cmd_status.rs:98:fn print_json_status(cfg: &Option<myclaw::config::AppConfig>) -> Result<()> {
+src/cli/cmd_status.rs:144:fn print_last_update_text() {
+src/cli/cmd_status.rs:180:fn read_uptime(pid: i32) -> Option<(u64, u64)> {
+src/cli/cmd_tools.rs:6:use crate::cli::Cli;
+src/cli/cmd_tools.rs:9:pub enum ToolsCommand {
+src/cli/cmd_tools.rs:32:pub async fn run(cli: &Cli, cmd: ToolsCommand) -> Result<()> {
+src/cli/cmd_tools.rs:40:fn list_tools(format: &str) -> Result<()> {
+src/cli/cmd_tools.rs:86:fn list_agents(cli: &Cli, format: &str) -> Result<()> {
+src/cli/cmd_tools.rs:125:fn list_mcp(cli: &Cli, format: &str) -> Result<()> {
+src/cli/cmd_restart.rs:5:use crate::cli::Cli;
+src/cli/cmd_restart.rs:7:pub async fn run(_cli: &Cli) -> Result<()> {
+src/cli/cmd_config.rs:6:use crate::cli::Cli;
+src/cli/cmd_config.rs:9:pub enum ConfigAction {
+src/cli/cmd_config.rs:35:pub async fn run(cli: &Cli, action: ConfigAction) -> Result<()> {
+src/cli/cmd_config.rs:120:fn generate_default_config() -> String {
+src/cli/cmd_exec.rs:6:use crate::cli::Cli;
+src/cli/cmd_exec.rs:8:pub async fn run(
+src/cli/mod.rs:34:pub struct Cli {
+src/cli/mod.rs:48:pub enum Commands {
+src/cli/mod.rs:163:const DEFAULT_CONFIG_PATHS: &[&str] = &[
+src/cli/mod.rs:170:pub fn load_config(cli: &Cli) -> Result<myclaw::config::AppConfig> {
+src/cli/mod.rs:181:pub fn load_config_opt(cli: &Cli) -> Option<myclaw::config::AppConfig> {
+src/cli/mod.rs:187:fn resolve_config_path(cli: &Cli) -> Option<std::path::PathBuf> {
+src/cli/mod.rs:220:pub fn init_tracing(cfg: &myclaw::config::AppConfig) {
+src/cli/cmd_update.rs:22:const SIGUSR1_DELAY: Duration = Duration::from_millis(400);
+src/cli/cmd_update.rs:25:pub fn run_update() -> Result<()> {
+src/cli/cmd_update.rs:35:fn run_update_inner() -> Result<()> {
+src/cli/cmd_update.rs:260:fn resolve_install_path(current_exe: &Path) -> PathBuf {
+src/cli/cmd_update.rs:272:fn already_up_to_date_message(
+src/cli/cmd_update.rs:313:fn print_noop(
+src/cli/cmd_update.rs:339:fn find_downloaded_binary(dest: &Path) -> Result<PathBuf> {
+src/cli/cmd_update.rs:364:const GH_REPO: &str = "nxajh/MyClaw";
+src/cli/cmd_update.rs:367:fn get_latest_run_meta() -> Result<(String, Option<String>)> {
+src/cli/cmd_update.rs:415:fn download_artifact(run_id: &str, dest: &Path) -> Result<()> {
+src/cli/cmd_update.rs:438:fn send_sigusr1() -> Result<()> {
+src/cli/cmd_tui.rs:6:const DEFAULT_WS_URL: &str = "ws://127.0.0.1:18789/myclaw";
+src/cli/cmd_tui.rs:8:pub async fn run(url: Option<&str>) -> Result<()> {
+src/cli/cmd_completion.rs:7:use crate::cli::Cli as RootCli;
+src/cli/cmd_completion.rs:9:pub fn run(shell: Shell) -> Result<()> {
+src/cli/cmd_migrate.rs:10:use crate::cli::{load_config, Cli};
+src/cli/cmd_migrate.rs:13:pub fn run(cli: &Cli, to_namespace: &str, yes: bool) -> Result<()> {
+src/cli/cmd_stop.rs:5:use crate::cli::Cli;
+src/cli/cmd_stop.rs:7:pub async fn run(_cli: &Cli) -> Result<()> {
+src/cli/cmd_doctor.rs:6:use crate::cli::Cli;
+src/cli/cmd_doctor.rs:8:pub async fn run(_cli: &Cli, fix: bool) -> Result<()> {
+src/cli/cmd_doctor.rs:117:fn find_config() -> Option<PathBuf> {
+src/cli/cmd_doctor.rs:131:fn try_load_config() -> Option<myclaw::config::AppConfig> {
+src/cli/cmd_reload.rs:8:use crate::cli::Cli;
+src/cli/cmd_reload.rs:10:pub async fn run(_cli: &Cli) -> Result<()> {
+src/cli/cmd_chat.rs:6:use crate::cli::Cli;
+src/cli/cmd_chat.rs:8:pub async fn run(
+src/config/provider.rs:11:pub use crate::providers::RotationStrategy;
+src/config/provider.rs:12:pub use crate::providers::capability::{
+src/config/provider.rs:21:pub enum Protocol {
+src/config/provider.rs:42:pub enum AuthStyle {
+src/config/provider.rs:50:impl From<AuthStyle> for crate::providers::AuthStyle {
+src/config/provider.rs:63:pub struct ChatSection {
+src/config/provider.rs:80:pub struct EmbeddingSection {
+src/config/provider.rs:92:pub struct CapabilitySection {
+src/config/provider.rs:113:pub struct ProviderConfig {
+src/config/provider.rs:154:impl ProviderConfig {
+src/config/mod.rs:66:use crate::agents::loop_breaker::LoopBreakerConfig;
+src/config/mod.rs:67:use crate::config::scheduler::SchedulerConfig;
+src/config/mod.rs:79:struct RawConfig {
+src/config/mod.rs:157:pub struct LoggingConfig {
+src/config/mod.rs:171:pub struct SafetyConfig {
+src/config/mod.rs:178:impl Default for SafetyConfig {
+src/config/mod.rs:187:fn default_protected_paths() -> Vec<String> {
+src/config/mod.rs:195:impl SafetyConfig {
+src/config/mod.rs:215:pub struct SystemConfig {
+src/config/mod.rs:223:impl Default for SystemConfig {
+src/config/mod.rs:234:fn default_system_namespace() -> String {
+src/config/mod.rs:242:pub struct MessagingConfig {
+src/config/mod.rs:253:pub struct SmtpConfig {
+src/config/mod.rs:269:pub struct DelegationConfig {
+src/config/mod.rs:278:impl Default for DelegationConfig {
+src/config/mod.rs:285:fn default_delegation_max_depth() -> u32 {
+src/config/mod.rs:290:fn glob_match(pattern: &str, path: &str) -> bool {
+src/config/mod.rs:298:fn glob_match_parts(pattern: &[&str], path: &[&str]) -> bool {
+src/config/mod.rs:333:fn glob_match_segment(pattern: &str, segment: &str) -> bool {
+src/config/mod.rs:341:fn glob_match_chars(pat: &[char], seg: &[char]) -> bool {
+src/config/mod.rs:362:pub struct AppConfig {
+src/config/mod.rs:409:pub fn init_safety_config(config: SafetyConfig) {
+src/config/mod.rs:417:pub fn is_path_protected(path: &Path) -> bool {
+src/config/mod.rs:428:pub struct ConfigLoader;
+src/config/mod.rs:430:impl ConfigLoader {
+src/config/mod.rs:593:    use crate::providers::Capability;
+src/config/scheduler.rs:8:fn default_every() -> String {
+src/config/scheduler.rs:11:fn default_target() -> String {
+src/config/scheduler.rs:14:fn default_webhook_port() -> u16 {
+src/config/scheduler.rs:20:pub struct HeartbeatConfig {
+src/config/scheduler.rs:38:impl Default for HeartbeatConfig {
+src/config/scheduler.rs:54:pub enum ContextPolicy {
+src/config/scheduler.rs:63:impl Default for ContextPolicy {
+src/config/scheduler.rs:71:pub struct CronJob {
+src/config/scheduler.rs:89:fn default_cron_context_policy() -> ContextPolicy {
+src/config/scheduler.rs:95:pub struct CronConfig {
+src/config/scheduler.rs:103:pub struct WebhookConfig {
+src/config/scheduler.rs:116:impl Default for WebhookConfig {
+src/config/scheduler.rs:128:pub struct SchedulerConfig {
+src/config/sub_agent.rs:28:pub enum AgentIsolation {
+src/config/sub_agent.rs:35:impl Default for AgentIsolation {
+src/config/sub_agent.rs:49:pub struct SubAgentConfig {
+src/config/sub_agent.rs:97:impl SubAgentConfig {
+src/config/sub_agent.rs:114:impl SubAgentConfig {
+src/config/channel.rs:14:pub struct WechatAccountConfig {
+src/config/channel.rs:38:fn default_wechat_debounce_ms() -> u64 {
+src/config/channel.rs:42:fn default_poll_timeout() -> u64 {
+src/config/channel.rs:46:fn default_true() -> bool {
+src/config/channel.rs:50:impl Default for WechatAccountConfig {
+src/config/channel.rs:69:pub struct WechatChannelConfig {
+src/config/channel.rs:82:pub enum StreamingMode {
+src/config/channel.rs:100:pub struct TelegramAccountConfig {
+src/config/channel.rs:141:fn default_debounce_ms() -> u64 {
+src/config/channel.rs:145:fn default_stall_timeout_secs() -> u64 {
+src/config/channel.rs:149:fn default_approval_timeout() -> u64 {
+src/config/channel.rs:157:pub struct TelegramChannelConfig {
+src/config/channel.rs:173:pub struct GroupConfig {
+src/config/channel.rs:187:pub struct QQBotAccountConfig {
+src/config/channel.rs:220:fn default_debounce_separator() -> String {
+src/config/channel.rs:228:pub struct QQBotChannelConfig {
+src/config/channel.rs:241:pub struct ChannelConfigs {
+src/config/channel.rs:248:impl ChannelConfigs {
+src/config/channel.rs:286:pub struct ClientConfig {
+src/config/channel.rs:300:fn default_client_bind() -> String {
+src/config/channel.rs:304:fn default_max_connections() -> u32 {
+src/config/channel.rs:308:impl Default for ClientConfig {
+src/config/filters.rs:18:pub enum NameFilter {
+src/config/filters.rs:33:pub struct AllKeyword(pub Vec<String>);
+src/config/filters.rs:37:pub struct DenyList {
+src/config/filters.rs:41:impl NameFilter {
+src/config/filters.rs:64:impl Default for NameFilter {
+src/config/filters.rs:71:pub type ToolFilter = NameFilter;
+src/config/filters.rs:73:pub type SkillFilter = NameFilter;
+src/config/filters.rs:75:pub type McpFilter = NameFilter;
+src/config/agent.rs:10:pub enum PermissionMode {
+src/config/agent.rs:25:pub enum RunMode {
+src/config/agent.rs:38:pub struct ContextConfig {
+src/config/agent.rs:49:fn default_compact_threshold() -> f64 {
+src/config/agent.rs:52:fn default_retain_work_units() -> usize {
+src/config/agent.rs:56:impl Default for ContextConfig {
+src/config/agent.rs:69:pub struct ToolExecutorConfig {
+src/config/agent.rs:75:fn default_tool_timeout() -> u64 {
+src/config/agent.rs:79:impl Default for ToolExecutorConfig {
+src/config/agent.rs:93:pub struct AgentConfig {
+src/config/agent.rs:109:pub struct PromptConfig {
+src/config/agent.rs:129:fn default_timezone_offset() -> i32 {
+src/config/agent.rs:133:fn default_true() -> bool {
+src/config/agent.rs:137:impl Default for PromptConfig {
+src/config/routing.rs:7:use crate::providers::Capability;
+src/config/routing.rs:14:pub enum RoutingStrategy {
+src/config/routing.rs:30:pub struct RouteEntry {
+src/config/routing.rs:48:pub struct RoutingConfig(HashMap<String, RouteEntry>);
+src/config/routing.rs:50:impl RoutingConfig {
+src/config/mcp.rs:10:pub enum McpTransport {
+src/config/mcp.rs:22:pub struct McpServerConfig {
+src/config/memory.rs:5:fn default_distill_enabled() -> bool {
+src/config/memory.rs:8:fn default_distill_idle_secs() -> u64 {
+src/config/memory.rs:11:fn default_distill_interval_secs() -> u64 {
+src/config/memory.rs:17:pub struct MemoryConfig {
+src/config/memory.rs:30:impl Default for MemoryConfig {
+src/mcp/tool.rs:16:pub struct McpToolWrapper {
+src/mcp/tool.rs:28:impl McpToolWrapper {
+src/mcp/tool.rs:44:impl Tool for McpToolWrapper {
+src/mcp/client.rs:24:const RECV_TIMEOUT_SECS: u64 = 30;
+src/mcp/client.rs:27:const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 180;
+src/mcp/client.rs:30:const MAX_TOOL_TIMEOUT_SECS: u64 = 600;
+src/mcp/client.rs:34:struct McpServerInner {
+src/mcp/client.rs:50:pub struct McpServer {
+src/mcp/client.rs:54:impl McpServer {
+src/mcp/client.rs:234:pub struct McpRegistry {
+src/mcp/client.rs:240:impl McpRegistry {
+src/mcp/client.rs:359:    use crate::mcp::config_types::McpTransport;
+src/mcp/transport/mod.rs:9:use crate::mcp::config_types::{McpServerConfig, McpTransport};
+src/mcp/transport/mod.rs:10:use crate::mcp::protocol::{JsonRpcRequest, JsonRpcResponse};
+src/mcp/transport/mod.rs:38:pub trait McpTransportConn: Send + Sync {
+src/mcp/transport/mod.rs:175:pub fn create_transport(config: &McpServerConfig) -> Result<Box<dyn McpTransportConn>> {
+src/mcp/transport/mod.rs:188:    use crate::mcp::config_types::McpTransport;
+src/mcp/transport/http.rs:10:use crate::mcp::config_types::McpServerConfig;
+src/mcp/transport/http.rs:11:use crate::mcp::protocol::JSONRPC_VERSION;
+src/mcp/transport/http.rs:12:use crate::mcp::protocol::{JsonRpcRequest, JsonRpcResponse};
+src/mcp/transport/http.rs:15:pub struct HttpTransport {
+src/mcp/transport/http.rs:22:impl HttpTransport {
+src/mcp/transport/http.rs:67:impl McpTransportConn for HttpTransport {
+src/mcp/transport/sse.rs:15:use crate::mcp::config_types::McpServerConfig;
+src/mcp/transport/sse.rs:16:use crate::mcp::protocol::JSONRPC_VERSION;
+src/mcp/transport/sse.rs:17:use crate::mcp::protocol::{INTERNAL_ERROR, JsonRpcError, JsonRpcRequest, JsonRpcResponse};
+src/mcp/transport/sse.rs:21:enum SseStreamState {
+src/mcp/transport/sse.rs:27:pub struct SseTransport {
+src/mcp/transport/sse.rs:39:impl SseTransport {
+src/mcp/transport/sse.rs:233:struct SseSharedState {
+src/mcp/transport/sse.rs:260:async fn handle_sse_event(
+src/mcp/transport/sse.rs:336:impl McpTransportConn for SseTransport {
+src/mcp/transport/stdio.rs:9:use crate::mcp::config_types::McpServerConfig;
+src/mcp/transport/stdio.rs:10:use crate::mcp::protocol::JSONRPC_VERSION;
+src/mcp/transport/stdio.rs:11:use crate::mcp::protocol::{JsonRpcRequest, JsonRpcResponse};
+src/mcp/transport/stdio.rs:14:pub struct StdioTransport {
+src/mcp/transport/stdio.rs:20:impl StdioTransport {
+src/mcp/transport/stdio.rs:76:impl McpTransportConn for StdioTransport {
+src/mcp/deferred.rs:15:use crate::mcp::tool_trait::{Tool, ToolSpec};
+src/mcp/deferred.rs:23:pub struct DeferredMcpToolStub {
+src/mcp/deferred.rs:32:impl DeferredMcpToolStub {
+src/mcp/deferred.rs:57:pub struct DeferredMcpToolSet {
+src/mcp/deferred.rs:64:impl DeferredMcpToolSet {
+src/mcp/deferred.rs:160:pub struct ActivatedToolSet {
+src/mcp/deferred.rs:164:impl ActivatedToolSet {
+src/mcp/deferred.rs:223:impl Default for ActivatedToolSet {
+src/mcp/deferred.rs:235:pub fn build_deferred_tools_section(deferred: &DeferredMcpToolSet) -> String {
+src/mcp/deferred.rs:291:        use crate::mcp::tool_trait::ToolResult;
+src/mcp/deferred.rs:329:        use crate::mcp::tool_trait::ToolResult;
+src/mcp/deferred.rs:364:        use crate::mcp::tool_trait::ToolResult;
+src/mcp/config_types.rs:10:pub enum McpTransport {
+src/mcp/config_types.rs:22:pub struct McpServerConfig {
+src/mcp/protocol.rs:10:pub const JSONRPC_VERSION: &str = "2.0";
+src/mcp/protocol.rs:11:pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+src/mcp/protocol.rs:14:pub const PARSE_ERROR: i32 = -32700;
+src/mcp/protocol.rs:15:pub const INVALID_REQUEST: i32 = -32600;
+src/mcp/protocol.rs:16:pub const METHOD_NOT_FOUND: i32 = -32601;
+src/mcp/protocol.rs:17:pub const INVALID_PARAMS: i32 = -32602;
+src/mcp/protocol.rs:18:pub const INTERNAL_ERROR: i32 = -32603;
+src/mcp/protocol.rs:23:pub struct JsonRpcRequest {
+src/mcp/protocol.rs:32:impl JsonRpcRequest {
+src/mcp/protocol.rs:56:pub struct JsonRpcResponse {
+src/mcp/protocol.rs:68:pub struct JsonRpcError {
+src/mcp/protocol.rs:77:pub struct McpToolDef {
+src/mcp/protocol.rs:87:pub struct McpToolsListResult {
+src/mcp/tool_trait.rs:7:pub use crate::providers::capability_tool::{Tool, ToolResult, ToolSpec};
+src/memory/mod.rs:41:pub const MAX_INDEX_LINES: usize = 200;
+src/memory/mod.rs:42:pub const MAX_INDEX_BYTES: usize = 25_000;
+src/memory/mod.rs:43:pub const MEMORY_DIR_NAME: &str = "memory";
+src/memory/mod.rs:48:pub struct MemoryFile {
+src/memory/mod.rs:62:pub struct LinkRef {
+src/memory/mod.rs:70:pub struct IndexEntry {
+src/memory/mod.rs:79:impl From<&MemoryFile> for IndexEntry {
+src/memory/mod.rs:96:pub fn should_inject(inject: &str) -> bool {
+src/memory/mod.rs:104:pub fn ensure_memory_dir(knowledge_dir: &str) -> std::io::Result<std::path::PathBuf> {
+src/memory/mod.rs:114:pub fn scan_memory_files(memory_dir: &Path) -> Vec<MemoryFile> {
+src/memory/mod.rs:138:fn parse_memory_file(path: &Path) -> Option<MemoryFile> {
+src/memory/mod.rs:208:fn strip_yaml_quotes(s: &str) -> &str {
+src/memory/mod.rs:219:fn parse_tags(value: &str) -> Vec<String> {
+src/memory/mod.rs:237:pub fn extract_links_from_content(content: &str) -> Vec<LinkRef> {
+src/memory/mod.rs:241:fn extract_links(content: &str) -> Vec<LinkRef> {
+src/memory/mod.rs:272:fn parse_md_link(line: &str) -> Option<LinkRef> {
+src/memory/mod.rs:324:pub fn build_backlinks(files: &[MemoryFile]) -> HashMap<String, Vec<String>> {
+src/memory/mod.rs:347:pub fn format_wiki_index(entries: &[IndexEntry]) -> String {
+src/memory/mod.rs:394:pub fn format_full_memory_index(entries: &[IndexEntry]) -> String {
+src/memory/mod.rs:431:pub fn truncate_index(content: &str, max_lines: usize, max_bytes: usize) -> String {

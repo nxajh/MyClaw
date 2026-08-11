@@ -341,6 +341,24 @@ pub trait SessionBackend: Send + Sync {
         None
     }
 
+    /// Save the sub-agent's delegation timeout and allowed tools.
+    fn save_delegation_args(
+        &self,
+        _session_id: &str,
+        _timeout_secs: u64,
+        _allowed_tools: Option<Vec<String>>,
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Load the sub-agent's delegation timeout and allowed tools.
+    fn load_delegation_args(
+        &self,
+        _session_id: &str,
+    ) -> Option<(u64, Option<Vec<String>>)> {
+        None
+    }
+
     /// Save inbound file bytes into `sessions/<session_id>/files/` and return a
     /// workspace-relative path. Backends that cannot persist files may return an
     /// Unsupported error.
