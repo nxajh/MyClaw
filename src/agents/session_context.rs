@@ -23,23 +23,45 @@ use crate::channels::{Channel, ChannelInboundMessage};
 /// turn. `lines` hold the raw system bodies (already truncated by the
 /// caller, oldest dropped first); `remaining` is the turn-start snapshot's
 /// `pending.len()`. Pure so unit tests can pin the composition.
-fn render_progress_preview(lines: &[String], remaining: usize) -> String {
+///
+/// 方案 (挂起轮折叠, 2026-08-11): `origin` is the loud origin turn's output
+/// folded into the preview (OpenClaw single-message draft semantics) — it
+/// becomes the body, progress lines follow below it, and it is clipped to
+/// the preview budget so the trailing count always survives. `None` keeps
+/// the original "⏳ 任务进行中…" header form.
+fn render_progress_preview(origin: Option<&str>, lines: &[String], remaining: usize) -> String {
     const HEADER: &str = "⏳ 任务进行中…";
     const CHECK: &str = "✅ ";
-    let mut out = String::with_capacity(64 + lines.iter().map(|l| l.len()).sum::<usize>());
-    out.push_str(HEADER);
+    const MAX_PREVIEW_CHARS: usize = 4000;
+    let mut tail = String::with_capacity(64 + lines.iter().map(|l| l.len()).sum::<usize>());
     for line in lines {
-        out.push('\n');
-        out.push_str(CHECK);
-        out.push_str(line);
+        tail.push('\n');
+        tail.push_str(CHECK);
+        tail.push_str(line);
     }
-    out.push('\n');
+    tail.push('\n');
     if remaining > 0 {
-        out.push_str(&format!("⏳ 等待 {} 个任务…", remaining));
+        tail.push_str(&format!("⏳ 等待 {} 个任务…", remaining));
     } else {
-        out.push_str("✅ 全部任务已完成，正在汇总…");
+        tail.push_str("✅ 全部任务已完成，正在汇总…");
     }
-    out
+    match origin.filter(|t| !t.trim().is_empty()) {
+        // Folded origin output is the body; clip it so the tail always fits.
+        Some(text) => {
+            let budget = MAX_PREVIEW_CHARS.saturating_sub(tail.chars().count());
+            let body: String = text.chars().take(budget).collect();
+            let mut out = String::with_capacity(body.len() + tail.len());
+            out.push_str(&body);
+            out.push_str(&tail);
+            out
+        }
+        None => {
+            let mut out = String::with_capacity(HEADER.len() + tail.len());
+            out.push_str(HEADER);
+            out.push_str(&tail);
+            out
+        }
+    }
 }
 
 /// 方案 C (RFC §3.3, race fix 2026-08-10): decide whether a turn is silenced.
@@ -371,6 +393,7 @@ impl SessionContext {
             reply_target: reply_target.clone(),
             msg_id: None,
             lines: Vec::new(),
+            origin_text: None,
         });
         pv.lines.push(line.to_string());
         // Cap the preview: drop oldest lines first (newest stays visible).
@@ -380,7 +403,7 @@ impl SessionContext {
             total -= pv.lines.first().map(|l| l.chars().count()).unwrap_or(0);
             pv.lines.remove(0);
         }
-        let body = render_progress_preview(&pv.lines, snap.pending.len());
+        let body = render_progress_preview(pv.origin_text.as_deref(), &pv.lines, snap.pending.len());
         {
             let mut guard = self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(s) = guard.as_mut() {
@@ -841,10 +864,18 @@ impl SessionContext {
                 //      to None on Err; finish() returns Pending here)
                 //   3. Stream existed and acked everything → FinalDelivered
                 //      → skip fallback (avoids the double-display bug)
+                // 方案 (挂起轮折叠, 2026-08-11): read the stream's fold
+                // candidate BEFORE finish() consumes it — a loud origin turn
+                // that ends with pending delegations has its delivered output
+                // message repurposed (edited) into the progress preview
+                // below instead of leaving output + preview as two messages
+                // (OpenClaw single-message draft semantics).
+                let fold = stream.as_ref().and_then(|s| s.fold_candidate());
                 let delivery = match stream {
                     Some(s) => s.finish().await,
                     None => crate::channels::StreamDelivery::Pending,
                 };
+                let mut delivered_msg_id: Option<String> = None;
                 if !silenced
                     && delivery != crate::channels::StreamDelivery::FinalDelivered
                 {
@@ -872,12 +903,21 @@ impl SessionContext {
                                 ),
                                 options: Default::default(),
                             };
-                            if let Err(e) = ch.send_message(&message).await {
-                                tracing::error!(
-                                    session = %session.id,
-                                    err = %e,
-                                    "process_turn: fallback send failed"
-                                );
+                            match ch.send_message(&message).await {
+                                Ok(res) => {
+                                    // Remember the delivered message id so a
+                                    // pending suspension can fold it into the
+                                    // progress preview below (see fold block).
+                                    delivered_msg_id =
+                                        res.message_ids.first().map(|m| m.as_str().to_string());
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        session = %session.id,
+                                        err = %e,
+                                        "process_turn: fallback send failed"
+                                    );
+                                }
                             }
                         }
                     }
@@ -905,6 +945,97 @@ impl SessionContext {
                                     err = %e,
                                     "process_turn: progress preview delete failed"
                                 );
+                            }
+                        }
+                    }
+                }
+                // 方案 (挂起轮折叠, 2026-08-11, 参考 OpenClaw 单消息 draft
+                // 语义): a LOUD origin turn that ends with delegations still
+                // pending folds its delivered output into the progress
+                // preview — the message the user just saw is edited in place
+                // to `正文 + ⏳ 等待 N 个任务…` and its id is reused as
+                // `progress_preview.msg_id`, so subsequent silenced turns keep
+                // editing the SAME message and the final turn deletes it.
+                // 基底消息: FinalDelivered → 流式消息(承载完整输出);
+                // 否则 → fallback send_message 的消息(残留流式消息删除)。
+                // 非 telegram(无 edit+delete)通道保持全静默,不折叠。
+                if turn_result.has_pending && !silenced {
+                    if let Some(ref ch) = channel_for_send {
+                        let caps = ch.capabilities();
+                        if caps.supports_edit && caps.supports_delete {
+                            let base_msg = if delivery
+                                == crate::channels::StreamDelivery::FinalDelivered
+                            {
+                                fold.as_ref().map(|f| f.msg_id.clone())
+                            } else {
+                                delivered_msg_id.clone()
+                            };
+                            if let Some(mid) = base_msg {
+                                let receiver =
+                                    crate::channels::MessageReceiver::new(reply_target.clone());
+                                // Fallback path: the stream's own preview
+                                // (progress summary / partial tool lines) is a
+                                // leftover next to the real output message —
+                                // delete it so only ONE message survives.
+                                if delivery != crate::channels::StreamDelivery::FinalDelivered {
+                                    if let Some(extra) = fold.as_ref() {
+                                        if let Err(e) = ch
+                                            .delete_message(
+                                                &receiver,
+                                                &crate::channels::MessageId::new(
+                                                    extra.msg_id.clone(),
+                                                ),
+                                            )
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                session = %session.id,
+                                                err = %e,
+                                                "process_turn: fold leftover stream message delete failed"
+                                            );
+                                        }
+                                    }
+                                }
+                                let pending_count = self
+                                    .suspension_snapshot()
+                                    .map(|s| s.pending.len())
+                                    .unwrap_or(0);
+                                let body = render_progress_preview(
+                                    Some(turn_result.text.as_str()),
+                                    &[],
+                                    pending_count,
+                                );
+                                if let Err(e) = ch
+                                    .edit_message(
+                                        &receiver,
+                                        &crate::channels::MessageId::new(mid.clone()),
+                                        crate::channels::ChannelMessageContent::text(body),
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        session = %session.id,
+                                        err = %e,
+                                        "process_turn: fold origin output into progress preview failed"
+                                    );
+                                }
+                                // Register the preview: msg_id reused → later
+                                // silenced turns edit the same message
+                                // (update_progress_preview's Some(mid) branch),
+                                // the final turn deletes it. The folded origin
+                                // output is kept as `origin_text` so renders
+                                // keep it as the body until the final turn.
+                                let mut guard =
+                                    self.turn_suspension.lock().unwrap_or_else(|e| e.into_inner());
+                                if let Some(s) = guard.as_mut() {
+                                    s.progress_preview = Some(ProgressPreview {
+                                        reply_target: reply_target.clone(),
+                                        msg_id: Some(mid),
+                                        lines: Vec::new(),
+                                        origin_text: Some(turn_result.text.clone()),
+                                    });
+                                }
+                                self.persist_suspension();
                             }
                         }
                     }
@@ -1578,7 +1709,7 @@ mod suspension_tests {
     fn render_progress_preview_composes_header_lines_and_remaining() {
         let lines = vec!["子代理任务 t1 已完成（耗时 13s）".to_string()];
         assert_eq!(
-            render_progress_preview(&lines, 2),
+            render_progress_preview(None, &lines, 2),
             "⏳ 任务进行中…\n✅ 子代理任务 t1 已完成（耗时 13s）\n⏳ 等待 2 个任务…"
         );
     }
@@ -1589,12 +1720,43 @@ mod suspension_tests {
             "子代理任务 t1 已完成（耗时 13s）".to_string(),
             "子代理任务 t2 已完成（耗时 9s）".to_string(),
         ];
-        let body = render_progress_preview(&lines, 0);
+        let body = render_progress_preview(None, &lines, 0);
         assert!(body.starts_with("⏳ 任务进行中…"));
         assert!(body.contains("✅ 子代理任务 t1 已完成（耗时 13s）"));
         assert!(body.contains("✅ 子代理任务 t2 已完成（耗时 9s）"));
         assert!(body.ends_with("✅ 全部任务已完成，正在汇总…"));
         assert!(!body.contains("等待"));
+    }
+
+    /// 挂起轮折叠 (2026-08-11): the folded origin output becomes the preview
+    /// body with progress lines below it (OpenClaw single-message draft
+    /// semantics); the "⏳ 任务进行中…" header form is only for previews
+    /// created from a silenced turn's system body.
+    #[test]
+    fn render_progress_preview_with_origin_body() {
+        let body = render_progress_preview(
+            Some("已完成分析，正在等待子任务结果"),
+            &["子代理任务 t1 已完成".to_string()],
+            2,
+        );
+        assert!(body.starts_with("已完成分析，正在等待子任务结果"));
+        assert!(body.contains("\n✅ 子代理任务 t1 已完成"));
+        assert!(body.ends_with("\n⏳ 等待 2 个任务…"));
+        assert!(!body.contains("任务进行中"));
+    }
+
+    /// 挂起轮折叠: an oversized origin body is clipped so the trailing
+    /// remaining count always survives (Telegram 4096-char edit cap).
+    #[test]
+    fn render_progress_preview_clips_origin_to_budget() {
+        let long = "x".repeat(5000);
+        let body = render_progress_preview(Some(&long), &[], 3);
+        assert!(body.chars().count() <= 4000);
+        assert!(body.ends_with("\n⏳ 等待 3 个任务…"));
+        // Empty origin falls back to the header form (no stray blank body).
+        let empty = render_progress_preview(Some("   "), &[], 1);
+        assert!(empty.starts_with("⏳ 任务进行中…"));
+        assert!(empty.ends_with("⏳ 等待 1 个任务…"));
     }
 
     /// 方案 B: pre-B `suspension.json` (no `progress_preview` field) must
@@ -1613,6 +1775,7 @@ mod suspension_tests {
             reply_target: "12345:678".to_string(),
             msg_id: Some("42".to_string()),
             lines: vec!["子代理任务 t1 已完成".to_string()],
+            origin_text: None,
         });
         let s4: TurnSuspension = serde_json::from_str(&serde_json::to_string(&s3).unwrap()).unwrap();
         assert_eq!(s4.progress_preview.unwrap().msg_id.as_deref(), Some("42"));
@@ -1637,6 +1800,7 @@ mod suspension_tests {
                 reply_target: "chat:1".to_string(),
                 msg_id: Some("9".to_string()),
                 lines: vec!["x".to_string()],
+                origin_text: None,
             });
         }
         let _ = ctx.record_terminal("t2".into(), SubStatus::Completed, "ok".into(), 0);

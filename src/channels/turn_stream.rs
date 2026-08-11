@@ -34,6 +34,18 @@ pub enum StreamDelivery {
     FinalDelivered,
 }
 
+/// A message a streaming turn already delivered that the caller may
+/// repurpose (edit in place) instead of leaving it visible next to a second
+/// message — OpenClaw single-message draft semantics: one message evolves
+/// (output → preview → final), never output + preview side by side.
+#[derive(Debug, Clone)]
+pub struct FoldCandidate {
+    /// Platform message id (e.g. Telegram message id).
+    pub msg_id: String,
+    /// Current body of that message (what the user sees right now).
+    pub text: String,
+}
+
 /// A per-turn streaming output handle. Owned by `Session.turn_stream`;
 /// dropped or `finish`ed when the turn ends.
 ///
@@ -61,6 +73,17 @@ pub trait TurnStream: Send + Sync {
     /// Cancellation token observed by `Agent::run` for user-initiated
     /// turn cancel. Default `None` for streams without cancel support.
     fn cancel_token(&self) -> Option<CancellationToken> {
+        None
+    }
+
+    /// Fold candidate: if this stream flushed a visible message, return its
+    /// platform id + current body so the caller can repurpose it (e.g. edit
+    /// it into a progress preview) instead of leaving it next to a second
+    /// message. Default: none (non-message streams, nothing flushed yet, or
+    /// the message was already deleted — e.g. partial mode past the 4096 cap).
+    ///
+    /// MUST be called before `finish()`/`abort()` (they consume `Box<Self>`).
+    fn fold_candidate(&self) -> Option<FoldCandidate> {
         None
     }
 }

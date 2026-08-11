@@ -15,7 +15,7 @@ use crate::channels::message::{
     ChannelFile, ChannelFileMeta, ChannelInboundMessage, ChannelMessageContent, LocalFileBody,
     MessageReceiver, MessageSender,
 };
-use crate::channels::{StreamDelivery, TurnStream};
+use crate::channels::{FoldCandidate, StreamDelivery, TurnStream};
 use crate::config::channel::TelegramAccountConfig;
 use crate::{Channel, DedupState, ProcessingStatus};
 
@@ -2667,6 +2667,23 @@ impl TurnStream for TelegramTurnStream {
         self.delivery
     }
 
+    fn fold_candidate(&self) -> Option<FoldCandidate> {
+        // Only a flushed preview message can be repurposed; if it was
+        // deleted (partial mode past the 4096 cap) there is nothing to fold.
+        let msg_id = self.msg_id?;
+        // Report what the user currently sees: progress mode collapses to
+        // the one-line summary on Done, partial mode shows accumulated text.
+        let text = if self.finished && self.is_progress() {
+            self.collapse_summary()
+        } else {
+            self.preview_text()
+        };
+        Some(FoldCandidate {
+            msg_id: msg_id.to_string(),
+            text,
+        })
+    }
+
     async fn finish(self: Box<Self>) -> StreamDelivery {
         let mut s = *self;
         s.untrack();
@@ -2780,6 +2797,40 @@ mod tests {
             },
         );
         assert_eq!(decision, AuthDecision::Allow);
+    }
+
+    /// 挂起轮折叠 (2026-08-11): a flushed preview message is reported as a
+    /// fold candidate (id + current body) so the suspension machinery can
+    /// edit it in place; no flushed message → None (nothing to fold).
+    #[test]
+    fn fold_candidate_reports_flushed_message() {
+        let ch = TelegramChannel::new(make_config());
+        let mut s = TelegramTurnStream {
+            channel: ch,
+            chat_id: 42,
+            thread_id: None,
+            reply_target: "t".to_string(),
+            mode: crate::config::channel::StreamingMode::Partial,
+            msg_id: Some(7),
+            accumulated: "hello".to_string(),
+            tool_lines: vec![],
+            tool_count: 0,
+            thinking_steps: 0,
+            commentary_notes: 0,
+            thinking_tokens: 0,
+            thinking_active: false,
+            pending_commentary: String::new(),
+            start: std::time::Instant::now(),
+            last_edit: std::time::Instant::now(),
+            delivery: StreamDelivery::FinalDelivered,
+            finished: true,
+        };
+        let f = s.fold_candidate().unwrap();
+        assert_eq!(f.msg_id, "7");
+        assert_eq!(f.text, "hello");
+        // No flushed message (deleted / never sent) → None.
+        s.msg_id = None;
+        assert!(s.fold_candidate().is_none());
     }
 
     #[test]

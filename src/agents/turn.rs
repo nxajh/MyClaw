@@ -100,6 +100,13 @@ pub struct ProgressPreview {
     /// Rendered progress lines (newest last), truncated to the char cap by
     /// the caller (oldest lines dropped first).
     pub lines: Vec<String>,
+    /// 方案 (挂起轮折叠, 2026-08-11): when the loud origin turn's output was
+    /// folded into the preview, its full text is kept here as the preview
+    /// body (rendered above the progress lines, OpenClaw single-message
+    /// draft semantics). `None` for previews created from a silenced turn's
+    /// system body (original "⏳ 任务进行中…" header form).
+    #[serde(default)]
+    pub origin_text: Option<String>,
 }
 
 impl TurnSuspension {
