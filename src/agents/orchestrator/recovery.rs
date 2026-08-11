@@ -33,6 +33,7 @@ enum CompletionSink {
 }
 
 impl CompletionSink {
+    #[allow(dead_code)]
     async fn deliver(self, text: String) {
         let CompletionSink::Delegate {
             task_id,
@@ -80,6 +81,7 @@ impl CompletionSink {
 
 /// Spawn the recovery turn for one session. The LLM work runs in the
 /// background so the event loop starts without blocking.
+#[allow(dead_code)]
 fn spawn_recovery(
     turn_tracker: super::ctx::SharedTurnTracker,
     session_ctx: Arc<SessionContext>,
