@@ -33,6 +33,7 @@ use crate::agents::delegation::{
     AgentMail, AgentMessage, DelegationEvent, DelegationStatus, DelegationTimeout, SubAgentMailbox,
 };
 use crate::agents::session::{BackendPersistHook, PersistHook, SessionManager};
+use crate::agents::SessionContext;
 use crate::config::sub_agent::AgentIsolation;
 use crate::ids::{Fqid, TYPE_SESSION, TYPE_TASK};
 
@@ -1116,6 +1117,7 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
         task: &str,
         parent_session: &super::session::Session,
         timeout: Option<u64>,
+        allowed_tools: Option<Vec<String>>,
     ) -> anyhow::Result<String> {
         let reply_target = parent_session.reply_target().map(|s| s.to_string());
         let config_timeout = self
@@ -1131,6 +1133,7 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
             reply_target.as_deref(),
             timeout_secs,
             None,
+            allowed_tools,
         )
         .await
     }
@@ -1141,6 +1144,7 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
         task: &str,
         parent_session: &super::session::Session,
         timeout: Option<u64>,
+        allowed_tools: Option<Vec<String>>,
     ) -> anyhow::Result<String> {
         let reply_target = parent_session
             .reply_target()
@@ -1150,7 +1154,7 @@ impl crate::agents::AgentDelegator for DelegationCoordinator {
             .find_agent(agent_name)
             .and_then(|a| a.config.timeout);
         let timeout_secs = resolve_timeout(timeout, config_timeout);
-        self.spawn_delegate_async(agent_name, task, &parent_session.id, &reply_target, timeout_secs)
+        self.spawn_delegate_async(agent_name, task, &parent_session.id, &reply_target, timeout_secs, allowed_tools)
     }
 
     fn list_available(&self) -> Vec<(String, Option<String>)> {

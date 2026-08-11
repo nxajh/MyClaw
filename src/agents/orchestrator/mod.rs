@@ -19,7 +19,7 @@ mod recovery;
 mod scheduled;
 #[cfg(test)]
 mod test_support;
-mod turn;
+pub mod turn;
 
 pub use ctx::{ChannelRegistry, OrchestratorCtx};
 pub use event::OrchestratorEvent;

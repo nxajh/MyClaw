@@ -790,7 +790,7 @@ impl Agent {
             }
 
             if async_delegation_spawned {
-                if runtime.session_manager.registered_context_by_session_id(&session.id).is_some() {
+                if session.parent_session_id.is_none() {
                     tracing::info!(session = %session.id, "async delegation batch completed; suspending origin turn");
                     return Ok(TurnResult {
                         text: String::new(),
