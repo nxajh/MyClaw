@@ -74,39 +74,6 @@ pub struct TurnSuspension {
     /// task runs; folded into `SubResult.progress` at terminal collection
     /// (RFC §2.2/§2.3 — Progress never enters the parent context).
     pub progress_by_task: HashMap<String, Vec<String>>,
-    /// 方案 B (RFC §3.3, 2026-08-10): live progress preview on the
-    /// originating channel (telegram only — gated on `supports_edit &&
-    /// supports_delete`). Created on the first silenced resume turn, edited
-    /// in place on later ones, deleted when the suspension clears. Persisted
-    /// with the suspension so a daemon restart keeps editing the same
-    /// message. `#[serde(default)]` keeps pre-B `suspension.json` readable.
-    #[serde(default)]
-    pub progress_preview: Option<ProgressPreview>,
-}
-
-/// 方案 B: a live-edited progress preview message (one per suspended turn,
-/// never a separate message stream). The originating channel renders
-/// `lines` plus the remaining-task count via
-/// `SessionContext::render_progress_preview`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgressPreview {
-    /// Originating chat (e.g. telegram reply target) — where the preview
-    /// lives and where edits/deletes are addressed.
-    pub reply_target: String,
-    /// Platform message id of the preview; `None` until the first send
-    /// succeeds (a failed send leaves no message to edit, so the next
-    /// silenced turn retries the send).
-    pub msg_id: Option<String>,
-    /// Rendered progress lines (newest last), truncated to the char cap by
-    /// the caller (oldest lines dropped first).
-    pub lines: Vec<String>,
-    /// 方案 (挂起轮折叠, 2026-08-11): when the loud origin turn's output was
-    /// folded into the preview, its full text is kept here as the preview
-    /// body (rendered above the progress lines, OpenClaw single-message
-    /// draft semantics). `None` for previews created from a silenced turn's
-    /// system body (original "⏳ 任务进行中…" header form).
-    #[serde(default)]
-    pub origin_text: Option<String>,
 }
 
 impl TurnSuspension {
@@ -120,7 +87,6 @@ impl TurnSuspension {
             pending: vec![task_id],
             results: Vec::new(),
             progress_by_task: HashMap::new(),
-            progress_preview: None,
         }
     }
 
@@ -172,7 +138,8 @@ pub struct TurnResult {
     pub pending_retry: Option<String>,
     /// 方案 C: set by `SessionContext.process_turn` after `Agent::run`
     /// returns when `turn_suspension.pending` is non-empty — the turn must
-    /// suspend (no user-visible reply) instead of ending. Consumed by the
-    /// dispatcher (P0-3: silent resume until `pending` drains).
+    /// suspend (does NOT end) instead of ending; the model output is
+    /// delivered as an ordinary intermediate message. Consumed by the
+    /// dispatcher (P0-3: silenced resume until `pending` drains).
     pub has_pending: bool,
 }

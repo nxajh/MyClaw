@@ -215,7 +215,6 @@ pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSu
             timestamp: chrono::Utc::now().timestamp() as u64,
             interruption_scope_id: None,
             silenced_override: None,
-            progress_text: None,
         };
         tracing::info!(session = %key, "startup recovery: found incomplete turn, dispatching through normal turn path");
         let ctx = Arc::clone(ctx);
@@ -400,9 +399,6 @@ async fn recover_suspension(
         &session_ctx.session_id,
         notice,
         format!("recovery:{}", session_ctx.session_id),
-        // 方案 C (fix v2): recovery notices never carry a system progress
-        // body — process_turn falls back to the model output.
-        None,
     )
     .await;
 }
