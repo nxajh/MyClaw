@@ -1349,7 +1349,19 @@ async fn collect_stream(
     let mut received_first_chunk = false;
     let mut ref_renderer = crate::agents::mention::RefRenderer::new();
 
+    // Overall budget for the whole stream read (RFC v2 §六.A): bounds the
+    // worst case of many small-but-alive chunks trickling forever. Each
+    // individual wait is already bounded by the first-chunk/interval
+    // timeouts; this caps the total wall-clock spent in this function.
+    let stream_started_at = std::time::Instant::now();
+
     let stop_reason = loop {
+        if stream_started_at.elapsed() > crate::agents::llm_stream::STREAM_TOTAL_TIMEOUT {
+            anyhow::bail!(
+                "stream total timeout after {}s",
+                crate::agents::llm_stream::STREAM_TOTAL_TIMEOUT.as_secs()
+            );
+        }
         let event_opt = if !received_first_chunk {
             match tokio::time::timeout(
                 crate::agents::llm_stream::STREAM_FIRST_CHUNK_TIMEOUT,
@@ -1562,6 +1574,9 @@ fn is_transient_llm_error(err: &anyhow::Error) -> bool {
         return true;
     }
     if msg.contains("stream stalled") {
+        return true;
+    }
+    if msg.contains("stream total timeout") {
         return true;
     }
     if msg.contains("stream ended without a completion marker") {
