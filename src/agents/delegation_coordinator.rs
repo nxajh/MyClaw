@@ -1202,8 +1202,7 @@ impl DelegationCoordinator {
             mailboxes.remove(&running_task_id);
             // Delete the durable checkpoint — the recovered task reached a
             // terminal state.
-            if let Err(e) = backend.delete_delegation_checkpoint(&running_task_id)
-            {
+            if let Err(e) = backend.delete_delegation_checkpoint(&running_task_id) {
                 tracing::warn!(task_id = %running_task_id, err = %e, "delete delegation checkpoint failed");
             }
         });

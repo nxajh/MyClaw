@@ -391,8 +391,8 @@ pub trait SessionBackend: Send + Sync {
     }
 
     /// Persist (or update) a durable delegation checkpoint. Called when a
-    /// background task spawns and during shutdown. An empty `task_id` in the
-    /// checkpoint deletes it (terminal cleanup).
+    /// background task spawns and during shutdown. Terminal cleanup uses
+    /// `delete_delegation_checkpoint`.
     fn save_delegation_checkpoint(
         &self,
         _checkpoint: &DelegationCheckpoint,
