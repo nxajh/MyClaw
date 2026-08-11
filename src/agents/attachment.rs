@@ -906,7 +906,7 @@ mod tests {
             &crate::config::agent::PermissionMode::Default,
             &empty_history(),
         );
-        let msg = am.build_message(&SkillManager::new()).unwrap();
+        let _msg = am.build_message(&SkillManager::new()).unwrap();
         am.clear_pending();
 
         // Simulate compaction: history is empty
