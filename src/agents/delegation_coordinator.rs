@@ -1530,8 +1530,8 @@ mod tests {
         assert!(backend.load_delegation_checkpoints().is_empty());
     }
 
-    #[test]
-    fn checkpoint_and_cancel_all_empties_running_and_writes_checkpoints() {
+    #[tokio::test]
+    async fn checkpoint_and_cancel_all_empties_running_and_writes_checkpoints() {
         let (dc, manager) = coordinator(3);
         let backend = manager.backend();
 
