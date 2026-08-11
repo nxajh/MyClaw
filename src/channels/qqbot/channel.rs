@@ -1758,14 +1758,25 @@ impl Channel for QQBotChannel {
 
     fn group_stats(&self) -> Vec<crate::channels::GroupStat> {
         let history = self.group_history.lock();
-        history.iter().map(|(gid, deque)| {
-            crate::channels::GroupStat {
-                group_id: gid.clone(),
-                name: None,
+        history
+            .iter()
+            .map(|(gid, deque)| crate::channels::GroupStat {
+                group_id: gid.chars().take(12).collect(),
+                name: self
+                    .config
+                    .group_config
+                    .get(gid)
+                    .and_then(|c| c.name.clone())
+                    .or_else(|| {
+                        self.config
+                            .group_config
+                            .get("*")
+                            .and_then(|c| c.name.clone())
+                    }),
                 buffered_messages: deque.len(),
-                history_limit: 20,
-            }
-        }).collect()
+                history_limit: self.resolve_group_history_limit(gid),
+            })
+            .collect()
     }
 
     fn security_policy(&self) -> crate::channels::ChannelSecurityPolicy {
