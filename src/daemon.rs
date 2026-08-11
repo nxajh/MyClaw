@@ -1178,18 +1178,48 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
     // mechanism has been deleted along with the corresponding writes in
     // DelegationCoordinator).
     let unfinished_subagents = crate::agents::recovery::scan_unfinished_subagents(&session_manager);
+
+    // Load durable checkpoints from the previous run. Tasks with a checkpoint
+    // status of "checkpointed" or "running" were interrupted by a clean
+    // shutdown (not a crash) and will be resumed via the normal recovery path.
+    // Tasks without a checkpoint that appear "unfinished" are crash remnants.
+    let checkpoints: Vec<crate::storage::DelegationCheckpoint> =
+        session_manager.backend().load_delegation_checkpoints();
+    if !checkpoints.is_empty() {
+        tracing::info!(
+            count = checkpoints.len(),
+            checkpointed = checkpoints.iter().filter(|c| c.status == "checkpointed").count(),
+            running = checkpoints.iter().filter(|c| c.status == "running").count(),
+            "loaded delegation checkpoints from previous run"
+        );
+    }
+
+    // Correlate: unfinished sub-agents that have a matching checkpoint are
+    // confirmed resumable (clean shutdown). Those WITHOUT a checkpoint are
+    // crash remnants — log them at warn level so operators can distinguish.
+    let checkpoint_task_ids: std::collections::HashSet<&str> =
+        checkpoints.iter().map(|c| c.task_id.as_str()).collect();
+    for sa in &unfinished_subagents {
+        if checkpoint_task_ids.contains(sa.task_id.as_str()) {
+            tracing::info!(
+                agent = %sa.agent_name,
+                task_id = %sa.task_id,
+                "resumable sub-agent (checkpointed — clean shutdown)"
+            );
+        } else {
+            tracing::warn!(
+                agent = %sa.agent_name,
+                task_id = %sa.task_id,
+                "unfinished sub-agent without checkpoint (crash remnant)"
+            );
+        }
+    }
+
     if !unfinished_subagents.is_empty() {
         tracing::warn!(
             count = unfinished_subagents.len(),
             "detected unfinished sub-agents from previous run"
         );
-        for sa in &unfinished_subagents {
-            tracing::warn!(
-                agent = %sa.agent_name,
-                task_id = %sa.task_id,
-                "unfinished sub-agent"
-            );
-        }
     }
 
     // Create ClientChannel separately (needs session_manager for management API).
@@ -1570,7 +1600,7 @@ pub async fn run(config: crate::config::AppConfig) -> Result<()> {
             .drain(std::time::Duration::from_secs(30))
             .await;
         if let Some(ref delegator) = deferred_delegator {
-            delegator.drain(std::time::Duration::from_secs(60)).await;
+            delegator.checkpoint_and_cancel_all();
         }
         tracing::info!("hot switch: post-fork drain complete");
 

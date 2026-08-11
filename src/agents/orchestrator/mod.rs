@@ -518,9 +518,11 @@ impl Orchestrator {
             // persisted before the process exits.
             self.ctx.turn_tracker.drain(Duration::from_secs(30)).await;
 
-            // Also drain background sub-agents so their sessions persist cleanly.
+            // Checkpoint and cancel background sub-agents so their state
+            // survives restart. Unlike drain, this does not treat a timeout
+            // as a business failure — checkpointed tasks resume on restart.
             if let Some(ref delegator) = self.ctx.delegator {
-                delegator.drain(Duration::from_secs(60)).await;
+                delegator.checkpoint_and_cancel_all();
             }
             info!("all listeners stopped, turns drained, exiting");
         }

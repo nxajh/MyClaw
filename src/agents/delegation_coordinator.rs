@@ -268,6 +268,78 @@ impl DelegationCoordinator {
         }
     }
 
+    /// Checkpoint all running tasks to durable storage and cancel them.
+    ///
+    /// Called during daemon shutdown (before hot-switch fork or process exit).
+    /// Each running task's checkpoint is updated to `status: "checkpointed"`
+    /// so startup recovery knows the task was interrupted by shutdown, not a
+    /// business failure. The tokio tasks are then aborted — their sub-session
+    /// history is already persisted, so `scan_unfinished_subagents` will
+    /// resume them on restart.
+    ///
+    /// Unlike `drain`, this does NOT wait for tasks to finish — it checkpoints
+    /// and immediately aborts. The drain timeout is therefore not a business
+    /// failure.
+    pub fn checkpoint_and_cancel_all(&self) {
+        let backend = self.session_manager.backend();
+        let existing: Vec<crate::storage::DelegationCheckpoint> = backend.load_delegation_checkpoints();
+
+        // Take ownership of all entries by removing from the map (same pattern
+        // as `drain`). Each entry carries the JoinHandle we need to abort.
+        let entries: Vec<(String, RunningEntry)> = self
+            .running
+            .iter()
+            .map(|e| e.key().clone())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .filter_map(|id| self.running.remove(&id).map(|(_, v)| (id, v)))
+            .collect();
+
+        for (task_id, entry) in &entries {
+            let checkpoint = existing
+                .iter()
+                .find(|c| &c.task_id == task_id)
+                .cloned()
+                .map(|mut c| {
+                    c.status = "checkpointed".to_string();
+                    c.last_checkpoint = Some(chrono::Utc::now());
+                    c
+                })
+                .unwrap_or_else(|| crate::storage::DelegationCheckpoint {
+                    task_id: task_id.clone(),
+                    parent_session_id: entry.session_id.clone(),
+                    sub_session_id: String::new(),
+                    agent_name: entry.agent_name.clone(),
+                    status: "checkpointed".to_string(),
+                    started_at: chrono::Utc::now(),
+                    timeout_secs: SUB_AGENT_TIMEOUT_DEFAULT_SECS,
+                    allowed_tools: None,
+                    last_checkpoint: Some(chrono::Utc::now()),
+                });
+            if let Err(e) = backend.save_delegation_checkpoint(&checkpoint) {
+                tracing::warn!(task_id = %task_id, err = %e, "shutdown checkpoint failed");
+            }
+        }
+
+        // Abort all running tasks. The sub-session history is already on disk;
+        // startup recovery will resume via `scan_unfinished_subagents`.
+        for (_, entry) in &entries {
+            entry.handle.abort();
+        }
+        if !entries.is_empty() {
+            tracing::info!(count = entries.len(), "checkpointed and cancelled running sub-agents");
+        }
+    }
+
+    /// Load all durable delegation checkpoints from the backend.
+    ///
+    /// Called at daemon startup to distinguish tasks interrupted by shutdown
+    /// (checkpointed → resumable) from tasks that crashed without a checkpoint
+    /// (potentially failed).
+    pub fn load_checkpoints(&self) -> Vec<crate::storage::DelegationCheckpoint> {
+        self.session_manager.backend().load_delegation_checkpoints()
+    }
+
     /// Remove orphaned worktree directories left behind by crashed or
     /// timed-out sub-agent runs. Called once at daemon startup.
     pub fn cleanup_stale_worktrees(&self) {
@@ -327,6 +399,14 @@ impl DelegationCoordinator {
             session_id
         };
         self.running.remove(task_id);
+        // Delete the durable checkpoint — the task was cancelled by the user.
+        if let Err(e) = self
+            .session_manager
+            .backend()
+            .delete_delegation_checkpoint(task_id)
+        {
+            tracing::warn!(task_id, err = %e, "agent_kill: delete delegation checkpoint failed");
+        }
         if let Some(tx) = self.event_sender() {
             if tx
                 .send(DelegationEvent::Failed {
@@ -587,7 +667,7 @@ impl DelegationCoordinator {
             if let Err(e) = self
                 .session_manager
                 .backend()
-                .save_delegation_args(&sub_session_id, timeout_secs, allowlist_clone)
+                .save_delegation_args(&sub_session_id, timeout_secs, allowlist_clone.clone())
             {
                 tracing::warn!(sub_session = %sub_session_id, err = %e, "persist sub-agent delegation args failed");
             }
@@ -601,6 +681,27 @@ impl DelegationCoordinator {
                 .save_task_id(&sub_session_id, &task_id)
             {
                 tracing::warn!(sub_session = %sub_session_id, task_id = %task_id, err = %e, "persist sub-agent task_id failed");
+            }
+
+            // Durable delegation checkpoint: persists task identity so the
+            // daemon can resume (not mark Failed) on restart.
+            let checkpoint = crate::storage::DelegationCheckpoint {
+                task_id: task_id.clone(),
+                parent_session_id: parent_session_id.to_string(),
+                sub_session_id: sub_session_id.clone(),
+                agent_name: agent_name.to_string(),
+                status: "running".to_string(),
+                started_at: chrono::Utc::now(),
+                timeout_secs,
+                allowed_tools: allowlist_clone.clone(),
+                last_checkpoint: None,
+            };
+            if let Err(e) = self
+                .session_manager
+                .backend()
+                .save_delegation_checkpoint(&checkpoint)
+            {
+                tracing::warn!(task_id = %task_id, err = %e, "persist delegation checkpoint failed");
             }
 
             // Snapshot the runtime; for worktree isolation, overlay the
@@ -993,6 +1094,15 @@ impl DelegationCoordinator {
             // `send_message(recipient=task_id)` will now report the task_id
             // as unknown instead of queueing into a dead channel.
             mailboxes.remove(&running_task_id);
+            // Delete the durable checkpoint — the task reached a terminal
+            // state, so there's nothing to resume on restart.
+            if let Err(e) = sub_delegator
+                .session_manager
+                .backend()
+                .delete_delegation_checkpoint(&running_task_id)
+            {
+                tracing::warn!(task_id = %running_task_id, err = %e, "delete delegation checkpoint failed");
+            }
         });
 
         self.running.insert(
@@ -1031,6 +1141,7 @@ impl DelegationCoordinator {
         let running_task_id = task_id.clone();
         let task_id_clone = task_id.clone();
         let session_id = parent_session_id.clone();
+        let backend = Arc::clone(self.session_manager.backend());
 
         let runtime = match self.runtime() {
             Ok(rt) => rt,
@@ -1089,6 +1200,12 @@ impl DelegationCoordinator {
             }
             running.remove(&running_task_id);
             mailboxes.remove(&running_task_id);
+            // Delete the durable checkpoint — the recovered task reached a
+            // terminal state.
+            if let Err(e) = backend.delete_delegation_checkpoint(&running_task_id)
+            {
+                tracing::warn!(task_id = %running_task_id, err = %e, "delete delegation checkpoint failed");
+            }
         });
 
         self.running.insert(
@@ -1384,5 +1501,87 @@ mod tests {
     async fn cancel_unknown_task_returns_false() {
         let (dc, _m) = coordinator(3);
         assert!(!dc.cancel("no-such-task").await);
+    }
+
+    #[test]
+    fn checkpoint_roundtrip_via_backend() {
+        let (dc, manager) = coordinator(3);
+        let _ = dc; // not needed — we test the backend directly
+        let backend = manager.backend();
+        let cp = crate::storage::DelegationCheckpoint {
+            task_id: "test/t/abc".to_string(),
+            parent_session_id: "test/s/parent".to_string(),
+            sub_session_id: "test/s/sub".to_string(),
+            agent_name: "coder".to_string(),
+            status: "running".to_string(),
+            started_at: chrono::Utc::now(),
+            timeout_secs: 300,
+            allowed_tools: Some(vec!["shell".to_string()]),
+            last_checkpoint: None,
+        };
+        backend.save_delegation_checkpoint(&cp).unwrap();
+
+        let loaded = backend.load_delegation_checkpoints();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].task_id, "test/t/abc");
+        assert_eq!(loaded[0].agent_name, "coder");
+        assert_eq!(loaded[0].timeout_secs, 300);
+
+        backend.delete_delegation_checkpoint("test/t/abc").unwrap();
+        assert!(backend.load_delegation_checkpoints().is_empty());
+    }
+
+    #[test]
+    fn checkpoint_and_cancel_all_empties_running_and_writes_checkpoints() {
+        let (dc, manager) = coordinator(3);
+        let backend = manager.backend();
+
+        // Insert a hand-crafted running entry.
+        let task_id = Fqid::new("test", TYPE_TASK).to_string();
+        dc.running.insert(
+            task_id.clone(),
+            RunningEntry {
+                handle: tokio::spawn(async {}),
+                status: std::sync::RwLock::new(DelegationStatus::Running),
+                agent_name: "coder".to_string(),
+                session_id: "parent".to_string(),
+                spawned_at: std::time::Instant::now(),
+                messages_sent: std::sync::atomic::AtomicU64::new(0),
+            },
+        );
+        assert_eq!(dc.running_count(), 1);
+
+        dc.checkpoint_and_cancel_all();
+
+        // Running table should be empty.
+        assert_eq!(dc.running_count(), 0);
+        // Checkpoint should be persisted with status "checkpointed".
+        let loaded = backend.load_delegation_checkpoints();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].status, "checkpointed");
+        assert_eq!(loaded[0].task_id, task_id);
+    }
+
+    #[test]
+    fn load_checkpoints_returns_persisted_checkpoints() {
+        let (dc, manager) = coordinator(3);
+        let backend = manager.backend();
+        let cp = crate::storage::DelegationCheckpoint {
+            task_id: "test/t/xyz".to_string(),
+            parent_session_id: "parent".to_string(),
+            sub_session_id: "sub".to_string(),
+            agent_name: "coder".to_string(),
+            status: "checkpointed".to_string(),
+            started_at: chrono::Utc::now(),
+            timeout_secs: 120,
+            allowed_tools: None,
+            last_checkpoint: Some(chrono::Utc::now()),
+        };
+        backend.save_delegation_checkpoint(&cp).unwrap();
+
+        let loaded = dc.load_checkpoints();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].task_id, "test/t/xyz");
+        assert_eq!(loaded[0].status, "checkpointed");
     }
 }

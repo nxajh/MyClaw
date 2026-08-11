@@ -154,6 +154,11 @@ impl JsonFileBackend {
         self.session_dir(session_id).join("suspension.json")
     }
 
+    /// Durable delegation checkpoint file: `delegations/<task_id>.json`.
+    fn delegation_checkpoint_path(&self, task_id: &str) -> PathBuf {
+        self.root.join("delegations").join(format!("{}.json", dir_name(task_id)))
+    }
+
     // ── Atomic write helpers ──────────────────────────────────────────────────
 
     /// Write compact JSON atomically via a temp file + rename.
@@ -872,6 +877,47 @@ impl SessionBackend for JsonFileBackend {
         let timeout = meta.delegation_timeout_secs?;
         Some((timeout, meta.delegation_allowed_tools))
     }
+
+    fn save_delegation_checkpoint(
+        &self,
+        checkpoint: &crate::storage::DelegationCheckpoint,
+    ) -> std::io::Result<()> {
+        let path = self.delegation_checkpoint_path(&checkpoint.task_id);
+        fs::create_dir_all(path.parent().unwrap_or(&self.root))?;
+        Self::write_json_atomic(&path, checkpoint)
+    }
+
+    fn delete_delegation_checkpoint(&self, task_id: &str) -> std::io::Result<()> {
+        let path = self.delegation_checkpoint_path(task_id);
+        if path.exists() {
+            fs::remove_file(&path)?;
+        }
+        Ok(())
+    }
+
+    fn load_delegation_checkpoints(&self) -> Vec<crate::storage::DelegationCheckpoint> {
+        let dir = self.root.join("delegations");
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for entry in entries.filter_map(|e| e.ok()) {
+            let Ok(bytes) = fs::read(entry.path()) else {
+                continue;
+            };
+            match serde_json::from_slice::<crate::storage::DelegationCheckpoint>(&bytes) {
+                Ok(cp) => out.push(cp),
+                Err(e) => {
+                    tracing::warn!(
+                        path = ?entry.path(),
+                        err = %e,
+                        "delegation checkpoint parse failed; skipping"
+                    );
+                }
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -916,5 +962,63 @@ mod tests {
         assert!(!line.contains("base64"));
         assert!(!line.contains("image_b64"));
         assert_eq!(backend.load_messages(&sid)[0].parts.len(), 2);
+    }
+
+    #[test]
+    fn delegation_checkpoint_roundtrip() {
+        let (_dir, backend, _sid) = backend_with_session();
+        let cp = crate::storage::DelegationCheckpoint {
+            task_id: "test/t/abc123".to_string(),
+            parent_session_id: "parent".to_string(),
+            sub_session_id: "sub".to_string(),
+            agent_name: "coder".to_string(),
+            status: "checkpointed".to_string(),
+            started_at: chrono::Utc::now(),
+            timeout_secs: 600,
+            allowed_tools: Some(vec!["shell".to_string(), "file_edit".to_string()]),
+            last_checkpoint: Some(chrono::Utc::now()),
+        };
+        backend.save_delegation_checkpoint(&cp).unwrap();
+
+        let loaded = backend.load_delegation_checkpoints();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].task_id, "test/t/abc123");
+        assert_eq!(loaded[0].status, "checkpointed");
+        assert_eq!(loaded[0].timeout_secs, 600);
+        assert_eq!(
+            loaded[0].allowed_tools.as_deref(),
+            Some(&["shell".to_string(), "file_edit".to_string()][..])
+        );
+
+        // Delete works.
+        backend.delete_delegation_checkpoint("test/t/abc123").unwrap();
+        assert!(backend.load_delegation_checkpoints().is_empty());
+    }
+
+    #[test]
+    fn delegation_checkpoint_multiple_and_corrupt_skips() {
+        let (_dir, backend, _sid) = backend_with_session();
+
+        for i in 0..3 {
+            let cp = crate::storage::DelegationCheckpoint {
+                task_id: format!("test/t/task-{i}"),
+                parent_session_id: format!("parent-{i}"),
+                sub_session_id: format!("sub-{i}"),
+                agent_name: "coder".to_string(),
+                status: "running".to_string(),
+                started_at: chrono::Utc::now(),
+                timeout_secs: 300,
+                allowed_tools: None,
+                last_checkpoint: None,
+            };
+            backend.save_delegation_checkpoint(&cp).unwrap();
+        }
+
+        // Write a corrupt checkpoint file.
+        let corrupt_path = backend.root.join("delegations").join("corrupt.json");
+        fs::write(&corrupt_path, b"{not valid json").unwrap();
+
+        let loaded = backend.load_delegation_checkpoints();
+        assert_eq!(loaded.len(), 3, "corrupt file should be skipped");
     }
 }
