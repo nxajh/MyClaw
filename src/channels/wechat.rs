@@ -493,6 +493,29 @@ struct SharedState {
     api_base: Option<String>,
 }
 
+fn context_token_path() -> std::path::PathBuf {
+    let dir = std::env::var("HOME")
+        .map(|h| format!("{h}/.myclaw/state"))
+        .unwrap_or_else(|_| "/tmp/myclaw-state".to_string());
+    std::path::PathBuf::from(format!("{dir}/wechat_context_tokens.json"))
+}
+
+fn persist_context_tokens(state: &SharedState) {
+    let path = context_token_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let json = serde_json::to_string(&state.context_tokens).unwrap_or_default();
+    let _ = std::fs::write(path, json);
+}
+
+fn load_context_tokens() -> HashMap<String, String> {
+    match std::fs::read_to_string(context_token_path()) {
+        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+        Err(_) => HashMap::new(),
+    }
+}
+
 // ── API client ────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -526,14 +549,7 @@ impl ApiClient {
             state.aes_key = Some(key.clone());
         }
         // Restore persisted context tokens
-        let token_path = std::env::var("HOME")
-            .map(|h| format!("{h}/.myclaw/state/wechat_context_tokens.json"))
-            .unwrap_or_else(|_| "/tmp/wechat_context_tokens.json".to_string());
-        if let Ok(json) = std::fs::read_to_string(&token_path) {
-            if let Ok(tokens) = serde_json::from_str::<HashMap<String, String>>(&json) {
-                state.context_tokens = tokens;
-            }
-        }
+        state.context_tokens = load_context_tokens();
         Self {
             api_base: config.api_base.trim_end_matches('/').to_string(),
             http,
@@ -651,13 +667,21 @@ impl ApiClient {
             )
             .await?;
 
-        let parsed: GetUpdatesResponse =
-            serde_json::from_value(resp.clone()).map_err(|e| ApiError::Parse(format!("get_updates: {e}")))?;
+        let parsed: GetUpdatesResponse = serde_json::from_value(resp.clone())
+            .map_err(|e| ApiError::Parse(format!("get_updates: {e}")))?;
 
         if parsed.ret != 0 || parsed.errcode != 0 {
             return Err(ApiError::Api(
-                if parsed.errcode != 0 { parsed.errcode } else { parsed.ret },
-                if parsed.errmsg.is_empty() { "get_updates error".into() } else { parsed.errmsg },
+                if parsed.errcode != 0 {
+                    parsed.errcode
+                } else {
+                    parsed.ret
+                },
+                if parsed.errmsg.is_empty() {
+                    "get_updates error".into()
+                } else {
+                    parsed.errmsg
+                },
             ));
         }
 
@@ -707,7 +731,9 @@ impl ApiClient {
     }
 
     async fn send_typing(&self, to_user_id: &str, typing: bool) -> Result<(), ApiError> {
-        let ticket = self.state.read()
+        let ticket = self
+            .state
+            .read()
             .typing_tickets
             .get(to_user_id)
             .map(|(t, _)| t.clone())
@@ -839,8 +865,7 @@ impl ApiClient {
             Ok(decoded)
         } else if decoded.len() == 32 {
             let hex_str = String::from_utf8_lossy(&decoded);
-            hex::decode(hex_str.as_ref())
-                .map_err(|e| ApiError::Parse(format!("aes_key hex: {e}")))
+            hex::decode(hex_str.as_ref()).map_err(|e| ApiError::Parse(format!("aes_key hex: {e}")))
         } else {
             Err(ApiError::Parse(format!(
                 "aes_key decoded to {} bytes, expected 16 or 32",
@@ -962,6 +987,17 @@ impl ApiClient {
                 .unwrap_or("unknown error");
             return Err(ApiError::Http(resp.status().as_u16(), err_msg.to_string()));
         }
+        let download_param = resp
+            .headers()
+            .get("x-encrypted-param")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        if let Some(param) = download_param {
+            if !param.is_empty() {
+                return Ok(param);
+            }
+        }
+        // Fallback: some CDN deployments return a JSON body instead of the header.
         let body: serde_json::Value = resp
             .json()
             .await
@@ -989,9 +1025,15 @@ impl ApiClient {
         let rawsize = data.len() as i64;
         let mut hasher = Md5::new();
         hasher.update(data);
-        let rawfilemd5: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        let rawfilemd5: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
         let filesize = Self::aes_ecb_padded_size(data.len()) as i64;
-        let filekey: String = (0..16).map(|_| format!("{:02x}", rand::random::<u8>())).collect();
+        let filekey: String = (0..16)
+            .map(|_| format!("{:02x}", rand::random::<u8>()))
+            .collect();
         let aes_key_bytes: [u8; 16] = {
             let mut arr = [0u8; 16];
             for byte in arr.iter_mut() {
@@ -1058,9 +1100,7 @@ impl ApiClient {
         let req = serde_json::json!({
             "base_info": build_base_info(),
         });
-        let resp = self
-            .api_post("ilink/bot/msg/notifystart", &req)
-            .await?;
+        let resp = self.api_post("ilink/bot/msg/notifystart", &req).await?;
         self.check_ret(&resp)
     }
 
@@ -1068,9 +1108,7 @@ impl ApiClient {
         let req = serde_json::json!({
             "base_info": build_base_info(),
         });
-        let resp = self
-            .api_post("ilink/bot/msg/notifystop", &req)
-            .await?;
+        let resp = self.api_post("ilink/bot/msg/notifystop", &req).await?;
         self.check_ret(&resp)
     }
 }
@@ -1253,6 +1291,7 @@ pub struct WechatChannel {
     dedup: DedupState,
     debounce_ms: u64,
     debounce_buffer: Arc<Mutex<HashMap<String, WechatDebounceEntry>>>,
+    allowed_groups: Option<Vec<String>>,
     /// Active typing keep-alive tasks, keyed by recipient (wxid).
     typing_tasks: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
 }
@@ -1272,6 +1311,7 @@ impl WechatChannel {
             api: ApiClient::new(&config),
             debounce_ms: config.debounce_ms,
             debounce_buffer: Arc::new(Mutex::new(HashMap::new())),
+            allowed_groups: config.allowed_groups.clone(),
             typing_tasks: Arc::new(Mutex::new(HashMap::new())),
             config,
             dedup: DedupState::new(),
@@ -1288,7 +1328,7 @@ impl WechatChannel {
     /// `Some(...)` to reuse the unified `AllowList::from_config` path.
     fn build_security_policy(&self) -> crate::channels::ChannelSecurityPolicy {
         use crate::channels::{AllowList, ChannelSecurityPolicy, GroupAuthMode};
-        let (group_mode, group_allowlist) = match &self.config.allowed_groups {
+        let (group_mode, group_allowlist) = match &self.allowed_groups {
             None => (GroupAuthMode::Reject, AllowList::All),
             Some(groups) if groups.iter().any(|g| g == "*") => {
                 (GroupAuthMode::Open, AllowList::All)
@@ -1468,7 +1508,9 @@ impl WechatChannel {
                 if let Err(e) = api.send_typing(&recipient_key, true).await {
                     consecutive_failures += 1;
                     if consecutive_failures >= 3 {
-                        debug!("WeChat: typing keep-alive circuit breaker for {recipient_key}: {e}");
+                        debug!(
+                            "WeChat: typing keep-alive circuit breaker for {recipient_key}: {e}"
+                        );
                         break;
                     }
                 } else {
@@ -1532,18 +1574,8 @@ impl Channel for WechatChannel {
         }
     }
 
-    async fn on_tool_event(
-        &self,
-        recipient: &str,
-        event: crate::channels::ToolEvent,
-    ) {
-        let ctx_token = self
-            .api
-            .state
-            .read()
-            .context_tokens
-            .get(recipient)
-            .cloned();
+    async fn on_tool_event(&self, recipient: &str, event: crate::channels::ToolEvent) {
+        let ctx_token = self.api.state.read().context_tokens.get(recipient).cloned();
         let result = match &event {
             crate::channels::ToolEvent::Start {
                 tool_name,
@@ -1622,7 +1654,11 @@ impl Channel for WechatChannel {
             let mut buf = Vec::new();
             reader.read_to_end(&mut buf).await?;
 
-            let mime = file.meta.mime_type.as_deref().unwrap_or("application/octet-stream");
+            let mime = file
+                .meta
+                .mime_type
+                .as_deref()
+                .unwrap_or("application/octet-stream");
             let (media_type, item_type) = if mime.starts_with("image/") {
                 (UPLOAD_MEDIA_IMAGE, ITEM_TYPE_IMAGE)
             } else if mime.starts_with("video/") {
@@ -1636,9 +1672,7 @@ impl Channel for WechatChannel {
                 .upload_media(&buf, &message.receiver.id, media_type)
                 .await?;
 
-            let aes_key_b64 = BASE64.encode(
-                hex::decode(&uploaded.aeskey_hex).unwrap_or_default(),
-            );
+            let aes_key_b64 = BASE64.encode(hex::decode(&uploaded.aeskey_hex).unwrap_or_default());
 
             let req = SendMessageRequest {
                 msg: SendMessageMsg {
@@ -1705,7 +1739,10 @@ impl Channel for WechatChannel {
             };
             let resp = self
                 .api
-                .api_post("ilink/bot/sendmessage", &serde_json::to_value(&req).unwrap())
+                .api_post(
+                    "ilink/bot/sendmessage",
+                    &serde_json::to_value(&req).unwrap(),
+                )
                 .await?;
             self.api.check_ret(&resp)?;
         }
@@ -1801,7 +1838,11 @@ impl Channel for WechatChannel {
                                     aeskey_hex,
                                     filename,
                                 } => {
-                                    match this.api.download_cdn_media(&media, aeskey_hex.as_deref()).await {
+                                    match this
+                                        .api
+                                        .download_cdn_media(&media, aeskey_hex.as_deref())
+                                        .await
+                                    {
                                         Ok(data) => {
                                             let mime = match item_type {
                                                 ITEM_TYPE_IMAGE => "image/jpeg",
@@ -1810,12 +1851,18 @@ impl Channel for WechatChannel {
                                                 _ => "application/octet-stream",
                                             };
                                             let tmp_dir = std::env::temp_dir();
-                                            let tmp_path = tmp_dir.join(format!("wechat_media_{}", uuid::Uuid::new_v4()));
+                                            let tmp_path = tmp_dir.join(format!(
+                                                "wechat_media_{}",
+                                                uuid::Uuid::new_v4()
+                                            ));
                                             if let Err(e) = std::fs::write(&tmp_path, &data) {
-                                                warn!("WeChat: failed to write media temp file: {e}");
+                                                warn!(
+                                                    "WeChat: failed to write media temp file: {e}"
+                                                );
                                                 continue;
                                             }
-                                            let mut content = ChannelMessageContent::text(String::new());
+                                            let mut content =
+                                                ChannelMessageContent::text(String::new());
                                             content.files.push(ChannelFile {
                                                 meta: ChannelFileMeta {
                                                     file_name: filename,
@@ -1823,7 +1870,9 @@ impl Channel for WechatChannel {
                                                     size_bytes: Some(data.len() as u64),
                                                     source_url: None,
                                                 },
-                                                body: std::sync::Arc::new(LocalFileBody::new(&tmp_path)),
+                                                body: std::sync::Arc::new(LocalFileBody::new(
+                                                    &tmp_path,
+                                                )),
                                             });
                                             content
                                         }
@@ -1843,13 +1892,7 @@ impl Channel for WechatChannel {
                                     .context_tokens
                                     .insert(event.chat_id.clone(), event.context_token.clone());
                                 // Persist context tokens to disk
-                                {
-                                    let state = this.api.state.read();
-                                    let path = std::env::var("HOME")
-                                        .map(|h| format!("{h}/.myclaw/state/wechat_context_tokens.json"))
-                                        .unwrap_or_else(|_| "/tmp/wechat_context_tokens.json".to_string());
-                                    let _ = std::fs::write(&path, serde_json::to_string(&state.context_tokens).unwrap_or_default());
-                                }
+                                persist_context_tokens(&this.api.state.read());
                             }
 
                             // Fetch typing_ticket for this user (cached with TTL)
@@ -1862,7 +1905,9 @@ impl Channel for WechatChannel {
                                     }
                                 };
                                 if need_fetch {
-                                    if let Ok(config) = this.api.get_config(&event.sender_wxid).await {
+                                    if let Ok(config) =
+                                        this.api.get_config(&event.sender_wxid).await
+                                    {
                                         if !config.typing_ticket.is_empty() {
                                             this.api.state.write().typing_tickets.insert(
                                                 event.sender_wxid.clone(),
@@ -1887,10 +1932,15 @@ impl Channel for WechatChannel {
                         }
                     }
                     Err(ApiError::Api(-14, _)) => {
-                        warn!("WeChat: stale token / session invalid (-14), clearing token and re-login");
+                        warn!(
+                            "WeChat: stale token / session invalid (-14), clearing token and re-login"
+                        );
                         this.api.state.write().bot_token = None;
                         if let Err(login_err) = this.login().await {
-                            warn!("WeChat: re-login failed: {login_err}, pausing {}s", RATE_LIMIT_PAUSE_SECS);
+                            warn!(
+                                "WeChat: re-login failed: {login_err}, pausing {}s",
+                                RATE_LIMIT_PAUSE_SECS
+                            );
                             tokio::time::sleep(Duration::from_secs(RATE_LIMIT_PAUSE_SECS)).await;
                         } else {
                             info!("WeChat: re-login successful after stale token");
@@ -1957,7 +2007,11 @@ fn filter_markdown(text: &str) -> String {
             if let Some(end) = filtered[start..].find("](") {
                 let url_start = start + end + 2;
                 if let Some(url_end) = filtered[url_start..].find(')') {
-                    filtered = format!("{}{}", &filtered[..start], &filtered[url_start + url_end + 1..]);
+                    filtered = format!(
+                        "{}{}",
+                        &filtered[..start],
+                        &filtered[url_start + url_end + 1..]
+                    );
                     continue;
                 }
             }
@@ -2103,7 +2157,10 @@ mod tests {
             list: vec![MessageItem {
                 item_type: ITEM_TYPE_VOICE,
                 text_item: None,
-                voice_item: Some(VoiceItem { text: "   ".into(), media: CDNMedia::default() }),
+                voice_item: Some(VoiceItem {
+                    text: "   ".into(),
+                    media: CDNMedia::default(),
+                }),
                 image_item: None,
                 video_item: None,
                 file_item: None,
