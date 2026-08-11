@@ -2911,6 +2911,8 @@ mod tests {
             thinking_tokens: 0,
             thinking_active: false,
             pending_commentary: String::new(),
+            inherited_preview: None,
+            defer_collapse: false,
             start: std::time::Instant::now(),
             last_edit: std::time::Instant::now(),
             delivery: StreamDelivery::FinalDelivered,
