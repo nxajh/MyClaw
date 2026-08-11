@@ -227,11 +227,6 @@ impl SessionManager {
             history: msgs,
             message_ids: ids,
             compact_version: compact_ver,
-            system_reminders: Vec::new(),
-            custom_identity: None,
-            turn_lock: None,
-            turn_suspension: None,
-            turn_tool_allowlist: None,
             summary_metadata: summary_meta,
             session_override,
             incomplete_turn: false,
@@ -245,6 +240,7 @@ impl SessionManager {
             sub_agent_task_id: self.backend.load_task_id(&session_id),
             turn_injections: Vec::new(),
             turn_silenced: false,
+            turn_tool_allowlist: None,
         };
         // Breakpoints are detected purely for the incomplete-turn flag below;
         // recovery itself is handled by `Agent::run_recovery` (which re-reads

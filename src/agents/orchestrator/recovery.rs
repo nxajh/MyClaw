@@ -143,10 +143,10 @@ fn should_recover_active_session(
 /// Sub-agents: resume via `run_recovery` and emit the terminal event.
 pub(super) fn run_startup(ctx: &Arc<OrchestratorCtx>, unfinished: &[UnfinishedSubAgent]) {
     let sessions = Arc::clone(&ctx.sessions);
-    let runtime = ctx.runtime.clone();
+    let _runtime = ctx.runtime.clone();
     let channels = ctx.channels.clone();
     let delegator = ctx.delegator.clone();
-    let turn_tracker = ctx.turn_tracker.clone();
+    let _turn_tracker = ctx.turn_tracker.clone();
     let backend = Arc::clone(sessions.backend());
 
     // P1-1: sessions with a persisted non-empty suspension (daemon died while

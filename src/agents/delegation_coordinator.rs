@@ -1061,7 +1061,7 @@ impl DelegationCoordinator {
                 Ok(Ok(Some(tr))) if !tr.text.is_empty() => Ok(tr.text),
                 Ok(Ok(_)) => Err(anyhow::anyhow!("no recovery needed or empty text")),
                 Ok(Err(e)) => Err(e),
-                Err(_) => Err(anyhow::anyhow!(DelegationTimeout { secs: timeout_secs })),
+                Err(_) => Err(anyhow::anyhow!(DelegationTimeout { agent: agent_name.to_string(), secs: timeout_secs })),
             };
 
             let duration_secs = start_time.elapsed().as_secs();
