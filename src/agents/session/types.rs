@@ -111,7 +111,8 @@ pub struct Session {
     pub turn_injections: Vec<String>,
     /// 方案 C (RFC §3.3): true while the current turn is a silenced resume
     /// turn — session was suspended with pending tasks at turn start, so the
-    /// parent's intermediate output is suppressed (history-only) and
+    /// parent's intermediate output is delivered as an ordinary intermediate
+    /// message (streamed + sent like any turn; the turn does NOT end) and
     /// `ask_user` is disabled. Set by `process_turn` before `Agent::run`;
     /// never persisted, reset every turn.
     pub turn_silenced: bool,

@@ -832,7 +832,6 @@ impl ClientChannel {
                                                 timestamp: chrono::Utc::now().timestamp() as u64,
                                                 interruption_scope_id: None,
                                                 silenced_override: None,
-                                                progress_text: None,
                                             };
 
                                             if message_tx_clone.send(channel_msg).await.is_err() {
