@@ -23,6 +23,7 @@ pub struct InMemoryBackend {
     active: RwLock<HashMap<String, String>>,
     suspensions: RwLock<HashMap<String, String>>,
     parents: RwLock<HashMap<String, String>>,
+    checkpoints: RwLock<HashMap<String, crate::storage::DelegationCheckpoint>>,
     namespace: String,
 }
 
@@ -40,6 +41,7 @@ impl InMemoryBackend {
             active: RwLock::new(HashMap::new()),
             suspensions: RwLock::new(HashMap::new()),
             parents: RwLock::new(HashMap::new()),
+            checkpoints: RwLock::new(HashMap::new()),
             namespace: namespace.to_string(),
         }
     }
@@ -283,6 +285,25 @@ impl SessionBackend for InMemoryBackend {
 
     fn load_parent_session_id(&self, session_id: &str) -> Option<String> {
         self.parents.read().get(session_id).cloned()
+    }
+
+    fn save_delegation_checkpoint(
+        &self,
+        checkpoint: &crate::storage::DelegationCheckpoint,
+    ) -> std::io::Result<()> {
+        self.checkpoints
+            .write()
+            .insert(checkpoint.task_id.clone(), checkpoint.clone());
+        Ok(())
+    }
+
+    fn delete_delegation_checkpoint(&self, task_id: &str) -> std::io::Result<()> {
+        self.checkpoints.write().remove(task_id);
+        Ok(())
+    }
+
+    fn load_delegation_checkpoints(&self) -> Vec<crate::storage::DelegationCheckpoint> {
+        self.checkpoints.read().values().cloned().collect()
     }
 }
 

@@ -1,10 +1,41 @@
 //! Session domain — types and backend trait for multi-session management.
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::io::Write;
 
 /// Re-export ChatMessage from providers module.
 pub use crate::providers::ChatMessage;
+
+/// Durable delegation checkpoint — persists a background sub-agent's identity
+/// and lifecycle state across daemon restarts.
+///
+/// Written by `DelegationCoordinator` when a task spawns and when the daemon
+/// shuts down with in-flight tasks. On startup, `load_delegation_checkpoints`
+/// reconstructs resumable tasks instead of broadcasting `Failed`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DelegationCheckpoint {
+    /// Task FQID (`<ns>/t/<uuidv7>`).
+    pub task_id: String,
+    /// Parent session FQID that spawned the delegation.
+    pub parent_session_id: String,
+    /// Sub-session FQID the sub-agent runs in.
+    pub sub_session_id: String,
+    /// Sub-agent config name (e.g. "coder").
+    pub agent_name: String,
+    /// Lifecycle status string (mirrors `DelegationStatus`).
+    pub status: String,
+    /// When the task was spawned.
+    pub started_at: DateTime<Utc>,
+    /// Effective wall-clock timeout in seconds.
+    pub timeout_secs: u64,
+    /// Optional tool allowlist (RFC allowed_tools).
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
+    /// When the checkpoint was last written (None on first write).
+    #[serde(default)]
+    pub last_checkpoint: Option<DateTime<Utc>>,
+}
 
 /// Lightweight session metadata (no history payload).
 #[derive(Debug, Clone)]
@@ -357,6 +388,26 @@ pub trait SessionBackend: Send + Sync {
         _session_id: &str,
     ) -> Option<(u64, Option<Vec<String>>)> {
         None
+    }
+
+    /// Persist (or update) a durable delegation checkpoint. Called when a
+    /// background task spawns and during shutdown. Terminal cleanup uses
+    /// `delete_delegation_checkpoint`.
+    fn save_delegation_checkpoint(
+        &self,
+        _checkpoint: &DelegationCheckpoint,
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Delete a delegation checkpoint (called after terminal completion).
+    fn delete_delegation_checkpoint(&self, _task_id: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Load all durable delegation checkpoints (for startup resume).
+    fn load_delegation_checkpoints(&self) -> Vec<DelegationCheckpoint> {
+        Vec::new()
     }
 
     /// Save inbound file bytes into `sessions/<session_id>/files/` and return a

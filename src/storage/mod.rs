@@ -19,8 +19,8 @@ pub use json_file::JsonFileBackend;
 pub use memory::{ExportFilter, Memory, MemoryCategory, MemoryEntry, ProceduralMessage};
 pub use private::PrivateMemory;
 pub use session::{
-    ChatMessage, SavedSessionFile, SessionBackend, SessionInfo, SummaryRecord, session_file_name,
-    write_session_file,
+    ChatMessage, DelegationCheckpoint, SavedSessionFile, SessionBackend, SessionInfo,
+    SummaryRecord, session_file_name, write_session_file,
 };
 pub use shared::SharedMemory;
 pub use types::{MemoryConfig, MemoryPolicyConfig, Provider, SearchMode, build_proxy_client};

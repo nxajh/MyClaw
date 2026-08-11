@@ -211,3 +211,58 @@ pub struct SubResult {
 | `delegation_coordinator.rs` `mod tests` | resolve_timeout(默认/tool>config/钳 1800/0 值)、session_depth 未知回退 1、三层链边界(max_depth=3: main Ok/sub1 Ok/sub2 Err)、max_depth=1 全拒、spawn_async 登记 pending+running(task_id 含 `/t/`)、深度超限不登记、未知 agent 拒绝、cancel 广播 Failed{cancelled}(session_id=父会话)+running 移除、cancel 未知 false |
 | `orchestrator/delegation.rs` `mod tests` | wake 四类终态注入(Completed/Failed/TimedOut)、Completed sent_message_count>0 降噪、Progress 抑制不唤醒、progress 先到再 Completed 折叠进 r.progress、未知 session no-op |
 | `orchestrator/recovery.rs` `mod tests` | CompletionSink::Delegate deliver→Completed(session_id=parent_session_id,E29 固化)、fail→Failed、recover_suspension 未覆盖按 Failed+covered 保留、全 covered no-op |
+
+## 9. Delegation 持久化 checkpoint/resume（P2）
+
+### 9.1 背景
+
+P1-1 的重启恢复语义（§5）将遗留 `pending` 全部按 `Failed{error:"daemon 重启,子代理中断"}` 处理。这在 hot-switch 场景下过于悲观：daemon 主动 shutdown（SIGINT/SIGTERM/hot-switch fork）时，运行中的 async 子代理被 drain timeout 强制中断，但 drain timeout 本身不是业务失败。
+
+### 9.2 设计
+
+**Checkpoint 结构**（`storage/session.rs::DelegationCheckpoint`）：
+
+```json
+{
+  "task_id": "test/t/019f...",
+  "parent_session_id": "test/s/parent...",
+  "sub_session_id": "test/s/sub...",
+  "agent_name": "coder",
+  "status": "running" | "checkpointed",
+  "started_at": "2026-08-11T...",
+  "timeout_secs": 600,
+  "allowed_tools": ["shell", "file_edit"],
+  "last_checkpoint": "2026-08-11T..."
+}
+```
+
+存储路径：`sessions/delegations/<task_id>.json`（JsonFileBackend），原子写入。
+
+**生命周期**：
+
+| 事件 | 操作 |
+|---|---|
+| `spawn_delegate_async` → `delegate_with_parent` 创建 sub-session | `save_delegation_checkpoint(status="running")` |
+| 任务终态（Completed/Failed/TimedOut） | `delete_delegation_checkpoint` |
+| `agent_kill`（cancel） | `delete_delegation_checkpoint` |
+| daemon shutdown / hot-switch | `checkpoint_and_cancel_all()`：所有 running → `status="checkpointed"` + abort |
+| daemon startup | `load_delegation_checkpoints()`：有 checkpoint 的 unfinished 子代理 = clean shutdown，可安全 resume |
+
+**Shutdown 路径**：orchestrator `shutdown_all` 和 daemon hot-switch post-fork 均调用 `checkpoint_and_cancel_all()` 替代 `drain(60s)`。不再把 drain timeout 当业务失败。
+
+**Startup 路径**：`scan_unfinished_subagents` 照常运行（基于 sub-session history）。daemon startup 额外 `load_delegation_checkpoints()` 区分：
+- **有 checkpoint** = clean shutdown → 通过正常 recovery 路径 resume（`recover_async`）
+- **无 checkpoint** = crash remnant → warn 日志，按现有逻辑处理
+
+### 9.3 不变式
+
+- checkpoint 文件在任务终态时被删除（`spawn_delegate_async` closure + `recover_async` closure + `cancel`）
+- checkpoint status 只有两个值：`"running"`（spawn 时写入）和 `"checkpointed"`（shutdown 时更新）
+- `DelegationStatus` 枚举新增 `Checkpointed` 变体（非 terminal — 可 resume）
+
+### 9.4 测试覆盖
+
+| 模块 | 覆盖点 |
+|---|---|
+| `json_file.rs` tests | checkpoint roundtrip（save/load/delete）、多 checkpoint + corrupt 文件跳过 |
+| `delegation_coordinator.rs` tests | backend checkpoint roundtrip、`checkpoint_and_cancel_all` 清空 running + 写 checkpoint、`load_checkpoints` 返回持久化数据 |

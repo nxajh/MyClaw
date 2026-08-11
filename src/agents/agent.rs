@@ -1785,6 +1785,57 @@ mod tests {
     }
 
     #[test]
+    fn async_delegation_mode_detection() {
+        // The boundary logic in Agent::run detects a successful async
+        // agent_delegate by parsing the call arguments. This test
+        // verifies the JSON parsing logic in isolation (the inline
+        // detection mirrors this exactly).
+        fn is_async_delegate(name: &str, is_error: bool, arguments: &str) -> bool {
+            if name != "agent_delegate" || is_error {
+                return false;
+            }
+            serde_json::from_str::<serde_json::Value>(arguments)
+                .ok()
+                .and_then(|v| {
+                    v.get("mode").and_then(|m| m.as_str()).map(str::to_owned)
+                })
+                .map(|m| m == "async")
+                .unwrap_or(false)
+        }
+
+        // async mode → detected
+        assert!(is_async_delegate(
+            "agent_delegate",
+            false,
+            r#"{"agent":"coder","task":"x","mode":"async"}"#
+        ));
+        // sync mode (explicit) → not detected
+        assert!(!is_async_delegate(
+            "agent_delegate",
+            false,
+            r#"{"agent":"coder","task":"x","mode":"sync"}"#
+        ));
+        // sync mode (default, omitted) → not detected
+        assert!(!is_async_delegate(
+            "agent_delegate",
+            false,
+            r#"{"agent":"coder","task":"x"}"#
+        ));
+        // error result → not detected even with async mode
+        assert!(!is_async_delegate(
+            "agent_delegate",
+            true,
+            r#"{"agent":"coder","task":"x","mode":"async"}"#
+        ));
+        // different tool → not detected
+        assert!(!is_async_delegate(
+            "file_read",
+            false,
+            r#"{"path":"x"}"#
+        ));
+    }
+
+    #[test]
     fn fold_send_message_inlines_results_when_tool_absent() {
         let mut asst = ChatMessage::assistant_text("发送一下");
         asst.tool_calls = Some(vec![ToolCall {

@@ -50,6 +50,9 @@ pub enum DelegationStatus {
     TimedOut,
     /// Cancelled by the parent via `agent_kill` (transient).
     Cancelled,
+    /// Persisted to disk during shutdown; the task is resumable on restart.
+    /// On startup, checkpointed tasks are resumed (not marked Failed).
+    Checkpointed,
 }
 
 impl DelegationStatus {
